@@ -4,11 +4,9 @@ from __future__ import annotations
 
 CW_COMMAND_REFERENCE = """\
 [cw commands]
-- cw queue add <client> "task" — queue work for later pickup
-- cw queue next <client> [--purpose] [--json] — peek at next pending item (read-only)
-- cw queue claim <client> [--purpose] [--id] [--json] — claim next item (RUNNING)
-- cw queue complete <client> <item_id> [--result <text>] — mark item completed
-- cw queue fail <client> <item_id> [--error <text>] — mark item failed
+- cw dev-queue add <ticket> — enqueue a ticket for the auto-dev pipeline
+- cw dev-queue status — show dev-queue tickets and their stages
+- cw queue peek — inspect running dev-queue sessions (read-only)
 - cw bg — background current session (runs /session-done first)
 - cw status — show all sessions and their states"""
 
@@ -20,8 +18,7 @@ _AGENT_TEAM_GUIDANCE = (
     "- After completing a unit of work, spawn a review agent team: "
     "use Task agents to review architecture, code quality, test coverage, "
     "and API contracts.\n"
-    "- Feed review findings back as follow-up work items. "
-    "Queue debt items via `cw queue add`."
+    "- Feed review findings back as follow-up work items."
 )
 
 PURPOSE_PROMPTS: dict[str, str] = {

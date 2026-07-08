@@ -1,4 +1,4 @@
-"""Local task-queue (``queue``) and orchestrator event-bus (``event``) commands."""
+"""Dev-queue ``peek`` inspection and orchestrator event-bus (``event``) commands."""
 
 from __future__ import annotations
 
@@ -9,8 +9,7 @@ from datetime import UTC, datetime
 import click
 
 from cw import queue_peek as _queue_peek
-from cw.cli._base import _complete_client, handle_errors, main
-from cw.config import load_clients
+from cw.cli._base import handle_errors, main
 from cw.events import (
     advance_cursor,
     init_cursor_at_end,
@@ -23,24 +22,8 @@ from cw.events import (
 )
 from cw.exceptions import CwError
 from cw.models import (
-    WORKER_PURPOSES,
     OrchestratorEvent,
     OrchestratorEventType,
-    QueueItem,
-    QueueItemStatus,
-    SessionPurpose,
-    TaskSpec,
-)
-from cw.queue import (
-    add_item,
-    claim_by_id,
-    claim_next,
-    clear_queue,
-    complete_item,
-    fail_item,
-    load_queue,
-    peek_next,
-    remove_item,
 )
 
 # --- Queue command group ---
@@ -48,155 +31,7 @@ from cw.queue import (
 
 @main.group()
 def queue() -> None:
-    """Manage the task queue."""
-
-
-@queue.command(name="add")
-@click.argument("client", shell_complete=_complete_client)
-@click.argument("description")
-@click.option(
-    "--purpose",
-    type=click.Choice([p.value for p in WORKER_PURPOSES]),
-    default="debt",
-    help="Queue purpose.",
-)
-@click.option("--prompt", default=None, help="Exact prompt for Claude.")
-@click.option("--priority", type=int, default=0, help="Priority (higher = sooner).")
-@handle_errors
-def queue_add(
-    client: str,
-    description: str,
-    purpose: str,
-    prompt: str | None,
-    priority: int,
-) -> None:
-    """Add a work item to the queue."""
-    task = TaskSpec(
-        description=description,
-        purpose=SessionPurpose(purpose),
-        prompt=prompt or description,
-        priority=priority,
-    )
-    item = add_item(client, task)
-    click.echo(f"Added queue item: {item.id} ({description})")
-
-
-def _filter_queue_items(
-    items: list[QueueItem],
-    purpose: str | None,
-    status_filter: str | None,
-) -> list[QueueItem]:
-    if purpose:
-        items = [i for i in items if i.task.purpose == purpose]
-    if status_filter:
-        items = [i for i in items if i.status == status_filter]
-    return items
-
-
-def _print_queue_table(items: list[QueueItem]) -> None:
-    click.echo(f"{'ID':<10} {'STATUS':<12} {'PURPOSE':<10} {'DESCRIPTION'}")
-    click.echo("-" * 60)
-    for item in items:
-        desc = item.task.description[:40]
-        click.echo(f"{item.id:<10} {item.status:<12} {item.task.purpose:<10} {desc}")
-
-
-@queue.command(name="list")
-@click.argument("client", required=False, default=None, shell_complete=_complete_client)
-@click.option(
-    "--purpose",
-    type=click.Choice([p.value for p in WORKER_PURPOSES]),
-    default=None,
-    help="Filter by purpose.",
-)
-@click.option(
-    "--status",
-    "status_filter",
-    type=click.Choice([e.value for e in QueueItemStatus]),
-    default=None,
-    help="Filter by status.",
-)
-@handle_errors
-def queue_list(
-    client: str | None,
-    purpose: str | None,
-    status_filter: str | None,
-) -> None:
-    """Show queue items for a client, or all clients if CLIENT is omitted."""
-    if client is not None:
-        items = _filter_queue_items(load_queue(client).items, purpose, status_filter)
-        if not items:
-            click.echo("Queue is empty.")
-            return
-        _print_queue_table(items)
-    else:
-        clients = load_clients()
-        has_output = False
-        for name in clients:
-            items = _filter_queue_items(load_queue(name).items, purpose, status_filter)
-            if not items:
-                continue
-            if has_output:
-                click.echo()  # blank line between client sections, not after last
-            click.echo(f"--- {name} ---")
-            _print_queue_table(items)
-            has_output = True
-        if not has_output:
-            click.echo("Queue is empty.")
-
-
-@queue.command(name="remove")
-@click.argument("client", shell_complete=_complete_client)
-@click.argument("item_id")
-@handle_errors
-def queue_remove(client: str, item_id: str) -> None:
-    """Remove an item from the queue."""
-    remove_item(client, item_id)
-    click.echo(f"Removed queue item: {item_id}")
-
-
-@queue.command(name="clear")
-@click.argument("client", shell_complete=_complete_client)
-@click.option(
-    "--purpose",
-    type=click.Choice([p.value for p in WORKER_PURPOSES]),
-    default=None,
-    help="Clear only items with this purpose.",
-)
-@click.option("--completed", is_flag=True, help="Clear only completed items.")
-@handle_errors
-def queue_clear(client: str, purpose: str | None, completed: bool) -> None:
-    """Clear items from the queue."""
-    purpose_enum = SessionPurpose(purpose) if purpose else None
-    status_enum = QueueItemStatus.COMPLETED if completed else None
-    removed = clear_queue(client, purpose=purpose_enum, status=status_enum)
-    click.echo(f"Cleared {removed} item(s).")
-
-
-@queue.command(name="next")
-@click.argument("client", shell_complete=_complete_client)
-@click.option(
-    "--purpose",
-    type=click.Choice([p.value for p in WORKER_PURPOSES]),
-    default=None,
-    help="Filter by purpose.",
-)
-@click.option("--json", "as_json", is_flag=True, help="Output full QueueItem JSON.")
-@handle_errors
-def queue_next(client: str, purpose: str | None, as_json: bool) -> None:
-    """Peek at the next pending item without claiming it."""
-    purpose_enum = SessionPurpose(purpose) if purpose else None
-    item = peek_next(client, purpose=purpose_enum)
-    if item is None:
-        click.echo("No pending items.")
-        return
-    if as_json:
-        click.echo(item.model_dump_json(indent=2))
-    else:
-        click.echo(
-            f"{item.id}  priority={item.task.priority}"
-            f"  purpose={item.task.purpose}  {item.task.description}"
-        )
+    """Inspect running dev-queue sessions."""
 
 
 @queue.command(name="peek")
@@ -219,61 +54,6 @@ def queue_peek(client: str | None, as_json: bool) -> None:
         click.echo(json.dumps(rows, indent=2, default=str))
     else:
         _queue_peek.print_table(rows)
-
-
-@queue.command(name="claim")
-@click.argument("client", shell_complete=_complete_client)
-@click.option(
-    "--purpose",
-    type=click.Choice([p.value for p in WORKER_PURPOSES]),
-    default=None,
-    help="Filter by purpose.",
-)
-@click.option("--id", "item_id", default=None, help="Claim a specific item by ID.")
-@click.option("--json", "as_json", is_flag=True, help="Output full QueueItem JSON.")
-@handle_errors
-def queue_claim(
-    client: str,
-    purpose: str | None,
-    item_id: str | None,
-    as_json: bool,
-) -> None:
-    """Claim the next pending item (marks it RUNNING)."""
-    item: QueueItem | None
-    if item_id:
-        item = claim_by_id(client, item_id)
-    else:
-        purpose_enum = SessionPurpose(purpose) if purpose else None
-        item = claim_next(client, purpose=purpose_enum)
-    if item is None:
-        click.echo("No pending items to claim.")
-        return
-    if as_json:
-        click.echo(item.model_dump_json(indent=2))
-    else:
-        click.echo(f"Claimed: {item.id} ({item.task.description})")
-
-
-@queue.command(name="complete")
-@click.argument("client", shell_complete=_complete_client)
-@click.argument("item_id")
-@click.option("--result", default="", help="Result summary text.")
-@handle_errors
-def queue_complete(client: str, item_id: str, result: str) -> None:
-    """Mark a queue item as completed."""
-    complete_item(client, item_id, result)
-    click.echo(f"Completed: {item_id}")
-
-
-@queue.command(name="fail")
-@click.argument("client", shell_complete=_complete_client)
-@click.argument("item_id")
-@click.option("--error", "error_text", default="", help="Error description.")
-@handle_errors
-def queue_fail(client: str, item_id: str, error_text: str) -> None:
-    """Mark a queue item as failed."""
-    fail_item(client, item_id, error_text)
-    click.echo(f"Failed: {item_id}")
 
 
 # --- Event bus command group ---

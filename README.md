@@ -174,16 +174,6 @@ You (coordinator)
 | `cw board` | Open the orchestrator board |
 | `cw schema` | Print JSON schema for internal models |
 
-### Simple task queue (inter-session messaging)
-
-| Command | Description |
-|---------|-------------|
-| `cw queue add <client> "task"` | Queue a task for a session |
-| `cw queue list [client]` | View queued items |
-| `cw queue next <client>` | Claim the next queued item |
-| `cw queue remove <client> <id>` | Remove a queued item |
-| `cw queue clear <client>` | Clear the queue |
-
 ### Worktree management
 
 | Command | Description |
