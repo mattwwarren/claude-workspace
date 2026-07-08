@@ -2450,8 +2450,6 @@ def test_reconcile_usage_limited_true_from_stalled_wall_clock_path(
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
 
-    from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
-
     worktree = tmp_path / "wt-stalled-ul-reconcile"
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     surface_ref = "stall-ul1"

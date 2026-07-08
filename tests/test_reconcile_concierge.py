@@ -425,9 +425,7 @@ class TestDeadOnArrivalBackoff:
         assert requeued.false_park_recovery_count == 0
         assert requeued.false_park_recovery_next_eligible_at is None
 
-    def test_missing_evidence_no_session_is_false(
-        self, tmp_config_dir: Path
-    ) -> None:
+    def test_missing_evidence_no_session_is_false(self, tmp_config_dir: Path) -> None:
         """Addendum 6 arm 1: session is None → dead_on_arrival False, never armed."""
         task = _make_task(disposition=None, attempts=1)
         save_dev_queue(DevQueueStore(tasks=[task]))
