@@ -505,7 +505,11 @@ def rescue_finalize_blocked_sessions(
         ticket_id = ticket_id_for_session(session.name)
         if ticket_id and (session.client, ticket_id) in merged_client_ticket_ids:
             _rescue_complete(
-                session, ticket_id, branch, rescued_ticket_ids, skip_merge=True
+                session,
+                ticket_id=ticket_id,
+                branch=branch,
+                rescued_ticket_ids=rescued_ticket_ids,
+                skip_merge=True,
             )
             continue
         try:
@@ -531,6 +535,11 @@ def rescue_finalize_blocked_sessions(
         if not pr_created:
             _rescue_mark_attempted(session.id)
             continue
-        _rescue_complete(session, ticket_id, branch, rescued_ticket_ids)
+        _rescue_complete(
+            session,
+            ticket_id=ticket_id,
+            branch=branch,
+            rescued_ticket_ids=rescued_ticket_ids,
+        )
 
     return rescued_ticket_ids
