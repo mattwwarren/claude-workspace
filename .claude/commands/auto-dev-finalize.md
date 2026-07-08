@@ -140,7 +140,40 @@ Spawn a **general-purpose** agent (`model: "sonnet"`) scoped to the implementati
 - Sync-with-main and quality-gate-rerun logic live in one place instead of being duplicated between `/auto-dev` Stage 4b and `/prep-pr` Step 1/7.
 - PR monitor registration is handled by `/prep-pr` Step 9.
 
-**Worktree mechanic:** `/prep-pr` operates in `cwd`. The impl worktree is not the main session's cwd. The safer path is to spawn with `isolation: "worktree"` and have the agent re-checkout the feature branch from origin (same push-then-recheckout pattern as Stage 3b fix loop) before invoking `/prep-pr`.
+### Dispatch Detection — #766 (skip redundant isolation when already in a cw worktree)
+
+**Before spawning the Step 4c agent, check whether this session is already running
+inside a cw dispatch worktree** (same test as `auto-dev-impl.md`'s #766 block):
+
+```bash
+if [ -f ".claude/cw-context.json" ]; then
+  IN_DISPATCH_WORKTREE=true
+else
+  IN_DISPATCH_WORKTREE=false
+fi
+```
+
+**Root cause this closes (#1047):** the `isolation: "worktree"` flag on the Agent() call
+creates a **second, nested worktree inside the primary checkout**. When cw dispatch has
+already provisioned the session's cwd as an isolated worktree with the feature branch
+checked out there, `git checkout -B <branch-name>` inside the nested worktree collides
+(`fatal: '<branch-name>' is already used by worktree ...`). The observed failure mode
+(#1031 finalize transcript) was a subagent improvising `cd
+~/workspace/projects/claude-workspace && git checkout -b prep-pr-1031` to route around the
+collision — running the entire ship against the **primary checkout**.
+
+**Worktree mechanic depends on dispatch context:**
+
+- **Not in a dispatch worktree:** spawn with `isolation: "worktree"` and have the agent
+  re-checkout the feature branch from origin (same push-then-recheckout pattern as Stage
+  3b fix loop) before invoking `/prep-pr`.
+- **In a dispatch worktree:** **omit `isolation: "worktree"` entirely.** Spawn the agent
+  scoped to the session cwd (`worktree_path` in `.claude/cw-context.json` is the
+  authoritative anchor). Removing the nested worktree removes the branch collision — no
+  primary-checkout path to `cd` into. **Keep the git-refresh sequence below
+  unconditionally** (fetch + `checkout -B` + `merge origin/main`) — it still exists to pull
+  in any fix-loop pushes to `origin/<branch>` not yet reflected in the session's local
+  branch; it now just runs against the session cwd instead of a spawned worktree.
 
 **Permission mode (known limitation, #636 — deferred):** In headless/daemon context the worker runs under `claude --bg --permission-mode auto` (cw default, `native_daemon.py` `_DEFAULT_PERMISSION_MODE`), so the `auto` permission classifier fires on `gh pr create` inside the worktree-isolated subagent; with no TTY to approve, the call blocks and `/prep-pr` aborts. The global allowlist `Bash(gh pr:*)` does NOT suppress the classifier here. The *effective* fix is to spawn the worker with a non-`auto` `permission_mode` (cw side, requires the bypassPermissions disclaimer accepted once interactively) — **deferred** to RFC 0005's FINALIZE/REVIEW stages, which own PR creation and must carry this requirement (see #622/#621). Setting `bypassPermissions` on *this subagent spawn alone* is NOT currently effective — the worker's own `auto` mode is the source. Until the stage fix lands, a classifier block surfaces as a BLOCK (below) for manual ship.
 
@@ -152,6 +185,9 @@ Spawn a **general-purpose** agent (`model: "sonnet"`) scoped to the implementati
   # -B (not -b): idempotent reset-to-origin. cw provisions the per-ticket
   # worktree on this same feature branch (#712), so -b would fail "already
   # exists"; -B resets it to origin regardless.
+  # Why: runs against the session cwd when already in a dispatch worktree
+  # (#1047, see Dispatch Detection above) — the -B reset still pulls any
+  # fix-loop pushes to origin/<branch> not yet reflected locally.
   git checkout -B <branch-name> origin/<branch-name>
 
   # Refresh with latest main — catches any upstream commits that landed
