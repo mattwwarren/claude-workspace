@@ -385,6 +385,83 @@ class TestActRecheckRace:
     def test_empty_candidates_is_noop(self) -> None:
         assert _act_auto_approve_review([], now=_NOW) == []
 
+    def _stale_candidate(self) -> GateRecipeCandidate:
+        return GateRecipeCandidate(
+            ticket_id="GEN-1",
+            client="acme",
+            lane="default",
+            recipe=RECIPE_AUTO_APPROVE_REVIEW,
+            evidence={
+                "must_fix_initial": 0,
+                "deferred": 0,
+                "recommendation": "PROCEED",
+                "forbidden_touched": False,
+            },
+            session_id="sess-1",
+        )
+
+    def test_row_gone_or_not_blocked_at_act_skips(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Row no longer BLOCKED_ON_USER at act time (e.g. concurrent advance)."""
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        task = _make_task(status=QueueItemStatus.PENDING)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
+
+        assert _act_auto_approve_review([self._stale_candidate()], now=_NOW) == []
+
+    def test_session_id_cleared_at_act_skips(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Row's session_id cleared between detect and act."""
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        task = _make_task(session_id=None)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
+
+        assert _act_auto_approve_review([self._stale_candidate()], now=_NOW) == []
+
+    def test_session_gone_at_act_skips(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Session record pruned between detect and act."""
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        task = _make_task(session_id="sess-1")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[]))
+
+        assert _act_auto_approve_review([self._stale_candidate()], now=_NOW) == []
+
+
+class TestCommentNonZeroReturn:
+    def test_nonzero_gh_return_is_logged(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import subprocess
+
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        task = _make_task()
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
+
+        def _fail(argv: list[str], **_k: Any) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.CompletedProcess(argv, 1, stdout=b"", stderr=b"nope")
+
+        monkeypatch.setattr("cw.reconcile.gate_recipes.subprocess.run", _fail)
+
+        with caplog.at_level("WARNING"):
+            recovered = run_gate_recipes(now=_NOW, config=_config())
+
+        assert recovered == ["GEN-1"]  # approve stands despite comment rc!=0
+        assert any(
+            "rc=1" in rec.message and "GEN-1" in rec.message for rec in caplog.records
+        )
+
 
 def test_recipe_constants_are_distinct() -> None:
     """Both recipe keys are defined (P3 wires the second one, #1066)."""
