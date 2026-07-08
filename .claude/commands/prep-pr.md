@@ -1,6 +1,6 @@
 ---
 description: "Full PR prep: commit, self-review, fix loop, scope check, ship"
-argument-hint: "[--max-cycles N] [--skip-review] [--base <branch>]"
+argument-hint: "[--max-cycles N] [--skip-review] [--base <branch>] [--headless]"
 allowed-tools: ["Bash", "Glob", "Grep", "Read", "Task", "Skill", "AskUserQuestion"]
 ---
 
@@ -9,6 +9,44 @@ allowed-tools: ["Bash", "Glob", "Grep", "Read", "Task", "Skill", "AskUserQuestio
 Full PR preparation orchestrator: commit → self-review → fix → quality gates → ship. Monitors scope creep and surfaces conflicts to the user at each step.
 
 **Arguments:** "$ARGUMENTS"
+
+---
+
+## Headless Mode
+
+`/prep-pr` is delegated to by the headless `/auto-dev` finalize stage
+(`auto-dev-finalize.md` Step 4c → `/prep-pr --headless`). In headless mode there
+is no TTY: **every interactive gate that would call `AskUserQuestion` is
+forbidden.** Each gate below carries an explicit `**Headless:**` override — read
+it in place of the interactive prompt.
+
+**The universal rule:** a gate collapses to one of
+
+- a **deterministic auto-action** (auto-commit, continue-with-known-state), or
+- a **`HEADLESS BLOCK`** when the gate cannot be resolved without a human.
+
+Never silently skip a step. A silently-skipped ship step is the exact defect
+this mode exists to prevent (feed post / review-monitor registration dropped
+with auto-merge still armed). When a gate cannot be auto-resolved, STOP and emit
+a `HEADLESS BLOCK` as the **final output**, then halt — do not proceed to any
+later step.
+
+**`HEADLESS BLOCK` format** (greppable; the calling agent surfaces it as a
+friction **BLOCK**, which the pipeline maps to `blocker.reason: "agent_block"`
+per `claude-workspace/docs/headless-contract.md` §2 gate-collapse table, row
+"Any other agent BLOCK (Plan / prep-pr / etc.)"):
+
+```
+<<<PREP_PR_BLOCK
+reason: agent_block
+gate: <step + gate name, e.g. "Step 7 quality gate">
+details: <verbatim cause — failing gate output, conflicting files, or "no project /ship-it">
+PREP_PR_BLOCK>>>
+```
+
+Do NOT fall back to shipping-anyway, reverting work, or inventing a PR yourself
+to route around a block. Emitting the block and halting IS the correct headless
+behavior — the orchestrator routes it to a human.
 
 ---
 
@@ -26,6 +64,9 @@ Check that we're ready to prepare a PR:
    - `--base <branch>` → base branch for diff comparison (default: `main`)
    - `--max-cycles N` → maximum review-fix cycles (default: 3)
    - `--skip-review` → skip self-review, jump straight to quality gates
+   - `--headless` → non-interactive mode. See **Headless Mode** below. Every
+     gate that would otherwise call `AskUserQuestion` collapses to a
+     deterministic action or a `HEADLESS BLOCK`. Never prompt.
 
 3. **Has work to ship:**
    ```bash
@@ -38,6 +79,10 @@ Check that we're ready to prepare a PR:
    > "There are uncommitted changes. Commit them now before starting PR prep?"
    - **Yes** → Stage and commit (selective staging, descriptive message, never amend)
    - **No** → Abort: "Commit or stash changes before running /prep-pr"
+
+   **Headless:** AUTO-COMMIT (selective staging, descriptive message, never
+   amend) and continue. Committing pending work is non-destructive and matches
+   Step 8.1; do not abort on this.
 
 ## Step 1: Sync with Base Branch
 
@@ -53,6 +98,11 @@ git merge origin/<base>
   > "Merge conflicts with `<base>`. Conflicting files: [list]. Resolve before continuing?"
   - **Yes** → help resolve conflicts, commit the merge
   - **Abort** → `git merge --abort`, stop /prep-pr
+
+  **Headless:** run `git merge --abort` to restore a clean tree, then emit a
+  `HEADLESS BLOCK` (`gate: "Step 1 sync-with-base"`, `details:` the conflicting
+  file list). Do NOT attempt an autonomous conflict resolution — a mis-resolved
+  merge is worse than a surfaced block.
 
 ## Step 2: Detect Quality Gates
 
@@ -105,6 +155,12 @@ Options:
 3. **Skip fixes** → jump to quality gates
 4. **Abort** — stop /prep-pr entirely
 
+**Headless:** AUTO — fix all MUST_FIX findings via Step 6; note SHOULD_FIX
+findings (do not fix, do not block) and continue. Never abort on review
+findings alone. (In the `/auto-dev` pipeline this step is unreachable —
+finalize invokes `/prep-pr --skip-review`, having already run scope-aware
+review in Stage 3 — so this override only applies to standalone headless use.)
+
 ## Step 6: Fix Issues
 
 ### Small number of findings (1–3):
@@ -143,6 +199,11 @@ Spawn parallel subagents via the Task tool, grouped by file for exclusive owners
    - **Revert** — `git revert` the fix commits
    - **Abort** — stop entirely
 
+   **Headless:** CONTINUE with the expanded scope and record the creep metrics
+   (grown file/line counts, new files) so the caller can echo them into
+   `friction_highlights`. Do NOT revert (destructive to just-applied fixes) and
+   do NOT abort — the scope grew from resolving this run's own review findings.
+
 4. **Conflict detection:** If a fix introduced new findings that didn't exist before (regressions), flag this to the user:
    > "Fix cycle may have introduced new issues. Review recommended before continuing."
 
@@ -160,6 +221,12 @@ For each gate:
    - Report the failure output
    - Ask: "Gate [name] failed. Attempt to fix, or ship anyway?"
 
+   **Headless:** attempt a fix loop (back to Step 4 within `--max-cycles`). If
+   the gate still fails after the fix loop is exhausted, emit a `HEADLESS BLOCK`
+   (`gate: "Step 7 quality gate"`, `details:` the verbatim failing gate output).
+   NEVER "ship anyway" — shipping past a failing quality gate violates the
+   quality floor and is exactly the silent-degradation this mode forbids.
+
 ### Loop Control
 
 After all gates pass:
@@ -174,6 +241,10 @@ After all gates pass:
   - **Fix manually** — exit /prep-pr so user can fix by hand
   - **Abort** — stop entirely
 
+  **Headless:** emit a `HEADLESS BLOCK` (`gate: "Step 7 max review cycles"`,
+  `details:` the remaining-issues summary). Do NOT "ship anyway" past unresolved
+  MUST_FIX issues and do NOT proceed to Step 8.
+
 ## Step 8: Ship
 
 1. Commit any remaining uncommitted changes (staged autofix results, etc.)
@@ -186,6 +257,22 @@ After all gates pass:
      > "This project has no `/ship-it` command (`.claude/commands/ship-it.md`). Create a project-level ship-it that knows your repo's PR conventions, branch naming, and CI setup. The generic global one was removed because it caused more problems than it solved."
      >
      > Do NOT fall back to any global ship-it. Do NOT try to create a PR yourself. The user must set up a project-specific ship-it first.
+
+**Headless:** propagate headless-ness into the delegated `ship-it.md` execution
+— this is the delegation hop where the original defect surfaced.
+- **If no project-level ship-it exists** → emit a `HEADLESS BLOCK`
+  (`gate: "Step 8 ship"`, `details: "no project /ship-it"`) instead of the
+  interactive STOP message. (`auto-dev-finalize.md` Step 4c's subagent
+  instruction already expects and handles this specific BLOCK cause.)
+- **If it exists** → while following `ship-it.md` step-by-step, treat the whole
+  delegated run as headless: any interactive step in that file (its own
+  `AskUserQuestion`, a confirmation prompt, a "proceed?" gate) converts to the
+  same rule as this command — auto-resolve if the deterministic action is
+  unambiguous, otherwise emit a `HEADLESS BLOCK` (`gate: "Step 8 ship-it: <that
+  step>"`). A side-effecting step (push, `gh pr create`, feed/slack post,
+  monitor register) must run or BLOCK — it must **never** be silently skipped.
+  If `ship-it.md` itself accepts a `--headless`/non-interactive flag, pass it
+  through.
 
 Pass through relevant arguments when invoking the project-level ship-it:
 - `--draft` if the user's original arguments included it
@@ -212,6 +299,10 @@ Output is the canonical Ship Summary (markdown). For programmatic callers (e.g. 
 - Report the failed checks verbatim to the user
 - Do NOT claim success
 - Diagnose: most failures mean a /ship-it sub-step was skipped (no push, no PR, no auto-merge). Re-run the missing step rather than papering over it.
+- **Headless:** after attempting the missing sub-step once, if `verify` still
+  exits non-zero, emit a `HEADLESS BLOCK` (`gate: "Step 9 finalize verify"`,
+  `details:` the verbatim failed checks). Never emit a Ship Summary that claims
+  success when `verify` failed.
 
 **If monitor registration is missing**, run it now:
 ```bash
@@ -250,6 +341,7 @@ Print the Ship Summary from Step 9 as the final message. Add cycle-level context
 3. **User aborts** at any interaction point
 4. **User ships anyway** despite remaining issues
 5. **Unresolvable scope creep** → user declines to continue
+6. **Headless `HEADLESS BLOCK`** → an interactive gate could not be auto-resolved (conditions 3–5 have no interactive equivalent in headless mode; they collapse to a block or a deterministic action per each step's **Headless:** override)
 
 ## Notes
 
@@ -258,3 +350,4 @@ Print the Ship Summary from Step 9 as the final message. Add cycle-level context
 - Each review-fix cycle captures a scope snapshot for creep monitoring
 - Never amend commits. Each fix gets its own commit.
 - A project-level `/ship-it` (`.claude/commands/ship-it.md`) is required — there is no global fallback
+- `--headless` (see **Headless Mode**) is set by `auto-dev-finalize.md` Step 4c for the headless `/auto-dev` pipeline. It replaces every `AskUserQuestion` gate with a deterministic action or a `HEADLESS BLOCK`; nothing side-effecting is ever silently skipped.
