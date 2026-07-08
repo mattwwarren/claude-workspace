@@ -45,6 +45,19 @@ def _write_acme_clients_yaml(tmp_config_dir: Path, workspace: Path) -> None:
     )
 
 
+def _write_two_client_yaml(
+    tmp_config_dir: Path, acme_workspace: Path, beta_workspace: Path
+) -> None:
+    """Write a minimal clients.yaml for both 'acme' and 'beta'."""
+    config_dir = tmp_config_dir / ".config" / "cw"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "clients.yaml").write_text(
+        "clients:\n"
+        f"  acme:\n    workspace_path: {acme_workspace}\n    default_branch: main\n"
+        f"  beta:\n    workspace_path: {beta_workspace}\n    default_branch: main\n"
+    )
+
+
 def _clean_result(
     *,
     must_fix_initial: int = 0,
@@ -192,11 +205,13 @@ class TestDetect:
 
         assert _detect_auto_approve_review(state, [task]) == []
 
-    def test_malformed_last_result_section_yields_none(self) -> None:
-        """A review/health/scope section that is not a dict is not fireable."""
+    @pytest.mark.parametrize("section", ["review", "health", "scope"])
+    def test_malformed_last_result_section_yields_none(self, section: str) -> None:
+        """A review/health/scope section that is not a dict is not fireable,
+        independent of which of the three sections is malformed."""
         task = _make_task()
         bad = _clean_result()
-        bad["review"] = "not-a-dict"
+        bad[section] = "not-a-dict"
         session = _make_session(last_result=bad)
         state = CwState(sessions=[session])
 
@@ -221,6 +236,8 @@ class TestDetect:
 
 class TestMasterSwitch:
     def test_disabled_is_full_noop(self, tmp_config_dir: Path, tmp_path: Path) -> None:
+        from cw.events import read_events
+
         _write_acme_clients_yaml(tmp_config_dir, tmp_path)
         task = _make_task()
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -234,6 +251,11 @@ class TestMasterSwitch:
         store = load_dev_queue()
         assert store.tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
         assert store.tasks[0].stage == Stage.REVIEW
+        events = read_events(
+            consumer="test-gate-disabled-noop",
+            event_types=[OrchestratorEventType.GATE_AUTO_APPROVED],
+        )
+        assert events == []
 
 
 class TestRunApprove:
@@ -255,6 +277,49 @@ class TestRunApprove:
         assert approved.status == QueueItemStatus.PENDING
         assert approved.stage == Stage.FINALIZE
         assert approved.session_id is None
+
+    def test_approves_both_when_two_clients_share_a_ticket_id(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """ticket_id is a per-repo GitHub issue number, not globally unique —
+        two different clients can legitimately have a clean candidate that
+        shares the same ticket_id. Both must fire independently; neither
+        should silently collide/drop the other (regression test for keying
+        the act-phase dedup on (ticket_id, client), not ticket_id alone)."""
+        acme_ws = tmp_path / "acme"
+        beta_ws = tmp_path / "beta"
+        acme_ws.mkdir()
+        beta_ws.mkdir()
+        _write_two_client_yaml(tmp_config_dir, acme_ws, beta_ws)
+        acme_task = _make_task(ticket_id="GEN-1", client="acme", session_id="sess-a")
+        beta_task = _make_task(ticket_id="GEN-1", client="beta", session_id="sess-b")
+        save_dev_queue(DevQueueStore(tasks=[acme_task, beta_task]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(
+                        ticket_id="GEN-1",
+                        client="acme",
+                        session_id="sess-a",
+                        last_result=_clean_result(),
+                    ),
+                    _make_session(
+                        ticket_id="GEN-1",
+                        client="beta",
+                        session_id="sess-b",
+                        last_result=_clean_result(),
+                    ),
+                ]
+            )
+        )
+
+        recovered = run_gate_recipes(now=_NOW, config=_config())
+
+        assert sorted(recovered) == ["GEN-1", "GEN-1"]
+        store = load_dev_queue()
+        by_client = {t.client: t for t in store.tasks}
+        assert by_client["acme"].stage == Stage.FINALIZE
+        assert by_client["beta"].stage == Stage.FINALIZE
 
     def test_event_emitted_before_transition_with_reloaded_sources(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -338,6 +403,53 @@ class TestRunApprove:
         assert any("GEN-1" in rec.message for rec in caplog.records)
 
 
+class TestActApproveFailure:
+    def test_event_survives_a_failed_mutation_and_no_comment_is_posted(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        stub_gh_comment: list[list[str]],
+    ) -> None:
+        """Proves the event-before-mutation ordering actually matters: even
+        when the mutation itself raises, the already-recorded GATE_AUTO_APPROVED
+        event is not rolled back (durable audit trail) — but the ticket is NOT
+        approved, and no audit comment is posted for a mutation that never
+        landed. This is the coverage a passing "both happened" assertion alone
+        cannot provide."""
+        from cw.events import read_events
+        from cw.exceptions import ApproveGateError
+
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        task = _make_task()
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
+
+        boom_msg = "boom"
+
+        def _boom(*_a: Any, **_k: Any) -> None:
+            raise ApproveGateError(boom_msg)
+
+        monkeypatch.setattr("cw.reconcile.gate_recipes._approve_ticket_locked", _boom)
+
+        with caplog.at_level("WARNING"):
+            recovered = run_gate_recipes(now=_NOW, config=_config())
+
+        assert recovered == []
+        store = load_dev_queue()
+        assert store.tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+        assert store.tasks[0].stage == Stage.REVIEW
+        events = read_events(
+            consumer="test-gate-approve-failure",
+            event_types=[OrchestratorEventType.GATE_AUTO_APPROVED],
+        )
+        assert len(events) == 1
+        assert events[0].payload["ticket_id"] == "GEN-1"
+        assert stub_gh_comment == []
+        assert any("GEN-1" in rec.message for rec in caplog.records)
+
+
 class TestActRecheckRace:
     def test_stale_candidate_predicate_fails_at_act(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -400,13 +512,26 @@ class TestActRecheckRace:
             session_id="sess-1",
         )
 
-    def test_row_gone_or_not_blocked_at_act_skips(
+    def test_not_blocked_at_act_skips(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """Row no longer BLOCKED_ON_USER at act time (e.g. concurrent advance)."""
         _write_acme_clients_yaml(tmp_config_dir, tmp_path)
         task = _make_task(status=QueueItemStatus.PENDING)
         save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
+
+        assert _act_auto_approve_review([self._stale_candidate()], now=_NOW) == []
+
+    def test_row_deleted_at_act_skips(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Row removed from the dev-queue store entirely between detect and act
+        (the ``task is None`` half of the lookup's skip condition — distinct
+        from the ``test_not_blocked_at_act_skips`` case above, which only
+        flips ``status`` and never removes the row from ``store.tasks``)."""
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        save_dev_queue(DevQueueStore(tasks=[]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
 
         assert _act_auto_approve_review([self._stale_candidate()], now=_NOW) == []

@@ -46,6 +46,7 @@ from cw.dev_queue import (
     load_dev_queue,
 )
 from cw.events import record_event
+from cw.exceptions import CwError
 from cw.models import OrchestratorEventType, QueueItemStatus
 
 if TYPE_CHECKING:
@@ -97,6 +98,15 @@ class GateRecipeCandidate:
     ``predicate_snapshot`` — the exact four field values that licensed the fire
     (``must_fix_initial``, ``deferred``, ``recommendation``,
     ``forbidden_touched``), read off ``session.last_result``.
+
+    Why ``evidence`` is unlike :class:`ConciergeCandidate`'s: the concierge act
+    phase reads ``candidate.evidence`` straight into its event payload, but
+    this module's act phase (:func:`_act_auto_approve_review`) deliberately
+    re-derives a fresh snapshot instead of trusting this detect-time one — the
+    predicate is re-checked under ``dev_queue_lock()`` to close the
+    detect-to-act race (a concurrent human approve or new sentinel can
+    invalidate it), so acting on a stale ``evidence`` value here would defeat
+    that guard. The field is kept for detect-phase introspection/tests only.
     """
 
     ticket_id: str
@@ -240,18 +250,27 @@ def _act_auto_approve_review(
     """
     if not candidates:
         return []
-    by_ticket = {c.ticket_id: c for c in candidates}
+    # Keyed on (ticket_id, client): ticket_id alone is a per-repo GitHub issue
+    # number, not globally unique across this multi-tenant system's clients —
+    # keying on ticket_id alone would let two different clients' candidates
+    # that happen to share a ticket_id collide and silently drop one.
+    by_key = {(c.ticket_id, c.client): c for c in candidates}
     approved: list[str] = []
     comment_jobs: list[tuple[str, dict[str, object]]] = []
     with dev_queue_lock():
-        for ticket_id, candidate in by_ticket.items():
-            store = load_dev_queue()
+        # Loaded once: dev_queue_lock() is the exclusive writer lock for this
+        # file, so no concurrent process can change it mid-loop, and every
+        # mutation this loop performs goes through _approve_ticket_locked's
+        # own internal load/save round-trip rather than this snapshot.
+        store = load_dev_queue()
+        for candidate in by_key.values():
             state = load_state()
             task = next(
                 (
                     t
                     for t in store.tasks
-                    if t.ticket_id == ticket_id and t.client == candidate.client
+                    if t.ticket_id == candidate.ticket_id
+                    and t.client == candidate.client
                 ),
                 None,
             )
@@ -278,7 +297,25 @@ def _act_auto_approve_review(
                 },
                 correlation_id=task.ticket_id,
             )
-            _approve_ticket_locked(task.ticket_id, task.client)
+            try:
+                _approve_ticket_locked(task.ticket_id, task.client)
+            except CwError:
+                # The GATE_AUTO_APPROVED event above is already durable, but
+                # the mutation didn't land (e.g. a duplicate row resolved to a
+                # different task, or the client's pipeline config changed
+                # between detect and here). Log and skip rather than let this
+                # escape uncaught: an uncaught raise here would abort the rest
+                # of this reconcile tick (including run_escalation_sweep and
+                # every other still-valid candidate) and, via callers that
+                # don't wrap reconcile() in a broad except (e.g. cw status),
+                # surface as a crash to unrelated CLI commands.
+                _log.warning(
+                    "gate_recipe_approve_failed ticket=%s client=%s",
+                    task.ticket_id,
+                    task.client,
+                    exc_info=True,
+                )
+                continue
             approved.append(task.ticket_id)
             comment_jobs.append((task.ticket_id, snapshot))
     for ticket_id, snapshot in comment_jobs:
