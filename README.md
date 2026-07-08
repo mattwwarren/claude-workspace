@@ -174,16 +174,6 @@ You (coordinator)
 | `cw board` | Open the orchestrator board |
 | `cw schema` | Print JSON schema for internal models |
 
-### Simple task queue (inter-session messaging)
-
-| Command | Description |
-|---------|-------------|
-| `cw queue add <client> "task"` | Queue a task for a session |
-| `cw queue list [client]` | View queued items |
-| `cw queue next <client>` | Claim the next queued item |
-| `cw queue remove <client> <id>` | Remove a queued item |
-| `cw queue clear <client>` | Clear the queue |
-
 ### Worktree management
 
 | Command | Description |
@@ -217,8 +207,6 @@ These are invoked inside a Claude Code session and form the daily operational to
 | Command | When to use |
 |---------|-------------|
 | `/auto-dev-plan` | Stage 1 only: draft plan, run spec + soundness reviewers, post to issue tracker. |
-| `/queue-plan` | Queue an approved plan for async dispatch. |
-| `/queue-debt` | Queue a tech debt item for later cleanup. |
 | `/queue-issues` | Queue multiple issues for dispatch. |
 | `/auto-debt <ticket-id>` | Constrained auto-dev for small-scope tech debt tickets. |
 
@@ -246,7 +234,6 @@ These are invoked inside a Claude Code session and form the daily operational to
 
 | Command | When to use |
 |---------|-------------|
-| `/pull-and-execute` | Pull next queued item → spawn agents → review → mark complete. |
 | `/orchestrate-phase` | Run a single pipeline phase in an orchestrated multi-session setup. |
 | `/graduate-plan` | Promote a plan from draft to approved state. |
 

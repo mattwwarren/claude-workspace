@@ -78,9 +78,6 @@ Install the cw slash commands to `~/.claude/commands/` so they're available glob
 Or if working from a non-local install, find the project source and run the script. The skills include:
 - `/session-done` - Wrap up work session with handoff generation
 - `/handoff` - Generate session handoff for abnormal endings
-- `/queue-plan` - Queue a plan for implementation
-- `/queue-debt` - Queue a tech debt item
-- `/pull-and-execute` - Pull and execute queue items
 - `/orchestrate-phase` - Automated phase implementation with GitHub Issue integration
 
 ## Step 6: Shell Completion (Optional)
