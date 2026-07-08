@@ -683,6 +683,14 @@ class TestFalseParkRecoveryBackoffFields:
         assert restored.false_park_recovery_next_eligible_at == next_eligible
 
 
+class TestComputedScopeTierField:
+    """GitHub #1050: pipeline-computed scope tier stamped by dispatch."""
+
+    def test_ticket_task_computed_scope_tier_defaults_none(self) -> None:
+        task = TicketTask(ticket_id="T-1", client="c")
+        assert task.computed_scope_tier is None
+
+
 class TestConciergeRecoveryBackoffArmedEventType:
     def test_value(self) -> None:
         assert (
