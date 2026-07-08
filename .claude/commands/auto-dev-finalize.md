@@ -352,7 +352,7 @@ After `/prep-pr` returns with a PR number:
    2. Ship anyway — proceed to auto-merge (you'll attach evidence post-merge)
    3. Hold — leave PR open, do NOT enable auto-merge, exit ticket
    ```
-   - **Capture now** → spawn a `general-purpose` agent (`isolation: "worktree"`, `model: "haiku"`, `run_in_background: true`) with the playwright-cli capture + `gh pr edit --body` instructions from the project's `/ship-it` Step 6b. Re-run this gate after the agent returns. Max 2 capture attempts before falling through to the "Hold" branch.
+   - **Capture now** → apply the same Dispatch Detection test as Step 4c (`.claude/cw-context.json` present). **In a dispatch worktree:** spawn a `general-purpose` agent (`model: "haiku"`, `run_in_background: true`, no `isolation` key) scoped to the session cwd — same #766/#1047 rationale as Step 4c. **Otherwise:** spawn a `general-purpose` agent (`isolation: "worktree"`, `model: "haiku"`, `run_in_background: true`). Either way, with the playwright-cli capture + `gh pr edit --body` instructions from the project's `/ship-it` Step 6b. Re-run this gate after the agent returns. Max 2 capture attempts before falling through to the "Hold" branch.
    - **Ship anyway** → continue to step 2 (auto-merge enable). Append `"ui_evidence_missing_user_override"` to `friction_highlights`.
    - **Hold** → skip step 2 entirely (do NOT enable auto-merge). The PR exists but waits on the human to attach evidence and run `gh pr merge --auto --squash` manually. Set `pr.auto_merge: false` and `next_actions: ["attach_ui_evidence"]` in the structured output (interactive runs don't emit structured output, but a summary line at end-of-pipeline should mention it).
 
