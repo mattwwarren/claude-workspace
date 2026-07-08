@@ -445,6 +445,95 @@ def _handle_headless_no_sentinel(
     return True
 
 
+def _resolve_and_complete_headless_session(
+    state: CwState,
+    session: Session,
+    *,
+    hook_payload: dict[str, object],
+    context: dict[str, object],
+    cwd_value: str,
+    claude_session_id: object,
+    ticket_id_value: object,
+    is_headless: bool,
+    now: datetime,
+) -> bool | None:
+    """Resolve the headless sentinel and mark the session COMPLETED (#176, #251).
+
+    Extracted from ``signal_stop`` to stay under the branch/return caps; owns
+    the sentinel lookup, the #251 staged-advance routing, and the terminal
+    session mutation + ``save_state``.
+
+    Returns ``None`` when the caller must bail without any further action:
+    either no sentinel was found under budget (``_handle_headless_no_sentinel``
+    already ran its own transition), or the shared staged-advance authority
+    refused the route on a stage mismatch (GitHub #1031, the #986 incident —
+    extends #1019's phantom-path guard to the Stop-hook path). A refusal
+    leaves session and task completely untouched so a later reconcile tick
+    or Stop hook can re-observe them.
+
+    Returns the ``rescued`` flag (bool) once the session has been marked
+    COMPLETED and persisted.
+    """
+    parsed_sentinel: AutoDevResult | BlockedResult | None = None
+    # Issue #536: emit precedence. When the producer already pushed a
+    # terminal result via ``cw result emit`` (session.last_result carries a
+    # "status"), that value is authoritative — reconstruct it and skip the
+    # transcript re-parse entirely. The transcript sentinel is demoted to a
+    # forensic fallback: it still runs (and is still authoritative) whenever
+    # no emitted result exists, so a worker that never emits is unaffected.
+    emit_terminal = False
+    if is_headless and _has_terminal_sentinel(session):
+        parsed_sentinel = _reconstruct_emitted_sentinel(session)
+        emit_terminal = parsed_sentinel is not None
+    if not emit_terminal and is_headless:
+        parsed_sentinel = _parse_headless_sentinel(
+            session, cwd_value, claude_session_id
+        )
+        if parsed_sentinel is None:
+            _handle_headless_no_sentinel(
+                state,
+                session,
+                now=now,
+                claude_session_id=claude_session_id,
+                context=context,
+                ticket_id_value=ticket_id_value,
+                hook_payload=hook_payload,
+            )
+            return None
+
+    # Issue #251: directly update the dev-queue task *before* marking the
+    # session COMPLETED. This closes the race where revert_completed_silent_tasks
+    # sees a COMPLETED session with a still-RUNNING task and reverts it to
+    # PENDING before consume_completed_sessions can process the event — causing
+    # no_op and similar terminal outcomes to trigger infinite re-dispatch.
+    rescued = False
+    routed = True
+    if is_headless and parsed_sentinel is not None and isinstance(ticket_id_value, str):
+        outcome = _apply_sentinel_to_task(ticket_id_value, session.id, parsed_sentinel)
+        rescued = outcome.rescued
+        routed = outcome.routed
+    if not routed:
+        return None
+
+    session.status = SessionStatus.COMPLETED
+    session.completed_at = now
+    session.completed_reason = CompletionReason.NORMAL
+    if isinstance(claude_session_id, str):
+        session.claude_session_id = claude_session_id
+    # Issue #225: headless DAEMON sessions set last_result via signal_stop,
+    # which parses the transcript before save_state so downstream consumers
+    # (consume_completed_sessions, /cw-followup) can route by status.
+    # parse_stdout returns BlockedResult on malformed payloads — we
+    # persist either shape; both serialize to a dict with a "status" field.
+    # Issue #536: when the result was pushed via ``cw result emit``
+    # (emit_terminal), session.last_result is already the authoritative value
+    # — do NOT overwrite it with the reconstructed/re-parsed sentinel.
+    if parsed_sentinel is not None and not emit_terminal:
+        session.last_result = parsed_sentinel.model_dump(mode="json")
+    save_state(state)
+    return rescued
+
+
 def _handle_user_origin_stop(
     state: CwState,
     session: Session,
@@ -576,9 +665,6 @@ def signal_stop() -> None:
         # Recovery, not silent wedge.
         return
 
-    # #918: set True when a late Stop-hook sentinel rescues an idle-parked
-    # (BLOCKED_ON_USER) task; surfaced on the SESSION_COMPLETED payload below.
-    rescued = False
     # Why not mutate_state: dual-lock (dev_queue_lock nested at the TIMED_OUT path)
     # and daemon.stop() network call inside the lock window (criteria 1 and 2).
     with sessions_lock():
@@ -647,63 +733,24 @@ def signal_stop() -> None:
             context.get("headless")
         )
         now = datetime.now(UTC)
-        parsed_sentinel: AutoDevResult | BlockedResult | None = None
-        # Issue #536: emit precedence. When the producer already pushed a
-        # terminal result via ``cw result emit`` (session.last_result carries a
-        # "status"), that value is authoritative — reconstruct it and skip the
-        # transcript re-parse entirely. The transcript sentinel is demoted to a
-        # forensic fallback: it still runs (and is still authoritative) whenever
-        # no emitted result exists, so a worker that never emits is unaffected.
-        emit_terminal = False
-        if is_headless and _has_terminal_sentinel(session):
-            parsed_sentinel = _reconstruct_emitted_sentinel(session)
-            emit_terminal = parsed_sentinel is not None
-        if not emit_terminal and is_headless:
-            parsed_sentinel = _parse_headless_sentinel(
-                session, cwd_value, claude_session_id
-            )
-            if parsed_sentinel is None:
-                _handle_headless_no_sentinel(
-                    state,
-                    session,
-                    now=now,
-                    claude_session_id=claude_session_id,
-                    context=context,
-                    ticket_id_value=ticket_id_value,
-                    hook_payload=hook_payload,
-                )
-                return
 
-        # Issue #251: directly update the dev-queue task *before* marking the
-        # session COMPLETED. This closes the race where revert_completed_silent_tasks
-        # sees a COMPLETED session with a still-RUNNING task and reverts it to
-        # PENDING before consume_completed_sessions can process the event — causing
-        # no_op and similar terminal outcomes to trigger infinite re-dispatch.
-        if (
-            is_headless
-            and parsed_sentinel is not None
-            and isinstance(ticket_id_value, str)
-        ):
-            rescued = _apply_sentinel_to_task(
-                ticket_id_value, session.id, parsed_sentinel
-            ).rescued
-
-        session.status = SessionStatus.COMPLETED
-        session.completed_at = now
-        session.completed_reason = CompletionReason.NORMAL
-        if isinstance(claude_session_id, str):
-            session.claude_session_id = claude_session_id
-        # Issue #225: headless DAEMON sessions set last_result via signal_stop,
-        # which parses the transcript before save_state so downstream consumers
-        # (consume_completed_sessions, /cw-followup) can route by status.
-        # parse_stdout returns BlockedResult on malformed payloads — we
-        # persist either shape; both serialize to a dict with a "status" field.
-        # Issue #536: when the result was pushed via ``cw result emit``
-        # (emit_terminal), session.last_result is already the authoritative value
-        # — do NOT overwrite it with the reconstructed/re-parsed sentinel.
-        if parsed_sentinel is not None and not emit_terminal:
-            session.last_result = parsed_sentinel.model_dump(mode="json")
-        save_state(state)
+        # Resolves the sentinel, routes it through the #251 staged-advance
+        # authority, and (if accepted) marks the session COMPLETED. Returns
+        # None when the caller must bail without further action -- no
+        # sentinel under budget, or a #1031 stage-mismatch route refusal.
+        rescued = _resolve_and_complete_headless_session(
+            state,
+            session,
+            hook_payload=hook_payload,
+            context=context,
+            cwd_value=cwd_value,
+            claude_session_id=claude_session_id,
+            ticket_id_value=ticket_id_value,
+            is_headless=is_headless,
+            now=now,
+        )
+        if rescued is None:
+            return
 
     payload = _build_completed_payload(
         session, context, claude_session_id, hook_payload, rescued=rescued
