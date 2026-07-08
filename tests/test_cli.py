@@ -6425,7 +6425,7 @@ class TestFormatStatusHuman:
             running_sessions=[sess],
         )
         output = _format_status_human(status)
-        assert "(unknown — global auto-dev.md not yet emitting stage events)" in output
+        assert "last_stage=(none — no stage events recorded for this session)" in output
 
     def test_format_status_human_monitored_pr_shows_role(
         self, tmp_config_dir: Path

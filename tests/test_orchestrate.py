@@ -517,9 +517,7 @@ class TestOrchestratorStatus:
         the raw event count line is unaffected."""
         for _ in range(3):
             record_event(OrchestratorEventType.DISPATCH_TICK, {"client": "test-client"})
-        record_event(
-            OrchestratorEventType.TICKET_ENQUEUED, {"ticket_id": "GEN-100"}
-        )
+        record_event(OrchestratorEventType.TICKET_ENQUEUED, {"ticket_id": "GEN-100"})
         for _ in range(3):
             record_event(OrchestratorEventType.DISPATCH_TICK, {"client": "test-client"})
 
