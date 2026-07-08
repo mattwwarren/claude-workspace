@@ -2,7 +2,7 @@
 
 | Field | Value |
 |-------|-------|
-| Status | Draft |
+| Status | Accepted |
 | Owner | Matt Warren |
 | Date | 2026-07-08 |
 | Supersedes | — |
