@@ -241,19 +241,47 @@ def dev_queue_approve(ticket_id: str, client: str | None) -> None:
     default=False,
     help="Allow a backward --stage target on a blocked ticket (e.g. review->impl).",
 )
+@click.option(
+    "--from-cancelled",
+    "from_cancelled",
+    is_flag=True,
+    default=False,
+    help=(
+        "Allow requeuing a CANCELLED ticket back to PENDING at its current"
+        " stage (e.g. after `cw spawn close --confirmed-dead` on a RUNNING"
+        " row). See docs/dispatch-runbook.md."
+    ),
+)
 @handle_errors
 def dev_queue_requeue(
-    ticket_id: str, client: str | None, stage_override: str | None, regress: bool
+    ticket_id: str,
+    client: str | None,
+    stage_override: str | None,
+    regress: bool,
+    from_cancelled: bool,
 ) -> None:
     """Requeue a BLOCKED_ON_USER ticket back to PENDING.
 
     Defaults to re-running the current stage. Use --stage to advance forward.
     Use --regress with a backward --stage to move a blocked ticket backward
-    (e.g. a plan-deviation review exit back to impl).
+    (e.g. a plan-deviation review exit back to impl). Use --from-cancelled
+    to recover a CANCELLED ticket (forward/same-stage only).
     """
     config = load_orchestrator_config()
     resolved = resolve_client(ticket_id, config, client)
-    result = requeue_ticket(ticket_id, resolved, stage_override, allow_regress=regress)
+    result = requeue_ticket(
+        ticket_id,
+        resolved,
+        stage_override,
+        allow_regress=regress,
+        from_cancelled=from_cancelled,
+    )
+    if result["regressed"]:
+        reason = "cli_regress"
+    elif from_cancelled:
+        reason = "cli_requeue_from_cancelled"
+    else:
+        reason = "cli_requeue"
     record_event(
         OrchestratorEventType.TICKET_REQUEUED,
         {
@@ -261,7 +289,7 @@ def dev_queue_requeue(
             "client": resolved,
             "from_stage": result["from_stage"],
             "to_stage": result["to_stage"],
-            "reason": "cli_regress" if result["regressed"] else "cli_requeue",
+            "reason": reason,
             "regressed": result["regressed"],
             **(
                 {"regress_attempts": result["regress_attempts"]}
