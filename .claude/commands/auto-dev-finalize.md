@@ -242,7 +242,7 @@ If any signature is present, emit the structured `blocked` sentinel below and st
   "branch": "<branch-name>",
   "worktree_path": "<session worktree path — ~/.cw/wt/<hash>/auto-dev-<ticket>>",
   "pr": null,
-  "review": null,
+  "review": {"must_fix_initial": <count>, "should_fix": <count>, "fix_cycles_used": <count>, "deferred": <count>},
   "health": {
     "lowest_agent_confidence": "<HIGH | MEDIUM | LOW from health check>",
     "any_incomplete_risk": false,
