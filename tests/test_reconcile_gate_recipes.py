@@ -116,15 +116,20 @@ def _config(**kwargs: Any) -> OrchestratorConfig:
 
 
 @pytest.fixture(autouse=True)
-def _stub_gh_comment(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+def stub_gh_comment(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     """Capture ``gh issue comment`` argv without spawning a subprocess.
 
     Returns the list of captured argv lists so tests can assert on the body.
     """
+    import subprocess
+
     calls: list[list[str]] = []
 
-    def _fake_run(argv: list[str], **_kwargs: Any) -> None:
+    def _fake_run(
+        argv: list[str], **_kwargs: Any
+    ) -> subprocess.CompletedProcess[bytes]:
         calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr("cw.reconcile.gate_recipes.subprocess.run", _fake_run)
     return calls
@@ -206,9 +211,7 @@ class TestDetect:
             {"forbidden_touched": True},
         ],
     )
-    def test_predicate_boundary_each_field_blocks(
-        self, kwargs: dict[str, Any]
-    ) -> None:
+    def test_predicate_boundary_each_field_blocks(self, kwargs: dict[str, Any]) -> None:
         task = _make_task()
         session = _make_session(last_result=_clean_result(**kwargs))
         state = CwState(sessions=[session])
@@ -288,7 +291,7 @@ class TestRunApprove:
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
-        _stub_gh_comment: list[list[str]],
+        stub_gh_comment: list[list[str]],
     ) -> None:
         _write_acme_clients_yaml(tmp_config_dir, tmp_path)
         task = _make_task()
@@ -297,8 +300,8 @@ class TestRunApprove:
 
         run_gate_recipes(now=_NOW, config=_config())
 
-        assert len(_stub_gh_comment) == 1
-        argv = _stub_gh_comment[0]
+        assert len(stub_gh_comment) == 1
+        argv = stub_gh_comment[0]
         assert argv[:4] == ["gh", "issue", "comment", "GEN-1"]
         body = argv[-1]
         assert "auto_approve_clean_review" in body
@@ -318,8 +321,10 @@ class TestRunApprove:
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
 
+        boom_msg = "gh exploded"
+
         def _boom(*_a: Any, **_k: Any) -> None:
-            raise OSError("gh exploded")
+            raise OSError(boom_msg)
 
         monkeypatch.setattr("cw.reconcile.gate_recipes.subprocess.run", _boom)
 
