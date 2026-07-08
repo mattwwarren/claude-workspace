@@ -29,6 +29,7 @@ from cw.models import (
     ReapReason,
     SessionOrigin,
     SessionStatus,
+    Stage,
 )
 from cw.reconcile import _deps, _shared
 from cw.reconcile._shared import (
@@ -72,18 +73,52 @@ def _classify_idle_threshold(
     config: OrchestratorConfig,
     elapsed: float,
     new_count: int,
-) -> ReapCandidate:
+    merged_ticket_ids: frozenset[str] = frozenset(),
+) -> ReapCandidate | None:
     """Classify the final disposition for an idle session past the confirm threshold.
 
-    Returns a single ReapCandidate: SALVAGE_GIT when a worktree branch exists,
-    REVERT_TASK when the owning task is below its retry cap, else
-    PARK_BLOCKED_ON_USER. Makes zero writes. See GitHub #552, ADR-0006.
+    Returns a single ReapCandidate: REVERT_TASK when the ticket's PR is already
+    merged (shipped ground truth, checked before any other classification),
+    SALVAGE_GIT when a worktree branch exists, REVERT_TASK when the owning
+    task is below its retry cap, else PARK_BLOCKED_ON_USER. Returns None when
+    the session is at Stage.FINALIZE with a live worktree branch -- that
+    disposition is owned by stalled.py's finalize-blocked path. Makes zero
+    writes. See GitHub #552, ADR-0006, #1054.
     """
     lane = task.lane if task else DEFAULT_LANE
+    # Merged-first check (#1054): a ticket whose PR already merged is shipped
+    # ground truth regardless of stage or git state. Route it through the
+    # existing merged-REVERT_TASK completion path in _act_on_idle_candidates
+    # (splits REVERT_TASK candidates by ticket_id in merged_ticket_ids) rather
+    # than reclassifying it as a git-salvage or park candidate.
+    if ticket_id is not None and ticket_id in merged_ticket_ids:
+        return ReapCandidate(
+            session_id=session.id,
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id=ticket_id,
+            elapsed_seconds=elapsed,
+            new_observation_count=new_count,
+            usage_limit_detected=_shared.detect_usage_limit(session),
+            lane=lane,
+            client=session.client,
+        )
     # Git-state salvage path.
     if session.worktree_path is not None:
         branch = _deps.checked_out_branch(session.worktree_path)
         if branch is not None:
+            # Why: FINALIZE-stage parking is owned by stalled.py's
+            # finalize-blocked path (_resolve_finalize_blocked_condition +
+            # rescue_finalize_blocked_sessions), which is aware of the
+            # larger finalize wall-clock budget and merged-PR ground truth.
+            # idle's shorter confirm-threshold races ahead of that path; left
+            # unguarded, it would also reach _detect_post_review_clean below,
+            # which is structurally always False at FINALIZE (each stage
+            # spawns a new session id, so STAGE_ENTERED's session_id never
+            # matches this FINALIZE session). Returning None here -- before
+            # that call -- is what prevents idle from false-parking a
+            # FINALIZE-stage session as needs_salvage. See GitHub #1054.
+            if task is not None and task.stage == Stage.FINALIZE:
+                return None
             post_review_clean = _detect_post_review_clean(session)
             worktree_dirty = _shared.worktree_dirty_by_path(
                 session.client, session.worktree_path
@@ -135,6 +170,7 @@ def _detect_idle_candidates(
     native_live: set[str],
     config: OrchestratorConfig,
     task_by_ticket: dict[str, TicketTask],
+    merged_ticket_ids: frozenset[str] = frozenset(),
 ) -> list[ReapCandidate]:
     """Pure classification phase for silently idle DAEMON sessions.
 
@@ -232,16 +268,17 @@ def _detect_idle_candidates(
             )
             continue
         # Threshold reached: classify final disposition.
-        candidates.append(
-            _classify_idle_threshold(
-                session,
-                task=task,
-                ticket_id=ticket_id,
-                config=config,
-                elapsed=elapsed,
-                new_count=new_count,
-            )
+        candidate = _classify_idle_threshold(
+            session,
+            task=task,
+            ticket_id=ticket_id,
+            config=config,
+            elapsed=elapsed,
+            new_count=new_count,
+            merged_ticket_ids=merged_ticket_ids,
         )
+        if candidate is not None:
+            candidates.append(candidate)
     return candidates
 
 
