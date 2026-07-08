@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`cw orchestrate status` recent-events flood + stale `last_stage`
+  placeholder** (#854): the human renderer now aggregates consecutive
+  `dispatch.tick` events in the "Recent events:" section (raw count line
+  unaffected) via a relocated, generalized `_aggregate_feed` helper shared
+  with `cw board`; a new `--raw-events` flag restores the unaggregated
+  stream. The stale "last_stage=(unknown — global auto-dev.md not yet
+  emitting stage events)" placeholder is replaced with a neutral,
+  producer-agnostic "last_stage=(none — no stage events recorded for this
+  session)".
+
 ## [1.16.0] — 2026-07-07
 
 Post-RFC-0008 reliability wave: false-park elimination, a wrong-stage
