@@ -29,6 +29,7 @@ from cw.reconcile.gate_recipes import (
     GateRecipeCandidate,
     _act_auto_approve_review,
     _detect_auto_approve_review,
+    _stamp_gate_recipe_failure,
     run_gate_recipes,
 )
 
@@ -172,6 +173,17 @@ class TestDetect:
 
     def test_non_blocked_status_yields_none(self) -> None:
         task = _make_task(status=QueueItemStatus.PENDING)
+        session = _make_session(last_result=_clean_result())
+        state = CwState(sessions=[session])
+
+        assert _detect_auto_approve_review(state, [task]) == []
+
+    def test_latched_failure_yields_none_even_when_predicate_holds(self) -> None:
+        """A row with a non-None gate_recipe_failed_at is excluded from
+        detection regardless of how clean the current predicate looks —
+        the whole point of the latch is to suppress re-detection of a
+        persisting failure until something about the episode changes."""
+        task = _make_task(gate_recipe_failed_at=_NOW)
         session = _make_session(last_result=_clean_result())
         state = CwState(sessions=[session])
 
@@ -446,6 +458,7 @@ class TestActApproveFailure:
         store = load_dev_queue()
         assert store.tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
         assert store.tasks[0].stage == Stage.REVIEW
+        assert store.tasks[0].gate_recipe_failed_at == _NOW
         events = read_events(
             consumer="test-gate-approve-failure",
             event_types=[
@@ -471,6 +484,81 @@ class TestActApproveFailure:
         assert approved_events[0].payload["ticket_id"] == "GEN-1"
         assert stub_gh_comment == []
         assert any("GEN-1" in rec.message for rec in caplog.records)
+
+    def test_latched_failure_does_not_refire_on_the_next_tick(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression test for the repeat-forever bug: without the
+        gate_recipe_failed_at latch, a persisting failure (task stays
+        BLOCKED_ON_USER, predicate still holds, nothing about the episode
+        changes) would re-detect and re-emit both GATE_AUTO_APPROVED and
+        GATE_AUTO_APPROVE_FAILED on every single reconcile tick forever. The
+        latch stamped by the first failing tick must suppress every
+        subsequent tick until something about the episode actually changes."""
+        from cw.events import read_events
+        from cw.exceptions import ApproveGateError
+
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        task = _make_task()
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
+
+        boom_msg = "boom"
+
+        def _boom(*_a: Any, **_k: Any) -> None:
+            raise ApproveGateError(boom_msg)
+
+        monkeypatch.setattr("cw.reconcile.gate_recipes._approve_ticket_locked", _boom)
+
+        first_tick = run_gate_recipes(now=_NOW, config=_config())
+        second_tick = run_gate_recipes(now=_NOW, config=_config())
+
+        assert first_tick == []
+        assert second_tick == []
+        events = read_events(
+            consumer="test-gate-latch-no-refire",
+            event_types=[
+                OrchestratorEventType.GATE_AUTO_APPROVED,
+                OrchestratorEventType.GATE_AUTO_APPROVE_FAILED,
+            ],
+        )
+        # Exactly one of each — the second tick's detect phase excluded the
+        # latched row entirely, so neither event fired a second time.
+        assert len(events) == 2
+
+    def test_latch_clears_on_next_status_transition(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Once a human (or any status-transition call site) acts on the
+        ticket, transition_task_status unconditionally clears the latch — a
+        fresh episode always starts clean, matching the escalation-latch
+        precedent."""
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        task = _make_task(gate_recipe_failed_at=_NOW)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        from cw.dev_queue import cancel_ticket
+
+        cancel_ticket("GEN-1", "acme")
+
+        store = load_dev_queue()
+        assert store.tasks[0].gate_recipe_failed_at is None
+
+    def test_stamp_on_missing_row_is_a_noop(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """The row can vanish between the failed mutation and the stamp call
+        (e.g. a concurrent delete) — _stamp_gate_recipe_failure must not raise,
+        just skip silently, mirroring the act-loop's own task-is-None guard."""
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        _stamp_gate_recipe_failure("GEN-1", "acme", now=_NOW)
+
+        assert load_dev_queue().tasks == []
 
 
 class TestActRecheckRace:

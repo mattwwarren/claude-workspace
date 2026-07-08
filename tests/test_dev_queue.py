@@ -1623,6 +1623,21 @@ class TestCancelTicket:
         assert t.escalation_parked_at is None
         assert t.escalation_fired_at is None
 
+    def test_cancel_clears_gate_recipe_failed_latch(self, tmp_dev_queue: Path) -> None:
+        """cancel_ticket clears gate_recipe_failed_at (#1065, RFC 0009) — the
+        same unconditional-clear treatment as the escalation latch above."""
+        task = TicketTask(
+            ticket_id="TKT-GRF",
+            client="genhealth",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            gate_recipe_failed_at=datetime.now(UTC),
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        cancel_ticket("TKT-GRF", "genhealth")
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "TKT-GRF")
+        assert t.gate_recipe_failed_at is None
+
     def test_cancel_already_cancelled_returns_empty_list(
         self, tmp_dev_queue: Path
     ) -> None:
@@ -2005,7 +2020,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["pr_state"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 11
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 12
 
     def test_v8_pr_state_preserved_idempotently(self) -> None:
         """Existing pr_state survives a second migration pass (idempotent)."""
@@ -2049,7 +2064,7 @@ class TestMigrateDevQueue:
         """migrate_dev_queue bumps schema_version to current regardless of input."""
         raw: dict[str, object] = {"schema_version": 1, "tasks": []}
         migrated = migrate_dev_queue(raw)
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 11
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 12
 
     def test_v9_signoff_preserved_idempotently(self) -> None:
         """Existing signoff value survives a second migration pass."""
@@ -2084,7 +2099,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["escalation_parked_at"] is None
         assert migrated["tasks"][0]["escalation_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 11
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 12
 
     def test_v10_escalation_fields_preserved_idempotently(self) -> None:
         """Existing escalation timestamps survive a second migration pass."""
@@ -2127,7 +2142,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["false_park_recovery_count"] == 0
         assert migrated["tasks"][0]["false_park_recovery_next_eligible_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 11
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 12
 
     def test_v11_false_park_recovery_backoff_preserved_idempotently(self) -> None:
         """Existing false-park-recovery backoff state survives a second
@@ -2150,6 +2165,44 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["false_park_recovery_count"] == 2
         assert migrated["tasks"][0]["false_park_recovery_next_eligible_at"] == (
+            "2026-07-08T00:00:00+00:00"
+        )
+
+    def test_migrate_dev_queue_fills_gate_recipe_failed_default(self) -> None:
+        """migrate_dev_queue fills gate_recipe_failed_at=None on tasks missing
+        the key (v12, GitHub #1065, RFC 0009)."""
+        raw: dict[str, object] = {
+            "schema_version": 11,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-80",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["gate_recipe_failed_at"] is None
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 12
+
+    def test_v12_gate_recipe_failed_at_preserved_idempotently(self) -> None:
+        """Existing gate_recipe_failed_at timestamp survives a second
+        migration pass."""
+        raw: dict[str, object] = {
+            "schema_version": 12,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-81",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "blocked_on_user",
+                    "gate_recipe_failed_at": "2026-07-08T00:00:00+00:00",
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["gate_recipe_failed_at"] == (
             "2026-07-08T00:00:00+00:00"
         )
 

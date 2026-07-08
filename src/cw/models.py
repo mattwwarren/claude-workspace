@@ -152,7 +152,8 @@ CW_STATE_SCHEMA_VERSION = 13
 #      (GitHub #1015, RFC 0008 capstone).
 # v11: added TicketTask.false_park_recovery_count/
 #      false_park_recovery_next_eligible_at (GitHub #1030).
-DEV_QUEUE_SCHEMA_VERSION = 11
+# v12: added TicketTask.gate_recipe_failed_at (GitHub #1065, RFC 0009).
+DEV_QUEUE_SCHEMA_VERSION = 12
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -445,6 +446,18 @@ class TicketTask(BaseModel):
     # advance) ended the previous one.
     escalation_parked_at: datetime | None = None
     escalation_fired_at: datetime | None = None
+    # RFC 0009 P1+P2 (#1065) — one-shot gate-recipe failure latch. Stamped by
+    # cw.reconcile.gate_recipes._act_auto_approve_review when the act-phase
+    # mutation raises after GATE_AUTO_APPROVED was already emitted; a
+    # non-None value excludes this row from _detect_auto_approve_review so a
+    # persisting failure (e.g. stale client config, a duplicate row) does not
+    # re-detect and re-emit GATE_AUTO_APPROVED/GATE_AUTO_APPROVE_FAILED every
+    # reconcile tick forever. Cleared the same way the escalation latch above
+    # is: unconditionally, by transition_task_status on every status
+    # transition (including a same-status re-park) — so a fresh review
+    # episode (new session, new last_result re-parking the row at
+    # BLOCKED_ON_USER) always starts with a clean latch.
+    gate_recipe_failed_at: datetime | None = None
 
 
 class DispatchPlan(BaseModel):

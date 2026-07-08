@@ -136,6 +136,11 @@ def transition_task_status(
     # newly) in the escalation-eligible set.
     task.escalation_parked_at = None
     task.escalation_fired_at = None
+    # RFC 0009 P1+P2 (#1065): same unconditional-clear treatment for the
+    # gate-recipe failure latch — a fresh episode (any status transition,
+    # including a same-status re-park by a new review session) always starts
+    # with a clean latch. See cw.reconcile.gate_recipes for what stamps it.
+    task.gate_recipe_failed_at = None
     if old_status != new_status:
         # Why: emit inline while callers still hold dev_queue_lock. record_event
         # takes the events-inbox lock (_inbox_lock) *inside* dev_queue_lock; the
@@ -343,6 +348,13 @@ def _fill_false_park_recovery_backoff_default(task_raw: dict[str, Any]) -> None:
         task_raw["false_park_recovery_next_eligible_at"] = None
 
 
+def _fill_gate_recipe_failed_default(task_raw: dict[str, Any]) -> None:
+    """Fill gate_recipe_failed_at introduced in dev-queue schema v12
+    (GitHub #1065, RFC 0009). Idempotent."""
+    if "gate_recipe_failed_at" not in task_raw:
+        task_raw["gate_recipe_failed_at"] = None
+
+
 def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
     """Normalise a raw dev_queue.json payload into a currently-valid shape."""
     tasks = raw.get("tasks")
@@ -362,6 +374,7 @@ def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
                 _fill_signoff_default(task_raw)
                 _fill_escalation_defaults(task_raw)
                 _fill_false_park_recovery_backoff_default(task_raw)
+                _fill_gate_recipe_failed_default(task_raw)
     raw["schema_version"] = DEV_QUEUE_SCHEMA_VERSION
     return raw
 

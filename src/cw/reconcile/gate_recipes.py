@@ -28,7 +28,11 @@ concierge ``CONCIERGE_RECOVERED`` ordering). If the mutation itself then
 raises, :class:`OrchestratorEventType.GATE_AUTO_APPROVE_FAILED` is emitted as
 a durable, operator-forwarded correction — without it, ``GATE_AUTO_APPROVED``
 would stand alone on the operator channel as an uncorrected false-positive
-"approved" signal.
+"approved" signal — and ``TicketTask.gate_recipe_failed_at`` is stamped as a
+one-shot latch so the same still-failing episode doesn't re-detect and
+re-emit both events every reconcile tick forever. The latch clears itself
+the same way the RFC 0008 escalation latch does: unconditionally, on the
+next status transition (``dev_queue.transition_task_status``).
 
 The act phase calls the lock-free ``_approve_ticket_locked`` primitive directly
 from inside its own ``dev_queue_lock()`` acquisition — never the public
@@ -48,6 +52,7 @@ from cw.dev_queue import (
     _approve_ticket_locked,
     dev_queue_lock,
     load_dev_queue,
+    save_dev_queue,
 )
 from cw.events import record_event
 from cw.exceptions import CwError
@@ -175,11 +180,20 @@ def _detect_auto_approve_review(
     A candidate is produced for every BLOCKED_ON_USER row whose owning session
     (resolved via ``task.session_id``, the same lookup ``approve_ticket``
     performs) sits at the ``review_pending_approval`` gate with a clean-review
-    ``last_result``.
+    ``last_result``. A row with a non-None ``gate_recipe_failed_at`` latch is
+    excluded — a prior act-phase failure for this exact episode already fired
+    a correcting ``GATE_AUTO_APPROVE_FAILED`` event, and re-detecting it every
+    tick would re-emit both events forever for a condition that hasn't
+    changed. The latch clears itself the moment anything about the episode
+    does change (``transition_task_status`` unconditionally clears it on
+    every status transition, including a same-status re-park by a fresh
+    review session).
     """
     candidates: list[GateRecipeCandidate] = []
     for task in tasks:
         if task.status != QueueItemStatus.BLOCKED_ON_USER:
+            continue
+        if task.gate_recipe_failed_at is not None:
             continue
         if task.session_id is None:
             continue
@@ -234,6 +248,28 @@ def _post_auto_approve_comment(ticket_id: str, snapshot: dict[str, object]) -> N
             result.returncode,
             result.stderr.decode(errors="replace").strip(),
         )
+
+
+def _stamp_gate_recipe_failure(ticket_id: str, client: str, *, now: datetime) -> None:
+    """Persist the one-shot failure latch (GitHub #1065).
+
+    A fresh load/save round-trip, independent of the caller's outer ``store``
+    snapshot: the caller (:func:`_act_auto_approve_review`) holds a
+    pre-loop-hoisted snapshot that other candidates in the same loop may have
+    already made stale via their own successful (separately-persisted)
+    approve, so writing through that stale snapshot here would silently
+    revert those. Caller MUST already hold ``dev_queue_lock()``, so this
+    load-then-save is race-free against any other writer.
+    """
+    store = load_dev_queue()
+    task = next(
+        (t for t in store.tasks if t.ticket_id == ticket_id and t.client == client),
+        None,
+    )
+    if task is None:
+        return
+    task.gate_recipe_failed_at = now
+    save_dev_queue(store)
 
 
 def _act_auto_approve_review(
@@ -317,6 +353,9 @@ def _act_auto_approve_review(
                 # GATE_AUTO_APPROVED would stand alone on the operator
                 # channel as an uncorrected false-positive "approved" signal
                 # (a log line alone isn't queryable via the event stream).
+                # Then stamp the one-shot failure latch so a persisting
+                # failure doesn't re-detect and re-emit both events every
+                # reconcile tick forever.
                 _log.warning(
                     "gate_recipe_approve_failed ticket=%s client=%s",
                     task.ticket_id,
@@ -335,6 +374,7 @@ def _act_auto_approve_review(
                     },
                     correlation_id=task.ticket_id,
                 )
+                _stamp_gate_recipe_failure(task.ticket_id, task.client, now=now)
                 continue
             approved.append(task.ticket_id)
             comment_jobs.append((task.ticket_id, snapshot))
