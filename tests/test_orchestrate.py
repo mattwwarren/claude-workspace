@@ -525,8 +525,8 @@ class TestOrchestratorStatus:
         result = runner.invoke(main, ["orchestrate", "status"])
         assert result.exit_code == 0, result.output
         assert "Recent events:     7" in result.output
-        assert "dispatch.tick x" in result.output
-        assert result.output.count("dispatch.tick") < 6
+        assert result.output.count("dispatch.tick x3") == 2
+        assert result.output.count("dispatch.tick") == 2
 
     def test_cli_orchestrate_status_raw_events_flag(
         self,
