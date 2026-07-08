@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -23,6 +23,7 @@ from cw.models import (
     CompletionReason,
     CwState,
     DispatchSkipReason,
+    OrchestratorEvent,
     OrchestratorEventType,
     QueueItemStatus,
     Session,
@@ -32,11 +33,13 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.orchestrate import (
+    EventSummary,
     MissingWorkerEntry,
     OrchestratorStatus,
     PRDispatchRecord,
     TickSummary,
     WorkerEntry,
+    _aggregate_feed,
     clear_completed_pr_sessions,
     orchestrator_parent,
     orchestrator_status,
@@ -47,6 +50,8 @@ from cw.orchestrate import (
 from cw.reconcile import ProposedAction
 
 _RunnerFn = Callable[[list[str]], subprocess.CompletedProcess[str]]
+
+NOW = datetime(2026, 6, 14, 12, 0, 0, tzinfo=UTC)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -503,6 +508,44 @@ class TestOrchestratorStatus:
         assert tick.cap == 2
         assert tick.skip_reason == "none"
         assert tick.tick_at is not None
+
+    def test_cli_orchestrate_status_collapses_dispatch_ticks(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """Recent-events section aggregates consecutive dispatch.tick events;
+        the raw event count line is unaffected."""
+        for _ in range(3):
+            record_event(OrchestratorEventType.DISPATCH_TICK, {"client": "test-client"})
+        record_event(
+            OrchestratorEventType.TICKET_ENQUEUED, {"ticket_id": "GEN-100"}
+        )
+        for _ in range(3):
+            record_event(OrchestratorEventType.DISPATCH_TICK, {"client": "test-client"})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["orchestrate", "status"])
+        assert result.exit_code == 0, result.output
+        assert "Recent events:     7" in result.output
+        assert "dispatch.tick x" in result.output
+        assert result.output.count("dispatch.tick") < 6
+
+    def test_cli_orchestrate_status_raw_events_flag(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """--raw-events restores the unaggregated per-event stream with ids."""
+        events = [
+            record_event(OrchestratorEventType.DISPATCH_TICK, {"client": "test-client"})
+            for _ in range(3)
+        ]
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["orchestrate", "status", "--raw-events"])
+        assert result.exit_code == 0, result.output
+        assert result.output.count("dispatch.tick") == 3
+        for event in events:
+            assert event.id in result.output
 
     def test_last_tick_by_client_multiple_clients(
         self,
@@ -1240,6 +1283,93 @@ class TestRunningSessionLastStage:
 
 
 # ---------------------------------------------------------------------------
+# Tests: _aggregate_feed (relocated from cw.board -- issue #854)
+# ---------------------------------------------------------------------------
+
+
+class TestAggregateFeed:
+    def test_consecutive_ticks_collapse(self) -> None:
+        events = [
+            OrchestratorEvent(type=OrchestratorEventType.DISPATCH_TICK, created_at=NOW),
+            OrchestratorEvent(
+                type=OrchestratorEventType.DISPATCH_TICK,
+                created_at=NOW + timedelta(minutes=1),
+            ),
+            OrchestratorEvent(
+                type=OrchestratorEventType.DISPATCH_TICK,
+                created_at=NOW + timedelta(minutes=2),
+            ),
+        ]
+        result = _aggregate_feed(events)
+        assert len(result) == 1
+        assert "x3" in result[0].text
+        assert "2m" in result[0].text
+
+    def test_non_tick_breaks_run(self) -> None:
+        events = [
+            OrchestratorEvent(type=OrchestratorEventType.DISPATCH_TICK, created_at=NOW),
+            OrchestratorEvent(
+                type=OrchestratorEventType.DISPATCH_TICK,
+                created_at=NOW + timedelta(minutes=1),
+            ),
+            OrchestratorEvent(
+                type=OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+                created_at=NOW + timedelta(minutes=2),
+            ),
+            OrchestratorEvent(
+                type=OrchestratorEventType.DISPATCH_TICK,
+                created_at=NOW + timedelta(minutes=3),
+            ),
+        ]
+        result = _aggregate_feed(events)
+        texts = [e.text for e in result]
+        assert any("x2" in t for t in texts)
+        assert any("x1" in t for t in texts)
+
+    def test_single_tick_exact_label(self) -> None:
+        events = [
+            OrchestratorEvent(type=OrchestratorEventType.DISPATCH_TICK, created_at=NOW)
+        ]
+        result = _aggregate_feed(events)
+        assert result[0].text == "dispatch.tick x1 over 0m"
+
+    def test_event_summary_input_collapses_identically(self) -> None:
+        """_aggregate_feed must behave identically over EventSummary input --
+        the Protocol generalization exists precisely so status.recent_events
+        (a list[EventSummary]) can be aggregated without a bulk conversion
+        through OrchestratorEvent."""
+        events = [
+            EventSummary(
+                id=f"evt-{i}",
+                type=OrchestratorEventType.DISPATCH_TICK.value,
+                created_at=NOW + timedelta(minutes=i),
+            )
+            for i in range(3)
+        ]
+        result = _aggregate_feed(events)
+        assert len(result) == 1
+        assert result[0].text == "dispatch.tick x3 over 2m"
+
+    def test_passthrough_entry_carries_id_tick_summary_does_not(self) -> None:
+        events = [
+            EventSummary(
+                id="evt-tick-1",
+                type=OrchestratorEventType.DISPATCH_TICK.value,
+                created_at=NOW,
+            ),
+            EventSummary(
+                id="evt-attn-1",
+                type=OrchestratorEventType.SESSION_NEEDS_ATTENTION.value,
+                created_at=NOW + timedelta(minutes=1),
+            ),
+        ]
+        result = _aggregate_feed(events)
+        assert len(result) == 2
+        assert result[0].id is None
+        assert result[1].id == "evt-attn-1"
+
+
+# ---------------------------------------------------------------------------
 # Tests: CLI orchestrate status surfaces last_stage (issue #173)
 # ---------------------------------------------------------------------------
 
@@ -1290,7 +1420,7 @@ class TestCliOrchestrateStatusLastStage:
         runner = CliRunner()
         result = runner.invoke(main, ["orchestrate", "status"])
         assert result.exit_code == 0, result.output
-        expected = "(unknown — global auto-dev.md not yet emitting stage events)"
+        expected = "last_stage=(none — no stage events recorded for this session)"
         assert expected in result.output
 
 
