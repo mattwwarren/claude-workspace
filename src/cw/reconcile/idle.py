@@ -29,6 +29,7 @@ from cw.models import (
     ReapReason,
     SessionOrigin,
     SessionStatus,
+    Stage,
 )
 from cw.reconcile import _deps, _shared
 from cw.reconcile._shared import (
@@ -64,6 +65,34 @@ if TYPE_CHECKING:
     from cw.models import CwState, Session, TicketTask
 
 
+def _revert_task_candidate(
+    session: Session,
+    *,
+    ticket_id: str | None,
+    elapsed: float,
+    new_count: int,
+    lane: str,
+    worktree_dirty: bool = False,
+) -> ReapCandidate:
+    """Build a REVERT_TASK ReapCandidate.
+
+    Shared by the new merged-first check and the pre-existing retry-cap check
+    in ``_classify_idle_threshold`` -- the retry-cap site previously built this
+    inline; the two now differ only in ``worktree_dirty``. See GitHub #1054.
+    """
+    return ReapCandidate(
+        session_id=session.id,
+        proposed_action=ProposedAction.REVERT_TASK,
+        ticket_id=ticket_id,
+        elapsed_seconds=elapsed,
+        worktree_dirty=worktree_dirty,
+        new_observation_count=new_count,
+        usage_limit_detected=_shared.detect_usage_limit(session),
+        lane=lane,
+        client=session.client,
+    )
+
+
 def _classify_idle_threshold(
     session: Session,
     *,
@@ -72,18 +101,57 @@ def _classify_idle_threshold(
     config: OrchestratorConfig,
     elapsed: float,
     new_count: int,
-) -> ReapCandidate:
+    merged_client_ticket_ids: frozenset[tuple[str, str]] = frozenset(),
+) -> ReapCandidate | None:
     """Classify the final disposition for an idle session past the confirm threshold.
 
-    Returns a single ReapCandidate: SALVAGE_GIT when a worktree branch exists,
-    REVERT_TASK when the owning task is below its retry cap, else
-    PARK_BLOCKED_ON_USER. Makes zero writes. See GitHub #552, ADR-0006.
+    Returns a single ReapCandidate: REVERT_TASK when the ticket's PR is already
+    merged (shipped ground truth, checked before any other classification),
+    SALVAGE_GIT when a worktree branch exists, REVERT_TASK when the owning
+    task is below its retry cap, else PARK_BLOCKED_ON_USER. Returns None when
+    the session is at Stage.FINALIZE with a live worktree branch -- that
+    disposition is owned by stalled.py's finalize-blocked path. Makes zero
+    writes. See GitHub #552, ADR-0006, #1054.
     """
     lane = task.lane if task else DEFAULT_LANE
+    # Merged-first check (#1054): a ticket whose PR already merged is shipped
+    # ground truth regardless of stage or git state. Route it through the
+    # existing merged-REVERT_TASK completion path in _act_on_idle_candidates
+    # (splits REVERT_TASK candidates by ticket_id in merged_ticket_ids) rather
+    # than reclassifying it as a git-salvage or park candidate.
+    #
+    # Why (client, ticket_id) and not a bare ticket_id: ticket_id strings are
+    # not globally unique across clients (dev_queue.py's _find_ticket /
+    # remove_ticket / cancel_ticket all key on the (ticket_id, client) pair,
+    # and GitHub issue numbers restart per repo) -- a bare-string check here
+    # would let one client's merged ticket route a *different* client's
+    # same-numbered, unmerged ticket into completion. See GitHub #1054.
+    merged_key = (session.client, ticket_id) if ticket_id is not None else None
+    if merged_key is not None and merged_key in merged_client_ticket_ids:
+        return _revert_task_candidate(
+            session,
+            ticket_id=ticket_id,
+            elapsed=elapsed,
+            new_count=new_count,
+            lane=lane,
+        )
     # Git-state salvage path.
     if session.worktree_path is not None:
         branch = _deps.checked_out_branch(session.worktree_path)
         if branch is not None:
+            # Why: FINALIZE-stage parking is owned by stalled.py's
+            # finalize-blocked path (_resolve_finalize_blocked_condition +
+            # rescue_finalize_blocked_sessions), which is aware of the
+            # larger finalize wall-clock budget and merged-PR ground truth.
+            # idle's shorter confirm-threshold races ahead of that path; left
+            # unguarded, it would also reach _detect_post_review_clean below,
+            # which is structurally always False at FINALIZE (each stage
+            # spawns a new session id, so STAGE_ENTERED's session_id never
+            # matches this FINALIZE session). Returning None here -- before
+            # that call -- is what prevents idle from false-parking a
+            # FINALIZE-stage session as needs_salvage. See GitHub #1054.
+            if task is not None and task.stage == Stage.FINALIZE:
+                return None
             post_review_clean = _detect_post_review_clean(session)
             worktree_dirty = _shared.worktree_dirty_by_path(
                 session.client, session.worktree_path
@@ -105,16 +173,13 @@ def _classify_idle_threshold(
         session.client, session.worktree_path
     )
     if task is not None and task.attempts < cap:
-        return ReapCandidate(
-            session_id=session.id,
-            proposed_action=ProposedAction.REVERT_TASK,
+        return _revert_task_candidate(
+            session,
             ticket_id=ticket_id,
-            elapsed_seconds=elapsed,
-            worktree_dirty=worktree_dirty,
-            new_observation_count=new_count,
-            usage_limit_detected=_shared.detect_usage_limit(session),
+            elapsed=elapsed,
+            new_count=new_count,
             lane=lane,
-            client=session.client,
+            worktree_dirty=worktree_dirty,
         )
     return ReapCandidate(
         session_id=session.id,
@@ -128,6 +193,121 @@ def _classify_idle_threshold(
     )
 
 
+def _detect_idle_confirmed_candidate(
+    session: Session,
+    *,
+    task: TicketTask | None,
+    ticket_id: str | None,
+    config: OrchestratorConfig,
+    elapsed: float,
+    merged_client_ticket_ids: frozenset[tuple[str, str]],
+) -> ReapCandidate | None:
+    """Classify a session that already passed the liveness check.
+
+    Split out of ``_detect_idle_candidate_for_session`` to keep each
+    function's return-statement count under the PLR0911 limit. See GitHub
+    #1054.
+    """
+    # Sentinel salvage: evidence-based completion, not deferred by counter.
+    salvage = _shared.salvage_terminal_result(session)
+    if salvage is not None:
+        result, claude_session_id = salvage
+        return ReapCandidate(
+            session_id=session.id,
+            proposed_action=ProposedAction.SALVAGE_COMPLETION,
+            ticket_id=ticket_id,
+            salvage_result=result,
+            salvage_csid=claude_session_id,
+            elapsed_seconds=elapsed,
+            lane=task.lane if task else DEFAULT_LANE,
+            client=session.client,
+        )
+    # Confirm-before-reap: accumulate consecutive failed observations.
+    new_count = session.idle_observation_count + 1
+    if new_count < config.idle_confirm_observations:
+        return ReapCandidate(
+            session_id=session.id,
+            proposed_action=ProposedAction.INCREMENT_COUNTER,
+            ticket_id=ticket_id,
+            new_observation_count=new_count,
+            lane=task.lane if task else DEFAULT_LANE,
+            client=session.client,
+        )
+    # Threshold reached: classify final disposition.
+    return _classify_idle_threshold(
+        session,
+        task=task,
+        ticket_id=ticket_id,
+        config=config,
+        elapsed=elapsed,
+        new_count=new_count,
+        merged_client_ticket_ids=merged_client_ticket_ids,
+    )
+
+
+def _detect_idle_candidate_for_session(
+    session: Session,
+    *,
+    now: datetime,
+    config: OrchestratorConfig,
+    task: TicketTask | None,
+    ticket_id: str | None,
+    merged_client_ticket_ids: frozenset[tuple[str, str]],
+) -> ReapCandidate | None:
+    """Classify a single live DAEMON session for idle disposition, or None.
+
+    Extracted from ``_detect_idle_candidates`` (unchanged logic, just moved)
+    to keep that function's branch count under the PLR0912 limit after
+    adding the None-skip for FINALIZE-stage sessions. See GitHub #1054.
+    """
+    elapsed = (now - session.started_at).total_seconds()
+    budget = resolve_idle_watchdog_budget(task, config)
+    # ROUTE_EMITTED_SENTINEL: fires before the full idle-budget check.
+    # An emitted sentinel is positive evidence the worker completed; the
+    # 300 s threshold (sentinel_unrouted_check_seconds) is shorter than
+    # the watchdog budget to route the task before a reap fires.
+    # Guard: last_result is None means signal_stop never ran — prevents
+    # double-routing. Exempt from signal_only (constructive, not a reap).
+    # See GitHub #578.
+    unrouted_check = config.sentinel_unrouted_check_seconds
+    if session.last_result is None and elapsed >= unrouted_check:
+        routed = _parse_any_sentinel_from_transcript(session)
+        if routed is not None:
+            _routed_result, _csid = routed
+            return ReapCandidate(
+                session_id=session.id,
+                proposed_action=ProposedAction.ROUTE_EMITTED_SENTINEL,
+                ticket_id=ticket_id,
+                routed_sentinel=_routed_result,
+                salvage_csid=_csid,
+                elapsed_seconds=elapsed,
+                lane=task.lane if task else DEFAULT_LANE,
+                client=session.client,
+            )
+    if elapsed < budget:
+        return None
+    # Liveness check: if active, check for recovery of observation counter.
+    if _transcript_recently_active(session, now) or _awaiting_subagent(session, now):
+        if session.idle_observation_count > 0:
+            return ReapCandidate(
+                session_id=session.id,
+                proposed_action=ProposedAction.RECOVER_COUNTER,
+                ticket_id=ticket_id,
+                new_observation_count=0,
+                lane=task.lane if task else DEFAULT_LANE,
+                client=session.client,
+            )
+        return None
+    return _detect_idle_confirmed_candidate(
+        session,
+        task=task,
+        ticket_id=ticket_id,
+        config=config,
+        elapsed=elapsed,
+        merged_client_ticket_ids=merged_client_ticket_ids,
+    )
+
+
 def _detect_idle_candidates(
     state: CwState,
     *,
@@ -135,6 +315,7 @@ def _detect_idle_candidates(
     native_live: set[str],
     config: OrchestratorConfig,
     task_by_ticket: dict[str, TicketTask],
+    merged_client_ticket_ids: frozenset[tuple[str, str]] = frozenset(),
 ) -> list[ReapCandidate]:
     """Pure classification phase for silently idle DAEMON sessions.
 
@@ -153,95 +334,18 @@ def _detect_idle_candidates(
             continue
         if session.surface_ref is None or session.surface_ref not in native_live:
             continue
-        elapsed = (now - session.started_at).total_seconds()
         ticket_id = ticket_id_for_session(session.name)
         task = task_by_ticket.get(ticket_id) if ticket_id else None
-        budget = resolve_idle_watchdog_budget(task, config)
-        # ROUTE_EMITTED_SENTINEL: fires before the full idle-budget check.
-        # An emitted sentinel is positive evidence the worker completed; the
-        # 300 s threshold (sentinel_unrouted_check_seconds) is shorter than
-        # the watchdog budget to route the task before a reap fires.
-        # Guard: last_result is None means signal_stop never ran — prevents
-        # double-routing. Exempt from signal_only (constructive, not a reap).
-        # See GitHub #578.
-        unrouted_check = config.sentinel_unrouted_check_seconds
-        if session.last_result is None and elapsed >= unrouted_check:
-            routed = _parse_any_sentinel_from_transcript(session)
-            if routed is not None:
-                _routed_result, _csid = routed
-                candidates.append(
-                    ReapCandidate(
-                        session_id=session.id,
-                        proposed_action=ProposedAction.ROUTE_EMITTED_SENTINEL,
-                        ticket_id=ticket_id,
-                        routed_sentinel=_routed_result,
-                        salvage_csid=_csid,
-                        elapsed_seconds=elapsed,
-                        lane=task.lane if task else DEFAULT_LANE,
-                        client=session.client,
-                    )
-                )
-                continue
-        if elapsed < budget:
-            continue
-        # Liveness check: if active, check for recovery of observation counter.
-        if _transcript_recently_active(session, now) or _awaiting_subagent(
-            session, now
-        ):
-            if session.idle_observation_count > 0:
-                candidates.append(
-                    ReapCandidate(
-                        session_id=session.id,
-                        proposed_action=ProposedAction.RECOVER_COUNTER,
-                        ticket_id=ticket_id,
-                        new_observation_count=0,
-                        lane=task.lane if task else DEFAULT_LANE,
-                        client=session.client,
-                    )
-                )
-            continue
-        # Sentinel salvage: evidence-based completion, not deferred by counter.
-        salvage = _shared.salvage_terminal_result(session)
-        if salvage is not None:
-            result, claude_session_id = salvage
-            candidates.append(
-                ReapCandidate(
-                    session_id=session.id,
-                    proposed_action=ProposedAction.SALVAGE_COMPLETION,
-                    ticket_id=ticket_id,
-                    salvage_result=result,
-                    salvage_csid=claude_session_id,
-                    elapsed_seconds=elapsed,
-                    lane=task.lane if task else DEFAULT_LANE,
-                    client=session.client,
-                )
-            )
-            continue
-        # Confirm-before-reap: accumulate consecutive failed observations.
-        new_count = session.idle_observation_count + 1
-        if new_count < config.idle_confirm_observations:
-            candidates.append(
-                ReapCandidate(
-                    session_id=session.id,
-                    proposed_action=ProposedAction.INCREMENT_COUNTER,
-                    ticket_id=ticket_id,
-                    new_observation_count=new_count,
-                    lane=task.lane if task else DEFAULT_LANE,
-                    client=session.client,
-                )
-            )
-            continue
-        # Threshold reached: classify final disposition.
-        candidates.append(
-            _classify_idle_threshold(
-                session,
-                task=task,
-                ticket_id=ticket_id,
-                config=config,
-                elapsed=elapsed,
-                new_count=new_count,
-            )
+        candidate = _detect_idle_candidate_for_session(
+            session,
+            now=now,
+            config=config,
+            task=task,
+            ticket_id=ticket_id,
+            merged_client_ticket_ids=merged_client_ticket_ids,
         )
+        if candidate is not None:
+            candidates.append(candidate)
     return candidates
 
 
@@ -249,7 +353,7 @@ def _route_idle_by_policy(
     candidates: list[ReapCandidate],
     *,
     config: OrchestratorConfig | None,
-    merged_ticket_ids: frozenset[str],
+    merged_client_ticket_ids: frozenset[tuple[str, str]],
     gh_blocked_ticket_ids: frozenset[str],
 ) -> list[ReapCandidate]:
     """Apply per-lane reap-policy routing to idle REVERT_TASK candidates.
@@ -264,12 +368,17 @@ def _route_idle_by_policy(
     # Route each REVERT_TASK candidate individually based on its lane's policy.
     # Merged-PR / gh-blocked check (GitHub #637) runs BEFORE policy routing so
     # that a confirmed-merged ticket is always completed, even under SIGNAL_ONLY.
+    # Why (client, ticket_id): keyed by merged_client_ticket_ids, not a bare
+    # ticket_id, so one client's merged ticket cannot bypass SIGNAL_ONLY for a
+    # different client's same-numbered, unmerged candidate. See GitHub #1054.
     signal_mutations: dict[str, QueueItemStatus] = {}
     auto_candidates: list[ReapCandidate] = []
     for c in candidates:
         if c.proposed_action == ProposedAction.REVERT_TASK:
+            merged_key = (c.client, c.ticket_id) if c.client and c.ticket_id else None
             if c.ticket_id and (
-                c.ticket_id in merged_ticket_ids or c.ticket_id in gh_blocked_ticket_ids
+                (merged_key is not None and merged_key in merged_client_ticket_ids)
+                or c.ticket_id in gh_blocked_ticket_ids
             ):
                 auto_candidates.append(c)
                 continue
@@ -426,7 +535,14 @@ def _apply_idle_queue_mutations(
     least one task changed. Returns (blocked_ticket_ids, merged_completed_ids).
     """
     recovered_ids = {c.ticket_id for c in revert_candidates if c.ticket_id}
-    merged_tids = {c.ticket_id for c in merged_revert_candidates if c.ticket_id}
+    # (client, ticket_id) pairs, not bare ticket_id -- merged_revert_candidates
+    # can now include FINALIZE-stage / merged-first candidates (GitHub #1054),
+    # and ticket_id strings are not globally unique across clients.
+    merged_client_tids = {
+        (c.client, c.ticket_id)
+        for c in merged_revert_candidates
+        if c.ticket_id and c.client
+    }
     gh_blocked_tids = {c.ticket_id for c in gh_blocked_revert_candidates if c.ticket_id}
     park_disposition_by_tid = {
         c.ticket_id: c.paused_status for c in park_candidates if c.ticket_id
@@ -436,7 +552,7 @@ def _apply_idle_queue_mutations(
     merged_completed: list[str] = []
     if not (
         recovered_ids
-        or merged_tids
+        or merged_client_tids
         or gh_blocked_tids
         or park_disposition_by_tid
         or salvaged_ticket_ids_set
@@ -452,7 +568,7 @@ def _apply_idle_queue_mutations(
                 transition_task_status(task, QueueItemStatus.PENDING)
                 task.session_id = None
                 changed = True
-            elif task.ticket_id in merged_tids:
+            elif task.client and (task.client, task.ticket_id) in merged_client_tids:
                 # Why: PR URL is not in hand here — not worth a second gh call.
                 transition_task_status(
                     task, QueueItemStatus.COMPLETED, disposition="shipped"
@@ -497,7 +613,7 @@ def _act_on_idle_candidates(
     *,
     now: datetime,
     config: OrchestratorConfig | None = None,
-    merged_ticket_ids: frozenset[str] = frozenset(),
+    merged_client_ticket_ids: frozenset[tuple[str, str]] = frozenset(),
     gh_blocked_ticket_ids: frozenset[str] = frozenset(),
 ) -> tuple[list[str], list[str], list[_SalvageCandidate]]:
     """Act phase for silently idle sessions: apply all mutations.
@@ -505,7 +621,12 @@ def _act_on_idle_candidates(
     Consumes ReapCandidate objects from _detect_idle_candidates.
     Returns (blocked_ticket_ids, merged_completed_ticket_ids, salvage_git_candidates).
     merged_completed_ticket_ids contains ticket IDs completed because their
-    PR was already merged (from merged_ticket_ids pre-pass; GitHub #637).
+    PR was already merged (from merged_client_ticket_ids pre-pass; GitHub #637,
+    #1054). Keyed by (client, ticket_id) rather than a bare ticket_id -- see
+    GitHub #1054: ticket_id strings are not globally unique across clients, and
+    this act phase (unlike the sibling stalled/phantom sweeps, out of scope for
+    #1054) now also completes FINALIZE-stage / merged-first candidates that
+    idle's classify phase previously never routed here at all.
 
     Under ``ReapPolicy.SIGNAL_ONLY`` (default), REVERT_TASK candidates are
     routed to BLOCKED_ON_USER instead of triggering stop/remove.  Non-REVERT
@@ -520,7 +641,7 @@ def _act_on_idle_candidates(
     candidates = _route_idle_by_policy(
         candidates,
         config=config,
-        merged_ticket_ids=merged_ticket_ids,
+        merged_client_ticket_ids=merged_client_ticket_ids,
         gh_blocked_ticket_ids=gh_blocked_ticket_ids,
     )
     if not candidates:
@@ -548,13 +669,21 @@ def _act_on_idle_candidates(
     ]
 
     # Split REVERT_TASK candidates by world-state check results (GitHub #637).
-    # merged_ticket_ids / gh_blocked_ticket_ids come from a pre-pass in
+    # merged_client_ticket_ids / gh_blocked_ticket_ids come from a pre-pass in
     # reconcile() that runs BEFORE sessions_lock, so no gh subprocess executes
     # here. Candidates with no ticket_id fall through to the normal revert path.
+    # Why (client, ticket_id): a merged-first candidate from idle's classify
+    # phase can now reach this split for a FINALIZE-stage / git-branch session
+    # (previously unreachable -- such sessions always short-circuited to
+    # SALVAGE_GIT). A bare ticket_id match here would let one client's merged
+    # ticket mark a different client's same-numbered RUNNING task COMPLETED.
+    # See GitHub #1054.
     merged_revert_candidates = [
         c
         for c in all_revert_candidates
-        if c.ticket_id and c.ticket_id in merged_ticket_ids
+        if c.ticket_id
+        and c.client
+        and (c.client, c.ticket_id) in merged_client_ticket_ids
     ]
     gh_blocked_revert_candidates = [
         c

@@ -53,6 +53,8 @@ _log = logging.getLogger(__name__)
 
 def salvage_committed_no_pr_sessions(
     candidates: list[_SalvageCandidate],
+    *,
+    merged_client_ticket_ids: frozenset[tuple[str, str]] = frozenset(),
 ) -> list[str]:
     """Post-pass: git-state salvage for committed-but-no-PR reaped sessions.
 
@@ -61,6 +63,19 @@ def salvage_committed_no_pr_sessions(
 
     candidates: list of (session_id, ticket_id, branch, worktree_path_str,
     post_review_clean) collected by flag_silently_idle_daemon_sessions under lock.
+
+    merged_client_ticket_ids: (client, ticket_id) pairs whose PR is already
+    confirmed merged (#1054 pre-pass). A merged ticket is shipped ground
+    truth, not a salvage candidate; completion for it is owned by the idle
+    merged-REVERT_TASK path, so it is skipped here as a defensive guard
+    against a duplicate PR. In practice the FINALIZE guard + merged-routing
+    in idle.py make this branch unreachable for a real merged session, but
+    it costs nothing to check before the gh subprocess call. Keyed by
+    (client, ticket_id) rather than a bare ticket_id -- ticket_id strings
+    are not globally unique across clients (see dev_queue.py's
+    (ticket_id, client)-keyed lookups), so a bare-string check would let one
+    client's merged ticket wrongly skip a *different* client's unmerged,
+    same-numbered candidate.
 
     Returns list of ticket_ids that were auto-completed (HIGH path).
     """
@@ -100,6 +115,12 @@ def salvage_committed_no_pr_sessions(
         if not has_commits:
             # No commits beyond base — not a salvage candidate; fall through to
             # existing recover/park on the next reconcile tick.
+            continue
+
+        # PR merged — shipped, not a salvage candidate. Completion is owned
+        # by the idle merged-REVERT_TASK path; skip before the OPEN-only gh
+        # check below. See GitHub #1054.
+        if ticket_id and (session.client, ticket_id) in merged_client_ticket_ids:
             continue
 
         pr_result, gh_available = pr_exists_for_branch(branch)
@@ -353,8 +374,16 @@ def _rescue_complete(
     ticket_id: str | None,
     branch: str,
     rescued_ticket_ids: list[str],
+    *,
+    skip_merge: bool = False,
 ) -> None:
-    """Mark session + task COMPLETED and emit SESSION_COMPLETED event."""
+    """Mark session + task COMPLETED and emit SESSION_COMPLETED event.
+
+    skip_merge=True (merged-ticket path, #1054): the PR is already merged, so
+    the ``gh pr merge`` call below would be redundant (and could even fail
+    against an already-merged/closed branch); skip straight to marking the
+    session/task COMPLETED.
+    """
     now = datetime.now(UTC)
     mutated = False
     with sessions_lock():
@@ -378,27 +407,33 @@ def _rescue_complete(
     # race does not issue a redundant merge-enable (#816). The PR was opened
     # by _rescue_open_pr before this function runs, so the branch is valid.
     # Non-fatal if merge fails — PR is open, human can merge.
-    try:
-        subprocess.run(
-            ["gh", "pr", "merge", "--auto", "--squash", branch],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=60,
-        )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
-        _log.warning(
-            "rescue_finalize_blocked: gh pr merge failed for branch %r session %s",
-            branch,
-            session.id,
-        )
+    if not skip_merge:
+        try:
+            subprocess.run(
+                ["gh", "pr", "merge", "--auto", "--squash", branch],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=60,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+            _log.warning(
+                "rescue_finalize_blocked: gh pr merge failed for branch %r session %s",
+                branch,
+                session.id,
+            )
 
     if ticket_id:
         with dev_queue_lock():
             store = load_dev_queue()
             for task in store.tasks:
+                # Why (client, ticket_id): ticket_id strings are not globally
+                # unique across clients -- a bare ticket_id match here could
+                # complete a different client's BLOCKED_ON_USER task that
+                # happens to share this ticket_id. See GitHub #1054.
                 if (
-                    task.ticket_id == ticket_id
+                    task.client == session.client
+                    and task.ticket_id == ticket_id
                     and task.status == QueueItemStatus.BLOCKED_ON_USER
                 ):
                     transition_task_status(task, QueueItemStatus.COMPLETED)
@@ -417,6 +452,11 @@ def _rescue_complete(
             "salvaged": True,
             "salvage_kind": "finalize_blocked_rescue",
             "branch": branch,
+            # skip_merge=True means completion was driven by the merged-ticket
+            # ground-truth check (#1054) rather than by cw opening/merging this
+            # PR itself -- kept distinct in the audit trail since the two paths
+            # have different failure signatures. See GitHub #1054.
+            "skip_merge": skip_merge,
         },
     )
     if session.surface_ref is not None:
@@ -424,7 +464,10 @@ def _rescue_complete(
             _deps.get_native_daemon_client().stop(session.surface_ref)
 
 
-def rescue_finalize_blocked_sessions() -> list[str]:
+def rescue_finalize_blocked_sessions(
+    *,
+    merged_client_ticket_ids: frozenset[tuple[str, str]] = frozenset(),
+) -> list[str]:
     """Post-pass: open PRs for sessions blocked at the finalize stage (GitHub #812).
 
     Called from reconcile() AFTER sessions_lock releases. Finds TIMED_OUT sessions
@@ -433,6 +476,14 @@ def rescue_finalize_blocked_sessions() -> list[str]:
 
     Idempotency: after a gh failure, writes last_result["rescue_attempted"] = True
     so the session is not retried on every subsequent reconcile tick.
+
+    merged_client_ticket_ids: (client, ticket_id) pairs whose PR is already
+    confirmed merged (#1054 pre-pass). A merged ticket completes directly
+    (skip_merge=True) without the OPEN-only pr_exists_for_branch check or a
+    duplicate _rescue_open_pr — avoids the Mode B deadlock where a merged,
+    park-marker-blocked session would otherwise never reach completion.
+    Keyed by (client, ticket_id), not a bare ticket_id — see
+    salvage_committed_no_pr_sessions's docstring for why.
 
     Returns list of rescued ticket_ids (placed in ReconcileReport.rescued_ticket_ids).
     """
@@ -452,6 +503,15 @@ def rescue_finalize_blocked_sessions() -> list[str]:
         if not isinstance(branch, str) or not branch:
             continue
         ticket_id = ticket_id_for_session(session.name)
+        if ticket_id and (session.client, ticket_id) in merged_client_ticket_ids:
+            _rescue_complete(
+                session,
+                ticket_id=ticket_id,
+                branch=branch,
+                rescued_ticket_ids=rescued_ticket_ids,
+                skip_merge=True,
+            )
+            continue
         try:
             default_branch = get_client(session.client).default_branch
         except CwError:
@@ -475,6 +535,11 @@ def rescue_finalize_blocked_sessions() -> list[str]:
         if not pr_created:
             _rescue_mark_attempted(session.id)
             continue
-        _rescue_complete(session, ticket_id, branch, rescued_ticket_ids)
+        _rescue_complete(
+            session,
+            ticket_id=ticket_id,
+            branch=branch,
+            rescued_ticket_ids=rescued_ticket_ids,
+        )
 
     return rescued_ticket_ids
