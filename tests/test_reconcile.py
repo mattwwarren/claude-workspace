@@ -16728,7 +16728,7 @@ class TestWorldStateCheckBeforeRevert:
         )
         monkeypatch.setattr("cw.reconcile.core.complete_timed_out_merged_tasks", list)
         monkeypatch.setattr(
-            "cw.reconcile.core.salvage_committed_no_pr_sessions", lambda _c: []
+            "cw.reconcile.core.salvage_committed_no_pr_sessions", lambda _c, **_kw: []
         )
 
         with freezegun.freeze_time(now):
@@ -16776,7 +16776,7 @@ class TestWorldStateCheckBeforeRevert:
         )
         monkeypatch.setattr("cw.reconcile.core.complete_timed_out_merged_tasks", list)
         monkeypatch.setattr(
-            "cw.reconcile.core.salvage_committed_no_pr_sessions", lambda _c: []
+            "cw.reconcile.core.salvage_committed_no_pr_sessions", lambda _c, **_kw: []
         )
 
         with freezegun.freeze_time(now):
@@ -16834,7 +16834,7 @@ class TestWorldStateCheckBeforeRevert:
         monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
         monkeypatch.setattr("cw.reconcile.core.complete_timed_out_merged_tasks", list)
         monkeypatch.setattr(
-            "cw.reconcile.core.salvage_committed_no_pr_sessions", lambda _c: []
+            "cw.reconcile.core.salvage_committed_no_pr_sessions", lambda _c, **_kw: []
         )
 
         with freezegun.freeze_time(now):
@@ -16879,7 +16879,7 @@ class TestWorldStateCheckBeforeRevert:
         monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
         monkeypatch.setattr("cw.reconcile.core.complete_timed_out_merged_tasks", list)
         monkeypatch.setattr(
-            "cw.reconcile.core.salvage_committed_no_pr_sessions", lambda _c: []
+            "cw.reconcile.core.salvage_committed_no_pr_sessions", lambda _c, **_kw: []
         )
 
         with freezegun.freeze_time(now):

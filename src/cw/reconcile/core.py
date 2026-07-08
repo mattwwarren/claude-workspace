@@ -264,8 +264,12 @@ def reconcile() -> ReconcileReport:
     # Post-pass: runs AFTER sessions_lock releases so no gh subprocess
     # executes under the session lock (liveness — #485 SHOULD_FIX 4).
     completed_ticket_ids = complete_timed_out_merged_tasks()
-    salvaged_ticket_ids = salvage_committed_no_pr_sessions(salvage_git_candidates)
-    rescued_ticket_ids = rescue_finalize_blocked_sessions()
+    salvaged_ticket_ids = salvage_committed_no_pr_sessions(
+        salvage_git_candidates, merged_ticket_ids=merged_ticket_ids
+    )
+    rescued_ticket_ids = rescue_finalize_blocked_sessions(
+        merged_ticket_ids=merged_ticket_ids
+    )
 
     if not completed_ticket_ids and not salvaged_ticket_ids and not rescued_ticket_ids:
         return locked_report
@@ -420,6 +424,7 @@ def _reconcile_locked(
         native_live=native_live,
         config=orchestrator_config,
         task_by_ticket=shared_task_by_ticket,
+        merged_ticket_ids=merged_ticket_ids,
     )
     _emit_reap_proposed(state, idle_candidates, native_live=native_live, now=now)
     silently_idle_ticket_ids, merged_from_idle, salvage_git_candidates = (
