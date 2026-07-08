@@ -260,6 +260,14 @@ class OrchestratorEventType(StrEnum):
     # ticket. NOT a veto (contrast SESSION_PARK_VETOED above, which
     # accompanies zero mutation) — no queue/session mutation is suppressed.
     CONCIERGE_RECOVERY_BACKOFF_ARMED = "concierge.recovery_backoff_armed"
+    # RFC 0009 P1+P2 (#1065) — gate-recipe automation. Emitted by
+    # cw.reconcile.gate_recipes._act_auto_approve_review before the
+    # auto-approve mutation when a review met the fixed clean-review predicate
+    # (no MUST_FIX, no deferred, recommendation=PROCEED, no forbidden-area
+    # touch) and was approved with no human review. Unlike CONCIERGE_RECOVERED
+    # (audit-only), this IS forwarded to the operator channel by default — an
+    # auto-approve bypassing human review is attention-worthy.
+    GATE_AUTO_APPROVED = "gate.auto_approved"
 
 
 # Absolute ceiling on task.attempts across all kill causes (#786).
@@ -557,6 +565,10 @@ _DEFAULT_OPERATOR_EVENT_TYPES: frozenset[OrchestratorEventType] = frozenset(
         # operator does not need paged for, recorded via record_event but
         # never added to this forward-set.
         OrchestratorEventType.OPERATOR_ESCALATION,
+        # RFC 0009 P1+P2 (#1065): a gate recipe auto-approving a review with no
+        # human in the loop is operator-attention-worthy — forwarded by default
+        # (contrast CONCIERGE_RECOVERED, excluded above as audit-only).
+        OrchestratorEventType.GATE_AUTO_APPROVED,
     }
 )
 _DEFAULT_OPERATOR_TASK_TRANSITION_STATUSES: frozenset[QueueItemStatus] = frozenset(
@@ -773,6 +785,13 @@ class OrchestratorConfig(BaseModel):
     # silently disable the other two. Recognised keys: "false_park_requeue",
     # "park_marker_poison_clear", "cancelled_row_restore".
     concierge_recoveries: dict[str, bool] = Field(default_factory=dict)
+    # RFC 0009 P1+P2 (#1065) — gate-recipe automation master switch. Default
+    # False: the auto_approve_clean_review recipe in cw.reconcile.gate_recipes
+    # approves a review gate with NO human review, so nothing fires without an
+    # explicit operator opt-in — mirroring concierge_enabled's fail-safe
+    # default. Per-recipe / per-lane resolution (LaneConfig.gate_recipes,
+    # resolve_gate_recipe_enabled) is deferred to #1067.
+    gate_recipes_enabled: bool = False
 
     @field_validator("concierge_recoveries")
     @classmethod
