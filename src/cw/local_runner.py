@@ -27,6 +27,7 @@ from cw.auto_dev_result import (
     StageReached,
 )
 from cw.gh import fetch_approved_plan_comment
+from cw.models import CONTEXT_JSON_RELATIVE_PATH
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -228,7 +229,7 @@ def build_task_message(
     plan = plan_path.read_text(encoding="utf-8")
 
     header = ""
-    ctx_path = worktree / ".cw" / "context.json"
+    ctx_path = worktree / CONTEXT_JSON_RELATIVE_PATH
     if ctx_path.exists():
         try:
             ctx = json.loads(ctx_path.read_text(encoding="utf-8"))
