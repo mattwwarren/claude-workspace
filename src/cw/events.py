@@ -171,9 +171,11 @@ def prune_events(
         events = _parse_lines(raw_text.splitlines())
         if before is not None:
             kept_events, pruned_events = _partition_events_by_before(events, before)
-        else:
-            assert keep is not None  # guaranteed by the validation above
+        elif keep is not None:
             kept_events, pruned_events = _partition_events_by_keep(events, keep)
+        else:  # pragma: no cover - unreachable, guarded by validation above
+            msg = "prune_events: exactly one of 'before' or 'keep' must be given."
+            raise CwError(msg)
 
         new_text = "".join(e.model_dump_json() + "\n" for e in kept_events)
         atomic_write_text(inbox, new_text)
