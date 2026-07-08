@@ -6199,6 +6199,218 @@ class TestApplyStagedDecision:
 
 
 # ---------------------------------------------------------------------------
+# TestPersistCarriedContext
+# ---------------------------------------------------------------------------
+
+
+class TestPersistCarriedContext:
+    """GitHub #1050: _route_staged_decision stamps carried-through context
+
+    (plan_source, computed_scope_tier) onto the task from a stage-matched
+    sentinel, so a rescue respawn's fresh claim->spawn re-materializes it via
+    cw-context.json.
+    """
+
+    def _make_running_task(
+        self,
+        ticket_id: str,
+        stage: Stage = Stage.IMPL,
+        plan_source: str | None = None,
+        computed_scope_tier: str | None = None,
+    ) -> TicketTask:
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            stage=stage,
+            plan_source=plan_source,
+        )
+        task.computed_scope_tier = computed_scope_tier
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        return task
+
+    def _clients(self, tmp_path: Path) -> dict[str, ClientConfig]:
+        return {
+            "test-client": ClientConfig(name="test-client", workspace_path=tmp_path)
+        }
+
+    def test_route_staged_decision_persists_plan_source(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Stage-matched stage_complete sentinel stamps plan_source + tier."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("PC-1", stage=Stage.IMPL)
+        last_result: dict[str, object] = {
+            "status": "stage_complete",
+            "stage_reached": "stage2_impl",
+            "plan_source": "github_issue_existing",
+            "scope": {"tier": "small", "files": 3, "lines_estimate": 10},
+        }
+        apply_staged_decision(
+            task, "stage_complete", last_result, self._clients(tmp_path)
+        )
+
+        assert task.plan_source == "github_issue_existing"
+        assert task.computed_scope_tier == "small"
+
+    def test_route_staged_decision_persists_from_blocked_sentinel(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Stage-matched blocked finalize sentinel still carries plan_source/tier."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("PC-2", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "stage_reached": "stage4b_pr_create",
+            "plan_source": "generated",
+            "scope": {"tier": "large", "files": 20, "lines_estimate": 800},
+            "blocker": {"stage": "s4_finalize", "reason": "dirty_tree_no_sentinel"},
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.plan_source == "generated"
+        assert task.computed_scope_tier == "large"
+
+    def test_route_staged_decision_does_not_overwrite_with_null_tier(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """A stage-matched sentinel with scope.tier=None never clobbers an
+        already-set computed_scope_tier."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task(
+            "PC-3", stage=Stage.PLAN, computed_scope_tier="large"
+        )
+        last_result: dict[str, object] = {
+            "status": "stage_complete",
+            "stage_reached": "stage1_plan",
+            "plan_source": "free_text",
+            "scope": {"tier": None, "files": None, "lines_estimate": None},
+        }
+        apply_staged_decision(
+            task, "stage_complete", last_result, self._clients(tmp_path)
+        )
+
+        assert task.computed_scope_tier == "large"
+
+    def test_route_staged_decision_does_not_overwrite_plan_source_with_none(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """A stage-matched sentinel with plan_source="none" never clobbers an
+        already-resolved plan_source."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task(
+            "PC-4", stage=Stage.IMPL, plan_source="github_issue_existing"
+        )
+        last_result: dict[str, object] = {
+            "status": "stage_complete",
+            "stage_reached": "stage2_impl",
+            "plan_source": "none",
+            "scope": {"tier": "small", "files": 1, "lines_estimate": 5},
+        }
+        apply_staged_decision(
+            task, "stage_complete", last_result, self._clients(tmp_path)
+        )
+
+        assert task.plan_source == "github_issue_existing"
+
+    def test_route_staged_decision_skips_persist_on_stage_mismatch(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """A late/replayed sentinel whose stage_reached mismatches task.stage
+        is refused by the stage-mismatch guard -- neither field mutates."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("PC-5", stage=Stage.IMPL)
+        last_result: dict[str, object] = {
+            "status": "stage_complete",
+            "stage_reached": "stage1_plan",
+            "plan_source": "github_issue_existing",
+            "scope": {"tier": "small", "files": 1, "lines_estimate": 5},
+        }
+        routed = apply_staged_decision(
+            task, "stage_complete", last_result, self._clients(tmp_path)
+        )
+
+        assert routed is False
+        assert task.plan_source is None
+        assert task.computed_scope_tier is None
+
+    def test_resolve_scope_tier_unchanged_by_new_field(self) -> None:
+        """_resolve_scope_tier behavior is identical regardless of whether
+        computed_scope_tier is set (#1050 regression guard: the new field
+        must never feed into the escalate-only resolver)."""
+        from cw.dispatch import _resolve_scope_tier
+
+        # (a) scope_hint="large" still escalates even with computed_scope_tier set.
+        task_a = TicketTask(ticket_id="RS-A", client="c", scope_hint="large")
+        task_a.computed_scope_tier = "small"
+        assert _resolve_scope_tier({"scope": {"tier": "small"}}, task_a) == "large"
+
+        # (b) sentinel tier used when present, computed_scope_tier set differently.
+        task_b = TicketTask(ticket_id="RS-B", client="c")
+        task_b.computed_scope_tier = "large"
+        assert _resolve_scope_tier({"scope": {"tier": "small"}}, task_b) == "small"
+
+        # (c) returns None when both scope_hint and sentinel tier absent, even
+        # though computed_scope_tier is set.
+        task_c = TicketTask(ticket_id="RS-C", client="c")
+        task_c.computed_scope_tier = "large"
+        assert _resolve_scope_tier({"scope": {}}, task_c) is None
+
+    def test_consume_stamps_carried_context_on_task(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """consume_completed_sessions persists plan_source/scope.tier from a
+        SESSION_COMPLETED event's last_result, surviving the queue-store save."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        task = TicketTask(
+            ticket_id="PC-CONSUME-1",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            stage=Stage.IMPL,
+            session_id="sess-pc-consume-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        sess = Session(
+            id="sess-pc-consume-1",
+            name="test-client/auto-dev/PC-CONSUME-1",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=sample_client_config.workspace_path,
+            last_result={
+                "status": "stage_complete",
+                "stage_reached": "stage2_impl",
+                "plan_source": "github_issue_existing",
+                "scope": {"tier": "small", "files": 2, "lines_estimate": 20},
+            },
+        )
+        save_state(CwState(sessions=[sess]))
+
+        record_event(
+            OrchestratorEventType.SESSION_COMPLETED,
+            {"ticket_id": "PC-CONSUME-1", "session_id": "sess-pc-consume-1"},
+        )
+
+        completed = consume_completed_sessions()
+        assert completed == 1
+
+        reloaded = load_dev_queue().tasks[0]
+        assert reloaded.plan_source == "github_issue_existing"
+        assert reloaded.computed_scope_tier == "small"
+
+
+# ---------------------------------------------------------------------------
 # TestWaveCollisionDetection
 # ---------------------------------------------------------------------------
 

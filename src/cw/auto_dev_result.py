@@ -121,6 +121,9 @@ FINALIZE_REGRESS_BLOCKER_REASONS: frozenset[str] = frozenset({"agent_block"})
 FINALIZE_REGRESS_CAP: int = 2
 SCOPE_TIER_SMALL: Literal["small"] = "small"
 SCOPE_TIER_LARGE: Literal["large"] = "large"
+# Unresolved-provenance sentinel for PlanSource, e.g. when no stage has yet
+# classified how a ticket's plan originated.
+PLAN_SOURCE_NONE: Literal["none"] = "none"
 
 # AutoDevResult statuses that represent terminal outcomes the dev-queue should
 # never auto-retry. A phantom or stalled session that emitted one of these
