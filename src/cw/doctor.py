@@ -29,7 +29,6 @@ from pydantic import ValidationError
 from cw import __version__
 from cw.config import (
     clients_file,
-    events_dir,
     load_clients,
     load_orchestrator_config,
     load_state,
@@ -45,7 +44,7 @@ from cw.dev_queue import (
     transition_task_status,
 )
 from cw.dispatch import TICK_STALE_SECONDS
-from cw.events import read_events, record_event
+from cw.events import inbox_path, read_events, record_event
 from cw.exceptions import CwError
 from cw.gh import TIMED_OUT_MERGED_LOOKBACK_DAYS, pr_is_merged_for_ticket
 from cw.models import (
@@ -305,7 +304,7 @@ def _check_inbox_size() -> CheckResult:
     Read-only: never mutates or prunes the inbox. Absent inbox is healthy
     (nothing has been recorded yet). See ``cw event prune`` (GitHub #856).
     """
-    inbox = events_dir() / "inbox.jsonl"
+    inbox = inbox_path()
     if not inbox.exists():
         return CheckResult("inbox-size", ok=True, detail="no inbox file")
 

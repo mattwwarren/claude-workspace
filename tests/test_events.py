@@ -1029,7 +1029,7 @@ def test_poll_inbox_growth_stat_oserror_treated_as_size_zero(
         def stat(self) -> object:
             raise OSError
 
-    monkeypatch.setattr("cw.events._inbox_path", _RaisingPath)
+    monkeypatch.setattr("cw.events.inbox_path", _RaisingPath)
 
     should_read, size = _poll_inbox_growth(None)
 
@@ -1947,6 +1947,12 @@ def test_prune_events_neither_given_raises(tmp_events_dir: Path) -> None:
         prune_events()
 
 
+def test_prune_events_negative_keep_raises(tmp_events_dir: Path) -> None:
+    """A negative keep raises CwError directly from prune_events, not just the CLI."""
+    with pytest.raises(CwError):
+        prune_events(keep=-1)
+
+
 def test_prune_events_holds_inbox_lock(
     tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2149,8 +2155,9 @@ def test_cli_event_prune_invalid_before_errors(tmp_events_dir: Path) -> None:
 
 
 def test_cli_event_prune_before_naive_timestamp(tmp_events_dir: Path) -> None:
-    """A tz-naive --before ISO timestamp is accepted (UTC assumed)."""
+    """A tz-naive --before ISO timestamp is accepted (UTC assumed) with a warning."""
     events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
     runner = CliRunner()
     result = runner.invoke(main, ["event", "prune", "--before", "2000-01-01T00:00:00"])
     assert result.exit_code == 0, result.output
+    assert "no timezone; assuming UTC" in result.output

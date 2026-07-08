@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _inbox_path() -> Path:
+def inbox_path() -> Path:
     """Return the path to the global event inbox JSONL file."""
     return events_dir() / "inbox.jsonl"
 
@@ -76,7 +76,7 @@ def record_event(
         correlation_id=correlation_id,
     )
     with _inbox_lock():
-        inbox = _inbox_path()
+        inbox = inbox_path()
         inbox.parent.mkdir(parents=True, exist_ok=True)
         with inbox.open("a") as f:
             f.write(event.model_dump_json() + "\n")
@@ -154,14 +154,18 @@ def prune_events(
         A :class:`PruneResult` describing what happened.
 
     Raises:
-        CwError: If both or neither of *before*/*keep* are given.
+        CwError: If both or neither of *before*/*keep* are given, or if *keep*
+            is negative.
     """
     if (before is None) == (keep is None):
         msg = "prune_events: exactly one of 'before' or 'keep' must be given."
         raise CwError(msg)
+    if keep is not None and keep < 0:
+        msg = "prune_events: 'keep' must be non-negative."
+        raise CwError(msg)
 
     with _inbox_lock():
-        inbox = _inbox_path()
+        inbox = inbox_path()
         raw_text = inbox.read_text() if inbox.exists() else ""
         if not raw_text:
             return PruneResult(
@@ -187,6 +191,13 @@ def prune_events(
             if archive:
                 path = _archive_path_for_today()
                 path.parent.mkdir(parents=True, exist_ok=True)
+                # Why: this append is not atomic with the inbox rewrite above.
+                # A crash between the two would drop the pruned events from
+                # both files. Accepted: the archive is a best-effort audit
+                # copy, not the durable source of truth (inbox.jsonl is), and
+                # atomicity here would require a second temp-file+rename step
+                # for marginal benefit on an operator-invoked, non-hot-path
+                # command.
                 with path.open("a") as f:
                     for ev in pruned_events:
                         f.write(ev.model_dump_json() + "\n")
@@ -241,7 +252,7 @@ def init_cursor_at_end(consumer: str) -> bool:
     """
     if _cursor_path(consumer).exists():
         return False
-    inbox = _inbox_path()
+    inbox = inbox_path()
     with _inbox_lock():
         raw_text = inbox.read_text() if inbox.exists() else ""
     # Why: _inbox_lock is released before advance_cursor runs, so events appended
@@ -341,7 +352,7 @@ def read_events(
     if cursor is None and consumer is not None:
         cursor = load_cursor(consumer)
 
-    inbox = _inbox_path()
+    inbox = inbox_path()
     with _inbox_lock():
         raw_text = inbox.read_text() if inbox.exists() else ""
 
@@ -418,7 +429,7 @@ def _poll_inbox_growth(last_size: int | None) -> tuple[bool, int]:
     resets the baseline rather than replaying from 0, which avoids the
     cursor-not-found replay path in ``read_events``.
     """
-    inbox = _inbox_path()
+    inbox = inbox_path()
     current_size: int = 0
     if inbox.exists():
         try:

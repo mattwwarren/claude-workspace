@@ -630,6 +630,10 @@ def _parse_before(before: str) -> datetime:
         msg = f"Cannot parse --before value '{before}' as ISO timestamp."
         raise CwError(msg) from exc
     if before_ts.tzinfo is None:
+        click.echo(
+            f"Warning: --before '{before}' has no timezone; assuming UTC",
+            err=True,
+        )
         before_ts = before_ts.replace(tzinfo=UTC)
     return before_ts
 
