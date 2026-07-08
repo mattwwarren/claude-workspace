@@ -11,10 +11,11 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import pathlib
 import shutil
 import subprocess
 from typing import TYPE_CHECKING, Literal, Protocol, TypedDict, runtime_checkable
+
+import psutil
 
 from cw.auto_dev_result import (
     AutoDevResult,
@@ -44,6 +45,7 @@ AIDER_NOT_FOUND = "aider_not_found"
 PLAN_MISSING = "plan_missing"
 AIDER_NO_OUTPUT = "aider_no_output"
 UNEXPECTED_ERROR = "unexpected_error"
+LIVENESS_UNAVAILABLE = "liveness_unavailable"
 
 # --- Shared fixed constants for ALL blocked paths ---
 # scope.tier="small" and lines_actual=0 satisfy the stage2_impl post-impl
@@ -113,8 +115,8 @@ class FakeAiderRunner:
     """Test double: records the launch call; returns a real live subprocess.
 
     Returns ``Popen(["sleep", "60"])`` rather than a fast-exiting process so the
-    caller's ``read_process_start_time_ns`` read of ``/proc/<pid>/stat`` does not
-    race a just-exited PID. Mirrors FakeNativeDaemonClient in native_daemon.py.
+    caller's ``read_process_start_time_ns`` lookup does not race a just-exited
+    PID. Mirrors FakeNativeDaemonClient in native_daemon.py.
     Spawned processes are tracked in ``self.procs`` so tests can kill them.
     """
 
@@ -145,24 +147,18 @@ class FakeAiderRunner:
 
 
 def read_process_start_time_ns(pid: int) -> int | None:
-    """Return the process start-time in ns since boot, or None if unreadable.
+    """Return the process start-time in ns, or None if unreadable.
 
-    Reads field 22 (``starttime``, in clock ticks since boot) from
-    ``/proc/<pid>/stat`` and scales it to nanoseconds via ``SC_CLK_TCK``. Splits
-    on the LAST ``)`` so a process ``comm`` containing spaces or parentheses
-    (fields 2, parenthesised) does not shift the field index. Returns None when
-    the PID is gone or the stat line cannot be parsed — the caller treats None as
-    "process not alive". Linux-only; psutil is intentionally not a dependency.
+    Uses ``psutil.Process(pid).create_time()`` (epoch seconds as a float) on all
+    platforms — no ``/proc`` field parsing or ``sys.platform`` branch — so macOS
+    and Linux share one code path (issue #921). The float is converted to integer
+    nanoseconds to preserve the historical ``int | None`` contract. Returns None
+    when the PID is gone or inaccessible — the caller treats None as "process not
+    alive".
     """
     try:
-        data = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
-        after_paren = data.rsplit(")", 1)[1]
-        fields = after_paren.split()
-        # Field 22 (1-indexed) is starttime; index 19 after splitting past ')'.
-        starttime_ticks = int(fields[19])
-        clk_tck = os.sysconf("SC_CLK_TCK")
-        return starttime_ticks * 1_000_000_000 // clk_tck
-    except (OSError, IndexError, ValueError):
+        return int(psutil.Process(pid).create_time() * 1_000_000_000)
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.Error, ValueError):
         return None
 
 

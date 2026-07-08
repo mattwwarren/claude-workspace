@@ -94,7 +94,6 @@ def test_real_runner_launch_returns_live_popen_with_devnull(tmp_path: Path) -> N
 
 def test_real_runner_launch_raises_on_missing_binary(tmp_path: Path) -> None:
     """RealAiderRunner.launch() propagates FileNotFoundError for an absent binary."""
-    import pytest
 
     runner = RealAiderRunner()
     with pytest.raises(FileNotFoundError):
@@ -121,7 +120,7 @@ def test_read_start_time_ns_live_process() -> None:
 
 
 def test_read_start_time_ns_dead_pid_returns_none() -> None:
-    """read_process_start_time_ns returns None for a PID with no /proc entry."""
+    """read_process_start_time_ns returns None for a PID with no live process."""
     proc = subprocess.Popen(
         ["true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
