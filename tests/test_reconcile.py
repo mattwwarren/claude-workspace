@@ -2244,6 +2244,262 @@ def test_stalled_retry_cap_no_retried_event_when_parked(
     assert not any(e.payload.get("ticket_id") == "cap-no-evt" for e in events)
 
 
+def test_stalled_revert_usage_limit_detected_sets_cause(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1030: wall-clock REVERT_TASK path threads usage_limit_detected onto
+    its ReapCandidate → reap_reason=usage_limit_cutoff when the session's
+    transcript shows a usage-limit refusal."""
+    from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
+
+    worktree = tmp_path / "wt-revert-ul"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("revert-ul", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="revert-ul",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="revert-ul",
+        attempts=1,  # below cap -> normal REVERT_TASK path
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        lambda _branch, **_kw: (True, True),
+    )
+    with patch("cw.reconcile._shared.detect_usage_limit", return_value=True):
+        reverted = revert_stalled_headless_sessions(
+            state, now=now, config=_auto_config()
+        )
+
+    assert "revert-ul" in reverted
+    s = next(s for s in state.sessions if s.id == "revert-ul")
+    assert s.reap_reason == ReapReason.USAGE_LIMIT_CUTOFF
+
+
+def test_stalled_revert_no_usage_limit_keeps_wall_clock_budget_cause(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1030: revert path's False arm — no usage-limit transcript keeps the
+    original wall_clock_budget cause."""
+    from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
+
+    worktree = tmp_path / "wt-revert-no-ul"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("revert-no-ul", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="revert-no-ul",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="revert-no-ul",
+        attempts=1,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        lambda _branch, **_kw: (True, True),
+    )
+    with patch("cw.reconcile._shared.detect_usage_limit", return_value=False):
+        reverted = revert_stalled_headless_sessions(
+            state, now=now, config=_auto_config()
+        )
+
+    assert "revert-no-ul" in reverted
+    s = next(s for s in state.sessions if s.id == "revert-no-ul")
+    assert s.reap_reason == ReapReason.WALL_CLOCK_BUDGET
+
+
+def test_stalled_cap_park_usage_limit_detected_sets_cause(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1030: the cap-park branch is NEW usage-limit logic (unlike the revert
+    path, which mirrors idle.py precedent) — direct coverage required.
+    attempts >= cap + usage-limit transcript →
+    reap_reason=usage_limit_cutoff instead of stalled_retry_cap_parked."""
+    from cw.reconcile import (
+        _STALLED_CAP_PARKED_REASON,
+        DEFAULT_STALLED_RETRY_CAP,
+        HEADLESS_TIMEOUT_SECONDS,
+    )
+
+    worktree = tmp_path / "wt-cap-ul"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("cap-ul", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="cap-ul",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="cap-ul",
+        stage=Stage.IMPL,
+        attempts=DEFAULT_STALLED_RETRY_CAP,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
+    with patch("cw.reconcile._shared.detect_usage_limit", return_value=True):
+        reverted = revert_stalled_headless_sessions(
+            state, now=now, config=_auto_config(headless_timeout_by_stage={})
+        )
+
+    assert "cap-ul" not in reverted  # still a park, not a requeue
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "cap-ul")
+    assert t.status == QueueItemStatus.BLOCKED_ON_USER
+    # Task-level disposition is unaffected — only session.reap_reason changes.
+    assert t.disposition == _STALLED_CAP_PARKED_REASON
+
+    s = next(s for s in state.sessions if s.id == "cap-ul")
+    assert s.status == SessionStatus.TIMED_OUT
+    assert s.reap_reason == ReapReason.USAGE_LIMIT_CUTOFF
+
+
+def test_stalled_cap_park_no_usage_limit_keeps_retry_cap_parked_cause(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1030: cap-park branch's False arm — no usage-limit transcript keeps
+    the original stalled_retry_cap_parked cause."""
+    from cw.reconcile import DEFAULT_STALLED_RETRY_CAP, HEADLESS_TIMEOUT_SECONDS
+
+    worktree = tmp_path / "wt-cap-no-ul"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("cap-no-ul", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="cap-no-ul",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="cap-no-ul",
+        stage=Stage.IMPL,
+        attempts=DEFAULT_STALLED_RETRY_CAP,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
+    with patch("cw.reconcile._shared.detect_usage_limit", return_value=False):
+        reverted = revert_stalled_headless_sessions(
+            state, now=now, config=_auto_config(headless_timeout_by_stage={})
+        )
+
+    assert "cap-no-ul" not in reverted
+    s = next(s for s in state.sessions if s.id == "cap-no-ul")
+    assert s.status == SessionStatus.TIMED_OUT
+    assert s.reap_reason == ReapReason.STALLED_RETRY_CAP_PARKED
+
+
+def test_reconcile_usage_limited_true_from_stalled_wall_clock_path(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1030 root cause: reconcile()'s watchdog_usage_limited aggregation
+    previously snapshotted pre_watchdog_timed_out_ids AFTER the stalled sweep
+    already ran, so a usage-limit death caught by the stalled sweep's
+    REVERT_TASK path (not just idle/phantom) could never reach
+    ReconcileReport.usage_limited. This is the exact incident path: wall-clock
+    budget expiry on a session that died to the account session limit."""
+    monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / "wt-stalled-ul-reconcile"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    surface_ref = "stall-ul1"
+    sess = _mk_headless_daemon_session(
+        "stalled-ul-reconcile", worktree, started_at, surface_ref=surface_ref
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="stalled-ul-reconcile",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="stalled-ul-reconcile",
+                    attempts=1,  # below cap -> normal REVERT_TASK path
+                )
+            ]
+        )
+    )
+
+    transcript = _write_idle_transcript_with_text(
+        home,
+        worktree,
+        "You've hit your session limit · resets 11:50am ET",
+        filename=f"{surface_ref}-sess-1030.jsonl",
+    )
+    after_ts = started_at.timestamp() + 60
+    os.utime(str(transcript), (after_ts, after_ts))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        lambda _branch, **_kw: (True, True),
+    )
+    # Non-empty (decoy) live set bypasses the outage guard.
+    monkeypatch.setattr(
+        "cw.reconcile.core._claude_agents_json",
+        lambda: [{"sessionId": "decoy00001111222233334444555566"}],
+    )
+
+    report = reconcile()
+
+    assert report.usage_limited is True
+    assert "stalled-ul-reconcile" in report.reverted_ticket_ids
+
+
 def test_stalled_retry_cap_per_tier_override(
     tmp_config_dir: Path,
     tmp_path: Path,

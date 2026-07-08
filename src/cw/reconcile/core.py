@@ -316,6 +316,22 @@ def _reconcile_locked(
     state = load_state()
     now = datetime.now(UTC)
 
+    # Snapshot sessions that are already TIMED_OUT before ANY reap sweep runs
+    # this tick, so the usage-limit diff below (watchdog_usage_limited) can
+    # see transitions caused by the stalled sweep in addition to the idle
+    # sweep. #1030: this snapshot used to be taken AFTER the stalled sweep
+    # already ran (right before the idle sweep), which meant a session the
+    # stalled sweep had just reaped to TIMED_OUT was already present in the
+    # "pre" snapshot and silently excluded from the diff — a usage-limit
+    # death caught by the stalled sweep could never reach
+    # ReconcileReport.usage_limited. Widening the window to before the
+    # stalled sweep closes that gap. Named for the widened scope (not just
+    # "pre_watchdog") so a future sweep inserted above this line doesn't
+    # silently fall outside it under a stale name, reintroducing this bug.
+    pre_reap_timed_out_ids = {
+        s.id for s in state.sessions if s.status == SessionStatus.TIMED_OUT
+    }
+
     # Passive budget sweep: catches headless DAEMON sessions whose agent
     # stalled mid-turn and produced no further Stop hook firings. Runs before
     # the outage guard so a daemon hiccup does not delay budget enforcement.
@@ -398,11 +414,6 @@ def _reconcile_locked(
     _backfill_claude_session_ids(state, surface_to_full)
     _verify_supervisor_session_id(state)
 
-    # Snapshot sessions that are already TIMED_OUT before the watchdog sweep,
-    # so we can detect which sessions were newly reaped by usage_limit_cutoff.
-    pre_watchdog_timed_out_ids = {
-        s.id for s in state.sessions if s.status == SessionStatus.TIMED_OUT
-    }
     idle_candidates = _detect_idle_candidates(
         state,
         now=now,
@@ -425,7 +436,7 @@ def _reconcile_locked(
     # transcript. The _detect_usage_limit I/O cost is minimal (OS-cached files).
     watchdog_usage_limited = any(
         s.status == SessionStatus.TIMED_OUT
-        and s.id not in pre_watchdog_timed_out_ids
+        and s.id not in pre_reap_timed_out_ids
         and _shared.detect_usage_limit(s)
         for s in state.sessions
     )

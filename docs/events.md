@@ -612,6 +612,43 @@ for `cancelled_row_restore`).
 
 `correlation_id` is the `ticket_id`.
 
+### `concierge.recovery_backoff_armed`
+
+**Emitter:** `_act_on_false_park_candidates` (`cw.reconcile.concierge`)
+**Payload:**
+```json
+{
+  "ticket_id": "<str>",
+  "client": "<str>",
+  "recovery_count": "<int>",
+  "next_eligible_at": "<ISO 8601 timestamp>",
+  "session_id": "<str | null>"
+}
+```
+**Semantics:** GitHub #1030. Emitted from recipe 1 (`false_park_requeue`)
+when the candidate's session shows the dead-on-arrival signature — its
+transcript's last write lands within seconds of spawn (active lifespan
+< 120s), meaning the *previous* mechanical recovery churned against the
+account session limit rather than helping. **The PENDING requeue always
+proceeds** on this detect — nothing about the current cycle's action is
+suppressed or vetoed (contrast `session.park_vetoed` above, which
+accompanies zero mutation). This event only records that
+`TicketTask.false_park_recovery_count` and
+`false_park_recovery_next_eligible_at` were stamped, deferring the *next*
+false-park detection cycle for this ticket by an exponentially increasing
+window (5 minutes initially, doubling up to a 1-hour cap). Once that window
+elapses, the recipe's detect phase considers the row again as normal.
+
+Emitted before the unconditional `concierge.recovered` event, in the same
+act-phase pass, for the same candidate.
+
+Missing evidence (no session record for the ticket, or an unlocatable
+transcript) never arms this backoff — only positive evidence of an instant
+death does; a row with missing evidence keeps churning under the #1015
+escalation latch's existing backstop instead.
+
+`correlation_id` is the `ticket_id`.
+
 ### `operator.escalation`
 
 **Emitter:** `run_escalation_sweep` (`cw.reconcile.escalation`)

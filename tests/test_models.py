@@ -661,6 +661,36 @@ class TestCostFields:
         assert restored.total_cost_usd == pytest.approx(3.14)
 
 
+class TestFalseParkRecoveryBackoffFields:
+    """GitHub #1030: new TicketTask backoff-state fields for concierge recipe 1."""
+
+    def test_defaults(self) -> None:
+        task = TicketTask(ticket_id="T-1", client="c")
+        assert task.false_park_recovery_count == 0
+        assert task.false_park_recovery_next_eligible_at is None
+
+    def test_round_trip(self) -> None:
+        next_eligible = datetime(2026, 7, 8, 12, 0, 0, tzinfo=UTC)
+        task = TicketTask(
+            ticket_id="T-1",
+            client="c",
+            false_park_recovery_count=2,
+            false_park_recovery_next_eligible_at=next_eligible,
+        )
+        dumped = task.model_dump(mode="json")
+        restored = TicketTask.model_validate(dumped)
+        assert restored.false_park_recovery_count == 2
+        assert restored.false_park_recovery_next_eligible_at == next_eligible
+
+
+class TestConciergeRecoveryBackoffArmedEventType:
+    def test_value(self) -> None:
+        assert (
+            OrchestratorEventType.CONCIERGE_RECOVERY_BACKOFF_ARMED.value
+            == "concierge.recovery_backoff_armed"
+        )
+
+
 class TestLaneConfig:
     def test_default_fields(self) -> None:
         """LaneConfig has correct defaults when instantiated with only name."""
@@ -791,7 +821,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_9(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 10
+        assert DEV_QUEUE_SCHEMA_VERSION == 11
 
     def test_pr_state_defaults(self) -> None:
         state = PrState()

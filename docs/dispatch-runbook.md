@@ -817,6 +817,16 @@ the ticket silently spinning forever. Every recovery emits a
 `concierge.recovered` event (audit-trail only, not forwarded to the operator
 channel by default) **before** mutating the row — see `docs/events.md`.
 
+Recipe 1 (`false_park_requeue`) also has an internal churn backoff (#1030):
+if a row's *previous* recovery produced a session that died within seconds
+of spawn (dead-on-arrival — active lifespan under 2 minutes), the recipe
+arms an exponential deferral (5 min → 1 hr cap) before it will consider that
+row again, emitting `concierge.recovery_backoff_armed`; the requeue still
+happens on every detect, this only defers the *next* cycle. Missing
+evidence (no session record, or an unlocatable transcript) never arms the
+backoff — a legitimately-stalled row is never penalized, and evidence-less
+churn stays covered by the 11.2 escalation latch below.
+
 ### 11.2 Durable escalation latch (`cw.reconcile.escalation`)
 
 Runs **unconditionally** every reconcile tick (not gated by

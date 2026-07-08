@@ -334,6 +334,15 @@ def _fill_escalation_defaults(task_raw: dict[str, Any]) -> None:
         task_raw["escalation_fired_at"] = None
 
 
+def _fill_false_park_recovery_backoff_default(task_raw: dict[str, Any]) -> None:
+    """Fill false_park_recovery_count/false_park_recovery_next_eligible_at
+    introduced in dev-queue schema v11 (GitHub #1030). Idempotent."""
+    if "false_park_recovery_count" not in task_raw:
+        task_raw["false_park_recovery_count"] = 0
+    if "false_park_recovery_next_eligible_at" not in task_raw:
+        task_raw["false_park_recovery_next_eligible_at"] = None
+
+
 def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
     """Normalise a raw dev_queue.json payload into a currently-valid shape."""
     tasks = raw.get("tasks")
@@ -352,6 +361,7 @@ def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
                 _fill_pr_state_default(task_raw)
                 _fill_signoff_default(task_raw)
                 _fill_escalation_defaults(task_raw)
+                _fill_false_park_recovery_backoff_default(task_raw)
     raw["schema_version"] = DEV_QUEUE_SCHEMA_VERSION
     return raw
 
