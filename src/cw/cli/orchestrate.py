@@ -25,6 +25,7 @@ from cw.orchestrate import (
     MissingWorkerEntry,
     OrchestratorStatus,
     WorkerEntry,
+    _aggregate_feed,
     orchestrator_parent,
     orchestrator_status,
     orchestrator_workers,
@@ -53,8 +54,12 @@ def _should_show_lane_breakdown(lanes: dict[str, dict[str, int]]) -> bool:
     return next(iter(lanes)) != DEFAULT_LANE
 
 
-def _format_status_human(status: OrchestratorStatus) -> str:
-    """Render an OrchestratorStatus as a human-readable string."""
+def _format_status_human(status: OrchestratorStatus, *, raw: bool = False) -> str:
+    """Render an OrchestratorStatus as a human-readable string.
+
+    Recent events are aggregated (consecutive dispatch.tick runs collapsed)
+    by default; ``raw=True`` restores the unaggregated per-event stream.
+    """
     ts = status.generated_at.strftime("%Y-%m-%dT%H:%M:%SZ")
     lines: list[str] = [f"Orchestrator status (as of {ts})", ""]
 
@@ -90,11 +95,7 @@ def _format_status_human(status: OrchestratorStatus) -> str:
         if s.last_stage:
             line += f"  last_stage={s.last_stage}"
         else:
-            _stage_unknown = (
-                "  last_stage=(unknown"
-                " — global auto-dev.md not yet emitting stage events)"
-            )
-            line += _stage_unknown
+            line += "  last_stage=(none — no stage events recorded for this session)"
         lines.append(line)
 
     lines.extend(("", f"Monitored PRs:     {len(status.monitored_prs)}"))
@@ -107,18 +108,31 @@ def _format_status_human(status: OrchestratorStatus) -> str:
         )
 
     lines.extend(("", f"Recent events:     {len(status.recent_events)}"))
-    lines.extend(
-        f"  - {e.created_at.strftime('%Y-%m-%dT%H:%M:%SZ')}  {e.id}  {e.type}"
-        for e in status.recent_events
-    )
+    if raw:
+        lines.extend(
+            f"  - {e.created_at.strftime('%Y-%m-%dT%H:%M:%SZ')}  {e.id}  {e.type}"
+            for e in status.recent_events
+        )
+    else:
+        lines.extend(
+            f"  - {fe.created_at.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+            f"  {fe.id or '—'}  {fe.text}"
+            for fe in _aggregate_feed(status.recent_events)
+        )
 
     return "\n".join(lines)
 
 
 @orchestrate.command(name="status")
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+@click.option(
+    "--raw-events",
+    is_flag=True,
+    default=False,
+    help="Show raw event stream instead of aggregated ticks.",
+)
 @handle_errors
-def orchestrate_status(as_json: bool) -> None:
+def orchestrate_status(as_json: bool, raw_events: bool) -> None:
     """Show a snapshot of the orchestrator subsystem.
 
     Includes pending dev-queue tickets, running sessions, PRs being
@@ -128,7 +142,7 @@ def orchestrate_status(as_json: bool) -> None:
     if as_json:
         click.echo(snapshot.model_dump_json(indent=2))
     else:
-        click.echo(_format_status_human(snapshot))
+        click.echo(_format_status_human(snapshot, raw=raw_events))
 
 
 @orchestrate.command(name="retire")

@@ -24,9 +24,10 @@ import json
 import logging
 import shutil
 import subprocess
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import BaseModel, Field
 
@@ -54,7 +55,7 @@ from cw.models import (
 from cw.reconcile._shared import _transcript_age_seconds
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping, Sequence
 
     from cw.models import CwState
 
@@ -68,6 +69,81 @@ _RECENT_EVENTS_LIMIT = 20
 # semantics exist), so resolved/ancient flags accumulate forever. See #854.
 _ATTENTION_WINDOW = timedelta(hours=24)
 _REVIEW_MONITOR_SCRIPT = Path.home() / ".claude" / "scripts" / "review_monitor.py"
+_SECONDS_PER_MINUTE = 60
+
+
+class _FeedEvent(Protocol):
+    """Structural-typing seam for :func:`_aggregate_feed`.
+
+    Lets the aggregator operate on both :class:`~cw.models.OrchestratorEvent`
+    (board's windowed feed) and :class:`EventSummary`
+    (``OrchestratorStatus.recent_events``) without a bulk conversion between
+    the two on the render hot path. Read-only ``@property`` members (not
+    plain attributes) are required so the covariant ``str`` return accepts
+    ``OrchestratorEventType`` (a ``StrEnum`` subtype of ``str``) -- a plain
+    mutable protocol attribute would be invariant and fail ``mypy --strict``.
+    """
+
+    @property
+    def id(self) -> str: ...
+
+    @property
+    def type(self) -> str: ...
+
+    @property
+    def payload(self) -> Mapping[str, Any]: ...
+
+    @property
+    def created_at(self) -> datetime: ...
+
+
+@dataclass(frozen=True)
+class _FeedEntry:
+    """One display row in the (possibly aggregated) event-feed panel.
+
+    ``id`` is preserved for passthrough (non-tick) entries so raw-mode
+    callers can still surface it; synthetic tick-summary entries have no
+    single originating event id, so ``id`` is ``None``.
+    """
+
+    text: str
+    created_at: datetime
+    id: str | None = None
+
+
+def _aggregate_feed(events: Sequence[_FeedEvent]) -> list[_FeedEntry]:
+    """Collapse consecutive dispatch.tick events into one summary entry.
+
+    Any other event type breaks the run and is emitted verbatim. Pure --
+    operates over whatever event sequence it is given (no truncation here;
+    callers own the aggregate-then-tail truncation order).
+    """
+    entries: list[_FeedEntry] = []
+    run: list[_FeedEvent] = []
+
+    def _flush_tick_run() -> None:
+        if not run:
+            return
+        span_seconds = (run[-1].created_at - run[0].created_at).total_seconds()
+        span_minutes = int(span_seconds // _SECONDS_PER_MINUTE)
+        entries.append(
+            _FeedEntry(
+                text=f"dispatch.tick x{len(run)} over {span_minutes}m",
+                created_at=run[-1].created_at,
+            )
+        )
+        run.clear()
+
+    for event in events:
+        if event.type == OrchestratorEventType.DISPATCH_TICK.value:
+            run.append(event)
+            continue
+        _flush_tick_run()
+        ticket_id = event.payload.get("ticket_id")
+        label = f"{event.type} ({ticket_id})" if ticket_id else f"{event.type}"
+        entries.append(_FeedEntry(text=label, created_at=event.created_at, id=event.id))
+    _flush_tick_run()
+    return entries
 
 
 # ---------------------------------------------------------------------------

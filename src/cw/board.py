@@ -42,6 +42,7 @@ from cw.models import (
 from cw.orchestrate import (
     SessionSummary,
     TicketSummary,
+    _aggregate_feed,
     summarise_session,
     summarise_ticket,
 )
@@ -127,14 +128,6 @@ class BoardState:
     # default-empty so non-detail frames and existing builders stay valid.
     running_sessions: list[SessionSummary] = field(default_factory=list)
     pending_tickets: list[TicketSummary] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class _FeedEntry:
-    """One display row in the (possibly aggregated) event-feed panel."""
-
-    text: str
-    created_at: datetime
 
 
 def _load_board_state(
@@ -303,41 +296,6 @@ def _row_badge(
         # by design (R1 PR column + R4 badge precedence), not a duplication bug.
         return _pr_attention_label(pr_state.attention_state)
     return _DASH
-
-
-def _aggregate_feed(events: list[OrchestratorEvent]) -> list[_FeedEntry]:
-    """Collapse consecutive dispatch.tick events into one summary entry.
-
-    Any other event type breaks the run and is emitted verbatim. Pure —
-    operates over whatever event list it is given (no truncation here; see
-    _build_event_feed_panel for the aggregate-then-tail truncation order).
-    """
-    entries: list[_FeedEntry] = []
-    run: list[OrchestratorEvent] = []
-
-    def _flush_tick_run() -> None:
-        if not run:
-            return
-        span_seconds = (run[-1].created_at - run[0].created_at).total_seconds()
-        span_minutes = int(span_seconds // _SECONDS_PER_MINUTE)
-        entries.append(
-            _FeedEntry(
-                text=f"dispatch.tick x{len(run)} over {span_minutes}m",
-                created_at=run[-1].created_at,
-            )
-        )
-        run.clear()
-
-    for event in events:
-        if event.type == OrchestratorEventType.DISPATCH_TICK:
-            run.append(event)
-            continue
-        _flush_tick_run()
-        ticket_id = event.payload.get("ticket_id")
-        label = f"{event.type.value} ({ticket_id})" if ticket_id else event.type.value
-        entries.append(_FeedEntry(text=label, created_at=event.created_at))
-    _flush_tick_run()
-    return entries
 
 
 def _build_event_feed_panel(
