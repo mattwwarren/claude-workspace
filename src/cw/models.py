@@ -268,6 +268,14 @@ class OrchestratorEventType(StrEnum):
     # (audit-only), this IS forwarded to the operator channel by default — an
     # auto-approve bypassing human review is attention-worthy.
     GATE_AUTO_APPROVED = "gate.auto_approved"
+    # RFC 0009 P1+P2 (#1065) — companion to GATE_AUTO_APPROVED. Emitted when
+    # the act-phase mutation raises after GATE_AUTO_APPROVED was already
+    # recorded (e.g. a duplicate row, or the client's pipeline config changed
+    # between detect and act) — so the durable event stream carries a
+    # correction, not just a non-durable log line, for what would otherwise
+    # be a false "approved" signal on the operator channel. Forwarded by
+    # default alongside GATE_AUTO_APPROVED for the same reason.
+    GATE_AUTO_APPROVE_FAILED = "gate.auto_approve_failed"
 
 
 # Absolute ceiling on task.attempts across all kill causes (#786).
@@ -569,6 +577,11 @@ _DEFAULT_OPERATOR_EVENT_TYPES: frozenset[OrchestratorEventType] = frozenset(
         # human in the loop is operator-attention-worthy — forwarded by default
         # (contrast CONCIERGE_RECOVERED, excluded above as audit-only).
         OrchestratorEventType.GATE_AUTO_APPROVED,
+        # Forwarded alongside GATE_AUTO_APPROVED: without this, a failed
+        # act-phase mutation would leave GATE_AUTO_APPROVED standing alone on
+        # the operator channel as an uncorrected false-positive "approved"
+        # signal.
+        OrchestratorEventType.GATE_AUTO_APPROVE_FAILED,
     }
 )
 _DEFAULT_OPERATOR_TASK_TRANSITION_STATUSES: frozenset[QueueItemStatus] = frozenset(

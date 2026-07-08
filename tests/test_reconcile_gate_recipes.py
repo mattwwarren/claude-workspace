@@ -321,9 +321,13 @@ class TestRunApprove:
         assert by_client["acme"].stage == Stage.FINALIZE
         assert by_client["beta"].stage == Stage.FINALIZE
 
-    def test_event_emitted_before_transition_with_reloaded_sources(
+    def test_event_payload_sources_from_reloaded_state(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
+        """Checks the emitted event's payload content and that exactly one
+        fires. For the event-survives-a-failed-mutation ordering guarantee
+        itself, see TestActApproveFailure — this test alone doesn't prove
+        emit-before-mutation ordering since both already succeeded here."""
         from cw.events import read_events
 
         _write_acme_clients_yaml(tmp_config_dir, tmp_path)
@@ -417,7 +421,9 @@ class TestActApproveFailure:
         event is not rolled back (durable audit trail) — but the ticket is NOT
         approved, and no audit comment is posted for a mutation that never
         landed. This is the coverage a passing "both happened" assertion alone
-        cannot provide."""
+        cannot provide. Also asserts GATE_AUTO_APPROVE_FAILED is emitted as a
+        durable correction, so GATE_AUTO_APPROVED never stands alone on the
+        operator channel as an uncorrected false-positive "approved" signal."""
         from cw.events import read_events
         from cw.exceptions import ApproveGateError
 
@@ -442,10 +448,27 @@ class TestActApproveFailure:
         assert store.tasks[0].stage == Stage.REVIEW
         events = read_events(
             consumer="test-gate-approve-failure",
-            event_types=[OrchestratorEventType.GATE_AUTO_APPROVED],
+            event_types=[
+                OrchestratorEventType.GATE_AUTO_APPROVED,
+                OrchestratorEventType.GATE_AUTO_APPROVE_FAILED,
+            ],
         )
-        assert len(events) == 1
-        assert events[0].payload["ticket_id"] == "GEN-1"
+        approved_events = [
+            e for e in events if e.type == OrchestratorEventType.GATE_AUTO_APPROVED
+        ]
+        failed_events = [
+            e
+            for e in events
+            if e.type == OrchestratorEventType.GATE_AUTO_APPROVE_FAILED
+        ]
+        assert len(approved_events) == 1
+        assert len(failed_events) == 1
+        failed_payload = failed_events[0].payload
+        assert failed_payload["ticket_id"] == "GEN-1"
+        assert failed_payload["client"] == "acme"
+        assert boom_msg in failed_payload["error"]
+        assert failed_events[0].correlation_id == "GEN-1"
+        assert approved_events[0].payload["ticket_id"] == "GEN-1"
         assert stub_gh_comment == []
         assert any("GEN-1" in rec.message for rec in caplog.records)
 

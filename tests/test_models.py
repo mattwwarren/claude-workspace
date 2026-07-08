@@ -966,6 +966,7 @@ class TestOperatorChannelForward:
                 OrchestratorEventType.SESSION_LIVENESS_CHANGED,
                 OrchestratorEventType.OPERATOR_ESCALATION,
                 OrchestratorEventType.GATE_AUTO_APPROVED,
+                OrchestratorEventType.GATE_AUTO_APPROVE_FAILED,
             }
         )
 
@@ -1130,6 +1131,21 @@ class TestConciergeAndEscalationModelSurface:
         from cw.models import _DEFAULT_OPERATOR_EVENT_TYPES
 
         assert OrchestratorEventType.GATE_AUTO_APPROVED in _DEFAULT_OPERATOR_EVENT_TYPES
+
+    def test_orchestrator_event_type_includes_gate_auto_approve_failed(self) -> None:
+        assert (
+            OrchestratorEventType.GATE_AUTO_APPROVE_FAILED == "gate.auto_approve_failed"
+        )
+
+    def test_gate_auto_approve_failed_in_default_forward_set(self) -> None:
+        """GATE_AUTO_APPROVE_FAILED IS forwarded by default: it corrects a
+        false-positive GATE_AUTO_APPROVED already on the operator channel."""
+        from cw.models import _DEFAULT_OPERATOR_EVENT_TYPES
+
+        assert (
+            OrchestratorEventType.GATE_AUTO_APPROVE_FAILED
+            in _DEFAULT_OPERATOR_EVENT_TYPES
+        )
 
     def test_orchestrator_config_gate_recipes_enabled_defaults_false(self) -> None:
         assert OrchestratorConfig().gate_recipes_enabled is False

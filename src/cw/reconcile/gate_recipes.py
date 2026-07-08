@@ -24,7 +24,11 @@ then ``_act_auto_approve_review`` which re-validates the predicate under
 :class:`OrchestratorEventType.GATE_AUTO_APPROVED` is recorded (durably, to the
 append-only events inbox) *before* the approval mutation, so evidence of what
 the recipe decided survives even if the subsequent write fails (mirrors the
-concierge ``CONCIERGE_RECOVERED`` ordering).
+concierge ``CONCIERGE_RECOVERED`` ordering). If the mutation itself then
+raises, :class:`OrchestratorEventType.GATE_AUTO_APPROVE_FAILED` is emitted as
+a durable, operator-forwarded correction — without it, ``GATE_AUTO_APPROVED``
+would stand alone on the operator channel as an uncorrected false-positive
+"approved" signal.
 
 The act phase calls the lock-free ``_approve_ticket_locked`` primitive directly
 from inside its own ``dev_queue_lock()`` acquisition — never the public
@@ -299,21 +303,37 @@ def _act_auto_approve_review(
             )
             try:
                 _approve_ticket_locked(task.ticket_id, task.client)
-            except CwError:
+            except CwError as exc:
                 # The GATE_AUTO_APPROVED event above is already durable, but
                 # the mutation didn't land (e.g. a duplicate row resolved to a
                 # different task, or the client's pipeline config changed
-                # between detect and here). Log and skip rather than let this
-                # escape uncaught: an uncaught raise here would abort the rest
-                # of this reconcile tick (including run_escalation_sweep and
+                # between detect and here). Skip rather than let this escape
+                # uncaught: an uncaught raise here would abort the rest of
+                # this reconcile tick (including run_escalation_sweep and
                 # every other still-valid candidate) and, via callers that
                 # don't wrap reconcile() in a broad except (e.g. cw status),
-                # surface as a crash to unrelated CLI commands.
+                # surface as a crash to unrelated CLI commands. Also emit a
+                # durable, operator-forwarded correction: without it,
+                # GATE_AUTO_APPROVED would stand alone on the operator
+                # channel as an uncorrected false-positive "approved" signal
+                # (a log line alone isn't queryable via the event stream).
                 _log.warning(
                     "gate_recipe_approve_failed ticket=%s client=%s",
                     task.ticket_id,
                     task.client,
                     exc_info=True,
+                )
+                record_event(
+                    OrchestratorEventType.GATE_AUTO_APPROVE_FAILED,
+                    {
+                        "ticket_id": task.ticket_id,
+                        "client": task.client,
+                        "lane": task.lane,
+                        "session_id": session.id,
+                        "recipe": RECIPE_AUTO_APPROVE_REVIEW,
+                        "error": str(exc),
+                    },
+                    correlation_id=task.ticket_id,
                 )
                 continue
             approved.append(task.ticket_id)
