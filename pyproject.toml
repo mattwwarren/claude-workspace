@@ -210,6 +210,11 @@ python_version = "3.13"
 strict = true
 mypy_path = "src"
 packages = ["cw"]
+# The gate is src-only (`mypy --strict src/`). Exclude tests from recursive
+# discovery so a bare `mypy .` matches the gate instead of type-checking the
+# test suite under --strict (which is intentionally out of scope). Explicitly
+# passing a test file on the CLI still checks it.
+exclude = ['^tests/']
 
 [[tool.mypy.overrides]]
 # starlette, mcp, uvicorn, anyio are optional extras; ignore missing stubs when not installed

@@ -563,7 +563,7 @@ def _run_attempt(
 def _resolve_task(args: argparse.Namespace) -> str:
     """Return the task description from --task, --task-file, or the built-in default."""
     if args.task:
-        return args.task
+        return str(args.task)
     if args.task_file:
         return Path(args.task_file).read_text()
     return _default_task(args.stage)
