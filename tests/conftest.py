@@ -116,7 +116,6 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr("cw.config.STATE_DIR", state_dir)
     monkeypatch.setattr("cw.config.CLIENTS_FILE", config_dir / "clients.yaml")
     monkeypatch.setattr("cw.config.STATE_FILE", state_dir / "sessions.json")
-    monkeypatch.setattr("cw.config.QUEUES_DIR", state_dir / "queues")
     monkeypatch.setattr("cw.config.EVENTS_DIR", state_dir / "events")
     monkeypatch.setattr("cw.config.HISTORY_DIR", state_dir / "history")
     monkeypatch.setattr("cw.config.PR_WATCHER_DIR", state_dir / "pr_watcher")

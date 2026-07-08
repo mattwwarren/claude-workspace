@@ -107,10 +107,10 @@ class TestBuildSessionContext:
     def test_includes_command_reference(self) -> None:
         result = build_session_context("personal", "/home/user/ws", "impl")
         assert "[cw commands]" in result
-        assert "cw queue add" in result
+        assert "cw dev-queue add" in result
         assert "cw bg" in result
         assert "cw status" in result
 
     def test_command_reference_constant_not_empty(self) -> None:
         assert CW_COMMAND_REFERENCE
-        assert "cw queue add" in CW_COMMAND_REFERENCE
+        assert "cw dev-queue add" in CW_COMMAND_REFERENCE

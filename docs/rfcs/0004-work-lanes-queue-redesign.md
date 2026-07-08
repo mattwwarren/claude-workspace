@@ -590,4 +590,4 @@ behavior and can merge first.
 - ADR 0005 — single state lock (S1; the cross-cutting state-integrity invariant)
 - `src/cw/daemon.py` — `run_watcher_tick` (S2/S3/S4/S5), `src/cw/events.py` (S6)
 - `docs/events.md` — orchestrator event bus
-- `ROADMAP.md` v4 (Autonomous Delegation), v6 (JARVIS)
+- `docs/vision.md` — JARVIS north star (formerly `ROADMAP.md` v4/v6)
