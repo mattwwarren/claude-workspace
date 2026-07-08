@@ -84,9 +84,12 @@ AMBIGUITIES — N items
    - Alternative(s) the ticket also supports: <list>
    - Why it matters: <how the answer changes the code>
    - Ticket evidence: <verbatim quote from ticket description or comment that is the source of the ambiguity>
+   - Recommendation: ADOPT — <why the plan's stated assumption is safe to auto-adopt without a human answer> | PARK — <why a human must decide: product/scope intent, public-contract shape, destructive-action semantics, or "cannot confidently recommend a side">
 
 2. ...
 ```
+
+**Recommendation is mandatory on every item — never omit it.** ADOPT only when getting it wrong is cheap to unwind and the choice doesn't touch a public contract, a destructive action, or a product-intent call reserved for a human. Default to PARK whenever unsure. Consumer-side default: a missing or malformed `Recommendation` line (wrong token, absent sub-bullet, anything other than a leading `ADOPT`/`PARK` token) is treated as PARK downstream — a deliberate fail-closed default, not a bug, and never a shortcut for writing ADOPT.
 
 If no ambiguities are found, return exactly:
 
