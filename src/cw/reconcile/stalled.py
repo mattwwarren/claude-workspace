@@ -276,10 +276,10 @@ def _detect_stalled_candidates(
             # PARK_BLOCKED_ON_USER disposition and a RESET_SALVAGE_SKIP_COUNTER
             # candidate in the same pass (#974).
             _maybe_append_salvage_skip_reset(candidates, session, ticket_id)
-            # Why: this branch never previously computed usage_limit_detected
-            # (Addendum 3) — unlike the revert path below, which mirrors
-            # idle.py's existing usage-limit precedent, this cap-park usage-
-            # limit branch is new logic (GitHub #1030 Resolved #1).
+            # Why: this branch never previously computed usage_limit_detected —
+            # unlike the revert path below, which mirrors idle.py's existing
+            # usage-limit precedent, this cap-park usage-limit branch is new
+            # logic (GitHub #1030).
             cap_usage_limit_detected = _shared.detect_usage_limit(session)
             candidates.append(
                 ReapCandidate(
@@ -356,17 +356,25 @@ def _resolve_wall_clock_candidate(
                 attempts=task.attempts if task else 0,
                 stale_minutes=stale_minutes,
             )
+    # #1030: branch reap_reason here (not after) so the SESSION_REAP_PROPOSED
+    # audit event (emitted from the candidate before the apply phase runs)
+    # reports the correct cause — matching the cap-park branch's pattern below.
+    revert_usage_limit_detected = _shared.detect_usage_limit(session)
     return ReapCandidate(
         session_id=session.id,
         proposed_action=ProposedAction.REVERT_TASK,
         ticket_id=ticket_id,
         elapsed_seconds=elapsed,
-        reap_reason=ReapReason.WALL_CLOCK_BUDGET,
+        reap_reason=(
+            ReapReason.USAGE_LIMIT_CUTOFF
+            if revert_usage_limit_detected
+            else ReapReason.WALL_CLOCK_BUDGET
+        ),
         lane=task.lane if task else DEFAULT_LANE,
         client=session.client,
         stage=stage,
         attempts=task.attempts if task else 0,
-        usage_limit_detected=_shared.detect_usage_limit(session),
+        usage_limit_detected=revert_usage_limit_detected,
     )
 
 
@@ -458,13 +466,12 @@ def _apply_stalled_state_mutations(
         session.status = SessionStatus.TIMED_OUT
         session.completed_at = now
         session.completed_reason = CompletionReason.TIMED_OUT
-        # #1030: a usage-limit death caught by the wall-clock revert path gets
-        # the distinct cause, mirroring idle.py's existing revert-path branch.
-        session.reap_reason = (
-            ReapReason.USAGE_LIMIT_CUTOFF
-            if candidate.usage_limit_detected
-            else ReapReason.WALL_CLOCK_BUDGET
-        )
+        # #1030: read the candidate's own reap_reason (branched at construction
+        # in _resolve_wall_clock_candidate) instead of re-deriving it here from
+        # usage_limit_detected — keeps this in sync with the SESSION_REAP_PROPOSED
+        # audit event, which reads candidate.reap_reason before this apply phase
+        # runs. Same pattern as the cap-park loop below.
+        session.reap_reason = candidate.reap_reason
     # Cap exceeded: terminate and park BLOCKED_ON_USER (not re-queued to PENDING).
     for candidate in park_candidates:
         session = session_by_id[candidate.session_id]

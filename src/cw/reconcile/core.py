@@ -325,8 +325,10 @@ def _reconcile_locked(
     # "pre" snapshot and silently excluded from the diff — a usage-limit
     # death caught by the stalled sweep could never reach
     # ReconcileReport.usage_limited. Widening the window to before the
-    # stalled sweep closes that gap.
-    pre_watchdog_timed_out_ids = {
+    # stalled sweep closes that gap. Named for the widened scope (not just
+    # "pre_watchdog") so a future sweep inserted above this line doesn't
+    # silently fall outside it under a stale name, reintroducing this bug.
+    pre_reap_timed_out_ids = {
         s.id for s in state.sessions if s.status == SessionStatus.TIMED_OUT
     }
 
@@ -434,7 +436,7 @@ def _reconcile_locked(
     # transcript. The _detect_usage_limit I/O cost is minimal (OS-cached files).
     watchdog_usage_limited = any(
         s.status == SessionStatus.TIMED_OUT
-        and s.id not in pre_watchdog_timed_out_ids
+        and s.id not in pre_reap_timed_out_ids
         and _shared.detect_usage_limit(s)
         for s in state.sessions
     )
