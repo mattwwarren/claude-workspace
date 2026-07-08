@@ -265,10 +265,28 @@ linear_prefix_map: {}
 # Per-tier headless timeout budgets (seconds). Sessions whose scope.tier is
 # known (from the auto-dev sentinel scope field) are budgeted by this map.
 # Sessions without a known tier fall back to the global HEADLESS_TIMEOUT_SECONDS.
-# Explicit per-ticket overrides (cw dev-queue add --timeout <s>) always win.
+# Explicit per-ticket overrides (cw dev-queue add --timeout <s>) still win over
+# both this and the per-stage map below. Per-stage budgets
+# (`headless_timeout_by_stage`, see below) are consulted before this per-tier
+# map; a stage present in that map fully overrides the per-tier lookup below
+# for sessions at that stage.
 headless_timeout_by_tier:
   small: 1800   # 30 min — tight cap for small-scope tickets
   large: 5400   # 90 min — room for 11-file, 600-line implementations
+
+# Per-stage wall-clock timeout budgets (seconds), consulted BEFORE the
+# per-tier default above. Keyed by Stage (plan/impl/review/finalize);
+# HARDEN is a dormant stage and intentionally has no entry. A stage absent
+# from this map falls through to headless_timeout_by_tier / the global
+# HEADLESS_TIMEOUT_SECONDS fallback unchanged. Seeded from empirical stage
+# timing baselines (wiki cw-stage-timing-baselines-2026-07-05, n=739 legs).
+# Explicit per-ticket overrides (cw dev-queue add --timeout <s>) still win
+# over both this and the per-tier default.
+headless_timeout_by_stage:
+  plan: 3600      # 60 min — wall-clock p99 38.5m, max 47.8m
+  impl: 4200      # 70 min — wall-clock p99 38.6m, max 50.5m
+  review: 7200    # 120 min — wall-clock p99 72.0m (matches prior -t 7200 workaround)
+  finalize: 5400  # 90 min — matches existing large-tier ceiling (CI-wait tail)
 
 # Per-tier idle-watchdog budgets (seconds). After this window of silence
 # (no terminal sentinel emitted), a DAEMON session is flagged as
