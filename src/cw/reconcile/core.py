@@ -218,10 +218,11 @@ def reconcile() -> ReconcileReport:
     pre_state = load_state()
     # Load clients once for branch-key resolution (feature_branch_prefix SSOT, #728).
     _clients = load_clients()
-    _merged_tids: list[str] = []
     # (client, ticket_id) pairs, for consumers that must not match a merged
     # ticket against a *different* client's same-numbered ticket (#1054) —
-    # ticket_id strings are not globally unique across clients.
+    # ticket_id strings are not globally unique across clients. merged_ticket_ids
+    # (bare) is derived from this below rather than accumulated in parallel, so
+    # the two sets cannot drift out of sync.
     _merged_client_tids: list[tuple[str, str]] = []
     _gh_blocked_tids: list[str] = []
     _gh_available = True
@@ -249,10 +250,9 @@ def reconcile() -> ReconcileReport:
             # (above), which routes ALL subsequent tickets to gh_blocked_tids.
             continue
         if _merged:
-            _merged_tids.append(_ticket_id)
             _merged_client_tids.append((_session.client, _ticket_id))
-    merged_ticket_ids = frozenset(_merged_tids)
     merged_client_ticket_ids = frozenset(_merged_client_tids)
+    merged_ticket_ids = frozenset(tid for _client, tid in _merged_client_tids)
     gh_blocked_ticket_ids = frozenset(_gh_blocked_tids)
 
     # Pre-pass: check PR existence for FINALIZE-stage sessions with pushed branches.
@@ -308,11 +308,17 @@ def _reconcile_locked(
 
     merged_ticket_ids / gh_blocked_ticket_ids come from a lockless pre-pass in
     reconcile() (GitHub #637); no gh subprocess executes under sessions_lock.
-    merged_client_ticket_ids is the same merge signal, additionally keyed by
-    client — used only by the FINALIZE-stage / merged-first classification in
-    idle.py's ``_detect_idle_candidates``, which (unlike the pre-existing
-    ``_act_on_idle_candidates`` merged-split below) is new-in-#1054 code that
-    must not match across clients. See GitHub #1054.
+    They are consumed as-is by the stalled/phantom sweeps below (out of scope
+    for #1054). merged_client_ticket_ids is the same merge signal, additionally
+    keyed by client, and is threaded into idle.py's classify AND act phases
+    (``_detect_idle_candidates``, ``_act_on_idle_candidates``) — the merged-first
+    classification is new-in-#1054 code that routes FINALIZE-stage / git-branch
+    sessions into the REVERT_TASK completion pipeline for the first time (such
+    sessions previously always short-circuited to SALVAGE_GIT), so every
+    consumer of that pipeline in idle.py (route-by-policy, the merged split,
+    and the dev-queue sweep) must key on (client, ticket_id), not a bare
+    ticket_id, to avoid completing a different client's same-numbered task.
+    See GitHub #1054.
     finalize_pr_by_branch comes from a second lockless pre-pass that checks PR
     existence for FINALIZE-stage sessions (GitHub #812, liveness invariant #485).
     clients comes from the same lockless pre-pass's `load_clients()` call
@@ -446,7 +452,7 @@ def _reconcile_locked(
             idle_candidates,
             now=now,
             config=orchestrator_config,
-            merged_ticket_ids=merged_ticket_ids,
+            merged_client_ticket_ids=merged_client_ticket_ids,
             gh_blocked_ticket_ids=gh_blocked_ticket_ids,
         )
     )

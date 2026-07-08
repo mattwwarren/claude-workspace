@@ -76,9 +76,9 @@ def _revert_task_candidate(
 ) -> ReapCandidate:
     """Build a REVERT_TASK ReapCandidate.
 
-    Shared by the merged-first check and the retry-cap check in
-    ``_classify_idle_threshold`` -- the two previously hand-duplicated call
-    sites differed only in ``worktree_dirty``. See GitHub #1054.
+    Shared by the new merged-first check and the pre-existing retry-cap check
+    in ``_classify_idle_threshold`` -- the retry-cap site previously built this
+    inline; the two now differ only in ``worktree_dirty``. See GitHub #1054.
     """
     return ReapCandidate(
         session_id=session.id,
@@ -353,7 +353,7 @@ def _route_idle_by_policy(
     candidates: list[ReapCandidate],
     *,
     config: OrchestratorConfig | None,
-    merged_ticket_ids: frozenset[str],
+    merged_client_ticket_ids: frozenset[tuple[str, str]],
     gh_blocked_ticket_ids: frozenset[str],
 ) -> list[ReapCandidate]:
     """Apply per-lane reap-policy routing to idle REVERT_TASK candidates.
@@ -368,12 +368,17 @@ def _route_idle_by_policy(
     # Route each REVERT_TASK candidate individually based on its lane's policy.
     # Merged-PR / gh-blocked check (GitHub #637) runs BEFORE policy routing so
     # that a confirmed-merged ticket is always completed, even under SIGNAL_ONLY.
+    # Why (client, ticket_id): keyed by merged_client_ticket_ids, not a bare
+    # ticket_id, so one client's merged ticket cannot bypass SIGNAL_ONLY for a
+    # different client's same-numbered, unmerged candidate. See GitHub #1054.
     signal_mutations: dict[str, QueueItemStatus] = {}
     auto_candidates: list[ReapCandidate] = []
     for c in candidates:
         if c.proposed_action == ProposedAction.REVERT_TASK:
+            merged_key = (c.client, c.ticket_id) if c.client and c.ticket_id else None
             if c.ticket_id and (
-                c.ticket_id in merged_ticket_ids or c.ticket_id in gh_blocked_ticket_ids
+                (merged_key is not None and merged_key in merged_client_ticket_ids)
+                or c.ticket_id in gh_blocked_ticket_ids
             ):
                 auto_candidates.append(c)
                 continue
@@ -530,7 +535,14 @@ def _apply_idle_queue_mutations(
     least one task changed. Returns (blocked_ticket_ids, merged_completed_ids).
     """
     recovered_ids = {c.ticket_id for c in revert_candidates if c.ticket_id}
-    merged_tids = {c.ticket_id for c in merged_revert_candidates if c.ticket_id}
+    # (client, ticket_id) pairs, not bare ticket_id -- merged_revert_candidates
+    # can now include FINALIZE-stage / merged-first candidates (GitHub #1054),
+    # and ticket_id strings are not globally unique across clients.
+    merged_client_tids = {
+        (c.client, c.ticket_id)
+        for c in merged_revert_candidates
+        if c.ticket_id and c.client
+    }
     gh_blocked_tids = {c.ticket_id for c in gh_blocked_revert_candidates if c.ticket_id}
     park_disposition_by_tid = {
         c.ticket_id: c.paused_status for c in park_candidates if c.ticket_id
@@ -540,7 +552,7 @@ def _apply_idle_queue_mutations(
     merged_completed: list[str] = []
     if not (
         recovered_ids
-        or merged_tids
+        or merged_client_tids
         or gh_blocked_tids
         or park_disposition_by_tid
         or salvaged_ticket_ids_set
@@ -556,7 +568,7 @@ def _apply_idle_queue_mutations(
                 transition_task_status(task, QueueItemStatus.PENDING)
                 task.session_id = None
                 changed = True
-            elif task.ticket_id in merged_tids:
+            elif task.client and (task.client, task.ticket_id) in merged_client_tids:
                 # Why: PR URL is not in hand here — not worth a second gh call.
                 transition_task_status(
                     task, QueueItemStatus.COMPLETED, disposition="shipped"
@@ -601,7 +613,7 @@ def _act_on_idle_candidates(
     *,
     now: datetime,
     config: OrchestratorConfig | None = None,
-    merged_ticket_ids: frozenset[str] = frozenset(),
+    merged_client_ticket_ids: frozenset[tuple[str, str]] = frozenset(),
     gh_blocked_ticket_ids: frozenset[str] = frozenset(),
 ) -> tuple[list[str], list[str], list[_SalvageCandidate]]:
     """Act phase for silently idle sessions: apply all mutations.
@@ -609,7 +621,12 @@ def _act_on_idle_candidates(
     Consumes ReapCandidate objects from _detect_idle_candidates.
     Returns (blocked_ticket_ids, merged_completed_ticket_ids, salvage_git_candidates).
     merged_completed_ticket_ids contains ticket IDs completed because their
-    PR was already merged (from merged_ticket_ids pre-pass; GitHub #637).
+    PR was already merged (from merged_client_ticket_ids pre-pass; GitHub #637,
+    #1054). Keyed by (client, ticket_id) rather than a bare ticket_id -- see
+    GitHub #1054: ticket_id strings are not globally unique across clients, and
+    this act phase (unlike the sibling stalled/phantom sweeps, out of scope for
+    #1054) now also completes FINALIZE-stage / merged-first candidates that
+    idle's classify phase previously never routed here at all.
 
     Under ``ReapPolicy.SIGNAL_ONLY`` (default), REVERT_TASK candidates are
     routed to BLOCKED_ON_USER instead of triggering stop/remove.  Non-REVERT
@@ -624,7 +641,7 @@ def _act_on_idle_candidates(
     candidates = _route_idle_by_policy(
         candidates,
         config=config,
-        merged_ticket_ids=merged_ticket_ids,
+        merged_client_ticket_ids=merged_client_ticket_ids,
         gh_blocked_ticket_ids=gh_blocked_ticket_ids,
     )
     if not candidates:
@@ -652,13 +669,21 @@ def _act_on_idle_candidates(
     ]
 
     # Split REVERT_TASK candidates by world-state check results (GitHub #637).
-    # merged_ticket_ids / gh_blocked_ticket_ids come from a pre-pass in
+    # merged_client_ticket_ids / gh_blocked_ticket_ids come from a pre-pass in
     # reconcile() that runs BEFORE sessions_lock, so no gh subprocess executes
     # here. Candidates with no ticket_id fall through to the normal revert path.
+    # Why (client, ticket_id): a merged-first candidate from idle's classify
+    # phase can now reach this split for a FINALIZE-stage / git-branch session
+    # (previously unreachable -- such sessions always short-circuited to
+    # SALVAGE_GIT). A bare ticket_id match here would let one client's merged
+    # ticket mark a different client's same-numbered RUNNING task COMPLETED.
+    # See GitHub #1054.
     merged_revert_candidates = [
         c
         for c in all_revert_candidates
-        if c.ticket_id and c.ticket_id in merged_ticket_ids
+        if c.ticket_id
+        and c.client
+        and (c.client, c.ticket_id) in merged_client_ticket_ids
     ]
     gh_blocked_revert_candidates = [
         c

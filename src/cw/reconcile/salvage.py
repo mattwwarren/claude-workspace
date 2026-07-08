@@ -427,8 +427,13 @@ def _rescue_complete(
         with dev_queue_lock():
             store = load_dev_queue()
             for task in store.tasks:
+                # Why (client, ticket_id): ticket_id strings are not globally
+                # unique across clients -- a bare ticket_id match here could
+                # complete a different client's BLOCKED_ON_USER task that
+                # happens to share this ticket_id. See GitHub #1054.
                 if (
-                    task.ticket_id == ticket_id
+                    task.client == session.client
+                    and task.ticket_id == ticket_id
                     and task.status == QueueItemStatus.BLOCKED_ON_USER
                 ):
                     transition_task_status(task, QueueItemStatus.COMPLETED)

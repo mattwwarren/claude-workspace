@@ -16524,6 +16524,7 @@ class TestWorldStateCheckBeforeRevert:
             ticket_id="idle-merged-1",
             elapsed_seconds=3700.0,
             reap_reason=ReapReason.IDLE_STALL,
+            client="client-a",
         )
 
         blocked, merged, _salvage = _act_on_idle_candidates(
@@ -16531,7 +16532,7 @@ class TestWorldStateCheckBeforeRevert:
             [candidate],
             now=now,
             config=_auto_config(),
-            merged_ticket_ids=frozenset({"idle-merged-1"}),
+            merged_client_ticket_ids=frozenset({("client-a", "idle-merged-1")}),
         )
 
         assert blocked == []
@@ -16610,7 +16611,9 @@ class TestWorldStateCheckBeforeRevert:
             candidates,
             now=now,
             config=_auto_config(),
-            merged_ticket_ids=frozenset({"idle-merged-finalize-1"}),
+            merged_client_ticket_ids=frozenset(
+                {("client-a", "idle-merged-finalize-1")}
+            ),
         )
 
         assert blocked == []
@@ -16623,6 +16626,104 @@ class TestWorldStateCheckBeforeRevert:
         t = next(t for t in store.tasks if t.ticket_id == "idle-merged-finalize-1")
         assert t.status == QueueItemStatus.COMPLETED
         assert t.disposition == "shipped"
+
+    def test_idle_merged_finalize_does_not_complete_different_clients_same_ticket(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Full pipeline regression (#1054): client-a's merged FINALIZE session
+        completes shipped, but a DIFFERENT client's RUNNING task sharing the
+        same ticket_id string must NOT be swept into COMPLETED by the
+        merged-first candidate's downstream act phase (_act_on_idle_candidates'
+        merge split + _apply_idle_queue_mutations' dev-queue sweep both key on
+        bare ticket_id pre-#1054; this proves they are now (client, ticket_id)
+        scoped end to end, not just at the classify entry point)."""
+        from cw.reconcile import _act_on_idle_candidates, _detect_idle_candidates
+
+        ticket_id = "collide-finalize-1"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+        wt_path = tmp_path / "wt-idle-collide-finalize"
+        wt_path.mkdir(parents=True)
+
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._shared.remove_worktree", lambda *_a, **_kw: None
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.checked_out_branch",
+            lambda _p: "auto-dev/collide-finalize-1",
+        )
+
+        sess = _mk_live_idle_daemon_session(
+            "collide-finalize-1",
+            "live-ref",
+            started_at,
+            idle_observation_count=1,
+            worktree_path=wt_path,
+        )
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task_a = TicketTask(
+            ticket_id=ticket_id,
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="collide-finalize-1",
+            stage=Stage.FINALIZE,
+        )
+        # client-b's unrelated, unmerged task happens to share the ticket_id
+        # string -- must survive this tick untouched.
+        task_b = TicketTask(
+            ticket_id=ticket_id,
+            client="client-b",
+            status=QueueItemStatus.RUNNING,
+            session_id="some-other-live-session",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task_a, task_b]))
+
+        candidates = _detect_idle_candidates(
+            state,
+            now=now,
+            native_live={"live-ref"},
+            config=_auto_config(idle_confirm_observations=2),
+            task_by_ticket={ticket_id: task_a},
+            merged_client_ticket_ids=frozenset({("client-a", ticket_id)}),
+        )
+
+        blocked, merged, salvage_git = _act_on_idle_candidates(
+            state,
+            candidates,
+            now=now,
+            config=_auto_config(),
+            merged_client_ticket_ids=frozenset({("client-a", ticket_id)}),
+        )
+
+        assert blocked == []
+        assert salvage_git == []
+        assert ticket_id in merged
+        assert sess.status == SessionStatus.COMPLETED
+
+        store = load_dev_queue()
+        reloaded_a = next(
+            t
+            for t in store.tasks
+            if t.client == "client-a" and t.ticket_id == ticket_id
+        )
+        reloaded_b = next(
+            t
+            for t in store.tasks
+            if t.client == "client-b" and t.ticket_id == ticket_id
+        )
+        assert reloaded_a.status == QueueItemStatus.COMPLETED
+        assert reloaded_a.disposition == "shipped"
+        # The regression this test guards against: pre-fix, this would also
+        # read COMPLETED because _apply_idle_queue_mutations matched on bare
+        # ticket_id with no client filter.
+        assert reloaded_b.status == QueueItemStatus.RUNNING
 
     def test_idle_gh_blocked_routes_blocked_on_user(
         self,
@@ -18666,6 +18767,86 @@ class TestFinalizeBlocked:
         assert len(events) == 1
         assert events[0].payload.get("skip_merge") is True
 
+    def test_rescue_finalize_blocked_merged_does_not_complete_other_clients_task(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """_rescue_complete's dev-queue task lookup is (client, ticket_id)
+        scoped (#1054): when a DIFFERENT client also has a BLOCKED_ON_USER
+        task sharing this ticket_id string, only the merged session's own
+        client's task is completed -- the other client's task must be left
+        untouched, not silently marked COMPLETED by the bare ticket_id match
+        that pre-existed in _rescue_complete."""
+        from cw.reconcile._shared import _FINALIZE_BLOCKED_REASON
+        from cw.reconcile.salvage import rescue_finalize_blocked_sessions
+
+        ticket_id = "FB-COLLIDE-COMPLETE-1"
+        branch = f"dev/{ticket_id}"
+        sid = "fb-sess-collide-complete-1"
+        now = datetime(2026, 1, 1, 2, 0, 0, tzinfo=UTC)
+
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+        sess = _mk_timed_out_daemon_session(sid, ticket_id, completed_at=now)
+        sess.reap_reason = ReapReason.FINALIZE_BLOCKED
+        sess.last_result = {"paused_status": _FINALIZE_BLOCKED_REASON, "branch": branch}
+        save_state(CwState(sessions=[sess]))
+
+        task_a = TicketTask(
+            ticket_id=ticket_id,
+            client="client-a",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            session_id=None,
+        )
+        # client-b's own BLOCKED_ON_USER task happens to share this ticket_id
+        # string -- must survive untouched. Listed BEFORE task_a: _rescue_complete
+        # `break`s on its first dev-queue match, so without client-scoping this
+        # ordering would complete task_b (wrong client) and never reach task_a.
+        task_b = TicketTask(
+            ticket_id=ticket_id,
+            client="client-b",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            session_id=None,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task_b, task_a]))
+
+        monkeypatch.setattr(
+            "cw.reconcile.salvage.subprocess.run",
+            MagicMock(return_value=MagicMock(returncode=0, stdout="")),
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.salvage.pr_exists_for_branch",
+            MagicMock(return_value=(False, True)),
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+        )
+
+        completed = rescue_finalize_blocked_sessions(
+            merged_client_ticket_ids=frozenset({("client-a", ticket_id)})
+        )
+
+        assert ticket_id in completed
+
+        store = load_dev_queue()
+        reloaded_a = next(
+            t
+            for t in store.tasks
+            if t.client == "client-a" and t.ticket_id == ticket_id
+        )
+        reloaded_b = next(
+            t
+            for t in store.tasks
+            if t.client == "client-b" and t.ticket_id == ticket_id
+        )
+        assert reloaded_a.status == QueueItemStatus.COMPLETED
+        # The regression this test guards against: pre-fix, _rescue_complete's
+        # bare `task.ticket_id == ticket_id` match (no client filter) would
+        # complete whichever BLOCKED_ON_USER task it iterated to first.
+        assert reloaded_b.status == QueueItemStatus.BLOCKED_ON_USER
+
     def test_rescue_finalize_blocked_different_client_ticket_not_completed(
         self,
         tmp_config_dir: Path,
@@ -19627,6 +19808,7 @@ def test_idle_queue_mutations_merged_stamps_shipped(
         session_id="idle-merged-disp-1",
         proposed_action=ProposedAction.REVERT_TASK,
         ticket_id="idle-merged-disp-1",
+        client="client-a",
     )
 
     _apply_idle_queue_mutations([], [candidate], [], [], [], {})
