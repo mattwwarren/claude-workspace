@@ -965,6 +965,7 @@ class TestOperatorChannelForward:
                 OrchestratorEventType.PR_MERGED,
                 OrchestratorEventType.SESSION_LIVENESS_CHANGED,
                 OrchestratorEventType.OPERATOR_ESCALATION,
+                OrchestratorEventType.GATE_AUTO_APPROVED,
             }
         )
 
@@ -1128,12 +1129,11 @@ class TestConciergeAndEscalationModelSurface:
         which is audit-only)."""
         from cw.models import _DEFAULT_OPERATOR_EVENT_TYPES
 
-        assert (
-            OrchestratorEventType.GATE_AUTO_APPROVED in _DEFAULT_OPERATOR_EVENT_TYPES
-        )
+        assert OrchestratorEventType.GATE_AUTO_APPROVED in _DEFAULT_OPERATOR_EVENT_TYPES
 
     def test_orchestrator_config_gate_recipes_enabled_defaults_false(self) -> None:
         assert OrchestratorConfig().gate_recipes_enabled is False
 
     def test_orchestrator_config_gate_recipes_enabled_accepts_true(self) -> None:
-        assert OrchestratorConfig(gate_recipes_enabled=True).gate_recipes_enabled is True
+        cfg = OrchestratorConfig(gate_recipes_enabled=True)
+        assert cfg.gate_recipes_enabled is True
