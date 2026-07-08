@@ -2951,6 +2951,10 @@ class TestSignalStop:
                     status=QueueItemStatus.RUNNING,
                     session_id=session.id,
                     attempts=1,
+                    # Matches _SENTINEL_285_SHIPPED's stage_reached
+                    # ("stage5_post_create") so the #1019/#1031 stage-match
+                    # guard accepts the route.
+                    stage=Stage.FINALIZE,
                 )
             ]
         )
