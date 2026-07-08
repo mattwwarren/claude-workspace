@@ -289,17 +289,31 @@ def test_step1b_updated_at_named_as_coarse_trigger() -> None:
 
 
 def test_step1c_ambiguities_exit_uses_pending_header() -> None:
-    """The AMBIGUITIES headless exit posts under the pinned pending-verify header."""
+    """The parked-non-empty headless exit posts under the pinned pending-verify header.
+
+    Anchor updated for #1032: the trigger now keys on `parked` non-empty rather
+    than raw `AMBIGUITIES` presence (see Step 4c partition rewrite).
+    """
     content = _cmd("auto-dev-plan.md")
-    window = _after(content, "`AMBIGUITIES` → EXIT `ambiguities_pending_resolution`")
+    window = _after(
+        content,
+        "`parked` non-empty AND no premises block → EXIT "
+        "`ambiguities_pending_resolution`",
+    )
     assert PENDING_HEADER in window
 
 
 def test_step1c_premises_exit_uses_pending_header() -> None:
-    """The PREMISES TO VERIFY headless exit posts under the pinned header too."""
+    """The premises-present headless exit posts under the pinned header too.
+
+    Anchor updated for #1032: the trigger now reads on `parked` state rather
+    than raw `PREMISES TO VERIFY` presence alone (see Step 4c partition rewrite).
+    """
     content = _cmd("auto-dev-plan.md")
     window = _after(
-        content, "`PREMISES TO VERIFY` → EXIT `premises_pending_verification`"
+        content,
+        "Premises block present AND `parked` non-empty → EXIT "
+        "`premises_pending_verification`",
     )
     assert PENDING_HEADER in window
 
@@ -329,14 +343,14 @@ def _step1c_section() -> str:
 
 
 def test_mode1_output_has_recommendation_field() -> None:
-    """Mode 1 output format requires a Recommendation sub-bullet with ADOPT/PARK tokens."""
+    """Mode 1 format requires a Recommendation sub-bullet with ADOPT/PARK tokens."""
     content = _agent("product-manager-reviewer.md")
     assert "Recommendation: ADOPT" in content
     assert "PARK" in content
 
 
 def test_mode1_recommendation_park_reasons_listed() -> None:
-    """The PARK bar names product/scope intent, public-contract, destructive-action reasons."""
+    """The PARK bar names product/scope, public-contract, destructive-action reasons."""
     content = _agent("product-manager-reviewer.md")
     window = _after(content, "Recommendation: ADOPT", span=400)
     assert "public-contract shape" in window
@@ -345,7 +359,7 @@ def test_mode1_recommendation_park_reasons_listed() -> None:
 
 
 def test_mode1_recommendation_missing_field_documented_as_parked() -> None:
-    """A missing/malformed Recommendation line is documented as defaulting to PARK downstream."""
+    """A missing/malformed Recommendation line documents defaulting to PARK."""
     content = _agent("product-manager-reviewer.md")
     assert "a missing or malformed `Recommendation` line" in content
     assert "is treated as PARK downstream" in content
@@ -361,12 +375,12 @@ def test_ambiguity_pre_flight_parenthetical_mentions_recommendation() -> None:
 
 
 def test_step1c_has_adopted_assumptions_section() -> None:
-    """Step 1c's headless partition introduces a plan-body Adopted Assumptions section."""
+    """Step 1c's partition introduces a plan-body Adopted Assumptions section."""
     assert "## Adopted Assumptions" in _step1c_section()
 
 
 def test_step1c_partition_splits_by_recommendation() -> None:
-    """Step 1c splits ambiguity items into adopted/parked by their Recommendation value."""
+    """Step 1c splits ambiguity items into adopted/parked by their Recommendation."""
     section = _step1c_section()
     assert "split its items by each item's `Recommendation:` sub-bullet" in section
     assert "`adopted`" in section
@@ -393,7 +407,7 @@ def test_step1c_all_adopt_does_not_exit() -> None:
 
 
 def test_step1c_sentinel_carries_only_parked() -> None:
-    """The comment/sentinel ambiguities field carries only parked items, never the raw list."""
+    """The comment/sentinel ambiguities field carries only parked, never raw."""
     section = _step1c_section()
     assert (
         "include only the `parked` items in the result payload under "
@@ -402,7 +416,7 @@ def test_step1c_sentinel_carries_only_parked() -> None:
 
 
 def test_step1c_original_ambiguities_section_collapsed_after_partition() -> None:
-    """A pre-existing plan-body Ambiguities section is rewritten in place, not left raw."""
+    """A pre-existing plan-body Ambiguities section is rewritten, not left raw."""
     section = _step1c_section()
     assert (
         "rewrite that section's contents in place: literal `NO_AMBIGUITIES` "
@@ -415,7 +429,7 @@ def test_step1c_original_ambiguities_section_collapsed_after_partition() -> None
 
 
 def test_step1c_combined_premises_exit_keys_on_parked_not_raw_ambiguities() -> None:
-    """The combined-exit trigger reads on parked non-empty, not raw AMBIGUITIES presence."""
+    """The combined-exit trigger keys on parked non-empty, not raw AMBIGUITIES."""
     section = _step1c_section()
     assert (
         "Premises block present AND `parked` non-empty → EXIT "
@@ -425,7 +439,7 @@ def test_step1c_combined_premises_exit_keys_on_parked_not_raw_ambiguities() -> N
 
 
 def test_step1c_all_adopt_plus_premises_exits_premises_only() -> None:
-    """All-adopt plus a premises block exits premises-only, no parked/ambiguities pair."""
+    """All-adopt plus premises exits premises-only, no parked/ambiguities pair."""
     section = _step1c_section()
     assert (
         "Premises block present AND `parked` empty → EXIT "
@@ -434,7 +448,7 @@ def test_step1c_all_adopt_plus_premises_exits_premises_only() -> None:
 
 
 def test_step1c_partition_is_headless_only() -> None:
-    """The interactive AskUserQuestion AMBIGUITIES branch carries no partition language."""
+    """The interactive AskUserQuestion AMBIGUITIES branch has no partition language."""
     content = _cmd("auto-dev-plan.md")
     window = _after(
         content,
@@ -452,7 +466,7 @@ def test_step1c_ambiguities_exit_anchor_preserved() -> None:
 
 
 def test_adopted_assumptions_placed_at_plan_body_insertion_point() -> None:
-    """Adopted Assumptions is inserted after Conformance if present, else before Ambiguities."""
+    """Adopted Assumptions inserts after Conformance if present, else before Ambig."""
     content = _cmd("auto-dev-plan.md")
     assert (
         "insert a `## Adopted Assumptions` section into the plan body — "
