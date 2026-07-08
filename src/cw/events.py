@@ -10,8 +10,11 @@ import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from pydantic import BaseModel
+
 from cw.atomic import atomic_write_text
 from cw.config import events_dir
+from cw.exceptions import CwError
 from cw.models import OrchestratorEvent, OrchestratorEventType
 
 if TYPE_CHECKING:
@@ -78,6 +81,124 @@ def record_event(
         with inbox.open("a") as f:
             f.write(event.model_dump_json() + "\n")
     return event
+
+
+class PruneResult(BaseModel):
+    """Outcome of a :func:`prune_events` call."""
+
+    archived_count: int
+    deleted_count: int
+    archive_path: str | None
+    kept_count: int
+
+
+def _archive_path_for_today() -> Path:
+    """Return today's inbox archive path: ``events/inbox.<YYYY-MM-DD>.jsonl``."""
+    date_str = datetime.now(UTC).strftime("%Y-%m-%d")
+    return events_dir() / f"inbox.{date_str}.jsonl"
+
+
+def _partition_events_by_before(
+    events: list[OrchestratorEvent], before: datetime
+) -> tuple[list[OrchestratorEvent], list[OrchestratorEvent]]:
+    """Split *events* into (kept, pruned) by created_at against *before*."""
+    kept = [e for e in events if e.created_at >= before]
+    pruned = [e for e in events if e.created_at < before]
+    return kept, pruned
+
+
+def _partition_events_by_keep(
+    events: list[OrchestratorEvent], keep: int
+) -> tuple[list[OrchestratorEvent], list[OrchestratorEvent]]:
+    """Split *events* into (kept, pruned), keeping the newest *keep* events."""
+    if keep <= 0:
+        return [], list(events)
+    if keep >= len(events):
+        return list(events), []
+    split = len(events) - keep
+    return events[split:], events[:split]
+
+
+def prune_events(
+    *,
+    before: datetime | None = None,
+    keep: int | None = None,
+    archive: bool = True,
+) -> PruneResult:
+    """Truncate the inbox by age or count, archiving (default) or deleting the rest.
+
+    Exactly one of *before* or *keep* must be given: *before* prunes every
+    event with ``created_at`` earlier than the cutoff; *keep* retains the
+    newest *keep* events and prunes the rest.
+
+    When *archive* is True (default), pruned events are appended to
+    ``events/inbox.<YYYY-MM-DD>.jsonl`` (plain JSONL, no compression) before
+    being dropped from the inbox. When False, pruned events are discarded
+    without being written anywhere.
+
+    The read, rewrite, and (optional) archive-append all happen under a
+    single acquisition of the inbox lock — ``_inbox_lock`` is not reentrant,
+    so releasing and reacquiring it mid-call would self-deadlock.
+
+    Deliberately does not call :func:`record_event`: doing so would require
+    a second, nested ``_inbox_lock()`` acquisition, which self-deadlocks
+    (see above). No audit event is emitted for a prune.
+
+    Args:
+        before: Prune events with ``created_at`` earlier than this.
+        keep: Retain only the newest N events; prune the rest.
+        archive: When True, append pruned events to the daily archive file
+            before dropping them. When False, discard them outright.
+
+    Returns:
+        A :class:`PruneResult` describing what happened.
+
+    Raises:
+        CwError: If both or neither of *before*/*keep* are given.
+    """
+    if (before is None) == (keep is None):
+        msg = "prune_events: exactly one of 'before' or 'keep' must be given."
+        raise CwError(msg)
+
+    with _inbox_lock():
+        inbox = _inbox_path()
+        raw_text = inbox.read_text() if inbox.exists() else ""
+        if not raw_text:
+            return PruneResult(
+                archived_count=0, deleted_count=0, archive_path=None, kept_count=0
+            )
+
+        events = _parse_lines(raw_text.splitlines())
+        if before is not None:
+            kept_events, pruned_events = _partition_events_by_before(events, before)
+        else:
+            assert keep is not None  # guaranteed by the validation above
+            kept_events, pruned_events = _partition_events_by_keep(events, keep)
+
+        new_text = "".join(e.model_dump_json() + "\n" for e in kept_events)
+        atomic_write_text(inbox, new_text)
+
+        archived_count = 0
+        deleted_count = 0
+        archive_path: str | None = None
+        if pruned_events:
+            if archive:
+                path = _archive_path_for_today()
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("a") as f:
+                    for ev in pruned_events:
+                        f.write(ev.model_dump_json() + "\n")
+                archived_count = len(pruned_events)
+                archive_path = str(path)
+            else:
+                deleted_count = len(pruned_events)
+
+        return PruneResult(
+            archived_count=archived_count,
+            deleted_count=deleted_count,
+            archive_path=archive_path,
+            kept_count=len(kept_events),
+        )
 
 
 def load_cursor(consumer: str) -> str | None:
@@ -283,15 +404,16 @@ def _poll_inbox_growth(last_size: int | None) -> tuple[bool, int]:
     gates the cursor-based ``read_events`` call. This helper never reads or
     replays — cursor semantics stay entirely in ``read_events``.
 
-    Decision table (append-only inbox -> size is monotonic in production):
+    Decision table:
       * first poll (``last_size is None``) -> read
       * size grew                           -> read
       * size unchanged                      -> no-op
-      * size shrank (defensive dead branch) -> warn + reset baseline, no read
+      * size shrank                         -> warn + reset baseline, no read
 
-    The shrink branch is defensive: the inbox is single-file, global, strictly
-    append-only and lock-serialised, never truncated or rotated, so size is
-    monotonic. Resetting the baseline (rather than replaying from 0) avoids the
+    The shrink branch is a live path, not dead code: ``prune_events`` (#856)
+    legitimately truncates and rewrites the inbox, so size is no longer
+    monotonic in production. When a shrink is observed, this guard warns and
+    resets the baseline rather than replaying from 0, which avoids the
     cursor-not-found replay path in ``read_events``.
     """
     inbox = _inbox_path()

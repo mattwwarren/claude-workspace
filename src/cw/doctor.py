@@ -29,7 +29,9 @@ from pydantic import ValidationError
 from cw import __version__
 from cw.config import (
     clients_file,
+    events_dir,
     load_clients,
+    load_orchestrator_config,
     load_state,
     orchestrator_config_file,
     save_state,
@@ -295,6 +297,41 @@ def _check_dev_queue() -> CheckResult:
     except (OSError, json.JSONDecodeError, ValidationError) as exc:
         return CheckResult("dev_queue.json", ok=False, detail=f"load failed: {exc}")
     return CheckResult("dev_queue.json", ok=True, detail="parseable")
+
+
+def _check_inbox_size() -> CheckResult:
+    """Warn when events/inbox.jsonl exceeds its configured size/line thresholds.
+
+    Read-only: never mutates or prunes the inbox. Absent inbox is healthy
+    (nothing has been recorded yet). See ``cw event prune`` (GitHub #856).
+    """
+    inbox = events_dir() / "inbox.jsonl"
+    if not inbox.exists():
+        return CheckResult("inbox-size", ok=True, detail="no inbox file")
+
+    config = load_orchestrator_config()
+    size_bytes = inbox.stat().st_size
+    with inbox.open("r", encoding="utf-8") as f:
+        line_count = sum(1 for _ in f)
+
+    problems: list[str] = []
+    if size_bytes > config.inbox_size_warn_bytes:
+        problems.append(
+            f"size {size_bytes}B exceeds inbox_size_warn_bytes"
+            f" ({config.inbox_size_warn_bytes}B)"
+        )
+    if line_count > config.inbox_line_count_warn:
+        problems.append(
+            f"{line_count} lines exceeds inbox_line_count_warn"
+            f" ({config.inbox_line_count_warn})"
+        )
+    if problems:
+        detail = "; ".join(problems) + " — run `cw event prune`"
+        return CheckResult("inbox-size", ok=False, detail=detail)
+
+    return CheckResult(
+        "inbox-size", ok=True, detail=f"{size_bytes}B, {line_count} lines"
+    )
 
 
 def _check_linkage(state: CwState) -> list[CheckResult]:
@@ -1255,6 +1292,7 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     report.checks.append(_check_daemon_reachable())
     report.checks.extend(_check_loop_health())
     report.checks.extend(_check_loop_liveness())
+    report.checks.append(_check_inbox_size())
     report.checks.extend(_check_workspace_paths())
     report.checks.extend(_check_dispatch_repo_head(_clients))
     report.checks.extend(_check_worktree_paths_sessions(link_state))

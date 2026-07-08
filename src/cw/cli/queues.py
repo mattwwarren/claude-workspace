@@ -15,6 +15,7 @@ from cw.events import (
     advance_cursor,
     init_cursor_at_end,
     load_cursor,
+    prune_events,
     read_events,
     record_event,
     tail_events_follow,
@@ -619,3 +620,67 @@ def event_wait(
         raise click.exceptions.Exit(130) from None
     except BrokenPipeError:
         raise click.exceptions.Exit(0) from None
+
+
+def _parse_before(before: str) -> datetime:
+    """Parse the --before value as an ISO 8601 timestamp. Raises CwError on failure."""
+    try:
+        before_ts = datetime.fromisoformat(before)
+    except ValueError as exc:
+        msg = f"Cannot parse --before value '{before}' as ISO timestamp."
+        raise CwError(msg) from exc
+    if before_ts.tzinfo is None:
+        before_ts = before_ts.replace(tzinfo=UTC)
+    return before_ts
+
+
+@event.command(name="prune")
+@click.option(
+    "--before",
+    default=None,
+    help="ISO 8601 timestamp; prune events created before this.",
+)
+@click.option(
+    "--keep",
+    type=int,
+    default=None,
+    help="Keep only the newest N events; prune the rest.",
+)
+@click.option(
+    "--delete",
+    "delete_flag",
+    is_flag=True,
+    help="Discard pruned events instead of archiving them.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Output the PruneResult as JSON.")
+@handle_errors
+def event_prune(
+    before: str | None,
+    keep: int | None,
+    delete_flag: bool,
+    as_json: bool,
+) -> None:
+    """Prune the event inbox by age or count.
+
+    Exactly one of --before or --keep is required. By default, pruned events
+    are archived to events/inbox.<date>.jsonl before being dropped from the
+    inbox; pass --delete to discard them instead.
+    """
+    if (before is None) == (keep is None):
+        msg = "Exactly one of --before or --keep is required."
+        raise CwError(msg)
+    if keep is not None and keep < 0:
+        msg = "--keep must be non-negative."
+        raise CwError(msg)
+
+    before_ts = _parse_before(before) if before is not None else None
+    result = prune_events(before=before_ts, keep=keep, archive=not delete_flag)
+
+    if as_json:
+        click.echo(result.model_dump_json())
+    else:
+        detail = f" (archive: {result.archive_path})" if result.archive_path else ""
+        click.echo(
+            f"Archived {result.archived_count}, deleted {result.deleted_count},"
+            f" kept {result.kept_count}{detail}"
+        )
