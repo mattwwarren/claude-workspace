@@ -2005,7 +2005,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["pr_state"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 10
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 11
 
     def test_v8_pr_state_preserved_idempotently(self) -> None:
         """Existing pr_state survives a second migration pass (idempotent)."""
@@ -2049,7 +2049,7 @@ class TestMigrateDevQueue:
         """migrate_dev_queue bumps schema_version to current regardless of input."""
         raw: dict[str, object] = {"schema_version": 1, "tasks": []}
         migrated = migrate_dev_queue(raw)
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 10
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 11
 
     def test_v9_signoff_preserved_idempotently(self) -> None:
         """Existing signoff value survives a second migration pass."""
@@ -2084,7 +2084,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["escalation_parked_at"] is None
         assert migrated["tasks"][0]["escalation_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 10
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 11
 
     def test_v10_escalation_fields_preserved_idempotently(self) -> None:
         """Existing escalation timestamps survive a second migration pass."""
@@ -2106,6 +2106,52 @@ class TestMigrateDevQueue:
             "2026-07-01T00:00:00+00:00"
         )
         assert migrated["tasks"][0]["escalation_fired_at"] is None
+
+    def test_migrate_dev_queue_fills_false_park_recovery_backoff_default(
+        self,
+    ) -> None:
+        """migrate_dev_queue fills false_park_recovery_count=0 /
+        false_park_recovery_next_eligible_at=None on tasks missing the keys
+        (v11, GitHub #1030)."""
+        raw: dict[str, object] = {
+            "schema_version": 10,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-70",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["false_park_recovery_count"] == 0
+        assert migrated["tasks"][0]["false_park_recovery_next_eligible_at"] is None
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 11
+
+    def test_v11_false_park_recovery_backoff_preserved_idempotently(self) -> None:
+        """Existing false-park-recovery backoff state survives a second
+        migration pass."""
+        raw: dict[str, object] = {
+            "schema_version": 11,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-71",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "blocked_on_user",
+                    "false_park_recovery_count": 2,
+                    "false_park_recovery_next_eligible_at": (
+                        "2026-07-08T00:00:00+00:00"
+                    ),
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["false_park_recovery_count"] == 2
+        assert migrated["tasks"][0]["false_park_recovery_next_eligible_at"] == (
+            "2026-07-08T00:00:00+00:00"
+        )
 
     def test_load_dev_queue_migrates_v2_file_lane(self, tmp_config_dir: Path) -> None:
         """load_dev_queue applies lane migration when loading a v2 file from disk."""

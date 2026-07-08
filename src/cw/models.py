@@ -150,7 +150,9 @@ CW_STATE_SCHEMA_VERSION = 13
 # v9: added TicketTask.signoff (GitHub #990).
 # v10: added TicketTask.escalation_parked_at/escalation_fired_at
 #      (GitHub #1015, RFC 0008 capstone).
-DEV_QUEUE_SCHEMA_VERSION = 10
+# v11: added TicketTask.false_park_recovery_count/
+#      false_park_recovery_next_eligible_at (GitHub #1030).
+DEV_QUEUE_SCHEMA_VERSION = 11
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
