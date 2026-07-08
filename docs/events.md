@@ -12,6 +12,11 @@ the daemon and other consumers read from it using cursor-based consumption.
 `EVENTS_DIR` is already defined in `config.py` as `STATE_DIR / "events"`.
 The `inbox.jsonl` file coexists with any other state in this directory without conflict.
 
+**Not append-only-forever**: `inbox.jsonl` is unbounded by default, and
+`cw event prune` (see below, #856) can truncate or rotate it — the file's
+byte size is no longer guaranteed monotonic. `cw doctor` warns when the
+inbox exceeds configurable size/line-count thresholds.
+
 ## Event Model
 
 ```python
@@ -783,6 +788,51 @@ Behaviour notes:
 - Exits with code 130 on SIGINT (`Ctrl-C`), 0 on broken pipe.
 - Out of scope: persistent cursor advance on `--follow`; `--since now` semantics
   (treats `now` as a consumer name, unchanged).
+
+### Prune events
+
+`events/inbox.jsonl` grows unbounded by default. `cw event prune` truncates
+it by age or by count (issue #856):
+
+```bash
+# Keep only the newest 500 events; archive the rest (default)
+cw event prune --keep 500
+
+# Archive everything created before a cutoff timestamp
+cw event prune --before 2026-01-01T00:00:00Z
+
+# Hard-drop instead of archiving
+cw event prune --keep 500 --delete
+
+# Machine-readable output
+cw event prune --keep 500 --json
+```
+
+Behaviour notes:
+- `--before` and `--keep` are mutually exclusive; exactly one is required.
+- By default (no `--delete`), pruned events are appended to
+  `events/inbox.<YYYY-MM-DD>.jsonl` (plain JSONL, no compression) before being
+  dropped from `inbox.jsonl`. Repeated prunes on the same day append to the
+  same archive file.
+- `--delete` discards pruned events outright — nothing is written.
+- The read, rewrite, and archive-append happen under a single acquisition of
+  the inbox lock, so a concurrent `record_event`/`read_events` call sees
+  either the pre-prune or post-prune inbox, never a partial state.
+- No audit event is emitted for a prune (avoids a self-deadlock: the inbox
+  lock is not reentrant).
+- `--json` emits exactly this schema:
+
+  ```json
+  {
+    "archived_count": 3,
+    "deleted_count": 0,
+    "archive_path": "/home/user/.local/share/cw/events/inbox.2026-07-07.jsonl",
+    "kept_count": 2
+  }
+  ```
+
+  `archive_path` is `null` when nothing was archived (empty inbox, or
+  `--delete` was passed).
 
 ## Python API
 

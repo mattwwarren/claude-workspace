@@ -354,6 +354,14 @@ concierge_recoveries: {}
 # referenced by a dev-queue task, so lowering this increases gh API load.
 pr_hydration_interval_seconds: 150
 
+# Thresholds `cw doctor` checks events/inbox.jsonl against (GitHub #856).
+# The inbox grows unbounded by default; when either threshold is exceeded,
+# `cw doctor` reports the "inbox-size" check as failing and suggests
+# `cw event prune`. Read-only: doctor never mutates or prunes the inbox
+# itself. See docs/events.md's "Prune events" section for `cw event prune`.
+inbox_size_warn_bytes: 5000000    # 5 MB
+inbox_line_count_warn: 15000
+
 # Global default operator-signoff gate (RFC 0007 Phase 3, GitHub #990).
 # "none" (default): no gate — the existing staged-advance rules apply.
 # "operator": every ticket pauses at AWAITING_OPERATOR_SIGNOFF at the
