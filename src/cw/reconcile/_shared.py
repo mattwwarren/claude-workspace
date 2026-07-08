@@ -463,9 +463,10 @@ def resolve_headless_budget(
     """
     if task is not None and task.headless_timeout_override is not None:
         return task.headless_timeout_override
-    stage = task.stage if task is not None else None
-    if task is not None and stage in config.headless_timeout_by_stage:
-        return config.headless_timeout_by_stage[stage]
+    if task is not None:
+        stage_budget = config.headless_timeout_by_stage.get(task.stage)
+        if stage_budget is not None:
+            return stage_budget
     last_result = session.last_result if session is not None else None
     if last_result is not None:
         tier: str | None = None

@@ -3471,7 +3471,10 @@ def test_resolve_headless_budget_no_scope_hint_no_session(
     tmp_config_dir: Path,
 ) -> None:
     """Step 2.5 (#314): scope_hint=None + session=None → global timeout."""
-    config = _auto_config(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    config = _auto_config(
+        headless_timeout_by_tier={"small": 1800, "large": 5400},
+        headless_timeout_by_stage={},
+    )
     task = TicketTask(ticket_id="GEN-314", client="client-a")
     budget = resolve_headless_budget(task, None, config)
     assert budget == HEADLESS_TIMEOUT_SECONDS

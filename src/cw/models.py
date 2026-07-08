@@ -636,6 +636,14 @@ class OrchestratorConfig(BaseModel):
     # unchanged. Seeds derived from empirical p99/max wall-clock baselines —
     # finalize legitimately blocks on CI and was falsely parked under the
     # small-tier 1800s floor during the RFC 0007 wave. See GitHub issue #1020.
+    # Why: PLAN (3600) and IMPL (4200) are numerically below the large-tier
+    # default (5400) this map overrides for those stages on a large-tier
+    # ticket. This is intentional, not a regression: each seed clears its
+    # own stage's *observed max* wall-clock duration (not the tier default)
+    # with a 25-39% margin, and the #976 liveness veto (stalled.py) still
+    # backstops any session actively producing output past budget. Full
+    # override (no max() composition with the tier map) was a deliberate
+    # choice — see ticket #1020 pre-flight resolution §3.
     headless_timeout_by_stage: dict[Stage, int] = Field(
         default_factory=lambda: {
             Stage.PLAN: 3600,
