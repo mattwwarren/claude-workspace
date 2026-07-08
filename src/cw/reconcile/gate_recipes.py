@@ -61,7 +61,7 @@ from cw.models import OrchestratorEventType, QueueItemStatus
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from cw.models import CwState, OrchestratorConfig, TicketTask
+    from cw.models import CwState, DevQueueStore, OrchestratorConfig, TicketTask
 
 _log = logging.getLogger(__name__)
 
@@ -250,6 +250,43 @@ def _post_auto_approve_comment(ticket_id: str, snapshot: dict[str, object]) -> N
         )
 
 
+def _find_blocked_task(
+    store: DevQueueStore, ticket_id: str, client: str
+) -> TicketTask | None:
+    """Resolve the (ticket_id, client) row this recipe acts on.
+
+    Mirrors :func:`dev_queue._find_ticket`'s tie-break for the BLOCKED_ON_USER
+    tier only (newest ``created_at`` wins) — this recipe never needs the
+    PENDING/RUNNING/terminal tiers, since it exclusively operates on
+    BLOCKED_ON_USER rows. A hand-rolled ``next()`` with no tie-break (the
+    original shape of both call sites below) would, on the same duplicate-row
+    condition ``_find_ticket`` itself guards against, risk resolving a
+    *different* physical row than the one ``_approve_ticket_locked``
+    (internally, via the real ``_find_ticket``) just acted on — silently
+    latching or re-validating the wrong row. Returns ``None`` (rather than
+    ``_find_ticket``'s raise) since every caller here treats a missing row as
+    a silent skip, not an error.
+
+    Deliberately NOT full parity with ``_find_ticket``: a duplicate row in a
+    *live* status (PENDING/RUNNING) for the same key is out of scope here —
+    ``_find_ticket``'s own live-tier precedence would resolve that case
+    inside ``_approve_ticket_locked`` instead, which then rejects it with
+    ``ApproveGateError`` (status not approvable). That failure is caught by
+    this module's own ``except CwError`` and turned into a
+    ``GATE_AUTO_APPROVE_FAILED`` correction + latch — fails safe, not silent.
+    """
+    matches = [
+        t
+        for t in store.tasks
+        if t.ticket_id == ticket_id
+        and t.client == client
+        and t.status == QueueItemStatus.BLOCKED_ON_USER
+    ]
+    if not matches:
+        return None
+    return max(matches, key=lambda t: t.created_at)
+
+
 def _stamp_gate_recipe_failure(ticket_id: str, client: str, *, now: datetime) -> None:
     """Persist the one-shot failure latch (GitHub #1065).
 
@@ -262,10 +299,7 @@ def _stamp_gate_recipe_failure(ticket_id: str, client: str, *, now: datetime) ->
     load-then-save is race-free against any other writer.
     """
     store = load_dev_queue()
-    task = next(
-        (t for t in store.tasks if t.ticket_id == ticket_id and t.client == client),
-        None,
-    )
+    task = _find_blocked_task(store, ticket_id, client)
     if task is None:
         return
     task.gate_recipe_failed_at = now
@@ -305,16 +339,8 @@ def _act_auto_approve_review(
         store = load_dev_queue()
         for candidate in by_key.values():
             state = load_state()
-            task = next(
-                (
-                    t
-                    for t in store.tasks
-                    if t.ticket_id == candidate.ticket_id
-                    and t.client == candidate.client
-                ),
-                None,
-            )
-            if task is None or task.status != QueueItemStatus.BLOCKED_ON_USER:
+            task = _find_blocked_task(store, candidate.ticket_id, candidate.client)
+            if task is None:
                 continue
             if task.session_id is None:
                 continue

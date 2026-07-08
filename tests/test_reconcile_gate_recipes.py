@@ -29,6 +29,7 @@ from cw.reconcile.gate_recipes import (
     GateRecipeCandidate,
     _act_auto_approve_review,
     _detect_auto_approve_review,
+    _find_blocked_task,
     _stamp_gate_recipe_failure,
     run_gate_recipes,
 )
@@ -526,8 +527,19 @@ class TestActApproveFailure:
             ],
         )
         # Exactly one of each — the second tick's detect phase excluded the
-        # latched row entirely, so neither event fired a second time.
-        assert len(events) == 2
+        # latched row entirely, so neither event fired a second time. Split
+        # by type (not just a combined count) so a regression that fired 2x
+        # one type and 0x the other would still be caught.
+        approved = [
+            e for e in events if e.type == OrchestratorEventType.GATE_AUTO_APPROVED
+        ]
+        failed = [
+            e
+            for e in events
+            if e.type == OrchestratorEventType.GATE_AUTO_APPROVE_FAILED
+        ]
+        assert len(approved) == 1
+        assert len(failed) == 1
 
     def test_latch_clears_on_next_status_transition(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -547,6 +559,111 @@ class TestActApproveFailure:
         store = load_dev_queue()
         assert store.tasks[0].gate_recipe_failed_at is None
 
+    def test_duplicate_blocked_rows_stamp_the_newest_not_the_stale_one(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end regression test for the duplicate-row resolution-
+        consistency fix: two BLOCKED_ON_USER rows share (ticket_id, client)
+        (a legitimate scenario per add_ticket's dedup guard, which only blocks
+        re-insertion for PENDING/RUNNING/terminal-matching rows, not
+        BLOCKED_ON_USER). Both the act loop's own lookup and the failure-path
+        stamp helper must resolve to the SAME (newest) physical row, not
+        silently diverge and latch the wrong one."""
+        from cw.exceptions import ApproveGateError
+
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        older = _make_task(
+            session_id="sess-old", created_at=datetime(2026, 7, 1, tzinfo=UTC)
+        )
+        newer = _make_task(
+            session_id="sess-new", created_at=datetime(2026, 7, 8, tzinfo=UTC)
+        )
+        save_dev_queue(DevQueueStore(tasks=[older, newer]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(session_id="sess-old", last_result=_clean_result()),
+                    _make_session(session_id="sess-new", last_result=_clean_result()),
+                ]
+            )
+        )
+
+        boom_msg = "boom"
+
+        def _boom(*_a: Any, **_k: Any) -> None:
+            raise ApproveGateError(boom_msg)
+
+        monkeypatch.setattr("cw.reconcile.gate_recipes._approve_ticket_locked", _boom)
+
+        run_gate_recipes(now=_NOW, config=_config())
+
+        store = load_dev_queue()
+        by_session = {t.session_id: t for t in store.tasks}
+        assert by_session["sess-new"].gate_recipe_failed_at == _NOW
+        assert by_session["sess-old"].gate_recipe_failed_at is None
+
+    def test_mixed_outcome_batch_does_not_revert_the_successful_candidate(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression test for the stale-outer-snapshot clobber risk flagged
+        against _stamp_gate_recipe_failure: when one candidate in a batch
+        succeeds and a LATER candidate in the same _act_auto_approve_review
+        call fails, the failure-path stamp (a fresh load/save round-trip)
+        must not silently revert the earlier candidate's already-persisted
+        approve by writing through the loop's stale pre-loop-hoisted
+        snapshot."""
+        from cw.exceptions import ApproveGateError
+
+        acme_ws = tmp_path / "acme"
+        beta_ws = tmp_path / "beta"
+        acme_ws.mkdir()
+        beta_ws.mkdir()
+        _write_two_client_yaml(tmp_config_dir, acme_ws, beta_ws)
+        acme_task = _make_task(ticket_id="GEN-1", client="acme", session_id="sess-a")
+        beta_task = _make_task(ticket_id="GEN-1", client="beta", session_id="sess-b")
+        save_dev_queue(DevQueueStore(tasks=[acme_task, beta_task]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(
+                        ticket_id="GEN-1",
+                        client="acme",
+                        session_id="sess-a",
+                        last_result=_clean_result(),
+                    ),
+                    _make_session(
+                        ticket_id="GEN-1",
+                        client="beta",
+                        session_id="sess-b",
+                        last_result=_clean_result(),
+                    ),
+                ]
+            )
+        )
+
+        from cw.dev_queue import _approve_ticket_locked as real_approve_locked
+
+        boom_msg = "boom"
+
+        def _fail_beta_only(ticket_id: str, client: str) -> dict[str, str | bool]:
+            if client == "beta":
+                raise ApproveGateError(boom_msg)
+            return real_approve_locked(ticket_id, client)
+
+        monkeypatch.setattr(
+            "cw.reconcile.gate_recipes._approve_ticket_locked", _fail_beta_only
+        )
+
+        run_gate_recipes(now=_NOW, config=_config())
+
+        store = load_dev_queue()
+        by_client = {t.client: t for t in store.tasks}
+        # acme's successful approve must survive beta's later failure/stamp.
+        assert by_client["acme"].stage == Stage.FINALIZE
+        assert by_client["acme"].status == QueueItemStatus.PENDING
+        assert by_client["beta"].status == QueueItemStatus.BLOCKED_ON_USER
+        assert by_client["beta"].gate_recipe_failed_at == _NOW
+
     def test_stamp_on_missing_row_is_a_noop(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
@@ -559,6 +676,47 @@ class TestActApproveFailure:
         _stamp_gate_recipe_failure("GEN-1", "acme", now=_NOW)
 
         assert load_dev_queue().tasks == []
+
+
+class TestFindBlockedTask:
+    def test_resolves_the_only_match(self) -> None:
+        task = _make_task()
+        store = DevQueueStore(tasks=[task])
+
+        found = _find_blocked_task(store, "GEN-1", "acme")
+
+        assert found is task
+
+    def test_returns_none_when_no_match(self) -> None:
+        store = DevQueueStore(tasks=[])
+
+        assert _find_blocked_task(store, "GEN-1", "acme") is None
+
+    def test_ignores_non_blocked_status_rows(self) -> None:
+        task = _make_task(status=QueueItemStatus.PENDING)
+        store = DevQueueStore(tasks=[task])
+
+        assert _find_blocked_task(store, "GEN-1", "acme") is None
+
+    def test_duplicate_rows_resolve_to_newest_blocked_on_user(self) -> None:
+        """Regression test (Data Safety cycle-3 finding): a naive first-match
+        lookup could resolve a duplicate (ticket_id, client) row differently
+        than dev_queue._find_ticket's tie-break, silently latching or
+        re-validating the wrong physical row. _find_blocked_task must mirror
+        that tie-break (newest created_at wins) for the BLOCKED_ON_USER tier
+        it operates on."""
+        older = _make_task(
+            session_id="sess-old", created_at=datetime(2026, 7, 1, tzinfo=UTC)
+        )
+        newer = _make_task(
+            session_id="sess-new", created_at=datetime(2026, 7, 8, tzinfo=UTC)
+        )
+        store = DevQueueStore(tasks=[older, newer])
+
+        found = _find_blocked_task(store, "GEN-1", "acme")
+
+        assert found is newer
+        assert found.session_id == "sess-new"
 
 
 class TestActRecheckRace:
