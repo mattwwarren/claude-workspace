@@ -119,6 +119,12 @@ def _act_on_local_harvest_candidates(
     so dispatch's persist_last_result guard skips it. Returns the harvested ticket
     IDs. Acquires no gh subprocess; runs entirely under the caller's
     ``sessions_lock``.
+
+    GitHub #1031 (extends #1019's phantom-path guard): when
+    ``_apply_sentinel_to_task`` reports ``routed=False`` (a stage-mismatch
+    refusal, the #986 incident), the candidate's session must NOT be
+    completed and its ticket_id must NOT be counted as harvested -- the task
+    row was left untouched, so completing the session here would orphan it.
     """
     if not candidates:
         return []
@@ -160,8 +166,15 @@ def _act_on_local_harvest_candidates(
             )
         # Task first (before the session status change) so the task is in its
         # terminal/advanced state when revert_completed_silent_tasks runs.
+        routed = True
         if candidate.ticket_id:
-            _apply_sentinel_to_task(candidate.ticket_id, candidate.session_id, sentinel)
+            outcome = _apply_sentinel_to_task(
+                candidate.ticket_id, candidate.session_id, sentinel
+            )
+            routed = outcome.routed
+        if not routed:
+            continue
+        if candidate.ticket_id:
             harvested_ticket_ids.append(candidate.ticket_id)
         session.status = SessionStatus.COMPLETED
         session.completed_reason = CompletionReason.NORMAL
