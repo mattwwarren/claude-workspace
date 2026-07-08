@@ -3518,6 +3518,126 @@ def test_resolve_headless_budget_non_dict_last_result_falls_to_scope_hint(
     assert budget == 5400  # scope_hint fires after AttributeError caught
 
 
+def test_resolve_headless_budget_per_stage_hit_beats_tier(
+    tmp_config_dir: Path,
+) -> None:
+    """Per-stage REVIEW default (7200) beats the small-tier default (1800)."""
+    config = _auto_config(
+        headless_timeout_by_tier={"small": 1800, "large": 5400},
+        headless_timeout_by_stage={Stage.REVIEW: 7200},
+    )
+    task = TicketTask(ticket_id="GEN-1020", client="client-a", stage=Stage.REVIEW)
+    sess = Session(
+        name="client-a/auto-dev/GEN-1020",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        workspace_path=Path("/tmp/ws"),
+        last_result={"scope": {"tier": "small"}},
+    )
+    budget = resolve_headless_budget(task, sess, config)
+    assert budget == 7200
+
+
+def test_resolve_headless_budget_per_stage_hit_beats_scope_hint(
+    tmp_config_dir: Path,
+) -> None:
+    """Per-stage PLAN default (3600) beats the large-tier scope_hint (5400)."""
+    config = _auto_config(
+        headless_timeout_by_tier={"small": 1800, "large": 5400},
+        headless_timeout_by_stage={Stage.PLAN: 3600},
+    )
+    task = TicketTask(
+        ticket_id="GEN-1020",
+        client="client-a",
+        stage=Stage.PLAN,
+        scope_hint="large",
+    )
+    budget = resolve_headless_budget(task, None, config)
+    assert budget == 3600
+
+
+def test_resolve_headless_budget_per_stage_hit_beats_global(
+    tmp_config_dir: Path,
+) -> None:
+    """Per-stage IMPL default (4200) beats the global HEADLESS_TIMEOUT_SECONDS fallback."""
+    config = _auto_config(headless_timeout_by_stage={Stage.IMPL: 4200})
+    task = TicketTask(ticket_id="GEN-1020", client="client-a", stage=Stage.IMPL)
+    budget = resolve_headless_budget(task, None, config)
+    assert budget == 4200
+
+
+def test_resolve_headless_budget_per_stage_override_still_beats_stage(
+    tmp_config_dir: Path,
+) -> None:
+    """Step 1 (headless_timeout_override) still outranks step 1.5 (per-stage)."""
+    config = _auto_config(headless_timeout_by_stage={Stage.REVIEW: 7200})
+    task = TicketTask(
+        ticket_id="GEN-1020",
+        client="client-a",
+        stage=Stage.REVIEW,
+        headless_timeout_override=9999,
+    )
+    budget = resolve_headless_budget(task, None, config)
+    assert budget == 9999
+
+
+def test_resolve_headless_budget_stage_absent_falls_through_to_tier(
+    tmp_config_dir: Path,
+) -> None:
+    """Stage absent from the per-stage map (HARDEN) falls through to the tier default."""
+    config = _auto_config(
+        headless_timeout_by_tier={"small": 1800, "large": 5400},
+        headless_timeout_by_stage={Stage.PLAN: 3600},
+    )
+    task = TicketTask(ticket_id="GEN-1020", client="client-a", stage=Stage.HARDEN)
+    sess = Session(
+        name="client-a/auto-dev/GEN-1020",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        workspace_path=Path("/tmp/ws"),
+        last_result={"scope": {"tier": "large"}},
+    )
+    budget = resolve_headless_budget(task, sess, config)
+    assert budget == 5400
+
+
+def test_resolve_headless_budget_stage_absent_falls_through_to_scope_hint(
+    tmp_config_dir: Path,
+) -> None:
+    """Stage absent from the per-stage map (HARDEN) falls through to scope_hint."""
+    config = _auto_config(
+        headless_timeout_by_tier={"small": 1800, "large": 5400},
+        headless_timeout_by_stage={Stage.PLAN: 3600},
+    )
+    task = TicketTask(
+        ticket_id="GEN-1020",
+        client="client-a",
+        stage=Stage.HARDEN,
+        scope_hint="small",
+    )
+    budget = resolve_headless_budget(task, None, config)
+    assert budget == 1800
+
+
+def test_resolve_headless_budget_task_none_skips_stage_step(
+    tmp_config_dir: Path,
+) -> None:
+    """task=None short-circuits step 1.5 exactly as it already short-circuits step 1."""
+    config = _auto_config(
+        headless_timeout_by_tier={"small": 1800, "large": 5400},
+        headless_timeout_by_stage={Stage.PLAN: 3600},
+    )
+    sess = Session(
+        name="client-a/auto-dev/GEN-1020",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        workspace_path=Path("/tmp/ws"),
+        last_result={"scope": {"tier": "large"}},
+    )
+    budget = resolve_headless_budget(None, sess, config)
+    assert budget == 5400
+
+
 def test_revert_stalled_uses_per_session_budget(
     tmp_config_dir: Path,
     tmp_path: Path,
