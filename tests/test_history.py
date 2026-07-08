@@ -141,14 +141,14 @@ def test_record_event_appends(tmp_config_dir: Path) -> None:
 def test_history_event_metadata(tmp_config_dir: Path) -> None:
     """Events store arbitrary metadata."""
     event = HistoryEvent(
-        event_type=EventType.QUEUE_ITEM_ADDED,
+        event_type=EventType.SESSION_HANDOFF,
         client="test-client",
-        metadata={"queue_item_id": "abc123"},
+        metadata={"handoff_id": "abc123"},
     )
     append_event("test-client", event)
 
     events = load_history("test-client")
-    assert events[0].metadata["queue_item_id"] == "abc123"
+    assert events[0].metadata["handoff_id"] == "abc123"
 
 
 def test_multiple_clients_isolated(tmp_config_dir: Path) -> None:

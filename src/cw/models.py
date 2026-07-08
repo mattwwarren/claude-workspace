@@ -157,57 +157,6 @@ DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
 
-class TaskSpec(BaseModel):
-    """Machine-parseable task specification for agent-to-agent handoffs."""
-
-    description: str
-    purpose: SessionPurpose
-    prompt: str
-    context_files: list[str] = Field(default_factory=list)
-    success_criteria: str | None = None
-    source_session: str | None = None
-    priority: int = 0
-    target_session: str | None = None
-
-
-class QueueItem(BaseModel):
-    """A queued work item for delegation or daemon processing."""
-
-    id: str = Field(default_factory=lambda: uuid4().hex[:8])
-    client: str
-    task: TaskSpec
-    status: QueueItemStatus = QueueItemStatus.PENDING
-    assigned_session_id: str | None = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    started_at: datetime | None = None
-    completed_at: datetime | None = None
-    result: str | None = None
-
-
-class QueueStore(BaseModel):
-    """Persisted queue state for a client."""
-
-    items: list[QueueItem] = Field(default_factory=list)
-
-    def pending(self) -> list[QueueItem]:
-        return [i for i in self.items if i.status == QueueItemStatus.PENDING]
-
-    def running(self) -> list[QueueItem]:
-        return [i for i in self.items if i.status == QueueItemStatus.RUNNING]
-
-    def by_purpose(self, purpose: str) -> list[QueueItem]:
-        return [i for i in self.items if i.task.purpose == purpose]
-
-    def by_status(self, status: QueueItemStatus) -> list[QueueItem]:
-        return [i for i in self.items if i.status == status]
-
-    def find_item(self, item_id: str) -> QueueItem | None:
-        for item in self.items:
-            if item.id == item_id:
-                return item
-        return None
-
-
 class LaneConcurrencyOverride(BaseModel):
     """Per-lane overrides from the concurrency override store."""
 
@@ -417,6 +366,15 @@ class TicketTask(BaseModel):
     # AutoDevResult sentinel without rediscovering it at runtime (#314).
     # Always None today; populated by a future dev-queue plan command.
     plan_source: str | None = None
+    # Pipeline-computed scope tier ("small"/"large") stamped onto the task by
+    # dispatch's _persist_carried_context after each stage completes (from the
+    # sentinel's scope.tier). Distinct from scope_hint (operator hint, escalate-
+    # only in _resolve_scope_tier) -- kept separate so a computed tier can never
+    # overwrite an operator escalation. Carried into cw-context is intentionally
+    # deferred to a follow-up ticket (#1050 introduced this field; wiring it
+    # into cw-context.json is out of scope there); today it records
+    # provenance on the row.
+    computed_scope_tier: str | None = None
     # Lane this ticket is assigned to. Defaults to DEFAULT_LANE; set by
     # orchestrate/dispatch in Phase 2 (#558).
     lane: str = DEFAULT_LANE

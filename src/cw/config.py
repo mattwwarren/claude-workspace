@@ -57,7 +57,6 @@ CONFIG_DIR = Path(_xdg_config) / "cw" if _xdg_config else Path.home() / ".config
 STATE_DIR = (
     Path(_xdg_data) / "cw" if _xdg_data else Path.home() / ".local" / "share" / "cw"
 )
-QUEUES_DIR = STATE_DIR / "queues"
 EVENTS_DIR = STATE_DIR / "events"
 HISTORY_DIR = STATE_DIR / "history"
 PR_WATCHER_DIR = STATE_DIR / "pr_watcher"
@@ -100,10 +99,6 @@ def config_dir() -> Path:
 
 def state_dir() -> Path:
     return STATE_DIR
-
-
-def queues_dir() -> Path:
-    return QUEUES_DIR
 
 
 def events_dir() -> Path:

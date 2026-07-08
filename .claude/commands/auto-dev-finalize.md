@@ -16,6 +16,27 @@ In standalone headless invocation: emit `AUTO_DEV_RESULT` after this stage compl
 
 > **Model selection:** All agent spawns in this file use explicit `model:` pins (Sonnet or Haiku). Do not change any pin to `model: inherit` — see CLAUDE.md §"Model Selection for Subagents" for the rationale and tier matrix.
 
+## Resolve carried-through context before emitting the sentinel
+
+Every `AUTO_DEV_RESULT` sentinel emitted from this file requires concrete, non-null `plan_source` and `scope.tier` values (see "every field above is required" below). On a normal run these were classified back in Stage 0/1 and Stage 2; on a **concierge-rescued respawn**, the fresh worker starts from a re-materialized `.claude/cw-context.json` and has no memory of that earlier classification. Resolve both explicitly before filling in any sentinel template — do not just copy the raw `"<value carried from Stage 0/1>"` / `"<small | large — same value carried through from Stage 2 scope classification>"` placeholder text verbatim.
+
+**Resolve `plan_source`:**
+1. `.claude/cw-context.json` → `queue_metadata.plan_source` — populated by dispatch's `_persist_carried_context` write-back (`_route_staged_decision`, `src/cw/dispatch.py`) from the prior stage's own sentinel, so a rescue respawn's fresh claim→spawn re-materializes it here.
+2. Fallback: `.cw/context.json` — infer from the tracker (`github_issue_existing` when the ticket is a GitHub issue, the dispatch default). **If the file is absent, prose-delegate to `auto-dev-intake.md` first to materialize it** (mirroring `auto-dev-plan.md`/`auto-dev-impl.md`'s own Orientation fallback) — a concierge-rescued respawn (`task.attempts > 1`, non-local backend) has its stale `.cw/context.json` deleted before spawn (`dispatch.py:_invalidate_stale_context_json`, #1046), so this step would otherwise silently fall through to step 3 on exactly the rescue path this ticket targets.
+3. Fallback: `"none"`.
+
+Use the resolved value in every sentinel `plan_source` field below.
+
+**Resolve `scope.tier`:** structurally mirrors `auto-dev-review.md`'s "Before emitting the sentinel, resolve `scope.tier` explicitly" section — same precedence chain, same rationale (a null tier causes `apply_staged_decision` Rule 1 to route to `BLOCKED_ON_USER`):
+1. Read `.cw/plan.md` — look for an explicit `Scope tier:`, `**Scope:** Small`, `tier: small`, or similar Stage-1c marker.
+2. Fallback: read `.claude/cw-context.json` → `queue_metadata.scope_hint` (operator hint).
+3. Fallback: re-derive from the diff itself using the canonical Stage-1c thresholds — run `git diff --stat $FORK_POINT...origin/<branch-name>` and count changed files and lines. **Small** = ≤10 files AND ≤500 lines AND no forbidden-area touches; **Large** otherwise.
+4. If no source yields `"small"` or `"large"`, do **not** emit a `shipped` or `merge_gate_blocked` sentinel — emit `blocked` instead with `blocker.reason: "scope_tier_unresolvable"` and `scope.tier: "small"` (required by the schema validator even on blocked).
+
+`scope.tier` must always be a concrete value (`"small"` or `"large"`) in the emitted sentinel.
+
+**R3 edge case:** `.cw/plan.md` and `.cw/deferred-findings.md` persist across a normal requeue (worktree reused, `allow_dirty_reuse=True`); the only loss path is a `StaleWorktreeError` rebuild (fresh worktree), where the plan-marker step above falls through to re-derivation and the deferred-findings section is legitimately omitted.
+
 ## Stage 4: PR Creation (Merge-Gated)
 
 ### Pre-Stage Detector Guard
@@ -212,6 +233,63 @@ collision — running the entire ship against the **primary checkout**.
   - **Recommendation**: PROCEED | EXIT_FOR_HUMAN_REVIEW
   ```
 
+**Push-auth-failure classifier (#1049):** Immediately after the subagent returns — before the verify-script gate below — inspect its returned text (friction report / BLOCK message) for a push-authentication failure. This covers the project's `ship-it.md` initial `git push -u origin "$BRANCH"` (the only push site the Step 4c subagent's returned text can reflect). Match any of these signatures verbatim:
+
+- `Permission denied (publickey)`
+- `could not read Username`
+- `Host key verification failed`
+- `Authentication failed`
+
+(Step 4c.5's own rebase-retry push is a separate site, checked directly by the main session — see the classifier added there below, which reuses this same signature list.)
+
+If any signature is present, emit the structured `blocked` sentinel below and stop — do NOT proceed to the verify-script gate or Step 4c.5.
+
+**Sentinel template — `push_auth_failed` blocker:**
+
+```json
+{
+  "schema_version": 4,
+  "ticket_id": "<ticket-id>",
+  "status": "blocked",
+  "stage_reached": "stage4b_pr_create",
+  "scope": {
+    "tier": "<resolved scope.tier — see 'Resolve carried-through context' above>",
+    "files": <count>,
+    "lines_estimate": <count>,
+    "lines_actual": <count>,
+    "forbidden_touched": false
+  },
+  "plan_source": "<resolved plan_source — see 'Resolve carried-through context' above>",
+  "branch": "<branch-name>",
+  "worktree_path": "<session worktree path — ~/.cw/wt/<hash>/auto-dev-<ticket>>",
+  "pr": null,
+  "review": {"must_fix_initial": <count>, "should_fix": <count>, "fix_cycles_used": <count>, "deferred": <count>},
+  "health": {
+    "lowest_agent_confidence": "<HIGH | MEDIUM | LOW from health check>",
+    "any_incomplete_risk": false,
+    "shortcuts": [],
+    "recommendation": "PROCEED",
+    "downgrade_applied": false,
+    "fix_loop_escalated": false
+  },
+  "blocker": {
+    "stage": "stage4b_pr_create",
+    "reason": "push_auth_failed",
+    "details": "<matched signature + which push site, e.g. 'ship-it.md initial push: Permission denied (publickey)'>",
+    "exception_type": null,
+    "message": "git push failed authentication (SSH key locked or credentials expired)",
+    "recovery_hint": "Unlock the SSH key (or refresh credentials) and requeue the ticket",
+    "retry_eligible": true,
+    "retry_delay_seconds": null
+  },
+  "next_actions": []
+}
+```
+
+**Do not add `push_auth_failed` to `FINALIZE_REGRESS_BLOCKER_REASONS`** (`auto_dev_result.py:119`, currently `{"agent_block"}`). A locked SSH key is not fixed by re-running implementation — adding this reason to the regress set would auto-regress FINALIZE→IMPL and burn `FINALIZE_REGRESS_CAP` attempts against a still-locked key. Park for the operator instead via the sentinel above.
+
+**Producer note:** `push_auth_failed` is an open-enum addition to `blocker.reason` (per headless-contract.md §4.2 — `reason` is open by design, same precedent as `merge_conflict_post_push` below). Consumers surface it verbatim; no parser change needed.
+
 **Main-session re-verification (do not skip):** After the subagent returns, re-run finalize from the impl worktree (using the worktree's git context — either `cd <worktree>` or `git -C <worktree>`):
 
 ```bash
@@ -255,6 +333,8 @@ git rebase origin/main
 git push --force-with-lease origin HEAD:<branch-name>
 ```
 
+**Push-auth-failure check (#1049):** Before re-verifying mergeability, check this push's own output for the same four signatures listed under the Step 4c classifier above (`Permission denied (publickey)`, `could not read Username`, `Host key verification failed`, `Authentication failed`). If any signature is present, emit the `push_auth_failed` sentinel (same shape as the Step 4c template above) with `stage_reached` and `blocker.stage` set to `"stage5_post_create"` (this site runs after PR creation) and `blocker.details` naming this site, e.g. `"Step 4c.5 rebase-retry push: Permission denied (publickey)"`. Stop — do not proceed to the mergeability re-check below.
+
 After the push, re-verify mergeability once:
 
 ```bash
@@ -273,13 +353,13 @@ gh pr view <pr_number> --repo <owner>/<repo> --json mergeable,mergeStateStatus
   "status": "blocked",
   "stage_reached": "stage5_post_create",
   "scope": {
-    "tier": "<small | large — same value carried through from Stage 2 scope classification>",
+    "tier": "<resolved scope.tier — see 'Resolve carried-through context' above>",
     "files": <count>,
     "lines_estimate": <count>,
     "lines_actual": <count>,
     "forbidden_touched": false
   },
-  "plan_source": "<value carried from Stage 0/1>",
+  "plan_source": "<resolved plan_source — see 'Resolve carried-through context' above>",
   "branch": "<branch-name>",
   "worktree_path": "<session worktree path — ~/.cw/wt/<hash>/auto-dev-<ticket>>",
   "pr_info": {
@@ -507,8 +587,8 @@ printf '%s' "$SENTINEL_JSON" | cw result validate -
   "ticket_id": "<ticket-id>",
   "status": "<shipped | merge_gate_blocked | blocked>",
   "stage_reached": "stage5_post_create",
-  "scope": {"tier": "<small|large>", "files": 0, "lines_estimate": 0, "lines_actual": 0, "forbidden_touched": false},
-  "plan_source": "<github_issue_existing | generated | free_text | none>",
+  "scope": {"tier": "<resolved scope.tier — see 'Resolve carried-through context' above>", "files": 0, "lines_estimate": 0, "lines_actual": 0, "forbidden_touched": false},
+  "plan_source": "<resolved plan_source (github_issue_existing | generated | free_text | none) — see 'Resolve carried-through context' above>",
   "branch": "<branch-name>",
   "worktree_path": "<session worktree path>",
   "fork_point_sha": "<fork point sha>",

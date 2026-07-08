@@ -13,9 +13,6 @@ some, and enqueues the selected IDs on the **cw orchestrator dev-queue**
 one worktree per ticket, up to the per-client concurrency cap in
 `~/.claude-workspace/orchestrator.yaml`.
 
-This is the GitHub-Issues-era counterpart to `/queue-plan` / `/queue-debt` (which feed
-the per-session `cw queue`, not the orchestrator dev-queue).
-
 **Arguments:** "$ARGUMENTS"
 
 ---
@@ -99,8 +96,7 @@ also pre-fetch each page's title and include it as part of the queued prompt
 ### local
 
 No external tracking — list `.claude/plans/*.md` files. Each plan becomes a
-candidate ticket, using the plan filename as the ID. (This path is essentially
-equivalent to `/queue-plan` for the dev-queue and is here for completeness.)
+candidate ticket, using the plan filename as the ID.
 
 ## Step 5: Present and Select
 
@@ -165,5 +161,4 @@ Report:
   works (the ticket ID ends up in commit messages / PR body via the prompt),
   but Stage 1d ("Post plan to Linear") doesn't have a GitHub equivalent yet.
   When that gets wired up, this skill is already passing the right IDs.
-- The skill writes only to `cw dev-queue`, never to `cw queue`. Use `/queue-plan`
-  or `/queue-debt` for the per-session queue (`/pull-and-execute` consumers).
+- The skill writes only to `cw dev-queue`, the orchestrator dispatch queue.
