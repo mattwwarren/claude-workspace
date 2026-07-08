@@ -2716,6 +2716,90 @@ class TestSignalStop:
         assert "rescued" not in payload
         assert "rescue_reason" not in payload
 
+    def test_signal_stop_stage_mismatch_does_not_orphan_task_or_complete_session(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """GitHub #1031: a stale/replayed stage_complete sentinel must not
+        complete the session or leave the task orphaned (mirrors phantom's
+        #1019 stage-mismatch guard, extended to the Stop-hook path).
+
+        The task's row has already advanced to REVIEW by the time this stale
+        IMPL-leg (stage_reached=stage2_impl) sentinel is discovered -- the
+        #986 shape. ``_apply_sentinel_to_task`` reports ``routed=False`` for
+        the mismatch; signal_stop must leave session and task exactly as they
+        were -- no COMPLETED transition, no SESSION_COMPLETED event, no
+        daemon stop call.
+        """
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        worktree, session = self._setup_headless_session(
+            tmp_path, "sess-1031-mismatch", "worktree-1031-mismatch"
+        )
+        _write_staged_clients_yaml_for_test(tmp_config_dir, "test-client")
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=self.SEED_TICKET_ID,
+                        client="test-client",
+                        status=QueueItemStatus.RUNNING,
+                        session_id=session.id,
+                        # Row already advanced past IMPL by the time this
+                        # stale IMPL-leg sentinel is discovered (#986 shape).
+                        stage=Stage.REVIEW,
+                        attempts=1,
+                    )
+                ]
+            )
+        )
+        self._write_headless_context(worktree, session_id=session.id)
+
+        claude_session_id = "uuid-1031-mismatch"
+        fake_home = tmp_path / "fake-home-1031-mismatch"
+        self._write_transcript(
+            worktree, claude_session_id, _SENTINEL_918_STAGE_COMPLETE, fake_home
+        )
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
+
+        runner = CliRunner()
+        with freeze_time(datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)):
+            result = runner.invoke(
+                main,
+                ["signal-stop"],
+                input=json.dumps(
+                    {
+                        "session_id": claude_session_id,
+                        "cwd": str(worktree),
+                        "hook_event_name": "Stop",
+                    }
+                ),
+            )
+        assert result.exit_code == 0, result.output
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status != SessionStatus.COMPLETED
+
+        task = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == self.SEED_TICKET_ID
+        )
+        assert task.status == QueueItemStatus.RUNNING
+        assert task.stage == Stage.REVIEW
+        assert task.disposition is None
+
+        events = read_events(
+            consumer="test-1031-mismatch",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert events == []
+        assert daemon.stop_calls == []
+
     def test_signal_stop_schema_version_unsupported_marks_failed(
         self,
         tmp_config_dir: Path,
