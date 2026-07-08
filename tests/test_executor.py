@@ -5,7 +5,6 @@ RFC 0005 A2 / F3.
 
 from __future__ import annotations
 
-import sys
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
@@ -25,6 +24,7 @@ from cw.executor import (
 from cw.local_runner import (
     AIDER_NOT_FOUND,
     ENDPOINT_NOT_CONFIGURED,
+    LIVENESS_UNAVAILABLE,
     PLAN_MISSING,
     UNEXPECTED_ERROR,
     FakeAiderRunner,
@@ -607,11 +607,6 @@ def test_local_executor_blocked_plan_missing(
     assert result.blocker.reason == PLAN_MISSING
 
 
-@pytest.mark.skipif(
-    sys.platform != "linux",
-    reason="/proc-based process start-time is Linux-only; "
-    "cross-platform macOS support tracked in #921",
-)
 def test_local_executor_spawn_runner_path(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
@@ -670,11 +665,6 @@ def test_local_executor_stage_sentinel_schema(tmp_path: Path) -> None:
     assert schema == AutoDevResult.model_json_schema()
 
 
-@pytest.mark.skipif(
-    sys.platform != "linux",
-    reason="/proc-based process start-time is Linux-only; "
-    "cross-platform macOS support tracked in #921",
-)
 def test_local_executor_launch_records_liveness_and_returns_active(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
@@ -759,7 +749,7 @@ def test_local_executor_proc_stat_unreadable_marks_session_completed(
     before exec or /proc transiently unavailable), storing start_time_ns=0 would
     make every liveness check return False — triggering premature harvest while
     aider is still running. Instead the orphan is killed and the session completes
-    synchronously with UNEXPECTED_ERROR so dispatch retries (no liveness handle
+    synchronously with LIVENESS_UNAVAILABLE so dispatch retries (no liveness handle
     persisted, no exception propagated).
     """
     import contextlib
@@ -798,7 +788,11 @@ def test_local_executor_proc_stat_unreadable_marks_session_completed(
     result = AutoDevResult.model_validate(session.last_result)
     assert result.status == "blocked"
     assert result.blocker is not None
-    assert result.blocker.reason == UNEXPECTED_ERROR
+    assert result.blocker.reason == LIVENESS_UNAVAILABLE
+    assert (
+        result.blocker.details
+        == f"process {fake_runner.procs[-1].pid} start-time unavailable"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -919,11 +913,6 @@ def test_local_executor_no_tracker_no_plan_is_plan_missing(
     assert result.blocker.reason == PLAN_MISSING
 
 
-@pytest.mark.skipif(
-    sys.platform != "linux",
-    reason="/proc-based process start-time is Linux-only; "
-    "cross-platform macOS support tracked in #921",
-)
 def test_local_executor_launch_reached_after_tracker_fetch(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
