@@ -54,8 +54,12 @@ review.must_fix_initial == 0
 ```
 
 **`auto_adopt_clean_plan`** — candidates with `last_result["status"] == "plan_pending_approval"`. Fires only when the plan cleared both review stations cleanly: both signoff markers present (`plan-spec-reviewed`, `plan-soundness-reviewed`) and no MUST_FIX recorded for the plan. (The plan sentinel exposes the review outcome the same way; W2 implementation pins the exact field during the plan-of-record read.)
+>
+> **Errata (2026-07-08, OQ1 resolved):** the plan sentinel does **not** expose a structured plan-review field — `AutoDevResult.review` is hardcoded to zeros at plan-stage exit (`.claude/commands/auto-dev-plan.md:360`, schema filler). `auto_adopt_clean_plan` must read the two signoff markers from the plan-of-record (tracker comment via `gh.py:284`, or `.cw/plan.md`). This is fine: the markers are written *only* on a clean pass (`plan-spec-reviewed` on NO_ISSUES/SHOULD_FIX/PRINCIPLE-only `auto-dev-plan.md:272`; `plan-soundness-reviewed` on NO_ISSUES `:279`), so **both-present ⟺ the "no MUST_FIX, both stations clean" predicate**.
 
 Act phase, for a firing candidate: re-load state under `dev_queue_lock()`, re-validate the predicate against the *current* `last_result` (guard against a race with a concurrent human approve / re-dispatch), **emit the W4 evidence event, then call `approve_ticket(ticket_id, client)`** — the identical mutation a human approve performs. A predicate that no longer holds on re-check is skipped silently (no event, no mutation).
+
+> **Errata (2026-07-08, impl #1065):** calling the *public* `approve_ticket()` from inside the recipe's `dev_queue_lock()` **self-deadlocks** — `approve_ticket()` acquires the same `_lock()` internally (`dev_queue.py:876`; `dev_queue_lock` *is* `_lock`, `:209`), and two `flock` acquisitions on the same file from one process block forever. Correct implementation: extract a lock-free `_approve_ticket_locked(...)` from `approve_ticket`'s body (public `approve_ticket()` keeps wrapping it in `with _lock():`), and have the recipe act acquire the lock itself and call the lock-free helper — the pattern `concierge.py` `_act_*` (`:405/:564/:661`) already uses.
 
 The predicate is **hardcoded**, not config-tunable (operator decision, 2026-07-08): config toggles *enablement*, code owns *criteria* — the concierge split. Tightening/loosening the predicate is a code change with a review, not a config knob that can silently widen a ship gate.
 
