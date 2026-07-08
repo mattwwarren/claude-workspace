@@ -6247,7 +6247,9 @@ class TestPersistCarriedContext:
             "plan_source": "github_issue_existing",
             "scope": {"tier": "small", "files": 3, "lines_estimate": 10},
         }
-        apply_staged_decision(task, "stage_complete", last_result, self._clients(tmp_path))
+        apply_staged_decision(
+            task, "stage_complete", last_result, self._clients(tmp_path)
+        )
 
         assert task.plan_source == "github_issue_existing"
         assert task.computed_scope_tier == "small"
@@ -6288,7 +6290,9 @@ class TestPersistCarriedContext:
             "plan_source": "free_text",
             "scope": {"tier": None, "files": None, "lines_estimate": None},
         }
-        apply_staged_decision(task, "stage_complete", last_result, self._clients(tmp_path))
+        apply_staged_decision(
+            task, "stage_complete", last_result, self._clients(tmp_path)
+        )
 
         assert task.computed_scope_tier == "large"
 
@@ -6308,7 +6312,9 @@ class TestPersistCarriedContext:
             "plan_source": "none",
             "scope": {"tier": "small", "files": 1, "lines_estimate": 5},
         }
-        apply_staged_decision(task, "stage_complete", last_result, self._clients(tmp_path))
+        apply_staged_decision(
+            task, "stage_complete", last_result, self._clients(tmp_path)
+        )
 
         assert task.plan_source == "github_issue_existing"
 
@@ -6341,9 +6347,7 @@ class TestPersistCarriedContext:
         from cw.dispatch import _resolve_scope_tier
 
         # (a) scope_hint="large" still escalates even with computed_scope_tier set.
-        task_a = TicketTask(
-            ticket_id="RS-A", client="c", scope_hint="large"
-        )
+        task_a = TicketTask(ticket_id="RS-A", client="c", scope_hint="large")
         task_a.computed_scope_tier = "small"
         assert _resolve_scope_tier({"scope": {"tier": "small"}}, task_a) == "large"
 
