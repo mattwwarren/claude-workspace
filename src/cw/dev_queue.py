@@ -869,97 +869,117 @@ def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str | bool]:
             last_result is absent, or last_result status is not an approval gate.
         CwError: if no matching task is found.
     """
+    with _lock():
+        return _approve_ticket_locked(ticket_id, client_name)
+
+
+def _approve_ticket_locked(ticket_id: str, client_name: str) -> dict[str, str | bool]:
+    """Lock-free body of :func:`approve_ticket`.
+
+    The caller MUST already hold ``dev_queue_lock()`` (``_lock``). Extracted
+    from ``approve_ticket`` so an in-process caller that has *already* acquired
+    the dev-queue lock — e.g. the RFC 0009 gate-recipe act phase
+    (``cw.reconcile.gate_recipes``) — can invoke the approval mutation directly
+    without a second acquisition of the same flock-based lock, which would
+    self-deadlock (``_lock`` opens a fresh fd and blocks on ``LOCK_EX`` per
+    call). All validation guards and return shape are identical to the public
+    wrapper. See GitHub #1065.
+
+    Raises:
+        ApproveGateError: if ticket is not at either gate, session is missing,
+            last_result is absent, or last_result status is not an approval gate.
+        CwError: if no matching task is found.
+    """
     from cw.auto_dev_result import SCOPE_GATED_APPROVAL_STATUSES
     from cw.config import load_state
     from cw.dispatch import _should_gate_for_signoff
 
-    with _lock():
-        store = load_dev_queue()
-        task = _find_ticket(store, ticket_id, client_name)
+    store = load_dev_queue()
+    task = _find_ticket(store, ticket_id, client_name)
 
-        if task.status not in _APPROVABLE_STATUSES:
-            msg = (
-                f"Cannot approve ticket '{ticket_id}': status is {task.status.value!r},"
-                " expected BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF."
-                " Use 'requeue' to re-run a stage."
-            )
-            raise ApproveGateError(msg)
+    if task.status not in _APPROVABLE_STATUSES:
+        msg = (
+            f"Cannot approve ticket '{ticket_id}': status is {task.status.value!r},"
+            " expected BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF."
+            " Use 'requeue' to re-run a stage."
+        )
+        raise ApproveGateError(msg)
 
-        client_cfg = get_client(client_name)
-        stages = client_cfg.pipeline.stages
+    client_cfg = get_client(client_name)
+    stages = client_cfg.pipeline.stages
 
-        if task.stage not in stages:
-            msg = (
-                f"Cannot approve ticket '{ticket_id}':"
-                f" stage {task.stage!r} not in pipeline."
-            )
-            raise ApproveGateError(msg)
+    if task.stage not in stages:
+        msg = (
+            f"Cannot approve ticket '{ticket_id}':"
+            f" stage {task.stage!r} not in pipeline."
+        )
+        raise ApproveGateError(msg)
 
-        if task.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF:
-            from_stage = task.stage.value
-            _clear_signoff_gate(task, stages)
-            to_stage = task.stage.value
-            save_dev_queue(store)
-            return {
-                "from_stage": from_stage,
-                "to_stage": to_stage,
-                "ticket_id": ticket_id,
-                "client": client_name,
-                "awaiting_signoff": False,
-            }
-
-        state = load_state()
-        session = None
-        if task.session_id is not None:
-            session = state.find_by_name_or_id(task.session_id)
-
-        if session is None:
-            msg = (
-                f"Cannot approve ticket '{ticket_id}': session not found"
-                f" (session_id={task.session_id!r}). The session may have been"
-                " cleaned up. Use 'requeue' to re-run the stage."
-            )
-            raise ApproveGateError(msg)
-
-        if (
-            session.last_result is None
-            or session.last_result.get("status") not in SCOPE_GATED_APPROVAL_STATUSES
-        ):
-            actual = session.last_result.get("status") if session.last_result else None
-            msg = (
-                f"Cannot approve ticket '{ticket_id}': not at an approval gate"
-                f" (last_result status={actual!r})."
-                " Expected one of: plan_pending_approval, review_pending_approval."
-                " Use 'requeue' if you want to re-run the current stage."
-            )
-            raise ApproveGateError(msg)
-
-        if task.stage == stages[-1]:
-            msg = (
-                f"Cannot approve ticket '{ticket_id}':"
-                f" already at terminal stage {task.stage!r}."
-            )
-            raise ApproveGateError(msg)
-
+    if task.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF:
         from_stage = task.stage.value
-        awaiting_signoff = False
-        # Why REVIEW-scoped: signoff is the ship checkpoint (RFC 0007's "gate a
-        # ticket before it ships"); it never reroutes the earlier
-        # plan_pending_approval->IMPL advance, only the review->FINALIZE one.
-        if task.stage == Stage.REVIEW and _should_gate_for_signoff(
-            task, {client_name: client_cfg}
-        ):
-            transition_task_status(
-                task,
-                QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
-                disposition=SIGNOFF_GATE_DISPOSITION,
-            )
-            awaiting_signoff = True
-        else:
-            _advance_task_pointer(task, stages)
+        _clear_signoff_gate(task, stages)
         to_stage = task.stage.value
-
         save_dev_queue(store)
+        return {
+            "from_stage": from_stage,
+            "to_stage": to_stage,
+            "ticket_id": ticket_id,
+            "client": client_name,
+            "awaiting_signoff": False,
+        }
+
+    state = load_state()
+    session = None
+    if task.session_id is not None:
+        session = state.find_by_name_or_id(task.session_id)
+
+    if session is None:
+        msg = (
+            f"Cannot approve ticket '{ticket_id}': session not found"
+            f" (session_id={task.session_id!r}). The session may have been"
+            " cleaned up. Use 'requeue' to re-run the stage."
+        )
+        raise ApproveGateError(msg)
+
+    if (
+        session.last_result is None
+        or session.last_result.get("status") not in SCOPE_GATED_APPROVAL_STATUSES
+    ):
+        actual = session.last_result.get("status") if session.last_result else None
+        msg = (
+            f"Cannot approve ticket '{ticket_id}': not at an approval gate"
+            f" (last_result status={actual!r})."
+            " Expected one of: plan_pending_approval, review_pending_approval."
+            " Use 'requeue' if you want to re-run the current stage."
+        )
+        raise ApproveGateError(msg)
+
+    if task.stage == stages[-1]:
+        msg = (
+            f"Cannot approve ticket '{ticket_id}':"
+            f" already at terminal stage {task.stage!r}."
+        )
+        raise ApproveGateError(msg)
+
+    from_stage = task.stage.value
+    awaiting_signoff = False
+    # Why REVIEW-scoped: signoff is the ship checkpoint (RFC 0007's "gate a
+    # ticket before it ships"); it never reroutes the earlier
+    # plan_pending_approval->IMPL advance, only the review->FINALIZE one.
+    if task.stage == Stage.REVIEW and _should_gate_for_signoff(
+        task, {client_name: client_cfg}
+    ):
+        transition_task_status(
+            task,
+            QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+            disposition=SIGNOFF_GATE_DISPOSITION,
+        )
+        awaiting_signoff = True
+    else:
+        _advance_task_pointer(task, stages)
+    to_stage = task.stage.value
+
+    save_dev_queue(store)
 
     return {
         "from_stage": from_stage,
