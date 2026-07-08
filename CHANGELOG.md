@@ -6,17 +6,65 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.17.0] — 2026-07-08
+
+Finalize-reliability wave: eliminates the `needs_salvage` false-block class
+that made successful ships look like failures, closes the primary-checkout
+leak and the push-auth silent-death in finalize, and adds per-stage timeout
+axes — plus the accumulated recovery-gap wave.
+
+### Added
+
+- **`headless_timeout_by_stage` resolution axis** (#1020): per-stage
+  wall-clock budgets (plan 3600 / impl 4200 / review 7200 / finalize 5400s)
+  so long review/finalize passes are not reaped on the flat global budget.
+- **`cw dev-queue requeue --from-cancelled`** (#1018): escape hatch to
+  recover a CANCELLED ticket (forward/same-stage only).
+
 ### Fixed
 
+- **Finalize `needs_salvage` false-block / salvage deadlock** (#1054):
+  `idle.py`'s stage-blind `SALVAGE_GIT` classification raced ahead of the
+  finalize-aware `stalled.py` path (900s vs 5400s), parking FINALIZE-stage
+  sessions `needs_salvage` and tripping the `park_marker_blocks_salvage`
+  deadlock — so a session whose PR had already merged showed
+  `blocked_on_user` despite shipping. Idle now defers FINALIZE-stage
+  git-branch sessions and consults merged-PR ground truth; the same
+  merge-aware check is applied to `rescue_finalize_blocked_sessions`, with
+  cross-client `(client, ticket_id)` scoping throughout.
+- **Finalize leaked branches into the primary checkout** (#1047): finalize
+  Steps 4c / 4d.1 now apply the #766 dispatch-worktree detection (omit
+  `isolation: "worktree"` when already in a cw worktree), preventing the
+  `git checkout` leak that freshness-gated the whole client.
+- **Stale `.cw/context.json` on requeue** (#1046): dispatch invalidates the
+  per-worktree context before re-spawn so a requeue's newly-added operator
+  resolutions reach the planner (LocalExecutor lane excluded).
+- **Push-auth silent death in finalize** (#1049): a git-push auth failure
+  (locked SSH key / expired credentials) now emits a `push_auth_failed`
+  `blocked_on_user` blocker with a recovery hint instead of dying silently.
+- **Rescued-finalize carried context** (#1050): the computed scope tier and
+  `plan_source` are now written back onto the task after each stage, so a
+  respawned finalize synthesizes a full PR body — and the large-tier idle
+  budget (3600s) is finally fed instead of always falling back to 900s.
+- **Concierge false-park recovery backoff** (#1030): dead-on-arrival
+  detection plus backoff so an instant-death retry loop recovers
+  mechanically without operator action.
+- **Events inbox prune/rotate** (#856): `cw event prune` plus a doctor
+  inbox-size check bound unbounded inbox growth.
 - **`cw orchestrate status` recent-events flood + stale `last_stage`
   placeholder** (#854): the human renderer now aggregates consecutive
-  `dispatch.tick` events in the "Recent events:" section (raw count line
-  unaffected) via a relocated, generalized `_aggregate_feed` helper shared
-  with `cw board`; a new `--raw-events` flag restores the unaggregated
-  stream. The stale "last_stage=(unknown — global auto-dev.md not yet
-  emitting stage events)" placeholder is replaced with a neutral,
-  producer-agnostic "last_stage=(none — no stage events recorded for this
-  session)".
+  `dispatch.tick` events in the "Recent events:" section (a new
+  `--raw-events` flag restores the unaggregated stream), and the stale
+  `last_stage` placeholder is replaced with a neutral, producer-agnostic
+  message.
+- **Stage-mismatch sentinel refusal** (#1031): the idle/local/signal_stop
+  paths refuse a sentinel whose `stage_reached` disagrees with `task.stage`.
+- **Adopt-assumption fast path** (#1032): self-answerable plan ambiguities
+  are adopted inline instead of parking for the operator.
+
+### Removed
+
+- **Dead local task-queue (`cw queue`) and stale ROADMAP** (#1051).
 
 ## [1.16.0] — 2026-07-07
 
