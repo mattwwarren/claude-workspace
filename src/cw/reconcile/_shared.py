@@ -451,6 +451,8 @@ def resolve_headless_budget(
 
     Precedence (highest first):
     1. task.headless_timeout_override — explicit per-ticket escape hatch.
+    1.5. config.headless_timeout_by_stage[task.stage] — per-stage default,
+         when task is not None and task.stage has an entry in the map.
     2. session.last_result scope.tier — look up per-tier default in config.
     2.5. task.scope_hint — fallback when last_result tier is unavailable (#314).
     3. HEADLESS_TIMEOUT_SECONDS — global fallback (pre-Stage-1 or unknown tier).
@@ -461,6 +463,9 @@ def resolve_headless_budget(
     """
     if task is not None and task.headless_timeout_override is not None:
         return task.headless_timeout_override
+    stage = task.stage if task is not None else None
+    if task is not None and stage in config.headless_timeout_by_stage:
+        return config.headless_timeout_by_stage[stage]
     last_result = session.last_result if session is not None else None
     if last_result is not None:
         tier: str | None = None

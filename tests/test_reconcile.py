@@ -2177,7 +2177,9 @@ def test_stalled_retry_cap_parks_when_at_cap(
         lambda _tid, **_kw: (False, True),
     )
 
-    reverted = revert_stalled_headless_sessions(state, now=now, config=_auto_config())
+    reverted = revert_stalled_headless_sessions(
+        state, now=now, config=_auto_config(headless_timeout_by_stage={})
+    )
 
     assert "at-cap" not in reverted
 
@@ -3442,7 +3444,10 @@ def test_resolve_headless_budget_scope_hint_large_no_session(
     tmp_config_dir: Path,
 ) -> None:
     """Step 2.5 (#314): scope_hint='large' + session=None → large-tier budget."""
-    config = _auto_config(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    config = _auto_config(
+        headless_timeout_by_tier={"small": 1800, "large": 5400},
+        headless_timeout_by_stage={},
+    )
     task = TicketTask(ticket_id="GEN-314", client="client-a", scope_hint="large")
     budget = resolve_headless_budget(task, None, config)
     assert budget == 5400
@@ -3453,7 +3458,10 @@ def test_resolve_headless_budget_scope_hint_small_no_session(
     tmp_config_dir: Path,
 ) -> None:
     """Step 2.5 (#314): scope_hint='small' + session=None → small-tier budget."""
-    config = _auto_config(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    config = _auto_config(
+        headless_timeout_by_tier={"small": 1800, "large": 5400},
+        headless_timeout_by_stage={},
+    )
     task = TicketTask(ticket_id="GEN-314", client="client-a", scope_hint="small")
     budget = resolve_headless_budget(task, None, config)
     assert budget == 1800
@@ -3488,7 +3496,10 @@ def test_resolve_headless_budget_last_result_beats_scope_hint(
     tmp_config_dir: Path,
 ) -> None:
     """Step 2 (last_result tier) beats step 2.5 (scope_hint) when tier is present."""
-    config = _auto_config(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    config = _auto_config(
+        headless_timeout_by_tier={"small": 1800, "large": 5400},
+        headless_timeout_by_stage={},
+    )
     task = TicketTask(ticket_id="GEN-314", client="client-a", scope_hint="large")
     sess = Session(
         name="client-a/auto-dev/GEN-314",
@@ -3505,7 +3516,10 @@ def test_resolve_headless_budget_non_dict_last_result_falls_to_scope_hint(
     tmp_config_dir: Path,
 ) -> None:
     """Non-dict last_result → AttributeError caught → step 2.5 scope_hint fires."""
-    config = _auto_config(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    config = _auto_config(
+        headless_timeout_by_tier={"small": 1800, "large": 5400},
+        headless_timeout_by_stage={},
+    )
     task = TicketTask(ticket_id="GEN-314", client="client-a", scope_hint="large")
     sess = Session(
         name="client-a/auto-dev/GEN-314",
@@ -3559,7 +3573,7 @@ def test_resolve_headless_budget_per_stage_hit_beats_scope_hint(
 def test_resolve_headless_budget_per_stage_hit_beats_global(
     tmp_config_dir: Path,
 ) -> None:
-    """Per-stage IMPL default (4200) beats the global HEADLESS_TIMEOUT_SECONDS fallback."""
+    """Per-stage IMPL default (4200) beats the global HEADLESS_TIMEOUT_SECONDS."""
     config = _auto_config(headless_timeout_by_stage={Stage.IMPL: 4200})
     task = TicketTask(ticket_id="GEN-1020", client="client-a", stage=Stage.IMPL)
     budget = resolve_headless_budget(task, None, config)
@@ -3584,7 +3598,7 @@ def test_resolve_headless_budget_per_stage_override_still_beats_stage(
 def test_resolve_headless_budget_stage_absent_falls_through_to_tier(
     tmp_config_dir: Path,
 ) -> None:
-    """Stage absent from the per-stage map (HARDEN) falls through to the tier default."""
+    """Stage absent from the per-stage map (HARDEN) falls through to tier."""
     config = _auto_config(
         headless_timeout_by_tier={"small": 1800, "large": 5400},
         headless_timeout_by_stage={Stage.PLAN: 3600},
@@ -3651,7 +3665,10 @@ def test_revert_stalled_uses_per_session_budget(
 
     sess = _mk_headless_daemon_session("per-sess-small", worktree, started_at)
     sess.last_result = {"scope": {"tier": "small"}}
-    config = _auto_config(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    config = _auto_config(
+        headless_timeout_by_tier={"small": 1800, "large": 5400},
+        headless_timeout_by_stage={},
+    )
 
     # Verify resolve_headless_budget returns 1800 for this session
     budget = resolve_headless_budget(None, sess, config)
@@ -13757,7 +13774,7 @@ def test_stalled_cap_park_candidate_stamps_disposition(
     candidates = _detect_stalled_candidates(
         state,
         now=now,
-        config=_auto_config(),
+        config=_auto_config(headless_timeout_by_stage={}),
         task_by_ticket={"cap-disp-1": task},
     )
 
