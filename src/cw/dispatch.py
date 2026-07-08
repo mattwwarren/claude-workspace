@@ -62,8 +62,9 @@ from cw.exceptions import (
     VersionDriftError,
     WorktreeError,
 )
-from cw.executor import resolve_executor
+from cw.executor import resolve_executor, resolve_executor_config
 from cw.models import (
+    LOCAL_BACKEND,
     OCCUPIED_LANE_STATUSES,
     ClientConcurrencyOverride,
     ClientConfig,
@@ -98,6 +99,7 @@ from cw.worktree import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
     from cw.models import (
         ClientConfig,
@@ -614,6 +616,39 @@ def _emit_stale_skip(
     )
 
 
+def _invalidate_stale_context_json(
+    task: TicketTask, client: ClientConfig, worktree_path: Path
+) -> None:
+    """Delete a stale ``.cw/context.json`` before spawning a re-spawned task.
+
+    Requeue idempotency guard (#1046): a re-spawned task (``attempts > 1``,
+    covering true requeues as well as normal plan->impl->review stage
+    advances) may reuse a worktree that still carries a prior session's
+    materialized ``.cw/context.json``. Left in place, a worker can silently
+    replan against stale ticket context and miss operator-folded
+    resolutions/comments (the #1030 incident). Delete it before spawn so the
+    new session always materializes fresh context.
+
+    Excluded for LocalExecutor: ``local_runner.build_task_message`` reads
+    ``.cw/context.json`` directly and degrades silently to an empty
+    ``## Ticket:`` header if it is missing (the #952 regression class).
+    """
+    if task.attempts <= 1:
+        return
+    if resolve_executor_config(task.stage, task, client).backend == LOCAL_BACKEND:
+        return
+    stale_context = worktree_path / ".cw" / "context.json"
+    if stale_context.exists():
+        _log.info(
+            "dispatch: invalidated stale .cw/context.json for"
+            " ticket_id=%s attempts=%d worktree_path=%s",
+            task.ticket_id,
+            task.attempts,
+            worktree_path,
+        )
+    stale_context.unlink(missing_ok=True)
+
+
 def _spawn_claimed_task(
     task: TicketTask,
     client: ClientConfig,
@@ -699,6 +734,8 @@ def _spawn_claimed_task(
         # normally catches this itself, but a mocked or buggy
         # implementation could still return the same path.
         check_not_main_checkout(worktree_path, client)
+
+        _invalidate_stale_context_json(task, client, worktree_path)
 
         executor = resolve_executor(task, client, native_daemon=resolved_native_daemon)
         session_id = executor.spawn(

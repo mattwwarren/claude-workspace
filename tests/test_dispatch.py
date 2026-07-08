@@ -7431,9 +7431,7 @@ class TestSpawnInvalidatesStaleContextJson:
         context_file.parent.mkdir(parents=True, exist_ok=True)
         context_file.write_text('{"sentinel": "stale"}')
 
-        add_ticket(
-            TicketTask(ticket_id="GEN-STALE", client="test-client", attempts=1)
-        )
+        add_ticket(TicketTask(ticket_id="GEN-STALE", client="test-client", attempts=1))
 
         daemon = FakeNativeDaemonClient()
         spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
@@ -7476,9 +7474,7 @@ class TestSpawnInvalidatesStaleContextJson:
         context_file.write_text('{"sentinel": "preserved"}')
 
         add_ticket(
-            TicketTask(
-                ticket_id="GEN-STALE-LOCAL", client="test-client", attempts=1
-            )
+            TicketTask(ticket_id="GEN-STALE-LOCAL", client="test-client", attempts=1)
         )
 
         daemon = FakeNativeDaemonClient()
