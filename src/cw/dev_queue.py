@@ -532,6 +532,18 @@ _APPROVABLE_STATUSES: frozenset[QueueItemStatus] = frozenset(
     [QueueItemStatus.BLOCKED_ON_USER, QueueItemStatus.AWAITING_OPERATOR_SIGNOFF]
 )
 
+# Statuses requeue_ticket's forward/same-stage path additionally accepts, but
+# ONLY when the caller explicitly opts in via from_cancelled=True (CLI:
+# --from-cancelled). Deliberately NOT folded into _APPROVABLE_STATUSES, which
+# is shared by _find_ticket's tie-break, approve_ticket, and the regress gate
+# in _apply_requeue_stage — widening that frozenset would silently change
+# behavior at all three. See GitHub #1018: `cw spawn close <sid>
+# --confirmed-dead` on a RUNNING row transitions it to CANCELLED (not
+# BLOCKED_ON_USER), leaving no CLI path back to PENDING.
+_REQUEUE_FROM_CANCELLED_STATUSES: frozenset[QueueItemStatus] = frozenset(
+    [QueueItemStatus.CANCELLED]
+)
+
 
 def move_ticket(ticket_id: str, client_name: str, to_lane: str) -> str:
     """Move a pending ticket to a different lane.
@@ -1014,12 +1026,30 @@ def _apply_requeue_stage(
     return False
 
 
+def _requeue_state_error_message(ticket_id: str, status: QueueItemStatus) -> str:
+    """Build the RequeueStateError message for the forward/same-stage gate.
+
+    Names the --from-cancelled escape hatch only when it would actually apply
+    (status is CANCELLED) so the message doesn't mislead callers hitting the
+    gate from PENDING/RUNNING/etc. See GitHub #1018.
+    """
+    base = (
+        f"Cannot requeue ticket '{ticket_id}':"
+        f" status is {status.value!r},"
+        " expected BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF"
+    )
+    if status in _REQUEUE_FROM_CANCELLED_STATUSES:
+        return base + " (or CANCELLED with --from-cancelled)."
+    return base + "."
+
+
 def requeue_ticket(
     ticket_id: str,
     client_name: str,
     stage_override: str | None = None,
     *,
     allow_regress: bool = False,
+    from_cancelled: bool = False,
 ) -> dict[str, str | bool | int]:
     """Requeue a BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF ticket, optionally
     at a specific stage.
@@ -1030,9 +1060,19 @@ def requeue_ticket(
     task); ``regress_attempts`` is the post-mutation attempt count (0 on the
     forward/same-stage path).
 
+    Args:
+        from_cancelled: when True, the forward/same-stage path also accepts a
+            CANCELLED row (CLI: --from-cancelled). Recovers a ticket stranded
+            by ``cw spawn close <sid> --confirmed-dead`` on a RUNNING row
+            (#1018). Does NOT widen the backward-regress gate: a CANCELLED
+            row combined with a backward stage_override still raises
+            RequeueStageError, since _apply_requeue_stage's regress check is
+            unchanged.
+
     Raises:
         RequeueStateError: if ticket is not BLOCKED_ON_USER or
-            AWAITING_OPERATOR_SIGNOFF (forward path).
+            AWAITING_OPERATOR_SIGNOFF (forward path), unless from_cancelled
+            is True and the ticket is CANCELLED.
         RequeueStageError: if stage_override would regress without allow_regress,
             is not in the client pipeline, regresses a non-blocked task, or if
             allow_regress is set with no backward stage_override.
@@ -1060,14 +1100,15 @@ def requeue_ticket(
         if not regressed:
             # Forward/same-stage path (including inert allow_regress forward
             # targets) requires the ticket to be at a BLOCKED_ON_USER or
-            # AWAITING_OPERATOR_SIGNOFF gate.
-            if task.status not in _APPROVABLE_STATUSES:
-                msg = (
-                    f"Cannot requeue ticket '{ticket_id}':"
-                    f" status is {task.status.value!r},"
-                    " expected BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF."
+            # AWAITING_OPERATOR_SIGNOFF gate, OR (opt-in) CANCELLED.
+            approvable = task.status in _APPROVABLE_STATUSES
+            cancelled_ok = (
+                from_cancelled and task.status in _REQUEUE_FROM_CANCELLED_STATUSES
+            )
+            if not (approvable or cancelled_ok):
+                raise RequeueStateError(
+                    _requeue_state_error_message(ticket_id, task.status)
                 )
-                raise RequeueStateError(msg)
             transition_task_status(task, QueueItemStatus.PENDING)
             task.session_id = None
             task.stage_base_ref = None
