@@ -163,6 +163,121 @@ def _classify_idle_threshold(
     )
 
 
+def _detect_idle_confirmed_candidate(
+    session: Session,
+    *,
+    task: TicketTask | None,
+    ticket_id: str | None,
+    config: OrchestratorConfig,
+    elapsed: float,
+    merged_ticket_ids: frozenset[str],
+) -> ReapCandidate | None:
+    """Classify a session that already passed the liveness check.
+
+    Split out of ``_detect_idle_candidate_for_session`` to keep each
+    function's return-statement count under the PLR0911 limit. See GitHub
+    #1054.
+    """
+    # Sentinel salvage: evidence-based completion, not deferred by counter.
+    salvage = _shared.salvage_terminal_result(session)
+    if salvage is not None:
+        result, claude_session_id = salvage
+        return ReapCandidate(
+            session_id=session.id,
+            proposed_action=ProposedAction.SALVAGE_COMPLETION,
+            ticket_id=ticket_id,
+            salvage_result=result,
+            salvage_csid=claude_session_id,
+            elapsed_seconds=elapsed,
+            lane=task.lane if task else DEFAULT_LANE,
+            client=session.client,
+        )
+    # Confirm-before-reap: accumulate consecutive failed observations.
+    new_count = session.idle_observation_count + 1
+    if new_count < config.idle_confirm_observations:
+        return ReapCandidate(
+            session_id=session.id,
+            proposed_action=ProposedAction.INCREMENT_COUNTER,
+            ticket_id=ticket_id,
+            new_observation_count=new_count,
+            lane=task.lane if task else DEFAULT_LANE,
+            client=session.client,
+        )
+    # Threshold reached: classify final disposition.
+    return _classify_idle_threshold(
+        session,
+        task=task,
+        ticket_id=ticket_id,
+        config=config,
+        elapsed=elapsed,
+        new_count=new_count,
+        merged_ticket_ids=merged_ticket_ids,
+    )
+
+
+def _detect_idle_candidate_for_session(
+    session: Session,
+    *,
+    now: datetime,
+    config: OrchestratorConfig,
+    task: TicketTask | None,
+    ticket_id: str | None,
+    merged_ticket_ids: frozenset[str],
+) -> ReapCandidate | None:
+    """Classify a single live DAEMON session for idle disposition, or None.
+
+    Extracted from ``_detect_idle_candidates`` (unchanged logic, just moved)
+    to keep that function's branch count under the PLR0912 limit after
+    adding the None-skip for FINALIZE-stage sessions. See GitHub #1054.
+    """
+    elapsed = (now - session.started_at).total_seconds()
+    budget = resolve_idle_watchdog_budget(task, config)
+    # ROUTE_EMITTED_SENTINEL: fires before the full idle-budget check.
+    # An emitted sentinel is positive evidence the worker completed; the
+    # 300 s threshold (sentinel_unrouted_check_seconds) is shorter than
+    # the watchdog budget to route the task before a reap fires.
+    # Guard: last_result is None means signal_stop never ran — prevents
+    # double-routing. Exempt from signal_only (constructive, not a reap).
+    # See GitHub #578.
+    unrouted_check = config.sentinel_unrouted_check_seconds
+    if session.last_result is None and elapsed >= unrouted_check:
+        routed = _parse_any_sentinel_from_transcript(session)
+        if routed is not None:
+            _routed_result, _csid = routed
+            return ReapCandidate(
+                session_id=session.id,
+                proposed_action=ProposedAction.ROUTE_EMITTED_SENTINEL,
+                ticket_id=ticket_id,
+                routed_sentinel=_routed_result,
+                salvage_csid=_csid,
+                elapsed_seconds=elapsed,
+                lane=task.lane if task else DEFAULT_LANE,
+                client=session.client,
+            )
+    if elapsed < budget:
+        return None
+    # Liveness check: if active, check for recovery of observation counter.
+    if _transcript_recently_active(session, now) or _awaiting_subagent(session, now):
+        if session.idle_observation_count > 0:
+            return ReapCandidate(
+                session_id=session.id,
+                proposed_action=ProposedAction.RECOVER_COUNTER,
+                ticket_id=ticket_id,
+                new_observation_count=0,
+                lane=task.lane if task else DEFAULT_LANE,
+                client=session.client,
+            )
+        return None
+    return _detect_idle_confirmed_candidate(
+        session,
+        task=task,
+        ticket_id=ticket_id,
+        config=config,
+        elapsed=elapsed,
+        merged_ticket_ids=merged_ticket_ids,
+    )
+
+
 def _detect_idle_candidates(
     state: CwState,
     *,
@@ -189,92 +304,14 @@ def _detect_idle_candidates(
             continue
         if session.surface_ref is None or session.surface_ref not in native_live:
             continue
-        elapsed = (now - session.started_at).total_seconds()
         ticket_id = ticket_id_for_session(session.name)
         task = task_by_ticket.get(ticket_id) if ticket_id else None
-        budget = resolve_idle_watchdog_budget(task, config)
-        # ROUTE_EMITTED_SENTINEL: fires before the full idle-budget check.
-        # An emitted sentinel is positive evidence the worker completed; the
-        # 300 s threshold (sentinel_unrouted_check_seconds) is shorter than
-        # the watchdog budget to route the task before a reap fires.
-        # Guard: last_result is None means signal_stop never ran — prevents
-        # double-routing. Exempt from signal_only (constructive, not a reap).
-        # See GitHub #578.
-        unrouted_check = config.sentinel_unrouted_check_seconds
-        if session.last_result is None and elapsed >= unrouted_check:
-            routed = _parse_any_sentinel_from_transcript(session)
-            if routed is not None:
-                _routed_result, _csid = routed
-                candidates.append(
-                    ReapCandidate(
-                        session_id=session.id,
-                        proposed_action=ProposedAction.ROUTE_EMITTED_SENTINEL,
-                        ticket_id=ticket_id,
-                        routed_sentinel=_routed_result,
-                        salvage_csid=_csid,
-                        elapsed_seconds=elapsed,
-                        lane=task.lane if task else DEFAULT_LANE,
-                        client=session.client,
-                    )
-                )
-                continue
-        if elapsed < budget:
-            continue
-        # Liveness check: if active, check for recovery of observation counter.
-        if _transcript_recently_active(session, now) or _awaiting_subagent(
-            session, now
-        ):
-            if session.idle_observation_count > 0:
-                candidates.append(
-                    ReapCandidate(
-                        session_id=session.id,
-                        proposed_action=ProposedAction.RECOVER_COUNTER,
-                        ticket_id=ticket_id,
-                        new_observation_count=0,
-                        lane=task.lane if task else DEFAULT_LANE,
-                        client=session.client,
-                    )
-                )
-            continue
-        # Sentinel salvage: evidence-based completion, not deferred by counter.
-        salvage = _shared.salvage_terminal_result(session)
-        if salvage is not None:
-            result, claude_session_id = salvage
-            candidates.append(
-                ReapCandidate(
-                    session_id=session.id,
-                    proposed_action=ProposedAction.SALVAGE_COMPLETION,
-                    ticket_id=ticket_id,
-                    salvage_result=result,
-                    salvage_csid=claude_session_id,
-                    elapsed_seconds=elapsed,
-                    lane=task.lane if task else DEFAULT_LANE,
-                    client=session.client,
-                )
-            )
-            continue
-        # Confirm-before-reap: accumulate consecutive failed observations.
-        new_count = session.idle_observation_count + 1
-        if new_count < config.idle_confirm_observations:
-            candidates.append(
-                ReapCandidate(
-                    session_id=session.id,
-                    proposed_action=ProposedAction.INCREMENT_COUNTER,
-                    ticket_id=ticket_id,
-                    new_observation_count=new_count,
-                    lane=task.lane if task else DEFAULT_LANE,
-                    client=session.client,
-                )
-            )
-            continue
-        # Threshold reached: classify final disposition.
-        candidate = _classify_idle_threshold(
+        candidate = _detect_idle_candidate_for_session(
             session,
+            now=now,
+            config=config,
             task=task,
             ticket_id=ticket_id,
-            config=config,
-            elapsed=elapsed,
-            new_count=new_count,
             merged_ticket_ids=merged_ticket_ids,
         )
         if candidate is not None:

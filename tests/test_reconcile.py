@@ -5397,9 +5397,11 @@ def test_flag_silently_idle_daemon_sessions_unchanged_no_merged_param(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """flag_silently_idle_daemon_sessions preserves SALVAGE_GIT for a non-merged,
-    non-FINALIZE git session -- it does not thread merged_ticket_ids, so the
-    classify default (empty frozenset) must leave existing behavior unchanged (#1054)."""
+    """Non-merged, non-FINALIZE git session -> SALVAGE_GIT preserved (#1054).
+
+    flag_silently_idle_daemon_sessions does not thread merged_ticket_ids, so
+    the classify default (empty frozenset) must leave behavior unchanged.
+    """
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
     worktree = tmp_path / "wt-unchanged-salvage-git"
@@ -5437,9 +5439,7 @@ def test_flag_silently_idle_daemon_sessions_unchanged_no_merged_param(
         "cw.reconcile._deps.checked_out_branch",
         lambda _p: "auto-dev/unchanged-sgit-branch",
     )
-    monkeypatch.setattr(
-        "cw.reconcile.idle._detect_post_review_clean", lambda _s: False
-    )
+    monkeypatch.setattr("cw.reconcile.idle._detect_post_review_clean", lambda _s: False)
     monkeypatch.setattr(
         "cw.reconcile._shared.worktree_dirty_by_path", lambda _c, _p: False
     )
@@ -6939,7 +6939,7 @@ def test_classify_idle_threshold_finalize_stage_returns_none(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """FINALIZE-stage session w/ worktree+branch -> None; defer to stalled.py (#1054)."""
+    """FINALIZE-stage worktree+branch session -> None; defer to stalled.py (#1054)."""
     from cw.reconcile.idle import _classify_idle_threshold
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -6987,7 +6987,10 @@ def test_classify_idle_threshold_merged_routes_to_revert_task(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Merged ticket, worktree+branch, any stage -> REVERT_TASK not SALVAGE_GIT (#1054)."""
+    """Merged ticket, worktree+branch, any stage -> REVERT_TASK not SALVAGE_GIT.
+
+    See GitHub #1054.
+    """
     from cw.reconcile import ProposedAction
     from cw.reconcile.idle import _classify_idle_threshold
 
@@ -7038,7 +7041,10 @@ def test_classify_idle_threshold_non_finalize_worktree_still_salvage_git(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Non-FINALIZE worktree+branch, not merged -> still SALVAGE_GIT (regression, #1054)."""
+    """Non-FINALIZE worktree+branch, not merged -> still SALVAGE_GIT.
+
+    Regression check; see GitHub #1054.
+    """
     from cw.reconcile import ProposedAction
     from cw.reconcile.idle import _classify_idle_threshold
 
@@ -12243,7 +12249,10 @@ def test_detect_idle_candidates_finalize_yields_zero_candidates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """FINALIZE-stage session at threshold -> zero candidates; defer to stalled.py (#1054)."""
+    """FINALIZE-stage session at threshold -> zero candidates.
+
+    Defers to stalled.py; see GitHub #1054.
+    """
     from cw.reconcile import _detect_idle_candidates
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
