@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import threading
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -15,18 +17,20 @@ from freezegun import freeze_time
 
 from cw.cli import main
 from cw.events import (
+    PruneResult,
     advance_cursor,
     init_cursor_at_end,
+    prune_events,
     read_events,
     tail_events_follow,
     wait_for_event,
 )
 from cw.events import record_event as events_record_event
+from cw.exceptions import CwError
 from cw.models import OrchestratorEvent, OrchestratorEventType
 
 if TYPE_CHECKING:
     from collections.abc import Generator
-    from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
@@ -1859,3 +1863,262 @@ def test_cli_event_tail_client_comma_only_no_events(tmp_events_dir: Path) -> Non
     assert result.exit_code == 0, result.output
     # Comma-only produces empty frozenset normalized to None — no filter applied
     assert "aaa" in result.output
+
+
+# ---------------------------------------------------------------------------
+# prune_events (issue #856)
+# ---------------------------------------------------------------------------
+
+
+def test_prune_events_keep_n_archives_by_default(tmp_events_dir: Path) -> None:
+    """prune_events(keep=N) archives the oldest events beyond N by default."""
+    for i in range(5):
+        events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i})
+
+    result = prune_events(keep=2)
+
+    assert result.archived_count == 3
+    assert result.deleted_count == 0
+    assert result.kept_count == 2
+    assert result.archive_path is not None
+    archive_lines = [
+        ln for ln in Path(result.archive_path).read_text().splitlines() if ln.strip()
+    ]
+    assert len(archive_lines) == 3
+
+
+def test_prune_events_before_ts_archives_by_default(tmp_events_dir: Path) -> None:
+    """prune_events(before=ts) archives events older than ts by default."""
+    base = datetime(2026, 7, 1, 12, 0, 0, tzinfo=UTC)
+    with freeze_time(base):
+        events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+    with freeze_time(base + timedelta(days=1)):
+        ev_new = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 2})
+
+    cutoff = base + timedelta(hours=12)
+    result = prune_events(before=cutoff)
+
+    assert result.archived_count == 1
+    assert result.kept_count == 1
+    assert result.archive_path is not None
+    remaining = read_events()
+    assert [e.id for e in remaining] == [ev_new.id]
+
+
+def test_prune_events_delete_flag_discards_without_archiving(
+    tmp_events_dir: Path,
+) -> None:
+    """archive=False discards pruned events without writing an archive file."""
+    for i in range(4):
+        events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i})
+
+    result = prune_events(keep=1, archive=False)
+
+    assert result.archived_count == 0
+    assert result.deleted_count == 3
+    assert result.kept_count == 1
+    assert result.archive_path is None
+    assert not list(tmp_events_dir.glob("inbox.*.jsonl"))
+
+
+def test_prune_events_returns_counts(tmp_events_dir: Path) -> None:
+    """prune_events returns a PruneResult with archived/deleted/archive_path/kept."""
+    for i in range(3):
+        events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i})
+
+    result = prune_events(keep=1)
+
+    assert isinstance(result, PruneResult)
+    assert result.archived_count == 2
+    assert result.deleted_count == 0
+    assert result.kept_count == 1
+    assert result.archive_path is not None
+
+
+def test_prune_events_mutually_exclusive_raises(tmp_events_dir: Path) -> None:
+    """Passing both before and keep raises CwError."""
+    with pytest.raises(CwError):
+        prune_events(before=datetime.now(UTC), keep=1)
+
+
+def test_prune_events_neither_given_raises(tmp_events_dir: Path) -> None:
+    """Passing neither before nor keep raises CwError."""
+    with pytest.raises(CwError):
+        prune_events()
+
+
+def test_prune_events_holds_inbox_lock(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """prune_events acquires the inbox lock exactly once (no release+reacquire)."""
+    events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+    events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 2})
+
+    from cw import events as events_module
+
+    original_lock = events_module._inbox_lock
+    call_count = 0
+
+    @contextlib.contextmanager
+    def counting_lock() -> Generator[None]:
+        nonlocal call_count
+        call_count += 1
+        with original_lock():
+            yield
+
+    monkeypatch.setattr(events_module, "_inbox_lock", counting_lock)
+
+    result = prune_events(keep=1)
+
+    assert call_count == 1
+    assert result.kept_count == 1
+
+
+def test_prune_events_kept_events_remain_readable(tmp_events_dir: Path) -> None:
+    """Events remaining after a prune are still readable via read_events."""
+    events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+    ev2 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 2})
+    ev3 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 3})
+
+    prune_events(keep=2)
+
+    remaining = read_events()
+    assert [e.id for e in remaining] == [ev2.id, ev3.id]
+
+
+def test_prune_events_archive_file_appends_across_multiple_prunes(
+    tmp_events_dir: Path,
+) -> None:
+    """Multiple prune_events calls on the same day append to the same archive file."""
+    with freeze_time("2026-07-07 12:00:00", tz_offset=0):
+        for i in range(3):
+            events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i})
+        result1 = prune_events(keep=1)
+        assert result1.archived_count == 2
+        archive_path = result1.archive_path
+        assert archive_path is not None
+
+        for i in range(3, 5):
+            events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i})
+        result2 = prune_events(keep=1)
+        assert result2.archived_count == 2
+        assert result2.archive_path == archive_path
+
+    lines = [ln for ln in Path(archive_path).read_text().splitlines() if ln.strip()]
+    assert len(lines) == 4
+
+
+def test_prune_events_keep_zero_archives_all(tmp_events_dir: Path) -> None:
+    """keep=0 archives every event in the inbox."""
+    for i in range(3):
+        events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i})
+
+    result = prune_events(keep=0)
+
+    assert result.archived_count == 3
+    assert result.kept_count == 0
+    remaining = read_events()
+    assert remaining == []
+
+
+def test_prune_events_empty_inbox_returns_zero_counts(tmp_events_dir: Path) -> None:
+    """prune_events on an empty/absent inbox returns all-zero counts."""
+    result = prune_events(keep=5)
+
+    assert result.archived_count == 0
+    assert result.deleted_count == 0
+    assert result.kept_count == 0
+    assert result.archive_path is None
+
+
+# ---------------------------------------------------------------------------
+# CLI: cw event prune (issue #856)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_event_prune_keep_basic(tmp_events_dir: Path) -> None:
+    """cw event prune --keep N truncates the inbox to the newest N events."""
+    for i in range(4):
+        events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i})
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "prune", "--keep", "1"])
+    assert result.exit_code == 0, result.output
+    remaining = read_events()
+    assert len(remaining) == 1
+
+
+def test_cli_event_prune_before_basic(tmp_events_dir: Path) -> None:
+    """cw event prune --before <iso> removes events older than the cutoff."""
+    base = datetime(2026, 7, 1, 12, 0, 0, tzinfo=UTC)
+    with freeze_time(base):
+        events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+    with freeze_time(base + timedelta(days=1)):
+        events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 2})
+
+    cutoff = (base + timedelta(hours=12)).isoformat()
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "prune", "--before", cutoff])
+    assert result.exit_code == 0, result.output
+    remaining = read_events()
+    assert len(remaining) == 1
+
+
+def test_cli_event_prune_both_flags_errors(tmp_events_dir: Path) -> None:
+    """--before and --keep together is a CwError."""
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["event", "prune", "--keep", "1", "--before", "2026-01-01T00:00:00"]
+    )
+    assert result.exit_code != 0
+
+
+def test_cli_event_prune_neither_flag_errors(tmp_events_dir: Path) -> None:
+    """Neither --before nor --keep is a CwError."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "prune"])
+    assert result.exit_code != 0
+
+
+def test_cli_event_prune_keep_json_output(tmp_events_dir: Path) -> None:
+    """--json emits exactly the PruneResult schema."""
+    for i in range(3):
+        events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i})
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "prune", "--keep", "1", "--json"])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output.strip())
+    assert set(data.keys()) == {
+        "archived_count",
+        "deleted_count",
+        "archive_path",
+        "kept_count",
+    }
+    assert data["archived_count"] == 2
+    assert data["kept_count"] == 1
+
+
+def test_cli_event_prune_delete_flag_json_archive_path_null(
+    tmp_events_dir: Path,
+) -> None:
+    """--delete --json reports archive_path: null and populates deleted_count."""
+    for i in range(3):
+        events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i})
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["event", "prune", "--keep", "1", "--delete", "--json"]
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output.strip())
+    assert data["archive_path"] is None
+    assert data["deleted_count"] == 2
+    assert data["archived_count"] == 0
+
+
+def test_cli_event_prune_invalid_keep_negative_errors(tmp_events_dir: Path) -> None:
+    """A negative --keep value is rejected."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "prune", "--keep", "-1"])
+    assert result.exit_code != 0

@@ -4969,3 +4969,81 @@ class TestWedgeActiveNoDaemonEntry:
             ticket_id="new-sess-2",
             origin=SessionOrigin.DAEMON,
         )
+
+
+# ---------------------------------------------------------------------------
+# TestCheckInboxSize (issue #856)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckInboxSize:
+    """Tests for _check_inbox_size — warns when events/inbox.jsonl grows large."""
+
+    def test_inbox_absent_ok(self, tmp_events_dir: Path) -> None:
+        """No inbox file → ok=True, nothing to warn about."""
+        from cw.doctor import _check_inbox_size
+
+        result = _check_inbox_size()
+        assert result.ok is True
+
+    def test_inbox_size_under_threshold_ok(
+        self, tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Inbox present but under both thresholds → ok=True."""
+        from cw.doctor import _check_inbox_size
+        from cw.models import OrchestratorConfig
+
+        (tmp_events_dir / "inbox.jsonl").write_text('{"a": 1}\n')
+        monkeypatch.setattr(
+            "cw.doctor.load_orchestrator_config",
+            lambda: OrchestratorConfig(
+                inbox_size_warn_bytes=1_000_000, inbox_line_count_warn=1_000
+            ),
+        )
+        result = _check_inbox_size()
+        assert result.ok is True
+
+    def test_inbox_size_over_threshold_warns(
+        self, tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Byte size over threshold → ok=False, detail names it and suggests prune."""
+        from cw.doctor import _check_inbox_size
+        from cw.models import OrchestratorConfig
+
+        (tmp_events_dir / "inbox.jsonl").write_text('{"a": 1}\n' * 5)
+        monkeypatch.setattr(
+            "cw.doctor.load_orchestrator_config",
+            lambda: OrchestratorConfig(
+                inbox_size_warn_bytes=1, inbox_line_count_warn=1_000
+            ),
+        )
+        result = _check_inbox_size()
+        assert result.ok is False
+        assert "cw event prune" in result.detail
+
+    def test_inbox_line_count_over_threshold_warns(
+        self, tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Line count over threshold → ok=False, detail names it and suggests prune."""
+        from cw.doctor import _check_inbox_size
+        from cw.models import OrchestratorConfig
+
+        (tmp_events_dir / "inbox.jsonl").write_text('{"a": 1}\n' * 5)
+        monkeypatch.setattr(
+            "cw.doctor.load_orchestrator_config",
+            lambda: OrchestratorConfig(
+                inbox_size_warn_bytes=1_000_000, inbox_line_count_warn=2
+            ),
+        )
+        result = _check_inbox_size()
+        assert result.ok is False
+        assert "cw event prune" in result.detail
+
+    def test_inbox_check_registered_in_run_doctor(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """run_doctor() includes the inbox-size check."""
+        _stub_claude_version_ok(monkeypatch)
+        report = run_doctor()
+        names = {c.name for c in report.checks}
+        assert "inbox-size" in names
