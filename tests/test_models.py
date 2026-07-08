@@ -898,6 +898,16 @@ class TestConsecutiveSkipLatches:
         assert session.consecutive_salvage_skips == 0
 
 
+class TestInboxPruneThresholds:
+    """Issue #856: OrchestratorConfig defaults for the inbox-size doctor check."""
+
+    def test_orchestrator_config_default_inbox_size_warn_bytes(self) -> None:
+        assert OrchestratorConfig().inbox_size_warn_bytes == 5_000_000
+
+    def test_orchestrator_config_default_inbox_line_count_warn(self) -> None:
+        assert OrchestratorConfig().inbox_line_count_warn == 15_000
+
+
 class TestOperatorChannelForward:
     """RFC 0008 W3 (#1002): operator-attention forward-set config surface."""
 

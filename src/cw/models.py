@@ -702,6 +702,11 @@ class OrchestratorConfig(BaseModel):
     # emitted exactly once (same latch semantics as
     # freshness_block_attention_threshold above). Closes #974.
     salvage_skip_attention_threshold: int = 5
+    # `cw doctor` warns when events/inbox.jsonl exceeds either threshold,
+    # suggesting `cw event prune`. Read-only: doctor never mutates the inbox
+    # itself. See GitHub #856.
+    inbox_size_warn_bytes: int = 5_000_000
+    inbox_line_count_warn: int = 15_000
     # Gating policy for destructive reap actions (stop daemon, revert task to
     # PENDING, remove worktree). Default ``signal_only`` routes stalled/phantom
     # sessions to BLOCKED_ON_USER for operator review; ``auto`` restores the
