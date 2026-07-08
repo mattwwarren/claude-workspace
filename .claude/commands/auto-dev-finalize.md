@@ -212,12 +212,14 @@ collision — running the entire ship against the **primary checkout**.
   - **Recommendation**: PROCEED | EXIT_FOR_HUMAN_REVIEW
   ```
 
-**Push-auth-failure classifier (#1049):** Immediately after the subagent returns — before the verify-script gate below — inspect its returned text (friction report / BLOCK message) for a push-authentication failure. This applies **regardless of which push site produced it**: the project's `ship-it.md` initial `git push -u origin "$BRANCH"`, or this file's own Step 4c.5 rebase-retry `git push --force-with-lease`. Match any of these signatures verbatim:
+**Push-auth-failure classifier (#1049):** Immediately after the subagent returns — before the verify-script gate below — inspect its returned text (friction report / BLOCK message) for a push-authentication failure. This covers the project's `ship-it.md` initial `git push -u origin "$BRANCH"` (the only push site the Step 4c subagent's returned text can reflect). Match any of these signatures verbatim:
 
 - `Permission denied (publickey)`
 - `could not read Username`
 - `Host key verification failed`
 - `Authentication failed`
+
+(Step 4c.5's own rebase-retry push is a separate site, checked directly by the main session — see the classifier added there below, which reuses this same signature list.)
 
 If any signature is present, emit the structured `blocked` sentinel below and stop — do NOT proceed to the verify-script gate or Step 4c.5.
 
@@ -228,7 +230,7 @@ If any signature is present, emit the structured `blocked` sentinel below and st
   "schema_version": 4,
   "ticket_id": "<ticket-id>",
   "status": "blocked",
-  "stage_reached": "stage4_finalize",
+  "stage_reached": "stage4b_pr_create",
   "scope": {
     "tier": "<small | large — same value carried through from Stage 2 scope classification>",
     "files": <count>,
@@ -239,7 +241,7 @@ If any signature is present, emit the structured `blocked` sentinel below and st
   "plan_source": "<value carried from Stage 0/1>",
   "branch": "<branch-name>",
   "worktree_path": "<session worktree path — ~/.cw/wt/<hash>/auto-dev-<ticket>>",
-  "pr_info": null,
+  "pr": null,
   "review": null,
   "health": {
     "lowest_agent_confidence": "<HIGH | MEDIUM | LOW from health check>",
@@ -250,7 +252,7 @@ If any signature is present, emit the structured `blocked` sentinel below and st
     "fix_loop_escalated": false
   },
   "blocker": {
-    "stage": "stage4_finalize",
+    "stage": "stage4b_pr_create",
     "reason": "push_auth_failed",
     "details": "<matched signature + which push site, e.g. 'ship-it.md initial push: Permission denied (publickey)'>",
     "exception_type": null,
@@ -259,7 +261,7 @@ If any signature is present, emit the structured `blocked` sentinel below and st
     "retry_eligible": true,
     "retry_delay_seconds": null
   },
-  "next_actions": ["manual_intervention"]
+  "next_actions": []
 }
 ```
 
@@ -309,6 +311,8 @@ git rebase origin/main
 # If rebase fails with conflicts here → abort and emit blocker (see below)
 git push --force-with-lease origin HEAD:<branch-name>
 ```
+
+**Push-auth-failure check (#1049):** Before re-verifying mergeability, check this push's own output for the same four signatures listed under the Step 4c classifier above (`Permission denied (publickey)`, `could not read Username`, `Host key verification failed`, `Authentication failed`). If any signature is present, emit the `push_auth_failed` sentinel (same shape as the Step 4c template above) with `stage_reached` and `blocker.stage` set to `"stage5_post_create"` (this site runs after PR creation) and `blocker.details` naming this site, e.g. `"Step 4c.5 rebase-retry push: Permission denied (publickey)"`. Stop — do not proceed to the mergeability re-check below.
 
 After the push, re-verify mergeability once:
 
