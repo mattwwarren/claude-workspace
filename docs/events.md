@@ -760,6 +760,63 @@ from the ordinary wall-clock-budget fallthrough.
 
 `correlation_id` is the `ticket_id`.
 
+### `gate.auto_approved`
+
+**Emitter:** `_act_auto_approve_review` / `_act_auto_adopt_plan` (`cw.reconcile.gate_recipes`, both dispatched by `run_gate_recipes`)
+**Payload:**
+```json
+{
+  "ticket_id": "<str>",
+  "client": "<str>",
+  "lane": "<str>",
+  "session_id": "<str>",
+  "recipe": "auto_approve_clean_review | auto_adopt_clean_plan",
+  "predicate_snapshot": "<dict>",
+  "approved_at": "<ISO 8601 timestamp>"
+}
+```
+**Semantics:** RFC 0009 P1+P2 (#1065). Emitted before the approve mutation
+when a gate recipe auto-clears a clean review/plan gate with no human review —
+the event is durably recorded even if the subsequent `_approve_ticket_locked`
+write fails, so the decision trace survives a partial write. Unlike
+`concierge.recovered` (audit-only), this **is** forwarded to the
+operator-attention channel by default — an auto-approve bypassing human review
+is attention-worthy.
+
+`predicate_snapshot` is recipe-specific: for `auto_approve_clean_review` it
+holds the four field values that licensed the fire (`must_fix_initial: int`,
+`deferred: int`, `recommendation: str`, `forbidden_touched: bool`); for
+`auto_adopt_clean_plan` it holds the two signoff marker-version strings
+(`plan_spec_reviewed: str`, `plan_soundness_reviewed: str`).
+
+`correlation_id` is the `ticket_id`.
+
+### `gate.auto_approve_failed`
+
+**Emitter:** `_act_auto_approve_review` / `_act_auto_adopt_plan` (`cw.reconcile.gate_recipes`, both dispatched by `run_gate_recipes`)
+**Payload:**
+```json
+{
+  "ticket_id": "<str>",
+  "client": "<str>",
+  "lane": "<str>",
+  "session_id": "<str>",
+  "recipe": "auto_approve_clean_review | auto_adopt_clean_plan",
+  "error": "<stringified CwError>"
+}
+```
+**Semantics:** RFC 0009 P1+P2 (#1065). Companion correction to
+`gate.auto_approved`. Emitted when the act-phase `_approve_ticket_locked`
+mutation raises `CwError` after `gate.auto_approved` was already recorded —
+so the durable event stream carries a correction, not a standing
+false-positive "approved" signal on the operator channel. Forwarded to the
+operator-attention channel by default alongside `gate.auto_approved`. Stamps
+`TicketTask.gate_recipe_failed_at` as a one-shot latch so a persisting
+failure doesn't re-detect and re-emit both events every reconcile tick; the
+latch clears itself once the condition resolves.
+
+`correlation_id` is the `ticket_id`.
+
 ### Operator-attention channel (RFC 0008 W3, #1002)
 
 A server-side filter (`cw.cw_operator_events`) forwards a declarative subset
