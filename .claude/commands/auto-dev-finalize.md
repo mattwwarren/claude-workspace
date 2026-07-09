@@ -220,6 +220,12 @@ collision — running the entire ship against the **primary checkout**.
   If conflicts → BLOCK with file list; do NOT force.
 - Instruction to invoke `/prep-pr --skip-review --base main` via the Skill tool. **If the user chose Force at Step 4a (stacking onto an open pipeline PR), append `--draft`** so `/prep-pr` passes it through to the project's `/ship-it` (`/prep-pr` Step 8 already supports `--draft` pass-through). The PR must be a draft until the parent merges.
   - `--skip-review` is required: Stage 3 already ran scope-aware review with the full reviewer set. `/prep-pr`'s own review pass is thinner and would double up.
+
+  **Headless:** when the finalize stage itself is running headless (`--headless` in "$ARGUMENTS"), the `/prep-pr` invocation MUST include `--headless` so the flag propagates down the delegated `prep-pr` → `ship-it` chain and every interactive gate in it collapses per the gate-collapse contract. Compose the invocation string as:
+  - Plain case (headless, not stacking): `/prep-pr --skip-review --base main --headless`
+  - Force + `--draft` case (headless, stacking onto an open pipeline PR per the Step 4a Force option): `/prep-pr --skip-review --base main --headless --draft`
+
+  Instruct the finalize subagent explicitly: any interactive prompt anywhere in the delegated `prep-pr` → `ship-it` chain that cannot be auto-resolved (e.g. `/prep-pr`'s own Step-7 "Ship anyway" gate, or a project `ship-it.md`'s tag-confirmation prompts) MUST surface as `agent_block` per the existing gate-collapse contract (`docs/headless-contract.md` §2, the "Any other agent BLOCK" row) — it must NEVER be silently skipped.
 - **Required deliverable:** the JSON output of `~/.claude/scripts/prep_pr_finalize.py verify --require-automerge --json`, run from the worktree after `/prep-pr` returns. The friction report MUST include this JSON verbatim. Do NOT summarize or paraphrase it — paste it.
 - Instruction: if `/prep-pr` aborts (no project `/ship-it`, merge conflicts, gate failures), escalate as BLOCK with the specific cause — do NOT fall back to inline `gh pr create`
 - The friction protocol block
