@@ -255,7 +255,7 @@ def test_codex_executor_exception_handler_marks_session_completed(
 
 def test_post_review_comment_suppresses_oserror() -> None:
     """_post_review_comment swallows OSError from a missing gh binary."""
-    with patch("cw.executor.subprocess.run", side_effect=FileNotFoundError("no gh")):
+    with patch("cw.gh._sp.run", side_effect=FileNotFoundError("no gh")):
         _post_review_comment("T-1", "findings")
 
 
@@ -264,7 +264,7 @@ def test_post_review_comment_suppresses_timeout() -> None:
     import subprocess as _subprocess
 
     with patch(
-        "cw.executor.subprocess.run",
+        "cw.gh._sp.run",
         side_effect=_subprocess.TimeoutExpired(cmd="gh", timeout=30),
     ):
         _post_review_comment("T-1", "findings")

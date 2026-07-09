@@ -16,6 +16,7 @@ from cw.auto_dev_result import (
 from cw.codex_runner import CodexRunner, CodexRunResult, RealCodexRunner
 from cw.config import load_state, save_state, sessions_lock
 from cw.events import record_event as _record_orchestrator_event
+from cw.gh import post_issue_comment
 from cw.local_runner import (
     _FIXED_REVIEW,
     _SCHEMA_VERSION,
@@ -601,11 +602,10 @@ def _synthesize_codex_result(
 
 
 def _post_review_comment(ticket_id: str, review_text: str) -> None:
-    """Post codex review findings as a GitHub issue comment (best-effort)."""
-    with contextlib.suppress(OSError, subprocess.TimeoutExpired):
-        subprocess.run(
-            ["gh", "issue", "comment", ticket_id, "--body", review_text],
-            capture_output=True,
-            timeout=30,
-            check=False,
-        )
+    """Post codex review findings as a GitHub issue comment (best-effort).
+
+    Delegates to the shared ``cw.gh.post_issue_comment`` primitive and discards
+    the result — this call site silently swallows every gh failure (missing
+    binary, timeout, non-zero exit) exactly as before.
+    """
+    post_issue_comment(ticket_id, review_text)

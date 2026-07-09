@@ -46,7 +46,6 @@ flock-based lock (see #1065 and ``dev_queue._approve_ticket_locked``).
 from __future__ import annotations
 
 import logging
-import subprocess
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -60,7 +59,7 @@ from cw.dev_queue import (
 )
 from cw.events import record_event
 from cw.exceptions import CwError
-from cw.gh import fetch_approved_plan_comment
+from cw.gh import fetch_approved_plan_comment, post_issue_comment
 from cw.models import OrchestratorEventType, QueueItemStatus
 
 if TYPE_CHECKING:
@@ -154,11 +153,6 @@ def _recipe_gate_open(
 _REVIEW_PENDING_APPROVAL = "review_pending_approval"
 # The single health recommendation the clean-review predicate accepts.
 _RECOMMENDATION_PROCEED = "PROCEED"
-
-# Best-effort ticket-comment subprocess timeout (seconds). Same shape as
-# executor._post_review_comment's gh call, but this helper LOGS failures
-# rather than silently suppressing them (the plan's OQ2 resolution).
-_COMMENT_TIMEOUT_SECONDS = 30
 
 _AUTO_APPROVE_COMMENT_TEMPLATE = """\
 Auto-approved by gate recipe `{recipe}`.
@@ -482,15 +476,9 @@ def _post_auto_approve_comment(ticket_id: str, snapshot: dict[str, object]) -> N
         recommendation=snapshot["recommendation"],
         forbidden_touched=snapshot["forbidden_touched"],
     )
-    try:
-        result = subprocess.run(
-            ["gh", "issue", "comment", ticket_id, "--body", body],
-            capture_output=True,
-            timeout=_COMMENT_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        _log.warning("gate_recipe_comment_failed ticket=%s: %s", ticket_id, exc)
+    result = post_issue_comment(ticket_id, body)
+    if result is None:
+        _log.warning("gate_recipe_comment_failed ticket=%s: gh call failed", ticket_id)
         return
     if result.returncode != 0:
         _log.warning(
@@ -520,15 +508,9 @@ def _post_auto_adopt_comment(ticket_id: str, snapshot: dict[str, object]) -> Non
         plan_spec_reviewed=snapshot[_SNAPSHOT_KEY_SPEC],
         plan_soundness_reviewed=snapshot[_SNAPSHOT_KEY_SOUNDNESS],
     )
-    try:
-        result = subprocess.run(
-            ["gh", "issue", "comment", ticket_id, "--body", body],
-            capture_output=True,
-            timeout=_COMMENT_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        _log.warning("gate_recipe_comment_failed ticket=%s: %s", ticket_id, exc)
+    result = post_issue_comment(ticket_id, body)
+    if result is None:
+        _log.warning("gate_recipe_comment_failed ticket=%s: gh call failed", ticket_id)
         return
     if result.returncode != 0:
         _log.warning(
