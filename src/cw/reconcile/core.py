@@ -39,6 +39,7 @@ from cw.reconcile._shared import (
 )
 from cw.reconcile.concierge import run_concierge_recoveries
 from cw.reconcile.escalation import run_escalation_sweep
+from cw.reconcile.gate_recipes import run_gate_recipes
 from cw.reconcile.idle import _act_on_idle_candidates, _detect_idle_candidates
 from cw.reconcile.liveness import record_session_liveness_changes
 from cw.reconcile.local import (
@@ -100,6 +101,7 @@ def _run_terminal_backstops_and_sweeps(
     completed_silent_ticket_ids = revert_completed_silent_tasks()
     park_terminal_sibling_tasks()
     run_concierge_recoveries(now=now, native_live=native_live, config=config)
+    run_gate_recipes(now=now, config=config)
     run_escalation_sweep(now=now)
     return timed_out_ticket_ids, completed_silent_ticket_ids
 

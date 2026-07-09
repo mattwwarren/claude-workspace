@@ -829,7 +829,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_9(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 11
+        assert DEV_QUEUE_SCHEMA_VERSION == 12
 
     def test_pr_state_defaults(self) -> None:
         state = PrState()
@@ -965,6 +965,8 @@ class TestOperatorChannelForward:
                 OrchestratorEventType.PR_MERGED,
                 OrchestratorEventType.SESSION_LIVENESS_CHANGED,
                 OrchestratorEventType.OPERATOR_ESCALATION,
+                OrchestratorEventType.GATE_AUTO_APPROVED,
+                OrchestratorEventType.GATE_AUTO_APPROVE_FAILED,
             }
         )
 
@@ -1116,3 +1118,38 @@ class TestConciergeAndEscalationModelSurface:
 
         with pytest.raises(ValidationError, match="unrecognized recipe key"):
             OrchestratorConfig(concierge_recoveries={"flase_park_requeue": True})
+
+    # -- RFC 0009 gate-recipe automation surface (#1065) ---------------------
+
+    def test_orchestrator_event_type_includes_gate_auto_approved(self) -> None:
+        assert OrchestratorEventType.GATE_AUTO_APPROVED == "gate.auto_approved"
+
+    def test_gate_auto_approved_in_default_forward_set(self) -> None:
+        """GATE_AUTO_APPROVED IS forwarded by default: an auto-approve with no
+        human review is operator-attention-worthy (contrast CONCIERGE_RECOVERED,
+        which is audit-only)."""
+        from cw.models import _DEFAULT_OPERATOR_EVENT_TYPES
+
+        assert OrchestratorEventType.GATE_AUTO_APPROVED in _DEFAULT_OPERATOR_EVENT_TYPES
+
+    def test_orchestrator_event_type_includes_gate_auto_approve_failed(self) -> None:
+        assert (
+            OrchestratorEventType.GATE_AUTO_APPROVE_FAILED == "gate.auto_approve_failed"
+        )
+
+    def test_gate_auto_approve_failed_in_default_forward_set(self) -> None:
+        """GATE_AUTO_APPROVE_FAILED IS forwarded by default: it corrects a
+        false-positive GATE_AUTO_APPROVED already on the operator channel."""
+        from cw.models import _DEFAULT_OPERATOR_EVENT_TYPES
+
+        assert (
+            OrchestratorEventType.GATE_AUTO_APPROVE_FAILED
+            in _DEFAULT_OPERATOR_EVENT_TYPES
+        )
+
+    def test_orchestrator_config_gate_recipes_enabled_defaults_false(self) -> None:
+        assert OrchestratorConfig().gate_recipes_enabled is False
+
+    def test_orchestrator_config_gate_recipes_enabled_accepts_true(self) -> None:
+        cfg = OrchestratorConfig(gate_recipes_enabled=True)
+        assert cfg.gate_recipes_enabled is True

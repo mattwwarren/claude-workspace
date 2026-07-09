@@ -152,7 +152,8 @@ CW_STATE_SCHEMA_VERSION = 13
 #      (GitHub #1015, RFC 0008 capstone).
 # v11: added TicketTask.false_park_recovery_count/
 #      false_park_recovery_next_eligible_at (GitHub #1030).
-DEV_QUEUE_SCHEMA_VERSION = 11
+# v12: added TicketTask.gate_recipe_failed_at (GitHub #1065, RFC 0009).
+DEV_QUEUE_SCHEMA_VERSION = 12
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -260,6 +261,22 @@ class OrchestratorEventType(StrEnum):
     # ticket. NOT a veto (contrast SESSION_PARK_VETOED above, which
     # accompanies zero mutation) — no queue/session mutation is suppressed.
     CONCIERGE_RECOVERY_BACKOFF_ARMED = "concierge.recovery_backoff_armed"
+    # RFC 0009 P1+P2 (#1065) — gate-recipe automation. Emitted by
+    # cw.reconcile.gate_recipes._act_auto_approve_review before the
+    # auto-approve mutation when a review met the fixed clean-review predicate
+    # (no MUST_FIX, no deferred, recommendation=PROCEED, no forbidden-area
+    # touch) and was approved with no human review. Unlike CONCIERGE_RECOVERED
+    # (audit-only), this IS forwarded to the operator channel by default — an
+    # auto-approve bypassing human review is attention-worthy.
+    GATE_AUTO_APPROVED = "gate.auto_approved"
+    # RFC 0009 P1+P2 (#1065) — companion to GATE_AUTO_APPROVED. Emitted when
+    # the act-phase mutation raises after GATE_AUTO_APPROVED was already
+    # recorded (e.g. a duplicate row, or the client's pipeline config changed
+    # between detect and act) — so the durable event stream carries a
+    # correction, not just a non-durable log line, for what would otherwise
+    # be a false "approved" signal on the operator channel. Forwarded by
+    # default alongside GATE_AUTO_APPROVED for the same reason.
+    GATE_AUTO_APPROVE_FAILED = "gate.auto_approve_failed"
 
 
 # Absolute ceiling on task.attempts across all kill causes (#786).
@@ -429,6 +446,18 @@ class TicketTask(BaseModel):
     # advance) ended the previous one.
     escalation_parked_at: datetime | None = None
     escalation_fired_at: datetime | None = None
+    # RFC 0009 P1+P2 (#1065) — one-shot gate-recipe failure latch. Stamped by
+    # cw.reconcile.gate_recipes._act_auto_approve_review when the act-phase
+    # mutation raises after GATE_AUTO_APPROVED was already emitted; a
+    # non-None value excludes this row from _detect_auto_approve_review so a
+    # persisting failure (e.g. stale client config, a duplicate row) does not
+    # re-detect and re-emit GATE_AUTO_APPROVED/GATE_AUTO_APPROVE_FAILED every
+    # reconcile tick forever. Cleared the same way the escalation latch above
+    # is: unconditionally, by transition_task_status on every status
+    # transition (including a same-status re-park) — so a fresh review
+    # episode (new session, new last_result re-parking the row at
+    # BLOCKED_ON_USER) always starts with a clean latch.
+    gate_recipe_failed_at: datetime | None = None
 
 
 class DispatchPlan(BaseModel):
@@ -557,6 +586,15 @@ _DEFAULT_OPERATOR_EVENT_TYPES: frozenset[OrchestratorEventType] = frozenset(
         # operator does not need paged for, recorded via record_event but
         # never added to this forward-set.
         OrchestratorEventType.OPERATOR_ESCALATION,
+        # RFC 0009 P1+P2 (#1065): a gate recipe auto-approving a review with no
+        # human in the loop is operator-attention-worthy — forwarded by default
+        # (contrast CONCIERGE_RECOVERED, excluded above as audit-only).
+        OrchestratorEventType.GATE_AUTO_APPROVED,
+        # Forwarded alongside GATE_AUTO_APPROVED: without this, a failed
+        # act-phase mutation would leave GATE_AUTO_APPROVED standing alone on
+        # the operator channel as an uncorrected false-positive "approved"
+        # signal.
+        OrchestratorEventType.GATE_AUTO_APPROVE_FAILED,
     }
 )
 _DEFAULT_OPERATOR_TASK_TRANSITION_STATUSES: frozenset[QueueItemStatus] = frozenset(
@@ -773,6 +811,13 @@ class OrchestratorConfig(BaseModel):
     # silently disable the other two. Recognised keys: "false_park_requeue",
     # "park_marker_poison_clear", "cancelled_row_restore".
     concierge_recoveries: dict[str, bool] = Field(default_factory=dict)
+    # RFC 0009 P1+P2 (#1065) — gate-recipe automation master switch. Default
+    # False: the auto_approve_clean_review recipe in cw.reconcile.gate_recipes
+    # approves a review gate with NO human review, so nothing fires without an
+    # explicit operator opt-in — mirroring concierge_enabled's fail-safe
+    # default. Per-recipe / per-lane resolution (LaneConfig.gate_recipes,
+    # resolve_gate_recipe_enabled) is deferred to #1067.
+    gate_recipes_enabled: bool = False
 
     @field_validator("concierge_recoveries")
     @classmethod
