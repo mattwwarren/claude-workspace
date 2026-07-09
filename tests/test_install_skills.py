@@ -57,12 +57,17 @@ def _run(script: Path, fake_home: Path) -> subprocess.CompletedProcess[str]:
 
 @pytest.fixture
 def fake_repo(tmp_path: Path) -> Path:
-    """Minimal fake repo .claude tree: 2 commands + 1 skill dir."""
+    """Minimal fake repo .claude tree: 2 installable commands + 1 skill dir.
+
+    ship-it.md is present in source but is project-scoped, so it must never be
+    installed globally — the counts below deliberately exclude it.
+    """
     repo = tmp_path / "repo"
     commands = repo / ".claude" / "commands"
     commands.mkdir(parents=True)
     (commands / "auto-dev.md").write_text("# auto-dev\n")
     (commands / "review.md").write_text("# review\n")
+    (commands / "ship-it.md").write_text("# ship-it (project-scoped)\n")
 
     skill_dir = repo / ".claude" / "skills" / "cw-fanout"
     skill_dir.mkdir(parents=True)
@@ -200,3 +205,69 @@ class TestInstallSkillsPruneSafety:
         assert "orphans pruned  : 0" in r2.stdout
         assert (fake_home / ".claude" / "commands" / "auto-dev.md").exists()
         assert (fake_home / ".claude" / "skills" / "cw-fanout" / "SKILL.md").exists()
+
+
+class TestProjectScopedCommandsExcluded:
+    """Project-scoped commands must never reach ~/.claude/commands.
+
+    /prep-pr resolves /ship-it against the current project's
+    .claude/commands/ship-it.md and treats its absence as a BLOCK. A global
+    copy makes every unrelated repo appear to have one, then ships it with
+    claude-workspace's base branch, test plan, and finalize scripts.
+    """
+
+    def test_ship_it_not_installed(self, script: Path, fake_home: Path) -> None:
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+
+        installed = fake_home / ".claude" / "commands" / "ship-it.md"
+        assert not installed.exists(), (
+            "ship-it.md is project-scoped and must never be installed into "
+            "~/.claude/commands — a global copy hijacks /ship-it in every "
+            "other repo."
+        )
+
+    def test_ship_it_not_in_manifest(self, script: Path, fake_home: Path) -> None:
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+
+        manifest = fake_home / ".claude" / ".cw-skills-manifest"
+        entries = manifest.read_text().splitlines()
+        assert "commands/ship-it.md" not in entries
+
+    def test_installable_commands_still_sync(
+        self, script: Path, fake_home: Path
+    ) -> None:
+        """Excluding ship-it.md must not suppress its siblings."""
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+
+        assert (fake_home / ".claude" / "commands" / "auto-dev.md").exists()
+        assert (fake_home / ".claude" / "commands" / "review.md").exists()
+        assert "commands synced : 2" in result.stdout
+        assert "commands skipped: 1 (project-scoped)" in result.stdout
+
+    def test_previously_installed_ship_it_is_pruned(
+        self, script: Path, fake_home: Path
+    ) -> None:
+        """A ship-it.md installed by an older cw is cleaned up on next run.
+
+        The manifest-scoped prune owns the entry, so dropping it from the
+        install set is self-healing — no manual rm required.
+        """
+        commands_dst = fake_home / ".claude" / "commands"
+        commands_dst.mkdir(parents=True, exist_ok=True)
+        stale = commands_dst / "ship-it.md"
+        stale.write_text("# stale global ship-it\n")
+
+        manifest = fake_home / ".claude" / ".cw-skills-manifest"
+        manifest.write_text("commands/ship-it.md\ncommands/auto-dev.md\n")
+
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+
+        assert not stale.exists(), (
+            "A previously-installed global ship-it.md should be pruned once it "
+            "is excluded from the install set"
+        )
+        assert "commands/ship-it.md" not in manifest.read_text().splitlines()

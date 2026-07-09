@@ -14,6 +14,26 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
+# Project-scoped commands that must NEVER be installed into ~/.claude/commands.
+#
+# Why: /prep-pr resolves /ship-it against the *current project's*
+# .claude/commands/ship-it.md and treats its absence as a BLOCK (see
+# .claude/commands/auto-dev-finalize.md).  A global copy would make every other
+# repo look like it has one, then ship it with claude-workspace's conventions —
+# origin/main base, this repo's test plan, its finalize scripts.
+EXCLUDED_COMMANDS=("ship-it.md")
+
+_is_excluded_command() {
+    local candidate="$1"
+    local excluded
+    for excluded in "${EXCLUDED_COMMANDS[@]}"; do
+        if [ "$candidate" = "$excluded" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 COMMANDS_SRC="$PROJECT_DIR/.claude/commands"
 SKILLS_SRC="$PROJECT_DIR/.claude/skills"
 CLAUDE_HOME="${HOME}/.claude"
@@ -37,9 +57,14 @@ mkdir -p "$COMMANDS_DST" "$SKILLS_DST"
 new_entries=()
 
 cmd_count=0
+excluded_count=0
 for src_file in "$COMMANDS_SRC"/*.md; do
     [ -f "$src_file" ] || continue
     name="$(basename "$src_file")"
+    if _is_excluded_command "$name"; then
+        excluded_count=$((excluded_count + 1))
+        continue
+    fi
     cp "$src_file" "$COMMANDS_DST/$name"
     new_entries+=("commands/$name")
     cmd_count=$((cmd_count + 1))
@@ -111,6 +136,7 @@ printf '%s\n' "${new_entries[@]+"${new_entries[@]}"}" > "$MANIFEST"
 # ---------------------------------------------------------------------------
 echo "cw skills installed:"
 echo "  commands synced : $cmd_count"
+echo "  commands skipped: $excluded_count (project-scoped)"
 echo "  skill dirs synced: $skill_count"
 echo "  orphans pruned  : $prune_count"
 

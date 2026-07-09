@@ -218,7 +218,7 @@ These are invoked inside a Claude Code session and form the daily operational to
 | `/review-sweep` | Sweep all open PRs for feedback and CI status. |
 | `/review-monitor` | Watch a PR and respond to review events. |
 | `/prep-pr` | Prepare a PR: format title/body, wire auto-merge, post to tracker. |
-| `/ship-it` | Final gate check + merge. |
+| `/ship-it` | Final gate check + merge. **Project-scoped** — each repo supplies its own `.claude/commands/ship-it.md`; `/prep-pr` resolves it from the current project and blocks if absent. Never installed globally. |
 | `/post-review` | Post-merge cleanup and debt filing. |
 
 ### Session management
