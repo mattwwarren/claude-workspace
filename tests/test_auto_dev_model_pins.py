@@ -37,16 +37,25 @@ def test_plan_step1f4_revision_agent_pins_sonnet() -> None:
     assert 'Re-spawn the **Plan** agent (`model: "sonnet"`)' in content
 
 
-def test_impl_spawn_heading_announces_opus() -> None:
-    """Impl spawn-shape heading must announce model: "opus" for code generation."""
+def test_impl_spawn_heading_announces_scope_based_model() -> None:
+    """Impl heading announces scope-resolved $IMPL_MODEL."""
     content = _cmd("auto-dev-impl.md")
-    assert 'all variants pin `model: "opus"` — real code generation' in content
+    assert "all variants pass `model: $IMPL_MODEL`" in content
 
 
-def test_impl_interactive_variant_pins_opus() -> None:
-    """Interactive-mode impl spawn bullet must include model: "opus" inline."""
+def test_impl_model_maps_scope_tier_to_model() -> None:
+    """Impl model must map large->opus, small->sonnet, resolved from the scope tier."""
     content = _cmd("auto-dev-impl.md")
-    assert '`isolation: "worktree"`, `model: "opus"`' in content
+    assert '`large` → `"opus"`' in content
+    assert '`small` → `"sonnet"`' in content
+
+
+def test_impl_variants_pin_resolved_model() -> None:
+    """Every impl spawn variant passes the resolved $IMPL_MODEL inline."""
+    content = _cmd("auto-dev-impl.md")
+    assert '`isolation: "worktree"`, `model: $IMPL_MODEL`' in content
+    # dispatch-worktree variant omits isolation but still pins the resolved model
+    assert "with `model: $IMPL_MODEL`" in content
 
 
 def test_review_small_scope_pins_sonnet() -> None:
