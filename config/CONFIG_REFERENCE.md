@@ -49,7 +49,7 @@ State is stored at `~/.local/share/cw/` (or `$XDG_DATA_HOME/cw/`).
 | `worker_model` | string \| null | `null` | Pin the model for DAEMON-origin worker spawns (auto-dev). Forwarded as `--model <id>` to `claude --bg` from both initial spawn and DAEMON-origin resume. USER-origin sessions (interactive `cw start` / `cw resume`) always inherit the operator's logged-in default model. Opaque string — no validation. |
 | `repo_path` | path | *none** | Shared repo path (worktree mode) |
 | `branch` | string | *none** | Branch name (worktree mode) |
-| `lanes` | list[LaneConfig] | `[]` | Named dispatch lanes. Phase 1 (data model only); dispatch wiring in #558. Each lane has `name` (required), `max_parallel: int = 1`, `priority: int = 0`, `paused: bool = false`, `description: str = ""`, `reap_policy: str = "signal_only"`, `signoff: "operator" | null = null` (RFC 0007 Phase 3 — see [Operator Signoff Gates](#operator-signoff-gates-rfc-0007-phase-3) below). |
+| `lanes` | list[LaneConfig] | `[]` | Named dispatch lanes. Phase 1 (data model only); dispatch wiring in #558. Each lane has `name` (required), `max_parallel: int = 1`, `priority: int = 0`, `paused: bool = false`, `description: str = ""`, `reap_policy: str = "signal_only"`, `signoff: "operator" | null = null` (RFC 0007 Phase 3 — see [Operator Signoff Gates](#operator-signoff-gates-rfc-0007-phase-3) below), `gate_recipes: dict[str,bool] | null = null` (RFC 0009 Phase 4 — per-lane gate-recipe enablement; see [Gate Recipe Enablement](#gate-recipe-enablement-rfc-0009-phase-4) below). |
 | `pipeline` | PipelineConfig \| null | `null` | Per-stage executor configuration (RFC 0005). See [Pipeline Configuration](#pipeline-configuration--per-stage-model-pinning) below. |
 
 \* Either `workspace_path` OR both `repo_path` + `branch` must be set.
@@ -348,6 +348,16 @@ concierge_recoveries: {}
 #   park_marker_poison_clear: true
 #   cancelled_row_restore: true
 
+# Gate-recipe automation master switch (RFC 0009, GitHub #1065/#1067). Default
+# false, mirroring concierge_enabled's fail-safe posture: a gate recipe
+# auto-clears an approval gate with NO human review, so nothing fires without
+# an explicit operator opt-in. This is a hard top-level short-circuit -- when
+# false, the whole gate-recipes module is a no-op regardless of any per-lane
+# or per-ticket enablement. When true, each recipe is still gated per-lane /
+# per-ticket via the 3-tier resolution below (both recipes default OFF). See
+# Gate Recipe Enablement below.
+gate_recipes_enabled: false
+
 # Minimum elapsed seconds between PR-state hydration passes in the serve tick
 # (GitHub #929). Gated off max(pr_state.hydrated_at) across dev-queue tasks —
 # no separate timer state. Each pass fetches `gh pr view` for every open PR
@@ -438,6 +448,43 @@ clearing it forward, regress it back to an earlier stage:
 ```bash
 cw dev-queue requeue GEN-123 --client my-project --stage impl --regress
 ```
+
+## Gate Recipe Enablement (RFC 0009 Phase 4)
+
+Gate recipes (`cw.reconcile.gate_recipes`) auto-clear an approval gate with **no
+human review** when a fixed predicate holds — `auto_approve_clean_review`
+auto-approves a clean review, `auto_adopt_clean_plan` auto-adopts a
+double-signed plan. Whether a recipe fires for a given ticket is resolved with
+3-tier precedence, highest first:
+
+1. **Per-ticket** — a `gate_recipes` map on the `TicketTask` (e.g.
+   `{auto_approve_clean_review: true}`). There is **no CLI flag** for this tier
+   yet; it is a data-model surface only.
+2. **Per-lane** — a `gate_recipes` map on a `LaneConfig` entry (see the `lanes`
+   field above).
+3. **Hardcoded default** — both recipes default **OFF**. A recipe absent from
+   the ticket map and the lane map is disabled.
+
+Independently, the module-wide master switch `gate_recipes_enabled` (in
+`orchestrator.yaml`, default `false`) is a hard top-level short-circuit: when
+`false`, **no** recipe fires regardless of any per-lane or per-ticket setting.
+The per-lane resolution above only matters once the master switch is `true`.
+
+```yaml
+# clients.yaml — enable auto-approve on one lane, leave the other off
+clients:
+  my-project:
+    workspace_path: /path/to/repo
+    lanes:
+      - name: fastlane
+        gate_recipes:
+          auto_approve_clean_review: true
+          auto_adopt_clean_plan: true
+      - name: default   # both recipes stay off (hardcoded default)
+```
+
+Unrecognized recipe keys fail loud at config-load time (a typo like
+`auto_aprove_clean_review` raises rather than silently no-opping).
 
 ## Worktree Context File (`.claude/cw-context.json`)
 
