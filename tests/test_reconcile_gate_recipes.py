@@ -864,7 +864,7 @@ class TestActApproveFailure:
         boom_msg = "boom"
 
         def _fail_beta_only(
-            ticket_id: str, client: str, *, resolved_task: Any = None
+            ticket_id: str, client: str, *, resolved_task: TicketTask | None = None
         ) -> dict[str, str | bool]:
             if client == "beta":
                 raise ApproveGateError(boom_msg)
