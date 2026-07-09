@@ -886,7 +886,63 @@ def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str | bool]:
         return _approve_ticket_locked(ticket_id, client_name)
 
 
-def _approve_ticket_locked(ticket_id: str, client_name: str) -> dict[str, str | bool]:
+def _resolve_approval_target(
+    store: DevQueueStore,
+    ticket_id: str,
+    client_name: str,
+    resolved_task: TicketTask | None,
+) -> TicketTask:
+    """Select the physical row :func:`_approve_ticket_locked` acts on.
+
+    ``resolved_task is None`` (public ``approve_ticket`` / CLI / API path): fall
+    back to :func:`_find_ticket`'s status-pooled newest-wins resolution.
+
+    ``resolved_task`` supplied (RFC 0009 gate-recipe path, #1083): the caller has
+    ALREADY validated a specific physical row and must not have the mutation
+    re-resolved to a different duplicate. Re-locate that exact row inside this
+    freshly-loaded ``store`` by stable identity ``(ticket_id, client,
+    created_at)`` -- ``created_at`` is set once at construction, never mutated by
+    a transition, and round-trips through ``model_dump_json``/``model_validate``.
+    Belt-and-suspenders: the matched row's status must equal the status the
+    caller validated (not merely "any approvable status"), else the caller's
+    premise no longer holds and we fail closed rather than clear a gate we never
+    checked.
+
+    Raises:
+        ApproveGateError: if ``resolved_task`` is supplied but its identity is
+            no longer present, or the matched row's status diverged from the
+            validated status.
+    """
+    if resolved_task is None:
+        return _find_ticket(store, ticket_id, client_name)
+    for t in store.tasks:
+        if (
+            t.ticket_id == resolved_task.ticket_id
+            and t.client == resolved_task.client
+            and t.created_at == resolved_task.created_at
+        ):
+            if t.status != resolved_task.status:
+                msg = (
+                    f"Cannot approve ticket '{ticket_id}': resolved row status"
+                    f" is {t.status.value!r}, expected"
+                    f" {resolved_task.status.value!r} (the status the caller"
+                    " validated)."
+                )
+                raise ApproveGateError(msg)
+            return t
+    msg = (
+        f"Cannot approve ticket '{ticket_id}': the resolved row is no longer"
+        " present in the dev queue."
+    )
+    raise ApproveGateError(msg)
+
+
+def _approve_ticket_locked(
+    ticket_id: str,
+    client_name: str,
+    *,
+    resolved_task: TicketTask | None = None,
+) -> dict[str, str | bool]:
     """Lock-free body of :func:`approve_ticket`.
 
     The caller MUST already hold ``dev_queue_lock()`` (``_lock``). Extracted
@@ -898,9 +954,16 @@ def _approve_ticket_locked(ticket_id: str, client_name: str) -> dict[str, str | 
     call). All validation guards and return shape are identical to the public
     wrapper. See GitHub #1065.
 
+    When ``resolved_task`` is supplied (RFC 0009 gate-recipe path, #1083) the
+    mutation is pinned to the caller-validated physical row by stable identity
+    rather than re-resolved via :func:`_find_ticket` -- see
+    :func:`_resolve_approval_target`.
+
     Raises:
         ApproveGateError: if ticket is not at either gate, session is missing,
-            last_result is absent, or last_result status is not an approval gate.
+            last_result is absent, last_result status is not an approval gate,
+            or (with ``resolved_task``) the validated row vanished or its status
+            diverged from the validated status.
         CwError: if no matching task is found.
     """
     from cw.auto_dev_result import SCOPE_GATED_APPROVAL_STATUSES
@@ -908,7 +971,7 @@ def _approve_ticket_locked(ticket_id: str, client_name: str) -> dict[str, str | 
     from cw.dispatch import _should_gate_for_signoff
 
     store = load_dev_queue()
-    task = _find_ticket(store, ticket_id, client_name)
+    task = _resolve_approval_target(store, ticket_id, client_name, resolved_task)
 
     if task.status not in _APPROVABLE_STATUSES:
         msg = (
