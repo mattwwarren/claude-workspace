@@ -964,6 +964,16 @@ class TestDetectAdoptPlan:
 
         assert _detect_auto_adopt_plan(state, [task]) == []
 
+    def test_non_blocked_status_yields_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _stub_fetch_plan(monkeypatch, _plan_body())
+        task = _make_task(stage=Stage.PLAN, status=QueueItemStatus.PENDING)
+        session = _make_session(last_result=_plan_result())
+        state = CwState(sessions=[session])
+
+        assert _detect_auto_adopt_plan(state, [task]) == []
+
     def test_latched_failure_yields_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _stub_fetch_plan(monkeypatch, _plan_body())
         task = _make_task(stage=Stage.PLAN, gate_recipe_failed_at=_NOW)
@@ -1021,6 +1031,21 @@ class TestDetectAdoptPlan:
         the recipe must return None rather than raise on Path(None)."""
         _stub_fetch_plan(monkeypatch, None)
         task = _make_task(stage=Stage.PLAN, worktree_path=None)
+        session = _make_session(last_result=_plan_result())
+        state = CwState(sessions=[session])
+
+        assert _detect_auto_adopt_plan(state, [task]) == []
+
+    def test_missing_cw_plan_md_when_tracker_returns_none_yields_none(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Tracker returns None and the worktree exists but has no
+        `.cw/plan.md` on disk — the fallback is unavailable, so the recipe
+        returns None (the ``plan_path.exists()`` False branch)."""
+        _stub_fetch_plan(monkeypatch, None)
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        task = _make_task(stage=Stage.PLAN, worktree_path=ws)
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
@@ -1149,6 +1174,64 @@ class TestRunAdoptPlan:
         recovered = run_gate_recipes(now=_NOW, config=_config())
 
         assert recovered == ["GEN-R", "GEN-P"]
+
+    def test_comment_failure_swallowed_and_logged(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A comment-write OSError is logged best-effort; the approve stands."""
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        _stub_fetch_plan(monkeypatch, _plan_body())
+        task = _make_task(stage=Stage.PLAN)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
+
+        boom_msg = "gh exploded"
+
+        def _boom(*_a: Any, **_k: Any) -> None:
+            raise OSError(boom_msg)
+
+        monkeypatch.setattr("cw.reconcile.gate_recipes.subprocess.run", _boom)
+
+        with caplog.at_level("WARNING"):
+            recovered = run_gate_recipes(now=_NOW, config=_config())
+
+        assert recovered == ["GEN-1"]
+        store = load_dev_queue()
+        assert store.tasks[0].stage == Stage.IMPL
+        assert any("GEN-1" in rec.message for rec in caplog.records)
+
+    def test_comment_nonzero_return_is_logged(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A nonzero gh return code is logged best-effort; the approve stands."""
+        import subprocess
+
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        _stub_fetch_plan(monkeypatch, _plan_body())
+        task = _make_task(stage=Stage.PLAN)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
+
+        def _fail(argv: list[str], **_k: Any) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.CompletedProcess(argv, 1, stdout=b"", stderr=b"nope")
+
+        monkeypatch.setattr("cw.reconcile.gate_recipes.subprocess.run", _fail)
+
+        with caplog.at_level("WARNING"):
+            recovered = run_gate_recipes(now=_NOW, config=_config())
+
+        assert recovered == ["GEN-1"]
+        assert any(
+            "rc=1" in rec.message and "GEN-1" in rec.message for rec in caplog.records
+        )
 
 
 class TestActAdoptPlanFailure:
@@ -1315,6 +1398,18 @@ class TestActAdoptRecheckRace:
         task = _make_task(stage=Stage.PLAN)
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[]))
+
+        assert _act_auto_adopt_plan([self._plan_candidate()], now=_NOW) == []
+
+    def test_session_id_cleared_at_act_skips(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Row still BLOCKED_ON_USER but its session_id was cleared between
+        detect and act (the ``task.session_id is None`` half of the skip)."""
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        task = _make_task(stage=Stage.PLAN, session_id=None)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
 
         assert _act_auto_adopt_plan([self._plan_candidate()], now=_NOW) == []
 
