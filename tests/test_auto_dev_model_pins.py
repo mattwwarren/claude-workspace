@@ -9,9 +9,11 @@ def _cmd(name: str) -> str:
     return (COMMANDS / name).read_text()
 
 
-def test_plan_step1b_plan_agent_pins_opus() -> None:
-    """Step 1b Plan agent spawn must pin model: "opus"."""
-    assert 'subagent_type: "Plan", model: "opus"' in _cmd("auto-dev-plan.md")
+def test_plan_step1b_plan_agent_pins_sonnet() -> None:
+    """Step 1b Plan agent spawns Sonnet (review targets the weaker model, not Opus)."""
+    content = _cmd("auto-dev-plan.md")
+    assert 'subagent_type: "Plan", model: "sonnet"' in content
+    assert 'subagent_type: "Plan", model: "opus"' not in content
 
 
 def test_plan_step1c_pm_reviewer_pins_sonnet() -> None:
