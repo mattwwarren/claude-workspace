@@ -313,6 +313,15 @@ _VALID_SESSION_ORIGINS = frozenset(v.value for v in SessionOrigin)
 # surface_refs are cleared only during the upgrade pass from below this version.
 _HEX_SURFACE_REF_SCHEMA_VERSION = 5
 
+# Schema version at which local_liveness.start_time_ns switched reference
+# points (boot-relative /proc -> epoch-relative psutil.create_time, #921).
+# A handle written below this version is in the old format and will never
+# compare equal to a freshly-read epoch-relative value for the same live
+# process, so it is cleared only during the upgrade pass from below this
+# version -- otherwise reconcile would misread a live aider process as dead
+# and harvest it out from under an in-flight session.
+_EPOCH_LIVENESS_SCHEMA_VERSION = 14
+
 
 def migrate_cw_state(raw: dict[str, Any]) -> dict[str, Any]:
     """Normalise a raw sessions.json payload into a currently-valid shape.
@@ -343,6 +352,8 @@ def migrate_cw_state(raw: dict[str, Any]) -> dict[str, Any]:
             # daemon-spawn short ids that happen to look like plain strings).
             if on_disk_version < _HEX_SURFACE_REF_SCHEMA_VERSION:
                 _clear_non_hex_surface_refs(session_raw)
+            if on_disk_version < _EPOCH_LIVENESS_SCHEMA_VERSION:
+                _clear_stale_local_liveness(session_raw)
             _coerce_session_origin(session_raw)
             _fill_linkage_field_defaults(session_raw)
             _fill_last_result_default(session_raw)
@@ -470,6 +481,32 @@ def _clear_non_hex_surface_refs(session_raw: dict[str, Any]) -> None:
         return
     if not SHORT_SESSION_ID_RE.fullmatch(surface_ref):
         session_raw["surface_ref"] = None
+
+
+def _clear_stale_local_liveness(session_raw: dict[str, Any]) -> None:
+    """Clear a pre-v14 local_liveness handle (boot-relative start_time_ns).
+
+    A handle captured before the #921 psutil switch stores start_time_ns in
+    the old boot-relative /proc format, which will never equal a freshly-read
+    epoch-relative value for the same still-live process -- so leaving it in
+    place would cause reconcile to misclassify a live aider session as dead
+    on the first pass after upgrade. Clearing it drops the fast process-exit
+    harvest path for that session; recovery falls back to stalled.py's
+    headless wall-clock sweep (gated on _is_headless, not surface_ref/
+    local_liveness -- LOCAL sessions never carry a surface_ref, so idle.py
+    and the phantom detector in _shared.py both skip them) once
+    resolve_headless_budget() elapses, or a fresh LocalExecutor spawn
+    re-establishes an epoch-relative handle.
+    """
+    if session_raw.get("local_liveness") is not None:
+        logger.info(
+            "session %s: clearing pre-v%d local_liveness handle "
+            "(boot-relative start_time_ns incompatible with epoch-relative "
+            "format, GitHub #921)",
+            session_raw.get("id", "<unknown>"),
+            _EPOCH_LIVENESS_SCHEMA_VERSION,
+        )
+        session_raw["local_liveness"] = None
 
 
 def _backup_state_file(raw: dict[str, Any]) -> None:

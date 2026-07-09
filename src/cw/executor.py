@@ -21,6 +21,7 @@ from cw.local_runner import (
     _SCHEMA_VERSION,
     AIDER_NOT_FOUND,
     ENDPOINT_NOT_CONFIGURED,
+    LIVENESS_UNAVAILABLE,
     PLAN_MISSING,
     UNEXPECTED_ERROR,
     AiderRunner,
@@ -344,7 +345,8 @@ class LocalExecutor:
                 completion_result: AutoDevResult = make_blocked(
                     ticket_id=task.ticket_id,
                     worktree=worktree,
-                    reason=UNEXPECTED_ERROR,
+                    reason=LIVENESS_UNAVAILABLE,
+                    details=f"process {proc.pid} start-time unavailable",
                 )
             else:
                 completion_result = preflight

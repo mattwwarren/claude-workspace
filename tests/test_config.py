@@ -975,6 +975,66 @@ class TestMigrateCwState:
         session = migrated["sessions"][0]
         assert session["liveness_bucket"] == "stale_30m"
 
+    def test_v13_to_v14_clears_stale_local_liveness(self) -> None:
+        """A pre-v14 local_liveness handle (boot-relative start_time_ns) is
+        cleared on migration, since it can never compare equal to a
+        freshly-read epoch-relative value for the same live process
+        (GitHub #921)."""
+        raw = {
+            "schema_version": 13,
+            "sessions": [
+                {
+                    "id": "s1",
+                    "parent_session_id": None,
+                    "worker_session_ids": [],
+                    "last_result": None,
+                    "cost_usd": None,
+                    "cost_breakdown": None,
+                    "lane": None,
+                    "stage": None,
+                    "consecutive_salvage_skips": 0,
+                    "liveness_bucket": "live",
+                    "local_liveness": {"pid": 4242, "start_time_ns": 123456},
+                }
+            ],
+        }
+        migrated = migrate_cw_state(raw)
+        session = migrated["sessions"][0]
+        assert session["local_liveness"] is None
+        assert migrated["schema_version"] == CW_STATE_SCHEMA_VERSION
+
+    def test_v14_local_liveness_preserved_idempotently(self) -> None:
+        """A local_liveness handle already on schema v14+ survives a
+        migration pass unchanged (it's in the current epoch-relative
+        format)."""
+        raw = {
+            "schema_version": 14,
+            "sessions": [
+                {
+                    "id": "s1",
+                    "parent_session_id": None,
+                    "worker_session_ids": [],
+                    "last_result": None,
+                    "cost_usd": None,
+                    "cost_breakdown": None,
+                    "lane": None,
+                    "stage": None,
+                    "consecutive_salvage_skips": 0,
+                    "liveness_bucket": "live",
+                    "local_liveness": {
+                        "pid": 4242,
+                        "start_time_ns": 1782938077013950000,
+                    },
+                }
+            ],
+        }
+        migrated = migrate_cw_state(raw)
+        session = migrated["sessions"][0]
+        assert session["local_liveness"] == {
+            "pid": 4242,
+            "start_time_ns": 1782938077013950000,
+        }
+
     # -----------------------------------------------------------------------
     # Phase F: cmux surface_ref migration tests (schema v5)
     # -----------------------------------------------------------------------

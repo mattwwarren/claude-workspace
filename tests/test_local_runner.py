@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
@@ -52,11 +51,6 @@ def _make_task(ticket_id: str = "T-1", scope_hint: str | None = None) -> MagicMo
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(
-    sys.platform != "linux",
-    reason="/proc-based process start-time is Linux-only; "
-    "cross-platform macOS support tracked in #921",
-)
 def test_fake_runner_launch_records_call_and_returns_live_proc(tmp_path: Path) -> None:
     """FakeAiderRunner.launch() records argv/cwd/env and returns a live process."""
     runner = FakeAiderRunner()
@@ -100,7 +94,6 @@ def test_real_runner_launch_returns_live_popen_with_devnull(tmp_path: Path) -> N
 
 def test_real_runner_launch_raises_on_missing_binary(tmp_path: Path) -> None:
     """RealAiderRunner.launch() propagates FileNotFoundError for an absent binary."""
-    import pytest
 
     runner = RealAiderRunner()
     with pytest.raises(FileNotFoundError):
@@ -112,11 +105,6 @@ def test_real_runner_launch_raises_on_missing_binary(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(
-    sys.platform != "linux",
-    reason="/proc-based process start-time is Linux-only; "
-    "cross-platform macOS support tracked in #921",
-)
 def test_read_start_time_ns_live_process() -> None:
     """read_process_start_time_ns returns a positive int for a live process."""
     proc = subprocess.Popen(
@@ -132,7 +120,7 @@ def test_read_start_time_ns_live_process() -> None:
 
 
 def test_read_start_time_ns_dead_pid_returns_none() -> None:
-    """read_process_start_time_ns returns None for a PID with no /proc entry."""
+    """read_process_start_time_ns returns None for a PID with no live process."""
     proc = subprocess.Popen(
         ["true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
