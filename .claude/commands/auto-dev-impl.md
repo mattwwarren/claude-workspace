@@ -14,7 +14,14 @@ In standalone headless invocation: emit `AUTO_DEV_RESULT` after this stage compl
 
 ---
 
-> **Model selection:** The implementation agent spawned here is pinned to `model: "opus"` — the only stage that unambiguously requires Opus-level reasoning. Do not change to `model: inherit` — see CLAUDE.md §"Model Selection for Subagents" for the rationale and tier matrix.
+> **Model selection (scope-based):** The implementation agent's model is **resolved from the
+> ticket's scope tier** — **Small → `model: "sonnet"`, Large → `model: "opus"`** — NOT
+> unconditionally Opus. Impl is a fanned-out subagent, and both the global and repo CLAUDE.md
+> model matrices make **Sonnet the implementation default**, reserving Opus for large/complex
+> work ("Opus: main-thread reasoning only. Never fan it out."). Resolve the tier via the ladder
+> in "Resolve the impl model from scope tier" below **before** spawning, and pass the resolved
+> `$IMPL_MODEL` to every spawn variant. Do not use `model: inherit` (propagates the operator's
+> Opus default into every fan-out). See CLAUDE.md §"Model Selection for Subagents".
 
 ## Stage 2: Implement (Agent in Worktree)
 
@@ -41,17 +48,37 @@ redundant AND it places the impl agent in a position where the main checkout pat
 trivially derivable — causing the #766 leak pattern (worker `cd`s to main checkout and
 commits there).
 
-**Spawn shape depends on mode AND dispatch context** (all variants pin `model: "opus"` — real code generation):
+### Resolve the impl model from scope tier
 
-- **Interactive mode AND not in a dispatch worktree:** `isolation: "worktree"`, `model: "opus"`,
+**Before spawning the impl agent, resolve `$IMPL_MODEL` from the ticket's scope tier** — the
+same tier-resolution ladder Stage 3 (`auto-dev-review.md`) and finalize use, minus the
+post-impl diff-stat source (no diff exists yet, pre-impl):
+
+1. Read `.cw/plan.md` — look for an explicit `Scope tier:`, `**Scope:** Small`, `tier: small`,
+   or similar Stage-1c marker.
+2. Fallback: read `.claude/cw-context.json` → `queue_metadata.scope_hint` (the operator's
+   `cw dev-queue add --scope` hint).
+3. Fallback (unresolvable): default to `small` — mirroring the pipeline's existing
+   unresolvable→`small` convention (`auto-dev-review.md`, `auto-dev-finalize.md`).
+
+Map the resolved tier to `$IMPL_MODEL`: **`large` → `"opus"`**, **`small` → `"sonnet"`**.
+Why: impl is a fanned-out subagent; Sonnet is the CLAUDE.md implementation default and
+handles Small-scope changes at a fraction of the Opus cost, while Large scope keeps Opus for
+the genuinely hard reasoning. Defaulting the unresolvable case to `small`/Sonnet biases toward
+the cheaper model — the operator can always re-dispatch with `--scope large` to force Opus.
+
+**Spawn shape depends on mode AND dispatch context** (all variants pass `model: $IMPL_MODEL`
+resolved above — Sonnet for Small scope, Opus for Large):
+
+- **Interactive mode AND not in a dispatch worktree:** `isolation: "worktree"`, `model: $IMPL_MODEL`,
   `run_in_background: true` (parallel — the parent waits for the next user gate anyway,
   no orphan hazard).
-- **`--headless` mode AND not in a dispatch worktree:** `isolation: "worktree"`, `model: "opus"`,
+- **`--headless` mode AND not in a dispatch worktree:** `isolation: "worktree"`, `model: $IMPL_MODEL`,
   **synchronous** (omit `run_in_background`). Same orphan-hazard rationale as the Step
   1b Plan agent fix (`750ea77`).
 - **In a dispatch worktree (either mode):** **omit `isolation: "worktree"` entirely**.
   The dispatch worktree IS the impl agent's sandbox. Spawn synchronously with no
-  `isolation` key, with `model: "opus"` — the agent works directly in the current cwd. The `worktree_path`
+  `isolation` key, with `model: $IMPL_MODEL` — the agent works directly in the current cwd. The `worktree_path`
   in `.claude/cw-context.json` is the authoritative anchor for all git operations.
 
 ### Worktree Isolation Guard (headless) — #402
