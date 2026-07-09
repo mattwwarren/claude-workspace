@@ -35,6 +35,7 @@ from cw.reconcile.gate_recipes import (
     _detect_auto_adopt_plan,
     _detect_auto_approve_review,
     _find_blocked_task,
+    _marker_version,
     _stamp_gate_recipe_failure,
     run_gate_recipes,
 )
@@ -1530,6 +1531,14 @@ class TestActAdoptRecheckRace:
         run_gate_recipes(now=_NOW, config=_config())
 
         assert events == ["locked", "unlocked", "comment_posted"]
+
+
+def test_marker_version_fails_closed_when_marker_absent() -> None:
+    """_marker_version defends its own fail-closed contract rather than
+    depending on callers to pre-check marker presence — direct unit test
+    for the branch _clean_plan_snapshot's presence guard never exercises
+    (that guard always short-circuits before calling this function)."""
+    assert _marker_version("no markers here", marker="<!-- plan-spec-reviewed") is None
 
 
 def test_plan_spec_marker_matches_gh_marker() -> None:

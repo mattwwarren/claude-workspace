@@ -209,16 +209,22 @@ def _predicate_holds(snapshot: dict[str, object]) -> bool:
 def _marker_version(body: str, *, marker: str) -> str | None:
     """Extract the ``<date> <vN>`` version string that follows *marker*.
 
-    The caller guarantees *marker* is present in *body* (both markers are
-    substring-checked before this is called). Substring split only — no regex
-    or date parser (R3): the marker line is ``<!-- plan-spec-reviewed: D vN -->``,
-    so we take everything between the marker and the ``-->`` close, strip the
-    leading ``:`` and surrounding whitespace. Returns None (fail-closed) if the
-    marker comment is never closed with ``-->`` — without this check,
-    ``str.split`` silently returns the rest of *body* verbatim, which would
-    leak raw plan-of-record text into the predicate_snapshot, the
-    GATE_AUTO_APPROVED event payload, and the public audit comment.
+    Fails closed (returns None) both when *marker* is absent from *body* and
+    when its comment is never closed with ``-->`` — the caller currently
+    always pre-checks marker presence, but this function defends its own
+    fail-closed contract rather than depending on that discipline, since a
+    future caller (or refactor) skipping the pre-check would otherwise hit an
+    uncaught ``IndexError`` instead of failing closed. Substring split only —
+    no regex or date parser (R3): the marker line is
+    ``<!-- plan-spec-reviewed: D vN -->``, so we take everything between the
+    marker and the ``-->`` close, strip the leading ``:`` and surrounding
+    whitespace. The closure check specifically prevents ``str.split`` from
+    silently returning the rest of *body* verbatim, which would leak raw
+    plan-of-record text into the predicate_snapshot, the GATE_AUTO_APPROVED
+    event payload, and the public audit comment.
     """
+    if marker not in body:
+        return None
     rest = body.split(marker, 1)[1]
     if "-->" not in rest:
         return None
@@ -246,12 +252,14 @@ def _plan_of_record_body(task: TicketTask) -> str | None:
         return None
     try:
         return plan_path.read_text(encoding="utf-8")
-    except OSError:
-        # Read failure between .exists() and read_text() (deleted,
-        # permission error, etc.) degrades to "no plan body" rather than
-        # propagating — an unhandled exception here would abort the entire
-        # reconcile tick, including the unrelated auto_approve_clean_review
-        # recipe processed in the same run_gate_recipes() call.
+    except (OSError, UnicodeDecodeError):
+        # Read/decode failure between .exists() and read_text() (deleted,
+        # permission error, non-UTF-8 content, etc.) degrades to "no plan
+        # body" rather than propagating — an unhandled exception here would
+        # abort the entire reconcile tick, including the unrelated
+        # auto_approve_clean_review recipe processed in the same
+        # run_gate_recipes() call. UnicodeDecodeError is not an OSError
+        # subclass, so it must be caught explicitly alongside it.
         return None
 
 
@@ -414,10 +422,12 @@ def _post_auto_adopt_comment(ticket_id: str, snapshot: dict[str, object]) -> Non
     comment`` subprocess call, same best-effort log-on-failure behavior),
     formatting the plan template with the two marker-version strings.
     """
+    # snapshot's keys are exactly _SNAPSHOT_KEY_SPEC/_SNAPSHOT_KEY_SOUNDNESS,
+    # which match the template's placeholders verbatim (both derive from R3's
+    # predicate_snapshot shape) — unpacking directly avoids re-typing the
+    # literal key strings a second time at this call site.
     body = _AUTO_ADOPT_COMMENT_TEMPLATE.format(
-        recipe=RECIPE_AUTO_ADOPT_PLAN,
-        plan_spec_reviewed=snapshot[_SNAPSHOT_KEY_SPEC],
-        plan_soundness_reviewed=snapshot[_SNAPSHOT_KEY_SOUNDNESS],
+        recipe=RECIPE_AUTO_ADOPT_PLAN, **snapshot
     )
     try:
         result = subprocess.run(
