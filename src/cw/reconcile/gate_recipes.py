@@ -9,13 +9,16 @@ approval gate — so they gate on their own opt-in master switch
 audit event to the operator channel, since an auto-advance with no human in the
 loop is attention-worthy.
 
-**P1+P2 scope (this module, GitHub #1065):** the ``auto_approve_clean_review``
-recipe. It auto-approves a ``review_pending_approval`` gate when the review
-came back completely clean — no MUST_FIX findings, nothing deferred, health
-recommendation PROCEED, and no forbidden-area touch. ``auto_adopt_clean_plan``
-(P3, #1066) and the per-lane ``resolve_gate_recipe_enabled`` precedence (P4,
-#1067) are out of scope; only the ``RECIPE_AUTO_ADOPT_PLAN`` constant is
-defined here so both recipe keys have a single home.
+**P1+P2 scope (GitHub #1065):** the ``auto_approve_clean_review`` recipe. It
+auto-approves a ``review_pending_approval`` gate when the review came back
+completely clean — no MUST_FIX findings, nothing deferred, health
+recommendation PROCEED, and no forbidden-area touch.
+
+**P3 scope (GitHub #1066):** the ``auto_adopt_clean_plan`` recipe. It
+auto-adopts a ``plan_pending_approval`` gate when the plan-of-record carries
+both signoff markers (``plan-spec-reviewed`` and ``plan-soundness-reviewed``)
+appended by ``auto-dev-plan``. The per-lane ``resolve_gate_recipe_enabled``
+precedence (P4, #1067) remains out of scope here.
 
 The recipe follows the repo's detect/act split (see ``concierge.py`` for the
 closest sibling): a pure ``_detect_auto_approve_review`` classification phase,
@@ -56,6 +59,7 @@ from cw.dev_queue import (
 )
 from cw.events import record_event
 from cw.exceptions import CwError
+from cw.gh import fetch_approved_plan_comment
 from cw.models import OrchestratorEventType, QueueItemStatus
 
 if TYPE_CHECKING:
@@ -92,6 +96,29 @@ The review met the clean-review predicate and was approved automatically
 - deferred: {deferred}
 - recommendation: {recommendation}
 - forbidden_touched: {forbidden_touched}
+
+See event `GATE_AUTO_APPROVED` for the full audit trail.
+"""
+
+# The only sentinel status the plan recipe fires on. A row whose owning
+# session's last_result is not at this gate is never a candidate.
+_PLAN_PENDING_APPROVAL = "plan_pending_approval"
+
+# The two signoff markers auto-dev-plan appends to the plan-of-record body.
+# _PLAN_SPEC_MARKER mirrors gh._PLAN_MARKER — a local copy avoids importing a
+# private cross-module constant; keep the two in sync.
+_PLAN_SPEC_MARKER = "<!-- plan-spec-reviewed"
+_PLAN_SOUNDNESS_MARKER = "<!-- plan-soundness-reviewed"
+
+_AUTO_ADOPT_COMMENT_TEMPLATE = """\
+Auto-approved by gate recipe `{recipe}`.
+
+The plan met the clean-plan predicate (both signoff markers present on the
+plan-of-record) and was approved automatically (no human review) by RFC 0009
+gate-recipe automation:
+
+- plan_spec_reviewed: {plan_spec_reviewed}
+- plan_soundness_reviewed: {plan_soundness_reviewed}
 
 See event `GATE_AUTO_APPROVED` for the full audit trail.
 """
@@ -172,6 +199,69 @@ def _predicate_holds(snapshot: dict[str, object]) -> bool:
     )
 
 
+def _marker_version(body: str, marker: str) -> str:
+    """Extract the ``<date> <vN>`` version string that follows *marker*.
+
+    The caller guarantees *marker* is present in *body* (both markers are
+    substring-checked before this is called). Substring split only — no regex
+    or date parser (R3): the marker line is ``<!-- plan-spec-reviewed: D vN -->``,
+    so we take everything between the marker and the ``-->`` close, strip the
+    leading ``:`` and surrounding whitespace.
+    """
+    return body.split(marker, 1)[1].split("-->", 1)[0].strip().lstrip(":").strip()
+
+
+def _plan_of_record_body(task: TicketTask) -> str | None:
+    """Return the plan-of-record body, tracker-first with a `.cw/plan.md` fallback.
+
+    Why tracker-first (opposite of local_runner.build_task_message's
+    .cw-first order): that function fills a local cache for Stage-2 task
+    prompts; this gate checks *current* approval freshness, for which the
+    tracker is the authoritative, freshest source. Falls back to the
+    worktree's ``.cw/plan.md`` only when the tracker read returns None. A row
+    with no materialized worktree has no fallback (returns None rather than
+    raising on ``Path(None)``).
+    """
+    body = fetch_approved_plan_comment(task.ticket_id)
+    if body is not None:
+        return body
+    if task.worktree_path is None:
+        return None
+    plan_path = task.worktree_path / ".cw" / "plan.md"
+    if not plan_path.exists():
+        return None
+    return plan_path.read_text(encoding="utf-8")
+
+
+def _clean_plan_snapshot(
+    last_result: object, task: TicketTask
+) -> dict[str, object] | None:
+    """Extract the clean-plan predicate snapshot, or None if not fireable.
+
+    Returns None (fail-closed) unless *last_result* is a dict at the
+    ``plan_pending_approval`` gate AND the plan-of-record body carries BOTH
+    signoff markers. Both markers are read from the SAME body (R2 — there is
+    exactly one ``body`` variable in scope, so same-source is structural, not
+    a separate check); a union across tracker + `.cw/plan.md` is impossible by
+    construction. The returned snapshot holds only the two marker-version
+    strings — the raw plan body is never placed in the snapshot, the event
+    payload, or the audit comment.
+    """
+    if not isinstance(last_result, dict):
+        return None
+    if last_result.get("status") != _PLAN_PENDING_APPROVAL:
+        return None
+    body = _plan_of_record_body(task)
+    if body is None:
+        return None
+    if _PLAN_SPEC_MARKER not in body or _PLAN_SOUNDNESS_MARKER not in body:
+        return None
+    return {
+        "plan_spec_reviewed": _marker_version(body, _PLAN_SPEC_MARKER),
+        "plan_soundness_reviewed": _marker_version(body, _PLAN_SOUNDNESS_MARKER),
+    }
+
+
 def _detect_auto_approve_review(
     state: CwState, tasks: list[TicketTask]
 ) -> list[GateRecipeCandidate]:
@@ -230,6 +320,37 @@ def _post_auto_approve_comment(ticket_id: str, snapshot: dict[str, object]) -> N
         deferred=snapshot["deferred"],
         recommendation=snapshot["recommendation"],
         forbidden_touched=snapshot["forbidden_touched"],
+    )
+    try:
+        result = subprocess.run(
+            ["gh", "issue", "comment", ticket_id, "--body", body],
+            capture_output=True,
+            timeout=_COMMENT_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _log.warning("gate_recipe_comment_failed ticket=%s: %s", ticket_id, exc)
+        return
+    if result.returncode != 0:
+        _log.warning(
+            "gate_recipe_comment_failed ticket=%s rc=%s: %s",
+            ticket_id,
+            result.returncode,
+            result.stderr.decode(errors="replace").strip(),
+        )
+
+
+def _post_auto_adopt_comment(ticket_id: str, snapshot: dict[str, object]) -> None:
+    """Post the auto-adopt audit comment to the ticket (best-effort, logged).
+
+    Mirrors :func:`_post_auto_approve_comment` exactly (same ``gh issue
+    comment`` subprocess call, same best-effort log-on-failure behavior),
+    formatting the plan template with the two marker-version strings.
+    """
+    body = _AUTO_ADOPT_COMMENT_TEMPLATE.format(
+        recipe=RECIPE_AUTO_ADOPT_PLAN,
+        plan_spec_reviewed=snapshot["plan_spec_reviewed"],
+        plan_soundness_reviewed=snapshot["plan_soundness_reviewed"],
     )
     try:
         result = subprocess.run(
