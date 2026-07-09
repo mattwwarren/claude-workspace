@@ -9,13 +9,16 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from cw.config import save_state
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.gh import _PLAN_MARKER
 from cw.models import (
+    ClientConfig,
     CwState,
     DevQueueStore,
+    LaneConfig,
     OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
@@ -37,10 +40,27 @@ from cw.reconcile.gate_recipes import (
     _find_blocked_task,
     _marker_version,
     _stamp_gate_recipe_failure,
+    resolve_gate_recipe_enabled,
     run_gate_recipes,
 )
 
 _NOW = datetime(2026, 7, 8, 12, 0, 0, tzinfo=UTC)
+
+
+# YAML lanes block enabling both gate recipes on both the 'default' and
+# 'fastlane' lanes — appended to each test client so run_gate_recipes resolves
+# the recipes enabled under the 3-tier per-lane precedence (RFC 0009 P4).
+_LANES_YAML = (
+    "    lanes:\n"
+    "      - name: default\n"
+    "        gate_recipes:\n"
+    "          auto_approve_clean_review: true\n"
+    "          auto_adopt_clean_plan: true\n"
+    "      - name: fastlane\n"
+    "        gate_recipes:\n"
+    "          auto_approve_clean_review: true\n"
+    "          auto_adopt_clean_plan: true\n"
+)
 
 
 def _write_acme_clients_yaml(tmp_config_dir: Path, workspace: Path) -> None:
@@ -49,7 +69,7 @@ def _write_acme_clients_yaml(tmp_config_dir: Path, workspace: Path) -> None:
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "clients.yaml").write_text(
         f"clients:\n  acme:\n    workspace_path: {workspace}\n"
-        "    default_branch: main\n"
+        "    default_branch: main\n" + _LANES_YAML
     )
 
 
@@ -62,7 +82,9 @@ def _write_two_client_yaml(
     (config_dir / "clients.yaml").write_text(
         "clients:\n"
         f"  acme:\n    workspace_path: {acme_workspace}\n    default_branch: main\n"
-        f"  beta:\n    workspace_path: {beta_workspace}\n    default_branch: main\n"
+        + _LANES_YAML
+        + f"  beta:\n    workspace_path: {beta_workspace}\n    default_branch: main\n"
+        + _LANES_YAML
     )
 
 
@@ -136,6 +158,30 @@ def _config(**kwargs: Any) -> OrchestratorConfig:
     return OrchestratorConfig(**kwargs)
 
 
+def _seam1_clients() -> dict[str, ClientConfig]:
+    """Seam-1 per-lane clients dict for the direct ``_detect_*`` call sites.
+
+    Client ``acme`` declares BOTH the ``default`` and ``fastlane`` lanes, each
+    enabling both gate recipes, so that a task on either lane resolves enabled
+    under the 3-tier ``resolve_gate_recipe_enabled`` precedence (several detect
+    tests run tasks on ``fastlane``).
+    """
+    both_on = {RECIPE_AUTO_APPROVE_REVIEW: True, RECIPE_AUTO_ADOPT_PLAN: True}
+    return {
+        "acme": ClientConfig(
+            workspace_path=Path("/tmp/ws"),
+            default_branch="main",
+            lanes=[
+                LaneConfig(name="default", gate_recipes=dict(both_on)),
+                LaneConfig(name="fastlane", gate_recipes=dict(both_on)),
+            ],
+        )
+    }
+
+
+_SEAM1_CLIENTS = _seam1_clients()
+
+
 @pytest.fixture(autouse=True)
 def stub_gh_comment(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     """Capture ``gh issue comment`` argv without spawning a subprocess.
@@ -162,7 +208,9 @@ class TestDetect:
         session = _make_session(last_result=_clean_result())
         state = CwState(sessions=[session])
 
-        candidates = _detect_auto_approve_review(state, [task])
+        candidates = _detect_auto_approve_review(
+            state, [task], clients=_SEAM1_CLIENTS, config=_config()
+        )
 
         assert len(candidates) == 1
         cand = candidates[0]
@@ -183,7 +231,9 @@ class TestDetect:
         session = _make_session(last_result=_clean_result())
         state = CwState(sessions=[session])
 
-        assert _detect_auto_approve_review(state, [task]) == []
+        assert _detect_auto_approve_review(
+            state, [task], clients=_SEAM1_CLIENTS, config=_config()
+        ) == []
 
     def test_latched_failure_yields_none_even_when_predicate_holds(self) -> None:
         """A row with a non-None gate_recipe_failed_at is excluded from
@@ -194,7 +244,9 @@ class TestDetect:
         session = _make_session(last_result=_clean_result())
         state = CwState(sessions=[session])
 
-        assert _detect_auto_approve_review(state, [task]) == []
+        assert _detect_auto_approve_review(
+            state, [task], clients=_SEAM1_CLIENTS, config=_config()
+        ) == []
 
     def test_wrong_last_result_status_yields_none(self) -> None:
         task = _make_task()
@@ -203,26 +255,34 @@ class TestDetect:
         )
         state = CwState(sessions=[session])
 
-        assert _detect_auto_approve_review(state, [task]) == []
+        assert _detect_auto_approve_review(
+            state, [task], clients=_SEAM1_CLIENTS, config=_config()
+        ) == []
 
     def test_no_session_id_yields_none(self) -> None:
         task = _make_task(session_id=None)
         state = CwState(sessions=[])
 
-        assert _detect_auto_approve_review(state, [task]) == []
+        assert _detect_auto_approve_review(
+            state, [task], clients=_SEAM1_CLIENTS, config=_config()
+        ) == []
 
     def test_missing_session_yields_none(self) -> None:
         task = _make_task(session_id="ghost")
         state = CwState(sessions=[])
 
-        assert _detect_auto_approve_review(state, [task]) == []
+        assert _detect_auto_approve_review(
+            state, [task], clients=_SEAM1_CLIENTS, config=_config()
+        ) == []
 
     def test_null_last_result_yields_none(self) -> None:
         task = _make_task()
         session = _make_session(last_result=None)
         state = CwState(sessions=[session])
 
-        assert _detect_auto_approve_review(state, [task]) == []
+        assert _detect_auto_approve_review(
+            state, [task], clients=_SEAM1_CLIENTS, config=_config()
+        ) == []
 
     @pytest.mark.parametrize("section", ["review", "health", "scope"])
     def test_malformed_last_result_section_yields_none(self, section: str) -> None:
@@ -234,7 +294,9 @@ class TestDetect:
         session = _make_session(last_result=bad)
         state = CwState(sessions=[session])
 
-        assert _detect_auto_approve_review(state, [task]) == []
+        assert _detect_auto_approve_review(
+            state, [task], clients=_SEAM1_CLIENTS, config=_config()
+        ) == []
 
     @pytest.mark.parametrize(
         "kwargs",
@@ -250,7 +312,9 @@ class TestDetect:
         session = _make_session(last_result=_clean_result(**kwargs))
         state = CwState(sessions=[session])
 
-        assert _detect_auto_approve_review(state, [task]) == []
+        assert _detect_auto_approve_review(
+            state, [task], clients=_SEAM1_CLIENTS, config=_config()
+        ) == []
 
 
 class TestMasterSwitch:
@@ -925,7 +989,9 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
-        candidates = _detect_auto_adopt_plan(state, [task])
+        candidates = _detect_auto_adopt_plan(
+            state, [task], clients=_SEAM1_CLIENTS, config=_config()
+        )
 
         assert len(candidates) == 1
         cand = candidates[0]
@@ -944,7 +1010,9 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
-        assert _detect_auto_adopt_plan(state, [task]) == []
+        assert _detect_auto_adopt_plan(
+            state, [task], clients=_SEAM1_CLIENTS, config=_config()
+        ) == []
 
     def test_missing_spec_marker_yields_none(
         self, monkeypatch: pytest.MonkeyPatch
@@ -954,7 +1022,9 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
-        assert _detect_auto_adopt_plan(state, [task]) == []
+        assert _detect_auto_adopt_plan(
+            state, [task], clients=_SEAM1_CLIENTS, config=_config()
+        ) == []
 
     def test_non_plan_pending_status_yields_none(
         self, monkeypatch: pytest.MonkeyPatch
@@ -966,7 +1036,9 @@ class TestDetectAdoptPlan:
         )
         state = CwState(sessions=[session])
 
-        assert _detect_auto_adopt_plan(state, [task]) == []
+        assert _detect_auto_adopt_plan(
+            state, [task], clients=_SEAM1_CLIENTS, config=_config()
+        ) == []
 
     def test_non_blocked_status_yields_none(
         self, monkeypatch: pytest.MonkeyPatch
@@ -976,7 +1048,9 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
-        assert _detect_auto_adopt_plan(state, [task]) == []
+        assert _detect_auto_adopt_plan(
+            state, [task], clients=_SEAM1_CLIENTS, config=_config()
+        ) == []
 
     def test_latched_failure_yields_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _stub_fetch_plan(monkeypatch, _plan_body())
@@ -984,21 +1058,27 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
-        assert _detect_auto_adopt_plan(state, [task]) == []
+        assert _detect_auto_adopt_plan(
+            state, [task], clients=_SEAM1_CLIENTS, config=_config()
+        ) == []
 
     def test_no_session_id_yields_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _stub_fetch_plan(monkeypatch, _plan_body())
         task = _make_task(stage=Stage.PLAN, session_id=None)
         state = CwState(sessions=[])
 
-        assert _detect_auto_adopt_plan(state, [task]) == []
+        assert _detect_auto_adopt_plan(
+            state, [task], clients=_SEAM1_CLIENTS, config=_config()
+        ) == []
 
     def test_missing_session_yields_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _stub_fetch_plan(monkeypatch, _plan_body())
         task = _make_task(stage=Stage.PLAN, session_id="ghost")
         state = CwState(sessions=[])
 
-        assert _detect_auto_adopt_plan(state, [task]) == []
+        assert _detect_auto_adopt_plan(
+            state, [task], clients=_SEAM1_CLIENTS, config=_config()
+        ) == []
 
     def test_null_last_result_yields_none(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1008,7 +1088,9 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=None)
         state = CwState(sessions=[session])
 
-        assert _detect_auto_adopt_plan(state, [task]) == []
+        assert _detect_auto_adopt_plan(
+            state, [task], clients=_SEAM1_CLIENTS, config=_config()
+        ) == []
 
     def test_falls_back_to_cw_plan_md_when_tracker_returns_none(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1023,7 +1105,9 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
-        candidates = _detect_auto_adopt_plan(state, [task])
+        candidates = _detect_auto_adopt_plan(
+            state, [task], clients=_SEAM1_CLIENTS, config=_config()
+        )
 
         assert len(candidates) == 1
         assert candidates[0].evidence == _PLAN_SNAPSHOT
@@ -1038,7 +1122,9 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
-        assert _detect_auto_adopt_plan(state, [task]) == []
+        assert _detect_auto_adopt_plan(
+            state, [task], clients=_SEAM1_CLIENTS, config=_config()
+        ) == []
 
     def test_missing_cw_plan_md_when_tracker_returns_none_yields_none(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1053,7 +1139,9 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
-        assert _detect_auto_adopt_plan(state, [task]) == []
+        assert _detect_auto_adopt_plan(
+            state, [task], clients=_SEAM1_CLIENTS, config=_config()
+        ) == []
 
     def test_tracker_spec_only_body_not_completed_by_cw_plan_md(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1071,7 +1159,9 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
-        assert _detect_auto_adopt_plan(state, [task]) == []
+        assert _detect_auto_adopt_plan(
+            state, [task], clients=_SEAM1_CLIENTS, config=_config()
+        ) == []
 
     def test_unclosed_marker_yields_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Fail-closed on a malformed marker: the soundness marker's prefix is
@@ -1090,7 +1180,9 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
-        assert _detect_auto_adopt_plan(state, [task]) == []
+        assert _detect_auto_adopt_plan(
+            state, [task], clients=_SEAM1_CLIENTS, config=_config()
+        ) == []
 
     def test_plan_md_read_error_yields_none(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1116,7 +1208,9 @@ class TestDetectAdoptPlan:
 
         monkeypatch.setattr(Path, "read_text", _boom_read_text)
 
-        assert _detect_auto_adopt_plan(state, [task]) == []
+        assert _detect_auto_adopt_plan(
+            state, [task], clients=_SEAM1_CLIENTS, config=_config()
+        ) == []
 
     def test_plan_md_non_utf8_content_yields_none(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1135,7 +1229,9 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
-        assert _detect_auto_adopt_plan(state, [task]) == []
+        assert _detect_auto_adopt_plan(
+            state, [task], clients=_SEAM1_CLIENTS, config=_config()
+        ) == []
 
 
 class TestRunAdoptPlan:
@@ -1570,3 +1666,195 @@ def test_plan_spec_marker_matches_gh_marker() -> None:
     from cw.reconcile.gate_recipes import _PLAN_SPEC_MARKER
 
     assert _PLAN_SPEC_MARKER == _PLAN_MARKER
+
+
+def _client_with_lanes(*lanes: LaneConfig) -> ClientConfig:
+    return ClientConfig(
+        workspace_path=Path("/tmp/ws"), default_branch="main", lanes=list(lanes)
+    )
+
+
+class TestResolveGateRecipeEnabled:
+    """3-tier precedence for resolve_gate_recipe_enabled (RFC 0009 P4)."""
+
+    def test_tier1_task_override_wins_over_lane_and_default(self) -> None:
+        """A ticket-level override beats an enabling lane map (True) and a
+        disabling lane map (False), in both directions."""
+        clients = {
+            "acme": _client_with_lanes(
+                LaneConfig(
+                    name="default",
+                    gate_recipes={RECIPE_AUTO_APPROVE_REVIEW: True},
+                )
+            )
+        }
+        task_off = _make_task(gate_recipes={RECIPE_AUTO_APPROVE_REVIEW: False})
+        assert (
+            resolve_gate_recipe_enabled(
+                task_off, clients, RECIPE_AUTO_APPROVE_REVIEW
+            )
+            is False
+        )
+        clients_off = {
+            "acme": _client_with_lanes(
+                LaneConfig(
+                    name="default",
+                    gate_recipes={RECIPE_AUTO_APPROVE_REVIEW: False},
+                )
+            )
+        }
+        task_on = _make_task(gate_recipes={RECIPE_AUTO_APPROVE_REVIEW: True})
+        assert (
+            resolve_gate_recipe_enabled(
+                task_on, clients_off, RECIPE_AUTO_APPROVE_REVIEW
+            )
+            is True
+        )
+
+    def test_tier2_lane_map_wins_over_default(self) -> None:
+        clients = {
+            "acme": _client_with_lanes(
+                LaneConfig(
+                    name="default",
+                    gate_recipes={RECIPE_AUTO_APPROVE_REVIEW: True},
+                )
+            )
+        }
+        task = _make_task()
+        assert (
+            resolve_gate_recipe_enabled(task, clients, RECIPE_AUTO_APPROVE_REVIEW)
+            is True
+        )
+
+    def test_tier2_lane_map_recipe_miss_falls_through_to_default(self) -> None:
+        """A lane map that sets one recipe but not the other leaves the
+        unset recipe on its hardcoded default-off, not implicitly enabled."""
+        clients = {
+            "acme": _client_with_lanes(
+                LaneConfig(
+                    name="default",
+                    gate_recipes={RECIPE_AUTO_APPROVE_REVIEW: True},
+                )
+            )
+        }
+        task = _make_task()
+        assert (
+            resolve_gate_recipe_enabled(task, clients, RECIPE_AUTO_ADOPT_PLAN)
+            is False
+        )
+
+    def test_tier3_default_off_when_nothing_configured(self) -> None:
+        clients = {"acme": _client_with_lanes(LaneConfig(name="default"))}
+        task = _make_task()
+        assert (
+            resolve_gate_recipe_enabled(task, clients, RECIPE_AUTO_APPROVE_REVIEW)
+            is False
+        )
+        assert (
+            resolve_gate_recipe_enabled(task, clients, RECIPE_AUTO_ADOPT_PLAN)
+            is False
+        )
+
+    def test_client_absent_falls_through_to_default(self) -> None:
+        task = _make_task(client="ghost")
+        assert (
+            resolve_gate_recipe_enabled(task, {}, RECIPE_AUTO_APPROVE_REVIEW)
+            is False
+        )
+
+    def test_lane_absent_from_client_falls_through_to_default(self) -> None:
+        clients = {
+            "acme": _client_with_lanes(
+                LaneConfig(
+                    name="default",
+                    gate_recipes={RECIPE_AUTO_APPROVE_REVIEW: True},
+                )
+            )
+        }
+        task = _make_task(lane="nonexistent")
+        assert (
+            resolve_gate_recipe_enabled(task, clients, RECIPE_AUTO_APPROVE_REVIEW)
+            is False
+        )
+
+
+class TestMasterSwitchVsLane:
+    """Master switch on; per-lane enablement decides which rows fire."""
+
+    def test_only_enabled_lane_row_is_a_candidate(self) -> None:
+        clients = {
+            "acme": _client_with_lanes(
+                LaneConfig(
+                    name="default",
+                    gate_recipes={RECIPE_AUTO_APPROVE_REVIEW: False},
+                ),
+                LaneConfig(
+                    name="fastlane",
+                    gate_recipes={RECIPE_AUTO_APPROVE_REVIEW: True},
+                ),
+            )
+        }
+        task_off = _make_task(
+            ticket_id="GEN-A", lane="default", session_id="sess-a"
+        )
+        task_on = _make_task(
+            ticket_id="GEN-B", lane="fastlane", session_id="sess-b"
+        )
+        state = CwState(
+            sessions=[
+                _make_session(
+                    ticket_id="GEN-A",
+                    session_id="sess-a",
+                    last_result=_clean_result(),
+                ),
+                _make_session(
+                    ticket_id="GEN-B",
+                    session_id="sess-b",
+                    last_result=_clean_result(),
+                ),
+            ]
+        )
+
+        candidates = _detect_auto_approve_review(
+            state, [task_off, task_on], clients=clients, config=_config()
+        )
+
+        assert [c.ticket_id for c in candidates] == ["GEN-B"]
+
+
+class TestGateRecipesValidator:
+    """Both LaneConfig.gate_recipes and TicketTask.gate_recipes reject
+    unrecognized recipe keys at construction (fail-loud)."""
+
+    def test_lane_config_rejects_unrecognized_key(self) -> None:
+        with pytest.raises(ValidationError):
+            LaneConfig(name="default", gate_recipes={"bogus_recipe": True})
+
+    def test_ticket_task_rejects_unrecognized_key(self) -> None:
+        with pytest.raises(ValidationError):
+            _make_task(gate_recipes={"bogus_recipe": True})
+
+    def test_lane_config_accepts_recognized_keys(self) -> None:
+        lane = LaneConfig(
+            name="default",
+            gate_recipes={
+                RECIPE_AUTO_APPROVE_REVIEW: True,
+                RECIPE_AUTO_ADOPT_PLAN: False,
+            },
+        )
+        assert lane.gate_recipes == {
+            RECIPE_AUTO_APPROVE_REVIEW: True,
+            RECIPE_AUTO_ADOPT_PLAN: False,
+        }
+
+    def test_ticket_task_accepts_recognized_keys(self) -> None:
+        task = _make_task(
+            gate_recipes={
+                RECIPE_AUTO_APPROVE_REVIEW: False,
+                RECIPE_AUTO_ADOPT_PLAN: True,
+            }
+        )
+        assert task.gate_recipes == {
+            RECIPE_AUTO_APPROVE_REVIEW: False,
+            RECIPE_AUTO_ADOPT_PLAN: True,
+        }
