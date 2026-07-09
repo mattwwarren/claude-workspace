@@ -1,7 +1,7 @@
 """Harvest path for fire-and-forget LocalExecutor aider sessions (RFC 0005 F3).
 
 A LOCAL session is left ACTIVE with a :class:`LocalLivenessHandle` (PID +
-/proc start-time) by ``LocalExecutor.spawn`` after it launches aider
+process creation-time) by ``LocalExecutor.spawn`` after it launches aider
 fire-and-forget. When that process exits, the session is still ACTIVE in cw
 state but the PID is gone (or recycled to an unrelated process). This module
 detects that dead-process condition and synthesizes the git-based completion:
@@ -52,8 +52,8 @@ if TYPE_CHECKING:
 def _local_process_alive(handle: LocalLivenessHandle) -> bool:
     """Return True iff the handle's PID still names the same live process.
 
-    Re-reads ``/proc/<pid>/stat`` and requires the start-time to match the value
-    captured at spawn. A missing stat file (PID gone) or a start-time mismatch
+    Re-reads the process creation-time and requires it to match the value
+    captured at spawn. A PID with no live process, or a start-time mismatch
     (PID recycled to an unrelated process) both read as NOT alive — the latter is
     the recycled-PID guard that keeps harvest from being fooled by PID reuse.
     """
