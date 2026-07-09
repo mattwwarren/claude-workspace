@@ -12,7 +12,7 @@ Complete reference for `cw` client configuration.
 
 ```bash
 # Install
-uv tool install git+https://github.com/mattwwarren/claude-workspace.git
+uv tool install "claude-workspace[mcp] @ git+https://github.com/mattwwarren/claude-workspace.git"
 
 # Add your first project
 cw init my-project --path /path/to/repo

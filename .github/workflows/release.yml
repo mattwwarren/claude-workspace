@@ -60,7 +60,7 @@ jobs:
             ## Install
 
             ```bash
-            uv tool install git+https://github.com/${{ github.repository }}.git@${{ github.ref_name }}
+            uv tool install "claude-workspace[mcp] @ git+https://github.com/${{ github.repository }}.git@${{ github.ref_name }}"
             ```
 
             ## First-time setup

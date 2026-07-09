@@ -61,13 +61,13 @@ Expected output for a healthy setup:
 ### From GitHub (recommended)
 
 ```bash
-uv tool install git+https://github.com/mattwwarren/claude-workspace.git
+uv tool install "claude-workspace[mcp] @ git+https://github.com/mattwwarren/claude-workspace.git"
 ```
 
 Pin to a specific release:
 
 ```bash
-uv tool install git+https://github.com/mattwwarren/claude-workspace.git@v0.4.0
+uv tool install "claude-workspace[mcp] @ git+https://github.com/mattwwarren/claude-workspace.git@v0.4.0"
 ```
 
 ### From Local Clone
@@ -78,7 +78,7 @@ cd claude-workspace
 ./scripts/install.sh
 ```
 
-The install script runs `uv tool install --from . --force claude-workspace`, making `cw` globally available.
+The install script runs `uv tool install --from "$PROJECT_DIR" --force --reinstall --no-cache "claude-workspace[mcp]"`, making `cw` globally available.
 
 ### For Development
 
@@ -93,7 +93,7 @@ uv run cw --help           # Run without global install
 
 ```bash
 # From GitHub (latest)
-uv tool install --force git+https://github.com/mattwwarren/claude-workspace.git
+uv tool install --force "claude-workspace[mcp] @ git+https://github.com/mattwwarren/claude-workspace.git"
 
 # From local clone
 cd claude-workspace
@@ -232,7 +232,7 @@ export PATH="$HOME/.local/bin:$PATH"
 The package wasn't installed correctly. Reinstall:
 
 ```bash
-uv tool install --force git+https://github.com/mattwwarren/claude-workspace.git
+uv tool install --force "claude-workspace[mcp] @ git+https://github.com/mattwwarren/claude-workspace.git"
 ```
 
 ### `Python 3.13 required`

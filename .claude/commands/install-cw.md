@@ -32,7 +32,7 @@ Optional: check for peon-ping (`peon status`) - not required but provides sound 
 ## Step 2: Install cw
 
 Ask the user which installation method they prefer:
-1. **From GitHub** (recommended for users): `uv tool install git+https://github.com/mattwwarren/claude-workspace.git`
+1. **From GitHub** (recommended for users): `uv tool install "claude-workspace[mcp] @ git+https://github.com/mattwwarren/claude-workspace.git"`
 2. **From local clone** (for development): Clone the repo, then run `./scripts/install.sh`
 3. **Development mode** (editable): Clone the repo, run `uv sync`, use `uv run cw`
 
