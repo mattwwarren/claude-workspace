@@ -16,7 +16,12 @@ import pytest
 
 from cw._util import claude_project_dir
 from cw.auto_dev_result import AutoDevResult, BlockedResult, parse_stdout
-from cw.config import load_state, save_state, sessions_lock
+from cw.config import (
+    load_state,
+    orchestrator_config_file,
+    save_state,
+    sessions_lock,
+)
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
 from cw.exceptions import WorktreeError
@@ -71,7 +76,19 @@ from cw.reconcile import (
     revert_timed_out_tasks,
     salvage_committed_no_pr_sessions,
 )
+from cw.reconcile.gate_recipes import (
+    RECIPE_AUTO_ADOPT_PLAN,
+    RECIPE_AUTO_APPROVE_REVIEW,
+)
 from tests.conftest import _make_daemon_session, _write_idle_transcript
+from tests.test_reconcile_gate_recipes import (
+    _clean_result,
+    _make_session,
+    _plan_body,
+    _plan_result,
+    _stub_fetch_plan,
+    _write_acme_clients_yaml,
+)
 
 
 def _mk_session(
@@ -21054,3 +21071,115 @@ class TestConciergeAndEscalationWiring:
         assert report.phantom_session_ids == ["phantom-1"]
         concierge_mock.assert_called_once()
         escalation_mock.assert_called_once()
+
+
+def _write_gate_orchestrator_yaml(*, gate_recipes_enabled: bool) -> None:
+    """Write orchestrator.yaml toggling the gate-recipe master switch.
+
+    concierge_enabled stays False so the tick exercises only the gate-recipe
+    path (single-concern), and reconcile()'s real load_orchestrator_config()
+    reads this file off disk rather than an in-memory _config() object.
+    """
+    path = orchestrator_config_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"gate_recipes_enabled: {str(gate_recipes_enabled).lower()}\n"
+        "concierge_enabled: false\n"
+    )
+
+
+def _stub_gate_comment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub cw.gh._sp.run so the post-approve comment never hits real gh."""
+
+    def _fake_run(
+        argv: list[str], **_kwargs: Any
+    ) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+
+
+class TestReconcileGateRecipeIntegration:
+    """RFC 0009 (#1088 item 2): behavioral reconcile()-level coverage of the
+    gate-recipe act path — the real load_orchestrator_config() disk read,
+    per-lane enablement, gate advance, and event emission through ONE unmocked
+    tick. The sibling TestConciergeAndEscalationWiring is mocked wiring-only
+    (asserts the sweeps are *called*); this drives the reactor for real.
+
+    The owning session is refless (surface_ref=None) so compute_drift skips it
+    (no phantom → the cheap no-phantoms branch of _reconcile_locked, which still
+    runs run_gate_recipes via _run_terminal_backstops_and_sweeps).
+    """
+
+    @staticmethod
+    def _blocked_task(stage: Stage) -> TicketTask:
+        return TicketTask(
+            ticket_id="GEN-1",
+            client="acme",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            stage=stage,
+            session_id="sess-1",
+        )
+
+    def test_clean_review_auto_approved_advances_to_finalize(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        _write_gate_orchestrator_yaml(gate_recipes_enabled=True)
+        _stub_gate_comment(monkeypatch)
+        save_dev_queue(DevQueueStore(tasks=[self._blocked_task(Stage.REVIEW)]))
+        save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
+
+        reconcile()
+
+        store = load_dev_queue()
+        assert store.tasks[0].stage == Stage.FINALIZE
+        events = read_events(
+            event_types=[OrchestratorEventType.GATE_AUTO_APPROVED],
+        )
+        assert len(events) == 1
+        assert events[0].payload["ticket_id"] == "GEN-1"
+        assert events[0].payload["recipe"] == RECIPE_AUTO_APPROVE_REVIEW
+
+    def test_clean_plan_auto_adopted_advances_to_impl(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        _write_gate_orchestrator_yaml(gate_recipes_enabled=True)
+        _stub_gate_comment(monkeypatch)
+        _stub_fetch_plan(monkeypatch, _plan_body())
+        save_dev_queue(DevQueueStore(tasks=[self._blocked_task(Stage.PLAN)]))
+        save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
+
+        reconcile()
+
+        store = load_dev_queue()
+        assert store.tasks[0].stage == Stage.IMPL
+        events = read_events(
+            event_types=[OrchestratorEventType.GATE_AUTO_APPROVED],
+        )
+        assert len(events) == 1
+        assert events[0].payload["ticket_id"] == "GEN-1"
+        assert events[0].payload["recipe"] == RECIPE_AUTO_ADOPT_PLAN
+
+    def test_master_switch_off_leaves_task_blocked(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        _write_gate_orchestrator_yaml(gate_recipes_enabled=False)
+        _stub_gate_comment(monkeypatch)
+        save_dev_queue(DevQueueStore(tasks=[self._blocked_task(Stage.REVIEW)]))
+        save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
+
+        reconcile()
+
+        store = load_dev_queue()
+        # Recipe never fired: the row stays parked at the review gate. (Do not
+        # assert escalation_parked_at — the escalation sweep may stamp it in the
+        # same tick; only the gate-recipe non-fire is under test here.)
+        assert store.tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+        assert store.tasks[0].stage == Stage.REVIEW
+        events = read_events(
+            event_types=[OrchestratorEventType.GATE_AUTO_APPROVED],
+        )
+        assert events == []
