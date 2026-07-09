@@ -3444,22 +3444,21 @@ class TestApproveTicketLockedResolved:
         save_state(CwState(sessions=[session]))  # type: ignore[list-item]
 
         with dev_queue_lock():
-            result = _approve_ticket_locked(
-                "GEN-500", "genhealth", resolved_task=row_a
-            )
+            result = _approve_ticket_locked("GEN-500", "genhealth", resolved_task=row_a)
 
         assert result["from_stage"] == "plan"
         assert result["to_stage"] == "impl"
         store = load_dev_queue()
-        by_session = {t.session_id: t for t in store.tasks}
-        assert by_session["sess0001"].stage == Stage.IMPL
-        assert by_session["sess0001"].status == QueueItemStatus.PENDING
+        # Key on created_at (stable identity): row A's session_id is cleared to
+        # None on advance, so it can't identify both rows post-approve.
+        by_created = {t.created_at: t for t in store.tasks}
+        row_a = by_created[datetime(2026, 7, 1, tzinfo=UTC)]
+        row_b = by_created[datetime(2026, 7, 8, tzinfo=UTC)]
+        assert row_a.stage == Stage.IMPL
+        assert row_a.status == QueueItemStatus.PENDING
         # Row B's signoff gate untouched.
-        assert (
-            by_session["sess0002"].status
-            == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
-        )
-        assert by_session["sess0002"].stage == Stage.REVIEW
+        assert row_b.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+        assert row_b.stage == Stage.REVIEW
 
     def test_resolved_task_status_mismatch_raises_approve_gate_error(
         self, tmp_config_dir: Path, tmp_path: Path

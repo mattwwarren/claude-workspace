@@ -805,13 +805,19 @@ class TestActApproveFailure:
         approved = run_gate_recipes(now=_NOW, config=_config())
 
         store = load_dev_queue()
-        by_session = {t.session_id: t for t in store.tasks}
+        # Key on created_at (stable identity): the approved row's session_id is
+        # cleared to None by _advance_task_pointer, so session_id can't identify
+        # both rows post-approve.
+        by_created = {t.created_at: t for t in store.tasks}
+        row_b = by_created[datetime(2026, 7, 8, tzinfo=UTC)]
+        row_a = by_created[datetime(2026, 7, 1, tzinfo=UTC)]
         # Row B's signoff gate is untouched — NOT advanced/completed.
-        assert by_session["sess-new"].status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
-        assert by_session["sess-new"].stage == Stage.REVIEW
+        assert row_b.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+        assert row_b.stage == Stage.REVIEW
+        assert row_b.session_id == "sess-new"
         # Row A is the one approved: review -> finalize PENDING.
-        assert by_session["sess-old"].stage == Stage.FINALIZE
-        assert by_session["sess-old"].status == QueueItemStatus.PENDING
+        assert row_a.stage == Stage.FINALIZE
+        assert row_a.status == QueueItemStatus.PENDING
         assert approved == ["GEN-1"]
 
     def test_mixed_outcome_batch_does_not_revert_the_successful_candidate(

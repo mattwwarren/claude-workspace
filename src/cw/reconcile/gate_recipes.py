@@ -652,7 +652,11 @@ def _act_auto_approve_review(
                 correlation_id=task.ticket_id,
             )
             try:
-                _approve_ticket_locked(task.ticket_id, task.client)
+                # RFC 0009 / #1083: pin the mutation to THIS validated row's
+                # identity so _approve_ticket_locked cannot re-resolve to a
+                # newer AWAITING_OPERATOR_SIGNOFF duplicate and clear a signoff
+                # gate this recipe never checked.
+                _approve_ticket_locked(task.ticket_id, task.client, resolved_task=task)
             except CwError as exc:
                 # The GATE_AUTO_APPROVED event above is already durable, but
                 # the mutation didn't land (e.g. a duplicate row resolved to a
@@ -762,7 +766,11 @@ def _act_auto_adopt_plan(
                 correlation_id=task.ticket_id,
             )
             try:
-                _approve_ticket_locked(task.ticket_id, task.client)
+                # RFC 0009 / #1083: pin the mutation to THIS validated row's
+                # identity so _approve_ticket_locked cannot re-resolve to a
+                # newer AWAITING_OPERATOR_SIGNOFF duplicate and clear a signoff
+                # gate this recipe never checked.
+                _approve_ticket_locked(task.ticket_id, task.client, resolved_task=task)
             except CwError as exc:
                 _log.warning(
                     "gate_recipe_approve_failed ticket=%s client=%s",
