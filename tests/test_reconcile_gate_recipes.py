@@ -1118,6 +1118,25 @@ class TestDetectAdoptPlan:
 
         assert _detect_auto_adopt_plan(state, [task]) == []
 
+    def test_plan_md_non_utf8_content_yields_none(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """UnicodeDecodeError is not an OSError subclass, so it needs its
+        own dedicated coverage distinct from test_plan_md_read_error_yields_none
+        (which only proves the OSError arm). Writes genuinely invalid UTF-8
+        bytes to disk rather than monkeypatching, so this exercises the real
+        decode failure read_text(encoding="utf-8") raises, not a simulated
+        stand-in exception type."""
+        _stub_fetch_plan(monkeypatch, None)
+        ws = tmp_path / "ws"
+        (ws / ".cw").mkdir(parents=True)
+        (ws / ".cw" / "plan.md").write_bytes(b"\xff\xfe not valid utf-8")
+        task = _make_task(stage=Stage.PLAN, worktree_path=ws)
+        session = _make_session(last_result=_plan_result())
+        state = CwState(sessions=[session])
+
+        assert _detect_auto_adopt_plan(state, [task]) == []
+
 
 class TestRunAdoptPlan:
     def test_adopts_clean_plan_like_human(

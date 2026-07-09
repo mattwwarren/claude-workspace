@@ -422,12 +422,17 @@ def _post_auto_adopt_comment(ticket_id: str, snapshot: dict[str, object]) -> Non
     comment`` subprocess call, same best-effort log-on-failure behavior),
     formatting the plan template with the two marker-version strings.
     """
-    # snapshot's keys are exactly _SNAPSHOT_KEY_SPEC/_SNAPSHOT_KEY_SOUNDNESS,
-    # which match the template's placeholders verbatim (both derive from R3's
-    # predicate_snapshot shape) — unpacking directly avoids re-typing the
-    # literal key strings a second time at this call site.
+    # Explicit named args, not **snapshot: this writes to a public,
+    # append-only GitHub comment, so the fields exposed there must stay
+    # grep-able and reviewable at this call site. Unpacking the full
+    # snapshot dict would auto-expose any future key added to
+    # _clean_plan_snapshot with no code change here to acknowledge the new
+    # public disclosure, and would raise TypeError if a future key ever
+    # collided with the `recipe=` kwarg.
     body = _AUTO_ADOPT_COMMENT_TEMPLATE.format(
-        recipe=RECIPE_AUTO_ADOPT_PLAN, **snapshot
+        recipe=RECIPE_AUTO_ADOPT_PLAN,
+        plan_spec_reviewed=snapshot[_SNAPSHOT_KEY_SPEC],
+        plan_soundness_reviewed=snapshot[_SNAPSHOT_KEY_SOUNDNESS],
     )
     try:
         result = subprocess.run(
