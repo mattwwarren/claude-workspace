@@ -157,7 +157,9 @@ CW_STATE_SCHEMA_VERSION = 14
 # v11: added TicketTask.false_park_recovery_count/
 #      false_park_recovery_next_eligible_at (GitHub #1030).
 # v12: added TicketTask.gate_recipe_failed_at (GitHub #1065, RFC 0009).
-DEV_QUEUE_SCHEMA_VERSION = 12
+# v13: added TicketTask.gate_recipes + LaneConfig.gate_recipes (GitHub #1067,
+#      RFC 0009 P4).
+DEV_QUEUE_SCHEMA_VERSION = 13
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -343,6 +345,30 @@ class PrState(BaseModel):
     hydrated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
+def _validate_gate_recipe_keys(value: dict[str, bool]) -> dict[str, bool]:
+    """Fail loud on an unrecognized gate-recipe key (RFC 0009 P4).
+
+    Shared by the ``gate_recipes`` field validators on both
+    :class:`TicketTask` and :class:`LaneConfig`. Local literal, not an import
+    of cw.reconcile.gate_recipes's RECIPE_* constants — models.py sits below
+    cw.reconcile in the import graph (reconcile imports from models, not the
+    reverse), so importing them here would be circular. Mirrors
+    OrchestratorConfig._validate_concierge_recoveries_keys's fail-loud stance:
+    a typo'd key would otherwise silently resolve to the hardcoded default-off
+    via resolve_gate_recipe_enabled's plain ``in`` check, leaving the intended
+    recipe disabled with zero error at config-load time.
+    """
+    recognized = {"auto_approve_clean_review", "auto_adopt_clean_plan"}
+    unknown = sorted(set(value) - recognized)
+    if unknown:
+        msg = (
+            f"gate_recipes has unrecognized recipe key(s): {unknown}. "
+            f"Recognised keys: {sorted(recognized)}."
+        )
+        raise ValueError(msg)
+    return value
+
+
 class TicketTask(BaseModel):
     """A ticket queued for dispatch to a Claude session."""
 
@@ -437,6 +463,13 @@ class TicketTask(BaseModel):
     # override -- fall through to lane/global". Set via
     # ``cw dev-queue add --signoff operator``. See GitHub #990.
     signoff: Literal["operator"] | None = None
+    # Ticket-level gate-recipe enablement override (RFC 0009 P4, #1067). Highest
+    # tier in resolve_gate_recipe_enabled's 3-tier precedence: a recipe present
+    # here wins over LaneConfig.gate_recipes and the hardcoded default-off. None
+    # (or a recipe absent from the map) defers to the lane map, then the
+    # default. Recognised keys: "auto_approve_clean_review",
+    # "auto_adopt_clean_plan".
+    gate_recipes: dict[str, bool] | None = None
     # RFC 0008 capstone (#1015) — durable escalation latch. Stamped by
     # cw.reconcile.escalation.run_escalation_sweep when this task first enters
     # the escalation-eligible set (see that module's docstring for the
@@ -462,6 +495,15 @@ class TicketTask(BaseModel):
     # episode (new session, new last_result re-parking the row at
     # BLOCKED_ON_USER) always starts with a clean latch.
     gate_recipe_failed_at: datetime | None = None
+
+    @field_validator("gate_recipes")
+    @classmethod
+    def _check_gate_recipes(
+        cls, value: dict[str, bool] | None
+    ) -> dict[str, bool] | None:
+        if value is None:
+            return None
+        return _validate_gate_recipe_keys(value)
 
 
 class DispatchPlan(BaseModel):
@@ -556,6 +598,13 @@ class LaneConfig(BaseModel):
     # Lane-level operator-signoff override (RFC 0007 Phase 3). None defers to
     # OrchestratorConfig.default_signoff. See GitHub #990.
     signoff: Literal["operator"] | None = None
+    # Lane-level gate-recipe enablement map (RFC 0009 P4, #1067). Middle tier in
+    # resolve_gate_recipe_enabled's 3-tier precedence: consulted when the ticket
+    # carries no override for the recipe, and itself overridden by
+    # TicketTask.gate_recipes. A recipe absent from this map (or None) defers to
+    # the hardcoded default-off. Recognised keys: "auto_approve_clean_review",
+    # "auto_adopt_clean_plan".
+    gate_recipes: dict[str, bool] | None = None
 
     @field_validator("name")
     @classmethod
@@ -564,6 +613,15 @@ class LaneConfig(BaseModel):
             msg = "lane name must be non-empty"
             raise ValueError(msg)
         return v
+
+    @field_validator("gate_recipes")
+    @classmethod
+    def _check_gate_recipes(
+        cls, value: dict[str, bool] | None
+    ) -> dict[str, bool] | None:
+        if value is None:
+            return None
+        return _validate_gate_recipe_keys(value)
 
 
 _USAGE_LIMIT_BACKOFF_SECONDS = 3600
