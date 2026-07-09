@@ -6,6 +6,66 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.18.0] — 2026-07-09
+
+RFC 0009 gate-recipe automation — the first event-driven auto-actor. Two
+config-gated "gate recipes" auto-clear the two operator-approval gates that an
+operator was clearing *mechanically* — a clean Stage-3 review and a clean
+Stage-1 plan — whenever the pipeline's own structured evidence already says
+"clean." Ships **opt-in** behind a master `gate_recipes_enabled=False` switch
+with per-lane enablement, so a fresh install auto-approves nothing. Plus two
+model-cost fixes (the impl and plan stages no longer default to Opus) and
+assorted finalize/install hardening.
+
+### Added
+
+- **RFC 0009 gate recipes — `auto_approve_clean_review` + `auto_adopt_clean_plan`**
+  (#1065, #1078): a detect→act reactor (modeled on `concierge.py`) that
+  auto-clears a `review_pending_approval` gate when the review is clean
+  (`must_fix_initial=0`, `deferred=0`, `recommendation=PROCEED`,
+  `forbidden_touched=false`) and a `plan_pending_approval` gate when both plan
+  signoff markers are present. Emits an auditable `gate.auto_approved` event
+  (carrying a `predicate_snapshot`) *before* mutating, forwarded to the operator
+  channel; fails safe via `gate.auto_approve_failed` + a self-clearing latch.
+  Behind the master `gate_recipes_enabled=False` opt-in.
+- **Per-lane gate-recipe enablement** (#1067): `LaneConfig.gate_recipes` +
+  `TicketTask.gate_recipes` + `resolve_gate_recipe_enabled()` 3-tier precedence
+  (ticket > lane > global default-off), mirroring `resolve_signoff`. Dev-queue
+  schema v12→13 (additive, non-destructive).
+- **Behavioral `reconcile()`-tick integration test for the gate recipes** (#1088):
+  drives a full reconcile tick with the switch enabled end-to-end (clean review
+  auto-approved, clean plan auto-adopted, `GATE_AUTO_APPROVED` emitted). Plus
+  shared `_newest_by_created_at` (dev_queue) and `post_issue_comment` (gh)
+  primitives extracted from duplicated call sites.
+- **Event catalog entries for `gate.auto_approved` / `gate.auto_approve_failed`**
+  (#1087).
+
+### Fixed
+
+- **Impl agent no longer hardcodes Opus** (#1079): the Stage-2 implementation
+  agent's model is resolved from the ticket's scope tier (Small→Sonnet,
+  Large→Opus) instead of unconditionally Opus — matching the documented model
+  matrices and cutting Opus spend on every small-scope ticket.
+- **Plan agent runs Sonnet, not Opus** (#1084): the Stage-1 plan agent is Sonnet
+  so the plan review is calibrated to the weaker model's output (the
+  plan-revision agent was already Sonnet).
+- **Gate recipe could clear an `AWAITING_OPERATOR_SIGNOFF` gate it never
+  validated** (#1083): the act phase now threads the resolved row identity
+  through `_approve_ticket_locked` (plus a status assertion) instead of
+  re-resolving by `(ticket_id, client)` string key, so a newer duplicate
+  signoff row can no longer be cleared by a review recipe.
+- **`--headless` now propagates into finalize's `/prep-pr`** (#1074, #1071).
+- **Cross-platform LocalExecutor liveness** (#921): a single psutil code path
+  replaces the Linux-only `/proc` read, with a schema migration clearing stale
+  liveness handles.
+- **`mypy .` scoped to the CI gate** (#1064).
+- **Project-scoped `/ship-it` no longer installed globally** (#1090).
+
+### Changed
+
+- RFC 0009 design doc + errata: lock-free approve helper, marker-read reality
+  (#1068).
+
 ## [1.17.0] — 2026-07-08
 
 Finalize-reliability wave: eliminates the `needs_salvage` false-block class
