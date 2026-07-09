@@ -3407,6 +3407,108 @@ class TestApproveTicket:
 
 
 # ---------------------------------------------------------------------------
+# TestApproveTicketLockedResolved — _approve_ticket_locked(resolved_task=...)
+# ---------------------------------------------------------------------------
+
+
+class TestApproveTicketLockedResolved:
+    """RFC 0009 / #1083: the gate-recipe path threads the validated row's
+    identity through _approve_ticket_locked so the mutation acts on THAT row,
+    never a re-resolved duplicate."""
+
+    def test_resolved_task_acts_on_that_row_despite_newer_awaiting_duplicate(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """resolved_task pins the mutation to the caller-validated
+        BLOCKED_ON_USER row A even when a strictly-newer
+        AWAITING_OPERATOR_SIGNOFF duplicate B exists (which _find_ticket would
+        otherwise select via _APPROVABLE_STATUSES newest-wins)."""
+        from cw.config import save_state
+        from cw.dev_queue import _approve_ticket_locked, dev_queue_lock
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        row_a = _make_blocked_task(stage=Stage.PLAN, session_id="sess0001")
+        row_a.created_at = datetime(2026, 7, 1, tzinfo=UTC)
+        row_b = _make_blocked_task(
+            stage=Stage.REVIEW,
+            session_id="sess0002",
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        )
+        row_b.created_at = datetime(2026, 7, 8, tzinfo=UTC)
+        save_dev_queue(DevQueueStore(tasks=[row_a, row_b]))
+        session = _make_session(
+            session_id="sess0001",
+            last_result={"status": "plan_pending_approval"},
+        )
+        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+
+        with dev_queue_lock():
+            result = _approve_ticket_locked("GEN-500", "genhealth", resolved_task=row_a)
+
+        assert result["from_stage"] == "plan"
+        assert result["to_stage"] == "impl"
+        store = load_dev_queue()
+        # Key on created_at (stable identity): row A's session_id is cleared to
+        # None on advance, so it can't identify both rows post-approve.
+        by_created = {t.created_at: t for t in store.tasks}
+        row_a = by_created[datetime(2026, 7, 1, tzinfo=UTC)]
+        row_b = by_created[datetime(2026, 7, 8, tzinfo=UTC)]
+        assert row_a.stage == Stage.IMPL
+        assert row_a.status == QueueItemStatus.PENDING
+        # Row B's signoff gate untouched.
+        assert row_b.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+        assert row_b.stage == Stage.REVIEW
+
+    def test_resolved_task_status_mismatch_raises_approve_gate_error(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Belt-and-suspenders: if the row matched by stable identity no longer
+        holds the status the caller validated (e.g. same (ticket_id, client,
+        created_at) but the live row is AWAITING while the caller validated
+        BLOCKED_ON_USER), fail closed rather than clear a gate never checked."""
+        from cw.dev_queue import _approve_ticket_locked, dev_queue_lock
+        from cw.exceptions import ApproveGateError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        ts = datetime(2026, 7, 3, tzinfo=UTC)
+        live = _make_blocked_task(
+            stage=Stage.REVIEW,
+            session_id=None,
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        )
+        live.created_at = ts
+        save_dev_queue(DevQueueStore(tasks=[live]))
+        # Detached spec with matching identity but the OTHER (validated) status.
+        detached = _make_blocked_task(stage=Stage.REVIEW, session_id="sess-x")
+        detached.created_at = ts
+
+        with dev_queue_lock(), pytest.raises(ApproveGateError):
+            _approve_ticket_locked("GEN-500", "genhealth", resolved_task=detached)
+
+        # The signoff row was NOT cleared.
+        store = load_dev_queue()
+        assert store.tasks[0].status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+        assert store.tasks[0].stage == Stage.REVIEW
+
+    def test_resolved_task_row_vanished_raises(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """If the resolved row's stable identity is absent from the freshly
+        loaded store (e.g. a concurrent delete), fail closed."""
+        from cw.dev_queue import _approve_ticket_locked, dev_queue_lock
+        from cw.exceptions import ApproveGateError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        save_dev_queue(DevQueueStore(tasks=[]))
+        gone = _make_blocked_task(stage=Stage.PLAN, session_id="sess-gone")
+        gone.created_at = datetime(2026, 7, 4, tzinfo=UTC)
+
+        with dev_queue_lock(), pytest.raises(ApproveGateError):
+            _approve_ticket_locked("GEN-500", "genhealth", resolved_task=gone)
+
+
+# ---------------------------------------------------------------------------
 # TestRequeueTicket — requeue_ticket() mutation function
 # ---------------------------------------------------------------------------
 

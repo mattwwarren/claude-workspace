@@ -771,6 +771,55 @@ class TestActApproveFailure:
         assert by_session["sess-new"].gate_recipe_failed_at == _NOW
         assert by_session["sess-old"].gate_recipe_failed_at is None
 
+    def test_recipe_does_not_clear_a_newer_awaiting_signoff_duplicate(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """RFC 0009 / #1083 regression: when a resolved BLOCKED_ON_USER row A
+        coexists with a strictly-newer AWAITING_OPERATOR_SIGNOFF duplicate B for
+        the same (ticket_id, client), the recipe must approve the exact row A it
+        validated — NOT let _approve_ticket_locked re-resolve to row B (which
+        _find_ticket would pick, since _APPROVABLE_STATUSES pools both statuses
+        newest-wins) and blindly clear a signoff gate the recipe never checked.
+        Exercises the real _approve_ticket_locked (no monkeypatch)."""
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        row_a = _make_task(
+            session_id="sess-old",
+            stage=Stage.REVIEW,
+            created_at=datetime(2026, 7, 1, tzinfo=UTC),
+        )
+        row_b = _make_task(
+            session_id="sess-new",
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+            stage=Stage.REVIEW,
+            created_at=datetime(2026, 7, 8, tzinfo=UTC),
+        )
+        save_dev_queue(DevQueueStore(tasks=[row_a, row_b]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(session_id="sess-old", last_result=_clean_result())
+                ]
+            )
+        )
+
+        approved = run_gate_recipes(now=_NOW, config=_config())
+
+        store = load_dev_queue()
+        # Key on created_at (stable identity): the approved row's session_id is
+        # cleared to None by _advance_task_pointer, so session_id can't identify
+        # both rows post-approve.
+        by_created = {t.created_at: t for t in store.tasks}
+        row_b = by_created[datetime(2026, 7, 8, tzinfo=UTC)]
+        row_a = by_created[datetime(2026, 7, 1, tzinfo=UTC)]
+        # Row B's signoff gate is untouched — NOT advanced/completed.
+        assert row_b.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+        assert row_b.stage == Stage.REVIEW
+        assert row_b.session_id == "sess-new"
+        # Row A is the one approved: review -> finalize PENDING.
+        assert row_a.stage == Stage.FINALIZE
+        assert row_a.status == QueueItemStatus.PENDING
+        assert approved == ["GEN-1"]
+
     def test_mixed_outcome_batch_does_not_revert_the_successful_candidate(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -814,10 +863,12 @@ class TestActApproveFailure:
 
         boom_msg = "boom"
 
-        def _fail_beta_only(ticket_id: str, client: str) -> dict[str, str | bool]:
+        def _fail_beta_only(
+            ticket_id: str, client: str, *, resolved_task: TicketTask | None = None
+        ) -> dict[str, str | bool]:
             if client == "beta":
                 raise ApproveGateError(boom_msg)
-            return real_approve_locked(ticket_id, client)
+            return real_approve_locked(ticket_id, client, resolved_task=resolved_task)
 
         monkeypatch.setattr(
             "cw.reconcile.gate_recipes._approve_ticket_locked", _fail_beta_only
