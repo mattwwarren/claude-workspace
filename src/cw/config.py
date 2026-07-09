@@ -490,12 +490,22 @@ def _clear_stale_local_liveness(session_raw: dict[str, Any]) -> None:
     the old boot-relative /proc format, which will never equal a freshly-read
     epoch-relative value for the same still-live process -- so leaving it in
     place would cause reconcile to misclassify a live aider session as dead
-    on the first pass after upgrade. Clearing it drops the liveness pin;
-    reconcile's other ACTIVE-session handling (idle/phantom detection) still
-    applies, and a subsequent LocalExecutor spawn establishes a fresh
-    epoch-relative handle.
+    on the first pass after upgrade. Clearing it drops the fast process-exit
+    harvest path for that session; recovery falls back to stalled.py's
+    headless wall-clock sweep (gated on _is_headless, not surface_ref/
+    local_liveness -- LOCAL sessions never carry a surface_ref, so idle.py
+    and the phantom detector in _shared.py both skip them) once
+    resolve_headless_budget() elapses, or a fresh LocalExecutor spawn
+    re-establishes an epoch-relative handle.
     """
     if session_raw.get("local_liveness") is not None:
+        logger.info(
+            "session %s: clearing pre-v%d local_liveness handle "
+            "(boot-relative start_time_ns incompatible with epoch-relative "
+            "format, GitHub #921)",
+            session_raw.get("id", "<unknown>"),
+            _EPOCH_LIVENESS_SCHEMA_VERSION,
+        )
         session_raw["local_liveness"] = None
 
 
