@@ -2020,7 +2020,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["pr_state"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 12
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 13
 
     def test_v8_pr_state_preserved_idempotently(self) -> None:
         """Existing pr_state survives a second migration pass (idempotent)."""
@@ -2064,7 +2064,7 @@ class TestMigrateDevQueue:
         """migrate_dev_queue bumps schema_version to current regardless of input."""
         raw: dict[str, object] = {"schema_version": 1, "tasks": []}
         migrated = migrate_dev_queue(raw)
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 12
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 13
 
     def test_v9_signoff_preserved_idempotently(self) -> None:
         """Existing signoff value survives a second migration pass."""
@@ -2099,7 +2099,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["escalation_parked_at"] is None
         assert migrated["tasks"][0]["escalation_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 12
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 13
 
     def test_v10_escalation_fields_preserved_idempotently(self) -> None:
         """Existing escalation timestamps survive a second migration pass."""
@@ -2142,7 +2142,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["false_park_recovery_count"] == 0
         assert migrated["tasks"][0]["false_park_recovery_next_eligible_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 12
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 13
 
     def test_v11_false_park_recovery_backoff_preserved_idempotently(self) -> None:
         """Existing false-park-recovery backoff state survives a second
@@ -2184,7 +2184,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["gate_recipe_failed_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 12
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 13
 
     def test_v12_gate_recipe_failed_at_preserved_idempotently(self) -> None:
         """Existing gate_recipe_failed_at timestamp survives a second
