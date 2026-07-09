@@ -964,9 +964,7 @@ class TestDetectAdoptPlan:
 
         assert _detect_auto_adopt_plan(state, [task]) == []
 
-    def test_latched_failure_yields_none(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_latched_failure_yields_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _stub_fetch_plan(monkeypatch, _plan_body())
         task = _make_task(stage=Stage.PLAN, gate_recipe_failed_at=_NOW)
         session = _make_session(last_result=_plan_result())
@@ -974,18 +972,14 @@ class TestDetectAdoptPlan:
 
         assert _detect_auto_adopt_plan(state, [task]) == []
 
-    def test_no_session_id_yields_none(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_no_session_id_yields_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _stub_fetch_plan(monkeypatch, _plan_body())
         task = _make_task(stage=Stage.PLAN, session_id=None)
         state = CwState(sessions=[])
 
         assert _detect_auto_adopt_plan(state, [task]) == []
 
-    def test_missing_session_yields_none(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_missing_session_yields_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _stub_fetch_plan(monkeypatch, _plan_body())
         task = _make_task(stage=Stage.PLAN, session_id="ghost")
         state = CwState(sessions=[])
@@ -1133,9 +1127,7 @@ class TestRunAdoptPlan:
         review_task = _make_task(
             ticket_id="GEN-R", session_id="sess-r", stage=Stage.REVIEW
         )
-        plan_task = _make_task(
-            ticket_id="GEN-P", session_id="sess-p", stage=Stage.PLAN
-        )
+        plan_task = _make_task(ticket_id="GEN-P", session_id="sess-p", stage=Stage.PLAN)
         save_dev_queue(DevQueueStore(tasks=[review_task, plan_task]))
         save_state(
             CwState(
@@ -1235,8 +1227,10 @@ class TestActAdoptPlanFailure:
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
 
+        boom_msg = "boom"
+
         def _boom(*_a: Any, **_k: Any) -> None:
-            raise ApproveGateError("boom")
+            raise ApproveGateError(boom_msg)
 
         monkeypatch.setattr("cw.reconcile.gate_recipes._approve_ticket_locked", _boom)
 
@@ -1333,10 +1327,11 @@ class TestActAdoptRecheckRace:
         from in-memory state + the detect-time snapshot."""
         _write_acme_clients_yaml(tmp_config_dir, tmp_path)
         calls: list[str] = []
+        no_refetch_msg = "fetch must not be re-called during act"
 
         def _boom_fetch(ticket_id: str, **_k: Any) -> str | None:
             calls.append(ticket_id)
-            raise AssertionError("fetch must not be re-called during act")
+            raise AssertionError(no_refetch_msg)
 
         monkeypatch.setattr(
             "cw.reconcile.gate_recipes.fetch_approved_plan_comment", _boom_fetch
