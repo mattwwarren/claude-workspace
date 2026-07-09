@@ -53,6 +53,7 @@ from typing import TYPE_CHECKING
 from cw.config import load_effective_clients, load_state
 from cw.dev_queue import (
     _approve_ticket_locked,
+    _newest_by_created_at,
     dev_queue_lock,
     load_dev_queue,
     save_dev_queue,
@@ -572,7 +573,7 @@ def _find_blocked_task(
     ]
     if not matches:
         return None
-    return max(matches, key=lambda t: t.created_at)
+    return _newest_by_created_at(matches)
 
 
 def _stamp_gate_recipe_failure(ticket_id: str, client: str, *, now: datetime) -> None:
