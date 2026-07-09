@@ -366,6 +366,80 @@ class TestMasterSwitch:
         assert events == []
 
 
+class TestPerLaneYamlDisablement:
+    """Per-lane disablement resolved through the real load_effective_clients()
+    -> YAML-parse path, not just hand-built ClientConfig objects.
+
+    TestMasterSwitchVsLane covers the same tier-2 behavior by calling
+    _detect_* directly against an in-memory clients dict, which never
+    exercises LaneConfig(gate_recipes=...) deserialization from YAML. These
+    tests close that gap by driving the real run_gate_recipes() entry point."""
+
+    def test_run_gate_recipes_skips_lane_with_recipe_disabled_in_yaml(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            f"clients:\n  acme:\n    workspace_path: {tmp_path}\n"
+            "    default_branch: main\n"
+            "    lanes:\n"
+            "      - name: default\n"
+            "        gate_recipes:\n"
+            "          auto_approve_clean_review: false\n"
+            "          auto_adopt_clean_plan: false\n"
+        )
+        task = _make_task()
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
+
+        recovered = run_gate_recipes(now=_NOW, config=_config())
+
+        assert recovered == []
+        store = load_dev_queue()
+        assert store.tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_run_gate_recipes_fires_only_yaml_enabled_lane(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            f"clients:\n  acme:\n    workspace_path: {tmp_path}\n"
+            "    default_branch: main\n"
+            "    lanes:\n"
+            "      - name: default\n"
+            "        gate_recipes:\n"
+            "          auto_approve_clean_review: false\n"
+            "      - name: fastlane\n"
+            "        gate_recipes:\n"
+            "          auto_approve_clean_review: true\n"
+        )
+        task_off = _make_task(ticket_id="GEN-A", lane="default", session_id="sess-a")
+        task_on = _make_task(ticket_id="GEN-B", lane="fastlane", session_id="sess-b")
+        save_dev_queue(DevQueueStore(tasks=[task_off, task_on]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(
+                        ticket_id="GEN-A",
+                        session_id="sess-a",
+                        last_result=_clean_result(),
+                    ),
+                    _make_session(
+                        ticket_id="GEN-B",
+                        session_id="sess-b",
+                        last_result=_clean_result(),
+                    ),
+                ]
+            )
+        )
+
+        recovered = run_gate_recipes(now=_NOW, config=_config())
+
+        assert recovered == ["GEN-B"]
+
+
 class TestRunApprove:
     def test_approves_clean_review_like_human(
         self, tmp_config_dir: Path, tmp_path: Path

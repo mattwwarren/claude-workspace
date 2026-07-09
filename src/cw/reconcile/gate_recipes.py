@@ -122,7 +122,30 @@ def resolve_gate_recipe_enabled(
                 and recipe_name in lane_cfg.gate_recipes
             ):
                 return lane_cfg.gate_recipes[recipe_name]
-    return _DEFAULT_GATE_RECIPE_ENABLED[recipe_name]
+    # .get(..., False): a recipe_name outside _DEFAULT_GATE_RECIPE_ENABLED
+    # (i.e. not one of the two RECIPE_* constants) falls through to the safe
+    # default instead of raising KeyError, matching this function's documented
+    # no-exception robustness guarantee for every other unresolved input.
+    return _DEFAULT_GATE_RECIPE_ENABLED.get(recipe_name, False)
+
+
+def _recipe_gate_open(
+    config: OrchestratorConfig,
+    task: TicketTask,
+    clients: dict[str, ClientConfig],
+    recipe_name: str,
+) -> bool:
+    """Return whether *recipe_name* may fire for *task* right now.
+
+    Composes the master switch with the per-lane/per-ticket resolution so
+    both ``_detect_*`` functions share one gating check instead of drifting
+    copies. Why: redundant with ``run_gate_recipes``'s top-level short-circuit
+    on ``config.gate_recipes_enabled`` — needed here too so a caller invoking
+    ``_detect_*`` directly (unit tests) still gets correct gating.
+    """
+    return config.gate_recipes_enabled and resolve_gate_recipe_enabled(
+        task, clients, recipe_name
+    )
 
 
 # The only sentinel status the review recipe fires on. A row whose owning
@@ -381,13 +404,7 @@ def _detect_auto_approve_review(
         snapshot = _clean_review_snapshot(session.last_result)
         if snapshot is None or not _predicate_holds(snapshot):
             continue
-        # Why: redundant with run_gate_recipes's top-level short-circuit so a
-        # caller invoking _detect_* directly (unit tests) still gets correct
-        # gating.
-        if not (
-            config.gate_recipes_enabled
-            and resolve_gate_recipe_enabled(task, clients, RECIPE_AUTO_APPROVE_REVIEW)
-        ):
+        if not _recipe_gate_open(config, task, clients, RECIPE_AUTO_APPROVE_REVIEW):
             continue
         candidates.append(
             GateRecipeCandidate(
@@ -434,13 +451,7 @@ def _detect_auto_adopt_plan(
         snapshot = _clean_plan_snapshot(session.last_result, task)
         if snapshot is None:
             continue
-        # Why: redundant with run_gate_recipes's top-level short-circuit so a
-        # caller invoking _detect_* directly (unit tests) still gets correct
-        # gating.
-        if not (
-            config.gate_recipes_enabled
-            and resolve_gate_recipe_enabled(task, clients, RECIPE_AUTO_ADOPT_PLAN)
-        ):
+        if not _recipe_gate_open(config, task, clients, RECIPE_AUTO_ADOPT_PLAN):
             continue
         candidates.append(
             GateRecipeCandidate(
