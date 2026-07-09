@@ -270,4 +270,8 @@ class TestProjectScopedCommandsExcluded:
             "A previously-installed global ship-it.md should be pruned once it "
             "is excluded from the install set"
         )
+        # Pin the removal to the manifest-scoped prune specifically, not to any
+        # code path that happens to delete the file (e.g. a wipe-and-repopulate
+        # refactor would silently lose the foreign-file safety invariant).
+        assert "orphans pruned  : 1" in result.stdout
         assert "commands/ship-it.md" not in manifest.read_text().splitlines()
