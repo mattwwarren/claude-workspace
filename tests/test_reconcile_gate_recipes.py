@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -10,6 +12,7 @@ import pytest
 
 from cw.config import save_state
 from cw.dev_queue import load_dev_queue, save_dev_queue
+from cw.gh import _PLAN_MARKER
 from cw.models import (
     CwState,
     DevQueueStore,
@@ -1069,6 +1072,51 @@ class TestDetectAdoptPlan:
 
         assert _detect_auto_adopt_plan(state, [task]) == []
 
+    def test_unclosed_marker_yields_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Fail-closed on a malformed marker: the soundness marker's prefix is
+        present but the comment is never closed with ``-->``. Without a
+        closure check, str.split would silently return the rest of the body
+        as the "version" — leaking raw plan text into the snapshot. Proves
+        _marker_version's fail-closed branch, not just the prefix-presence
+        check in _clean_plan_snapshot."""
+        unclosed_body = (
+            "# Plan\n\n"
+            "<!-- plan-spec-reviewed: 2026-07-08 v2 -->\n"
+            "<!-- plan-soundness-reviewed: 2026-07-08 v1 unterminated, no close"
+        )
+        _stub_fetch_plan(monkeypatch, unclosed_body)
+        task = _make_task(stage=Stage.PLAN)
+        session = _make_session(last_result=_plan_result())
+        state = CwState(sessions=[session])
+
+        assert _detect_auto_adopt_plan(state, [task]) == []
+
+    def test_plan_md_read_error_yields_none(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A read failure between .exists() and read_text() (permission
+        error, file removed mid-read, etc.) degrades to "no plan body"
+        rather than propagating — an unhandled exception here would abort
+        the entire reconcile tick, including the unrelated
+        auto_approve_clean_review recipe processed in the same
+        run_gate_recipes() call."""
+        _stub_fetch_plan(monkeypatch, None)
+        ws = tmp_path / "ws"
+        (ws / ".cw").mkdir(parents=True)
+        (ws / ".cw" / "plan.md").write_text(_plan_body(), encoding="utf-8")
+        task = _make_task(stage=Stage.PLAN, worktree_path=ws)
+        session = _make_session(last_result=_plan_result())
+        state = CwState(sessions=[session])
+
+        read_err_msg = "permission denied"
+
+        def _boom_read_text(_self: Path, encoding: str = "utf-8") -> str:
+            raise OSError(read_err_msg)
+
+        monkeypatch.setattr(Path, "read_text", _boom_read_text)
+
+        assert _detect_auto_adopt_plan(state, [task]) == []
+
 
 class TestRunAdoptPlan:
     def test_adopts_clean_plan_like_human(
@@ -1441,3 +1489,56 @@ class TestActAdoptRecheckRace:
         assert calls == []
         store = load_dev_queue()
         assert store.tasks[0].stage == Stage.IMPL
+
+    def test_comment_posted_after_lock_release(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R5's lock-scope guarantee: the gh issue comment subprocess call
+        must fire AFTER dev_queue_lock() releases, never while held. Prior
+        tests only proved *what* gets called (stub_gh_comment); this proves
+        *when* — a regression here would silently re-widen the lock hold
+        time to include a ~30s network call, defeating R5's whole point."""
+        import subprocess
+
+        from cw.dev_queue import dev_queue_lock as real_lock
+
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        _stub_fetch_plan(monkeypatch, _plan_body())
+        task = _make_task(stage=Stage.PLAN)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
+
+        events: list[str] = []
+
+        @contextmanager
+        def _tracking_lock() -> Iterator[None]:
+            with real_lock():
+                events.append("locked")
+                yield
+            events.append("unlocked")
+
+        monkeypatch.setattr("cw.reconcile.gate_recipes.dev_queue_lock", _tracking_lock)
+
+        def _tracking_run(
+            argv: list[str], **_kwargs: Any
+        ) -> subprocess.CompletedProcess[bytes]:
+            events.append("comment_posted")
+            return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
+
+        monkeypatch.setattr("cw.reconcile.gate_recipes.subprocess.run", _tracking_run)
+
+        run_gate_recipes(now=_NOW, config=_config())
+
+        assert events == ["locked", "unlocked", "comment_posted"]
+
+
+def test_plan_spec_marker_matches_gh_marker() -> None:
+    """Drift guard for the intentionally-duplicated marker constant: the
+    module docstring for _PLAN_SPEC_MARKER says "keep the two in sync" but
+    that was previously enforced by comment only. If gh._PLAN_MARKER ever
+    changes, this recipe's predicate would silently stop matching (fails
+    closed, but silently) — this test converts the comment-only invariant
+    into a real assertion."""
+    from cw.reconcile.gate_recipes import _PLAN_SPEC_MARKER
+
+    assert _PLAN_SPEC_MARKER == _PLAN_MARKER

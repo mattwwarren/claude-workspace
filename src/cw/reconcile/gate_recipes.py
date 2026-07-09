@@ -106,9 +106,16 @@ _PLAN_PENDING_APPROVAL = "plan_pending_approval"
 
 # The two signoff markers auto-dev-plan appends to the plan-of-record body.
 # _PLAN_SPEC_MARKER mirrors gh._PLAN_MARKER — a local copy avoids importing a
-# private cross-module constant; keep the two in sync.
+# private cross-module constant; keep the two in sync (see
+# test_plan_spec_marker_matches_gh_marker for a drift guard).
 _PLAN_SPEC_MARKER = "<!-- plan-spec-reviewed"
 _PLAN_SOUNDNESS_MARKER = "<!-- plan-soundness-reviewed"
+
+# predicate_snapshot dict keys (R3) — named once so the producer
+# (_clean_plan_snapshot) and consumer (_post_auto_adopt_comment) can't drift
+# via a typo'd string literal at one site only.
+_SNAPSHOT_KEY_SPEC = "plan_spec_reviewed"
+_SNAPSHOT_KEY_SOUNDNESS = "plan_soundness_reviewed"
 
 _AUTO_ADOPT_COMMENT_TEMPLATE = """\
 Auto-approved by gate recipe `{recipe}`.
@@ -199,16 +206,23 @@ def _predicate_holds(snapshot: dict[str, object]) -> bool:
     )
 
 
-def _marker_version(body: str, marker: str) -> str:
+def _marker_version(body: str, *, marker: str) -> str | None:
     """Extract the ``<date> <vN>`` version string that follows *marker*.
 
     The caller guarantees *marker* is present in *body* (both markers are
     substring-checked before this is called). Substring split only — no regex
     or date parser (R3): the marker line is ``<!-- plan-spec-reviewed: D vN -->``,
     so we take everything between the marker and the ``-->`` close, strip the
-    leading ``:`` and surrounding whitespace.
+    leading ``:`` and surrounding whitespace. Returns None (fail-closed) if the
+    marker comment is never closed with ``-->`` — without this check,
+    ``str.split`` silently returns the rest of *body* verbatim, which would
+    leak raw plan-of-record text into the predicate_snapshot, the
+    GATE_AUTO_APPROVED event payload, and the public audit comment.
     """
-    return body.split(marker, 1)[1].split("-->", 1)[0].strip().lstrip(":").strip()
+    rest = body.split(marker, 1)[1]
+    if "-->" not in rest:
+        return None
+    return rest.split("-->", 1)[0].lstrip(":").strip()
 
 
 def _plan_of_record_body(task: TicketTask) -> str | None:
@@ -230,7 +244,15 @@ def _plan_of_record_body(task: TicketTask) -> str | None:
     plan_path = task.worktree_path / ".cw" / "plan.md"
     if not plan_path.exists():
         return None
-    return plan_path.read_text(encoding="utf-8")
+    try:
+        return plan_path.read_text(encoding="utf-8")
+    except OSError:
+        # Read failure between .exists() and read_text() (deleted,
+        # permission error, etc.) degrades to "no plan body" rather than
+        # propagating — an unhandled exception here would abort the entire
+        # reconcile tick, including the unrelated auto_approve_clean_review
+        # recipe processed in the same run_gate_recipes() call.
+        return None
 
 
 def _clean_plan_snapshot(
@@ -256,9 +278,13 @@ def _clean_plan_snapshot(
         return None
     if _PLAN_SPEC_MARKER not in body or _PLAN_SOUNDNESS_MARKER not in body:
         return None
+    spec_version = _marker_version(body, marker=_PLAN_SPEC_MARKER)
+    soundness_version = _marker_version(body, marker=_PLAN_SOUNDNESS_MARKER)
+    if spec_version is None or soundness_version is None:
+        return None
     return {
-        "plan_spec_reviewed": _marker_version(body, _PLAN_SPEC_MARKER),
-        "plan_soundness_reviewed": _marker_version(body, _PLAN_SOUNDNESS_MARKER),
+        _SNAPSHOT_KEY_SPEC: spec_version,
+        _SNAPSHOT_KEY_SOUNDNESS: soundness_version,
     }
 
 
@@ -309,14 +335,16 @@ def _detect_auto_approve_review(
 def _detect_auto_adopt_plan(
     state: CwState, tasks: list[TicketTask]
 ) -> list[GateRecipeCandidate]:
-    """Pure classification phase for auto_adopt_clean_plan. Zero writes.
+    """Read-only classification phase for auto_adopt_clean_plan. Zero writes.
 
     Mirrors :func:`_detect_auto_approve_review`'s guard chain (BLOCKED_ON_USER,
     ``gate_recipe_failed_at`` latch None, resolvable session) but swaps the
     clean-review snapshot for a clean-plan snapshot: the row's owning session
     must sit at the ``plan_pending_approval`` gate and the plan-of-record must
     carry both signoff markers. The plan-of-record read (tracker-first) happens
-    here at detect time — unlocked — never under the act-phase lock (R5).
+    here at detect time — unlocked — never under the act-phase lock (R5). Not
+    a pure function (it makes a ``gh`` subprocess call and may read a file),
+    but it performs no writes/mutations.
     """
     candidates: list[GateRecipeCandidate] = []
     for task in tasks:
@@ -388,8 +416,8 @@ def _post_auto_adopt_comment(ticket_id: str, snapshot: dict[str, object]) -> Non
     """
     body = _AUTO_ADOPT_COMMENT_TEMPLATE.format(
         recipe=RECIPE_AUTO_ADOPT_PLAN,
-        plan_spec_reviewed=snapshot["plan_spec_reviewed"],
-        plan_soundness_reviewed=snapshot["plan_soundness_reviewed"],
+        plan_spec_reviewed=snapshot[_SNAPSHOT_KEY_SPEC],
+        plan_soundness_reviewed=snapshot[_SNAPSHOT_KEY_SOUNDNESS],
     )
     try:
         result = subprocess.run(
@@ -592,9 +620,16 @@ def _act_auto_adopt_plan(
     approved: list[str] = []
     comment_jobs: list[tuple[str, dict[str, object]]] = []
     with dev_queue_lock():
+        # Both loaded once, unlike the sibling _act_auto_approve_review (which
+        # reloads state per candidate): that function re-derives a fresh
+        # predicate snapshot from session.last_result on every iteration, so a
+        # stale state read would matter. This function's R5 recheck only
+        # reads already-loaded task/session fields and never re-derives the
+        # predicate, so a per-candidate reload buys no correctness benefit
+        # while extending the exclusive dev_queue_lock() hold time.
         store = load_dev_queue()
+        state = load_state()
         for candidate in by_key.values():
-            state = load_state()
             task = _find_blocked_task(store, candidate.ticket_id, candidate.client)
             if task is None:
                 continue
