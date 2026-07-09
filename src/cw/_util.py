@@ -15,6 +15,16 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 
+MCP_EXTRA_MSG = (
+    "channel server requires [mcp] extra; "
+    "run 'uv pip install cw[mcp]' or 'uv sync --extra mcp'. "
+    "If you installed with 'uv tool install', reinstall with the extra: "
+    'uv tool install "claude-workspace[mcp] @ '
+    'git+https://github.com/mattwwarren/claude-workspace.git" '
+    '(or --from ".[mcp]" from a local clone).'
+)
+
+
 def _tail_lines(content: str, n: int) -> str:
     """Return the last *n* lines of *content*, preserving no trailing newline."""
     all_lines = content.splitlines()
