@@ -169,6 +169,7 @@ def _seam1_clients() -> dict[str, ClientConfig]:
     both_on = {RECIPE_AUTO_APPROVE_REVIEW: True, RECIPE_AUTO_ADOPT_PLAN: True}
     return {
         "acme": ClientConfig(
+            name="acme",
             workspace_path=Path("/tmp/ws"),
             default_branch="main",
             lanes=[
@@ -231,9 +232,12 @@ class TestDetect:
         session = _make_session(last_result=_clean_result())
         state = CwState(sessions=[session])
 
-        assert _detect_auto_approve_review(
-            state, [task], clients=_SEAM1_CLIENTS, config=_config()
-        ) == []
+        assert (
+            _detect_auto_approve_review(
+                state, [task], clients=_SEAM1_CLIENTS, config=_config()
+            )
+            == []
+        )
 
     def test_latched_failure_yields_none_even_when_predicate_holds(self) -> None:
         """A row with a non-None gate_recipe_failed_at is excluded from
@@ -244,9 +248,12 @@ class TestDetect:
         session = _make_session(last_result=_clean_result())
         state = CwState(sessions=[session])
 
-        assert _detect_auto_approve_review(
-            state, [task], clients=_SEAM1_CLIENTS, config=_config()
-        ) == []
+        assert (
+            _detect_auto_approve_review(
+                state, [task], clients=_SEAM1_CLIENTS, config=_config()
+            )
+            == []
+        )
 
     def test_wrong_last_result_status_yields_none(self) -> None:
         task = _make_task()
@@ -255,34 +262,46 @@ class TestDetect:
         )
         state = CwState(sessions=[session])
 
-        assert _detect_auto_approve_review(
-            state, [task], clients=_SEAM1_CLIENTS, config=_config()
-        ) == []
+        assert (
+            _detect_auto_approve_review(
+                state, [task], clients=_SEAM1_CLIENTS, config=_config()
+            )
+            == []
+        )
 
     def test_no_session_id_yields_none(self) -> None:
         task = _make_task(session_id=None)
         state = CwState(sessions=[])
 
-        assert _detect_auto_approve_review(
-            state, [task], clients=_SEAM1_CLIENTS, config=_config()
-        ) == []
+        assert (
+            _detect_auto_approve_review(
+                state, [task], clients=_SEAM1_CLIENTS, config=_config()
+            )
+            == []
+        )
 
     def test_missing_session_yields_none(self) -> None:
         task = _make_task(session_id="ghost")
         state = CwState(sessions=[])
 
-        assert _detect_auto_approve_review(
-            state, [task], clients=_SEAM1_CLIENTS, config=_config()
-        ) == []
+        assert (
+            _detect_auto_approve_review(
+                state, [task], clients=_SEAM1_CLIENTS, config=_config()
+            )
+            == []
+        )
 
     def test_null_last_result_yields_none(self) -> None:
         task = _make_task()
         session = _make_session(last_result=None)
         state = CwState(sessions=[session])
 
-        assert _detect_auto_approve_review(
-            state, [task], clients=_SEAM1_CLIENTS, config=_config()
-        ) == []
+        assert (
+            _detect_auto_approve_review(
+                state, [task], clients=_SEAM1_CLIENTS, config=_config()
+            )
+            == []
+        )
 
     @pytest.mark.parametrize("section", ["review", "health", "scope"])
     def test_malformed_last_result_section_yields_none(self, section: str) -> None:
@@ -294,9 +313,12 @@ class TestDetect:
         session = _make_session(last_result=bad)
         state = CwState(sessions=[session])
 
-        assert _detect_auto_approve_review(
-            state, [task], clients=_SEAM1_CLIENTS, config=_config()
-        ) == []
+        assert (
+            _detect_auto_approve_review(
+                state, [task], clients=_SEAM1_CLIENTS, config=_config()
+            )
+            == []
+        )
 
     @pytest.mark.parametrize(
         "kwargs",
@@ -312,9 +334,12 @@ class TestDetect:
         session = _make_session(last_result=_clean_result(**kwargs))
         state = CwState(sessions=[session])
 
-        assert _detect_auto_approve_review(
-            state, [task], clients=_SEAM1_CLIENTS, config=_config()
-        ) == []
+        assert (
+            _detect_auto_approve_review(
+                state, [task], clients=_SEAM1_CLIENTS, config=_config()
+            )
+            == []
+        )
 
 
 class TestMasterSwitch:
@@ -1010,9 +1035,12 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
-        assert _detect_auto_adopt_plan(
-            state, [task], clients=_SEAM1_CLIENTS, config=_config()
-        ) == []
+        assert (
+            _detect_auto_adopt_plan(
+                state, [task], clients=_SEAM1_CLIENTS, config=_config()
+            )
+            == []
+        )
 
     def test_missing_spec_marker_yields_none(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1022,9 +1050,12 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
-        assert _detect_auto_adopt_plan(
-            state, [task], clients=_SEAM1_CLIENTS, config=_config()
-        ) == []
+        assert (
+            _detect_auto_adopt_plan(
+                state, [task], clients=_SEAM1_CLIENTS, config=_config()
+            )
+            == []
+        )
 
     def test_non_plan_pending_status_yields_none(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1036,9 +1067,12 @@ class TestDetectAdoptPlan:
         )
         state = CwState(sessions=[session])
 
-        assert _detect_auto_adopt_plan(
-            state, [task], clients=_SEAM1_CLIENTS, config=_config()
-        ) == []
+        assert (
+            _detect_auto_adopt_plan(
+                state, [task], clients=_SEAM1_CLIENTS, config=_config()
+            )
+            == []
+        )
 
     def test_non_blocked_status_yields_none(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1048,9 +1082,12 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
-        assert _detect_auto_adopt_plan(
-            state, [task], clients=_SEAM1_CLIENTS, config=_config()
-        ) == []
+        assert (
+            _detect_auto_adopt_plan(
+                state, [task], clients=_SEAM1_CLIENTS, config=_config()
+            )
+            == []
+        )
 
     def test_latched_failure_yields_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _stub_fetch_plan(monkeypatch, _plan_body())
@@ -1058,27 +1095,36 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
-        assert _detect_auto_adopt_plan(
-            state, [task], clients=_SEAM1_CLIENTS, config=_config()
-        ) == []
+        assert (
+            _detect_auto_adopt_plan(
+                state, [task], clients=_SEAM1_CLIENTS, config=_config()
+            )
+            == []
+        )
 
     def test_no_session_id_yields_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _stub_fetch_plan(monkeypatch, _plan_body())
         task = _make_task(stage=Stage.PLAN, session_id=None)
         state = CwState(sessions=[])
 
-        assert _detect_auto_adopt_plan(
-            state, [task], clients=_SEAM1_CLIENTS, config=_config()
-        ) == []
+        assert (
+            _detect_auto_adopt_plan(
+                state, [task], clients=_SEAM1_CLIENTS, config=_config()
+            )
+            == []
+        )
 
     def test_missing_session_yields_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _stub_fetch_plan(monkeypatch, _plan_body())
         task = _make_task(stage=Stage.PLAN, session_id="ghost")
         state = CwState(sessions=[])
 
-        assert _detect_auto_adopt_plan(
-            state, [task], clients=_SEAM1_CLIENTS, config=_config()
-        ) == []
+        assert (
+            _detect_auto_adopt_plan(
+                state, [task], clients=_SEAM1_CLIENTS, config=_config()
+            )
+            == []
+        )
 
     def test_null_last_result_yields_none(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1088,9 +1134,12 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=None)
         state = CwState(sessions=[session])
 
-        assert _detect_auto_adopt_plan(
-            state, [task], clients=_SEAM1_CLIENTS, config=_config()
-        ) == []
+        assert (
+            _detect_auto_adopt_plan(
+                state, [task], clients=_SEAM1_CLIENTS, config=_config()
+            )
+            == []
+        )
 
     def test_falls_back_to_cw_plan_md_when_tracker_returns_none(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1122,9 +1171,12 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
-        assert _detect_auto_adopt_plan(
-            state, [task], clients=_SEAM1_CLIENTS, config=_config()
-        ) == []
+        assert (
+            _detect_auto_adopt_plan(
+                state, [task], clients=_SEAM1_CLIENTS, config=_config()
+            )
+            == []
+        )
 
     def test_missing_cw_plan_md_when_tracker_returns_none_yields_none(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1139,9 +1191,12 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
-        assert _detect_auto_adopt_plan(
-            state, [task], clients=_SEAM1_CLIENTS, config=_config()
-        ) == []
+        assert (
+            _detect_auto_adopt_plan(
+                state, [task], clients=_SEAM1_CLIENTS, config=_config()
+            )
+            == []
+        )
 
     def test_tracker_spec_only_body_not_completed_by_cw_plan_md(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1159,9 +1214,12 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
-        assert _detect_auto_adopt_plan(
-            state, [task], clients=_SEAM1_CLIENTS, config=_config()
-        ) == []
+        assert (
+            _detect_auto_adopt_plan(
+                state, [task], clients=_SEAM1_CLIENTS, config=_config()
+            )
+            == []
+        )
 
     def test_unclosed_marker_yields_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Fail-closed on a malformed marker: the soundness marker's prefix is
@@ -1180,9 +1238,12 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
-        assert _detect_auto_adopt_plan(
-            state, [task], clients=_SEAM1_CLIENTS, config=_config()
-        ) == []
+        assert (
+            _detect_auto_adopt_plan(
+                state, [task], clients=_SEAM1_CLIENTS, config=_config()
+            )
+            == []
+        )
 
     def test_plan_md_read_error_yields_none(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1208,9 +1269,12 @@ class TestDetectAdoptPlan:
 
         monkeypatch.setattr(Path, "read_text", _boom_read_text)
 
-        assert _detect_auto_adopt_plan(
-            state, [task], clients=_SEAM1_CLIENTS, config=_config()
-        ) == []
+        assert (
+            _detect_auto_adopt_plan(
+                state, [task], clients=_SEAM1_CLIENTS, config=_config()
+            )
+            == []
+        )
 
     def test_plan_md_non_utf8_content_yields_none(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1229,9 +1293,12 @@ class TestDetectAdoptPlan:
         session = _make_session(last_result=_plan_result())
         state = CwState(sessions=[session])
 
-        assert _detect_auto_adopt_plan(
-            state, [task], clients=_SEAM1_CLIENTS, config=_config()
-        ) == []
+        assert (
+            _detect_auto_adopt_plan(
+                state, [task], clients=_SEAM1_CLIENTS, config=_config()
+            )
+            == []
+        )
 
 
 class TestRunAdoptPlan:
@@ -1670,7 +1737,10 @@ def test_plan_spec_marker_matches_gh_marker() -> None:
 
 def _client_with_lanes(*lanes: LaneConfig) -> ClientConfig:
     return ClientConfig(
-        workspace_path=Path("/tmp/ws"), default_branch="main", lanes=list(lanes)
+        name="acme",
+        workspace_path=Path("/tmp/ws"),
+        default_branch="main",
+        lanes=list(lanes),
     )
 
 
@@ -1690,9 +1760,7 @@ class TestResolveGateRecipeEnabled:
         }
         task_off = _make_task(gate_recipes={RECIPE_AUTO_APPROVE_REVIEW: False})
         assert (
-            resolve_gate_recipe_enabled(
-                task_off, clients, RECIPE_AUTO_APPROVE_REVIEW
-            )
+            resolve_gate_recipe_enabled(task_off, clients, RECIPE_AUTO_APPROVE_REVIEW)
             is False
         )
         clients_off = {
@@ -1739,8 +1807,7 @@ class TestResolveGateRecipeEnabled:
         }
         task = _make_task()
         assert (
-            resolve_gate_recipe_enabled(task, clients, RECIPE_AUTO_ADOPT_PLAN)
-            is False
+            resolve_gate_recipe_enabled(task, clients, RECIPE_AUTO_ADOPT_PLAN) is False
         )
 
     def test_tier3_default_off_when_nothing_configured(self) -> None:
@@ -1751,15 +1818,13 @@ class TestResolveGateRecipeEnabled:
             is False
         )
         assert (
-            resolve_gate_recipe_enabled(task, clients, RECIPE_AUTO_ADOPT_PLAN)
-            is False
+            resolve_gate_recipe_enabled(task, clients, RECIPE_AUTO_ADOPT_PLAN) is False
         )
 
     def test_client_absent_falls_through_to_default(self) -> None:
         task = _make_task(client="ghost")
         assert (
-            resolve_gate_recipe_enabled(task, {}, RECIPE_AUTO_APPROVE_REVIEW)
-            is False
+            resolve_gate_recipe_enabled(task, {}, RECIPE_AUTO_APPROVE_REVIEW) is False
         )
 
     def test_lane_absent_from_client_falls_through_to_default(self) -> None:
@@ -1794,12 +1859,8 @@ class TestMasterSwitchVsLane:
                 ),
             )
         }
-        task_off = _make_task(
-            ticket_id="GEN-A", lane="default", session_id="sess-a"
-        )
-        task_on = _make_task(
-            ticket_id="GEN-B", lane="fastlane", session_id="sess-b"
-        )
+        task_off = _make_task(ticket_id="GEN-A", lane="default", session_id="sess-a")
+        task_on = _make_task(ticket_id="GEN-B", lane="fastlane", session_id="sess-b")
         state = CwState(
             sessions=[
                 _make_session(

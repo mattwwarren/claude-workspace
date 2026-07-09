@@ -50,7 +50,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from cw.config import load_state
+from cw.config import load_effective_clients, load_state
 from cw.dev_queue import (
     _approve_ticket_locked,
     dev_queue_lock,
@@ -65,7 +65,13 @@ from cw.models import OrchestratorEventType, QueueItemStatus
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from cw.models import CwState, DevQueueStore, OrchestratorConfig, TicketTask
+    from cw.models import (
+        ClientConfig,
+        CwState,
+        DevQueueStore,
+        OrchestratorConfig,
+        TicketTask,
+    )
 
 _log = logging.getLogger(__name__)
 
@@ -74,6 +80,50 @@ _log = logging.getLogger(__name__)
 # both keys have one home, but its detect/act land in P3 (#1066).
 RECIPE_AUTO_APPROVE_REVIEW = "auto_approve_clean_review"
 RECIPE_AUTO_ADOPT_PLAN = "auto_adopt_clean_plan"
+
+# RFC 0009 P4 (#1067) — tier-3 hardcoded fallback for the per-lane resolver.
+# Both recipes default OFF (inverted from concierge's all-True default): a gate
+# recipe auto-clears an approval gate with no human in the loop, so nothing
+# fires unless an operator opts a lane (or ticket) in. NOT a config field — it
+# is the floor the ticket/lane tiers fall through to.
+_DEFAULT_GATE_RECIPE_ENABLED: dict[str, bool] = {
+    RECIPE_AUTO_APPROVE_REVIEW: False,
+    RECIPE_AUTO_ADOPT_PLAN: False,
+}
+
+
+def resolve_gate_recipe_enabled(
+    task: TicketTask,
+    clients: dict[str, ClientConfig],
+    recipe_name: str,
+) -> bool:
+    """Return whether *recipe_name* is enabled for *task*, per RFC 0009 P4.
+
+    3-tier precedence, highest first (mirrors resolve_signoff's shape and
+    resolve_concierge_recipe_enabled's per-recipe .get fallback):
+
+    1. ``task.gate_recipes`` — ticket-level override wins when it names the
+       recipe.
+    2. ``LaneConfig.gate_recipes`` on the task's lane — the per-lane map.
+    3. ``_DEFAULT_GATE_RECIPE_ENABLED`` — the hardcoded default-off floor.
+
+    Robust to a missing client (absent from *clients*) or a missing lane
+    (absent from the client's ``effective_lanes``): either falls straight
+    through to the default with no exception.
+    """
+    if task.gate_recipes is not None and recipe_name in task.gate_recipes:
+        return task.gate_recipes[recipe_name]
+    client_cfg = clients.get(task.client)
+    if client_cfg is not None:
+        for lane_cfg in client_cfg.effective_lanes:
+            if (
+                lane_cfg.name == task.lane
+                and lane_cfg.gate_recipes is not None
+                and recipe_name in lane_cfg.gate_recipes
+            ):
+                return lane_cfg.gate_recipes[recipe_name]
+    return _DEFAULT_GATE_RECIPE_ENABLED[recipe_name]
+
 
 # The only sentinel status the review recipe fires on. A row whose owning
 # session's last_result is not at this gate is never a candidate.
@@ -297,7 +347,11 @@ def _clean_plan_snapshot(
 
 
 def _detect_auto_approve_review(
-    state: CwState, tasks: list[TicketTask]
+    state: CwState,
+    tasks: list[TicketTask],
+    *,
+    clients: dict[str, ClientConfig],
+    config: OrchestratorConfig,
 ) -> list[GateRecipeCandidate]:
     """Pure classification phase for auto_approve_clean_review. Zero writes.
 
@@ -327,6 +381,14 @@ def _detect_auto_approve_review(
         snapshot = _clean_review_snapshot(session.last_result)
         if snapshot is None or not _predicate_holds(snapshot):
             continue
+        # Why: redundant with run_gate_recipes's top-level short-circuit so a
+        # caller invoking _detect_* directly (unit tests) still gets correct
+        # gating.
+        if not (
+            config.gate_recipes_enabled
+            and resolve_gate_recipe_enabled(task, clients, RECIPE_AUTO_APPROVE_REVIEW)
+        ):
+            continue
         candidates.append(
             GateRecipeCandidate(
                 ticket_id=task.ticket_id,
@@ -341,7 +403,11 @@ def _detect_auto_approve_review(
 
 
 def _detect_auto_adopt_plan(
-    state: CwState, tasks: list[TicketTask]
+    state: CwState,
+    tasks: list[TicketTask],
+    *,
+    clients: dict[str, ClientConfig],
+    config: OrchestratorConfig,
 ) -> list[GateRecipeCandidate]:
     """Read-only classification phase for auto_adopt_clean_plan. Zero writes.
 
@@ -367,6 +433,14 @@ def _detect_auto_adopt_plan(
             continue
         snapshot = _clean_plan_snapshot(session.last_result, task)
         if snapshot is None:
+            continue
+        # Why: redundant with run_gate_recipes's top-level short-circuit so a
+        # caller invoking _detect_* directly (unit tests) still gets correct
+        # gating.
+        if not (
+            config.gate_recipes_enabled
+            and resolve_gate_recipe_enabled(task, clients, RECIPE_AUTO_ADOPT_PLAN)
+        ):
             continue
         candidates.append(
             GateRecipeCandidate(
@@ -725,12 +799,20 @@ def run_gate_recipes(*, now: datetime, config: OrchestratorConfig) -> list[str]:
 
     state = load_state()
     tasks = load_dev_queue().tasks
+    # Per-lane enablement (RFC 0009 P4) is resolved against effective clients —
+    # load_effective_clients so lane pause/override state is honoured, matching
+    # where the scheduler makes per-lane dispatch decisions.
+    clients = load_effective_clients()
 
     # Review-then-plan order (R6), matching the constant declaration order. A
     # task sits at exactly one gate at a time, so review-approved rows are
     # never plan candidates; plan act re-loads under its own lock.
     approved = _act_auto_approve_review(
-        _detect_auto_approve_review(state, tasks), now=now
+        _detect_auto_approve_review(state, tasks, clients=clients, config=config),
+        now=now,
     )
-    approved += _act_auto_adopt_plan(_detect_auto_adopt_plan(state, tasks), now=now)
+    approved += _act_auto_adopt_plan(
+        _detect_auto_adopt_plan(state, tasks, clients=clients, config=config),
+        now=now,
+    )
     return approved
