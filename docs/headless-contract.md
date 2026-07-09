@@ -52,6 +52,8 @@ All interactive gates in the pipeline collapse to one of: AUTO-SKIP, AUTO-CONTIN
 | S3 non-deferrable plan-deviation finding survives fix loop or judged beyond its scope | EXIT `blocked` with `blocker.reason: "plan_deviation"` (routes to BLOCKED_ON_USER; not finalize) |
 | S3 fix-loop cycle 3+ OR scope growth at any cycle | Append to `friction_highlights`, set `health.fix_loop_escalated: true`, continue |
 | Any other agent BLOCK (Plan / prep-pr / etc.) | EXIT `blocked` with `blocker.reason: "agent_block"` |
+| `/prep-pr` Step-7 "Ship anyway" interactive gate | EXIT `blocked` with `blocker.reason: "agent_block"` (collapses under the row above — the `--headless` flag must reach `/prep-pr` for it to fire; see §finalize Step 4c) |
+| Project `ship-it.md` interactive steps (e.g. tag-confirmation prompts) | EXIT `blocked` with `blocker.reason: "agent_block"` (collapses under the row above — never silently skipped) |
 | S4a merge gate (small only — large already exited) | EXIT `merge_gate_blocked` if prior pipeline PR open |
 | S4b PR creation, small | AUTO-CREATE with auto-merge |
 | S5 CI wait | AUTO-SKIP — return immediately after auto-merge enabled. CI watching = orchestrator concern |
