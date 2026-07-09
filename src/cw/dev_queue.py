@@ -679,6 +679,15 @@ def list_tickets(client: str | None = None) -> list[TicketTask]:
     return [t for t in store.tasks if t.client == client]
 
 
+def _newest_by_created_at(tasks: list[TicketTask]) -> TicketTask:
+    """Return the task with the newest created_at (duplicate-row tie-break).
+
+    Callers must pass a non-empty list (raises via max() on empty by design;
+    every existing call site already guards emptiness).
+    """
+    return max(tasks, key=lambda t: t.created_at)
+
+
 def _find_ticket(store: DevQueueStore, ticket_id: str, client: str) -> TicketTask:
     """Return the TicketTask matching (ticket_id, client) or raise CwError.
 
@@ -714,13 +723,13 @@ def _find_ticket(store: DevQueueStore, ticket_id: str, client: str) -> TicketTas
                 f"in client '{client}'; binding to newest.",
                 err=True,
             )
-        return max(live, key=lambda t: t.created_at)
+        return _newest_by_created_at(live)
 
     blocked = [t for t in matches if t.status in _APPROVABLE_STATUSES]
     if blocked:
-        return max(blocked, key=lambda t: t.created_at)
+        return _newest_by_created_at(blocked)
 
-    return max(matches, key=lambda t: t.created_at)
+    return _newest_by_created_at(matches)
 
 
 def consume_completed_sessions() -> int:

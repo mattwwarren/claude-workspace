@@ -199,7 +199,7 @@ def stub_gh_comment(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
         calls.append(argv)
         return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
 
-    monkeypatch.setattr("cw.reconcile.gate_recipes.subprocess.run", _fake_run)
+    monkeypatch.setattr("cw.gh._sp.run", _fake_run)
     return calls
 
 
@@ -577,7 +577,7 @@ class TestRunApprove:
         def _boom(*_a: Any, **_k: Any) -> None:
             raise OSError(boom_msg)
 
-        monkeypatch.setattr("cw.reconcile.gate_recipes.subprocess.run", _boom)
+        monkeypatch.setattr("cw.gh._sp.run", _boom)
 
         with caplog.at_level("WARNING"):
             recovered = run_gate_recipes(now=_NOW, config=_config())
@@ -1066,7 +1066,7 @@ class TestCommentNonZeroReturn:
         def _fail(argv: list[str], **_k: Any) -> subprocess.CompletedProcess[bytes]:
             return subprocess.CompletedProcess(argv, 1, stdout=b"", stderr=b"nope")
 
-        monkeypatch.setattr("cw.reconcile.gate_recipes.subprocess.run", _fail)
+        monkeypatch.setattr("cw.gh._sp.run", _fail)
 
         with caplog.at_level("WARNING"):
             recovered = run_gate_recipes(now=_NOW, config=_config())
@@ -1550,7 +1550,7 @@ class TestRunAdoptPlan:
         def _boom(*_a: Any, **_k: Any) -> None:
             raise OSError(boom_msg)
 
-        monkeypatch.setattr("cw.reconcile.gate_recipes.subprocess.run", _boom)
+        monkeypatch.setattr("cw.gh._sp.run", _boom)
 
         with caplog.at_level("WARNING"):
             recovered = run_gate_recipes(now=_NOW, config=_config())
@@ -1579,7 +1579,7 @@ class TestRunAdoptPlan:
         def _fail(argv: list[str], **_k: Any) -> subprocess.CompletedProcess[bytes]:
             return subprocess.CompletedProcess(argv, 1, stdout=b"", stderr=b"nope")
 
-        monkeypatch.setattr("cw.reconcile.gate_recipes.subprocess.run", _fail)
+        monkeypatch.setattr("cw.gh._sp.run", _fail)
 
         with caplog.at_level("WARNING"):
             recovered = run_gate_recipes(now=_NOW, config=_config())
@@ -1833,7 +1833,7 @@ class TestActAdoptRecheckRace:
             events.append("comment_posted")
             return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
 
-        monkeypatch.setattr("cw.reconcile.gate_recipes.subprocess.run", _tracking_run)
+        monkeypatch.setattr("cw.gh._sp.run", _tracking_run)
 
         run_gate_recipes(now=_NOW, config=_config())
 

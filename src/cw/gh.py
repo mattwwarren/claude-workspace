@@ -10,6 +10,7 @@ _GH_PR_STATE_MERGED = "MERGED"
 _PR_EXISTS_TIMEOUT = 10
 _PLAN_MARKER = "<!-- plan-spec-reviewed"
 _FETCH_COMMENTS_TIMEOUT = 30
+_POST_COMMENT_TIMEOUT_SECONDS = 30
 _PR_VIEW_TIMEOUT = 15
 # Field list hydrated per PR by the serve-tick pass (GitHub #929). Order is
 # asserted by tests/test_gh.py — keep it in sync with the decision-table spec.
@@ -315,6 +316,26 @@ def fetch_approved_plan_comment(
         if isinstance(body, str) and _PLAN_MARKER in body:
             return body
     return None
+
+
+def post_issue_comment(
+    ticket_id: str, body: str, *, timeout: int = _POST_COMMENT_TIMEOUT_SECONDS
+) -> _sp.CompletedProcess[bytes] | None:
+    """Post *body* as a GitHub issue comment via ``gh issue comment``.
+
+    Returns the completed subprocess (inspect .returncode / .stderr) or None
+    if the subprocess could not run / timed out. Policy-free: callers decide
+    whether to log or swallow — this neither logs nor raises on gh failure.
+    """
+    try:
+        return _sp.run(
+            ["gh", "issue", "comment", ticket_id, "--body", body],
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, _sp.TimeoutExpired):
+        return None
 
 
 def pr_exists_for_branch(
