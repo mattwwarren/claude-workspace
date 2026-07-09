@@ -1882,6 +1882,29 @@ class TestMasterSwitchVsLane:
 
         assert [c.ticket_id for c in candidates] == ["GEN-B"]
 
+    def test_adopt_plan_lane_disabled_yields_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A clean-plan row on a lane that disables auto_adopt_clean_plan is
+        gated out even though the plan predicate holds."""
+        _stub_fetch_plan(monkeypatch, _plan_body())
+        clients = {
+            "acme": _client_with_lanes(
+                LaneConfig(
+                    name="default",
+                    gate_recipes={RECIPE_AUTO_ADOPT_PLAN: False},
+                )
+            )
+        }
+        task = _make_task(stage=Stage.PLAN)
+        state = CwState(sessions=[_make_session(last_result=_plan_result())])
+
+        candidates = _detect_auto_adopt_plan(
+            state, [task], clients=clients, config=_config()
+        )
+
+        assert candidates == []
+
 
 class TestGateRecipesValidator:
     """Both LaneConfig.gate_recipes and TicketTask.gate_recipes reject
@@ -1919,3 +1942,9 @@ class TestGateRecipesValidator:
             RECIPE_AUTO_APPROVE_REVIEW: False,
             RECIPE_AUTO_ADOPT_PLAN: True,
         }
+
+    def test_explicit_none_passes_validator_on_both_models(self) -> None:
+        """An explicit None (not just the default) short-circuits both
+        gate_recipes field validators without raising."""
+        assert LaneConfig(name="default", gate_recipes=None).gate_recipes is None
+        assert _make_task(gate_recipes=None).gate_recipes is None
