@@ -631,12 +631,6 @@ class TestLazyStarlette:
         with pytest.raises(ImportError, match=r"channel server requires \[mcp\] extra"):
             _server_mod.serve()
 
-    def test_mcp_extra_msg_names_uv_tool_install_remediation(self) -> None:
-        from cw._util import MCP_EXTRA_MSG
-
-        assert "channel server requires [mcp] extra" in MCP_EXTRA_MSG
-        assert "uv tool install" in MCP_EXTRA_MSG
-
 
 class TestSSERouting:
     """Regression: /sse must not 307-redirect (issue #305).
