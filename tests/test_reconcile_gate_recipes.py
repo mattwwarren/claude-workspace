@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -10,6 +12,7 @@ import pytest
 
 from cw.config import save_state
 from cw.dev_queue import load_dev_queue, save_dev_queue
+from cw.gh import _PLAN_MARKER
 from cw.models import (
     CwState,
     DevQueueStore,
@@ -27,9 +30,12 @@ from cw.reconcile.gate_recipes import (
     RECIPE_AUTO_ADOPT_PLAN,
     RECIPE_AUTO_APPROVE_REVIEW,
     GateRecipeCandidate,
+    _act_auto_adopt_plan,
     _act_auto_approve_review,
+    _detect_auto_adopt_plan,
     _detect_auto_approve_review,
     _find_blocked_task,
+    _marker_version,
     _stamp_gate_recipe_failure,
     run_gate_recipes,
 )
@@ -862,3 +868,705 @@ def test_recipe_constants_are_distinct() -> None:
     assert RECIPE_AUTO_APPROVE_REVIEW == "auto_approve_clean_review"
     assert RECIPE_AUTO_ADOPT_PLAN == "auto_adopt_clean_plan"
     assert RECIPE_AUTO_APPROVE_REVIEW != RECIPE_AUTO_ADOPT_PLAN
+
+
+# --------------------------------------------------------------------------- #
+# RFC 0009 P3 — auto_adopt_clean_plan (#1066)
+# --------------------------------------------------------------------------- #
+
+# The predicate_snapshot the two markers in _plan_body() extract to (R3):
+# snake_case keys, "<date> <vN>" string values, no other keys.
+_PLAN_SNAPSHOT: dict[str, object] = {
+    "plan_spec_reviewed": "2026-07-08 v2",
+    "plan_soundness_reviewed": "2026-07-08 v1",
+}
+
+
+def _plan_result(status: str = "plan_pending_approval") -> dict[str, Any]:
+    """Build a last_result dict for a plan-gate sentinel snapshot.
+
+    The plan recipe only reads ``status`` off ``last_result`` (the review/
+    health/scope blocks are hardcoded zeros at plan-stage exit and are
+    intentionally NOT read), so this is deliberately minimal.
+    """
+    return {"status": status}
+
+
+def _plan_body(*, spec: bool = True, soundness: bool = True) -> str:
+    """Build a plan-of-record body with optional signoff markers.
+
+    Markers match the verbatim shape auto-dev-plan.md appends:
+    ``<!-- plan-spec-reviewed: YYYY-MM-DD vN -->`` /
+    ``<!-- plan-soundness-reviewed: YYYY-MM-DD vN -->``.
+    """
+    lines = ["# Plan — some ticket", ""]
+    if spec:
+        lines.append("<!-- plan-spec-reviewed: 2026-07-08 v2 -->")
+    if soundness:
+        lines.append("<!-- plan-soundness-reviewed: 2026-07-08 v1 -->")
+    lines.extend(["", "body text"])
+    return "\n".join(lines)
+
+
+def _stub_fetch_plan(monkeypatch: pytest.MonkeyPatch, body: str | None) -> None:
+    """Stub gate_recipes.fetch_approved_plan_comment to return *body*."""
+    monkeypatch.setattr(
+        "cw.reconcile.gate_recipes.fetch_approved_plan_comment",
+        lambda _ticket_id, **_k: body,
+    )
+
+
+class TestDetectAdoptPlan:
+    def test_detects_clean_plan_pending_row(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _stub_fetch_plan(monkeypatch, _plan_body())
+        task = _make_task(stage=Stage.PLAN, lane="fastlane")
+        session = _make_session(last_result=_plan_result())
+        state = CwState(sessions=[session])
+
+        candidates = _detect_auto_adopt_plan(state, [task])
+
+        assert len(candidates) == 1
+        cand = candidates[0]
+        assert cand.ticket_id == "GEN-1"
+        assert cand.client == "acme"
+        assert cand.lane == "fastlane"
+        assert cand.recipe == RECIPE_AUTO_ADOPT_PLAN
+        assert cand.session_id == "sess-1"
+        assert cand.evidence == _PLAN_SNAPSHOT
+
+    def test_missing_soundness_marker_yields_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _stub_fetch_plan(monkeypatch, _plan_body(soundness=False))
+        task = _make_task(stage=Stage.PLAN)
+        session = _make_session(last_result=_plan_result())
+        state = CwState(sessions=[session])
+
+        assert _detect_auto_adopt_plan(state, [task]) == []
+
+    def test_missing_spec_marker_yields_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _stub_fetch_plan(monkeypatch, _plan_body(spec=False))
+        task = _make_task(stage=Stage.PLAN)
+        session = _make_session(last_result=_plan_result())
+        state = CwState(sessions=[session])
+
+        assert _detect_auto_adopt_plan(state, [task]) == []
+
+    def test_non_plan_pending_status_yields_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _stub_fetch_plan(monkeypatch, _plan_body())
+        task = _make_task(stage=Stage.PLAN)
+        session = _make_session(
+            last_result=_plan_result(status="review_pending_approval")
+        )
+        state = CwState(sessions=[session])
+
+        assert _detect_auto_adopt_plan(state, [task]) == []
+
+    def test_non_blocked_status_yields_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _stub_fetch_plan(monkeypatch, _plan_body())
+        task = _make_task(stage=Stage.PLAN, status=QueueItemStatus.PENDING)
+        session = _make_session(last_result=_plan_result())
+        state = CwState(sessions=[session])
+
+        assert _detect_auto_adopt_plan(state, [task]) == []
+
+    def test_latched_failure_yields_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _stub_fetch_plan(monkeypatch, _plan_body())
+        task = _make_task(stage=Stage.PLAN, gate_recipe_failed_at=_NOW)
+        session = _make_session(last_result=_plan_result())
+        state = CwState(sessions=[session])
+
+        assert _detect_auto_adopt_plan(state, [task]) == []
+
+    def test_no_session_id_yields_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _stub_fetch_plan(monkeypatch, _plan_body())
+        task = _make_task(stage=Stage.PLAN, session_id=None)
+        state = CwState(sessions=[])
+
+        assert _detect_auto_adopt_plan(state, [task]) == []
+
+    def test_missing_session_yields_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _stub_fetch_plan(monkeypatch, _plan_body())
+        task = _make_task(stage=Stage.PLAN, session_id="ghost")
+        state = CwState(sessions=[])
+
+        assert _detect_auto_adopt_plan(state, [task]) == []
+
+    def test_null_last_result_yields_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _stub_fetch_plan(monkeypatch, _plan_body())
+        task = _make_task(stage=Stage.PLAN)
+        session = _make_session(last_result=None)
+        state = CwState(sessions=[session])
+
+        assert _detect_auto_adopt_plan(state, [task]) == []
+
+    def test_falls_back_to_cw_plan_md_when_tracker_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """R1: tracker-first, `.cw/plan.md` fallback. When the tracker read
+        returns None, the recipe falls back to the worktree's plan.md."""
+        _stub_fetch_plan(monkeypatch, None)
+        ws = tmp_path / "ws"
+        (ws / ".cw").mkdir(parents=True)
+        (ws / ".cw" / "plan.md").write_text(_plan_body(), encoding="utf-8")
+        task = _make_task(stage=Stage.PLAN, worktree_path=ws)
+        session = _make_session(last_result=_plan_result())
+        state = CwState(sessions=[session])
+
+        candidates = _detect_auto_adopt_plan(state, [task])
+
+        assert len(candidates) == 1
+        assert candidates[0].evidence == _PLAN_SNAPSHOT
+
+    def test_no_worktree_path_when_tracker_returns_none_yields_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A None tracker read AND a None worktree_path leaves no fallback —
+        the recipe must return None rather than raise on Path(None)."""
+        _stub_fetch_plan(monkeypatch, None)
+        task = _make_task(stage=Stage.PLAN, worktree_path=None)
+        session = _make_session(last_result=_plan_result())
+        state = CwState(sessions=[session])
+
+        assert _detect_auto_adopt_plan(state, [task]) == []
+
+    def test_missing_cw_plan_md_when_tracker_returns_none_yields_none(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Tracker returns None and the worktree exists but has no
+        `.cw/plan.md` on disk — the fallback is unavailable, so the recipe
+        returns None (the ``plan_path.exists()`` False branch)."""
+        _stub_fetch_plan(monkeypatch, None)
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        task = _make_task(stage=Stage.PLAN, worktree_path=ws)
+        session = _make_session(last_result=_plan_result())
+        state = CwState(sessions=[session])
+
+        assert _detect_auto_adopt_plan(state, [task]) == []
+
+    def test_tracker_spec_only_body_not_completed_by_cw_plan_md(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """R2: same-source only, no cross-source union. The tracker returns a
+        spec-only body (non-None, so the `.cw/plan.md` fallback is never
+        consulted); even though plan.md on disk carries BOTH markers, the
+        soundness marker is absent from the single body in scope -> NOT
+        detected. Proves markers are never unioned across tracker + file."""
+        _stub_fetch_plan(monkeypatch, _plan_body(soundness=False))
+        ws = tmp_path / "ws"
+        (ws / ".cw").mkdir(parents=True)
+        (ws / ".cw" / "plan.md").write_text(_plan_body(), encoding="utf-8")
+        task = _make_task(stage=Stage.PLAN, worktree_path=ws)
+        session = _make_session(last_result=_plan_result())
+        state = CwState(sessions=[session])
+
+        assert _detect_auto_adopt_plan(state, [task]) == []
+
+    def test_unclosed_marker_yields_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Fail-closed on a malformed marker: the soundness marker's prefix is
+        present but the comment is never closed with ``-->``. Without a
+        closure check, str.split would silently return the rest of the body
+        as the "version" — leaking raw plan text into the snapshot. Proves
+        _marker_version's fail-closed branch, not just the prefix-presence
+        check in _clean_plan_snapshot."""
+        unclosed_body = (
+            "# Plan\n\n"
+            "<!-- plan-spec-reviewed: 2026-07-08 v2 -->\n"
+            "<!-- plan-soundness-reviewed: 2026-07-08 v1 unterminated, no close"
+        )
+        _stub_fetch_plan(monkeypatch, unclosed_body)
+        task = _make_task(stage=Stage.PLAN)
+        session = _make_session(last_result=_plan_result())
+        state = CwState(sessions=[session])
+
+        assert _detect_auto_adopt_plan(state, [task]) == []
+
+    def test_plan_md_read_error_yields_none(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A read failure between .exists() and read_text() (permission
+        error, file removed mid-read, etc.) degrades to "no plan body"
+        rather than propagating — an unhandled exception here would abort
+        the entire reconcile tick, including the unrelated
+        auto_approve_clean_review recipe processed in the same
+        run_gate_recipes() call."""
+        _stub_fetch_plan(monkeypatch, None)
+        ws = tmp_path / "ws"
+        (ws / ".cw").mkdir(parents=True)
+        (ws / ".cw" / "plan.md").write_text(_plan_body(), encoding="utf-8")
+        task = _make_task(stage=Stage.PLAN, worktree_path=ws)
+        session = _make_session(last_result=_plan_result())
+        state = CwState(sessions=[session])
+
+        read_err_msg = "permission denied"
+
+        def _boom_read_text(_self: Path, encoding: str = "utf-8") -> str:
+            raise OSError(read_err_msg)
+
+        monkeypatch.setattr(Path, "read_text", _boom_read_text)
+
+        assert _detect_auto_adopt_plan(state, [task]) == []
+
+    def test_plan_md_non_utf8_content_yields_none(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """UnicodeDecodeError is not an OSError subclass, so it needs its
+        own dedicated coverage distinct from test_plan_md_read_error_yields_none
+        (which only proves the OSError arm). Writes genuinely invalid UTF-8
+        bytes to disk rather than monkeypatching, so this exercises the real
+        decode failure read_text(encoding="utf-8") raises, not a simulated
+        stand-in exception type."""
+        _stub_fetch_plan(monkeypatch, None)
+        ws = tmp_path / "ws"
+        (ws / ".cw").mkdir(parents=True)
+        (ws / ".cw" / "plan.md").write_bytes(b"\xff\xfe not valid utf-8")
+        task = _make_task(stage=Stage.PLAN, worktree_path=ws)
+        session = _make_session(last_result=_plan_result())
+        state = CwState(sessions=[session])
+
+        assert _detect_auto_adopt_plan(state, [task]) == []
+
+
+class TestRunAdoptPlan:
+    def test_adopts_clean_plan_like_human(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The recipe advances the ticket exactly as a human approve would:
+        PLAN/BLOCKED_ON_USER -> IMPL/PENDING, session_id cleared."""
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        _stub_fetch_plan(monkeypatch, _plan_body())
+        task = _make_task(stage=Stage.PLAN)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
+
+        recovered = run_gate_recipes(now=_NOW, config=_config())
+
+        assert recovered == ["GEN-1"]
+        store = load_dev_queue()
+        approved = store.tasks[0]
+        assert approved.status == QueueItemStatus.PENDING
+        assert approved.stage == Stage.IMPL
+        assert approved.session_id is None
+
+    def test_event_payload_and_recipe_name(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.events import read_events
+
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        _stub_fetch_plan(monkeypatch, _plan_body())
+        task = _make_task(stage=Stage.PLAN, lane="fastlane")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
+
+        run_gate_recipes(now=_NOW, config=_config())
+
+        events = read_events(
+            consumer="test-gate-adopt-event",
+            event_types=[OrchestratorEventType.GATE_AUTO_APPROVED],
+        )
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["ticket_id"] == "GEN-1"
+        assert payload["client"] == "acme"
+        assert payload["lane"] == "fastlane"
+        assert payload["session_id"] == "sess-1"
+        assert payload["recipe"] == RECIPE_AUTO_ADOPT_PLAN
+        assert payload["predicate_snapshot"] == _PLAN_SNAPSHOT
+        assert events[0].correlation_id == "GEN-1"
+
+    def test_comment_written_best_effort(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        stub_gh_comment: list[list[str]],
+    ) -> None:
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        _stub_fetch_plan(monkeypatch, _plan_body())
+        task = _make_task(stage=Stage.PLAN)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
+
+        run_gate_recipes(now=_NOW, config=_config())
+
+        assert len(stub_gh_comment) == 1
+        argv = stub_gh_comment[0]
+        assert argv[:4] == ["gh", "issue", "comment", "GEN-1"]
+        body = argv[-1]
+        assert "auto_adopt_clean_plan" in body
+        assert "plan_spec_reviewed: 2026-07-08 v2" in body
+        assert "plan_soundness_reviewed: 2026-07-08 v1" in body
+
+    def test_review_then_plan_order(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R6: recipe order is review-then-plan, matching constant declaration
+        order. One clean-review candidate and one clean-plan candidate both
+        fire in one tick; the returned approvals appear in declared order."""
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        _stub_fetch_plan(monkeypatch, _plan_body())
+        review_task = _make_task(
+            ticket_id="GEN-R", session_id="sess-r", stage=Stage.REVIEW
+        )
+        plan_task = _make_task(ticket_id="GEN-P", session_id="sess-p", stage=Stage.PLAN)
+        save_dev_queue(DevQueueStore(tasks=[review_task, plan_task]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(
+                        ticket_id="GEN-R",
+                        session_id="sess-r",
+                        last_result=_clean_result(),
+                    ),
+                    _make_session(
+                        ticket_id="GEN-P",
+                        session_id="sess-p",
+                        last_result=_plan_result(),
+                    ),
+                ]
+            )
+        )
+
+        recovered = run_gate_recipes(now=_NOW, config=_config())
+
+        assert recovered == ["GEN-R", "GEN-P"]
+
+    def test_comment_failure_swallowed_and_logged(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A comment-write OSError is logged best-effort; the approve stands."""
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        _stub_fetch_plan(monkeypatch, _plan_body())
+        task = _make_task(stage=Stage.PLAN)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
+
+        boom_msg = "gh exploded"
+
+        def _boom(*_a: Any, **_k: Any) -> None:
+            raise OSError(boom_msg)
+
+        monkeypatch.setattr("cw.reconcile.gate_recipes.subprocess.run", _boom)
+
+        with caplog.at_level("WARNING"):
+            recovered = run_gate_recipes(now=_NOW, config=_config())
+
+        assert recovered == ["GEN-1"]
+        store = load_dev_queue()
+        assert store.tasks[0].stage == Stage.IMPL
+        assert any("GEN-1" in rec.message for rec in caplog.records)
+
+    def test_comment_nonzero_return_is_logged(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A nonzero gh return code is logged best-effort; the approve stands."""
+        import subprocess
+
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        _stub_fetch_plan(monkeypatch, _plan_body())
+        task = _make_task(stage=Stage.PLAN)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
+
+        def _fail(argv: list[str], **_k: Any) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.CompletedProcess(argv, 1, stdout=b"", stderr=b"nope")
+
+        monkeypatch.setattr("cw.reconcile.gate_recipes.subprocess.run", _fail)
+
+        with caplog.at_level("WARNING"):
+            recovered = run_gate_recipes(now=_NOW, config=_config())
+
+        assert recovered == ["GEN-1"]
+        assert any(
+            "rc=1" in rec.message and "GEN-1" in rec.message for rec in caplog.records
+        )
+
+
+class TestActAdoptPlanFailure:
+    def test_event_survives_failed_mutation_and_no_comment(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        stub_gh_comment: list[list[str]],
+    ) -> None:
+        """Even when the mutation raises, the durable GATE_AUTO_APPROVED event
+        is not rolled back, GATE_AUTO_APPROVE_FAILED is emitted as a correction,
+        the failure latch is stamped, and no audit comment is posted."""
+        from cw.events import read_events
+        from cw.exceptions import ApproveGateError
+
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        _stub_fetch_plan(monkeypatch, _plan_body())
+        task = _make_task(stage=Stage.PLAN)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
+
+        boom_msg = "boom"
+
+        def _boom(*_a: Any, **_k: Any) -> None:
+            raise ApproveGateError(boom_msg)
+
+        monkeypatch.setattr("cw.reconcile.gate_recipes._approve_ticket_locked", _boom)
+
+        with caplog.at_level("WARNING"):
+            recovered = run_gate_recipes(now=_NOW, config=_config())
+
+        assert recovered == []
+        store = load_dev_queue()
+        assert store.tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+        assert store.tasks[0].stage == Stage.PLAN
+        assert store.tasks[0].gate_recipe_failed_at == _NOW
+        events = read_events(
+            consumer="test-gate-adopt-failure",
+            event_types=[
+                OrchestratorEventType.GATE_AUTO_APPROVED,
+                OrchestratorEventType.GATE_AUTO_APPROVE_FAILED,
+            ],
+        )
+        approved = [
+            e for e in events if e.type == OrchestratorEventType.GATE_AUTO_APPROVED
+        ]
+        failed = [
+            e
+            for e in events
+            if e.type == OrchestratorEventType.GATE_AUTO_APPROVE_FAILED
+        ]
+        assert len(approved) == 1
+        assert len(failed) == 1
+        assert approved[0].payload["recipe"] == RECIPE_AUTO_ADOPT_PLAN
+        failed_payload = failed[0].payload
+        assert failed_payload["ticket_id"] == "GEN-1"
+        assert failed_payload["recipe"] == RECIPE_AUTO_ADOPT_PLAN
+        assert boom_msg in failed_payload["error"]
+        assert stub_gh_comment == []
+        assert any("GEN-1" in rec.message for rec in caplog.records)
+
+    def test_latched_failure_does_not_refire(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.events import read_events
+        from cw.exceptions import ApproveGateError
+
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        _stub_fetch_plan(monkeypatch, _plan_body())
+        task = _make_task(stage=Stage.PLAN)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
+
+        boom_msg = "boom"
+
+        def _boom(*_a: Any, **_k: Any) -> None:
+            raise ApproveGateError(boom_msg)
+
+        monkeypatch.setattr("cw.reconcile.gate_recipes._approve_ticket_locked", _boom)
+
+        first_tick = run_gate_recipes(now=_NOW, config=_config())
+        second_tick = run_gate_recipes(now=_NOW, config=_config())
+
+        assert first_tick == []
+        assert second_tick == []
+        events = read_events(
+            consumer="test-gate-adopt-latch",
+            event_types=[
+                OrchestratorEventType.GATE_AUTO_APPROVED,
+                OrchestratorEventType.GATE_AUTO_APPROVE_FAILED,
+            ],
+        )
+        approved = [
+            e for e in events if e.type == OrchestratorEventType.GATE_AUTO_APPROVED
+        ]
+        failed = [
+            e
+            for e in events
+            if e.type == OrchestratorEventType.GATE_AUTO_APPROVE_FAILED
+        ]
+        assert len(approved) == 1
+        assert len(failed) == 1
+
+
+class TestActAdoptRecheckRace:
+    def _plan_candidate(self) -> GateRecipeCandidate:
+        return GateRecipeCandidate(
+            ticket_id="GEN-1",
+            client="acme",
+            lane="default",
+            recipe=RECIPE_AUTO_ADOPT_PLAN,
+            evidence=dict(_PLAN_SNAPSHOT),
+            session_id="sess-1",
+        )
+
+    def test_status_changed_at_act_skips(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Row no longer BLOCKED_ON_USER at act time (concurrent advance)."""
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        task = _make_task(stage=Stage.PLAN, status=QueueItemStatus.PENDING)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
+
+        assert _act_auto_adopt_plan([self._plan_candidate()], now=_NOW) == []
+
+    def test_last_result_status_changed_at_act_skips(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """In-memory recheck (R5): last_result no longer at the plan gate."""
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        task = _make_task(stage=Stage.PLAN)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(
+                        last_result=_plan_result(status="review_pending_approval")
+                    )
+                ]
+            )
+        )
+
+        assert _act_auto_adopt_plan([self._plan_candidate()], now=_NOW) == []
+
+    def test_row_deleted_at_act_skips(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        save_dev_queue(DevQueueStore(tasks=[]))
+        save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
+
+        assert _act_auto_adopt_plan([self._plan_candidate()], now=_NOW) == []
+
+    def test_session_gone_at_act_skips(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        task = _make_task(stage=Stage.PLAN)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[]))
+
+        assert _act_auto_adopt_plan([self._plan_candidate()], now=_NOW) == []
+
+    def test_session_id_cleared_at_act_skips(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Row still BLOCKED_ON_USER but its session_id was cleared between
+        detect and act (the ``task.session_id is None`` half of the skip)."""
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        task = _make_task(stage=Stage.PLAN, session_id=None)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
+
+        assert _act_auto_adopt_plan([self._plan_candidate()], now=_NOW) == []
+
+    def test_fetch_not_recalled_during_act(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R5: the plan-of-record network read is NOT held under the lock. Act
+        must reuse candidate.evidence and never re-call
+        fetch_approved_plan_comment. Asserts the approve still lands purely
+        from in-memory state + the detect-time snapshot."""
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        calls: list[str] = []
+        no_refetch_msg = "fetch must not be re-called during act"
+
+        def _boom_fetch(ticket_id: str, **_k: Any) -> str | None:
+            calls.append(ticket_id)
+            raise AssertionError(no_refetch_msg)
+
+        monkeypatch.setattr(
+            "cw.reconcile.gate_recipes.fetch_approved_plan_comment", _boom_fetch
+        )
+        task = _make_task(stage=Stage.PLAN)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
+
+        recovered = _act_auto_adopt_plan([self._plan_candidate()], now=_NOW)
+
+        assert recovered == ["GEN-1"]
+        assert calls == []
+        store = load_dev_queue()
+        assert store.tasks[0].stage == Stage.IMPL
+
+    def test_comment_posted_after_lock_release(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R5's lock-scope guarantee: the gh issue comment subprocess call
+        must fire AFTER dev_queue_lock() releases, never while held. Prior
+        tests only proved *what* gets called (stub_gh_comment); this proves
+        *when* — a regression here would silently re-widen the lock hold
+        time to include a ~30s network call, defeating R5's whole point."""
+        import subprocess
+
+        from cw.dev_queue import dev_queue_lock as real_lock
+
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        _stub_fetch_plan(monkeypatch, _plan_body())
+        task = _make_task(stage=Stage.PLAN)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
+
+        events: list[str] = []
+
+        @contextmanager
+        def _tracking_lock() -> Iterator[None]:
+            with real_lock():
+                events.append("locked")
+                yield
+            events.append("unlocked")
+
+        monkeypatch.setattr("cw.reconcile.gate_recipes.dev_queue_lock", _tracking_lock)
+
+        def _tracking_run(
+            argv: list[str], **_kwargs: Any
+        ) -> subprocess.CompletedProcess[bytes]:
+            events.append("comment_posted")
+            return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
+
+        monkeypatch.setattr("cw.reconcile.gate_recipes.subprocess.run", _tracking_run)
+
+        run_gate_recipes(now=_NOW, config=_config())
+
+        assert events == ["locked", "unlocked", "comment_posted"]
+
+
+def test_marker_version_fails_closed_when_marker_absent() -> None:
+    """_marker_version defends its own fail-closed contract rather than
+    depending on callers to pre-check marker presence — direct unit test
+    for the branch _clean_plan_snapshot's presence guard never exercises
+    (that guard always short-circuits before calling this function)."""
+    assert _marker_version("no markers here", marker="<!-- plan-spec-reviewed") is None
+
+
+def test_plan_spec_marker_matches_gh_marker() -> None:
+    """Drift guard for the intentionally-duplicated marker constant: the
+    module docstring for _PLAN_SPEC_MARKER says "keep the two in sync" but
+    that was previously enforced by comment only. If gh._PLAN_MARKER ever
+    changes, this recipe's predicate would silently stop matching (fails
+    closed, but silently) — this test converts the comment-only invariant
+    into a real assertion."""
+    from cw.reconcile.gate_recipes import _PLAN_SPEC_MARKER
+
+    assert _PLAN_SPEC_MARKER == _PLAN_MARKER

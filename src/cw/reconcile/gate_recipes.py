@@ -9,13 +9,16 @@ approval gate — so they gate on their own opt-in master switch
 audit event to the operator channel, since an auto-advance with no human in the
 loop is attention-worthy.
 
-**P1+P2 scope (this module, GitHub #1065):** the ``auto_approve_clean_review``
-recipe. It auto-approves a ``review_pending_approval`` gate when the review
-came back completely clean — no MUST_FIX findings, nothing deferred, health
-recommendation PROCEED, and no forbidden-area touch. ``auto_adopt_clean_plan``
-(P3, #1066) and the per-lane ``resolve_gate_recipe_enabled`` precedence (P4,
-#1067) are out of scope; only the ``RECIPE_AUTO_ADOPT_PLAN`` constant is
-defined here so both recipe keys have a single home.
+**P1+P2 scope (GitHub #1065):** the ``auto_approve_clean_review`` recipe. It
+auto-approves a ``review_pending_approval`` gate when the review came back
+completely clean — no MUST_FIX findings, nothing deferred, health
+recommendation PROCEED, and no forbidden-area touch.
+
+**P3 scope (GitHub #1066):** the ``auto_adopt_clean_plan`` recipe. It
+auto-adopts a ``plan_pending_approval`` gate when the plan-of-record carries
+both signoff markers (``plan-spec-reviewed`` and ``plan-soundness-reviewed``)
+appended by ``auto-dev-plan``. The per-lane ``resolve_gate_recipe_enabled``
+precedence (P4, #1067) remains out of scope here.
 
 The recipe follows the repo's detect/act split (see ``concierge.py`` for the
 closest sibling): a pure ``_detect_auto_approve_review`` classification phase,
@@ -56,6 +59,7 @@ from cw.dev_queue import (
 )
 from cw.events import record_event
 from cw.exceptions import CwError
+from cw.gh import fetch_approved_plan_comment
 from cw.models import OrchestratorEventType, QueueItemStatus
 
 if TYPE_CHECKING:
@@ -92,6 +96,36 @@ The review met the clean-review predicate and was approved automatically
 - deferred: {deferred}
 - recommendation: {recommendation}
 - forbidden_touched: {forbidden_touched}
+
+See event `GATE_AUTO_APPROVED` for the full audit trail.
+"""
+
+# The only sentinel status the plan recipe fires on. A row whose owning
+# session's last_result is not at this gate is never a candidate.
+_PLAN_PENDING_APPROVAL = "plan_pending_approval"
+
+# The two signoff markers auto-dev-plan appends to the plan-of-record body.
+# _PLAN_SPEC_MARKER mirrors gh._PLAN_MARKER — a local copy avoids importing a
+# private cross-module constant; keep the two in sync (see
+# test_plan_spec_marker_matches_gh_marker for a drift guard).
+_PLAN_SPEC_MARKER = "<!-- plan-spec-reviewed"
+_PLAN_SOUNDNESS_MARKER = "<!-- plan-soundness-reviewed"
+
+# predicate_snapshot dict keys (R3) — named once so the producer
+# (_clean_plan_snapshot) and consumer (_post_auto_adopt_comment) can't drift
+# via a typo'd string literal at one site only.
+_SNAPSHOT_KEY_SPEC = "plan_spec_reviewed"
+_SNAPSHOT_KEY_SOUNDNESS = "plan_soundness_reviewed"
+
+_AUTO_ADOPT_COMMENT_TEMPLATE = """\
+Auto-approved by gate recipe `{recipe}`.
+
+The plan met the clean-plan predicate (both signoff markers present on the
+plan-of-record) and was approved automatically (no human review) by RFC 0009
+gate-recipe automation:
+
+- plan_spec_reviewed: {plan_spec_reviewed}
+- plan_soundness_reviewed: {plan_soundness_reviewed}
 
 See event `GATE_AUTO_APPROVED` for the full audit trail.
 """
@@ -172,6 +206,96 @@ def _predicate_holds(snapshot: dict[str, object]) -> bool:
     )
 
 
+def _marker_version(body: str, *, marker: str) -> str | None:
+    """Extract the ``<date> <vN>`` version string that follows *marker*.
+
+    Fails closed (returns None) both when *marker* is absent from *body* and
+    when its comment is never closed with ``-->`` — the caller currently
+    always pre-checks marker presence, but this function defends its own
+    fail-closed contract rather than depending on that discipline, since a
+    future caller (or refactor) skipping the pre-check would otherwise hit an
+    uncaught ``IndexError`` instead of failing closed. Substring split only —
+    no regex or date parser (R3): the marker line is
+    ``<!-- plan-spec-reviewed: D vN -->``, so we take everything between the
+    marker and the ``-->`` close, strip the leading ``:`` and surrounding
+    whitespace. The closure check specifically prevents ``str.split`` from
+    silently returning the rest of *body* verbatim, which would leak raw
+    plan-of-record text into the predicate_snapshot, the GATE_AUTO_APPROVED
+    event payload, and the public audit comment.
+    """
+    if marker not in body:
+        return None
+    rest = body.split(marker, 1)[1]
+    if "-->" not in rest:
+        return None
+    return rest.split("-->", 1)[0].lstrip(":").strip()
+
+
+def _plan_of_record_body(task: TicketTask) -> str | None:
+    """Return the plan-of-record body, tracker-first with a `.cw/plan.md` fallback.
+
+    Why tracker-first (opposite of local_runner.build_task_message's
+    .cw-first order): that function fills a local cache for Stage-2 task
+    prompts; this gate checks *current* approval freshness, for which the
+    tracker is the authoritative, freshest source. Falls back to the
+    worktree's ``.cw/plan.md`` only when the tracker read returns None. A row
+    with no materialized worktree has no fallback (returns None rather than
+    raising on ``Path(None)``).
+    """
+    body = fetch_approved_plan_comment(task.ticket_id)
+    if body is not None:
+        return body
+    if task.worktree_path is None:
+        return None
+    plan_path = task.worktree_path / ".cw" / "plan.md"
+    if not plan_path.exists():
+        return None
+    try:
+        return plan_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        # Read/decode failure between .exists() and read_text() (deleted,
+        # permission error, non-UTF-8 content, etc.) degrades to "no plan
+        # body" rather than propagating — an unhandled exception here would
+        # abort the entire reconcile tick, including the unrelated
+        # auto_approve_clean_review recipe processed in the same
+        # run_gate_recipes() call. UnicodeDecodeError is not an OSError
+        # subclass, so it must be caught explicitly alongside it.
+        return None
+
+
+def _clean_plan_snapshot(
+    last_result: object, task: TicketTask
+) -> dict[str, object] | None:
+    """Extract the clean-plan predicate snapshot, or None if not fireable.
+
+    Returns None (fail-closed) unless *last_result* is a dict at the
+    ``plan_pending_approval`` gate AND the plan-of-record body carries BOTH
+    signoff markers. Both markers are read from the SAME body (R2 — there is
+    exactly one ``body`` variable in scope, so same-source is structural, not
+    a separate check); a union across tracker + `.cw/plan.md` is impossible by
+    construction. The returned snapshot holds only the two marker-version
+    strings — the raw plan body is never placed in the snapshot, the event
+    payload, or the audit comment.
+    """
+    if not isinstance(last_result, dict):
+        return None
+    if last_result.get("status") != _PLAN_PENDING_APPROVAL:
+        return None
+    body = _plan_of_record_body(task)
+    if body is None:
+        return None
+    if _PLAN_SPEC_MARKER not in body or _PLAN_SOUNDNESS_MARKER not in body:
+        return None
+    spec_version = _marker_version(body, marker=_PLAN_SPEC_MARKER)
+    soundness_version = _marker_version(body, marker=_PLAN_SOUNDNESS_MARKER)
+    if spec_version is None or soundness_version is None:
+        return None
+    return {
+        _SNAPSHOT_KEY_SPEC: spec_version,
+        _SNAPSHOT_KEY_SOUNDNESS: soundness_version,
+    }
+
+
 def _detect_auto_approve_review(
     state: CwState, tasks: list[TicketTask]
 ) -> list[GateRecipeCandidate]:
@@ -216,6 +340,47 @@ def _detect_auto_approve_review(
     return candidates
 
 
+def _detect_auto_adopt_plan(
+    state: CwState, tasks: list[TicketTask]
+) -> list[GateRecipeCandidate]:
+    """Read-only classification phase for auto_adopt_clean_plan. Zero writes.
+
+    Mirrors :func:`_detect_auto_approve_review`'s guard chain (BLOCKED_ON_USER,
+    ``gate_recipe_failed_at`` latch None, resolvable session) but swaps the
+    clean-review snapshot for a clean-plan snapshot: the row's owning session
+    must sit at the ``plan_pending_approval`` gate and the plan-of-record must
+    carry both signoff markers. The plan-of-record read (tracker-first) happens
+    here at detect time — unlocked — never under the act-phase lock (R5). Not
+    a pure function (it makes a ``gh`` subprocess call and may read a file),
+    but it performs no writes/mutations.
+    """
+    candidates: list[GateRecipeCandidate] = []
+    for task in tasks:
+        if task.status != QueueItemStatus.BLOCKED_ON_USER:
+            continue
+        if task.gate_recipe_failed_at is not None:
+            continue
+        if task.session_id is None:
+            continue
+        session = state.find_by_name_or_id(task.session_id)
+        if session is None:
+            continue
+        snapshot = _clean_plan_snapshot(session.last_result, task)
+        if snapshot is None:
+            continue
+        candidates.append(
+            GateRecipeCandidate(
+                ticket_id=task.ticket_id,
+                client=task.client,
+                lane=task.lane,
+                recipe=RECIPE_AUTO_ADOPT_PLAN,
+                evidence=snapshot,
+                session_id=task.session_id,
+            )
+        )
+    return candidates
+
+
 def _post_auto_approve_comment(ticket_id: str, snapshot: dict[str, object]) -> None:
     """Post the auto-approve audit comment to the ticket (best-effort, logged).
 
@@ -230,6 +395,44 @@ def _post_auto_approve_comment(ticket_id: str, snapshot: dict[str, object]) -> N
         deferred=snapshot["deferred"],
         recommendation=snapshot["recommendation"],
         forbidden_touched=snapshot["forbidden_touched"],
+    )
+    try:
+        result = subprocess.run(
+            ["gh", "issue", "comment", ticket_id, "--body", body],
+            capture_output=True,
+            timeout=_COMMENT_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _log.warning("gate_recipe_comment_failed ticket=%s: %s", ticket_id, exc)
+        return
+    if result.returncode != 0:
+        _log.warning(
+            "gate_recipe_comment_failed ticket=%s rc=%s: %s",
+            ticket_id,
+            result.returncode,
+            result.stderr.decode(errors="replace").strip(),
+        )
+
+
+def _post_auto_adopt_comment(ticket_id: str, snapshot: dict[str, object]) -> None:
+    """Post the auto-adopt audit comment to the ticket (best-effort, logged).
+
+    Mirrors :func:`_post_auto_approve_comment` exactly (same ``gh issue
+    comment`` subprocess call, same best-effort log-on-failure behavior),
+    formatting the plan template with the two marker-version strings.
+    """
+    # Explicit named args, not **snapshot: this writes to a public,
+    # append-only GitHub comment, so the fields exposed there must stay
+    # grep-able and reviewable at this call site. Unpacking the full
+    # snapshot dict would auto-expose any future key added to
+    # _clean_plan_snapshot with no code change here to acknowledge the new
+    # public disclosure, and would raise TypeError if a future key ever
+    # collided with the `recipe=` kwarg.
+    body = _AUTO_ADOPT_COMMENT_TEMPLATE.format(
+        recipe=RECIPE_AUTO_ADOPT_PLAN,
+        plan_spec_reviewed=snapshot[_SNAPSHOT_KEY_SPEC],
+        plan_soundness_reviewed=snapshot[_SNAPSHOT_KEY_SOUNDNESS],
     )
     try:
         result = subprocess.run(
@@ -409,6 +612,100 @@ def _act_auto_approve_review(
     return approved
 
 
+def _act_auto_adopt_plan(
+    candidates: list[GateRecipeCandidate], *, now: datetime
+) -> list[str]:
+    """Act phase for auto_adopt_clean_plan: in-memory re-check, emit, approve.
+
+    Mirrors :func:`_act_auto_approve_review` with one deliberate divergence
+    (R5): the re-check under ``dev_queue_lock()`` reads ONLY already-loaded
+    in-memory state — the row is still BLOCKED_ON_USER, its session still
+    resolves, and ``session.last_result`` is still at the
+    ``plan_pending_approval`` gate. It does NOT re-run
+    :func:`_plan_of_record_body`/:func:`_clean_plan_snapshot`: the plan-of-
+    record read is a ~30s ``gh`` subprocess, and the signoff markers are
+    append-only, so cleanliness established at detect cannot regress between
+    detect and act. Only task/session state can. ``candidate.evidence`` (the
+    detect-time snapshot) is reused directly as the event's
+    ``predicate_snapshot`` and the audit-comment source.
+    """
+    if not candidates:
+        return []
+    by_key = {(c.ticket_id, c.client): c for c in candidates}
+    approved: list[str] = []
+    comment_jobs: list[tuple[str, dict[str, object]]] = []
+    with dev_queue_lock():
+        # Both loaded once, unlike the sibling _act_auto_approve_review (which
+        # reloads state per candidate): that function re-derives a fresh
+        # predicate snapshot from session.last_result on every iteration, so a
+        # stale state read would matter. This function's R5 recheck only
+        # reads already-loaded task/session fields and never re-derives the
+        # predicate, so a per-candidate reload buys no correctness benefit
+        # while extending the exclusive dev_queue_lock() hold time.
+        store = load_dev_queue()
+        state = load_state()
+        for candidate in by_key.values():
+            task = _find_blocked_task(store, candidate.ticket_id, candidate.client)
+            if task is None:
+                continue
+            if task.session_id is None:
+                continue
+            session = state.find_by_name_or_id(task.session_id)
+            if session is None:
+                continue
+            # In-memory re-check only (R5): no plan-of-record re-fetch. The
+            # markers are append-only, so only task/session state can have
+            # changed since detect.
+            last_result = session.last_result
+            if (
+                not isinstance(last_result, dict)
+                or last_result.get("status") != _PLAN_PENDING_APPROVAL
+            ):
+                continue
+            snapshot = candidate.evidence
+            record_event(
+                OrchestratorEventType.GATE_AUTO_APPROVED,
+                {
+                    "ticket_id": task.ticket_id,
+                    "client": task.client,
+                    "lane": task.lane,
+                    "session_id": session.id,
+                    "recipe": RECIPE_AUTO_ADOPT_PLAN,
+                    "predicate_snapshot": snapshot,
+                    "approved_at": now.isoformat(),
+                },
+                correlation_id=task.ticket_id,
+            )
+            try:
+                _approve_ticket_locked(task.ticket_id, task.client)
+            except CwError as exc:
+                _log.warning(
+                    "gate_recipe_approve_failed ticket=%s client=%s",
+                    task.ticket_id,
+                    task.client,
+                    exc_info=True,
+                )
+                record_event(
+                    OrchestratorEventType.GATE_AUTO_APPROVE_FAILED,
+                    {
+                        "ticket_id": task.ticket_id,
+                        "client": task.client,
+                        "lane": task.lane,
+                        "session_id": session.id,
+                        "recipe": RECIPE_AUTO_ADOPT_PLAN,
+                        "error": str(exc),
+                    },
+                    correlation_id=task.ticket_id,
+                )
+                _stamp_gate_recipe_failure(task.ticket_id, task.client, now=now)
+                continue
+            approved.append(task.ticket_id)
+            comment_jobs.append((task.ticket_id, snapshot))
+    for ticket_id, snapshot in comment_jobs:
+        _post_auto_adopt_comment(ticket_id, snapshot)
+    return approved
+
+
 def run_gate_recipes(*, now: datetime, config: OrchestratorConfig) -> list[str]:
     """Run all enabled gate recipes for one reconcile tick.
 
@@ -429,5 +726,11 @@ def run_gate_recipes(*, now: datetime, config: OrchestratorConfig) -> list[str]:
     state = load_state()
     tasks = load_dev_queue().tasks
 
-    candidates = _detect_auto_approve_review(state, tasks)
-    return _act_auto_approve_review(candidates, now=now)
+    # Review-then-plan order (R6), matching the constant declaration order. A
+    # task sits at exactly one gate at a time, so review-approved rows are
+    # never plan candidates; plan act re-loads under its own lock.
+    approved = _act_auto_approve_review(
+        _detect_auto_approve_review(state, tasks), now=now
+    )
+    approved += _act_auto_adopt_plan(_detect_auto_adopt_plan(state, tasks), now=now)
+    return approved
