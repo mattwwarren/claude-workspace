@@ -17,7 +17,7 @@ If you just pulled new cw code, reinstall with a real rebuild — `uv tool insta
 alone serves a STALE cached build when the version string is unchanged:
 
 ```bash
-uv tool install --force --reinstall --no-cache <path-to-claude-workspace>
+uv tool install --force --reinstall --no-cache "<path-to-claude-workspace>[mcp]"
 cw orchestrate run --help   # verify the NEW command exists — don't trust `cw --version`
 ```
 

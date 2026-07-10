@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field, field_validator
 
+from cw._util import MCP_EXTRA_MSG
 from cw.atomic import atomic_write_text
 from cw.config import state_dir
 from cw.pr_events_auth import (
@@ -29,11 +30,6 @@ if TYPE_CHECKING:
     from starlette.responses import Response
 
 logger = logging.getLogger(__name__)
-
-_MCP_EXTRA_MSG = (
-    "channel server requires [mcp] extra; "
-    "run 'uv pip install cw[mcp]' or 'uv sync --extra mcp'"
-)
 
 DEFAULT_PORT = 8788
 DEFAULT_HOST = "127.0.0.1"
@@ -316,7 +312,7 @@ def make_app() -> Starlette:
         from starlette.middleware import Middleware
         from starlette.routing import Mount, Route
     except ImportError as exc:
-        raise ImportError(_MCP_EXTRA_MSG) from exc
+        raise ImportError(MCP_EXTRA_MSG) from exc
     import anyio
     from mcp.server import Server
     from mcp.server.sse import SseServerTransport

@@ -332,3 +332,13 @@ class TestShortenWorktree:
         from cw._util import _shorten_worktree
 
         assert _shorten_worktree(None, "/home/u") == "—"
+
+
+class TestMcpExtraMsg:
+    """Tests for MCP_EXTRA_MSG (shared channel-server remediation constant)."""
+
+    def test_names_uv_tool_install_remediation(self) -> None:
+        from cw._util import MCP_EXTRA_MSG
+
+        assert "channel server requires [mcp] extra" in MCP_EXTRA_MSG
+        assert "uv tool install" in MCP_EXTRA_MSG

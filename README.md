@@ -13,15 +13,15 @@ The core loop: **harden a ticket → dispatch it → workers implement, review, 
 
 ```bash
 # Install from GitHub
-uv tool install git+https://github.com/mattwwarren/claude-workspace.git
+uv tool install "claude-workspace[mcp] @ git+https://github.com/mattwwarren/claude-workspace.git"
 
 # Pin to a specific release
-uv tool install git+https://github.com/mattwwarren/claude-workspace.git@v1.3.0
+uv tool install "claude-workspace[mcp] @ git+https://github.com/mattwwarren/claude-workspace.git@v1.3.0"
 
 # Install from local clone (development)
 git clone https://github.com/mattwwarren/claude-workspace.git
 cd claude-workspace
-uv tool install --editable .
+uv tool install --editable ".[mcp]"
 ```
 
 > **Stale binary warning:** `uv tool install --force` caches by version string. After pulling new code,
