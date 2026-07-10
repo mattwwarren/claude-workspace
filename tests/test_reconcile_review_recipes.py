@@ -14,7 +14,8 @@ from typing import Any
 
 import pytest
 
-from cw.models import OrchestratorConfig
+from cw.dev_queue import load_dev_queue, save_dev_queue
+from cw.models import DevQueueStore, OrchestratorConfig
 from cw.reconcile.review_recipes import (
     RECIPE_ADDRESS_REVIEW,
     _detect_address_review,
@@ -108,6 +109,21 @@ def test_run_review_recipes_master_switch_off_is_noop() -> None:
     # Dual gating: _detect_address_review gates on the switch itself too, so a
     # direct call with the switch off returns [] even given a live candidate.
     assert _detect_address_review([_cr_task()], config=config) == []
+
+
+def test_run_review_recipes_loads_from_dev_queue() -> None:
+    # Exercises the actual wiring core.py calls: run_review_recipes's own
+    # load_dev_queue() read, not just the pure _detect_address_review helper.
+    task = _cr_task()
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidates = run_review_recipes(config=_config())
+
+    assert len(candidates) == 1
+    assert candidates[0].ticket_id == task.ticket_id
+    assert candidates[0].attention_state == "changes_requested"
+    # P1 is detect-only: the dev-queue snapshot on disk is untouched.
+    assert load_dev_queue().tasks == [task]
 
 
 def test_draft_pr_never_a_candidate() -> None:

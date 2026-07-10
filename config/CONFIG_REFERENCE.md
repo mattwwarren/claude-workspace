@@ -358,6 +358,14 @@ concierge_recoveries: {}
 # Gate Recipe Enablement below.
 gate_recipes_enabled: false
 
+# Review-recipe automation master switch (RFC 0010 P1, GitHub #1096). Default
+# false, mirroring gate_recipes_enabled's fail-safe posture. P1 ships only the
+# address_review recipe's detect phase (classifies changes_requested PRs into
+# candidates) with no act/dispatch/event-emission phase yet, so setting this
+# true today is inert by construction -- it has no observable effect until
+# P2 adds the act phase.
+review_recipes_enabled: false
+
 # Minimum elapsed seconds between PR-state hydration passes in the serve tick
 # (GitHub #929). Gated off max(pr_state.hydrated_at) across dev-queue tasks —
 # no separate timer state. Each pass fetches `gh pr view` for every open PR
