@@ -17,6 +17,7 @@ from cw.native_daemon import (
     get_native_daemon_client,
     model_supports_auto,
     read_supervisor_resume_session_id,
+    resolve_permission_mode,
 )
 
 if TYPE_CHECKING:
@@ -533,6 +534,60 @@ class TestModelSupportsAuto:
     def test_skip_permissions_mode_literal(self) -> None:
         """Lock the fallback mode literal."""
         assert SKIP_PERMISSIONS_MODE == "bypassPermissions"
+
+
+class TestResolvePermissionMode:
+    """resolve_permission_mode: shared derivation for both spawn chokepoints (#1111)."""
+
+    def test_explicit_wins_over_non_auto_model(self) -> None:
+        """A caller-supplied permission_mode always wins over the derivation."""
+        assert (
+            resolve_permission_mode("claude-haiku-4-5-20251001", explicit="acceptEdits")
+            == "acceptEdits"
+        )
+
+    def test_explicit_wins_over_auto_capable_model(self) -> None:
+        assert (
+            resolve_permission_mode("claude-sonnet-5", explicit="acceptEdits")
+            == "acceptEdits"
+        )
+
+    def test_auto_capable_model_returns_none(self) -> None:
+        assert resolve_permission_mode("claude-sonnet-4-6-20251015") is None
+
+    def test_no_pin_returns_none(self) -> None:
+        assert resolve_permission_mode(None) is None
+
+    def test_non_auto_model_returns_skip_mode(self) -> None:
+        assert (
+            resolve_permission_mode("claude-haiku-4-5-20251001")
+            == SKIP_PERMISSIONS_MODE
+        )
+
+    def test_non_auto_model_logs_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The bypassPermissions fallback is audit-logged, not silent (#1111)."""
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            resolve_permission_mode("claude-haiku-4-5-20251001")
+
+        assert any(
+            "claude-haiku-4-5-20251001" in rec.message
+            and "bypassPermissions" in rec.message
+            for rec in caplog.records
+        )
+
+    def test_auto_capable_model_does_not_log_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            resolve_permission_mode("claude-sonnet-5")
+
+        assert caplog.records == []
 
 
 class TestReadSupervisorResumeSessionId:

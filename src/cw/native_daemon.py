@@ -83,6 +83,32 @@ def model_supports_auto(worker_model: str | None) -> bool:
     return normalized.startswith(_AUTO_CAPABLE_MODEL_PREFIXES)
 
 
+def resolve_permission_mode(
+    worker_model: str | None, *, explicit: str | None = None
+) -> str | None:
+    """Derive the effective ``--permission-mode`` for a DAEMON-origin spawn.
+
+    Shared by both DAEMON-origin spawn chokepoints (``spawn_create_impl`` and
+    ``resume_session``) so the ``model_supports_auto`` fallback rule can't
+    drift between them (#1111). *explicit* — a caller-supplied
+    ``permission_mode`` — always wins. Otherwise falls back to
+    :data:`SKIP_PERMISSIONS_MODE` when *worker_model* does not support
+    ``auto``; returns ``None`` (letting ``spawn_bg`` apply
+    ``_DEFAULT_PERMISSION_MODE``) when it does.
+    """
+    if explicit is not None:
+        return explicit
+    if model_supports_auto(worker_model):
+        return None
+    _log.warning(
+        "worker_model %r does not support --permission-mode auto; "
+        "falling back to %s (#1111)",
+        worker_model,
+        SKIP_PERMISSIONS_MODE,
+    )
+    return SKIP_PERMISSIONS_MODE
+
+
 # Path to the daemon's roster file. Keys under ``workers`` are short
 # session ids; the daemon updates this file synchronously when a worker
 # spawns or stops, so it's a reliable liveness oracle.

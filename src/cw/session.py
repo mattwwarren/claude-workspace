@@ -24,10 +24,9 @@ from cw.models import (
     SessionStatus,
 )
 from cw.native_daemon import (
-    SKIP_PERMISSIONS_MODE,
     NativeDaemonClient,
     get_native_daemon_client,
-    model_supports_auto,
+    resolve_permission_mode,
 )
 from cw.prompts import build_session_context, get_purpose_prompt
 from cw.reconcile import reconcile
@@ -427,9 +426,7 @@ def _resume_spawn_args(
     ):
         extra_args = [*extra_args, _LINEAR_MCP_DISALLOW_ARG]
 
-    permission_mode = (
-        None if model_supports_auto(client.worker_model) else SKIP_PERMISSIONS_MODE
-    )
+    permission_mode = resolve_permission_mode(client.worker_model)
     return extra_args, permission_mode
 
 
