@@ -17,7 +17,6 @@ import pytest
 from cw.models import OrchestratorConfig
 from cw.reconcile.review_recipes import (
     RECIPE_ADDRESS_REVIEW,
-    ReviewRecipeCandidate,
     _detect_address_review,
     run_review_recipes,
 )
@@ -98,9 +97,7 @@ def test_detect_address_review_requires_is_candidate() -> None:
 def test_detect_address_review_pr_state_none_guard() -> None:
     # pr_url set but pr_state None: _is_candidate is True (hydratable), but the
     # detect phase requires an actual pr_state to read attention_state from.
-    task = _make_task(
-        pr_url="https://github.com/acme/widgets/pull/42", pr_state=None
-    )
+    task = _make_task(pr_url="https://github.com/acme/widgets/pull/42", pr_state=None)
     assert _detect_address_review([task], config=_config()) == []
 
 
