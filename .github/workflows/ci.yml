@@ -35,6 +35,12 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install tmux
 
+      # Must run BEFORE `uv sync`: sync without --locked/--frozen silently
+      # rewrites a stale uv.lock on disk, which would make this check a no-op.
+      # `uv lock --check` needs no venv, so it stands alone before install.
+      - name: Check uv.lock is in sync
+        run: uv lock --check
+
       - name: Install dependencies
         run: uv sync --dev --extra mcp
 
