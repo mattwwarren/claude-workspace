@@ -11,9 +11,11 @@ import pytest
 
 from cw.exceptions import CwError
 from cw.native_daemon import (
+    SKIP_PERMISSIONS_MODE,
     FakeNativeDaemonClient,
     RealNativeDaemonClient,
     get_native_daemon_client,
+    model_supports_auto,
     read_supervisor_resume_session_id,
 )
 
@@ -494,6 +496,43 @@ class TestFakeNativeDaemonClient:
 
 def test_get_native_daemon_client_returns_real_instance() -> None:
     assert isinstance(get_native_daemon_client(), RealNativeDaemonClient)
+
+
+class TestModelSupportsAuto:
+    """model_supports_auto gates ``--permission-mode auto`` by worker_model (#1111)."""
+
+    def test_none_is_auto_capable(self) -> None:
+        """No pin (None) keeps today's behavior — treated as auto-capable."""
+        assert model_supports_auto(None) is True
+
+    def test_empty_string_is_auto_capable(self) -> None:
+        """Falsy value matches the ``if client.worker_model:`` truthiness convention."""
+        assert model_supports_auto("") is True
+
+    def test_bare_sonnet_alias_is_auto_capable(self) -> None:
+        assert model_supports_auto("claude-sonnet-5") is True
+
+    def test_dated_sonnet_id_is_auto_capable(self) -> None:
+        """Prefix match, not exact-set — dated/suffixed ids still resolve."""
+        assert model_supports_auto("claude-sonnet-4-6-20251015") is True
+
+    def test_opus_is_auto_capable(self) -> None:
+        assert model_supports_auto("claude-opus-4-8") is True
+
+    def test_known_haiku_is_not_auto_capable(self) -> None:
+        assert model_supports_auto("claude-haiku-4-5-20251001") is False
+
+    def test_unknown_ids_are_not_auto_capable(self) -> None:
+        """An unrecognized non-None id is conservatively NOT auto-capable."""
+        assert model_supports_auto("claude-fable-5") is False
+        assert model_supports_auto("claude-mythos-5") is False
+
+    def test_case_and_whitespace_insensitive(self) -> None:
+        assert model_supports_auto("  CLAUDE-SONNET-5-x  ") is True
+
+    def test_skip_permissions_mode_literal(self) -> None:
+        """Lock the fallback mode literal."""
+        assert SKIP_PERMISSIONS_MODE == "bypassPermissions"
 
 
 class TestReadSupervisorResumeSessionId:

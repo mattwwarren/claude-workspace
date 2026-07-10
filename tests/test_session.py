@@ -895,6 +895,149 @@ class TestResumeSession:
             "550e8400-e29b-41d4-a716-446655440000",
         ]
 
+    def test_resume_daemon_non_auto_model_derives_bypass_permissions(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """DAEMON resume with a Haiku pin spawns with bypassPermissions (#1111)."""
+        self._write_clients_file(
+            tmp_config_dir,
+            sample_client,
+            worker_model="claude-haiku-4-5-20251001",
+        )
+        monkeypatch.setattr("cw.session._attach_session", _noop)
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id="resumepm1",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    origin=SessionOrigin.DAEMON,
+                    status=SessionStatus.BACKGROUNDED,
+                    workspace_path=sample_client.workspace_path,
+                    worktree_path=sample_client.workspace_path.parent / "wt-resume",
+                    surface_ref="deadbeef",
+                    claude_session_id="550e8400-e29b-41d4-a716-446655440000",
+                )
+            ]
+        )
+        save_state(state)
+
+        resume_session("test-client/impl", native_daemon=mock_native_daemon)
+
+        assert mock_native_daemon.spawn_permission_modes[0] == "bypassPermissions"
+
+    def test_resume_daemon_auto_capable_model_permission_mode_none(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """DAEMON resume with an auto-capable pin leaves permission_mode None."""
+        self._write_clients_file(
+            tmp_config_dir,
+            sample_client,
+            worker_model="claude-sonnet-4-6-20251015",
+        )
+        monkeypatch.setattr("cw.session._attach_session", _noop)
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id="resumepm2",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    origin=SessionOrigin.DAEMON,
+                    status=SessionStatus.BACKGROUNDED,
+                    workspace_path=sample_client.workspace_path,
+                    worktree_path=sample_client.workspace_path.parent / "wt-resume",
+                    surface_ref="deadbeef",
+                    claude_session_id="550e8400-e29b-41d4-a716-446655440000",
+                )
+            ]
+        )
+        save_state(state)
+
+        resume_session("test-client/impl", native_daemon=mock_native_daemon)
+
+        assert mock_native_daemon.spawn_permission_modes[0] is None
+
+    def test_resume_daemon_no_worker_model_permission_mode_none(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression guard: DAEMON resume without a pin stays permission_mode None."""
+        self._write_clients_file(tmp_config_dir, sample_client)
+        monkeypatch.setattr("cw.session._attach_session", _noop)
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id="resumepm3",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    origin=SessionOrigin.DAEMON,
+                    status=SessionStatus.BACKGROUNDED,
+                    workspace_path=sample_client.workspace_path,
+                    worktree_path=sample_client.workspace_path.parent / "wt-resume",
+                    surface_ref="deadbeef",
+                    claude_session_id="550e8400-e29b-41d4-a716-446655440000",
+                )
+            ]
+        )
+        save_state(state)
+
+        resume_session("test-client/impl", native_daemon=mock_native_daemon)
+
+        assert mock_native_daemon.spawn_permission_modes[0] is None
+
+    def test_resume_user_session_non_auto_model_permission_mode_none(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """USER-origin resume never derives bypass — derivation is DAEMON-gated."""
+        self._write_clients_file(
+            tmp_config_dir,
+            sample_client,
+            worker_model="claude-haiku-4-5-20251001",
+        )
+        monkeypatch.setattr("cw.session._attach_session", _noop)
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id="resumepm4",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    origin=SessionOrigin.USER,
+                    status=SessionStatus.BACKGROUNDED,
+                    workspace_path=sample_client.workspace_path,
+                    surface_ref="deadbeef",
+                    claude_session_id="550e8400-e29b-41d4-a716-446655440000",
+                )
+            ]
+        )
+        save_state(state)
+
+        resume_session("test-client/impl", native_daemon=mock_native_daemon)
+
+        assert mock_native_daemon.spawn_permission_modes[0] is None
+
     def test_not_backgrounded_raises(
         self,
         tmp_config_dir: Path,
