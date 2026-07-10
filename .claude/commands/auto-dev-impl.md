@@ -38,8 +38,12 @@ else
 fi
 ```
 
-Alternatively: inspect `.claude/cw-context.json` for `"headless": true` — that field
-is only present when cw dispatch wrote the context.
+Alternatively: inspect `.claude/cw-context.json` for the `"headless"` field's **value**.
+The field is always written — every session's context gets one, and interactive
+USER-origin sessions get `headless: false`, not an absent field — so detection must key
+on truthiness, not presence, and fail open to interactive when the file is missing,
+unreadable, or the field is absent/false. This is the authoritative check
+`_is_headless()` implements (`src/cw/reconcile/_shared.py:493-505`).
 
 The `isolation: "worktree"` flag on the Agent() call creates a **second, nested worktree
 inside the main checkout** (at `<main_repo>/.claude/worktrees/<slug>`). When cw dispatch
