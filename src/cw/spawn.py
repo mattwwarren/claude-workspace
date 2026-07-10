@@ -28,7 +28,11 @@ from cw.models import (
     SessionStatus,
     TicketTask,
 )
-from cw.native_daemon import get_native_daemon_client
+from cw.native_daemon import (
+    SKIP_PERMISSIONS_MODE,
+    get_native_daemon_client,
+    model_supports_auto,
+)
 from cw.reconcile import _csid_from_transcript, ticket_id_for_session
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 
@@ -491,12 +495,22 @@ def spawn_create_impl(
     if extra_args:
         final_extra.extend(extra_args)
 
+    # A pinned worker_model that does not support ``--permission-mode auto``
+    # would hang the ``claude --bg`` spawn indefinitely (#1111). Fall back to
+    # the same non-interactive bypass posture Sonnet/Opus workers already run
+    # under. An explicit caller-supplied permission_mode always wins.
+    effective_permission_mode = permission_mode
+    if effective_permission_mode is None and not model_supports_auto(
+        client.worker_model
+    ):
+        effective_permission_mode = SKIP_PERMISSIONS_MODE
+
     daemon = native_daemon or get_native_daemon_client()
     sess.surface_ref = daemon.spawn_bg(
         cwd=worktree,
         prompt=prompt,
         extra_args=final_extra or None,
-        permission_mode=permission_mode,
+        permission_mode=effective_permission_mode,
     )
     _verify_roster_registration(
         daemon,
