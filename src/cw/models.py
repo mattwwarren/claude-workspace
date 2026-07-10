@@ -880,6 +880,11 @@ class OrchestratorConfig(BaseModel):
     # default. Per-recipe / per-lane resolution (LaneConfig.gate_recipes,
     # resolve_gate_recipe_enabled) is deferred to #1067.
     gate_recipes_enabled: bool = False
+    # RFC 0010 P1 (#1096) — review-recipe automation master switch (detect
+    # phase only in P1; no act phase exists yet, so True is inert by
+    # construction until P2 ships). Default False, mirroring
+    # gate_recipes_enabled's fail-safe default.
+    review_recipes_enabled: bool = False
 
     @field_validator("concierge_recoveries")
     @classmethod

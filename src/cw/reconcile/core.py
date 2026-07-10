@@ -54,6 +54,7 @@ from cw.reconcile.phantom import (
     _act_on_phantom_candidates,
     _detect_phantom_candidates,
 )
+from cw.reconcile.review_recipes import run_review_recipes
 from cw.reconcile.salvage import (
     rescue_finalize_blocked_sessions,
     salvage_committed_no_pr_sessions,
@@ -102,6 +103,7 @@ def _run_terminal_backstops_and_sweeps(
     park_terminal_sibling_tasks()
     run_concierge_recoveries(now=now, native_live=native_live, config=config)
     run_gate_recipes(now=now, config=config)
+    run_review_recipes(config=config)
     run_escalation_sweep(now=now)
     return timed_out_ticket_ids, completed_silent_ticket_ids
 
