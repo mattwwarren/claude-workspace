@@ -536,6 +536,101 @@ class TestSpawnCreateImplExtraArgsPermissionMode:
         assert daemon.spawn_permission_modes[0] is None
 
 
+class TestSpawnCreateImplPermissionModeFromModel:
+    """Non-auto-capable worker_model pins derive bypassPermissions (#1111)."""
+
+    def test_non_auto_model_derives_bypass_permissions(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Haiku pin + no explicit permission_mode → bypassPermissions."""
+        from cw.spawn import spawn_create_impl
+
+        workspace = tmp_path / "workspace" / "haiku-derive"
+        workspace.mkdir(parents=True)
+        client = ClientConfig(
+            name="haiku-derive",
+            workspace_path=workspace,
+            default_branch="main",
+            worker_model="claude-haiku-4-5-20251001",
+        )
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("worktree-haiku-derive")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="Do the thing.",
+            label=None,
+            native_daemon=daemon,
+        )
+
+        assert daemon.spawn_permission_modes[0] == "bypassPermissions"
+
+    def test_auto_capable_model_stays_none(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Auto-capable pin + no explicit permission_mode → None (default auto)."""
+        from cw.spawn import spawn_create_impl
+
+        workspace = tmp_path / "workspace" / "sonnet-derive"
+        workspace.mkdir(parents=True)
+        client = ClientConfig(
+            name="sonnet-derive",
+            workspace_path=workspace,
+            default_branch="main",
+            worker_model="claude-sonnet-4-6-20251015",
+        )
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("worktree-sonnet-derive")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="Do the thing.",
+            label=None,
+            native_daemon=daemon,
+        )
+
+        assert daemon.spawn_permission_modes[0] is None
+
+    def test_explicit_permission_mode_overrides_non_auto_model(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Explicit caller permission_mode wins over model-derived fallback."""
+        from cw.spawn import spawn_create_impl
+
+        workspace = tmp_path / "workspace" / "haiku-explicit"
+        workspace.mkdir(parents=True)
+        client = ClientConfig(
+            name="haiku-explicit",
+            workspace_path=workspace,
+            default_branch="main",
+            worker_model="claude-haiku-4-5-20251001",
+        )
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("worktree-haiku-explicit")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="Do the thing.",
+            label=None,
+            native_daemon=daemon,
+            permission_mode="acceptEdits",
+        )
+
+        assert daemon.spawn_permission_modes[0] == "acceptEdits"
+
+
 class TestValidateWorktree:
     """Tests for the _validate_worktree pre-flight gate (issue #186).
 

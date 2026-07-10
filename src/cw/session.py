@@ -23,7 +23,11 @@ from cw.models import (
     SessionPurpose,
     SessionStatus,
 )
-from cw.native_daemon import NativeDaemonClient, get_native_daemon_client
+from cw.native_daemon import (
+    NativeDaemonClient,
+    get_native_daemon_client,
+    resolve_permission_mode,
+)
 from cw.prompts import build_session_context, get_purpose_prompt
 from cw.reconcile import reconcile
 from cw.spawn import (
@@ -395,6 +399,37 @@ def _resolve_resume_cwd(session: Session, client: ClientConfig) -> Path:
     return session_cwd
 
 
+def _resume_spawn_args(
+    session: Session, client: ClientConfig
+) -> tuple[list[str], str | None]:
+    """Compute (extra_args, permission_mode) for a dead-surface respawn.
+
+    Mirrors the ``spawn_create_impl`` chokepoint. ``--resume <uuid>`` re-enters
+    the Claude transcript when available. For DAEMON-origin sessions only
+    (USER-origin inherits the operator's interactive defaults): forward
+    ``--model`` from ``client.worker_model`` (#248), block Linear MCP under
+    github-issues (#726), and fall back to ``bypassPermissions`` when the
+    pinned model lacks ``--permission-mode auto`` (#1111).
+    """
+    extra_args: list[str] = []
+    if session.claude_session_id:
+        extra_args = ["--resume", session.claude_session_id]
+
+    if session.origin != SessionOrigin.DAEMON:
+        return extra_args, None
+
+    if client.worker_model:
+        extra_args = [*extra_args, "--model", client.worker_model]
+    if (
+        resolve_tracker(client.repo_path or client.workspace_path)
+        == TRACKER_GITHUB_ISSUES
+    ):
+        extra_args = [*extra_args, _LINEAR_MCP_DISALLOW_ARG]
+
+    permission_mode = resolve_permission_mode(client.worker_model)
+    return extra_args, permission_mode
+
+
 def resume_session(
     session_name: str,
     *,
@@ -466,21 +501,7 @@ def resume_session(
         # worktree worker never re-lands on the operator main checkout.
         session_cwd = _resolve_resume_cwd(session, client)
 
-        extra_args: list[str] = []
-        if session.claude_session_id:
-            extra_args = ["--resume", session.claude_session_id]
-
-        # Forward client.worker_model for DAEMON-origin resume, mirroring the
-        # spawn_create_impl chokepoint. USER-origin sessions inherit the
-        # operator's default model (issue #248).
-        if session.origin == SessionOrigin.DAEMON and client.worker_model:
-            extra_args = [*extra_args, "--model", client.worker_model]
-        if (
-            session.origin == SessionOrigin.DAEMON
-            and resolve_tracker(client.repo_path or client.workspace_path)
-            == TRACKER_GITHUB_ISSUES
-        ):
-            extra_args = [*extra_args, _LINEAR_MCP_DISALLOW_ARG]
+        extra_args, resume_permission_mode = _resume_spawn_args(session, client)
 
         click.echo(
             f"Session {session.name} not live in daemon;"
@@ -490,6 +511,7 @@ def resume_session(
             cwd=session_cwd,
             prompt=full_prompt,
             extra_args=extra_args or None,
+            permission_mode=resume_permission_mode,
         )
         _verify_roster_registration(
             daemon,

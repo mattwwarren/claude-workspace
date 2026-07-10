@@ -11,10 +11,13 @@ import pytest
 
 from cw.exceptions import CwError
 from cw.native_daemon import (
+    SKIP_PERMISSIONS_MODE,
     FakeNativeDaemonClient,
     RealNativeDaemonClient,
     get_native_daemon_client,
+    model_supports_auto,
     read_supervisor_resume_session_id,
+    resolve_permission_mode,
 )
 
 if TYPE_CHECKING:
@@ -494,6 +497,97 @@ class TestFakeNativeDaemonClient:
 
 def test_get_native_daemon_client_returns_real_instance() -> None:
     assert isinstance(get_native_daemon_client(), RealNativeDaemonClient)
+
+
+class TestModelSupportsAuto:
+    """model_supports_auto gates ``--permission-mode auto`` by worker_model (#1111)."""
+
+    def test_none_is_auto_capable(self) -> None:
+        """No pin (None) keeps today's behavior — treated as auto-capable."""
+        assert model_supports_auto(None) is True
+
+    def test_empty_string_is_auto_capable(self) -> None:
+        """Falsy value matches the ``if client.worker_model:`` truthiness convention."""
+        assert model_supports_auto("") is True
+
+    def test_bare_sonnet_alias_is_auto_capable(self) -> None:
+        assert model_supports_auto("claude-sonnet-5") is True
+
+    def test_dated_sonnet_id_is_auto_capable(self) -> None:
+        """Prefix match, not exact-set — dated/suffixed ids still resolve."""
+        assert model_supports_auto("claude-sonnet-4-6-20251015") is True
+
+    def test_opus_is_auto_capable(self) -> None:
+        assert model_supports_auto("claude-opus-4-8") is True
+
+    def test_known_haiku_is_not_auto_capable(self) -> None:
+        assert model_supports_auto("claude-haiku-4-5-20251001") is False
+
+    def test_unknown_ids_are_not_auto_capable(self) -> None:
+        """An unrecognized non-None id is conservatively NOT auto-capable."""
+        assert model_supports_auto("claude-fable-5") is False
+        assert model_supports_auto("claude-mythos-5") is False
+
+    def test_case_and_whitespace_insensitive(self) -> None:
+        assert model_supports_auto("  CLAUDE-SONNET-5-x  ") is True
+
+    def test_skip_permissions_mode_literal(self) -> None:
+        """Lock the fallback mode literal."""
+        assert SKIP_PERMISSIONS_MODE == "bypassPermissions"
+
+
+class TestResolvePermissionMode:
+    """resolve_permission_mode: shared derivation for both spawn chokepoints (#1111)."""
+
+    def test_explicit_wins_over_non_auto_model(self) -> None:
+        """A caller-supplied permission_mode always wins over the derivation."""
+        assert (
+            resolve_permission_mode("claude-haiku-4-5-20251001", explicit="acceptEdits")
+            == "acceptEdits"
+        )
+
+    def test_explicit_wins_over_auto_capable_model(self) -> None:
+        assert (
+            resolve_permission_mode("claude-sonnet-5", explicit="acceptEdits")
+            == "acceptEdits"
+        )
+
+    def test_auto_capable_model_returns_none(self) -> None:
+        assert resolve_permission_mode("claude-sonnet-4-6-20251015") is None
+
+    def test_no_pin_returns_none(self) -> None:
+        assert resolve_permission_mode(None) is None
+
+    def test_non_auto_model_returns_skip_mode(self) -> None:
+        assert (
+            resolve_permission_mode("claude-haiku-4-5-20251001")
+            == SKIP_PERMISSIONS_MODE
+        )
+
+    def test_non_auto_model_logs_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The bypassPermissions fallback is audit-logged, not silent (#1111)."""
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            resolve_permission_mode("claude-haiku-4-5-20251001")
+
+        assert any(
+            "claude-haiku-4-5-20251001" in rec.message
+            and "bypassPermissions" in rec.message
+            for rec in caplog.records
+        )
+
+    def test_auto_capable_model_does_not_log_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            resolve_permission_mode("claude-sonnet-5")
+
+        assert caplog.records == []
 
 
 class TestReadSupervisorResumeSessionId:

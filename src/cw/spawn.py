@@ -28,7 +28,7 @@ from cw.models import (
     SessionStatus,
     TicketTask,
 )
-from cw.native_daemon import get_native_daemon_client
+from cw.native_daemon import get_native_daemon_client, resolve_permission_mode
 from cw.reconcile import _csid_from_transcript, ticket_id_for_session
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 
@@ -491,12 +491,16 @@ def spawn_create_impl(
     if extra_args:
         final_extra.extend(extra_args)
 
+    effective_permission_mode = resolve_permission_mode(
+        client.worker_model, explicit=permission_mode
+    )
+
     daemon = native_daemon or get_native_daemon_client()
     sess.surface_ref = daemon.spawn_bg(
         cwd=worktree,
         prompt=prompt,
         extra_args=final_extra or None,
-        permission_mode=permission_mode,
+        permission_mode=effective_permission_mode,
     )
     _verify_roster_registration(
         daemon,

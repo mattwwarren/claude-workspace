@@ -166,6 +166,17 @@ Scope: forwarded as `--model <id>` to `claude --bg` from both
 `spawn_create_impl` (initial DAEMON spawn) and `resume_session` (DAEMON-origin
 resume of a dead surface). USER-origin sessions ignore this field.
 
+Permission mode: some models (notably Haiku) do not support
+`--permission-mode auto`, which would hang the `claude --bg` spawn
+indefinitely (#1111). When a DAEMON-origin worker is pinned to a
+non-auto-capable model, cw spawns it with `--permission-mode bypassPermissions`
+instead — the same non-interactive posture already-supported Sonnet/Opus
+workers run under. This requires the bypass-permissions disclaimer to have
+been accepted once (`claude --dangerously-skip-permissions` interactively);
+an unaccepted disclaimer surfaces as a clear `DisclaimerNotAcceptedError`
+rather than a silent hang. Auto-capable pins (Sonnet 4.6+, Sonnet 5, Opus
+4.6+) and unpinned clients are unaffected and continue to use `auto`.
+
 ## Pipeline Configuration — Per-Stage Model Pinning
 
 RFC 0005 adds a `pipeline:` block that lets you assign a different model to each
