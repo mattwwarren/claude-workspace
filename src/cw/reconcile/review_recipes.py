@@ -31,11 +31,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from cw.config import load_effective_clients
 from cw.dev_queue import load_dev_queue
 from cw.pr_hydrate import _is_candidate
 
 if TYPE_CHECKING:
-    from cw.models import OrchestratorConfig, TicketTask
+    from cw.models import ClientConfig, OrchestratorConfig, TicketTask
 
 # The only recipe recognised in P1: react to a changes_requested review by
 # dispatching /address-review. Named as a constant so the detect phase and any
@@ -46,6 +47,54 @@ RECIPE_ADDRESS_REVIEW = "address_review"
 # PR is at any other attention state (or None, e.g. a draft) is never a
 # candidate. See cw.pr_hydrate._compute_attention_state, Row 3.
 _ATTENTION_CHANGES_REQUESTED = "changes_requested"
+
+# RFC 0010 P3 (#1098) — tier-3 hardcoded fallback for the per-lane resolver.
+# Default OFF (mirrors gate_recipes._DEFAULT_GATE_RECIPE_ENABLED): a review
+# recipe dispatches an /address-review session with no human in the loop, so
+# nothing fires unless an operator opts a lane (or ticket) in. NOT a config
+# field — it is the floor the ticket/lane tiers fall through to. Only the P1
+# recipe (RECIPE_ADDRESS_REVIEW) exists; no placeholders for unimplemented
+# recipe names.
+_DEFAULT_REVIEW_RECIPE_ENABLED: dict[str, bool] = {
+    RECIPE_ADDRESS_REVIEW: False,
+}
+
+
+def resolve_review_recipe_enabled(
+    task: TicketTask,
+    clients: dict[str, ClientConfig],
+    recipe_name: str,
+) -> bool:
+    """Return whether *recipe_name* is enabled for *task*, per RFC 0010 P3.
+
+    3-tier precedence, highest first (mirrors
+    gate_recipes.resolve_gate_recipe_enabled exactly):
+
+    1. ``task.review_recipes`` — ticket-level override wins when it names the
+       recipe.
+    2. ``LaneConfig.review_recipes`` on the task's lane — the per-lane map.
+    3. ``_DEFAULT_REVIEW_RECIPE_ENABLED`` — the hardcoded default-off floor.
+
+    Robust to a missing client (absent from *clients*) or a missing lane
+    (absent from the client's ``effective_lanes``): either falls straight
+    through to the default with no exception.
+    """
+    if task.review_recipes is not None and recipe_name in task.review_recipes:
+        return task.review_recipes[recipe_name]
+    client_cfg = clients.get(task.client)
+    if client_cfg is not None:
+        for lane_cfg in client_cfg.effective_lanes:
+            if (
+                lane_cfg.name == task.lane
+                and lane_cfg.review_recipes is not None
+                and recipe_name in lane_cfg.review_recipes
+            ):
+                return lane_cfg.review_recipes[recipe_name]
+    # .get(..., False): a recipe_name outside _DEFAULT_REVIEW_RECIPE_ENABLED
+    # falls through to the safe default instead of raising KeyError, matching
+    # this function's documented no-exception robustness guarantee for every
+    # other unresolved input.
+    return _DEFAULT_REVIEW_RECIPE_ENABLED.get(recipe_name, False)
 
 
 @dataclass(frozen=True)
@@ -72,16 +121,23 @@ class ReviewRecipeCandidate:
 
 
 def _detect_address_review(
-    tasks: list[TicketTask], *, config: OrchestratorConfig
+    tasks: list[TicketTask],
+    *,
+    clients: dict[str, ClientConfig],
+    config: OrchestratorConfig,
 ) -> list[ReviewRecipeCandidate]:
     """Pure classification phase for the address_review recipe. Zero writes.
 
     A candidate is produced for every task that is a hydration candidate
     (``_is_candidate``: non-null ``pr_url``, non-terminal ``pr_state``) whose
-    ``pr_state.attention_state`` is ``changes_requested``. No task-status filter:
-    a changes_requested PR warrants an address-review dispatch regardless of the
-    row's queue status. Gates on ``config.review_recipes_enabled`` as its first
-    line (dual gating — a direct caller still gets correct gating).
+    ``pr_state.attention_state`` is ``changes_requested`` AND for which the
+    address-review recipe is enabled under the 3-tier per-lane/per-ticket
+    precedence (``resolve_review_recipe_enabled``, RFC 0010 P3). No task-status
+    filter: a changes_requested PR warrants an address-review dispatch
+    regardless of the row's queue status. Gates on
+    ``config.review_recipes_enabled`` as its first line (dual gating — a direct
+    caller still gets correct gating); the per-task enablement check sits inside
+    the loop because it is per-task, not global.
     """
     if not config.review_recipes_enabled:
         return []
@@ -92,6 +148,8 @@ def _detect_address_review(
         if task.pr_state is None:
             continue
         if task.pr_state.attention_state != _ATTENTION_CHANGES_REQUESTED:
+            continue
+        if not resolve_review_recipe_enabled(task, clients, RECIPE_ADDRESS_REVIEW):
             continue
         pr_url = task.pr_url
         if pr_url is None:  # pragma: no cover - _is_candidate guarantees non-null
@@ -123,10 +181,15 @@ def run_review_recipes(*, config: OrchestratorConfig) -> list[ReviewRecipeCandid
     ``CwState`` lookup is needed. No ``now`` parameter: P1 has no act phase to
     forward it to.
 
+    Per-lane enablement (RFC 0010 P3) is resolved against effective clients —
+    ``load_effective_clients`` so lane pause/override state is honoured, matching
+    ``run_gate_recipes``.
+
     Returns the detected candidates (P1 performs no act phase, so nothing is
     dispatched or mutated).
     """
     if not config.review_recipes_enabled:
         return []
     tasks = load_dev_queue().tasks
-    return _detect_address_review(tasks, config=config)
+    clients = load_effective_clients()
+    return _detect_address_review(tasks, clients=clients, config=config)

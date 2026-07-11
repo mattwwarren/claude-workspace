@@ -49,7 +49,7 @@ State is stored at `~/.local/share/cw/` (or `$XDG_DATA_HOME/cw/`).
 | `worker_model` | string \| null | `null` | Pin the model for DAEMON-origin worker spawns (auto-dev). Forwarded as `--model <id>` to `claude --bg` from both initial spawn and DAEMON-origin resume. USER-origin sessions (interactive `cw start` / `cw resume`) always inherit the operator's logged-in default model. Opaque string — no validation. |
 | `repo_path` | path | *none** | Shared repo path (worktree mode) |
 | `branch` | string | *none** | Branch name (worktree mode) |
-| `lanes` | list[LaneConfig] | `[]` | Named dispatch lanes. Phase 1 (data model only); dispatch wiring in #558. Each lane has `name` (required), `max_parallel: int = 1`, `priority: int = 0`, `paused: bool = false`, `description: str = ""`, `reap_policy: str = "signal_only"`, `signoff: "operator" | null = null` (RFC 0007 Phase 3 — see [Operator Signoff Gates](#operator-signoff-gates-rfc-0007-phase-3) below), `gate_recipes: dict[str,bool] | null = null` (RFC 0009 Phase 4 — per-lane gate-recipe enablement; see [Gate Recipe Enablement](#gate-recipe-enablement-rfc-0009-phase-4) below). |
+| `lanes` | list[LaneConfig] | `[]` | Named dispatch lanes. Phase 1 (data model only); dispatch wiring in #558. Each lane has `name` (required), `max_parallel: int = 1`, `priority: int = 0`, `paused: bool = false`, `description: str = ""`, `reap_policy: str = "signal_only"`, `signoff: "operator" | null = null` (RFC 0007 Phase 3 — see [Operator Signoff Gates](#operator-signoff-gates-rfc-0007-phase-3) below), `gate_recipes: dict[str,bool] | null = null` (RFC 0009 Phase 4 — per-lane gate-recipe enablement; see [Gate Recipe Enablement](#gate-recipe-enablement-rfc-0009-phase-4) below), `review_recipes: dict[str,bool] | null = null` (RFC 0010 Phase 3 — per-lane review-recipe enablement; see [Review Recipe Enablement](#review-recipe-enablement-rfc-0010-phase-3) below). |
 | `pipeline` | PipelineConfig \| null | `null` | Per-stage executor configuration (RFC 0005). See [Pipeline Configuration](#pipeline-configuration--per-stage-model-pinning) below. |
 
 \* Either `workspace_path` OR both `repo_path` + `branch` must be set.
@@ -504,6 +504,46 @@ clients:
 
 Unrecognized recipe keys fail loud at config-load time (a typo like
 `auto_aprove_clean_review` raises rather than silently no-opping).
+
+## Review Recipe Enablement (RFC 0010 Phase 3)
+
+Review recipes (`cw.reconcile.review_recipes`) are the review-feedback analogue
+of the gate recipes above: the `address_review` recipe reacts to a PR whose
+review came back `changes_requested` by (in a future phase) dispatching an
+`/address-review` session to mechanically work the requested changes. They are a
+sibling of the gate recipes, **not** a reuse — a review recipe acts on review
+feedback, a distinct action class from advancing an approval gate, and operators
+configure the two independently. Whether the recipe fires for a given ticket is
+resolved with 3-tier precedence, highest first:
+
+1. **Per-ticket** — a `review_recipes` map on the `TicketTask` (e.g.
+   `{address_review: true}`). There is **no CLI flag** for this tier yet; it is a
+   data-model surface only.
+2. **Per-lane** — a `review_recipes` map on a `LaneConfig` entry (see the `lanes`
+   field above).
+3. **Hardcoded default** — the recipe defaults **OFF**. A recipe absent from the
+   ticket map and the lane map is disabled.
+
+Independently, the module-wide master switch `review_recipes_enabled` (in
+`orchestrator.yaml`, default `false`) is a hard top-level short-circuit: when
+`false`, **no** review recipe fires regardless of any per-lane or per-ticket
+setting. The per-lane resolution above only matters once the master switch is
+`true`.
+
+```yaml
+# clients.yaml — enable address-review on one lane, leave the other off
+clients:
+  my-project:
+    workspace_path: /path/to/repo
+    lanes:
+      - name: fastlane
+        review_recipes:
+          address_review: true
+      - name: default   # recipe stays off (hardcoded default)
+```
+
+Unrecognized recipe keys fail loud at config-load time (a typo like
+`adress_review` raises rather than silently no-opping).
 
 ## Worktree Context File (`.claude/cw-context.json`)
 

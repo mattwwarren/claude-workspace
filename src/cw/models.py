@@ -369,6 +369,30 @@ def _validate_gate_recipe_keys(value: dict[str, bool]) -> dict[str, bool]:
     return value
 
 
+def _validate_review_recipe_keys(value: dict[str, bool]) -> dict[str, bool]:
+    """Fail loud on an unrecognized review-recipe key (RFC 0010 P3, #1098).
+
+    Shared by the ``review_recipes`` field validators on both
+    :class:`TicketTask` and :class:`LaneConfig`. Local literal, not an import
+    of cw.reconcile.review_recipes's RECIPE_ADDRESS_REVIEW — models.py sits
+    below cw.reconcile in the import graph (reconcile imports from models, not
+    the reverse), so importing it here would be circular. Mirrors
+    _validate_gate_recipe_keys's fail-loud stance: a typo'd key would otherwise
+    silently resolve to the hardcoded default-off via
+    resolve_review_recipe_enabled's plain ``in`` check, leaving the intended
+    recipe disabled with zero error at config-load time.
+    """
+    recognized = {"address_review"}
+    unknown = sorted(set(value) - recognized)
+    if unknown:
+        msg = (
+            f"review_recipes has unrecognized recipe key(s): {unknown}. "
+            f"Recognised keys: {sorted(recognized)}."
+        )
+        raise ValueError(msg)
+    return value
+
+
 class TicketTask(BaseModel):
     """A ticket queued for dispatch to a Claude session."""
 
@@ -470,6 +494,14 @@ class TicketTask(BaseModel):
     # default. Recognised keys: "auto_approve_clean_review",
     # "auto_adopt_clean_plan".
     gate_recipes: dict[str, bool] | None = None
+    # Ticket-level review-recipe enablement override (RFC 0010 P3, #1098).
+    # Highest tier in resolve_review_recipe_enabled's 3-tier precedence: a
+    # recipe present here wins over LaneConfig.review_recipes and the hardcoded
+    # default-off. None (or a recipe absent from the map) defers to the lane
+    # map, then the default. Recognised key: "address_review". Sibling to
+    # gate_recipes, not a reuse: review recipes react to a changes_requested
+    # PR, a distinct action class from the approval-gate recipes above.
+    review_recipes: dict[str, bool] | None = None
     # RFC 0008 capstone (#1015) — durable escalation latch. Stamped by
     # cw.reconcile.escalation.run_escalation_sweep when this task first enters
     # the escalation-eligible set (see that module's docstring for the
@@ -504,6 +536,15 @@ class TicketTask(BaseModel):
         if value is None:
             return None
         return _validate_gate_recipe_keys(value)
+
+    @field_validator("review_recipes")
+    @classmethod
+    def _check_review_recipes(
+        cls, value: dict[str, bool] | None
+    ) -> dict[str, bool] | None:
+        if value is None:
+            return None
+        return _validate_review_recipe_keys(value)
 
 
 class DispatchPlan(BaseModel):
@@ -605,6 +646,12 @@ class LaneConfig(BaseModel):
     # the hardcoded default-off. Recognised keys: "auto_approve_clean_review",
     # "auto_adopt_clean_plan".
     gate_recipes: dict[str, bool] | None = None
+    # Lane-level review-recipe enablement map (RFC 0010 P3, #1098). Middle tier
+    # in resolve_review_recipe_enabled's 3-tier precedence: consulted when the
+    # ticket carries no override for the recipe, and itself overridden by
+    # TicketTask.review_recipes. A recipe absent from this map (or None) defers
+    # to the hardcoded default-off. Recognised key: "address_review".
+    review_recipes: dict[str, bool] | None = None
 
     @field_validator("name")
     @classmethod
@@ -622,6 +669,15 @@ class LaneConfig(BaseModel):
         if value is None:
             return None
         return _validate_gate_recipe_keys(value)
+
+    @field_validator("review_recipes")
+    @classmethod
+    def _check_review_recipes(
+        cls, value: dict[str, bool] | None
+    ) -> dict[str, bool] | None:
+        if value is None:
+            return None
+        return _validate_review_recipe_keys(value)
 
 
 _USAGE_LIMIT_BACKOFF_SECONDS = 3600
