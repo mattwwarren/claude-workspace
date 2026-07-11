@@ -39,13 +39,20 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw.config import load_effective_clients
-from cw.dev_queue import _newest_by_created_at, dev_queue_lock, load_dev_queue
+from cw.dev_queue import (
+    _newest_by_created_at,
+    dev_queue_lock,
+    load_dev_queue,
+    save_dev_queue,
+)
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.models import OrchestratorEventType
 from cw.pr_hydrate import _is_candidate, _parse_pr_url
+from cw.review_strategy import resolve_review_strategy
 
 if TYPE_CHECKING:
+    from datetime import datetime
     from pathlib import Path
 
     from cw.models import (
@@ -74,15 +81,22 @@ class _DispatchJob(NamedTuple):
 
 _log = logging.getLogger(__name__)
 
-# The only recipe recognised in P1: react to a changes_requested review by
-# dispatching /address-review. Named as a constant so the detect phase and any
-# future act phase can't drift via a typo'd string literal.
+# Recipe-name constants — one per attention state the review-recipe layer acts
+# on. Named so detect/act phases and the models.py recognized-key set can't
+# drift via a typo'd string literal. RFC 0010 P1 shipped address_review; P4
+# (#1099) adds the other three.
 RECIPE_ADDRESS_REVIEW = "address_review"
+RECIPE_AUTO_FIX_CI = "auto_fix_ci"
+RECIPE_REQUEST_REVIEWER = "request_reviewer"
+RECIPE_ESCALATE_MERGE_BLOCK = "escalate_merge_block"
 
-# The single attention_state the address-review recipe fires on. A row whose
-# PR is at any other attention state (or None, e.g. a draft) is never a
-# candidate. See cw.pr_hydrate._compute_attention_state, Row 3.
-_ATTENTION_CHANGES_REQUESTED = "changes_requested"
+# The attention_state each recipe fires on (1:1 with a recipe). A row whose PR
+# is at any other attention state (or None, e.g. a draft) is never a candidate
+# for that recipe. See cw.pr_hydrate._compute_attention_state's decision table.
+_ATTENTION_CHANGES_REQUESTED = "changes_requested"  # Row 3 -> address_review
+_ATTENTION_CI_FAILING = "ci_failing"  # Row 2 -> auto_fix_ci
+_ATTENTION_NO_REVIEWER = "no_reviewer"  # Row 4 -> request_reviewer
+_ATTENTION_MERGE_BLOCKED = "merge_blocked"  # Row 1 -> escalate_merge_block
 
 # PR_ACTION_TAKEN / PR_ACTION_FAILED payload keys (RFC 0010 P2) — named once so
 # the producer (_act_address_review) and the docs/consumers can't drift via a
@@ -97,6 +111,10 @@ _PAYLOAD_KEY_SESSION_ID = "session_id"
 _PAYLOAD_KEY_EVIDENCE_SNAPSHOT = "evidence_snapshot"
 _PAYLOAD_KEY_ERROR = "error"
 _PAYLOAD_KEY_REVIEW_DECISION = "review_decision"
+# RFC 0010 P4 (#1099) — request_reviewer / escalate_merge_block payload keys.
+_PAYLOAD_KEY_REVIEW_STRATEGY_MODE = "review_strategy_mode"
+_PAYLOAD_KEY_REVIEWER_HANDLE = "reviewer_handle"
+_PAYLOAD_KEY_MERGE_STATE_STATUS = "merge_state_status"
 
 # RFC 0010 P3 (#1098) — tier-3 hardcoded fallback for the per-lane resolver.
 # Default OFF (mirrors gate_recipes._DEFAULT_GATE_RECIPE_ENABLED): a review
@@ -107,6 +125,9 @@ _PAYLOAD_KEY_REVIEW_DECISION = "review_decision"
 # recipe names.
 _DEFAULT_REVIEW_RECIPE_ENABLED: dict[str, bool] = {
     RECIPE_ADDRESS_REVIEW: False,
+    RECIPE_AUTO_FIX_CI: False,
+    RECIPE_REQUEST_REVIEWER: False,
+    RECIPE_ESCALATE_MERGE_BLOCK: False,
 }
 
 
@@ -170,24 +191,28 @@ class ReviewRecipeCandidate:
     session_id: str | None
 
 
-def _detect_address_review(
+def _detect_by_attention_state(
     tasks: list[TicketTask],
     *,
     clients: dict[str, ClientConfig],
     config: OrchestratorConfig,
+    attention_state: str,
+    recipe: str,
 ) -> list[ReviewRecipeCandidate]:
-    """Pure classification phase for the address_review recipe. Zero writes.
+    """Shared pure classification phase for every review recipe. Zero writes.
 
     A candidate is produced for every task that is a hydration candidate
     (``_is_candidate``: non-null ``pr_url``, non-terminal ``pr_state``) whose
-    ``pr_state.attention_state`` is ``changes_requested`` AND for which the
-    address-review recipe is enabled under the 3-tier per-lane/per-ticket
-    precedence (``resolve_review_recipe_enabled``, RFC 0010 P3). No task-status
-    filter: a changes_requested PR warrants an address-review dispatch
-    regardless of the row's queue status. Gates on
-    ``config.review_recipes_enabled`` as its first line (dual gating — a direct
-    caller still gets correct gating); the per-task enablement check sits inside
-    the loop because it is per-task, not global.
+    ``pr_state.attention_state`` equals *attention_state* AND for which *recipe*
+    is enabled under the 3-tier per-lane/per-ticket precedence
+    (``resolve_review_recipe_enabled``, RFC 0010 P3). No task-status filter — a
+    PR at the recipe's attention state warrants action regardless of the row's
+    queue status. Gates on ``config.review_recipes_enabled`` as its first line
+    (dual gating — a direct caller still gets correct gating); the per-task
+    enablement check sits inside the loop because it is per-task, not global.
+    Each of the four ``_detect_*`` recipes is a one-line wrapper over this,
+    swapping only the ``(attention_state, recipe)`` pair — the routing is 1:1,
+    so a single row can never match two recipes (see the routing test).
     """
     if not config.review_recipes_enabled:
         return []
@@ -197,9 +222,9 @@ def _detect_address_review(
             continue
         if task.pr_state is None:
             continue
-        if task.pr_state.attention_state != _ATTENTION_CHANGES_REQUESTED:
+        if task.pr_state.attention_state != attention_state:
             continue
-        if not resolve_review_recipe_enabled(task, clients, RECIPE_ADDRESS_REVIEW):
+        if not resolve_review_recipe_enabled(task, clients, recipe):
             continue
         pr_url = task.pr_url
         if pr_url is None:  # pragma: no cover - _is_candidate guarantees non-null
@@ -209,7 +234,7 @@ def _detect_address_review(
                 ticket_id=task.ticket_id,
                 client=task.client,
                 lane=task.lane,
-                recipe=RECIPE_ADDRESS_REVIEW,
+                recipe=recipe,
                 attention_state=task.pr_state.attention_state,
                 pr_url=pr_url,
                 evidence={"review_decision": task.pr_state.review_decision},
@@ -217,6 +242,80 @@ def _detect_address_review(
             )
         )
     return candidates
+
+
+def _detect_address_review(
+    tasks: list[TicketTask],
+    *,
+    clients: dict[str, ClientConfig],
+    config: OrchestratorConfig,
+) -> list[ReviewRecipeCandidate]:
+    """Detect changes_requested PRs for the address_review recipe (RFC 0010 P1)."""
+    return _detect_by_attention_state(
+        tasks,
+        clients=clients,
+        config=config,
+        attention_state=_ATTENTION_CHANGES_REQUESTED,
+        recipe=RECIPE_ADDRESS_REVIEW,
+    )
+
+
+def _detect_auto_fix_ci(
+    tasks: list[TicketTask],
+    *,
+    clients: dict[str, ClientConfig],
+    config: OrchestratorConfig,
+) -> list[ReviewRecipeCandidate]:
+    """Detect ci_failing PRs for the auto_fix_ci recipe (RFC 0010 P4)."""
+    return _detect_by_attention_state(
+        tasks,
+        clients=clients,
+        config=config,
+        attention_state=_ATTENTION_CI_FAILING,
+        recipe=RECIPE_AUTO_FIX_CI,
+    )
+
+
+def _detect_request_reviewer(
+    tasks: list[TicketTask],
+    *,
+    clients: dict[str, ClientConfig],
+    config: OrchestratorConfig,
+) -> list[ReviewRecipeCandidate]:
+    """Detect no_reviewer PRs for the request_reviewer recipe (RFC 0010 P4).
+
+    Pure/config-review-free: no ``resolve_review_strategy`` read here — the
+    strategy lookup lives in the act phase, matching the module's "reads only in
+    act" framing.
+    """
+    return _detect_by_attention_state(
+        tasks,
+        clients=clients,
+        config=config,
+        attention_state=_ATTENTION_NO_REVIEWER,
+        recipe=RECIPE_REQUEST_REVIEWER,
+    )
+
+
+def _detect_escalate_merge_block(
+    tasks: list[TicketTask],
+    *,
+    clients: dict[str, ClientConfig],
+    config: OrchestratorConfig,
+) -> list[ReviewRecipeCandidate]:
+    """Detect merge_blocked PRs for the escalate_merge_block recipe (RFC 0010 P4).
+
+    Pure: the one-shot ``escalate_merge_block_fired_at`` latch is NOT consulted
+    here (detect stays write-free and stateless) — the act phase re-checks the
+    latch against the freshly-loaded row so a re-fire is blocked per episode.
+    """
+    return _detect_by_attention_state(
+        tasks,
+        clients=clients,
+        config=config,
+        attention_state=_ATTENTION_MERGE_BLOCKED,
+        recipe=RECIPE_ESCALATE_MERGE_BLOCK,
+    )
 
 
 def _find_review_task(
@@ -263,6 +362,33 @@ def _skip_with_anomaly(
     _emit_pr_action_failed(payload_base, error=error, ticket_id=ticket_id)
 
 
+def _review_payload_base(
+    task: TicketTask,
+    session_id: str | None,
+    recipe: str,
+    evidence: dict[str, object],
+) -> dict[str, object]:
+    """Build the 8-key PR_ACTION_TAKEN/FAILED payload for one review-recipe row.
+
+    Shared by every recipe's act phase so the payload shape can't drift between
+    producers. ``attention_state`` is read off the re-loaded ``pr_state`` (the
+    caller has already confirmed it is non-None); ``evidence`` is the
+    recipe-specific evidence snapshot (review_decision, failing_checks, etc.).
+    """
+    return {
+        _PAYLOAD_KEY_CLIENT: task.client,
+        _PAYLOAD_KEY_LANE: task.lane,
+        _PAYLOAD_KEY_RECIPE: recipe,
+        _PAYLOAD_KEY_TICKET_ID: task.ticket_id,
+        _PAYLOAD_KEY_PR_URL: task.pr_url,
+        _PAYLOAD_KEY_ATTENTION_STATE: (
+            task.pr_state.attention_state if task.pr_state is not None else None
+        ),
+        _PAYLOAD_KEY_SESSION_ID: session_id,
+        _PAYLOAD_KEY_EVIDENCE_SNAPSHOT: evidence,
+    }
+
+
 def _prepare_dispatch_job(
     task: TicketTask,
     session_id: str | None,
@@ -287,18 +413,12 @@ def _prepare_dispatch_job(
     pr_state = task.pr_state
     if pr_state is None or pr_state.attention_state != _ATTENTION_CHANGES_REQUESTED:
         return None  # stale — silent skip (precedent: gate_recipes silent paths)
-    payload_base: dict[str, object] = {
-        _PAYLOAD_KEY_CLIENT: task.client,
-        _PAYLOAD_KEY_LANE: task.lane,
-        _PAYLOAD_KEY_RECIPE: RECIPE_ADDRESS_REVIEW,
-        _PAYLOAD_KEY_TICKET_ID: task.ticket_id,
-        _PAYLOAD_KEY_PR_URL: task.pr_url,
-        _PAYLOAD_KEY_ATTENTION_STATE: pr_state.attention_state,
-        _PAYLOAD_KEY_SESSION_ID: session_id,
-        _PAYLOAD_KEY_EVIDENCE_SNAPSHOT: {
-            _PAYLOAD_KEY_REVIEW_DECISION: pr_state.review_decision
-        },
-    }
+    payload_base = _review_payload_base(
+        task,
+        session_id,
+        RECIPE_ADDRESS_REVIEW,
+        {_PAYLOAD_KEY_REVIEW_DECISION: pr_state.review_decision},
+    )
     parsed = _parse_pr_url(task.pr_url) if task.pr_url is not None else None
     if task.pr_url is None or parsed is None:
         _skip_with_anomaly(
@@ -422,6 +542,325 @@ def _act_address_review(
     return acted
 
 
+# --- auto_fix_ci act phase (RFC 0010 P4, #1099) ----------------------------
+
+
+class _RedispatchJob(NamedTuple):
+    """Deferred auto_fix_ci re-dispatch built under the lock, run after release.
+
+    Unlike ``_DispatchJob`` this carries no worktree/PR number — the auto_fix_ci
+    recipe re-enqueues the ticket and runs a dispatch tick (coarse re-entry into
+    auto-dev, RFC 0010 OQ2), it does not spawn a scoped ``/address-review``.
+    """
+
+    client: str
+    ticket_id: str
+    lane: str
+    payload_base: dict[str, object]
+
+
+def _prepare_auto_fix_ci_job(
+    task: TicketTask, session_id: str | None
+) -> _RedispatchJob | None:
+    """Re-validate a re-loaded row under the lock; emit + build its re-dispatch.
+
+    Silent skip (no event) when the row is stale — ``pr_state`` gone or no
+    longer ``ci_failing`` (a concurrent re-run can have moved it on between
+    detect and act). Otherwise records ``PR_ACTION_TAKEN`` (emit-before-dispatch)
+    and returns the deferred re-dispatch job.
+    """
+    pr_state = task.pr_state
+    if pr_state is None or pr_state.attention_state != _ATTENTION_CI_FAILING:
+        return None
+    payload_base = _review_payload_base(
+        task,
+        session_id,
+        RECIPE_AUTO_FIX_CI,
+        {_PAYLOAD_KEY_REVIEW_DECISION: pr_state.review_decision},
+    )
+    record_event(
+        OrchestratorEventType.PR_ACTION_TAKEN,
+        payload_base,
+        correlation_id=task.ticket_id,
+    )
+    return _RedispatchJob(
+        client=task.client,
+        ticket_id=task.ticket_id,
+        lane=task.lane,
+        payload_base=payload_base,
+    )
+
+
+def _dispatch_auto_fix_ci(job: _RedispatchJob) -> str | None:
+    """Re-enqueue the ticket then run one dispatch tick (post-lock); id or None.
+
+    Runs strictly AFTER ``dev_queue_lock()`` releases: ``add_ticket``'s own
+    internal lock IS ``dev_queue_lock`` (aliased in cw.dev_queue), so calling it
+    under our lock would self-deadlock. The function-local imports break the
+    ``review_recipes`` -> ``dev_queue``/``dispatch`` import cycle. ``add_ticket``
+    raising (``LaneNotFoundError``, a ``CwError``) after ``PR_ACTION_TAKEN`` was
+    already emitted -> catch, emit ``PR_ACTION_FAILED`` correction, return None.
+    """
+    from cw.dev_queue import add_ticket
+    from cw.dispatch import run_dispatch_loop
+    from cw.models import TicketTask
+
+    try:
+        add_ticket(
+            TicketTask(ticket_id=job.ticket_id, client=job.client, lane=job.lane)
+        )
+        run_dispatch_loop(once=True, client=job.client, emit=None)
+    except CwError as exc:
+        _log.warning(
+            "review_recipe_redispatch_failed ticket=%s",
+            job.ticket_id,
+            exc_info=True,
+        )
+        _emit_pr_action_failed(
+            job.payload_base, error=str(exc), ticket_id=job.ticket_id
+        )
+        return None
+    return job.ticket_id
+
+
+def _act_auto_fix_ci(candidates: list[ReviewRecipeCandidate]) -> list[str]:
+    """Act phase for auto_fix_ci: re-validate under lock, emit, then re-dispatch.
+
+    Mirrors ``_act_address_review``'s lock/re-load/emit-before-action/deferred-
+    side-effect shape. The re-enqueue + dispatch tick runs strictly after the
+    lock releases (``add_ticket`` re-acquires ``dev_queue_lock``, so nesting
+    would self-deadlock). Returns the ticket_ids whose re-dispatch succeeded.
+    """
+    if not candidates:
+        return []
+    by_key = {(c.ticket_id, c.client): c for c in candidates}
+    jobs: list[_RedispatchJob] = []
+    with dev_queue_lock():
+        store = load_dev_queue()
+        for candidate in by_key.values():
+            task = _find_review_task(store, candidate.ticket_id, candidate.client)
+            if task is None:
+                continue
+            job = _prepare_auto_fix_ci_job(task, candidate.session_id)
+            if job is not None:
+                jobs.append(job)
+    acted: list[str] = []
+    for job in jobs:
+        ticket_id = _dispatch_auto_fix_ci(job)
+        if ticket_id is not None:
+            acted.append(ticket_id)
+    return acted
+
+
+# --- request_reviewer act phase (RFC 0010 P4, #1099) -----------------------
+
+
+class _ReviewerJob(NamedTuple):
+    """Deferred request_reviewer gh call built under the lock, run after release."""
+
+    pr_url: str
+    handle: str
+    ticket_id: str
+
+
+def _prepare_request_reviewer_job(
+    task: TicketTask,
+    session_id: str | None,
+    clients: dict[str, ClientConfig],
+) -> _ReviewerJob | None:
+    """Re-validate under the lock, resolve the review strategy, emit + build job.
+
+    Skip flavours:
+
+    * **Silent** (no event) when the row is stale (``pr_state`` gone / no longer
+      ``no_reviewer``) OR the resolved strategy ``mode == "ci"`` — an intentional
+      "rely on CI, request no reviewer" policy, not an anomaly.
+    * **Anomaly** (``PR_ACTION_FAILED`` + warning) when the client is
+      unresolvable, or the strategy names a ``repo_owner``/``reviewer_team`` mode
+      whose handle is missing (a configured-but-broken repo), or the PR url is
+      absent — a fail-safe correction.
+
+    Otherwise records ``PR_ACTION_TAKEN`` (payload carries the strategy mode +
+    reviewer handle) and returns the deferred gh-call job. No dev-queue mutation.
+    """
+    pr_state = task.pr_state
+    if pr_state is None or pr_state.attention_state != _ATTENTION_NO_REVIEWER:
+        return None
+    payload_base = _review_payload_base(
+        task,
+        session_id,
+        RECIPE_REQUEST_REVIEWER,
+        {_PAYLOAD_KEY_REVIEW_DECISION: pr_state.review_decision},
+    )
+    client_cfg = clients.get(task.client)
+    if client_cfg is None:
+        _skip_with_anomaly(
+            payload_base,
+            error=f"client {task.client!r} not resolvable",
+            ticket_id=task.ticket_id,
+        )
+        return None
+    strategy = resolve_review_strategy(
+        client_cfg.repo_path or client_cfg.workspace_path
+    )
+    if strategy.mode == "ci":
+        return None  # policy: rely on CI — silent skip, not an anomaly
+    if strategy.handle is None:
+        _skip_with_anomaly(
+            payload_base,
+            error=f"review_strategy mode {strategy.mode!r} is missing its handle",
+            ticket_id=task.ticket_id,
+        )
+        return None
+    if task.pr_url is None:  # pragma: no cover - _is_candidate guarantees non-null
+        _skip_with_anomaly(
+            payload_base,
+            error="pr_url missing",
+            ticket_id=task.ticket_id,
+        )
+        return None
+    payload_base[_PAYLOAD_KEY_REVIEW_STRATEGY_MODE] = strategy.mode
+    payload_base[_PAYLOAD_KEY_REVIEWER_HANDLE] = strategy.handle
+    record_event(
+        OrchestratorEventType.PR_ACTION_TAKEN,
+        payload_base,
+        correlation_id=task.ticket_id,
+    )
+    return _ReviewerJob(
+        pr_url=task.pr_url, handle=strategy.handle, ticket_id=task.ticket_id
+    )
+
+
+def _dispatch_request_reviewer(job: _ReviewerJob) -> str:
+    """Request the resolved reviewer on the PR (post-lock). Returns ticket_id.
+
+    ``add_pr_reviewer`` is policy-free and never raises (it swallows OSError/
+    timeout, returning None), so there is no ``CwError`` path to correct here —
+    the durable ``PR_ACTION_TAKEN`` is the audit trail of the attempt. Imported
+    function-locally to keep the ``cw.gh`` dependency off module import.
+    """
+    from cw.gh import add_pr_reviewer
+
+    add_pr_reviewer(job.pr_url, job.handle)
+    return job.ticket_id
+
+
+def _act_request_reviewer(
+    candidates: list[ReviewRecipeCandidate], *, clients: dict[str, ClientConfig]
+) -> list[str]:
+    """Act phase for request_reviewer: re-validate + resolve strategy, then gh.
+
+    Mirrors ``_act_address_review``'s lock/re-load/emit-before-action/deferred-
+    side-effect shape. The ``add_pr_reviewer`` gh call runs strictly after the
+    lock releases. No dev-queue mutation (the ticket's "no ticket state change").
+    Returns the ticket_ids for which a reviewer request was issued.
+    """
+    if not candidates:
+        return []
+    by_key = {(c.ticket_id, c.client): c for c in candidates}
+    jobs: list[_ReviewerJob] = []
+    with dev_queue_lock():
+        store = load_dev_queue()
+        for candidate in by_key.values():
+            task = _find_review_task(store, candidate.ticket_id, candidate.client)
+            if task is None:
+                continue
+            job = _prepare_request_reviewer_job(task, candidate.session_id, clients)
+            if job is not None:
+                jobs.append(job)
+    return [_dispatch_request_reviewer(job) for job in jobs]
+
+
+# --- escalate_merge_block act phase (RFC 0010 P4, #1099) -------------------
+
+
+def _act_escalate_merge_block(
+    candidates: list[ReviewRecipeCandidate], *, now: datetime | None = None
+) -> list[str]:
+    """Act phase for escalate_merge_block: fire once per merge-blocked episode.
+
+    Under one ``dev_queue_lock()`` (the event IS the escalation — no dispatch or
+    spawn):
+
+    1. **Episode-end clear** — scan every freshly-loaded row and clear
+       ``escalate_merge_block_fired_at`` where it is set but the current
+       ``pr_state`` is None or no longer ``merge_blocked`` (the episode ended;
+       this re-arms the latch for a genuine future re-entry). Runs regardless of
+       whether *candidates* is empty, so a tick where the row has moved off
+       ``merge_blocked`` still clears the latch.
+    2. **Fire** — for each candidate, re-validate ``attention_state ==
+       merge_blocked`` and ``escalate_merge_block_fired_at is None``; if both
+       hold, emit ``PR_ACTION_TAKEN`` and stamp the latch to *now*. An already-
+       stamped row is a silent skip (already fired this episode).
+
+    Stamping/clearing the latch IS a dev-queue write (the one exception to the
+    review layer's "no dev-queue mutation" rule — it is a latch field, not a
+    status transition). ``record_event`` nests the inbox lock INSIDE
+    ``dev_queue_lock`` (never the reverse), so emitting under the lock is
+    deadlock-safe (same ordering as ``cw.reconcile.escalation``).
+    """
+    from datetime import UTC
+    from datetime import datetime as _datetime
+
+    resolved_now = now if now is not None else _datetime.now(UTC)
+    by_key = {(c.ticket_id, c.client): c for c in candidates}
+    acted: list[str] = []
+    with dev_queue_lock():
+        store = load_dev_queue()
+        changed = _clear_ended_merge_block_episodes(store)
+        for candidate in by_key.values():
+            task = _find_review_task(store, candidate.ticket_id, candidate.client)
+            if task is None:
+                continue
+            if _fire_escalate_merge_block(task, candidate.session_id, resolved_now):
+                acted.append(task.ticket_id)
+                changed = True
+        if changed:
+            save_dev_queue(store)
+    return acted
+
+
+def _clear_ended_merge_block_episodes(store: DevQueueStore) -> bool:
+    """Clear the latch on rows whose merge-block episode has ended. Returns dirty."""
+    changed = False
+    for task in store.tasks:
+        if task.escalate_merge_block_fired_at is None:
+            continue
+        pr_state = task.pr_state
+        if pr_state is None or pr_state.attention_state != _ATTENTION_MERGE_BLOCKED:
+            task.escalate_merge_block_fired_at = None
+            changed = True
+    return changed
+
+
+def _fire_escalate_merge_block(
+    task: TicketTask, session_id: str | None, now: datetime
+) -> bool:
+    """Emit + stamp the latch for one still-merge-blocked, un-fired row.
+
+    Returns True when it fired (event emitted, latch stamped); False for a stale
+    row (moved off merge_blocked) or one already fired this episode.
+    """
+    pr_state = task.pr_state
+    if pr_state is None or pr_state.attention_state != _ATTENTION_MERGE_BLOCKED:
+        return False
+    if task.escalate_merge_block_fired_at is not None:
+        return False
+    payload_base = _review_payload_base(
+        task,
+        session_id,
+        RECIPE_ESCALATE_MERGE_BLOCK,
+        {_PAYLOAD_KEY_MERGE_STATE_STATUS: pr_state.merge_state_status},
+    )
+    record_event(
+        OrchestratorEventType.PR_ACTION_TAKEN,
+        payload_base,
+        correlation_id=task.ticket_id,
+    )
+    task.escalate_merge_block_fired_at = now
+    return True
+
+
 def run_review_recipes(*, config: OrchestratorConfig) -> list[str]:
     """Run all enabled review recipes for one reconcile tick (P2: detect → act).
 
@@ -440,17 +879,34 @@ def run_review_recipes(*, config: OrchestratorConfig) -> list[str]:
     phases (mirrors ``run_gate_recipes``) rather than re-read inside the act
     phase's lock.
 
-    P2 (#1097) adds the act phase: detected candidates are dispatched via
-    ``_act_address_review``, which spawns an ``/address-review`` session per
-    still-valid candidate and emits ``PR_ACTION_TAKEN`` / ``PR_ACTION_FAILED``.
-    Returns the list of ticket_ids whose ``/address-review`` dispatch succeeded.
-    The act phase performs no dev-queue mutation.
+    P4 (#1099) adds three sibling recipes, each routed by a distinct PR
+    attention state (1:1 with a recipe; see the routing test): ``auto_fix_ci``
+    (re-dispatches a ci_failing PR into auto-dev), ``request_reviewer`` (requests
+    a reviewer per the repo's review_strategy on a no_reviewer PR), and
+    ``escalate_merge_block`` (fires one durable escalation per merge-blocked
+    episode). Each detect->act pair runs against the same fresh ``tasks``
+    snapshot; the escalate act phase performs a small latch write (the sole
+    dev-queue mutation in this module — a one-shot field, not a status
+    transition), every other act phase is read-only under its lock. Returns the
+    concatenated ticket_ids each recipe reports as acted.
     """
     if not config.review_recipes_enabled:
         return []
     tasks = load_dev_queue().tasks
     clients = load_effective_clients()
-    return _act_address_review(
+    acted: list[str] = []
+    acted += _act_address_review(
         _detect_address_review(tasks, clients=clients, config=config),
         clients=clients,
     )
+    acted += _act_auto_fix_ci(
+        _detect_auto_fix_ci(tasks, clients=clients, config=config)
+    )
+    acted += _act_request_reviewer(
+        _detect_request_reviewer(tasks, clients=clients, config=config),
+        clients=clients,
+    )
+    acted += _act_escalate_merge_block(
+        _detect_escalate_merge_block(tasks, clients=clients, config=config)
+    )
+    return acted

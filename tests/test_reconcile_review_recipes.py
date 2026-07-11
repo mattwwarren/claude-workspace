@@ -39,12 +39,22 @@ from cw.models import (
 )
 from cw.reconcile.review_recipes import (
     RECIPE_ADDRESS_REVIEW,
+    RECIPE_AUTO_FIX_CI,
+    RECIPE_ESCALATE_MERGE_BLOCK,
+    RECIPE_REQUEST_REVIEWER,
     ReviewRecipeCandidate,
     _act_address_review,
+    _act_auto_fix_ci,
+    _act_escalate_merge_block,
+    _act_request_reviewer,
     _detect_address_review,
+    _detect_auto_fix_ci,
+    _detect_escalate_merge_block,
+    _detect_request_reviewer,
     resolve_review_recipe_enabled,
     run_review_recipes,
 )
+from cw.review_strategy import ReviewStrategy
 
 # Reuse the sibling test helpers rather than re-deriving TicketTask / PrState
 # construction: _make_task accepts **kwargs (pr_url / pr_state / session_id /
@@ -299,7 +309,24 @@ class TestResolveReviewRecipeEnabled:
         )
 
     def test_unrecognized_review_recipe_key_rejected(self) -> None:
-        """Both TicketTask and LaneConfig fail loud on an unrecognized key."""
+        """All four recipe names are accepted; an unrecognized key fails loud
+        on both TicketTask and LaneConfig (RFC 0010 P4 extends the set)."""
+        all_four = {
+            RECIPE_ADDRESS_REVIEW: True,
+            RECIPE_AUTO_FIX_CI: True,
+            RECIPE_REQUEST_REVIEWER: False,
+            RECIPE_ESCALATE_MERGE_BLOCK: True,
+        }
+        assert (
+            TicketTask(
+                ticket_id="X", client="acme", review_recipes=all_four
+            ).review_recipes
+            == all_four
+        )
+        assert (
+            LaneConfig(name="default", review_recipes=all_four).review_recipes
+            == all_four
+        )
         with pytest.raises(ValidationError):
             TicketTask(ticket_id="X", client="acme", review_recipes={"bogus": True})
         with pytest.raises(ValidationError):
@@ -307,12 +334,20 @@ class TestResolveReviewRecipeEnabled:
 
 
 def test_config_reference_documents_review_recipes() -> None:
-    """CONFIG_REFERENCE.md documents the review_recipes field + prose section."""
+    """CONFIG_REFERENCE.md documents every review recipe + the strategy section."""
     doc = (
         Path(__file__).resolve().parent.parent / "config" / "CONFIG_REFERENCE.md"
     ).read_text(encoding="utf-8")
     assert "review_recipes" in doc
     assert "Review Recipe Enablement" in doc
+    for recipe in (
+        RECIPE_ADDRESS_REVIEW,
+        RECIPE_AUTO_FIX_CI,
+        RECIPE_REQUEST_REVIEWER,
+        RECIPE_ESCALATE_MERGE_BLOCK,
+    ):
+        assert recipe in doc
+    assert "Review Strategy" in doc
 
 
 # --- RFC 0010 P2 act-phase (#1097) -----------------------------------------
@@ -662,3 +697,411 @@ def test_missing_worktree_emits_pr_action_failed(
     failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
     assert len(failed) == 1
     assert failed[0].correlation_id == task.ticket_id
+
+
+# --- RFC 0010 P4 recipes (#1099) -------------------------------------------
+
+
+def _enabling_clients_for(*recipes: str) -> dict[str, ClientConfig]:
+    """Clients dict opting the default lane into each named review recipe."""
+    return {
+        "acme": _client_with_lanes(
+            LaneConfig(name="default", review_recipes=dict.fromkeys(recipes, True))
+        )
+    }
+
+
+def _candidate(
+    task: TicketTask, recipe: str, attention_state: str
+) -> ReviewRecipeCandidate:
+    assert task.pr_url is not None
+    return ReviewRecipeCandidate(
+        ticket_id=task.ticket_id,
+        client=task.client,
+        lane=task.lane,
+        recipe=recipe,
+        attention_state=attention_state,
+        pr_url=task.pr_url,
+        evidence={},
+        session_id=task.session_id,
+    )
+
+
+_PR_URL = "https://github.com/acme/widgets/pull/42"
+
+
+# --- auto_fix_ci -----------------------------------------------------------
+
+
+def test_detect_auto_fix_ci_fires_on_ci_failing() -> None:
+    task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="ci_failing"))
+    cands = _detect_auto_fix_ci(
+        [task], clients=_enabling_clients_for(RECIPE_AUTO_FIX_CI), config=_config()
+    )
+    assert len(cands) == 1
+    assert cands[0].recipe == RECIPE_AUTO_FIX_CI
+    assert cands[0].attention_state == "ci_failing"
+
+
+def test_detect_auto_fix_ci_master_switch_off_returns_empty() -> None:
+    task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="ci_failing"))
+    off = OrchestratorConfig()  # review_recipes_enabled False
+    assert (
+        _detect_auto_fix_ci(
+            [task], clients=_enabling_clients_for(RECIPE_AUTO_FIX_CI), config=off
+        )
+        == []
+    )
+
+
+def test_act_auto_fix_ci_calls_add_ticket_and_dispatch_once(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_acme_clients_yaml(tmp_config_dir)
+    task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="ci_failing"))
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    added: list[TicketTask] = []
+    dispatched: list[dict[str, Any]] = []
+
+    def _fake_add_ticket(t: TicketTask) -> bool:
+        # emit-before-dispatch: PR_ACTION_TAKEN is durable before re-enqueue.
+        taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+        assert any(e.correlation_id == task.ticket_id for e in taken)
+        added.append(t)
+        return True
+
+    def _fake_dispatch(**kwargs: Any) -> None:
+        dispatched.append(kwargs)
+
+    monkeypatch.setattr("cw.dev_queue.add_ticket", _fake_add_ticket)
+    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", _fake_dispatch)
+
+    acted = _act_auto_fix_ci([_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")])
+
+    assert acted == [task.ticket_id]
+    assert len(added) == 1
+    assert added[0].ticket_id == task.ticket_id
+    assert added[0].client == task.client
+    assert added[0].lane == task.lane
+    assert dispatched == [{"once": True, "client": task.client, "emit": None}]
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+
+
+def test_act_auto_fix_ci_stale_row_silent_skip(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_acme_clients_yaml(tmp_config_dir)
+    # Re-loaded row is no longer ci_failing -> silent skip.
+    task = _make_task(
+        pr_url=_PR_URL, pr_state=_pr_state(attention_state="ready_to_approve")
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    called: list[Any] = []
+    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda t: called.append(t) or True)
+    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: called.append(1))
+
+    acted = _act_auto_fix_ci([_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")])
+
+    assert acted == []
+    assert called == []
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+
+
+def test_act_auto_fix_ci_add_ticket_raises_emits_pr_action_failed(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from cw.dev_queue import LaneNotFoundError
+
+    _write_acme_clients_yaml(tmp_config_dir)
+    task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="ci_failing"))
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    lane_gone_msg = "lane gone"
+
+    def _boom(_t: TicketTask) -> bool:
+        raise LaneNotFoundError(lane_gone_msg)
+
+    monkeypatch.setattr("cw.dev_queue.add_ticket", _boom)
+    monkeypatch.setattr(
+        "cw.dispatch.run_dispatch_loop",
+        lambda **_kw: pytest.fail("dispatch must not run when add_ticket raises"),
+    )
+
+    with caplog.at_level("WARNING"):
+        acted = _act_auto_fix_ci([_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")])
+
+    assert acted == []
+    taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+    assert any(e.correlation_id == task.ticket_id for e in taken)
+    failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+    assert len(failed) == 1
+    assert failed[0].correlation_id == task.ticket_id
+    assert "lane gone" in failed[0].payload["error"]
+
+
+# --- request_reviewer ------------------------------------------------------
+
+
+def test_detect_request_reviewer_fires_on_no_reviewer() -> None:
+    task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="no_reviewer"))
+    cands = _detect_request_reviewer(
+        [task],
+        clients=_enabling_clients_for(RECIPE_REQUEST_REVIEWER),
+        config=_config(),
+    )
+    assert len(cands) == 1
+    assert cands[0].recipe == RECIPE_REQUEST_REVIEWER
+    assert cands[0].attention_state == "no_reviewer"
+
+
+def _stub_strategy(monkeypatch: pytest.MonkeyPatch, strategy: ReviewStrategy) -> None:
+    monkeypatch.setattr(
+        "cw.reconcile.review_recipes.resolve_review_strategy",
+        lambda _root: strategy,
+    )
+
+
+def test_act_request_reviewer_ci_mode_silent_skip(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_acme_clients_yaml(tmp_config_dir)
+    task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="no_reviewer"))
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    _stub_strategy(monkeypatch, ReviewStrategy("ci", None))
+    calls: list[Any] = []
+    monkeypatch.setattr("cw.gh.add_pr_reviewer", lambda *a, **kw: calls.append((a, kw)))
+
+    acted = _act_request_reviewer(
+        [_candidate(task, RECIPE_REQUEST_REVIEWER, "no_reviewer")],
+        clients=load_effective_clients(),
+    )
+
+    assert acted == []
+    assert calls == []
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+
+
+@pytest.mark.parametrize(
+    ("mode", "handle"),
+    [("repo_owner", "alice"), ("reviewer_team", "acme/reviewers")],
+)
+def test_act_request_reviewer_configured_mode_calls_gh_helper(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    handle: str,
+) -> None:
+    _write_acme_clients_yaml(tmp_config_dir)
+    task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="no_reviewer"))
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    _stub_strategy(monkeypatch, ReviewStrategy(mode, handle))  # type: ignore[arg-type]
+    calls: list[tuple[str, str]] = []
+
+    def _fake_add(pr_ref: str, reviewer: str, **_kw: Any) -> None:
+        # emit-before-action: PR_ACTION_TAKEN is durable before the gh call.
+        taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+        assert any(e.correlation_id == task.ticket_id for e in taken)
+        calls.append((pr_ref, reviewer))
+
+    monkeypatch.setattr("cw.gh.add_pr_reviewer", _fake_add)
+
+    acted = _act_request_reviewer(
+        [_candidate(task, RECIPE_REQUEST_REVIEWER, "no_reviewer")],
+        clients=load_effective_clients(),
+    )
+
+    assert acted == [task.ticket_id]
+    assert calls == [(_PR_URL, handle)]
+    taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+    payload = taken[-1].payload
+    assert payload["review_strategy_mode"] == mode
+    assert payload["reviewer_handle"] == handle
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+
+
+def test_act_request_reviewer_misconfigured_mode_missing_handle_emits_failed(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _write_acme_clients_yaml(tmp_config_dir)
+    task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="no_reviewer"))
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    _stub_strategy(monkeypatch, ReviewStrategy("repo_owner", None))
+    monkeypatch.setattr(
+        "cw.gh.add_pr_reviewer",
+        lambda *_a, **_kw: pytest.fail(
+            "gh must not be called for a misconfigured mode"
+        ),
+    )
+
+    with caplog.at_level("WARNING"):
+        acted = _act_request_reviewer(
+            [_candidate(task, RECIPE_REQUEST_REVIEWER, "no_reviewer")],
+            clients=load_effective_clients(),
+        )
+
+    assert acted == []
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
+    failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+    assert len(failed) == 1
+    assert failed[0].correlation_id == task.ticket_id
+
+
+# --- escalate_merge_block --------------------------------------------------
+
+
+def test_detect_escalate_merge_block_fires_on_merge_blocked() -> None:
+    task = _make_task(
+        pr_url=_PR_URL, pr_state=_pr_state(attention_state="merge_blocked")
+    )
+    cands = _detect_escalate_merge_block(
+        [task],
+        clients=_enabling_clients_for(RECIPE_ESCALATE_MERGE_BLOCK),
+        config=_config(),
+    )
+    assert len(cands) == 1
+    assert cands[0].recipe == RECIPE_ESCALATE_MERGE_BLOCK
+    assert cands[0].attention_state == "merge_blocked"
+
+
+def _detect_escalate(clients: dict[str, ClientConfig]) -> list[ReviewRecipeCandidate]:
+    return _detect_escalate_merge_block(
+        load_dev_queue().tasks, clients=clients, config=_config()
+    )
+
+
+def test_escalate_merge_block_fires_once_per_episode(tmp_config_dir: Path) -> None:
+    _write_acme_clients_yaml(tmp_config_dir)
+    task = _make_task(
+        pr_url=_PR_URL, pr_state=_pr_state(attention_state="merge_blocked")
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    clients = _enabling_clients_for(RECIPE_ESCALATE_MERGE_BLOCK)
+
+    acted1 = _act_escalate_merge_block(_detect_escalate(clients))
+    assert acted1 == [task.ticket_id]
+    assert load_dev_queue().tasks[0].escalate_merge_block_fired_at is not None
+
+    # Second tick, state unchanged: detect still yields a candidate, but the
+    # latch blocks a re-fire.
+    acted2 = _act_escalate_merge_block(_detect_escalate(clients))
+    assert acted2 == []
+    taken = [
+        e
+        for e in read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+        if e.correlation_id == task.ticket_id
+    ]
+    assert len(taken) == 1
+
+
+def test_escalate_merge_block_latch_clears_on_episode_end(
+    tmp_config_dir: Path,
+) -> None:
+    _write_acme_clients_yaml(tmp_config_dir)
+    task = _make_task(
+        pr_url=_PR_URL, pr_state=_pr_state(attention_state="merge_blocked")
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    clients = _enabling_clients_for(RECIPE_ESCALATE_MERGE_BLOCK)
+
+    assert _act_escalate_merge_block(_detect_escalate(clients)) == [task.ticket_id]
+
+    # Episode ends: hydration moves the PR off merge_blocked.
+    store = load_dev_queue()
+    store.tasks[0].pr_state = _pr_state(attention_state="ready_to_approve")
+    save_dev_queue(store)
+
+    cands = _detect_escalate(clients)
+    assert cands == []
+    _act_escalate_merge_block(cands)  # clear pass runs even with no candidates
+    assert load_dev_queue().tasks[0].escalate_merge_block_fired_at is None
+
+    # Genuine re-entry into merge_blocked fires again (episode semantics).
+    store = load_dev_queue()
+    store.tasks[0].pr_state = _pr_state(attention_state="merge_blocked")
+    save_dev_queue(store)
+    assert _act_escalate_merge_block(_detect_escalate(clients)) == [task.ticket_id]
+
+
+# --- routing ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("attention_state", "expected_recipe"),
+    [
+        ("changes_requested", RECIPE_ADDRESS_REVIEW),
+        ("ci_failing", RECIPE_AUTO_FIX_CI),
+        ("no_reviewer", RECIPE_REQUEST_REVIEWER),
+        ("merge_blocked", RECIPE_ESCALATE_MERGE_BLOCK),
+        ("ready_to_approve", None),
+    ],
+)
+def test_attention_state_routes_to_exactly_one_recipe(
+    attention_state: str, expected_recipe: str | None
+) -> None:
+    task = _make_task(
+        pr_url=_PR_URL, pr_state=_pr_state(attention_state=attention_state)
+    )
+    clients = _enabling_clients_for(
+        RECIPE_ADDRESS_REVIEW,
+        RECIPE_AUTO_FIX_CI,
+        RECIPE_REQUEST_REVIEWER,
+        RECIPE_ESCALATE_MERGE_BLOCK,
+    )
+    cfg = _config()
+    detects = {
+        RECIPE_ADDRESS_REVIEW: _detect_address_review,
+        RECIPE_AUTO_FIX_CI: _detect_auto_fix_ci,
+        RECIPE_REQUEST_REVIEWER: _detect_request_reviewer,
+        RECIPE_ESCALATE_MERGE_BLOCK: _detect_escalate_merge_block,
+    }
+    firing = {
+        recipe
+        for recipe, fn in detects.items()
+        if fn([task], clients=clients, config=cfg)
+    }
+    assert firing == (set() if expected_recipe is None else {expected_recipe})
+
+
+def test_ready_to_approve_adds_no_action() -> None:
+    task = _make_task(
+        pr_url=_PR_URL, pr_state=_pr_state(attention_state="ready_to_approve")
+    )
+    clients = _enabling_clients_for(
+        RECIPE_ADDRESS_REVIEW,
+        RECIPE_AUTO_FIX_CI,
+        RECIPE_REQUEST_REVIEWER,
+        RECIPE_ESCALATE_MERGE_BLOCK,
+    )
+    cfg = _config()
+    for fn in (
+        _detect_address_review,
+        _detect_auto_fix_ci,
+        _detect_request_reviewer,
+        _detect_escalate_merge_block,
+    ):
+        assert fn([task], clients=clients, config=cfg) == []
+
+
+def test_run_review_recipes_wires_escalate_merge_block(tmp_config_dir: Path) -> None:
+    """run_review_recipes drives the new escalate_merge_block recipe end-to-end."""
+    _write_acme_clients_yaml(tmp_config_dir)
+    # Opt the ticket into escalate_merge_block via the highest tier.
+    task = _make_task(
+        pr_url=_PR_URL,
+        pr_state=_pr_state(attention_state="merge_blocked"),
+        review_recipes={RECIPE_ESCALATE_MERGE_BLOCK: True},
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    acted = run_review_recipes(config=_config())
+
+    assert task.ticket_id in acted
+    assert load_dev_queue().tasks[0].escalate_merge_block_fired_at is not None
+    taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+    assert any(e.correlation_id == task.ticket_id for e in taken)

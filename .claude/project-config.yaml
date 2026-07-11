@@ -36,6 +36,14 @@ review:
   self_review: true
   max_cycles: 3
 
+# RFC 0010 P4 (#1099) — reviewer-selection policy for the request_reviewer review
+# recipe (cw.reconcile.review_recipes). Explicit `ci` self-documents this repo's
+# no-op choice (rely on CI, request no reviewer) rather than relying on the
+# silent absent-key default. See config/CONFIG_REFERENCE.md "Review Strategy
+# Config". Do NOT wire a handle here — request_reviewer always silent-skips.
+review_strategy:
+  mode: ci
+
 pr:
   tool: gh
   auto_create: false
