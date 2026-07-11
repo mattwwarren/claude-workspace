@@ -17,10 +17,19 @@ def test_orchestrator_agent_frontmatter_valid() -> None:
     assert "allowed-tools:" not in content
 
 
-def test_orchestrator_agent_decision_table_covers_known_events() -> None:
+def test_orchestrator_agent_retains_mergeable_and_merged_rows() -> None:
     content = AGENT_FILE.read_text()
-    for event in ["pr.ci_failed", "pr.review_received", "pr.mergeable", "pr.merged"]:
+    for event in ["pr.mergeable", "pr.merged"]:
         assert event in content, f"Event '{event}' missing from decision table"
+
+
+def test_orchestrator_agent_retired_ci_failed_and_review_received_rows() -> None:
+    # RFC 0010 P4 (#1099): auto_fix_ci / address_review review recipes now own
+    # the ci_failing / changes_requested reactions daemon-side, so the
+    # orchestrator agent no longer routes pr.ci_failed / pr.review_received.
+    content = AGENT_FILE.read_text()
+    for event in ["pr.ci_failed", "pr.review_received"]:
+        assert event not in content, f"Retired event '{event}' still in decision table"
 
 
 def test_orchestrator_agent_dedup_command_documented() -> None:
