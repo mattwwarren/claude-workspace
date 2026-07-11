@@ -154,7 +154,7 @@ Create PR via /prep-pr + /ship-it?
 
 ### Step 4c: Delegate to /prep-pr
 
-This step delegates to a **general-purpose** agent (`model: "sonnet"`) that invokes `/prep-pr`, which handles: sync-with-main (+ conflict handling), quality gate detection + re-run, and ship-it delegation (per-project PR creation conventions, branch naming, CI setup).
+Spawn a **general-purpose** agent (`model: "sonnet"`) scoped to the implementation worktree. The agent invokes `/prep-pr` which handles: sync-with-main (+ conflict handling), quality gate detection + re-run, and ship-it delegation (per-project PR creation conventions, branch naming, CI setup). **But first run the mandatory isolation gate in Step 4c.1 — the spawn's `isolation` flag is decided there, not defaulted.**
 
 **Why delegate:**
 - `/prep-pr` delegates to per-project `.claude/commands/ship-it.md` which knows repo-specific PR conventions (template, labels, reviewers, base branch, CI bootstrap) that the pipeline shouldn't hardcode.
