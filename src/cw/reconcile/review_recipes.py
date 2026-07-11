@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from cw.config import load_effective_clients
 from cw.dev_queue import _newest_by_created_at, dev_queue_lock, load_dev_queue
@@ -55,9 +55,22 @@ if TYPE_CHECKING:
         TicketTask,
     )
 
-    # (client_cfg, worktree, pr_number, ticket_id, lane, payload_base) — the
-    # deferred dispatch job built inside the lock and executed after release.
-    _DispatchJob = tuple[ClientConfig, Path, int, str, str, dict[str, object]]
+
+class _DispatchJob(NamedTuple):
+    """Deferred dispatch job built inside dev_queue_lock(), run after release.
+
+    A NamedTuple (not a bare positional tuple) so call sites access fields by
+    name — two adjacent same-typed str fields (ticket_id, lane) made a
+    positional reorder a silent, type-checker-invisible bug.
+    """
+
+    client_cfg: ClientConfig
+    worktree: Path
+    pr_number: int
+    ticket_id: str
+    lane: str
+    payload_base: dict[str, object]
+
 
 _log = logging.getLogger(__name__)
 
@@ -239,6 +252,17 @@ def _emit_pr_action_failed(
     )
 
 
+def _skip_with_anomaly(
+    payload_base: dict[str, object], *, error: str, ticket_id: str
+) -> None:
+    """Log + record PR_ACTION_FAILED for a _prepare_dispatch_job precondition
+    anomaly (unparseable pr_url, unresolvable client, missing worktree) — the
+    shared log-then-emit pairing so the three anomaly branches can't drift.
+    """
+    _log.warning("review_recipe_action_failed ticket=%s: %s", ticket_id, error)
+    _emit_pr_action_failed(payload_base, error=error, ticket_id=ticket_id)
+
+
 def _prepare_dispatch_job(
     task: TicketTask,
     session_id: str | None,
@@ -277,28 +301,41 @@ def _prepare_dispatch_job(
     }
     parsed = _parse_pr_url(task.pr_url) if task.pr_url is not None else None
     if task.pr_url is None or parsed is None:
-        error = f"unparseable or missing pr_url: {task.pr_url!r}"
-        _log.warning("review_recipe_action_failed ticket=%s: %s", task.ticket_id, error)
-        _emit_pr_action_failed(payload_base, error=error, ticket_id=task.ticket_id)
+        _skip_with_anomaly(
+            payload_base,
+            error=f"unparseable or missing pr_url: {task.pr_url!r}",
+            ticket_id=task.ticket_id,
+        )
         return None
     client_cfg = clients.get(task.client)
     if client_cfg is None:
-        error = f"client {task.client!r} not resolvable"
-        _log.warning("review_recipe_action_failed ticket=%s: %s", task.ticket_id, error)
-        _emit_pr_action_failed(payload_base, error=error, ticket_id=task.ticket_id)
+        _skip_with_anomaly(
+            payload_base,
+            error=f"client {task.client!r} not resolvable",
+            ticket_id=task.ticket_id,
+        )
         return None
     wt = task.worktree_path
     if wt is None or not wt.exists():
-        error = f"worktree_path missing or absent: {wt!r}"
-        _log.warning("review_recipe_action_failed ticket=%s: %s", task.ticket_id, error)
-        _emit_pr_action_failed(payload_base, error=error, ticket_id=task.ticket_id)
+        _skip_with_anomaly(
+            payload_base,
+            error=f"worktree_path missing or absent: {wt!r}",
+            ticket_id=task.ticket_id,
+        )
         return None
     record_event(
         OrchestratorEventType.PR_ACTION_TAKEN,
         payload_base,
         correlation_id=task.ticket_id,
     )
-    return (client_cfg, wt, parsed[1], task.ticket_id, task.lane, payload_base)
+    return _DispatchJob(
+        client_cfg=client_cfg,
+        worktree=wt,
+        pr_number=parsed[1],
+        ticket_id=task.ticket_id,
+        lane=task.lane,
+        payload_base=payload_base,
+    )
 
 
 def _dispatch_address_review(job: _DispatchJob) -> str | None:
@@ -314,30 +351,33 @@ def _dispatch_address_review(job: _DispatchJob) -> str | None:
     """
     from cw.spawn import spawn_create_impl
 
-    client_cfg, wt, pr_number, ticket_id, lane, payload_base = job
     try:
         spawn_create_impl(
-            client=client_cfg,
-            worktree=wt,
-            prompt=f"/address-review {pr_number}",
-            label=f"address-review-{pr_number}",
+            client=job.client_cfg,
+            worktree=job.worktree,
+            prompt=f"/address-review {job.pr_number}",
+            label=f"address-review-{job.pr_number}",
             headless=True,
-            ticket_id=ticket_id,
-            lane=lane,
+            ticket_id=job.ticket_id,
+            lane=job.lane,
         )
     except CwError as exc:
         _log.warning(
             "review_recipe_dispatch_failed ticket=%s pr=%s",
-            ticket_id,
-            pr_number,
+            job.ticket_id,
+            job.pr_number,
             exc_info=True,
         )
-        _emit_pr_action_failed(payload_base, error=str(exc), ticket_id=ticket_id)
+        _emit_pr_action_failed(
+            job.payload_base, error=str(exc), ticket_id=job.ticket_id
+        )
         return None
-    return ticket_id
+    return job.ticket_id
 
 
-def _act_address_review(candidates: list[ReviewRecipeCandidate]) -> list[str]:
+def _act_address_review(
+    candidates: list[ReviewRecipeCandidate], *, clients: dict[str, ClientConfig]
+) -> list[str]:
     """Act phase: re-validate under lock, emit PR_ACTION_TAKEN, then dispatch.
 
     Mirrors ``gate_recipes._act_auto_approve_review``'s shape (lock / re-load /
@@ -350,6 +390,12 @@ def _act_address_review(candidates: list[ReviewRecipeCandidate]) -> list[str]:
     releases, so the dispatch never nests the flock (guaranteeing no
     self-deadlock) and ``PR_ACTION_TAKEN`` is always durable before its spawn.
 
+    ``clients`` is the caller's snapshot (mirrors ``run_gate_recipes`` loading
+    ``load_effective_clients()`` once and threading it down) rather than a
+    second ``load_effective_clients()`` read taken inside the lock — clients.yaml
+    has no locking relationship to the dev-queue store, so re-reading it there
+    only extends the flock's hold time for no consistency benefit.
+
     Returns the acted ticket_ids (those whose ``/address-review`` dispatch
     succeeded).
     """
@@ -361,7 +407,6 @@ def _act_address_review(candidates: list[ReviewRecipeCandidate]) -> list[str]:
     dispatch_jobs: list[_DispatchJob] = []
     with dev_queue_lock():
         store = load_dev_queue()
-        clients = load_effective_clients()
         for candidate in by_key.values():
             task = _find_review_task(store, candidate.ticket_id, candidate.client)
             if task is None:
@@ -391,7 +436,9 @@ def run_review_recipes(*, config: OrchestratorConfig) -> list[str]:
 
     Per-lane enablement (RFC 0010 P3) is resolved against effective clients —
     ``load_effective_clients`` so lane pause/override state is honoured, matching
-    ``run_gate_recipes``.
+    ``run_gate_recipes``. Loaded once and threaded into both the detect and act
+    phases (mirrors ``run_gate_recipes``) rather than re-read inside the act
+    phase's lock.
 
     P2 (#1097) adds the act phase: detected candidates are dispatched via
     ``_act_address_review``, which spawns an ``/address-review`` session per
@@ -404,5 +451,6 @@ def run_review_recipes(*, config: OrchestratorConfig) -> list[str]:
     tasks = load_dev_queue().tasks
     clients = load_effective_clients()
     return _act_address_review(
-        _detect_address_review(tasks, clients=clients, config=config)
+        _detect_address_review(tasks, clients=clients, config=config),
+        clients=clients,
     )

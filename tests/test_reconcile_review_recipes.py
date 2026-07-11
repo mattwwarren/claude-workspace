@@ -17,13 +17,16 @@ and stub the daemon spawn via the file-local ``stub_spawn`` fixture.
 
 from __future__ import annotations
 
+import fcntl
 from pathlib import Path
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
-from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
+from cw.config import dev_queue_lock as _dev_queue_lock_path
+from cw.config import load_effective_clients
+from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
 from cw.exceptions import CwError
 from cw.models import (
@@ -389,7 +392,14 @@ def test_pr_action_taken_emitted_before_mutation(
     """
     _write_acme_clients_yaml(tmp_config_dir)
     worktree = make_git_repo("action-taken")
-    task = _cr_task(worktree_path=worktree)
+    task = _cr_task(
+        worktree_path=worktree,
+        pr_state=_pr_state(
+            state="OPEN",
+            attention_state="changes_requested",
+            review_decision="CHANGES_REQUESTED",
+        ),
+    )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     def _assert_taken_recorded(**_kwargs: Any) -> None:
@@ -398,7 +408,9 @@ def test_pr_action_taken_emitted_before_mutation(
 
     stub_spawn.side_effect = _assert_taken_recorded
 
-    acted = _act_address_review([_candidate_for(task)])
+    acted = _act_address_review(
+        [_candidate_for(task)], clients=load_effective_clients()
+    )
 
     assert acted == [task.ticket_id]
     assert len(stub_spawn.calls) == 1
@@ -418,9 +430,12 @@ def test_pr_action_taken_emitted_before_mutation(
     assert payload["recipe"] == RECIPE_ADDRESS_REVIEW
     assert payload["pr_url"] == task.pr_url
     assert payload["attention_state"] == "changes_requested"
-    assert "evidence_snapshot" in payload
+    # evidence_snapshot carries the exact field that licensed changes_requested.
+    assert payload["evidence_snapshot"] == {"review_decision": "CHANGES_REQUESTED"}
     # No PR_ACTION_FAILED on the happy path.
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+    # Resolution 6 (no dev-queue mutation): the on-disk snapshot is untouched.
+    assert load_dev_queue().tasks == [task]
 
 
 @pytest.mark.parametrize("stale_state", ["ready_to_approve", None])
@@ -462,7 +477,7 @@ def test_stale_attention_state_skips_silently(
         session_id=task.session_id,
     )
 
-    assert _act_address_review([candidate]) == []
+    assert _act_address_review([candidate], clients=load_effective_clients()) == []
     assert stub_spawn.calls == []
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
@@ -475,24 +490,38 @@ def test_no_self_deadlock_under_dev_queue_lock(
 ) -> None:
     """The spawn runs OUTSIDE dev_queue_lock() — no self-deadlock.
 
-    The stub acquires dev_queue_lock() at spawn time. Because the act phase
-    holds the flock for a consistent READ only and dispatches after releasing
-    it, this acquisition succeeds immediately. A re-entrant/nested acquisition
-    would self-deadlock (fresh fd + LOCK_EX per call), so the test completing
-    (no hang) is the deadlock guard.
+    The stub takes a non-blocking probe lock (LOCK_EX | LOCK_NB) on the
+    dev-queue lock file at spawn time. fcntl.flock locks are held per open
+    file description, not per-process, so a still-held lock from the act
+    phase would deny this second acquisition even from the same process. If
+    the act phase ever re-entered dev_queue_lock() around the dispatch (a
+    self-deadlock regression), the probe raises BlockingIOError instead of
+    hanging — this repo has no pytest-timeout/CI job timeout, so a blocking
+    re-acquire here would hang the whole CI job rather than fail fast.
     """
     _write_acme_clients_yaml(tmp_config_dir)
     worktree = make_git_repo("no-deadlock")
     task = _cr_task(worktree_path=worktree)
     save_dev_queue(DevQueueStore(tasks=[task]))
 
-    def _acquire_lock(**_kwargs: Any) -> None:
-        with dev_queue_lock():
-            pass
+    def _probe_lock_released(**_kwargs: Any) -> None:
+        fd = _dev_queue_lock_path().open("w")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            pytest.fail(
+                "dev_queue_lock() still held during dispatch — self-deadlock regression"
+            )
+        else:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            fd.close()
 
-    stub_spawn.side_effect = _acquire_lock
+    stub_spawn.side_effect = _probe_lock_released
 
-    assert _act_address_review([_candidate_for(task)]) == [task.ticket_id]
+    assert _act_address_review(
+        [_candidate_for(task)], clients=load_effective_clients()
+    ) == [task.ticket_id]
 
 
 def test_action_failure_emits_pr_action_failed(
@@ -531,7 +560,10 @@ def test_action_failure_emits_pr_action_failed(
     stub_spawn.side_effect = _raise_for_gen1
 
     with caplog.at_level("WARNING"):
-        acted = _act_address_review([_candidate_for(task1), _candidate_for(task2)])
+        acted = _act_address_review(
+            [_candidate_for(task1), _candidate_for(task2)],
+            clients=load_effective_clients(),
+        )
 
     # GEN-2 still dispatched despite GEN-1 failing.
     assert acted == ["GEN-2"]
@@ -543,6 +575,9 @@ def test_action_failure_emits_pr_action_failed(
     assert failed[0].payload["ticket_id"] == "GEN-1"
     assert boom_msg in failed[0].payload["error"]
     assert any("dispatch_failed" in r.message for r in caplog.records)
+    # Resolution 6 (no dev-queue mutation): the on-disk snapshot is untouched,
+    # including for the candidate whose dispatch failed.
+    assert load_dev_queue().tasks == [task1, task2]
 
 
 def test_unparseable_pr_url_emits_pr_action_failed(
@@ -559,7 +594,12 @@ def test_unparseable_pr_url_emits_pr_action_failed(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     with caplog.at_level("WARNING"):
-        assert _act_address_review([_candidate_for(task)]) == []
+        assert (
+            _act_address_review(
+                [_candidate_for(task)], clients=load_effective_clients()
+            )
+            == []
+        )
 
     assert stub_spawn.calls == []
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
@@ -583,7 +623,12 @@ def test_missing_client_emits_pr_action_failed(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     with caplog.at_level("WARNING"):
-        assert _act_address_review([_candidate_for(task)]) == []
+        assert (
+            _act_address_review(
+                [_candidate_for(task)], clients=load_effective_clients()
+            )
+            == []
+        )
 
     assert stub_spawn.calls == []
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
@@ -605,7 +650,12 @@ def test_missing_worktree_emits_pr_action_failed(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     with caplog.at_level("WARNING"):
-        assert _act_address_review([_candidate_for(task)]) == []
+        assert (
+            _act_address_review(
+                [_candidate_for(task)], clients=load_effective_clients()
+            )
+            == []
+        )
 
     assert stub_spawn.calls == []
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
