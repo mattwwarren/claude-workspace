@@ -27,7 +27,7 @@ class TestSendOrClose:
 
     def test_closed_resource_error_path(self) -> None:
         async def _run() -> bool:
-            send, recv = anyio.create_memory_object_stream[Any](max_buffer_size=5)
+            send, _recv = anyio.create_memory_object_stream[Any](max_buffer_size=5)
             await send.aclose()
             return await _send_or_close(send, "hello")
 

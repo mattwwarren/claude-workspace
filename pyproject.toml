@@ -192,6 +192,7 @@ ignore = [
 "tests/test_cw_queue_events_channel.py" = ["E402"]
 "tests/test_channels_queue_events.py" = ["E402"]
 "tests/test_cw_operator_events_channel.py" = ["E402"]
+"tests/test__sse_util.py" = ["E402"]
 "tests/**" = [
     "S101",     # assert is fine in tests
     "ARG001",   # unused function args common in fixtures/mocks
