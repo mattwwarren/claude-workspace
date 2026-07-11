@@ -967,6 +967,8 @@ class TestOperatorChannelForward:
                 OrchestratorEventType.OPERATOR_ESCALATION,
                 OrchestratorEventType.GATE_AUTO_APPROVED,
                 OrchestratorEventType.GATE_AUTO_APPROVE_FAILED,
+                OrchestratorEventType.PR_ACTION_TAKEN,
+                OrchestratorEventType.PR_ACTION_FAILED,
             }
         )
 

@@ -185,6 +185,11 @@ ignore = [
 # break the reconcile ↔ dispatch circular dependency (#698). Inline import
 # at function level is the sanctioned mechanism, not a workaround.
 "src/cw/reconcile/_shared.py" = ["PLC0415"]
+# review_recipes defers the cw.spawn import inside _dispatch_address_review to
+# break the cw.spawn ↔ cw.reconcile circular dependency (spawn.py imports
+# cw.reconcile at module top). Inline import at function level is the
+# sanctioned mechanism, not a workaround.
+"src/cw/reconcile/review_recipes.py" = ["PLC0415"]
 # Channel test files guard imports behind pytest.importorskip("starlette"/"mcp"),
 # so module-level imports legitimately follow executable code (E402).
 "tests/test_cw_pr_events_channel.py" = ["E402"]

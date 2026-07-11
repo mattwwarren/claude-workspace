@@ -817,6 +817,59 @@ latch clears itself once the condition resolves.
 
 `correlation_id` is the `ticket_id`.
 
+### `pr.action_taken`
+
+**Emitter:** `_act_address_review` (`cw.reconcile.review_recipes`, dispatched by `run_review_recipes`)
+**Payload:**
+```json
+{
+  "client": "<str>",
+  "lane": "<str>",
+  "recipe": "address_review",
+  "ticket_id": "<str>",
+  "pr_url": "<str>",
+  "attention_state": "changes_requested",
+  "session_id": "<str | null>",
+  "evidence_snapshot": { "review_decision": "<str>" }
+}
+```
+**Semantics:** RFC 0010 P2 (#1097). Emitted before a review recipe dispatches
+an `/address-review` session in response to a PR whose review came back
+`changes_requested`. The event is recorded durably inside `dev_queue_lock()`
+and BEFORE the `spawn_create_impl` dispatch (which runs after the lock
+releases), so the decision trace survives even if the subsequent spawn fails.
+The act phase performs no dev-queue mutation. Unlike `concierge.recovered`
+(audit-only), this **is** forwarded to the operator-attention channel by
+default — an automated PR action with no human review is attention-worthy.
+
+`session_id` is the ORIGINATING candidate's session (which may be null); the
+event fires before the new `/address-review` session exists, so it cannot carry
+that session's id. `evidence_snapshot.review_decision` is the PR field that
+licensed the `changes_requested` classification.
+
+`correlation_id` is the `ticket_id`.
+
+### `pr.action_failed`
+
+**Emitter:** `_act_address_review` (`cw.reconcile.review_recipes`, dispatched by `run_review_recipes`)
+**Payload:** same keys as `pr.action_taken`, plus:
+```json
+{
+  "error": "<stringified failure reason>"
+}
+```
+**Semantics:** RFC 0010 P2 (#1097). Companion correction to `pr.action_taken`.
+Emitted in two cases: (1) the `spawn_create_impl` dispatch raises `CwError`
+after `pr.action_taken` was already recorded; or (2) a precondition anomaly
+blocks the action before dispatch — an unparseable/missing `pr_url`, an
+unresolvable client, or a missing/absent worktree (in the anomaly case no
+`pr.action_taken` precedes it). Either way the durable event stream carries a
+correction, not just a non-durable log line. Forwarded to the
+operator-attention channel by default alongside `pr.action_taken`. Unlike the
+gate-recipe failure path, this emits no latch and performs no mutation.
+
+`correlation_id` is the `ticket_id`.
+
 ### Operator-attention channel (RFC 0008 W3, #1002)
 
 A server-side filter (`cw.cw_operator_events`) forwards a declarative subset

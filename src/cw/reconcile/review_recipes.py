@@ -5,17 +5,23 @@ came back ``changes_requested`` by dispatching an ``/address-review`` session to
 mechanically work the requested changes — the review-feedback analogue of the
 gate recipes (``cw.reconcile.gate_recipes``), which advance an *approval* gate.
 
-**P1 scope (GitHub #1096, this ticket):** detect-only. The pure
-``_detect_address_review`` classification phase produces
-:class:`ReviewRecipeCandidate`s for every dev-queue row whose ``pr_state``
-carries ``attention_state == "changes_requested"``; it performs NO act /
-dispatch / event emission / state mutation. The act phase — spawning the
-``/address-review`` session and emitting its audit event — is deferred to a
-future ticket (P2).
+**P1 scope (GitHub #1096):** detect-only. The pure ``_detect_address_review``
+classification phase produces :class:`ReviewRecipeCandidate`s for every
+dev-queue row whose ``pr_state`` carries
+``attention_state == "changes_requested"``; it performs no writes.
+
+**P2 scope (GitHub #1097, this ticket):** the act phase. ``_act_address_review``
+re-validates each candidate under ``dev_queue_lock()`` (a consistent READ only —
+NO dev-queue mutation, per Resolution 6), emits
+:class:`OrchestratorEventType.PR_ACTION_TAKEN` (durably, BEFORE the spawn), and
+then — strictly after the lock releases — dispatches an ``/address-review``
+session via ``spawn_create_impl``. A dispatch ``CwError`` or a precondition
+anomaly (unparseable PR url, unresolvable client, missing worktree) emits
+:class:`OrchestratorEventType.PR_ACTION_FAILED` instead. Emit-before-dispatch is
+structural: the event fires inside the lock, every spawn strictly afterward.
 
 Like the gate recipes, this module gates on its own opt-in master switch
-(``OrchestratorConfig.review_recipes_enabled``, default False). Because P1 has
-no act phase, ``True`` is inert by construction until P2 ships. The switch is
+(``OrchestratorConfig.review_recipes_enabled``, default False). The switch is
 checked in BOTH ``run_review_recipes`` and ``_detect_address_review`` (dual
 gating), mirroring ``gate_recipes._recipe_gate_open``'s rationale: a caller
 invoking ``_detect_address_review`` directly (unit tests) still gets correct
@@ -28,15 +34,32 @@ Candidate selection reuses ``cw.pr_hydrate._is_candidate`` — the same
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from cw.config import load_effective_clients
-from cw.dev_queue import load_dev_queue
-from cw.pr_hydrate import _is_candidate
+from cw.dev_queue import _newest_by_created_at, dev_queue_lock, load_dev_queue
+from cw.events import record_event
+from cw.exceptions import CwError
+from cw.models import OrchestratorEventType
+from cw.pr_hydrate import _is_candidate, _parse_pr_url
 
 if TYPE_CHECKING:
-    from cw.models import ClientConfig, OrchestratorConfig, TicketTask
+    from pathlib import Path
+
+    from cw.models import (
+        ClientConfig,
+        DevQueueStore,
+        OrchestratorConfig,
+        TicketTask,
+    )
+
+    # (client_cfg, worktree, pr_number, ticket_id, lane, payload_base) — the
+    # deferred dispatch job built inside the lock and executed after release.
+    _DispatchJob = tuple[ClientConfig, Path, int, str, str, dict[str, object]]
+
+_log = logging.getLogger(__name__)
 
 # The only recipe recognised in P1: react to a changes_requested review by
 # dispatching /address-review. Named as a constant so the detect phase and any
@@ -47,6 +70,20 @@ RECIPE_ADDRESS_REVIEW = "address_review"
 # PR is at any other attention state (or None, e.g. a draft) is never a
 # candidate. See cw.pr_hydrate._compute_attention_state, Row 3.
 _ATTENTION_CHANGES_REQUESTED = "changes_requested"
+
+# PR_ACTION_TAKEN / PR_ACTION_FAILED payload keys (RFC 0010 P2) — named once so
+# the producer (_act_address_review) and the docs/consumers can't drift via a
+# typo'd string literal at one site only (mirrors gate_recipes' _SNAPSHOT_KEY_*).
+_PAYLOAD_KEY_CLIENT = "client"
+_PAYLOAD_KEY_LANE = "lane"
+_PAYLOAD_KEY_RECIPE = "recipe"
+_PAYLOAD_KEY_TICKET_ID = "ticket_id"
+_PAYLOAD_KEY_PR_URL = "pr_url"
+_PAYLOAD_KEY_ATTENTION_STATE = "attention_state"
+_PAYLOAD_KEY_SESSION_ID = "session_id"
+_PAYLOAD_KEY_EVIDENCE_SNAPSHOT = "evidence_snapshot"
+_PAYLOAD_KEY_ERROR = "error"
+_PAYLOAD_KEY_REVIEW_DECISION = "review_decision"
 
 # RFC 0010 P3 (#1098) — tier-3 hardcoded fallback for the per-lane resolver.
 # Default OFF (mirrors gate_recipes._DEFAULT_GATE_RECIPE_ENABLED): a review
@@ -169,8 +206,179 @@ def _detect_address_review(
     return candidates
 
 
-def run_review_recipes(*, config: OrchestratorConfig) -> list[ReviewRecipeCandidate]:
-    """Run all enabled review recipes for one reconcile tick (P1: detect-only).
+def _find_review_task(
+    store: DevQueueStore, ticket_id: str, client: str
+) -> TicketTask | None:
+    """Resolve the (ticket_id, client) row this recipe acts on — no status filter.
+
+    Unlike ``gate_recipes._find_blocked_task``, review recipes are NOT
+    status-gated: a ``changes_requested`` PR warrants an address-review dispatch
+    regardless of the row's queue status (mirrors ``_detect_address_review``,
+    which applies no status filter — a status-filtering finder would silently
+    drop valid candidates). Reuses ``dev_queue._newest_by_created_at`` for the
+    duplicate-row tie-break (same import ``gate_recipes`` uses). Returns ``None``
+    (a silent skip for every caller) when the row has vanished between detect
+    and act.
+    """
+    matches = [
+        t for t in store.tasks if t.ticket_id == ticket_id and t.client == client
+    ]
+    if not matches:
+        return None
+    return _newest_by_created_at(matches)
+
+
+def _emit_pr_action_failed(
+    payload_base: dict[str, object], *, error: str, ticket_id: str
+) -> None:
+    """Record a durable, operator-forwarded PR_ACTION_FAILED correction."""
+    record_event(
+        OrchestratorEventType.PR_ACTION_FAILED,
+        {**payload_base, _PAYLOAD_KEY_ERROR: error},
+        correlation_id=ticket_id,
+    )
+
+
+def _prepare_dispatch_job(
+    task: TicketTask,
+    session_id: str | None,
+    clients: dict[str, ClientConfig],
+) -> _DispatchJob | None:
+    """Re-validate a re-loaded row under the lock; emit + build its dispatch job.
+
+    Returns ``None`` to skip. Two skip flavours:
+
+    * **Silent** (no event) when the row is stale — ``pr_state`` gone or no
+      longer ``changes_requested`` (a concurrent re-review can have moved it on
+      between detect and act).
+    * **Anomaly** (emits ``PR_ACTION_FAILED`` + a warning) when the PR url is
+      unparseable/absent, the client is unresolvable, or the worktree is
+      missing — a fail-safe correction, never a silent drop.
+
+    Otherwise records ``PR_ACTION_TAKEN`` (emit-before-dispatch) from the
+    RE-LOADED row and returns the deferred dispatch job. ``session_id`` is the
+    originating candidate's — the event fires before the new spawn exists, so it
+    can't carry a session id that doesn't exist yet.
+    """
+    pr_state = task.pr_state
+    if pr_state is None or pr_state.attention_state != _ATTENTION_CHANGES_REQUESTED:
+        return None  # stale — silent skip (precedent: gate_recipes silent paths)
+    payload_base: dict[str, object] = {
+        _PAYLOAD_KEY_CLIENT: task.client,
+        _PAYLOAD_KEY_LANE: task.lane,
+        _PAYLOAD_KEY_RECIPE: RECIPE_ADDRESS_REVIEW,
+        _PAYLOAD_KEY_TICKET_ID: task.ticket_id,
+        _PAYLOAD_KEY_PR_URL: task.pr_url,
+        _PAYLOAD_KEY_ATTENTION_STATE: pr_state.attention_state,
+        _PAYLOAD_KEY_SESSION_ID: session_id,
+        _PAYLOAD_KEY_EVIDENCE_SNAPSHOT: {
+            _PAYLOAD_KEY_REVIEW_DECISION: pr_state.review_decision
+        },
+    }
+    parsed = _parse_pr_url(task.pr_url) if task.pr_url is not None else None
+    if task.pr_url is None or parsed is None:
+        error = f"unparseable or missing pr_url: {task.pr_url!r}"
+        _log.warning("review_recipe_action_failed ticket=%s: %s", task.ticket_id, error)
+        _emit_pr_action_failed(payload_base, error=error, ticket_id=task.ticket_id)
+        return None
+    client_cfg = clients.get(task.client)
+    if client_cfg is None:
+        error = f"client {task.client!r} not resolvable"
+        _log.warning("review_recipe_action_failed ticket=%s: %s", task.ticket_id, error)
+        _emit_pr_action_failed(payload_base, error=error, ticket_id=task.ticket_id)
+        return None
+    wt = task.worktree_path
+    if wt is None or not wt.exists():
+        error = f"worktree_path missing or absent: {wt!r}"
+        _log.warning("review_recipe_action_failed ticket=%s: %s", task.ticket_id, error)
+        _emit_pr_action_failed(payload_base, error=error, ticket_id=task.ticket_id)
+        return None
+    record_event(
+        OrchestratorEventType.PR_ACTION_TAKEN,
+        payload_base,
+        correlation_id=task.ticket_id,
+    )
+    return (client_cfg, wt, parsed[1], task.ticket_id, task.lane, payload_base)
+
+
+def _dispatch_address_review(job: _DispatchJob) -> str | None:
+    """Dispatch one ``/address-review`` session (post-lock); ``ticket_id`` or None.
+
+    Runs strictly AFTER ``dev_queue_lock()`` releases (mirrors
+    ``gate_recipes._post_auto_approve_comment`` running post-lock), so the spawn
+    never nests the flock. The function-local ``spawn_create_impl`` import breaks
+    the ``cw.spawn`` ↔ ``cw.reconcile`` cycle. Passes NO ``task=`` kwarg
+    (Resolution 6: no dev-queue correlation). On ``CwError`` emits a durable
+    ``PR_ACTION_FAILED`` correction and returns ``None`` — one candidate's
+    failure never aborts the loop.
+    """
+    from cw.spawn import spawn_create_impl
+
+    client_cfg, wt, pr_number, ticket_id, lane, payload_base = job
+    try:
+        spawn_create_impl(
+            client=client_cfg,
+            worktree=wt,
+            prompt=f"/address-review {pr_number}",
+            label=f"address-review-{pr_number}",
+            headless=True,
+            ticket_id=ticket_id,
+            lane=lane,
+        )
+    except CwError as exc:
+        _log.warning(
+            "review_recipe_dispatch_failed ticket=%s pr=%s",
+            ticket_id,
+            pr_number,
+            exc_info=True,
+        )
+        _emit_pr_action_failed(payload_base, error=str(exc), ticket_id=ticket_id)
+        return None
+    return ticket_id
+
+
+def _act_address_review(candidates: list[ReviewRecipeCandidate]) -> list[str]:
+    """Act phase: re-validate under lock, emit PR_ACTION_TAKEN, then dispatch.
+
+    Mirrors ``gate_recipes._act_auto_approve_review``'s shape (lock / re-load /
+    re-check / emit-before-action / deferred side-effect after lock release) but
+    performs NO dev-queue mutation (RFC 0010 P2 Resolution 6): the
+    ``dev_queue_lock()`` is held only for a consistent READ re-validation. Each
+    candidate's row is re-loaded fresh under the lock and re-checked — a
+    concurrent re-review can have moved the PR off ``changes_requested`` between
+    detect and act. Every ``spawn_create_impl`` runs strictly after the lock
+    releases, so the dispatch never nests the flock (guaranteeing no
+    self-deadlock) and ``PR_ACTION_TAKEN`` is always durable before its spawn.
+
+    Returns the acted ticket_ids (those whose ``/address-review`` dispatch
+    succeeded).
+    """
+    if not candidates:
+        return []
+    # Keyed on (ticket_id, client): ticket_id alone is a per-repo GitHub issue
+    # number, not globally unique across this multi-tenant system's clients.
+    by_key = {(c.ticket_id, c.client): c for c in candidates}
+    dispatch_jobs: list[_DispatchJob] = []
+    with dev_queue_lock():
+        store = load_dev_queue()
+        clients = load_effective_clients()
+        for candidate in by_key.values():
+            task = _find_review_task(store, candidate.ticket_id, candidate.client)
+            if task is None:
+                continue
+            job = _prepare_dispatch_job(task, candidate.session_id, clients)
+            if job is not None:
+                dispatch_jobs.append(job)
+    acted: list[str] = []
+    for job in dispatch_jobs:
+        ticket_id = _dispatch_address_review(job)
+        if ticket_id is not None:
+            acted.append(ticket_id)
+    return acted
+
+
+def run_review_recipes(*, config: OrchestratorConfig) -> list[str]:
+    """Run all enabled review recipes for one reconcile tick (P2: detect → act).
 
     No-op (returns ``[]`` immediately) unless ``config.review_recipes_enabled``
     is True. Loads a fresh dev-queue snapshot itself rather than accepting one
@@ -178,18 +386,23 @@ def run_review_recipes(*, config: OrchestratorConfig) -> list[ReviewRecipeCandid
     sweeps have already mutated and saved the queue, so a caller-supplied
     snapshot would be stale (mirrors ``run_gate_recipes``). No ``load_state()``
     call: candidate ``client``/``lane`` come straight off the task, so no
-    ``CwState`` lookup is needed. No ``now`` parameter: P1 has no act phase to
-    forward it to.
+    ``CwState`` lookup is needed. No ``now`` parameter: the act phase performs no
+    time-stamped mutation.
 
     Per-lane enablement (RFC 0010 P3) is resolved against effective clients —
     ``load_effective_clients`` so lane pause/override state is honoured, matching
     ``run_gate_recipes``.
 
-    Returns the detected candidates (P1 performs no act phase, so nothing is
-    dispatched or mutated).
+    P2 (#1097) adds the act phase: detected candidates are dispatched via
+    ``_act_address_review``, which spawns an ``/address-review`` session per
+    still-valid candidate and emits ``PR_ACTION_TAKEN`` / ``PR_ACTION_FAILED``.
+    Returns the list of ticket_ids whose ``/address-review`` dispatch succeeded.
+    The act phase performs no dev-queue mutation.
     """
     if not config.review_recipes_enabled:
         return []
     tasks = load_dev_queue().tasks
     clients = load_effective_clients()
-    return _detect_address_review(tasks, clients=clients, config=config)
+    return _act_address_review(
+        _detect_address_review(tasks, clients=clients, config=config)
+    )
