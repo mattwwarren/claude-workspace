@@ -1147,6 +1147,30 @@ class TestConciergeAndEscalationModelSurface:
             in _DEFAULT_OPERATOR_EVENT_TYPES
         )
 
+    # -- RFC 0010 P2 review-recipe act-phase surface (#1097) -----------------
+
+    def test_orchestrator_event_type_includes_pr_action_taken(self) -> None:
+        assert OrchestratorEventType.PR_ACTION_TAKEN == "pr.action_taken"
+
+    def test_orchestrator_event_type_includes_pr_action_failed(self) -> None:
+        assert OrchestratorEventType.PR_ACTION_FAILED == "pr.action_failed"
+
+    def test_pr_action_taken_in_default_forward_set(self) -> None:
+        """PR_ACTION_TAKEN IS forwarded by default: a review recipe dispatching
+        an /address-review action with no human in the loop is
+        operator-attention-worthy (mirrors GATE_AUTO_APPROVED)."""
+        from cw.models import _DEFAULT_OPERATOR_EVENT_TYPES
+
+        assert OrchestratorEventType.PR_ACTION_TAKEN in _DEFAULT_OPERATOR_EVENT_TYPES
+
+    def test_pr_action_failed_in_default_forward_set(self) -> None:
+        """PR_ACTION_FAILED IS forwarded by default: it corrects a
+        PR_ACTION_TAKEN whose subsequent dispatch failed, so it forwards
+        alongside (same rationale as the gate pair)."""
+        from cw.models import _DEFAULT_OPERATOR_EVENT_TYPES
+
+        assert OrchestratorEventType.PR_ACTION_FAILED in _DEFAULT_OPERATOR_EVENT_TYPES
+
     def test_orchestrator_config_gate_recipes_enabled_defaults_false(self) -> None:
         assert OrchestratorConfig().gate_recipes_enabled is False
 
