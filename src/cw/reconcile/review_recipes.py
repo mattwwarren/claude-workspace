@@ -49,7 +49,7 @@ from cw.events import record_event
 from cw.exceptions import CwError
 from cw.models import OrchestratorEventType
 from cw.pr_hydrate import _is_candidate, _parse_pr_url
-from cw.review_strategy import resolve_review_strategy
+from cw.review_strategy import MODE_CI, resolve_review_strategy
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -115,6 +115,7 @@ _PAYLOAD_KEY_REVIEW_DECISION = "review_decision"
 _PAYLOAD_KEY_REVIEW_STRATEGY_MODE = "review_strategy_mode"
 _PAYLOAD_KEY_REVIEWER_HANDLE = "reviewer_handle"
 _PAYLOAD_KEY_MERGE_STATE_STATUS = "merge_state_status"
+_PAYLOAD_KEY_FAILING_CHECKS = "failing_checks"
 
 # RFC 0010 P3 (#1098) — tier-3 hardcoded fallback for the per-lane resolver.
 # Default OFF (mirrors gate_recipes._DEFAULT_GATE_RECIPE_ENABLED): a review
@@ -576,7 +577,7 @@ def _prepare_auto_fix_ci_job(
         task,
         session_id,
         RECIPE_AUTO_FIX_CI,
-        {_PAYLOAD_KEY_REVIEW_DECISION: pr_state.review_decision},
+        {_PAYLOAD_KEY_FAILING_CHECKS: pr_state.failing_checks},
     )
     record_event(
         OrchestratorEventType.PR_ACTION_TAKEN,
@@ -661,6 +662,7 @@ class _ReviewerJob(NamedTuple):
     pr_url: str
     handle: str
     ticket_id: str
+    payload_base: dict[str, object]
 
 
 def _prepare_request_reviewer_job(
@@ -703,7 +705,7 @@ def _prepare_request_reviewer_job(
     strategy = resolve_review_strategy(
         client_cfg.repo_path or client_cfg.workspace_path
     )
-    if strategy.mode == "ci":
+    if strategy.mode == MODE_CI:
         return None  # policy: rely on CI — silent skip, not an anomaly
     if strategy.handle is None:
         _skip_with_anomaly(
@@ -727,21 +729,45 @@ def _prepare_request_reviewer_job(
         correlation_id=task.ticket_id,
     )
     return _ReviewerJob(
-        pr_url=task.pr_url, handle=strategy.handle, ticket_id=task.ticket_id
+        pr_url=task.pr_url,
+        handle=strategy.handle,
+        ticket_id=task.ticket_id,
+        payload_base=payload_base,
     )
 
 
-def _dispatch_request_reviewer(job: _ReviewerJob) -> str:
-    """Request the resolved reviewer on the PR (post-lock). Returns ticket_id.
+def _dispatch_request_reviewer(job: _ReviewerJob) -> str | None:
+    """Request the resolved reviewer on the PR (post-lock). ticket_id or None.
 
-    ``add_pr_reviewer`` is policy-free and never raises (it swallows OSError/
-    timeout, returning None), so there is no ``CwError`` path to correct here —
-    the durable ``PR_ACTION_TAKEN`` is the audit trail of the attempt. Imported
+    ``add_pr_reviewer`` never raises (it swallows OSError/timeout, returning
+    ``None``), but a swallowed exception or a non-zero ``returncode`` both mean
+    the gh call did not actually request the reviewer — mirrors
+    ``gate_recipes._post_auto_approve_comment``'s log-on-failure precedent for
+    this exact ``CompletedProcess | None`` return shape. A failure here emits a
+    ``PR_ACTION_FAILED`` correction so the already-recorded ``PR_ACTION_TAKEN``
+    isn't the only, misleadingly-optimistic signal in the audit trail. Imported
     function-locally to keep the ``cw.gh`` dependency off module import.
     """
     from cw.gh import add_pr_reviewer
 
-    add_pr_reviewer(job.pr_url, job.handle)
+    result = add_pr_reviewer(job.pr_url, job.handle)
+    if result is None:
+        _skip_with_anomaly(
+            job.payload_base,
+            error="gh call failed (subprocess error or timeout)",
+            ticket_id=job.ticket_id,
+        )
+        return None
+    if result.returncode != 0:
+        _skip_with_anomaly(
+            job.payload_base,
+            error=(
+                f"gh pr edit --add-reviewer failed rc={result.returncode}: "
+                f"{result.stderr.decode(errors='replace').strip()}"
+            ),
+            ticket_id=job.ticket_id,
+        )
+        return None
     return job.ticket_id
 
 
@@ -753,7 +779,8 @@ def _act_request_reviewer(
     Mirrors ``_act_address_review``'s lock/re-load/emit-before-action/deferred-
     side-effect shape. The ``add_pr_reviewer`` gh call runs strictly after the
     lock releases. No dev-queue mutation (the ticket's "no ticket state change").
-    Returns the ticket_ids for which a reviewer request was issued.
+    Returns the ticket_ids for which a reviewer request actually succeeded (a
+    failed gh call is excluded and corrected via ``PR_ACTION_FAILED``).
     """
     if not candidates:
         return []
@@ -768,7 +795,12 @@ def _act_request_reviewer(
             job = _prepare_request_reviewer_job(task, candidate.session_id, clients)
             if job is not None:
                 jobs.append(job)
-    return [_dispatch_request_reviewer(job) for job in jobs]
+    acted: list[str] = []
+    for job in jobs:
+        ticket_id = _dispatch_request_reviewer(job)
+        if ticket_id is not None:
+            acted.append(ticket_id)
+    return acted
 
 
 # --- escalate_merge_block act phase (RFC 0010 P4, #1099) -------------------

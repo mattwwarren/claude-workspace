@@ -64,6 +64,7 @@ from cw.reconcile import (
     reconcile,
     ticket_id_for_session,
 )
+from cw.review_strategy import HANDLE_KEY_BY_MODE, RECOGNIZED_MODES
 from cw.tracker import PROJECT_CONFIG_RELPATH
 from cw.worktree import _git_dir, get_head_branch
 
@@ -143,17 +144,6 @@ _TERMINAL_SESSION_STATUSES: frozenset[SessionStatus] = frozenset(
 # is a config error: the headless worker would silently fall back to its
 # built-in default (Linear MCP) and stall on OAuth (see #675 / project-config).
 _RECOGNIZED_TRACKERS: frozenset[str] = frozenset({"github-issues", "linear"})
-
-# review_strategy modes cw recognizes in .claude/project-config.yaml (RFC 0010
-# P4, #1099). repo_owner/reviewer_team each require a handle; a bad value only
-# WARNS (runtime silently degrades to ci — never wedges reconcile).
-_REVIEW_STRATEGY_HANDLE_KEY: dict[str, str] = {
-    "repo_owner": "repo_owner",
-    "reviewer_team": "reviewer_team",
-}
-_RECOGNIZED_REVIEW_STRATEGY_MODES: frozenset[str] = frozenset(
-    {"ci", *_REVIEW_STRATEGY_HANDLE_KEY}
-)
 
 # Wedge class for BLOCKED_ON_USER tasks whose sessions are dead (OOM/crash path).
 _WEDGE_BLOCKED_DEAD_SESSION = "wedge/blocked-on-user-dead-session"
@@ -289,18 +279,18 @@ def _review_strategy_warning(name: str, block: object) -> CheckResult | None:
             name, ok=True, warn=True, detail="review_strategy is not a mapping"
         )
     mode = block.get("mode")
-    if mode not in _RECOGNIZED_REVIEW_STRATEGY_MODES:
+    if mode not in RECOGNIZED_MODES:
         return CheckResult(
             name,
             ok=True,
             warn=True,
             detail=(
                 f"review_strategy.mode={mode!r} is not recognized"
-                f" (expected one of {sorted(_RECOGNIZED_REVIEW_STRATEGY_MODES)})"
+                f" (expected one of {sorted(RECOGNIZED_MODES)})"
                 " — runtime degrades to ci"
             ),
         )
-    handle_key = _REVIEW_STRATEGY_HANDLE_KEY.get(mode)
+    handle_key = HANDLE_KEY_BY_MODE.get(mode)
     if handle_key is not None and not block.get(handle_key):
         return CheckResult(
             name,

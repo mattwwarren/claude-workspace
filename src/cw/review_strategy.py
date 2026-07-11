@@ -3,39 +3,48 @@
 Centralises the ``review_strategy`` read from ``.claude/project-config.yaml`` so
 ``cw.reconcile.review_recipes`` has one resolution point for "who should this
 repo request as a PR reviewer." Mirrors ``cw.tracker.resolve_tracker``'s shape
-exactly: the same ``PROJECT_CONFIG_RELPATH``, the same ``yaml.safe_load`` +
-``isinstance`` walk, and the same "any failure -> safe default" philosophy.
+exactly: the same ``PROJECT_CONFIG_RELPATH`` (imported from ``cw.tracker``, not
+redeclared), the same ``yaml.safe_load`` + ``isinstance`` walk, and the same
+"any failure -> safe default" philosophy.
 
 The safe default is ``ReviewStrategy("ci", None)`` — "rely on CI, request no
 reviewer." A missing file, malformed YAML, a non-dict root, an absent or
 non-dict ``review_strategy`` key, a non-string / unrecognized ``mode``, or a
 non-string handle all degrade to it. The runtime therefore never wedges on a
-typo; ``cw doctor`` is where the typo is surfaced to the operator as a warning.
+typo; ``cw doctor`` is where the typo is surfaced to the operator as a warning
+(``cw.doctor`` imports ``HANDLE_KEY_BY_MODE``/``RECOGNIZED_MODES`` below rather
+than redeclaring its own copy of the mode vocabulary).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import yaml
 
-# Repo-relative path to the per-client project config — the SAME file
-# cw.tracker.resolve_tracker reads (tracking.primary.system lives there too).
-PROJECT_CONFIG_RELPATH = Path(".claude") / "project-config.yaml"
+from cw.tracker import PROJECT_CONFIG_RELPATH
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # Recognized review-strategy modes. "ci" is the no-op default; the other two
-# name a GitHub handle source (repo owner login, or an org/team slug).
-_MODE_CI: Literal["ci"] = "ci"
-_MODE_REPO_OWNER: Literal["repo_owner"] = "repo_owner"
-_MODE_REVIEWER_TEAM: Literal["reviewer_team"] = "reviewer_team"
+# name a GitHub handle source (repo owner login, or an org/team slug). Public
+# (no leading underscore): cw.doctor imports these rather than redeclaring its
+# own copy of the mode vocabulary.
+MODE_CI: Literal["ci"] = "ci"
+MODE_REPO_OWNER: Literal["repo_owner"] = "repo_owner"
+MODE_REVIEWER_TEAM: Literal["reviewer_team"] = "reviewer_team"
 
 # Per-mode key naming the handle to read out of the review_strategy block.
-_HANDLE_KEY_BY_MODE: dict[str, str] = {
-    _MODE_REPO_OWNER: "repo_owner",
-    _MODE_REVIEWER_TEAM: "reviewer_team",
+HANDLE_KEY_BY_MODE: dict[str, str] = {
+    MODE_REPO_OWNER: "repo_owner",
+    MODE_REVIEWER_TEAM: "reviewer_team",
 }
+
+# Every recognized mode, including the handle-less "ci" default — the set
+# cw.doctor validates review_strategy.mode against.
+RECOGNIZED_MODES: frozenset[str] = frozenset({MODE_CI, *HANDLE_KEY_BY_MODE})
 
 ReviewStrategyMode = Literal["ci", "repo_owner", "reviewer_team"]
 
@@ -54,7 +63,7 @@ class ReviewStrategy:
     handle: str | None
 
 
-_CI_DEFAULT = ReviewStrategy(_MODE_CI, None)
+_CI_DEFAULT = ReviewStrategy(MODE_CI, None)
 
 
 def _load_review_strategy_block(root: Path) -> dict[str, object] | None:
@@ -90,9 +99,9 @@ def resolve_review_strategy(root: Path) -> ReviewStrategy:
     if block is None:
         return _CI_DEFAULT
     mode = block.get("mode")
-    if not isinstance(mode, str) or mode not in _HANDLE_KEY_BY_MODE:
+    if not isinstance(mode, str) or mode not in HANDLE_KEY_BY_MODE:
         return _CI_DEFAULT
-    handle = block.get(_HANDLE_KEY_BY_MODE[mode])
+    handle = block.get(HANDLE_KEY_BY_MODE[mode])
     return ReviewStrategy(
         cast("ReviewStrategyMode", mode),
         handle if isinstance(handle, str) else None,

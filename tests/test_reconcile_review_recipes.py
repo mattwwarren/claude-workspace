@@ -18,6 +18,7 @@ and stub the daemon spawn via the file-local ``stub_spawn`` fixture.
 from __future__ import annotations
 
 import fcntl
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -758,7 +759,12 @@ def test_act_auto_fix_ci_calls_add_ticket_and_dispatch_once(
     tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _write_acme_clients_yaml(tmp_config_dir)
-    task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="ci_failing"))
+    task = _make_task(
+        pr_url=_PR_URL,
+        pr_state=_pr_state(
+            attention_state="ci_failing", failing_checks=["lint", "mypy"]
+        ),
+    )
     save_dev_queue(DevQueueStore(tasks=[task]))
     added: list[TicketTask] = []
     dispatched: list[dict[str, Any]] = []
@@ -784,6 +790,12 @@ def test_act_auto_fix_ci_calls_add_ticket_and_dispatch_once(
     assert added[0].client == task.client
     assert added[0].lane == task.lane
     assert dispatched == [{"once": True, "client": task.client, "emit": None}]
+    taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+    # auto_fix_ci's evidence is the failing checks, not the (meaningless-here)
+    # review_decision field the address_review recipe uses.
+    assert taken[-1].payload["evidence_snapshot"] == {
+        "failing_checks": ["lint", "mypy"]
+    }
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
 
 
@@ -900,12 +912,16 @@ def test_act_request_reviewer_configured_mode_calls_gh_helper(
     save_dev_queue(DevQueueStore(tasks=[task]))
     _stub_strategy(monkeypatch, ReviewStrategy(mode, handle))  # type: ignore[arg-type]
     calls: list[tuple[str, str]] = []
+    store_before = load_dev_queue()
 
-    def _fake_add(pr_ref: str, reviewer: str, **_kw: Any) -> None:
+    def _fake_add(
+        pr_ref: str, reviewer: str, **_kw: Any
+    ) -> subprocess.CompletedProcess[bytes]:
         # emit-before-action: PR_ACTION_TAKEN is durable before the gh call.
         taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
         assert any(e.correlation_id == task.ticket_id for e in taken)
         calls.append((pr_ref, reviewer))
+        return subprocess.CompletedProcess(args=[], returncode=0)
 
     monkeypatch.setattr("cw.gh.add_pr_reviewer", _fake_add)
 
@@ -921,6 +937,38 @@ def test_act_request_reviewer_configured_mode_calls_gh_helper(
     assert payload["review_strategy_mode"] == mode
     assert payload["reviewer_handle"] == handle
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+    # request_reviewer's stated acceptance criterion is "no dev-queue mutation"
+    # — confirm the store is byte-for-byte unchanged, not just that no code
+    # path *looks* like it writes.
+    assert load_dev_queue() == store_before
+
+
+def test_act_request_reviewer_gh_call_fails_emits_failed(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_acme_clients_yaml(tmp_config_dir)
+    task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="no_reviewer"))
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    _stub_strategy(monkeypatch, ReviewStrategy("repo_owner", "alice"))
+    monkeypatch.setattr(
+        "cw.gh.add_pr_reviewer",
+        lambda *_a, **_kw: subprocess.CompletedProcess(
+            args=[], returncode=1, stderr=b"permission denied"
+        ),
+    )
+
+    acted = _act_request_reviewer(
+        [_candidate(task, RECIPE_REQUEST_REVIEWER, "no_reviewer")],
+        clients=load_effective_clients(),
+    )
+
+    assert acted == []
+    taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+    assert len(taken) == 1  # optimistic PR_ACTION_TAKEN still recorded pre-call
+    failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+    assert len(failed) == 1
+    assert failed[0].correlation_id == task.ticket_id
+    assert "permission denied" in failed[0].payload["error"]
 
 
 def test_act_request_reviewer_misconfigured_mode_missing_handle_emits_failed(
