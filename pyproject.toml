@@ -173,6 +173,7 @@ ignore = [
 "src/cw/cw_queue_events_channel.py" = ["PLC0415"]
 "src/cw/cw_operator_events.py" = ["PLC0415"]
 "src/cw/cw_operator_events_channel.py" = ["PLC0415"]
+"src/cw/_sse_util.py" = ["PLC0415"]
 # dev_queue defers the dispatch import to break the dev_queue ↔ dispatch
 # circular dependency. consume_completed_sessions() is a thin wrapper whose
 # deferred body import is the sanctioned mechanism, not a workaround.
