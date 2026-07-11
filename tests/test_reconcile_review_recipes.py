@@ -1105,3 +1105,118 @@ def test_run_review_recipes_wires_escalate_merge_block(tmp_config_dir: Path) -> 
     assert load_dev_queue().tasks[0].escalate_merge_block_fired_at is not None
     taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
     assert any(e.correlation_id == task.ticket_id for e in taken)
+
+
+# --- anomaly / stale / vanished branches -----------------------------------
+
+
+def _orphan_candidate(recipe: str, attention_state: str) -> ReviewRecipeCandidate:
+    """A candidate whose (ticket_id, client) row is absent from the store."""
+    return ReviewRecipeCandidate(
+        ticket_id="GONE",
+        client="acme",
+        lane="default",
+        recipe=recipe,
+        attention_state=attention_state,
+        pr_url=_PR_URL,
+        evidence={},
+        session_id=None,
+    )
+
+
+def test_act_auto_fix_ci_vanished_row_silent_skip(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_acme_clients_yaml(tmp_config_dir)
+    save_dev_queue(DevQueueStore(tasks=[]))  # row deleted between detect and act
+    monkeypatch.setattr(
+        "cw.dev_queue.add_ticket", lambda _t: pytest.fail("no dispatch for a gone row")
+    )
+    assert _act_auto_fix_ci([_orphan_candidate(RECIPE_AUTO_FIX_CI, "ci_failing")]) == []
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
+
+
+def test_act_request_reviewer_vanished_row_silent_skip(tmp_config_dir: Path) -> None:
+    _write_acme_clients_yaml(tmp_config_dir)
+    save_dev_queue(DevQueueStore(tasks=[]))
+    acted = _act_request_reviewer(
+        [_orphan_candidate(RECIPE_REQUEST_REVIEWER, "no_reviewer")],
+        clients=load_effective_clients(),
+    )
+    assert acted == []
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
+
+
+def test_act_request_reviewer_stale_row_silent_skip(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_acme_clients_yaml(tmp_config_dir)
+    task = _make_task(
+        pr_url=_PR_URL, pr_state=_pr_state(attention_state="ready_to_approve")
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    monkeypatch.setattr(
+        "cw.gh.add_pr_reviewer", lambda *_a, **_kw: pytest.fail("no gh for a stale row")
+    )
+    acted = _act_request_reviewer(
+        [_candidate(task, RECIPE_REQUEST_REVIEWER, "no_reviewer")],
+        clients=load_effective_clients(),
+    )
+    assert acted == []
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+
+
+def test_act_request_reviewer_missing_client_emits_failed(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _write_acme_clients_yaml(tmp_config_dir)  # defines acme, not ghost
+    task = _make_task(
+        client="ghost",
+        pr_url="https://github.com/ghost/widgets/pull/42",
+        pr_state=_pr_state(attention_state="no_reviewer"),
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    monkeypatch.setattr(
+        "cw.gh.add_pr_reviewer",
+        lambda *_a, **_kw: pytest.fail("no gh for an unresolvable client"),
+    )
+    with caplog.at_level("WARNING"):
+        acted = _act_request_reviewer(
+            [_candidate(task, RECIPE_REQUEST_REVIEWER, "no_reviewer")],
+            clients=load_effective_clients(),
+        )
+    assert acted == []
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
+    failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+    assert len(failed) == 1
+    assert failed[0].payload["client"] == "ghost"
+
+
+def test_act_escalate_merge_block_vanished_row_silent_skip(
+    tmp_config_dir: Path,
+) -> None:
+    _write_acme_clients_yaml(tmp_config_dir)
+    save_dev_queue(DevQueueStore(tasks=[]))
+    acted = _act_escalate_merge_block(
+        [_orphan_candidate(RECIPE_ESCALATE_MERGE_BLOCK, "merge_blocked")]
+    )
+    assert acted == []
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
+
+
+def test_act_escalate_merge_block_stale_row_silent_skip(tmp_config_dir: Path) -> None:
+    _write_acme_clients_yaml(tmp_config_dir)
+    # Re-loaded row moved off merge_blocked -> _fire returns False, no event.
+    task = _make_task(
+        pr_url=_PR_URL, pr_state=_pr_state(attention_state="ready_to_approve")
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    acted = _act_escalate_merge_block(
+        [_candidate(task, RECIPE_ESCALATE_MERGE_BLOCK, "merge_blocked")]
+    )
+    assert acted == []
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
+    assert load_dev_queue().tasks[0].escalate_merge_block_fired_at is None
