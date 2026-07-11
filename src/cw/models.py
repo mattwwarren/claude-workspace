@@ -283,6 +283,21 @@ class OrchestratorEventType(StrEnum):
     # be a false "approved" signal on the operator channel. Forwarded by
     # default alongside GATE_AUTO_APPROVED for the same reason.
     GATE_AUTO_APPROVE_FAILED = "gate.auto_approve_failed"
+    # RFC 0010 P2 (#1097) — review-recipe act phase. Emitted by
+    # cw.reconcile.review_recipes._act_address_review BEFORE dispatching an
+    # /address-review session in response to a PR whose review came back
+    # changes_requested. Like GATE_AUTO_APPROVED (contrast CONCIERGE_RECOVERED,
+    # audit-only), this IS forwarded to the operator channel by default — an
+    # automated PR action with no human in the loop is attention-worthy. Reused
+    # by RFC 0010 P4's other review recipes with no new event types.
+    PR_ACTION_TAKEN = "pr.action_taken"
+    # RFC 0010 P2 (#1097) — companion to PR_ACTION_TAKEN. Emitted when the
+    # dispatch (spawn_create_impl) raises after PR_ACTION_TAKEN was already
+    # recorded, or when a precondition anomaly (unparseable PR url, unresolvable
+    # client, missing worktree) blocks the action — so the durable event stream
+    # carries a correction, not just a non-durable log line. Forwarded by
+    # default alongside PR_ACTION_TAKEN for the same reason.
+    PR_ACTION_FAILED = "pr.action_failed"
 
 
 # Absolute ceiling on task.attempts across all kill causes (#786).
@@ -713,6 +728,13 @@ _DEFAULT_OPERATOR_EVENT_TYPES: frozenset[OrchestratorEventType] = frozenset(
         # the operator channel as an uncorrected false-positive "approved"
         # signal.
         OrchestratorEventType.GATE_AUTO_APPROVE_FAILED,
+        # RFC 0010 P2 (#1097): a review recipe dispatching an /address-review
+        # action with no human in the loop is operator-attention-worthy —
+        # forwarded by default (contrast CONCIERGE_RECOVERED, excluded above as
+        # audit-only). PR_ACTION_FAILED forwards alongside so a failed dispatch
+        # never leaves PR_ACTION_TAKEN standing alone as an uncorrected signal.
+        OrchestratorEventType.PR_ACTION_TAKEN,
+        OrchestratorEventType.PR_ACTION_FAILED,
     }
 )
 _DEFAULT_OPERATOR_TASK_TRANSITION_STATUSES: frozenset[QueueItemStatus] = frozenset(
