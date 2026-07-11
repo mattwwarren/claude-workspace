@@ -3896,6 +3896,12 @@ class TestCheckReviewStrategy:
         self._write(tmp_path, "review_strategy: [unclosed\n")
         assert _check_review_strategy({"client-a": self._client(tmp_path)}) == []
 
+    def test_non_dict_root_no_result(self, tmp_path: Path) -> None:
+        from cw.doctor import _check_review_strategy
+
+        self._write(tmp_path, "just-a-string\n")
+        assert _check_review_strategy({"client-a": self._client(tmp_path)}) == []
+
     def test_run_doctor_includes_review_strategy_warning(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
     ) -> None:
