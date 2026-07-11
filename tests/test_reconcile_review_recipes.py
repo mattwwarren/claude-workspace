@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from pydantic import ValidationError
 
 from cw.dev_queue import load_dev_queue, save_dev_queue
@@ -89,12 +88,17 @@ def test_detect_address_review_only_changes_requested_negative(
         pr_url="https://github.com/acme/widgets/pull/42",
         pr_state=_pr_state(state="OPEN", attention_state=attention_state),
     )
-    assert _detect_address_review([task], clients=_enabling_clients(), config=_config()) == []
+    assert (
+        _detect_address_review([task], clients=_enabling_clients(), config=_config())
+        == []
+    )
 
 
 def test_detect_address_review_only_changes_requested_positive() -> None:
     task = _cr_task()
-    candidates = _detect_address_review([task], clients=_enabling_clients(), config=_config())
+    candidates = _detect_address_review(
+        [task], clients=_enabling_clients(), config=_config()
+    )
     assert len(candidates) == 1
     candidate = candidates[0]
     assert candidate.recipe == RECIPE_ADDRESS_REVIEW
@@ -112,20 +116,29 @@ def test_detect_address_review_requires_is_candidate() -> None:
         pr_url=None,
         pr_state=_pr_state(state="OPEN", attention_state="changes_requested"),
     )
-    assert _detect_address_review([no_url], clients=_enabling_clients(), config=_config()) == []
+    assert (
+        _detect_address_review([no_url], clients=_enabling_clients(), config=_config())
+        == []
+    )
     # Terminal PR state -> _is_candidate False regardless of attention_state.
     merged = _make_task(
         pr_url="https://github.com/acme/widgets/pull/42",
         pr_state=_pr_state(state="MERGED", attention_state="changes_requested"),
     )
-    assert _detect_address_review([merged], clients=_enabling_clients(), config=_config()) == []
+    assert (
+        _detect_address_review([merged], clients=_enabling_clients(), config=_config())
+        == []
+    )
 
 
 def test_detect_address_review_pr_state_none_guard() -> None:
     # pr_url set but pr_state None: _is_candidate is True (hydratable), but the
     # detect phase requires an actual pr_state to read attention_state from.
     task = _make_task(pr_url="https://github.com/acme/widgets/pull/42", pr_state=None)
-    assert _detect_address_review([task], clients=_enabling_clients(), config=_config()) == []
+    assert (
+        _detect_address_review([task], clients=_enabling_clients(), config=_config())
+        == []
+    )
 
 
 def test_run_review_recipes_master_switch_off_is_noop() -> None:
@@ -135,9 +148,7 @@ def test_run_review_recipes_master_switch_off_is_noop() -> None:
     # Dual gating: _detect_address_review gates on the switch itself too, so a
     # direct call with the switch off returns [] even given a live candidate.
     assert (
-        _detect_address_review(
-            [_cr_task()], clients=_enabling_clients(), config=config
-        )
+        _detect_address_review([_cr_task()], clients=_enabling_clients(), config=config)
         == []
     )
 
@@ -165,12 +176,17 @@ def test_draft_pr_never_a_candidate() -> None:
         pr_url="https://github.com/acme/widgets/pull/42",
         pr_state=_pr_state(state="OPEN", attention_state=None),
     )
-    assert _detect_address_review([task], clients=_enabling_clients(), config=_config()) == []
+    assert (
+        _detect_address_review([task], clients=_enabling_clients(), config=_config())
+        == []
+    )
 
 
 def test_detect_address_review_surfaces_sessionless_candidate() -> None:
     task = _cr_task(session_id=None)
-    candidates = _detect_address_review([task], clients=_enabling_clients(), config=_config())
+    candidates = _detect_address_review(
+        [task], clients=_enabling_clients(), config=_config()
+    )
     assert len(candidates) == 1
     assert candidates[0].session_id is None
 
@@ -188,9 +204,7 @@ class TestResolveReviewRecipeEnabled:
         disabling lane map (False), in both directions."""
         clients = {
             "acme": _client_with_lanes(
-                LaneConfig(
-                    name="default", review_recipes={RECIPE_ADDRESS_REVIEW: True}
-                )
+                LaneConfig(name="default", review_recipes={RECIPE_ADDRESS_REVIEW: True})
             )
         }
         task_off = _make_task(review_recipes={RECIPE_ADDRESS_REVIEW: False})
@@ -215,9 +229,7 @@ class TestResolveReviewRecipeEnabled:
         """With no ticket override, the lane map wins over the default floor."""
         clients = {
             "acme": _client_with_lanes(
-                LaneConfig(
-                    name="default", review_recipes={RECIPE_ADDRESS_REVIEW: True}
-                )
+                LaneConfig(name="default", review_recipes={RECIPE_ADDRESS_REVIEW: True})
             )
         }
         task = _make_task()  # no ticket-level override
@@ -247,9 +259,7 @@ class TestResolveReviewRecipeEnabled:
         # Client present but the task's lane is not among its lanes.
         clients = {
             "acme": _client_with_lanes(
-                LaneConfig(
-                    name="other", review_recipes={RECIPE_ADDRESS_REVIEW: True}
-                )
+                LaneConfig(name="other", review_recipes={RECIPE_ADDRESS_REVIEW: True})
             )
         }
         assert (
