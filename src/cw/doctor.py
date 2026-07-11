@@ -144,6 +144,17 @@ _TERMINAL_SESSION_STATUSES: frozenset[SessionStatus] = frozenset(
 # built-in default (Linear MCP) and stall on OAuth (see #675 / project-config).
 _RECOGNIZED_TRACKERS: frozenset[str] = frozenset({"github-issues", "linear"})
 
+# review_strategy modes cw recognizes in .claude/project-config.yaml (RFC 0010
+# P4, #1099). repo_owner/reviewer_team each require a handle; a bad value only
+# WARNS (runtime silently degrades to ci — never wedges reconcile).
+_REVIEW_STRATEGY_HANDLE_KEY: dict[str, str] = {
+    "repo_owner": "repo_owner",
+    "reviewer_team": "reviewer_team",
+}
+_RECOGNIZED_REVIEW_STRATEGY_MODES: frozenset[str] = frozenset(
+    {"ci", *_REVIEW_STRATEGY_HANDLE_KEY}
+)
+
 # Wedge class for BLOCKED_ON_USER tasks whose sessions are dead (OOM/crash path).
 _WEDGE_BLOCKED_DEAD_SESSION = "wedge/blocked-on-user-dead-session"
 
@@ -240,6 +251,83 @@ def _check_project_configs(clients: dict[str, ClientConfig]) -> list[CheckResult
             )
             continue
         results.append(_tracker_prereq_result(name, system, path))
+    return results
+
+
+def _review_strategy_block(root: Path) -> object:
+    """Return the raw ``review_strategy`` value from project-config.yaml, or None.
+
+    Returns None (a "nothing to warn about" signal) for an absent file,
+    unparseable YAML, a non-dict root, or an absent key — a YAML parse failure
+    is already surfaced by ``_check_project_configs``, so this check stays quiet
+    rather than double-reporting.
+    """
+    path = root / PROJECT_CONFIG_RELPATH
+    if not path.exists():
+        return None
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    return raw.get("review_strategy")
+
+
+def _review_strategy_warning(name: str, block: object) -> CheckResult | None:
+    """Return a WARN CheckResult for a misconfigured review_strategy, else None.
+
+    Never a hard fail: the runtime silently degrades a bad value to ``ci`` (see
+    ``cw.review_strategy.resolve_review_strategy``), so doctor's job is only to
+    surface the typo. Clean configs (absent, ``ci``, or a mode with its handle)
+    return None so no line is emitted.
+    """
+    if block is None:
+        return None
+    if not isinstance(block, dict):
+        return CheckResult(
+            name, ok=True, warn=True, detail="review_strategy is not a mapping"
+        )
+    mode = block.get("mode")
+    if mode not in _RECOGNIZED_REVIEW_STRATEGY_MODES:
+        return CheckResult(
+            name,
+            ok=True,
+            warn=True,
+            detail=(
+                f"review_strategy.mode={mode!r} is not recognized"
+                f" (expected one of {sorted(_RECOGNIZED_REVIEW_STRATEGY_MODES)})"
+                " — runtime degrades to ci"
+            ),
+        )
+    handle_key = _REVIEW_STRATEGY_HANDLE_KEY.get(mode)
+    if handle_key is not None and not block.get(handle_key):
+        return CheckResult(
+            name,
+            ok=True,
+            warn=True,
+            detail=(
+                f"review_strategy.mode={mode!r} but {handle_key!r} handle is"
+                " missing — request_reviewer will emit PR_ACTION_FAILED"
+            ),
+        )
+    return None
+
+
+def _check_review_strategy(clients: dict[str, ClientConfig]) -> list[CheckResult]:
+    """Warn on a misconfigured review_strategy per client (RFC 0010 P4, #1099).
+
+    Advisory-only: emits a WARN (never a FAIL) when ``review_strategy.mode`` is
+    unrecognized, non-mapping, or names a ``repo_owner``/``reviewer_team`` mode
+    with a missing handle. A clean or absent config emits nothing.
+    """
+    results: list[CheckResult] = []
+    for client_name, client in clients.items():
+        root = client.repo_path or client.workspace_path
+        block = _review_strategy_block(root)
+        warning = _review_strategy_warning(f"review-strategy/{client_name}", block)
+        if warning is not None:
+            results.append(warning)
     return results
 
 
@@ -1274,6 +1362,7 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     except (OSError, yaml.YAMLError, CwError, ValidationError):
         _clients = {}
     report.checks.extend(_check_project_configs(_clients))
+    report.checks.extend(_check_review_strategy(_clients))
     state_check, link_state = _check_state_file()
     report.checks.append(state_check)
     report.checks.append(_check_dev_queue())
