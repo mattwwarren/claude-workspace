@@ -173,6 +173,7 @@ ignore = [
 "src/cw/cw_queue_events_channel.py" = ["PLC0415"]
 "src/cw/cw_operator_events.py" = ["PLC0415"]
 "src/cw/cw_operator_events_channel.py" = ["PLC0415"]
+"src/cw/_sse_util.py" = ["PLC0415"]
 # dev_queue defers the dispatch import to break the dev_queue ↔ dispatch
 # circular dependency. consume_completed_sessions() is a thin wrapper whose
 # deferred body import is the sanctioned mechanism, not a workaround.
@@ -191,6 +192,7 @@ ignore = [
 "tests/test_cw_queue_events_channel.py" = ["E402"]
 "tests/test_channels_queue_events.py" = ["E402"]
 "tests/test_cw_operator_events_channel.py" = ["E402"]
+"tests/test__sse_util.py" = ["E402"]
 "tests/**" = [
     "S101",     # assert is fine in tests
     "ARG001",   # unused function args common in fixtures/mocks
