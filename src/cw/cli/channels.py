@@ -24,7 +24,19 @@ def pr_channel_proxy(client_id: str | None) -> None:
 @pr_channel.command(name="serve")
 @click.option("--port", default=8788, type=int, show_default=True)
 @click.option("--host", default="127.0.0.1", show_default=True)
-def pr_channel_serve(port: int, host: str) -> None:
+@click.option(
+    "--allow-unsigned",
+    is_flag=True,
+    default=False,
+    help=(
+        "Accept unsigned /pr-event requests when CW_PR_EVENTS_HMAC_SECRET is "
+        "unset (#1127). Off by default: without a secret configured, "
+        "unsigned requests are rejected with 401. Only pass this if you "
+        "understand the blast radius of an unauthenticated, internet-facing "
+        "endpoint (see docs/dispatch-runbook.md)."
+    ),
+)
+def pr_channel_serve(port: int, host: str, allow_unsigned: bool) -> None:
     """Start the cw-pr-events MCP channel server.
 
     Defaults mirror ``cw.cw_pr_events_server.DEFAULT_HOST`` / ``DEFAULT_PORT`` —
@@ -33,7 +45,7 @@ def pr_channel_serve(port: int, host: str) -> None:
     """
     from cw.cw_pr_events_server import serve as _serve  # noqa: PLC0415
 
-    _serve(host=host, port=port)
+    _serve(host=host, port=port, allow_unsigned=allow_unsigned)
 
 
 @main.group(name="queue-channel")
