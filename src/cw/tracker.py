@@ -19,11 +19,16 @@ PROJECT_CONFIG_RELPATH = Path(".claude") / "project-config.yaml"
 TRACKER_GITHUB_ISSUES = "github-issues"
 
 
-def resolve_tracker(root: Path) -> str | None:
-    """Return tracking.primary.system from <root>/.claude/project-config.yaml, or None.
+def load_project_config_dict(root: Path) -> dict[str, object] | None:
+    """Read <root>/.claude/project-config.yaml as a dict, or None on any failure.
 
-    Returns None when the file is absent, unparseable, or the key is missing —
-    callers treat None as "unknown tracker, don't restrict."
+    Consolidates the safe-read walk (missing file, unparseable YAML, non-dict
+    root) shared by every ``.claude/project-config.yaml`` consumer — callers
+    then do their own ``.get(key)`` + type-narrowing for the section they need
+    (e.g. ``resolve_review_strategy``'s ``review_strategy`` block, ``cw
+    doctor``'s checks). Returns the raw root mapping unfiltered; a caller that
+    also needs "absent" distinguished from "present but wrong shape" for a
+    sub-key gets that from the returned dict directly.
     """
     path = root / PROJECT_CONFIG_RELPATH
     if not path.exists():
@@ -32,7 +37,17 @@ def resolve_tracker(root: Path) -> str | None:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError):
         return None
-    if not isinstance(raw, dict):
+    return raw if isinstance(raw, dict) else None
+
+
+def resolve_tracker(root: Path) -> str | None:
+    """Return tracking.primary.system from <root>/.claude/project-config.yaml, or None.
+
+    Returns None when the file is absent, unparseable, or the key is missing —
+    callers treat None as "unknown tracker, don't restrict."
+    """
+    raw = load_project_config_dict(root)
+    if raw is None:
         return None
     tracking = raw.get("tracking")
     if not isinstance(tracking, dict):

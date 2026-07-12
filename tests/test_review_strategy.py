@@ -9,11 +9,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from cw.review_strategy import (
-    PROJECT_CONFIG_RELPATH,
-    ReviewStrategy,
-    resolve_review_strategy,
-)
+from cw.review_strategy import ReviewStrategy, resolve_review_strategy
+from cw.tracker import PROJECT_CONFIG_RELPATH
 
 
 def _write_config(root: Path, content: str) -> None:

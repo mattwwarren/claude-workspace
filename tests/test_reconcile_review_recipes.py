@@ -971,6 +971,31 @@ def test_act_request_reviewer_gh_call_fails_emits_failed(
     assert "permission denied" in failed[0].payload["error"]
 
 
+def test_act_request_reviewer_gh_call_errors_emits_failed(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``add_pr_reviewer`` returns None on a subprocess error/timeout — a
+    distinct failure shape from a non-zero returncode, exercised separately."""
+    _write_acme_clients_yaml(tmp_config_dir)
+    task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="no_reviewer"))
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    _stub_strategy(monkeypatch, ReviewStrategy("repo_owner", "alice"))
+    monkeypatch.setattr("cw.gh.add_pr_reviewer", lambda *_a, **_kw: None)
+
+    acted = _act_request_reviewer(
+        [_candidate(task, RECIPE_REQUEST_REVIEWER, "no_reviewer")],
+        clients=load_effective_clients(),
+    )
+
+    assert acted == []
+    taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+    assert len(taken) == 1  # optimistic PR_ACTION_TAKEN still recorded pre-call
+    failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+    assert len(failed) == 1
+    assert failed[0].correlation_id == task.ticket_id
+    assert "gh call failed" in failed[0].payload["error"]
+
+
 def test_act_request_reviewer_misconfigured_mode_missing_handle_emits_failed(
     tmp_config_dir: Path,
     monkeypatch: pytest.MonkeyPatch,

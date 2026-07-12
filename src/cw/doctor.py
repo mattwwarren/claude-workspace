@@ -65,7 +65,7 @@ from cw.reconcile import (
     ticket_id_for_session,
 )
 from cw.review_strategy import HANDLE_KEY_BY_MODE, RECOGNIZED_MODES
-from cw.tracker import PROJECT_CONFIG_RELPATH
+from cw.tracker import PROJECT_CONFIG_RELPATH, load_project_config_dict
 from cw.worktree import _git_dir, get_head_branch
 
 if TYPE_CHECKING:
@@ -250,16 +250,12 @@ def _review_strategy_block(root: Path) -> object:
     Returns None (a "nothing to warn about" signal) for an absent file,
     unparseable YAML, a non-dict root, or an absent key — a YAML parse failure
     is already surfaced by ``_check_project_configs``, so this check stays quiet
-    rather than double-reporting.
+    rather than double-reporting. The file-read walk itself is shared with
+    every other project-config.yaml consumer via
+    ``cw.tracker.load_project_config_dict``.
     """
-    path = root / PROJECT_CONFIG_RELPATH
-    if not path.exists():
-        return None
-    try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
-        return None
-    if not isinstance(raw, dict):
+    raw = load_project_config_dict(root)
+    if raw is None:
         return None
     return raw.get("review_strategy")
 

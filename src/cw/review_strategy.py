@@ -2,10 +2,11 @@
 
 Centralises the ``review_strategy`` read from ``.claude/project-config.yaml`` so
 ``cw.reconcile.review_recipes`` has one resolution point for "who should this
-repo request as a PR reviewer." Mirrors ``cw.tracker.resolve_tracker``'s shape
-exactly: the same ``PROJECT_CONFIG_RELPATH`` (imported from ``cw.tracker``, not
-redeclared), the same ``yaml.safe_load`` + ``isinstance`` walk, and the same
-"any failure -> safe default" philosophy.
+repo request as a PR reviewer." Mirrors ``cw.tracker.resolve_tracker``'s shape:
+the file-read walk (path, ``yaml.safe_load``, non-dict-root guard) is the SAME
+call — ``cw.tracker.load_project_config_dict`` — that ``resolve_tracker`` and
+``cw.doctor``'s checks share, and the same "any failure -> safe default"
+philosophy.
 
 The safe default is ``ReviewStrategy("ci", None)`` — "rely on CI, request no
 reviewer." A missing file, malformed YAML, a non-dict root, an absent or
@@ -21,9 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, cast
 
-import yaml
-
-from cw.tracker import PROJECT_CONFIG_RELPATH
+from cw.tracker import load_project_config_dict
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -71,16 +70,12 @@ def _load_review_strategy_block(root: Path) -> dict[str, object] | None:
 
     Consolidates the four safe-default exits (absent file, unparseable YAML,
     non-dict root, absent/non-dict block) so ``resolve_review_strategy`` stays
-    under the return-count ceiling and reads as a single mode dispatch.
+    under the return-count ceiling and reads as a single mode dispatch. The
+    file-read walk itself is shared with every other project-config.yaml
+    consumer via ``cw.tracker.load_project_config_dict``.
     """
-    path = root / PROJECT_CONFIG_RELPATH
-    if not path.exists():
-        return None
-    try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
-        return None
-    if not isinstance(raw, dict):
+    raw = load_project_config_dict(root)
+    if raw is None:
         return None
     block = raw.get("review_strategy")
     return block if isinstance(block, dict) else None
