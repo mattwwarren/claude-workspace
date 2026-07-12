@@ -154,7 +154,16 @@ Create PR via /prep-pr + /ship-it?
 
 ### Step 4c: Delegate to /prep-pr
 
-Spawn a **general-purpose** agent (`model: "sonnet"`) scoped to the implementation worktree. The agent invokes `/prep-pr` which handles: sync-with-main (+ conflict handling), quality gate detection + re-run, and ship-it delegation (per-project PR creation conventions, branch naming, CI setup). **But first run the mandatory isolation gate in Step 4c.1 — the spawn's `isolation` flag is decided there, not defaulted.**
+**Do NOT spawn anything in this step. The spawn happens in Step 4c.2, and ONLY after
+the Step 4c.1 gate has run.** This step delegates PR creation to a `/prep-pr` agent, but
+the spawn is **gated**: your **first action is the mandatory isolation check in Step 4c.1**,
+whose result sets the spawn's `isolation` flag. Spawning here — before running 4c.1 — is the
+exact mistake that causes the guaranteed hang documented in 4c.1 (a headless finalize skipped
+straight to the spawn and hung ~40 min; #1097, #1123). The `/prep-pr` agent you spawn in 4c.2
+handles: sync-with-main (+ conflict handling), quality gate detection + re-run, and ship-it
+delegation (per-project PR creation conventions, branch naming, CI setup).
+
+**Proceed to Step 4c.1 now — do not skip ahead to 4c.2.**
 
 **Why delegate:**
 - `/prep-pr` delegates to per-project `.claude/commands/ship-it.md` which knows repo-specific PR conventions (template, labels, reviewers, base branch, CI bootstrap) that the pipeline shouldn't hardcode.
@@ -190,6 +199,10 @@ fi
 by hand from a normal checkout.
 
 #### Step 4c.2 — spawn the agent, `isolation` flag SET BY the gate
+
+Only now, with `IN_DISPATCH_WORKTREE` decided by Step 4c.1, spawn the agent.
+Spawn a **general-purpose** agent (`model: "sonnet"`) scoped to run `/prep-pr`, and set its
+`isolation` flag from the gate result per the two cases below:
 
 - **`IN_DISPATCH_WORKTREE=true` (default for every headless/cw-spawned run): OMIT
   `isolation: "worktree"` entirely.** Spawn the agent scoped to the session cwd
