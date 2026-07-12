@@ -4433,7 +4433,11 @@ class TestCLIApprove:
         assert result.exit_code == 0, result.output
         assert len(events) == 1
         assert events[0][1]["plan_requeued"] is True
-        assert "not yet quality-reviewed" in result.output
+        assert (
+            "Approved GEN-500 (genhealth): plan not yet quality-reviewed"
+            " — re-queued at plan stage to run Plan Quality Review."
+            " Re-run auto-dev-plan (or dispatch) to proceed."
+        ) in result.output
 
         # Case 2: reviewed plan -> plan_requeued=False, ordinary advance message.
         stub_fetch_plan(
