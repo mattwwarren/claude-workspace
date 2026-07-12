@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from cw.models import (
     DEFAULT_AUTO_PURPOSES,
@@ -1222,3 +1223,54 @@ class TestReviewRecipeKeyValidation:
             TicketTask(ticket_id="X", client="acme", review_recipes={"bogus": True})
         with pytest.raises(ValidationError):
             LaneConfig(name="default", review_recipes={"bogus": True})
+
+
+class TestTicketIdValidation:
+    """GitHub issue #1129: TicketTask.ticket_id is validated at construction
+    to prevent argv/URL-injection via a malformed ticket id (e.g. a leading
+    dash, an embedded '/', or a '..' path-confusion sequence)."""
+
+    @pytest.mark.parametrize(
+        "ticket_id", ["GEN-100", "1129", "ABC-1", "my.ticket_id-2"]
+    )
+    def test_ticket_task_accepts_typical_ticket_ids(self, ticket_id: str) -> None:
+        task = TicketTask(ticket_id=ticket_id, client="acme")
+        assert task.ticket_id == ticket_id
+
+    def test_ticket_task_accepts_empty_ticket_id(self) -> None:
+        """Regression guard: reconcile/local.py's LOCAL DAEMON harvest path
+        constructs TicketTask(ticket_id="", ...) as a "no associated ticket"
+        sentinel -- the empty string must remain exempt from format checks."""
+        task = TicketTask(ticket_id="", client="acme")
+        assert task.ticket_id == ""
+
+    def test_ticket_task_rejects_slash(self) -> None:
+        with pytest.raises(ValidationError):
+            TicketTask(ticket_id="foo/bar", client="acme")
+
+    def test_ticket_task_rejects_leading_dash(self) -> None:
+        with pytest.raises(ValidationError):
+            TicketTask(ticket_id="-rm-rf", client="acme")
+
+    def test_ticket_task_rejects_leading_whitespace(self) -> None:
+        with pytest.raises(ValidationError):
+            TicketTask(ticket_id=" GEN-1", client="acme")
+
+    def test_ticket_task_rejects_embedded_newline(self) -> None:
+        with pytest.raises(ValidationError):
+            TicketTask(ticket_id="GEN-1\n--flag", client="acme")
+
+    @pytest.mark.parametrize("ticket_id", ["1..2", "../../etc"])
+    def test_ticket_task_rejects_dot_dot_sequence(self, ticket_id: str) -> None:
+        with pytest.raises(ValidationError):
+            TicketTask(ticket_id=ticket_id, client="acme")
+
+    def test_ticket_task_rejects_ticket_id_starting_with_dot(self) -> None:
+        with pytest.raises(ValidationError):
+            TicketTask(ticket_id=".hidden", client="acme")
+
+    def test_ticket_task_ticket_id_error_message_is_clear(self) -> None:
+        with pytest.raises(ValidationError) as exc_info:
+            TicketTask(ticket_id="foo/bar", client="acme")
+        message = str(exc_info.value)
+        assert "foo/bar" in message

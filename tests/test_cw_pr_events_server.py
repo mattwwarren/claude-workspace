@@ -156,7 +156,9 @@ class TestSubscriberRegistry:
 
 class TestHandlePostPrEvent:
     def _make_client(self) -> TestClient:
-        return TestClient(make_app())
+        # These tests exercise payload validation / broadcast behavior, not
+        # auth -- allow_unsigned=True keeps them focused on that (#1127).
+        return TestClient(make_app(allow_unsigned=True))
 
     def test_valid_event_returns_ok(self) -> None:
         client = self._make_client()
@@ -216,6 +218,24 @@ class TestServe:
         assert call_kwargs.get("host") == "127.0.0.1"
         assert call_kwargs.get("port") == 9999
 
+    def test_serve_passes_allow_unsigned_to_make_app(self) -> None:
+        mock_make_app = MagicMock()
+        with (
+            patch("uvicorn.run", MagicMock()),
+            patch("cw.cw_pr_events_server.make_app", mock_make_app),
+        ):
+            serve(host="127.0.0.1", port=9999, allow_unsigned=True)
+        mock_make_app.assert_called_once_with(allow_unsigned=True)
+
+    def test_serve_calls_warn_with_allow_unsigned(self) -> None:
+        mock_warn = MagicMock()
+        with (
+            patch("uvicorn.run", MagicMock()),
+            patch("cw.cw_pr_events_server.warn_if_unsigned_mode", mock_warn),
+        ):
+            serve(host="127.0.0.1", port=9999, allow_unsigned=True)
+        mock_warn.assert_called_once_with(allow_unsigned=True)
+
 
 class TestCLIPrChannel:
     def test_pr_channel_serve_command_invokes_serve(self) -> None:
@@ -226,7 +246,23 @@ class TestCLIPrChannel:
         with patch("cw.cw_pr_events_server.serve", mock_serve):
             result = runner.invoke(main, ["pr-channel", "serve", "--port", "9123"])
         assert result.exit_code == 0
-        mock_serve.assert_called_once_with(host="127.0.0.1", port=9123)
+        mock_serve.assert_called_once_with(
+            host="127.0.0.1", port=9123, allow_unsigned=False
+        )
+
+    def test_pr_channel_serve_command_passes_allow_unsigned_flag(self) -> None:
+        from cw.cli import main
+
+        mock_serve = MagicMock()
+        runner = CliRunner()
+        with patch("cw.cw_pr_events_server.serve", mock_serve):
+            result = runner.invoke(
+                main, ["pr-channel", "serve", "--port", "9123", "--allow-unsigned"]
+            )
+        assert result.exit_code == 0
+        mock_serve.assert_called_once_with(
+            host="127.0.0.1", port=9123, allow_unsigned=True
+        )
 
 
 class TestAppendEvent:
@@ -856,16 +892,43 @@ class TestPrEventHMAC:
         )
         assert resp.status_code == 401
 
-    def test_accepts_unsigned_when_secret_unset(
+    def test_rejects_unsigned_when_secret_unset_by_default(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Default-deny (#1127): no secret configured and no --allow-unsigned
+        opt-in -- unsigned requests are rejected with 401, not accepted."""
         monkeypatch.delenv(CW_PR_EVENTS_HMAC_SECRET_ENV, raising=False)
         client = TestClient(make_app())
         resp = client.post(
             "/pr-event",
             json={"repo": "owner/repo", "pr_number": 1, "event_type": "merged"},
         )
+        assert resp.status_code == 401
+
+    def test_accepts_unsigned_when_secret_unset_and_allow_unsigned_flag(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The explicit --allow-unsigned opt-in restores the old open behavior."""
+        monkeypatch.delenv(CW_PR_EVENTS_HMAC_SECRET_ENV, raising=False)
+        client = TestClient(make_app(allow_unsigned=True))
+        resp = client.post(
+            "/pr-event",
+            json={"repo": "owner/repo", "pr_number": 1, "event_type": "merged"},
+        )
         assert resp.status_code == 200
+
+    def test_signature_still_required_when_secret_set_even_with_allow_unsigned_true(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Load-bearing regression: allow_unsigned=True must never bypass a
+        real signature check once a secret IS configured."""
+        monkeypatch.setenv(CW_PR_EVENTS_HMAC_SECRET_ENV, "s3cr3t")
+        client = TestClient(make_app(allow_unsigned=True))
+        resp = client.post(
+            "/pr-event",
+            json={"repo": "owner/repo", "pr_number": 1, "event_type": "merged"},
+        )
+        assert resp.status_code == 401
 
 
 class TestWireSuffixMapping:
@@ -907,7 +970,7 @@ class TestPushFeedsSharedObservation:
                 ]
             )
         )
-        client = TestClient(make_app())
+        client = TestClient(make_app(allow_unsigned=True))
         resp = client.post(
             "/pr-event",
             json={"repo": "acme/widgets", "pr_number": 42, "event_type": "merged"},
@@ -925,7 +988,7 @@ class TestPushFeedsSharedObservation:
 
     def test_unmatched_pr_is_silent_noop(self) -> None:
         save_dev_queue(DevQueueStore(tasks=[]))
-        client = TestClient(make_app())
+        client = TestClient(make_app(allow_unsigned=True))
         resp = client.post(
             "/pr-event",
             json={"repo": "ghost/repo", "pr_number": 1, "event_type": "merged"},
@@ -950,7 +1013,7 @@ class TestAsyncOffloadSeam:
             return None
 
         monkeypatch.setattr("anyio.to_thread.run_sync", _fake_run_sync)
-        client = TestClient(make_app())
+        client = TestClient(make_app(allow_unsigned=True))
         resp = client.post(
             "/pr-event",
             json={

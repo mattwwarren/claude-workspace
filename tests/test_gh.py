@@ -498,6 +498,39 @@ class TestFetchApprovedPlanComment:
     def _make_comments_result(self, comments: list[dict[str, str]]) -> Any:
         return _make_run_result(0, json.dumps({"comments": comments}))
 
+    def _make_dispatched_run(
+        self,
+        comments: list[dict[str, Any]],
+        identity: str | int | BaseException,
+        calls: list[list[str]] | None = None,
+    ) -> Any:
+        """Fake ``_sp.run`` that routes by which gh subcommand was invoked.
+
+        The comments-fetch call (``"comments" in args``) returns *comments*.
+        The identity-fetch call (``args[:3] == ["gh", "api", "user"]``)
+        returns/raises *identity*:
+        - str: successful login (used as stdout)
+        - int: non-zero returncode (gh api user failed)
+        - BaseException instance: raised (FileNotFoundError, TimeoutExpired)
+        """
+
+        def _fake_run(args: list[str], **_kw: object) -> Any:
+            argv = list(args)
+            if calls is not None:
+                calls.append(argv)
+            if "comments" in argv:
+                return self._make_comments_result(comments)
+            if argv[:3] == ["gh", "api", "user"]:
+                if isinstance(identity, BaseException):
+                    raise identity
+                if isinstance(identity, int):
+                    return _make_run_result(identity, "")
+                return _make_run_result(0, identity)
+            msg = f"unexpected _sp.run args: {argv}"
+            raise AssertionError(msg)
+
+        return _fake_run
+
     def test_returns_latest_comment_with_marker(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -508,11 +541,11 @@ class TestFetchApprovedPlanComment:
         )
         comments = [
             {"body": "First comment, no marker"},
-            {"body": plan_body},
+            {"body": plan_body, "author": {"login": "mattwwarren"}},
         ]
         monkeypatch.setattr(
             "cw.gh._sp.run",
-            lambda *_a, **_kw: self._make_comments_result(comments),
+            self._make_dispatched_run(comments, "mattwwarren"),
         )
         result = fetch_approved_plan_comment("896")
         assert result == plan_body
@@ -524,12 +557,12 @@ class TestFetchApprovedPlanComment:
         old_plan = "old plan <!-- plan-spec-reviewed: 2026-01-01 v1 -->"
         new_plan = "new plan <!-- plan-spec-reviewed: 2026-01-02 v2 -->"
         comments = [
-            {"body": old_plan},
-            {"body": new_plan},
+            {"body": old_plan, "author": {"login": "mattwwarren"}},
+            {"body": new_plan, "author": {"login": "mattwwarren"}},
         ]
         monkeypatch.setattr(
             "cw.gh._sp.run",
-            lambda *_a, **_kw: self._make_comments_result(comments),
+            self._make_dispatched_run(comments, "mattwwarren"),
         )
         result = fetch_approved_plan_comment("896")
         assert result == new_plan
@@ -539,6 +572,18 @@ class TestFetchApprovedPlanComment:
     ) -> None:
         """Comments with no plan marker → None."""
         comments = [{"body": "just a regular comment"}]
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: self._make_comments_result(comments),
+        )
+        result = fetch_approved_plan_comment("896")
+        assert result is None
+
+    def test_comment_missing_body_key_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A comment dict with no 'body' key at all is skipped, not a crash."""
+        comments: list[dict[str, Any]] = [{"id": "no-body-field"}]
         monkeypatch.setattr(
             "cw.gh._sp.run",
             lambda *_a, **_kw: self._make_comments_result(comments),
@@ -604,6 +649,126 @@ class TestFetchApprovedPlanComment:
         fetch_approved_plan_comment("42")
         assert len(captured) == 1
         assert "42" in captured[0]
+
+    def test_author_match_returns_body(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Marker comment authored by the trusted identity is returned."""
+        plan_body = "plan <!-- plan-spec-reviewed: 2026-01-01 v1 -->"
+        comments = [{"body": plan_body, "author": {"login": "mattwwarren"}}]
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            self._make_dispatched_run(comments, "mattwwarren"),
+        )
+        result = fetch_approved_plan_comment("896")
+        assert result == plan_body
+
+    def test_author_mismatch_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Marker comment authored by someone else is never trusted."""
+        plan_body = "plan <!-- plan-spec-reviewed: 2026-01-01 v1 -->"
+        comments = [{"body": plan_body, "author": {"login": "attacker"}}]
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            self._make_dispatched_run(comments, "mattwwarren"),
+        )
+        result = fetch_approved_plan_comment("896")
+        assert result is None
+
+    def test_author_mismatch_falls_through_to_older_trusted_comment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An untrusted marker comment is skipped, not scan-terminating."""
+        old_trusted = "old plan <!-- plan-spec-reviewed: 2026-01-01 v1 -->"
+        new_untrusted = "new plan <!-- plan-spec-reviewed: 2026-01-02 v2 -->"
+        comments = [
+            {"body": old_trusted, "author": {"login": "mattwwarren"}},
+            {"body": new_untrusted, "author": {"login": "attacker"}},
+        ]
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            self._make_dispatched_run(comments, "mattwwarren"),
+        )
+        result = fetch_approved_plan_comment("896")
+        assert result == old_trusted
+
+    def test_identity_fetch_failure_returns_none_when_marker_present(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Identity resolution failing (non-zero exit) fails closed."""
+        plan_body = "plan <!-- plan-spec-reviewed: 2026-01-01 v1 -->"
+        comments = [{"body": plan_body, "author": {"login": "mattwwarren"}}]
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            self._make_dispatched_run(comments, 1),
+        )
+        result = fetch_approved_plan_comment("896")
+        assert result is None
+
+    def test_identity_fetch_not_called_when_no_marker_present(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No marker-bearing comment → identity lookup is never issued."""
+        comments = [{"body": "just a regular comment"}]
+        calls: list[list[str]] = []
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            self._make_dispatched_run(comments, "mattwwarren", calls),
+        )
+        result = fetch_approved_plan_comment("896")
+        assert result is None
+        assert len(calls) == 1
+
+    def test_author_field_missing_treated_as_untrusted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Marker comment with no author key at all is skipped, not trusted."""
+        plan_body = "plan <!-- plan-spec-reviewed: 2026-01-01 v1 -->"
+        comments = [{"body": plan_body}]
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            self._make_dispatched_run(comments, "mattwwarren"),
+        )
+        result = fetch_approved_plan_comment("896")
+        assert result is None
+
+    def test_author_field_non_dict_treated_as_untrusted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Malformed (non-dict) author field is skipped, not a crash."""
+        plan_body = "plan <!-- plan-spec-reviewed: 2026-01-01 v1 -->"
+        comments = [{"body": plan_body, "author": "mattwwarren"}]
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            self._make_dispatched_run(comments, "mattwwarren"),
+        )
+        result = fetch_approved_plan_comment("896")
+        assert result is None
+
+    def test_identity_gh_not_found_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """gh binary vanishing during the identity call fails closed."""
+        plan_body = "plan <!-- plan-spec-reviewed: 2026-01-01 v1 -->"
+        comments = [{"body": plan_body, "author": {"login": "mattwwarren"}}]
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            self._make_dispatched_run(comments, FileNotFoundError("gh")),
+        )
+        result = fetch_approved_plan_comment("896")
+        assert result is None
+
+    def test_identity_timeout_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Identity call timing out fails closed."""
+        plan_body = "plan <!-- plan-spec-reviewed: 2026-01-01 v1 -->"
+        comments = [{"body": plan_body, "author": {"login": "mattwwarren"}}]
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            self._make_dispatched_run(comments, subprocess.TimeoutExpired(["gh"], 30)),
+        )
+        result = fetch_approved_plan_comment("896")
+        assert result is None
 
 
 _PR_VIEW_FIELDS = (
