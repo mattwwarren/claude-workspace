@@ -1951,44 +1951,38 @@ def _route_staged_decision(
         # reason and attempts below cap → regress to IMPL for self-heal (#770).
         # scope_exceeded/forbidden_area/merge_gate_blocked have no blocker field
         # (validator enforces this) so they always fall through to BLOCKED_ON_USER.
-        if status == "blocked" and task.stage == Stage.FINALIZE:
-            blocker = (
-                last_result.get("blocker") if isinstance(last_result, dict) else None
+        blocker = last_result.get("blocker") if isinstance(last_result, dict) else None
+        if (
+            status == "blocked"
+            and task.stage == Stage.FINALIZE
+            and isinstance(blocker, dict)
+            and blocker.get("reason") in FINALIZE_REGRESS_BLOCKER_REASONS
+            and task.regress_attempts < FINALIZE_REGRESS_CAP
+        ):
+            _log.info(
+                "dispatch: finalize gate blocked (%r) — regressing %r to IMPL"
+                " (regress attempt %d/%d)",
+                blocker.get("reason"),
+                task.ticket_id,
+                task.regress_attempts + 1,
+                FINALIZE_REGRESS_CAP,
             )
-            if (
-                isinstance(blocker, dict)
-                and blocker.get("reason") in FINALIZE_REGRESS_BLOCKER_REASONS
-                and task.regress_attempts < FINALIZE_REGRESS_CAP
-            ):
-                _log.info(
-                    "dispatch: finalize gate blocked (%r) — regressing %r to IMPL"
-                    " (regress attempt %d/%d)",
-                    blocker.get("reason"),
-                    task.ticket_id,
-                    task.regress_attempts + 1,
-                    FINALIZE_REGRESS_CAP,
-                )
-                _stage_regress(task, Stage.IMPL)
-                record_event(
-                    OrchestratorEventType.TICKET_REQUEUED,
-                    {
-                        "ticket_id": task.ticket_id,
-                        "client": task.client,
-                        "from_stage": Stage.FINALIZE,
-                        "to_stage": Stage.IMPL,
-                        "reason": "finalize_regress",
-                        "blocker_reason": blocker.get("reason"),
-                        "regress_attempt": task.regress_attempts,
-                    },
-                )
-                return True
-        fallthrough_blocker = (
-            last_result.get("blocker") if isinstance(last_result, dict) else None
-        )
+            _stage_regress(task, Stage.IMPL)
+            record_event(
+                OrchestratorEventType.TICKET_REQUEUED,
+                {
+                    "ticket_id": task.ticket_id,
+                    "client": task.client,
+                    "from_stage": Stage.FINALIZE,
+                    "to_stage": Stage.IMPL,
+                    "reason": "finalize_regress",
+                    "blocker_reason": blocker.get("reason"),
+                    "regress_attempt": task.regress_attempts,
+                },
+            )
+            return True
         breadcrumbs = (
-            str(fallthrough_blocker.get("reason", ""))
-            if isinstance(fallthrough_blocker, dict)
-            else ""
+            str(blocker.get("reason", "")) if isinstance(blocker, dict) else ""
         )
         record_event(
             OrchestratorEventType.SESSION_NEEDS_ATTENTION,
