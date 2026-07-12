@@ -1921,6 +1921,20 @@ def _route_staged_decision(
     elif status == "merge_pending":
         # Rule 3b: PR created but awaiting CI/merge gate (#899). Not a failure
         # — preserve pr_url so operator can monitor/merge. Do not re-dispatch.
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": task.session_id or "",
+                "session_name": "",
+                "client": task.client,
+                "ticket_id": task.ticket_id,
+                "claude_session_id": None,
+                "paused_status": "merge_pending",
+                "breadcrumbs": "",
+                "crashed": False,
+            },
+            correlation_id=task.ticket_id,
+        )
         transition_task_status(
             task,
             QueueItemStatus.BLOCKED_ON_USER,
@@ -1937,37 +1951,53 @@ def _route_staged_decision(
         # reason and attempts below cap → regress to IMPL for self-heal (#770).
         # scope_exceeded/forbidden_area/merge_gate_blocked have no blocker field
         # (validator enforces this) so they always fall through to BLOCKED_ON_USER.
-        if status == "blocked" and task.stage == Stage.FINALIZE:
-            blocker = (
-                last_result.get("blocker") if isinstance(last_result, dict) else None
+        blocker = last_result.get("blocker") if isinstance(last_result, dict) else None
+        if (
+            status == "blocked"
+            and task.stage == Stage.FINALIZE
+            and isinstance(blocker, dict)
+            and blocker.get("reason") in FINALIZE_REGRESS_BLOCKER_REASONS
+            and task.regress_attempts < FINALIZE_REGRESS_CAP
+        ):
+            _log.info(
+                "dispatch: finalize gate blocked (%r) — regressing %r to IMPL"
+                " (regress attempt %d/%d)",
+                blocker.get("reason"),
+                task.ticket_id,
+                task.regress_attempts + 1,
+                FINALIZE_REGRESS_CAP,
             )
-            if (
-                isinstance(blocker, dict)
-                and blocker.get("reason") in FINALIZE_REGRESS_BLOCKER_REASONS
-                and task.regress_attempts < FINALIZE_REGRESS_CAP
-            ):
-                _log.info(
-                    "dispatch: finalize gate blocked (%r) — regressing %r to IMPL"
-                    " (regress attempt %d/%d)",
-                    blocker.get("reason"),
-                    task.ticket_id,
-                    task.regress_attempts + 1,
-                    FINALIZE_REGRESS_CAP,
-                )
-                _stage_regress(task, Stage.IMPL)
-                record_event(
-                    OrchestratorEventType.TICKET_REQUEUED,
-                    {
-                        "ticket_id": task.ticket_id,
-                        "client": task.client,
-                        "from_stage": Stage.FINALIZE,
-                        "to_stage": Stage.IMPL,
-                        "reason": "finalize_regress",
-                        "blocker_reason": blocker.get("reason"),
-                        "regress_attempt": task.regress_attempts,
-                    },
-                )
-                return True
+            _stage_regress(task, Stage.IMPL)
+            record_event(
+                OrchestratorEventType.TICKET_REQUEUED,
+                {
+                    "ticket_id": task.ticket_id,
+                    "client": task.client,
+                    "from_stage": Stage.FINALIZE,
+                    "to_stage": Stage.IMPL,
+                    "reason": "finalize_regress",
+                    "blocker_reason": blocker.get("reason"),
+                    "regress_attempt": task.regress_attempts,
+                },
+            )
+            return True
+        breadcrumbs = (
+            str(blocker.get("reason", "")) if isinstance(blocker, dict) else ""
+        )
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": task.session_id or "",
+                "session_name": "",
+                "client": task.client,
+                "ticket_id": task.ticket_id,
+                "claude_session_id": None,
+                "paused_status": status,
+                "breadcrumbs": breadcrumbs,
+                "crashed": False,
+            },
+            correlation_id=task.ticket_id,
+        )
         transition_task_status(
             task, QueueItemStatus.BLOCKED_ON_USER, disposition=disposition
         )
@@ -1976,6 +2006,20 @@ def _route_staged_decision(
         # Why: unparseable sentinel must never silently advance/complete
         # (B2 correctness requirement). Changes pre-B2 behavior which
         # fell through to COMPLETED.
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": task.session_id or "",
+                "session_name": "",
+                "client": task.client,
+                "ticket_id": task.ticket_id,
+                "claude_session_id": None,
+                "paused_status": "blocked",
+                "breadcrumbs": "",
+                "crashed": False,
+            },
+            correlation_id=task.ticket_id,
+        )
         transition_task_status(
             task, QueueItemStatus.BLOCKED_ON_USER, disposition="abandoned"
         )

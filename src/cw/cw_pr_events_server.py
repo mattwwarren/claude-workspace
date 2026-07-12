@@ -224,22 +224,35 @@ async def handle_post_pr_event(request: Request) -> Response:
 
     When ``CW_PR_EVENTS_HMAC_SECRET`` is set, requires a valid
     ``X-Cw-Signature`` header (401 otherwise) -- the endpoint is otherwise
-    unauthenticated open internet-facing input via a relay tunnel. Validates
-    the JSON body (unchanged 400 contract), broadcasts the MCP notification
-    (unchanged, additive), then routes the event through
-    ``cw.pr_hydrate.observe_pushed_event`` -- offloaded onto a worker thread
-    via ``anyio.to_thread.run_sync`` since ``dev_queue_lock`` is a blocking
-    ``fcntl.flock``, not asyncio-aware.
+    unauthenticated open internet-facing input via a relay tunnel. When the
+    secret is unset, the endpoint default-denies with 401 (#1127) unless the
+    app was built with ``allow_unsigned=True`` (``cw pr-channel serve
+    --allow-unsigned``) -- a secret, when configured, is ALWAYS enforced
+    regardless of ``allow_unsigned``; the flag only relaxes the "no secret
+    configured" branch. Validates the JSON body (unchanged 400 contract),
+    broadcasts the MCP notification (unchanged, additive), then routes the
+    event through ``cw.pr_hydrate.observe_pushed_event`` -- offloaded onto a
+    worker thread via ``anyio.to_thread.run_sync`` since ``dev_queue_lock``
+    is a blocking ``fcntl.flock``, not asyncio-aware.
     """
     from starlette.responses import JSONResponse
 
     raw_body = await request.body()
     secret = os.environ.get(CW_PR_EVENTS_HMAC_SECRET_ENV)
-    if secret and not verify_signature(
-        raw_body, header_value=request.headers.get(SIGNATURE_HEADER), secret=secret
-    ):
-        logger.warning("pr-event rejected: invalid or missing signature")
-        return JSONResponse({"error": "invalid signature"}, status_code=401)
+    allow_unsigned = getattr(request.app.state, "allow_unsigned", False)
+    if secret:
+        if not verify_signature(
+            raw_body,
+            header_value=request.headers.get(SIGNATURE_HEADER),
+            secret=secret,
+        ):
+            logger.warning("pr-event rejected: invalid or missing signature")
+            return JSONResponse({"error": "invalid signature"}, status_code=401)
+    elif not allow_unsigned:
+        logger.warning(
+            "pr-event rejected: no HMAC secret configured and --allow-unsigned not set"
+        )
+        return JSONResponse({"error": "unsigned requests not allowed"}, status_code=401)
 
     try:
         body = json.loads(raw_body)
@@ -305,8 +318,14 @@ class _SSESlashMiddleware:
         await self._app(scope, receive, send)
 
 
-def make_app() -> Starlette:
-    """Build and return the Starlette ASGI app with MCP SSE + /pr-event route."""
+def make_app(*, allow_unsigned: bool = False) -> Starlette:
+    """Build and return the Starlette ASGI app with MCP SSE + /pr-event route.
+
+    ``allow_unsigned`` (#1127) is stashed on ``app.state`` and read by
+    ``handle_post_pr_event`` -- it only relaxes the "no secret configured"
+    branch of that handler; a configured ``CW_PR_EVENTS_HMAC_SECRET`` is
+    always enforced regardless of this flag.
+    """
     try:
         from starlette.applications import Starlette
         from starlette.middleware import Middleware
@@ -381,20 +400,27 @@ def make_app() -> Starlette:
         middleware=[Middleware(_SSESlashMiddleware)],
     )
     app.router.redirect_slashes = False
+    app.state.allow_unsigned = allow_unsigned
     return app
 
 
-def serve(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
+def serve(
+    host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, *, allow_unsigned: bool = False
+) -> None:
     """Start the server. Blocks until interrupted.
 
     Why: warn_if_unsigned_mode() is called here, not from make_app(), so that
     tests and callers constructing the app directly (TestClient(make_app()))
-    don't spam the unsigned-mode warning on every app construction (#930).
+    don't spam the unsigned-mode log on every app construction (#930).
+
+    ``allow_unsigned`` (#1127) threads through to both -- it is the CLI-flag
+    opt-in (``cw pr-channel serve --allow-unsigned``) that restores the old
+    open behavior when ``CW_PR_EVENTS_HMAC_SECRET`` is unset.
     """
     import uvicorn
 
-    warn_if_unsigned_mode()
-    uvicorn.run(make_app(), host=host, port=port)
+    warn_if_unsigned_mode(allow_unsigned=allow_unsigned)
+    uvicorn.run(make_app(allow_unsigned=allow_unsigned), host=host, port=port)
 
 
 if __name__ == "__main__":
