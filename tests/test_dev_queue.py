@@ -53,6 +53,7 @@ from cw.models import (
     Stage,
     TicketTask,
 )
+from tests.conftest import plan_body, stub_fetch_plan
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -3029,14 +3030,18 @@ class TestApproveTicket:
     """Tests for approve_ticket()."""
 
     def test_approve_plan_pending_advances_to_impl(
-        self, tmp_config_dir: Path, tmp_path: Path
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """plan_pending_approval BLOCKED task advances to impl PENDING."""
+        """plan_pending_approval BLOCKED task advances to impl PENDING when the
+        plan-of-record is already quality-reviewed (#968)."""
         from cw.config import save_state
         from cw.dev_queue import approve_ticket
         from cw.models import CwState
 
         _write_client_yaml(tmp_config_dir, tmp_path)
+        stub_fetch_plan(
+            monkeypatch, plan_body(), target="cw.dev_queue.fetch_approved_plan_comment"
+        )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess0001")
         save_dev_queue(DevQueueStore(tasks=[task]))
         session = _make_session(
@@ -3049,6 +3054,7 @@ class TestApproveTicket:
 
         assert result["from_stage"] == "plan"
         assert result["to_stage"] == "impl"
+        assert result["plan_requeued"] is False
         store = load_dev_queue()
         t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
         assert t.stage == Stage.IMPL
@@ -3057,7 +3063,7 @@ class TestApproveTicket:
         assert t.stage_base_ref is None
 
     def test_approve_then_re_park_starts_escalation_latch_fresh(
-        self, tmp_config_dir: Path, tmp_path: Path
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Q5 regression: approve clears a stale latch; a subsequent re-park
         starts the escalation window fresh rather than inheriting the old
@@ -3067,6 +3073,9 @@ class TestApproveTicket:
         from cw.models import CwState
 
         _write_client_yaml(tmp_config_dir, tmp_path)
+        stub_fetch_plan(
+            monkeypatch, plan_body(), target="cw.dev_queue.fetch_approved_plan_comment"
+        )
         stale_parked_at = datetime(2020, 1, 1, tzinfo=UTC)
         stale_fired_at = datetime(2020, 1, 1, tzinfo=UTC)
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess0001")
@@ -3219,7 +3228,7 @@ class TestApproveTicket:
     # -- Operator-signoff gates (RFC 0007 Phase 3, #990) ---------------------
 
     def test_approve_ticket_returns_awaiting_signoff_false_on_plain_advance(
-        self, tmp_config_dir: Path, tmp_path: Path
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Ordinary (no-signoff) approval returns awaiting_signoff=False."""
         from cw.config import save_state
@@ -3227,6 +3236,9 @@ class TestApproveTicket:
         from cw.models import CwState
 
         _write_client_yaml(tmp_config_dir, tmp_path)
+        stub_fetch_plan(
+            monkeypatch, plan_body(), target="cw.dev_queue.fetch_approved_plan_comment"
+        )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-plain-1")
         save_dev_queue(DevQueueStore(tasks=[task]))
         session = _make_session(
@@ -3411,6 +3423,7 @@ class TestApproveTicket:
         tmp_config_dir: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Approve→advance emits exactly one task.stage_changed (no double-emit).
 
@@ -3422,6 +3435,9 @@ class TestApproveTicket:
         from cw.models import CwState
 
         _write_client_yaml(tmp_config_dir, tmp_path)
+        stub_fetch_plan(
+            monkeypatch, plan_body(), target="cw.dev_queue.fetch_approved_plan_comment"
+        )
         events = capture_events(
             "cw.dev_queue", OrchestratorEventType.TASK_STAGE_CHANGED
         )
@@ -3433,14 +3449,128 @@ class TestApproveTicket:
         )
         save_state(CwState(sessions=[session]))  # type: ignore[list-item]
 
-        approve_ticket("GEN-500", "genhealth")
+        result = approve_ticket("GEN-500", "genhealth")
 
+        assert result["plan_requeued"] is False
         assert len(events) == 1
         _, payload, corr = events[0]
         assert corr == "GEN-500"
         assert payload["old_stage"] == Stage.PLAN
         assert payload["new_stage"] == Stage.IMPL
         assert payload["direction"] == "advance"
+
+    def test_approve_unreviewed_plan_requeue_emits_no_stage_changed(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Sibling to test_approve_advance_emits_single_stage_changed: a
+        same-stage requeue (unreviewed plan) is not a real stage move, so it
+        must emit no task.stage_changed at all (#968)."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        stub_fetch_plan(
+            monkeypatch, None, target="cw.dev_queue.fetch_approved_plan_comment"
+        )
+        events = capture_events(
+            "cw.dev_queue", OrchestratorEventType.TASK_STAGE_CHANGED
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-adv2")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess-adv2",
+            last_result={"status": "plan_pending_approval"},
+        )
+        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["plan_requeued"] is True
+        assert events == []
+
+    def test_approve_plan_pending_without_markers_requeues_plan_stage(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unreviewed plan (no tracker comment, no worktree fallback) re-parks
+        the row at Stage.PLAN/PENDING instead of advancing to impl -- the
+        core #968 fix (ticket option (a))."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        stub_fetch_plan(
+            monkeypatch, None, target="cw.dev_queue.fetch_approved_plan_comment"
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-unrev1")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess-unrev1",
+            last_result={"status": "plan_pending_approval"},
+        )
+        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["from_stage"] == "plan"
+        assert result["to_stage"] == "plan"
+        assert result["plan_requeued"] is True
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.stage == Stage.PLAN
+        assert t.status == QueueItemStatus.PENDING
+        assert t.session_id is None
+        assert t.stage_base_ref is None
+
+    def test_approve_plan_pending_cw_plan_md_fallback_requeues_or_advances(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Tracker fetch returns None; `.cw/plan.md` fallback carries both
+        signoff markers -> approve advances to impl (plan_requeued=False)."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        stub_fetch_plan(
+            monkeypatch, None, target="cw.dev_queue.fetch_approved_plan_comment"
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-fallback1")
+        task.worktree_path = tmp_path / "wt"
+        (task.worktree_path / ".cw").mkdir(parents=True)
+        (task.worktree_path / ".cw" / "plan.md").write_text(
+            plan_body(), encoding="utf-8"
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess-fallback1",
+            last_result={"status": "plan_pending_approval"},
+        )
+        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["plan_requeued"] is False
+        assert result["to_stage"] == "impl"
+
+    def test_approve_plan_reviewed_marker_constants_match_gate_recipes(self) -> None:
+        """Drift guard: dev_queue's locally-duplicated marker constants must
+        stay byte-identical to gate_recipes' pair (#968)."""
+        from cw.dev_queue import _PLAN_SOUNDNESS_MARKER, _PLAN_SPEC_MARKER
+        from cw.reconcile.gate_recipes import (
+            _PLAN_SOUNDNESS_MARKER as GR_SOUNDNESS,
+        )
+        from cw.reconcile.gate_recipes import (
+            _PLAN_SPEC_MARKER as GR_SPEC,
+        )
+
+        assert _PLAN_SPEC_MARKER == GR_SPEC
+        assert _PLAN_SOUNDNESS_MARKER == GR_SOUNDNESS
 
 
 # ---------------------------------------------------------------------------
@@ -3454,7 +3584,7 @@ class TestApproveTicketLockedResolved:
     never a re-resolved duplicate."""
 
     def test_resolved_task_acts_on_that_row_despite_newer_awaiting_duplicate(
-        self, tmp_config_dir: Path, tmp_path: Path
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """resolved_task pins the mutation to the caller-validated
         BLOCKED_ON_USER row A even when a strictly-newer
@@ -3465,6 +3595,9 @@ class TestApproveTicketLockedResolved:
         from cw.models import CwState
 
         _write_client_yaml(tmp_config_dir, tmp_path)
+        stub_fetch_plan(
+            monkeypatch, plan_body(), target="cw.dev_queue.fetch_approved_plan_comment"
+        )
         row_a = _make_blocked_task(stage=Stage.PLAN, session_id="sess0001")
         row_a.created_at = datetime(2026, 7, 1, tzinfo=UTC)
         row_b = _make_blocked_task(
@@ -4149,12 +4282,17 @@ class TestUnblockTicket:
 class TestCLIApprove:
     """CLI tests for `cw dev-queue approve`."""
 
-    def test_approve_happy_path(self, tmp_config_dir: Path, tmp_path: Path) -> None:
+    def test_approve_happy_path(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """CLI approve advances stage and prints confirmation."""
         from cw.config import save_state
         from cw.models import CwState
 
         _write_client_yaml(tmp_config_dir, tmp_path)
+        stub_fetch_plan(
+            monkeypatch, plan_body(), target="cw.dev_queue.fetch_approved_plan_comment"
+        )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess7001")
         save_dev_queue(DevQueueStore(tasks=[task]))
         session = _make_session(
@@ -4193,6 +4331,78 @@ class TestCLIApprove:
             ["dev-queue", "approve", "GEN-500", "--client", "genhealth"],
         )
         assert result.exit_code != 0
+
+    def test_approve_cli_event_includes_plan_requeued_key(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """TICKET_APPROVED's event payload carries plan_requeued for both the
+        unreviewed-requeue and reviewed-advance cases (#968)."""
+        from cw.config import save_state
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        events = capture_events(
+            "cw.cli.dev_queue", OrchestratorEventType.TICKET_APPROVED
+        )
+        runner = CliRunner()
+
+        # Case 1: unreviewed plan -> plan_requeued=True, echoed re-queue message.
+        stub_fetch_plan(
+            monkeypatch, None, target="cw.dev_queue.fetch_approved_plan_comment"
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-evt1")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(
+                        session_id="sess-evt1",
+                        last_result={"status": "plan_pending_approval"},
+                    )
+                ]
+            )  # type: ignore[list-item]
+        )
+
+        result = runner.invoke(
+            main, ["dev-queue", "approve", "GEN-500", "--client", "genhealth"]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert len(events) == 1
+        assert events[0][1]["plan_requeued"] is True
+        assert "not yet quality-reviewed" in result.output
+
+        # Case 2: reviewed plan -> plan_requeued=False, ordinary advance message.
+        stub_fetch_plan(
+            monkeypatch, plan_body(), target="cw.dev_queue.fetch_approved_plan_comment"
+        )
+        task2 = _make_blocked_task(
+            ticket_id="GEN-501", stage=Stage.PLAN, session_id="sess-evt2"
+        )
+        save_dev_queue(DevQueueStore(tasks=[task2]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(
+                        session_id="sess-evt2",
+                        last_result={"status": "plan_pending_approval"},
+                    )
+                ]
+            )  # type: ignore[list-item]
+        )
+
+        result2 = runner.invoke(
+            main, ["dev-queue", "approve", "GEN-501", "--client", "genhealth"]
+        )
+
+        assert result2.exit_code == 0, result2.output
+        assert len(events) == 2
+        assert events[1][1]["plan_requeued"] is False
+        assert "plan -> impl" in result2.output
 
 
 # ---------------------------------------------------------------------------
