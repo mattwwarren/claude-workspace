@@ -77,19 +77,15 @@ def test_fake_runner_launch_records_call_and_returns_live_proc(tmp_path: Path) -
 # ---------------------------------------------------------------------------
 
 
-def test_real_runner_launch_returns_live_popen_with_devnull(tmp_path: Path) -> None:
-    """RealAiderRunner.launch() returns a live Popen wired to DEVNULL, no wait."""
+def test_real_runner_launch_writes_child_output_to_log_file(tmp_path: Path) -> None:
+    """RealAiderRunner.launch() redirects child stdout/stderr to .cw/aider.log."""
     runner = RealAiderRunner()
-    proc = runner.launch(tmp_path, ["sleep", "60"], dict(os.environ))
-    try:
-        # Fire-and-forget: the process is running and launch did not block on it.
-        assert proc.poll() is None
-        # stdout/stderr are DEVNULL (not PIPE), so no pipe handles are exposed.
-        assert proc.stdout is None
-        assert proc.stderr is None
-    finally:
-        proc.kill()
-        proc.wait()
+    proc = runner.launch(tmp_path, ["sh", "-c", "echo hi"], dict(os.environ))
+    proc.wait()
+
+    log_path = tmp_path / ".cw" / "aider.log"
+    assert log_path.exists()
+    assert "hi" in log_path.read_text(encoding="utf-8")
 
 
 def test_real_runner_launch_raises_on_missing_binary(tmp_path: Path) -> None:
@@ -393,12 +389,9 @@ def test_synthesize_git_result_stage_complete(
     AutoDevResult.model_validate(result.model_dump(mode="json"))
 
 
-def test_synthesize_git_result_blocked_no_output(
-    tmp_config_dir: Path,
-    make_git_repo: Callable[[str], Path],
-) -> None:
-    """No new commits since fork point → blocked/aider_no_output."""
-    worktree = make_git_repo("wt-no-output")
+def _make_no_output_worktree(make_git_repo: Callable[[str], Path], name: str) -> Path:
+    """Helper: git repo with a fetched origin/main and no new commits."""
+    worktree = make_git_repo(name)
     subprocess.run(
         ["git", "-C", str(worktree), "remote", "add", "origin", str(worktree)],
         check=True,
@@ -409,6 +402,26 @@ def test_synthesize_git_result_blocked_no_output(
         check=True,
         capture_output=True,
     )
+    return worktree
+
+
+def _write_aider_log(worktree: Path, content: bytes | str) -> None:
+    """Helper: write .cw/aider.log under worktree, creating .cw/ if needed."""
+    cw_dir = worktree / ".cw"
+    cw_dir.mkdir(exist_ok=True)
+    log_path = cw_dir / "aider.log"
+    if isinstance(content, bytes):
+        log_path.write_bytes(content)
+    else:
+        log_path.write_text(content, encoding="utf-8")
+
+
+def test_synthesize_git_result_blocked_no_output(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """No new commits since fork point → blocked/aider_no_output."""
+    worktree = _make_no_output_worktree(make_git_repo, "wt-no-output")
     task = _make_task()
 
     result = synthesize_git_result(
@@ -421,7 +434,103 @@ def test_synthesize_git_result_blocked_no_output(
     assert result.blocker is not None
     assert result.blocker.reason == AIDER_NO_OUTPUT
     assert result.blocker.retry_eligible is True
+    assert result.blocker.details == ""
     AutoDevResult.model_validate(result.model_dump(mode="json"))
+
+
+def test_synthesize_git_result_no_output_with_log_populates_details(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """No commits + populated aider.log → blocker.details carries the log tail."""
+    worktree = _make_no_output_worktree(make_git_repo, "wt-no-output-log")
+    _write_aider_log(worktree, "aider: some diagnostic output\n")
+    task = _make_task()
+
+    result = synthesize_git_result(
+        task=task,
+        worktree=worktree,
+        default_branch="main",
+    )
+
+    assert result.blocker is not None
+    assert "some diagnostic output" in result.blocker.details
+
+
+def test_synthesize_git_result_no_output_no_log_empty_details(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """No commits + no aider.log file → blocker.details is empty string."""
+    worktree = _make_no_output_worktree(make_git_repo, "wt-no-output-no-log")
+    task = _make_task()
+
+    result = synthesize_git_result(
+        task=task,
+        worktree=worktree,
+        default_branch="main",
+    )
+
+    assert result.blocker is not None
+    assert result.blocker.details == ""
+
+
+def test_synthesize_git_result_no_output_log_truncated_to_tail(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """A log file over 4000 chars is truncated to exactly the last 4000 chars."""
+    worktree = _make_no_output_worktree(make_git_repo, "wt-no-output-truncate")
+    long_output = "x" * 5000
+    _write_aider_log(worktree, long_output)
+    task = _make_task()
+
+    result = synthesize_git_result(
+        task=task,
+        worktree=worktree,
+        default_branch="main",
+    )
+
+    assert result.blocker is not None
+    assert result.blocker.details == long_output[-4000:]
+
+
+def test_synthesize_git_result_no_output_malformed_utf8_replaced(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Invalid/truncated UTF-8 bytes in the log degrade via replacement, not raise."""
+    worktree = _make_no_output_worktree(make_git_repo, "wt-no-output-malformed")
+    _write_aider_log(
+        worktree,
+        b"partial output before crash: \xff\xfe truncated multi-byte tail \xe2\x98",
+    )
+    task = _make_task()
+
+    result = synthesize_git_result(
+        task=task,
+        worktree=worktree,
+        default_branch="main",
+    )
+
+    assert result.blocker is not None
+    assert "partial output before crash:" in result.blocker.details
+
+
+def test_real_runner_launch_truncates_log_on_retry(tmp_path: Path) -> None:
+    """A second launch() call truncates the log, not appends to the prior attempt."""
+    runner = RealAiderRunner()
+    env = dict(os.environ)
+
+    proc1 = runner.launch(tmp_path, ["sh", "-c", "echo first"], env)
+    proc1.wait()
+
+    proc2 = runner.launch(tmp_path, ["sh", "-c", "echo second"], env)
+    proc2.wait()
+
+    log_text = (tmp_path / ".cw" / "aider.log").read_text(encoding="utf-8")
+    assert "second" in log_text
+    assert "first" not in log_text
 
 
 def test_synthesize_git_result_scope_tier_large(
