@@ -135,6 +135,25 @@ class TestAttentionState:
             == "merge_blocked"
         )
 
+    def test_row1_unknown_merge_state_not_merge_blocked(self) -> None:
+        # Ported wiki lesson "mergeStateStatus can read UNKNOWN immediately
+        # after push/rebase" (session:826a27f3): GitHub computes
+        # mergeStateStatus asynchronously, so a transient UNKNOWN right after
+        # activity must NOT be read as merge_blocked. _ROW1_MERGE_BLOCKING_STATES
+        # is a strict allow-list ({DIRTY, BEHIND}); UNKNOWN falls through, so a
+        # not-yet-computed merge state can never misfire escalate_merge_block.
+        assert (
+            _compute_attention_state(
+                ci_ok=True,
+                pending_count=0,
+                merge_state_status="UNKNOWN",
+                review_decision="REVIEW_REQUIRED",
+                is_draft=False,
+                reviewer_count=1,
+            )
+            == "ready_to_approve"
+        )
+
     def test_row2_ci_failing(self) -> None:
         assert (
             _compute_attention_state(

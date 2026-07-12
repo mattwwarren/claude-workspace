@@ -42,6 +42,15 @@ _PENDING_CHECKRUN_STATUSES: frozenset[str] = frozenset(
 # Row-1 of the attention-state decision table (merge_blocked). BLOCKED is
 # deliberately NOT in this set — it means "waiting on required reviews/checks,"
 # not a code problem (see Rows 5a-5c).
+# Why: this is a strict ALLOW-list, not a deny-list, so an UNKNOWN merge state
+# never reads as merge_blocked. Ported review-monitor lesson (session:826a27f3,
+# "mergeStateStatus can read UNKNOWN immediately after push/rebase"): GitHub
+# computes mergeStateStatus asynchronously, so a check right after a push/rebase
+# can transiently return UNKNOWN before DIRTY/CLEAN is determinable. Keeping the
+# set to {DIRTY, BEHIND} means a not-yet-computed state can't misfire the
+# escalate_merge_block recipe; the next poll re-hydrates the real value. See
+# tests/test_pr_hydrate.py::TestAttentionState::
+# test_row1_unknown_merge_state_not_merge_blocked.
 _ROW1_MERGE_BLOCKING_STATES: frozenset[str] = frozenset({"DIRTY", "BEHIND"})
 # pr.mergeable fires on ENTERING one of GitHub's genuinely-mergeable statuses
 # from outside the set — not on merely leaving a blocking status into
@@ -124,12 +133,27 @@ def _compute_attention_state(
     approvals), so BLOCKED alone must not read as "ready to approve".
     """
     if is_draft:  # Row 0 — drafts never enter an escalation path.
+        # Why: unconditional draft-gate ported from review-monitor lesson
+        # (session:fc766c55, "Draft PRs must not enter attention/escalation
+        # paths"): a draft with green CI and a BLOCKED merge state would
+        # otherwise fall through to ready_to_approve and trigger channel bumps /
+        # auto-approve. is_draft short-circuits BEFORE every other row so no
+        # draft ever produces an attention state. See tests/test_pr_hydrate.py::
+        # TestAttentionState::{test_row0_draft_returns_none,
+        # test_row0_gates_row4_draft_zero_reviewers}.
         return None
     if merge_state_status in _ROW1_MERGE_BLOCKING_STATES:  # Row 1
         return "merge_blocked"
     if not ci_ok:  # Row 2
         return "ci_failing"
     if review_decision == "CHANGES_REQUESTED":  # Row 3
+        # Why: fires on the PR's top-level reviewDecision, ported from review-
+        # monitor lesson (session:1a93541b, "changes_requested fires on top-level
+        # reviewDecision"): a "Request changes" review with NO inline comments
+        # still moves reviewDecision to CHANGES_REQUESTED. cw has no inline-thread
+        # subsystem, so this top-level signal is the sole changes_requested
+        # trigger for the address_review recipe. See tests/test_pr_hydrate.py::
+        # TestAttentionState::test_row3_changes_requested.
         return "changes_requested"
     if review_decision == "REVIEW_REQUIRED" and reviewer_count == 0:  # Row 4
         return "no_reviewer"
@@ -255,7 +279,17 @@ def _diff_transitions(
 
 
 def _is_candidate(task: TicketTask) -> bool:
-    """A task is hydratable when it has a PR URL and a non-terminal PR state."""
+    """A task is hydratable when it has a PR URL and a non-terminal PR state.
+
+    Why the terminal-state exclusion: ported review-monitor lesson
+    (session:94a665a5, "Abandoned PR auto-completion") — a PR MERGED or CLOSED on
+    GitHub needs no further operator attention. Excluding terminal states here
+    (the same predicate the review-recipe detect phase reuses) means no review
+    recipe ever fires on a merged/abandoned PR, cw's analogue of review_monitor
+    auto-completing such PRs out of the monitored queue. See
+    tests/test_pr_hydrate.py::TestCandidateSelection::test_skips_closed_pr_state
+    and tests/test_reconcile_review_recipes.py::test_closed_pr_never_a_candidate.
+    """
     if not task.pr_url:
         return False
     return task.pr_state is None or task.pr_state.state not in _TERMINAL_PR_STATES
