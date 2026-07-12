@@ -8279,6 +8279,7 @@ def test_transcript_recently_active_finds_dotted_worktree(
     # Write a transcript that is "recent" (mtime = now).
     session_uuid = "test-uuid-dotted"
     transcript = project_dir / f"{session_uuid}.jsonl"
+    # Content-bearing timestamp (#1076): liveness now prefers this over mtime.
     now_ish = datetime.now(tz=UTC).isoformat()
     record = json.dumps(
         {

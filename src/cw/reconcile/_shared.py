@@ -910,6 +910,23 @@ def _detect_post_review_clean(session: Session) -> bool:
     return False
 
 
+def _effective_transcript_timestamp(transcript: Path) -> datetime:
+    """Return the timestamp to use for liveness checks on *transcript*.
+
+    Prefers the timestamp of the last *content-bearing* transcript entry
+    (:func:`cw._util._last_content_entry_timestamp`) over the file's mtime,
+    so a trailing metadata-only write (e.g. an ``ai-title`` record) does not
+    falsely resurrect liveness or understate idle age (GitHub #1076). Falls
+    back to mtime, unchanged from prior behavior, when no content entry has
+    a parseable timestamp. Raises ``OSError`` if the file cannot be stat'd —
+    callers are expected to catch it, matching existing fail-open behavior.
+    """
+    content_ts = _last_content_entry_timestamp(transcript)
+    if content_ts is not None:
+        return content_ts
+    return datetime.fromtimestamp(transcript.stat().st_mtime, tz=UTC)
+
+
 def _transcript_recently_active(
     session: Session,
     now: datetime,
@@ -922,22 +939,13 @@ def _transcript_recently_active(
     (surface_ref-prefix glob, #541).  Returns False — permitting the watchdog
     to proceed — when no transcript is found (pre-first-write or path
     unavailable).  See GitHub #340.
-
-    Prefers the timestamp of the last *content-bearing* transcript entry
-    (:func:`cw._util._last_content_entry_timestamp`) over the file's mtime,
-    so a trailing metadata-only write (e.g. an ``ai-title`` record) does not
-    falsely resurrect liveness (GitHub #1076). Falls back to mtime, unchanged
-    from prior behavior, when no content entry has a parseable timestamp.
     """
     try:
         transcript = _locate_session_transcript(session)
         if transcript is None:
             return False
-        content_ts = _last_content_entry_timestamp(transcript)
-        if content_ts is not None:
-            return (now - content_ts).total_seconds() < window_seconds
-        mtime = datetime.fromtimestamp(transcript.stat().st_mtime, tz=UTC)
-        return (now - mtime).total_seconds() < window_seconds
+        ts = _effective_transcript_timestamp(transcript)
+        return (now - ts).total_seconds() < window_seconds
     except OSError:
         return False
 
@@ -951,22 +959,13 @@ def _transcript_age_seconds(
     Returns None when the transcript file cannot be located.  Uses
     :func:`_locate_session_transcript` for precise per-session lookup
     (surface_ref-prefix glob, #541).
-
-    Prefers the timestamp of the last *content-bearing* transcript entry
-    (:func:`cw._util._last_content_entry_timestamp`) over the file's mtime,
-    so a trailing metadata-only write does not understate the session's true
-    idle age (GitHub #1076). Falls back to mtime, unchanged from prior
-    behavior, when no content entry has a parseable timestamp.
     """
     try:
         transcript = _locate_session_transcript(session)
         if transcript is None:
             return None
-        content_ts = _last_content_entry_timestamp(transcript)
-        if content_ts is not None:
-            return (now - content_ts).total_seconds()
-        mtime = datetime.fromtimestamp(transcript.stat().st_mtime, tz=UTC)
-        return (now - mtime).total_seconds()
+        ts = _effective_transcript_timestamp(transcript)
+        return (now - ts).total_seconds()
     except OSError:
         return None
 
