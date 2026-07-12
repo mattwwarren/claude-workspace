@@ -491,7 +491,7 @@ def _is_blank(s: str) -> bool:
 def _has_usable_agent_id(item: dict[str, Any]) -> bool:
     """Return True iff *item* carries a non-empty, non-whitespace 'agent_id' (#1130)."""
     agent_id = item.get("agent_id")
-    return isinstance(agent_id, str) and bool(agent_id.strip())
+    return isinstance(agent_id, str) and not _is_blank(agent_id)
 
 
 class AutoDevResult(BaseModel):
@@ -1264,10 +1264,20 @@ def _filter_empty_string_items(
     payload[key] = filtered
 
 
+def _get_health_dict(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Return payload['health'] iff it is a dict, else None (issue #1130).
+
+    Shared guard for the two health.* filters below — both need to bail out
+    the same way when a payload predates the health block or has it malformed.
+    """
+    health = payload.get("health")
+    return health if isinstance(health, dict) else None
+
+
 def _filter_empty_agent_health_summary(payload: dict[str, Any]) -> None:
     """Drop agent_health_summary entries with a blank agent_id (issue #1130)."""
-    health = payload.get("health")
-    if not isinstance(health, dict):
+    health = _get_health_dict(payload)
+    if health is None:
         return
     _filter_empty_pending_items(
         health,
@@ -1281,8 +1291,8 @@ def _filter_empty_agent_health_summary(payload: dict[str, Any]) -> None:
 
 def _filter_empty_health_shortcuts(payload: dict[str, Any]) -> None:
     """Drop blank/whitespace-only health.shortcuts items (issue #1130)."""
-    health = payload.get("health")
-    if not isinstance(health, dict):
+    health = _get_health_dict(payload)
+    if health is None:
         return
     _filter_empty_string_items(health, "shortcuts", "#1130", log_context=payload)
 
