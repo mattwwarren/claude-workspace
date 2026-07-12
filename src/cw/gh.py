@@ -276,18 +276,54 @@ def branch_exists_on_origin(
     return _fetch_branch_exists_on_origin(branch, timeout)
 
 
+def _current_gh_login(*, timeout: int) -> str | None:
+    """Return the login of the currently-authenticated ``gh`` identity.
+
+    This is the identity ``auto-dev-plan`` posts plan-review comments as
+    (cw is a single-user tool with no separate bot account, so "the
+    operator's own gh login" doubles as the trusted commenter). Returns
+    None on any failure to resolve it — gh binary absent, non-zero exit,
+    a timeout, or empty stdout after stripping. Callers MUST fail closed
+    on None; do not treat it as "trust anyone."
+    """
+    try:
+        result = _sp.run(
+            ["gh", "api", "user", "--jq", ".login"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        return None
+    except (OSError, _sp.TimeoutExpired):
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    login = result.stdout.strip()
+    return login or None
+
+
 def fetch_approved_plan_comment(
     ticket_id: str, *, timeout: int = _FETCH_COMMENTS_TIMEOUT
 ) -> str | None:
     """Return the body of the latest approved plan comment on a GitHub issue.
 
     Scans issue comments in reverse order (newest first) for the first one
-    containing the ``<!-- plan-spec-reviewed`` marker written by auto-dev-plan.
+    containing the ``<!-- plan-spec-reviewed`` marker written by auto-dev-plan
+    AND authored by the currently-authenticated ``gh`` identity. A
+    marker-bearing comment from any other commenter is skipped (not
+    scan-terminating) — it does not count as "no reviewed plan," it simply
+    isn't authoritative, so scanning continues for an older trusted match.
 
     Returns None when:
     - gh binary is absent or returns an error
     - the response cannot be parsed
     - no comment carries the plan marker (Stage 1 not yet complete)
+    - no marker-bearing comment is authored by the currently-authenticated
+      ``gh`` identity, or that identity cannot be resolved (fail-closed)
     """
     try:
         result = _sp.run(
@@ -311,9 +347,22 @@ def fetch_approved_plan_comment(
     except (ValueError, AttributeError):
         return None
 
+    if not any(
+        isinstance(c.get("body", ""), str) and _PLAN_MARKER in c["body"]
+        for c in comments
+    ):
+        return None
+
+    trusted_login = _current_gh_login(timeout=timeout)
+    if trusted_login is None:
+        return None
+
     for comment in reversed(comments):
         body = comment.get("body", "")
-        if isinstance(body, str) and _PLAN_MARKER in body:
+        if not (isinstance(body, str) and _PLAN_MARKER in body):
+            continue
+        author = comment.get("author")
+        if isinstance(author, dict) and author.get("login") == trusted_login:
             return body
     return None
 
