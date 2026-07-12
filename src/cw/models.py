@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -415,6 +416,16 @@ def _validate_review_recipe_keys(value: dict[str, bool]) -> dict[str, bool]:
     return value
 
 
+# ticket_id feeds into f"{feature_branch_prefix}/{ticket_id}" (dispatch.py),
+# raw `gh` argv slots, and gh API URL path segments (gh.py). Sibling to
+# _SAFE_CLIENT_NAME / _SAFE_BRANCH_NAME in cw.config (duplicated here, not
+# imported, to avoid a models<->config import cycle -- config.py already
+# imports from cw.models). No '/': ticket_id is a path *component*, the
+# branch prefix supplies the separator. No '..': blocks the gh-api
+# path-segment-confusion case in _fetch_branch_exists_on_origin. See #1129.
+_SAFE_TICKET_ID = re.compile(r"^(?!.*\.\.)[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+
+
 class TicketTask(BaseModel):
     """A ticket queued for dispatch to a Claude session."""
 
@@ -580,6 +591,20 @@ class TicketTask(BaseModel):
         if value is None:
             return None
         return _validate_review_recipe_keys(value)
+
+    @field_validator("ticket_id")
+    @classmethod
+    def _check_ticket_id(cls, value: str) -> str:
+        # "" is a deliberate sentinel for "no associated ticket"
+        # (reconcile/local.py's LOCAL DAEMON harvest path); only
+        # non-empty values are format-checked.
+        if value and not _SAFE_TICKET_ID.match(value):
+            msg = (
+                f"Invalid ticket_id {value!r}: must start with alphanumeric"
+                " and contain only [a-zA-Z0-9._-], with no '..' sequence"
+            )
+            raise ValueError(msg)
+        return value
 
 
 class DispatchPlan(BaseModel):
