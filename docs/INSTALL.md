@@ -235,6 +235,25 @@ The package wasn't installed correctly. Reinstall:
 uv tool install --force "claude-workspace[mcp] @ git+https://github.com/mattwwarren/claude-workspace.git"
 ```
 
+### `ModuleNotFoundError` after pulling new dependency-adding source changes
+
+If `cw` is installed via `uv tool install` (editable/local source), the tool's
+own venv is not automatically re-synced when the source `pyproject.toml`
+gains a new runtime dependency — only the next `uv tool upgrade` or
+`--reinstall` picks it up. Merging a PR that adds a dependency can therefore
+break every `cw` invocation, including a running `cw dev-queue serve` loop,
+until you run:
+
+```bash
+uv tool upgrade claude-workspace
+# or
+uv tool install --reinstall claude-workspace
+```
+
+`cw doctor` flags this drift (`cw-deps` check) by comparing declared
+dependencies in `pyproject.toml` against installed distributions, before it
+manifests as a crash.
+
 ### `Python 3.13 required`
 
 cw requires Python 3.13+. Install it via uv:

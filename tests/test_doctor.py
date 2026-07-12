@@ -3238,6 +3238,281 @@ class TestCheckCwVersion:
         assert _CW_VERSION_CHECK_NAME in check_names
 
 
+class TestCheckCwDeps:
+    """Direct tests for _check_cw_deps via monkeypatched importlib.metadata."""
+
+    def _patch_dist(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        direct_url_text: str | None,
+    ) -> None:
+        import importlib.metadata
+
+        class FakeDist:
+            def read_text(self, filename: str) -> str | None:
+                if filename == "direct_url.json":
+                    return direct_url_text
+                return None
+
+        monkeypatch.setattr(importlib.metadata, "distribution", lambda _pkg: FakeDist())
+
+    def test_package_not_found_skips_silently(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """PackageNotFoundError → ok=True, warn=False (registry/unknown install)."""
+        import importlib.metadata
+
+        from cw.doctor import _check_cw_deps
+
+        def _raise(_pkg: str) -> object:
+            raise importlib.metadata.PackageNotFoundError(_pkg)
+
+        monkeypatch.setattr(importlib.metadata, "distribution", _raise)
+        result = _check_cw_deps()
+        assert result.ok is True
+        assert result.warn is False
+        assert "registry" in result.detail
+
+    def test_registry_install_no_direct_url_skips_silently(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """direct_url.json absent (None) → ok=True, warn=False."""
+        from cw.doctor import _check_cw_deps
+
+        self._patch_dist(monkeypatch, direct_url_text=None)
+        result = _check_cw_deps()
+        assert result.ok is True
+        assert result.warn is False
+
+    def test_registry_install_https_url_skips_silently(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """direct_url.json with https:// URL → ok=True, warn=False."""
+        import json
+
+        from cw.doctor import _check_cw_deps
+
+        self._patch_dist(
+            monkeypatch,
+            direct_url_text=json.dumps(
+                {
+                    "url": "https://files.pythonhosted.org/packages/claude-workspace-0.14.2.tar.gz"
+                }
+            ),
+        )
+        result = _check_cw_deps()
+        assert result.ok is True
+        assert result.warn is False
+
+    def test_invalid_json_in_direct_url_skips_silently(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Malformed direct_url.json → ok=True, warn=False (silent skip)."""
+        from cw.doctor import _check_cw_deps
+
+        self._patch_dist(monkeypatch, direct_url_text="not-valid-json{")
+        result = _check_cw_deps()
+        assert result.ok is True
+        assert result.warn is False
+
+    def test_stale_source_path_warns(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Non-existent source path → ok=True, warn=True, detail names path."""
+        import json
+
+        from cw.doctor import _check_cw_deps
+
+        missing_path = "/nonexistent/path/to/claude-workspace"
+        self._patch_dist(
+            monkeypatch,
+            direct_url_text=json.dumps({"url": f"file://{missing_path}"}),
+        )
+        result = _check_cw_deps()
+        assert result.ok is True
+        assert result.warn is True
+        assert missing_path in result.detail
+
+    def test_missing_dependencies_key_warns(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """pyproject.toml with no [project.dependencies] → ok=True, warn=True."""
+        import json
+
+        from cw.doctor import _check_cw_deps
+
+        source_dir = tmp_path / "claude-workspace"
+        source_dir.mkdir()
+        pyproject_path = source_dir / "pyproject.toml"
+        pyproject_path.write_text(
+            '[project]\nname = "claude-workspace"\nversion = "0.14.2"\n'
+        )
+        self._patch_dist(
+            monkeypatch,
+            direct_url_text=json.dumps({"url": f"file://{source_dir}"}),
+        )
+        result = _check_cw_deps()
+        assert result.ok is True
+        assert result.warn is True
+        assert str(pyproject_path) in result.detail
+
+    def test_malformed_dependencies_not_a_list_warns(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """dependencies = "not-a-list" (wrong TOML type) → ok=True, warn=True.
+
+        A TOML string is character-iterable in Python, so the implementation
+        must explicitly guard with isinstance(..., list) before iterating —
+        otherwise this would silently iterate over characters instead of
+        warning.
+        """
+        import json
+
+        from cw.doctor import _check_cw_deps
+
+        source_dir = tmp_path / "claude-workspace"
+        source_dir.mkdir()
+        (source_dir / "pyproject.toml").write_text(
+            '[project]\nname = "claude-workspace"\nversion = "0.14.2"\n'
+            'dependencies = "not-a-list"\n'
+        )
+        self._patch_dist(
+            monkeypatch,
+            direct_url_text=json.dumps({"url": f"file://{source_dir}"}),
+        )
+        result = _check_cw_deps()
+        assert result.ok is True
+        assert result.warn is True
+
+    def test_all_dependencies_present_ok(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Every declared dep resolves via importlib.metadata → ok=True, warn=False."""
+        import importlib.metadata
+        import json
+
+        from cw.doctor import _CW_PACKAGE_NAME, _check_cw_deps
+
+        source_dir = tmp_path / "claude-workspace"
+        source_dir.mkdir()
+        (source_dir / "pyproject.toml").write_text(
+            '[project]\nname = "claude-workspace"\nversion = "0.14.2"\n'
+            'dependencies = ["fakepkgone>=1.0", "fakepkgtwo>=2.0"]\n'
+        )
+        direct_url_text = json.dumps({"url": f"file://{source_dir}"})
+
+        class FakeDist:
+            def read_text(self, filename: str) -> str | None:
+                if filename == "direct_url.json":
+                    return direct_url_text
+                return None
+
+        def _dispatch(pkg: str) -> object:
+            if pkg == _CW_PACKAGE_NAME:
+                return FakeDist()
+            return object()
+
+        monkeypatch.setattr(importlib.metadata, "distribution", _dispatch)
+        result = _check_cw_deps()
+        assert result.ok is True
+        assert result.warn is False
+        assert result.detail == "2 declared dependencies all installed"
+
+    def test_non_string_dependency_entry_skipped(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A non-string dependencies entry is skipped, not crashed on."""
+        import importlib.metadata
+        import json
+
+        from cw.doctor import _CW_PACKAGE_NAME, _check_cw_deps
+
+        source_dir = tmp_path / "claude-workspace"
+        source_dir.mkdir()
+        (source_dir / "pyproject.toml").write_text(
+            '[project]\nname = "claude-workspace"\nversion = "0.14.2"\n'
+            "dependencies = [1, 2]\n"
+        )
+        direct_url_text = json.dumps({"url": f"file://{source_dir}"})
+
+        class FakeDist:
+            def read_text(self, filename: str) -> str | None:
+                if filename == "direct_url.json":
+                    return direct_url_text
+                return None
+
+        def _dispatch(pkg: str) -> object:
+            if pkg == _CW_PACKAGE_NAME:
+                return FakeDist()
+            return object()
+
+        monkeypatch.setattr(importlib.metadata, "distribution", _dispatch)
+        result = _check_cw_deps()
+        assert result.ok is True
+        assert result.warn is False
+        assert result.detail == "2 declared dependencies all installed"
+
+    def test_one_missing_dependency_warns_and_names_it(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """One declared dependency is missing → ok=True, warn=True, names it."""
+        import importlib.metadata
+        import json
+
+        from cw.doctor import _CW_PACKAGE_NAME, _CW_REINSTALL_CMD, _check_cw_deps
+
+        source_dir = tmp_path / "claude-workspace"
+        source_dir.mkdir()
+        (source_dir / "pyproject.toml").write_text(
+            '[project]\nname = "claude-workspace"\nversion = "0.14.2"\n'
+            'dependencies = ["fakepkgone>=1.0", "fakepkgtwo>=2.0"]\n'
+        )
+        direct_url_text = json.dumps({"url": f"file://{source_dir}"})
+        missing_names = {"fakepkgtwo"}
+
+        class FakeDist:
+            def read_text(self, filename: str) -> str | None:
+                if filename == "direct_url.json":
+                    return direct_url_text
+                return None
+
+        def _dispatch(pkg: str) -> object:
+            if pkg == _CW_PACKAGE_NAME:
+                return FakeDist()
+            if pkg in missing_names:
+                raise importlib.metadata.PackageNotFoundError(pkg)
+            return object()
+
+        monkeypatch.setattr(importlib.metadata, "distribution", _dispatch)
+        result = _check_cw_deps()
+        assert result.ok is True
+        assert result.warn is True
+        assert "fakepkgtwo" in result.detail
+        assert _CW_REINSTALL_CMD in result.detail
+
+    def test_dependency_with_extras_and_markers_parses_name(self) -> None:
+        """_dep_distribution_name strips version specifiers and markers."""
+        from cw.doctor import _dep_distribution_name
+
+        cases = {
+            "psutil>=6.0": "psutil",
+            "ruamel.yaml>=0.18.6": "ruamel.yaml",
+            "click": "click",
+            "foo; sys_platform=='win32'": "foo",
+        }
+        for entry, expected in cases.items():
+            assert _dep_distribution_name(entry) == expected
+
+    def test_check_included_in_run_doctor(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """_check_cw_deps is wired into run_doctor output."""
+        from cw.doctor import _CW_DEPS_CHECK_NAME, run_doctor
+
+        _stub_claude_version_ok(monkeypatch)
+        report = run_doctor()
+        check_names = [c.name for c in report.checks]
+        assert _CW_DEPS_CHECK_NAME in check_names
+
+
 # ---------------------------------------------------------------------------
 # _reap_session_by_selector tests (GitHub #555)
 # ---------------------------------------------------------------------------
