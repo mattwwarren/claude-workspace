@@ -350,6 +350,23 @@ open enum; consumers MUST tolerate unknown values. Known values:
   the streak count plus the last salvage-skip reason. Surfaces via
   `board.py`'s existing per-ticket row badge — `_index_badge_events` already
   keys on `ticket_id`, so no new board.py path is needed for this one.
+- `"blocked"` — fires from two sources sharing the literal: Rule 5's
+  `blocked` status (a hard stage-execution blocker; `breadcrumbs` carries
+  `blocker.reason`, e.g. `"plan_unreviewable"` per the #1097 incident) and
+  Rule 6's unparseable/missing-sentinel fallback (`breadcrumbs` empty,
+  `disposition="abandoned"`). See #1117.
+- `"merge_gate_blocked"` — Rule 5: the merge/CI gate rejected the PR
+  (optionally `blocker.reason` in `breadcrumbs`, e.g.
+  `"prior_pipeline_pr_open"` per issue #777; empty otherwise). See #1117.
+- `"scope_exceeded"` — Rule 5: the session's changes exceeded the
+  configured scope limit. `breadcrumbs` empty (validator forbids a
+  `blocker` for this status). See #1117.
+- `"forbidden_area"` — Rule 5: the session touched a forbidden-area file.
+  `breadcrumbs` empty (validator forbids a `blocker` for this status).
+  See #1117.
+- `"merge_pending"` — Rule 3b: PR is open, awaiting CI/merge gate; not a
+  failure. `breadcrumbs` empty; `pr_url` is preserved on the task
+  separately. See #1117.
 
 `correlation_id` is the `ticket_id` when resolvable, `null` otherwise.
 A push notification is fired for most emissions (via `fire_push_notification`)
