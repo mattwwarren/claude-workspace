@@ -123,11 +123,19 @@ _VERSION_PARTS = 3
 # Check name for the installed-vs-source cw version drift detector.
 _CW_VERSION_CHECK_NAME = "cw-version"
 
+# Check name for the declared-vs-installed dependency drift detector.
+_CW_DEPS_CHECK_NAME = "cw-deps"
+
 # Reinstall command surfaced in warnings when the installed cw is stale.
 _CW_REINSTALL_CMD = "uv tool install --reinstall claude-workspace"
 
 # Package name used for importlib.metadata lookups.
 _CW_PACKAGE_NAME = "claude-workspace"
+
+# Separator characters that terminate a PEP 508 dependency name (version
+# specifiers, environment markers, whitespace) — mirrors _parse_version's
+# lightweight, no-`packaging`-dependency parsing style.
+_DEP_NAME_SEPARATORS = "<>=!~; "
 
 # Number of consecutive FRESHNESS_GATE ticks required to declare a loop stall.
 _LOOP_STALL_CONSECUTIVE_TICKS = 3
@@ -1363,6 +1371,7 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     report.checks.append(_check_bypass_disclaimer())
     report.checks.append(_check_claude_version())
     report.checks.append(_check_cw_version())
+    report.checks.append(_check_cw_deps())
     report.checks.append(_check_daemon_reachable())
     report.checks.extend(_check_loop_health())
     report.checks.extend(_check_loop_liveness())
@@ -1440,6 +1449,19 @@ def _parse_version(v: str) -> tuple[int, ...]:
         return tuple(int(p) for p in parts[:_VERSION_PARTS])
     except ValueError:
         return ()
+
+
+def _dep_distribution_name(entry: str) -> str:
+    """Extract the leading distribution name from a PEP 508 dependency entry.
+
+    Scans for the first separator character (version specifier, environment
+    marker, or whitespace) and returns the prefix, stripped. E.g.
+    ``"psutil>=6.0"`` → ``"psutil"``, ``"foo; sys_platform=='win32'"`` → ``"foo"``.
+    """
+    for i, ch in enumerate(entry):
+        if ch in _DEP_NAME_SEPARATORS:
+            return entry[:i].strip()
+    return entry.strip()
 
 
 def _check_claude_version() -> CheckResult:
@@ -1617,6 +1639,84 @@ def _check_cw_version() -> CheckResult:
         ok=True,
         warn=False,
         detail=f"installed {installed_version_str} matches source",
+    )
+
+
+def _check_cw_deps() -> CheckResult:
+    """Check whether every dependency declared in source pyproject.toml is installed.
+
+    Detects the class of drift that crash-looped `cw dev-queue serve` on
+    2026-07-09 after #1075 added `psutil` to pyproject.toml but the running
+    tool venv was never re-synced. Silent-skips (ok=True, warn=False) for
+    registry/PyPI installs and when package metadata is absent — this check
+    only makes sense for local editable installs. Warns (ok=True, warn=True)
+    when the source path is stale, the dependencies list is unreadable or
+    malformed, or one or more declared dependencies are not installed.
+    """
+    source_path = _resolve_cw_source_path()
+    if isinstance(source_path, CheckResult):
+        return CheckResult(
+            _CW_DEPS_CHECK_NAME,
+            ok=source_path.ok,
+            warn=source_path.warn,
+            detail=source_path.detail,
+        )
+
+    if not source_path.exists():
+        return CheckResult(
+            _CW_DEPS_CHECK_NAME,
+            ok=True,
+            warn=True,
+            detail=(
+                f"source path {source_path} no longer exists"
+                f" — run `{_CW_REINSTALL_CMD}`"
+            ),
+        )
+
+    pyproject_path = source_path / "pyproject.toml"
+    try:
+        with pyproject_path.open("rb") as fh:
+            pyproject = tomllib.load(fh)
+        dependencies = pyproject["project"]["dependencies"]
+    except (FileNotFoundError, KeyError, tomllib.TOMLDecodeError, OSError):
+        return CheckResult(
+            _CW_DEPS_CHECK_NAME,
+            ok=True,
+            warn=True,
+            detail=f"could not read dependencies from {pyproject_path}",
+        )
+
+    if not isinstance(dependencies, list):
+        return CheckResult(
+            _CW_DEPS_CHECK_NAME,
+            ok=True,
+            warn=True,
+            detail=f"dependencies in {pyproject_path} is not a list",
+        )
+
+    missing: list[str] = []
+    for entry in dependencies:
+        if not isinstance(entry, str):
+            continue
+        name = _dep_distribution_name(entry)
+        try:
+            importlib.metadata.distribution(name)
+        except importlib.metadata.PackageNotFoundError:
+            missing.append(name)
+
+    if missing:
+        return CheckResult(
+            _CW_DEPS_CHECK_NAME,
+            ok=True,
+            warn=True,
+            detail=(f"not installed: {', '.join(missing)} — run `{_CW_REINSTALL_CMD}`"),
+        )
+
+    return CheckResult(
+        _CW_DEPS_CHECK_NAME,
+        ok=True,
+        warn=False,
+        detail=f"{len(dependencies)} declared dependencies all installed",
     )
 
 
