@@ -24,7 +24,14 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -310,6 +317,17 @@ class AgentHealthEntry(BaseModel):
     confidence: Literal["HIGH", "MEDIUM", "LOW"]
     scope: str | None = None
 
+    # Why: mirrors the #953/#962 empty-item guard shape for a scalar field
+    # (issue #1130). A blank agent_id defeats the orchestrator retry-targeting
+    # use case this field exists for (§5.3).
+    @field_validator("agent_id")
+    @classmethod
+    def _reject_blank_agent_id(cls, v: str) -> str:
+        if _is_blank(v):
+            msg = f"agent_id must be a non-empty, non-whitespace string (got {v!r})"
+            raise ValueError(msg)
+        return v
+
 
 class Health(BaseModel):
     lowest_agent_confidence: Literal["HIGH", "MEDIUM", "LOW"] | None = None
@@ -322,6 +340,14 @@ class Health(BaseModel):
     # the specific agent that caused a downgrade (issue #174). Optional: absent
     # on payloads from older producers; defaults to empty list.
     agent_health_summary: list[AgentHealthEntry] = Field(default_factory=list)
+
+    # Why: sibling of AutoDevResult's commits/friction_highlights/next_actions
+    # guard (issue #1130) — shortcuts lives on Health, not AutoDevResult, so it
+    # needs its own field_validator rather than joining the multi-field one.
+    @field_validator("shortcuts")
+    @classmethod
+    def _reject_empty_shortcuts(cls, v: list[str]) -> list[str]:
+        return _reject_empty_string_items(v, "shortcuts")
 
 
 class Blocker(BaseModel):
@@ -423,6 +449,25 @@ _PREMISE_GLITCH_PLACEHOLDER_CLAIM = (
 )
 
 
+def _reject_empty_string_items(v: list[str], field_name: str) -> list[str]:
+    """Raise if any item in *v* is empty/whitespace-only (issue #1130).
+
+    Shared by AutoDevResult's commits/friction_highlights/next_actions
+    multi-field validator and Health.shortcuts. Mirrors the indexed-message
+    shape of _reject_empty_question_ambiguities/_reject_empty_claim_premises,
+    adapted for bare string items rather than dict items.
+    """
+    for idx, item in enumerate(v):
+        if _is_blank(item):
+            msg = (
+                f"{field_name}[{idx}] is an empty/whitespace-only string "
+                f"(got {item!r}); every item must be a non-empty, non-whitespace "
+                "string. Drop the empty item (see #1130)."
+            )
+            raise ValueError(msg)
+    return v
+
+
 def _has_usable_question(item: dict[str, Any]) -> bool:
     """Return True iff *item* carries a non-empty, non-whitespace question string."""
     q = item.get("question")
@@ -436,6 +481,17 @@ def _has_usable_premise_text(item: dict[str, Any]) -> bool:
         if isinstance(v, str) and v.strip():
             return True
     return False
+
+
+def _is_blank(s: str) -> bool:
+    """Return True iff *s* is empty or whitespace-only."""
+    return not s.strip()
+
+
+def _has_usable_agent_id(item: dict[str, Any]) -> bool:
+    """Return True iff *item* carries a non-empty, non-whitespace 'agent_id' (#1130)."""
+    agent_id = item.get("agent_id")
+    return isinstance(agent_id, str) and not _is_blank(agent_id)
 
 
 class AutoDevResult(BaseModel):
@@ -532,6 +588,17 @@ class AutoDevResult(BaseModel):
                 )
                 raise ValueError(msg)
         return v
+
+    # Why: intentionally status-agnostic, mirroring the #953/#962 validators
+    # above (issue #1130). Unlike ambiguities/premises, none of these three
+    # fields is gated behind a status-specific non-empty invariant — an empty
+    # list remains each field's legitimate default/terminal value.
+    @field_validator("commits", "friction_highlights", "next_actions")
+    @classmethod
+    def _reject_empty_string_list_fields(
+        cls, v: list[str], info: ValidationInfo
+    ) -> list[str]:
+        return _reject_empty_string_items(v, str(info.field_name))
 
     @field_validator("stage_reached", mode="before")
     @classmethod
@@ -1113,25 +1180,32 @@ def _filter_empty_pending_items(
     predicate: Callable[[dict[str, Any]], bool],
     empty_desc: str,
     issue_ref: str,
+    log_context: dict[str, Any] | None = None,
 ) -> None:
     """Drop *key* items failing *predicate*, generalized across #953/#962.
 
     Non-dict items are left in place (isinstance guard) so they fail loudly
     at strict model_validate rather than being silently dropped.
+
+    *log_context* supplies the dict to read ``ticket_id``/``schema_version``
+    from for the warning log — defaults to *payload* itself. Needed for
+    #1130's ``health.agent_health_summary`` filter, where *payload* is the
+    nested ``health`` dict and the ticket id lives on the outer payload.
     """
     raw = payload.get(key)
     if not isinstance(raw, list):
         return
     filtered = [item for item in raw if not isinstance(item, dict) or predicate(item)]
     if len(filtered) != len(raw):
+        ctx = log_context if log_context is not None else payload
         _log.warning(
             "auto-dev: dropped %d %s item(s) with %s at parse boundary "
             "(ticket=%s, schema_version=%s); see %s",
             len(raw) - len(filtered),
             key,
             empty_desc,
-            payload.get("ticket_id", "unknown"),
-            payload.get("schema_version"),
+            ctx.get("ticket_id", "unknown"),
+            ctx.get("schema_version"),
             issue_ref,
         )
     payload[key] = filtered
@@ -1157,6 +1231,70 @@ def _filter_empty_claim_premises(payload: dict[str, Any]) -> None:
         "no usable 'claim'/'premise' text",
         "#962",
     )
+
+
+def _filter_empty_string_items(
+    payload: dict[str, Any],
+    key: str,
+    issue_ref: str,
+    log_context: dict[str, Any] | None = None,
+) -> None:
+    """Drop blank/whitespace-only string items from *key*, sibling of
+    _filter_empty_pending_items but for bare string items rather than dict
+    items (issue #1130).
+
+    Non-string items are left in place (isinstance guard) so they fail loudly
+    at strict model_validate rather than being silently dropped.
+    """
+    raw = payload.get(key)
+    if not isinstance(raw, list):
+        return
+    filtered = [item for item in raw if not isinstance(item, str) or bool(item.strip())]
+    if len(filtered) != len(raw):
+        ctx = log_context if log_context is not None else payload
+        _log.warning(
+            "auto-dev: dropped %d %s item(s) with empty/whitespace-only string "
+            "at parse boundary (ticket=%s, schema_version=%s); see %s",
+            len(raw) - len(filtered),
+            key,
+            ctx.get("ticket_id", "unknown"),
+            ctx.get("schema_version"),
+            issue_ref,
+        )
+    payload[key] = filtered
+
+
+def _get_health_dict(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Return payload['health'] iff it is a dict, else None (issue #1130).
+
+    Shared guard for the two health.* filters below — both need to bail out
+    the same way when a payload predates the health block or has it malformed.
+    """
+    health = payload.get("health")
+    return health if isinstance(health, dict) else None
+
+
+def _filter_empty_agent_health_summary(payload: dict[str, Any]) -> None:
+    """Drop agent_health_summary entries with a blank agent_id (issue #1130)."""
+    health = _get_health_dict(payload)
+    if health is None:
+        return
+    _filter_empty_pending_items(
+        health,
+        "agent_health_summary",
+        _has_usable_agent_id,
+        "empty/missing 'agent_id'",
+        "#1130",
+        log_context=payload,
+    )
+
+
+def _filter_empty_health_shortcuts(payload: dict[str, Any]) -> None:
+    """Drop blank/whitespace-only health.shortcuts items (issue #1130)."""
+    health = _get_health_dict(payload)
+    if health is None:
+        return
+    _filter_empty_string_items(health, "shortcuts", "#1130", log_context=payload)
 
 
 def _coerce_blocked_next_actions(payload: dict[str, Any]) -> None:
@@ -1258,6 +1396,16 @@ def _normalize_payload(payload: dict[str, Any], raw_status: str) -> None:
     that the strict ``model_validate`` still enforces. See the individual
     ``_coerce_*`` helpers for the per-issue rationale.
     """
+    # Status-agnostic (issue #1130): must run before any downstream coercion
+    # reads these fields — in particular _coerce_blocked_next_actions (below)
+    # reads next_actions to classify is_user_directed, and must see the
+    # already-filtered list or a blank item could cause a wrong coercion
+    # decision.
+    _filter_empty_string_items(payload, "commits", "#1130")
+    _filter_empty_string_items(payload, "friction_highlights", "#1130")
+    _filter_empty_string_items(payload, "next_actions", "#1130")
+    _filter_empty_health_shortcuts(payload)
+    _filter_empty_agent_health_summary(payload)
     if raw_status == "no_op":
         _coerce_no_op_strays(payload)
     if raw_status in ("scope_exceeded", "forbidden_area"):
