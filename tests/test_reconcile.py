@@ -9951,6 +9951,53 @@ class TestSalvageCommittedNoPrSessions:
         lr = s.last_result or {}
         assert lr.get("paused_status") == _NEEDS_SALVAGE_REASON
 
+    def test_low_path_merges_into_existing_last_result(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """LOW path must MERGE paused_status into last_result, not replace it —
+        otherwise it destroys the sentinel `status` that `cw dev-queue approve`
+        requires (#1105)."""
+        from cw.reconcile.salvage import _salvage_low_path
+
+        worktree = tmp_path / "wt-merge"
+        worktree.mkdir(parents=True)
+        ticket_id = "TKT-MERGE"
+        sess = _mk_live_daemon_session_with_worktree("sess-merge", worktree, ticket_id)
+        sess.last_result = {
+            "status": "review_pending_approval",
+            "review": {"clean": True},
+        }
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="sess-merge",
+                    )
+                ]
+            )
+        )
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+        monkeypatch.setattr(
+            "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
+        )
+
+        _salvage_low_path(sess, ticket_id, "dev/merge-branch", str(worktree))
+
+        reloaded = load_state()
+        s = next(s for s in reloaded.sessions if s.id == "sess-merge")
+        assert s.last_result is not None
+        assert s.last_result["status"] == "review_pending_approval"
+        assert s.last_result["review"] == {"clean": True}
+        assert s.last_result["paused_status"] == _NEEDS_SALVAGE_REASON
+        assert s.reap_reason == ReapReason.SALVAGE_PARKED
+
     def test_stalled_needs_salvage_route_stamps_disposition(
         self,
         tmp_config_dir: Path,
