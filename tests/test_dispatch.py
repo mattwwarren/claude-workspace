@@ -5689,7 +5689,7 @@ class TestApplyStagedDecision:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Rule 5's breadcrumbs gate is "blocker is a dict", not status=="blocked" (#1117).
+        """Rule 5's breadcrumbs gate is "blocker is a dict", not "blocked" (#1117).
 
         The validator (auto_dev_result.py) allows merge_gate_blocked to
         optionally carry a non-null blocker (issue #777, prior_pipeline_pr_open

@@ -1921,6 +1921,20 @@ def _route_staged_decision(
     elif status == "merge_pending":
         # Rule 3b: PR created but awaiting CI/merge gate (#899). Not a failure
         # — preserve pr_url so operator can monitor/merge. Do not re-dispatch.
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": task.session_id or "",
+                "session_name": "",
+                "client": task.client,
+                "ticket_id": task.ticket_id,
+                "claude_session_id": None,
+                "paused_status": "merge_pending",
+                "breadcrumbs": "",
+                "crashed": False,
+            },
+            correlation_id=task.ticket_id,
+        )
         transition_task_status(
             task,
             QueueItemStatus.BLOCKED_ON_USER,
@@ -1968,6 +1982,28 @@ def _route_staged_decision(
                     },
                 )
                 return True
+        fallthrough_blocker = (
+            last_result.get("blocker") if isinstance(last_result, dict) else None
+        )
+        breadcrumbs = (
+            str(fallthrough_blocker.get("reason", ""))
+            if isinstance(fallthrough_blocker, dict)
+            else ""
+        )
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": task.session_id or "",
+                "session_name": "",
+                "client": task.client,
+                "ticket_id": task.ticket_id,
+                "claude_session_id": None,
+                "paused_status": status,
+                "breadcrumbs": breadcrumbs,
+                "crashed": False,
+            },
+            correlation_id=task.ticket_id,
+        )
         transition_task_status(
             task, QueueItemStatus.BLOCKED_ON_USER, disposition=disposition
         )
@@ -1976,6 +2012,20 @@ def _route_staged_decision(
         # Why: unparseable sentinel must never silently advance/complete
         # (B2 correctness requirement). Changes pre-B2 behavior which
         # fell through to COMPLETED.
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": task.session_id or "",
+                "session_name": "",
+                "client": task.client,
+                "ticket_id": task.ticket_id,
+                "claude_session_id": None,
+                "paused_status": "blocked",
+                "breadcrumbs": "",
+                "crashed": False,
+            },
+            correlation_id=task.ticket_id,
+        )
         transition_task_status(
             task, QueueItemStatus.BLOCKED_ON_USER, disposition="abandoned"
         )
