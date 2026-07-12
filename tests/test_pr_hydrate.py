@@ -151,7 +151,7 @@ class TestAttentionState:
                 is_draft=False,
                 reviewer_count=1,
             )
-            != "merge_blocked"
+            == "ready_to_approve"
         )
 
     def test_row2_ci_failing(self) -> None:

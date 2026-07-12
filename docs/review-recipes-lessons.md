@@ -189,7 +189,7 @@ tests pass on first write), so they are class "applies + guarded" — P5 added t
 
 ## Notes for reviewers
 
-- The four "applies" guards that exist in the ported code (#4, #13, #22, #37,
+- The five "applies" guards that exist in the ported code (#4, #13, #22, #37,
   #46) were **already correct** before P5 — this phase is an audit + backfill:
   it added `# Why:` provenance comments and two regression pins
   (`test_closed_pr_never_a_candidate`,
