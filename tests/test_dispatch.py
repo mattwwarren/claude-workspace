@@ -6362,6 +6362,50 @@ class TestPersistCarriedContext:
         task_c.computed_scope_tier = "large"
         assert _resolve_scope_tier({"scope": {}}, task_c) is None
 
+    def test_route_scope_gated_approval_1091_shaped_small_tier_auto_advances(
+        self,
+        tmp_dispatch_dirs: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """#1104 regression: a #1091-shaped corrected scope block (small tier,
+        forbidden_touched=False, 11 files, 33 lines) auto-advances via Rule 1
+        rather than parking BLOCKED_ON_USER -- pins acceptance criterion 2
+        end-to-end through the dispatcher's ``_route_scope_gated_approval``,
+        not just the gate-recipe layer (see
+        tests/test_reconcile_gate_recipes.py for that layer's pin)."""
+        from cw.dispatch import _route_scope_gated_approval
+
+        calls: list[TicketTask] = []
+
+        def _advance_spy(
+            task: TicketTask,
+            clients: dict[str, ClientConfig],
+            *,
+            disposition: str | None = None,
+            pr_url: str | None = None,
+        ) -> None:
+            calls.append(task)
+
+        monkeypatch.setattr("cw.dispatch._stage_advance_unchecked", _advance_spy)
+
+        task = self._make_running_task("RS-1091", stage=Stage.PLAN)
+        last_result: dict[str, object] = {
+            "status": "plan_pending_approval",
+            "scope": {
+                "tier": "small",
+                "forbidden_touched": False,
+                "files": 11,
+                "lines_actual": 33,
+            },
+        }
+        _route_scope_gated_approval(
+            task, self._clients(tmp_path), last_result, "plan_pending_approval", None
+        )
+
+        assert len(calls) == 1
+        assert task.status == QueueItemStatus.RUNNING  # unchanged -- never parked
+
     def test_consume_stamps_carried_context_on_task(
         self,
         tmp_dispatch_dirs: Path,
