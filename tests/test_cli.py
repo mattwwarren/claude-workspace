@@ -4967,12 +4967,17 @@ class TestDevQueueAddTicketIdValidation:
     def test_dev_queue_add_rejects_ticket_id_with_leading_dash(
         self, tmp_config_dir: Path
     ) -> None:
+        # `--` stops Click's own option parsing so `-x` reaches TicketTask
+        # construction instead of being intercepted as an unrecognized
+        # option (Click would otherwise reject it before the validator
+        # under test ever runs).
         runner = CliRunner()
         result = runner.invoke(
-            main, ["dev-queue", "add", "-x", "--client", "client-a"]
+            main, ["dev-queue", "add", "--client", "client-a", "--", "-x"]
         )
         assert result.exit_code != 0
         assert "Traceback" not in result.output
+        assert "-x" in result.output
 
     def test_dev_queue_add_rejects_ticket_id_with_dot_dot(
         self, tmp_config_dir: Path
@@ -4985,9 +4990,7 @@ class TestDevQueueAddTicketIdValidation:
         assert "Traceback" not in result.output
         assert "1..2" in result.output
 
-    def test_dev_queue_add_accepts_normal_ticket_id(
-        self, tmp_config_dir: Path
-    ) -> None:
+    def test_dev_queue_add_accepts_normal_ticket_id(self, tmp_config_dir: Path) -> None:
         """Regression: a well-formed ticket_id still enqueues successfully."""
         from cw.dev_queue import load_dev_queue
 
