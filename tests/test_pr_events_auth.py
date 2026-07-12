@@ -68,7 +68,8 @@ class TestWarnIfUnsignedMode:
     def test_info_when_secret_unset_and_allow_unsigned_default(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """Secret unset + default-deny (allow_unsigned=False) is now safe -- INFO, not WARNING."""
+        """Secret unset + default-deny (allow_unsigned=False) is safe -- INFO,
+        not WARNING."""
         monkeypatch.delenv(CW_PR_EVENTS_HMAC_SECRET_ENV, raising=False)
         with caplog.at_level(logging.INFO):
             warn_if_unsigned_mode()
@@ -96,7 +97,7 @@ class TestWarnIfUnsignedMode:
     def test_no_warning_when_secret_set_and_allow_unsigned_true(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """allow_unsigned is ignored once a secret is configured -- no log either way."""
+        """allow_unsigned is ignored once secret is configured -- no log either way."""
         monkeypatch.setenv(CW_PR_EVENTS_HMAC_SECRET_ENV, "s3cr3t")
         with caplog.at_level(logging.WARNING):
             warn_if_unsigned_mode(allow_unsigned=True)
