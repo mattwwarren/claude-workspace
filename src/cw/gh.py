@@ -332,6 +332,12 @@ def _fetch_issue_comments(ticket_id: str, timeout: int) -> list[dict[str, Any]] 
     return comments
 
 
+def _comment_has_marker(comment: dict[str, Any]) -> bool:
+    """Return True if *comment*'s body contains the plan-review marker."""
+    body = comment.get("body", "")
+    return isinstance(body, str) and _PLAN_MARKER in body
+
+
 def fetch_approved_plan_comment(
     ticket_id: str, *, timeout: int = _FETCH_COMMENTS_TIMEOUT
 ) -> str | None:
@@ -355,10 +361,7 @@ def fetch_approved_plan_comment(
     if comments is None:
         return None
 
-    if not any(
-        isinstance(c.get("body", ""), str) and _PLAN_MARKER in c["body"]
-        for c in comments
-    ):
+    if not any(_comment_has_marker(c) for c in comments):
         return None
 
     trusted_login = _current_gh_login(timeout=timeout)
@@ -367,7 +370,7 @@ def fetch_approved_plan_comment(
 
     for comment in reversed(comments):
         body = comment.get("body", "")
-        if not (isinstance(body, str) and _PLAN_MARKER in body):
+        if not (isinstance(body, str) and _comment_has_marker(comment)):
             continue
         author = comment.get("author")
         if isinstance(author, dict) and author.get("login") == trusted_login:

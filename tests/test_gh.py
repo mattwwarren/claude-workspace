@@ -579,6 +579,18 @@ class TestFetchApprovedPlanComment:
         result = fetch_approved_plan_comment("896")
         assert result is None
 
+    def test_comment_missing_body_key_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A comment dict with no 'body' key at all is skipped, not a crash."""
+        comments: list[dict[str, Any]] = [{"id": "no-body-field"}]
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: self._make_comments_result(comments),
+        )
+        result = fetch_approved_plan_comment("896")
+        assert result is None
+
     def test_empty_comments_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Issue with no comments → None."""
         monkeypatch.setattr(
