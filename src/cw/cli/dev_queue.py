@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Literal
 
 import click
+from pydantic import ValidationError
 
 from cw.auto_dev_result import AutoDevResult, BlockedResult
 from cw.cli._base import _complete_client, _emit_freshness_subline, handle_errors, main
@@ -136,15 +137,19 @@ def dev_queue_add(
     config = load_orchestrator_config()
     for ticket_id in tickets:
         resolved = resolve_client(ticket_id, config, client)
-        task = TicketTask(
-            ticket_id=ticket_id,
-            client=resolved,
-            priority=priority,
-            headless_timeout_override=headless_timeout_override,
-            scope_hint=scope_hint,
-            lane=lane_name,
-            signoff=signoff,
-        )
+        try:
+            task = TicketTask(
+                ticket_id=ticket_id,
+                client=resolved,
+                priority=priority,
+                headless_timeout_override=headless_timeout_override,
+                scope_hint=scope_hint,
+                lane=lane_name,
+                signoff=signoff,
+            )
+        except ValidationError as exc:
+            msg = f"Invalid ticket '{ticket_id}': {exc.errors()[0]['msg']}"
+            raise click.ClickException(msg) from exc
         inserted = add_ticket(task)
         if not inserted:
             click.echo(
