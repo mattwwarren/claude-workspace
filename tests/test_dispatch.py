@@ -5549,7 +5549,7 @@ class TestApplyStagedDecision:
 
     @pytest.mark.parametrize(
         "non_v4_status",
-        ["blocked", "no_op", "shipped", "merge_pending"],
+        ["no_op", "shipped"],
     )
     def test_non_v4_status_does_not_emit_plan_parked(
         self,
@@ -5560,8 +5560,14 @@ class TestApplyStagedDecision:
     ) -> None:
         """Non-V4 statuses do not emit SESSION_NEEDS_ATTENTION(plan_parked).
 
-        Guards against false-positive plan_parked emissions for shipped, blocked,
-        no_op, and merge_pending paths in apply_staged_decision.
+        Guards against false-positive plan_parked emissions for the two
+        statuses that must stay fully silent on the attention channel: no_op
+        (terminal, no park) and shipped (Rule 3 success path, no park). NOTE
+        (#1117): "blocked" and "merge_pending" were dropped from this
+        parametrize list -- they now legitimately emit SESSION_NEEDS_ATTENTION
+        via Rule 5/3b (see test_stage_failure_status_emits_attention_with_matching_
+        paused_status and test_merge_pending_emits_attention); this test no
+        longer covers them.
         """
         from cw.dispatch import apply_staged_decision
 
@@ -5579,11 +5585,306 @@ class TestApplyStagedDecision:
         monkeypatch.setattr("cw.dispatch.record_event", capture_event)
 
         last_result: dict[str, object] = {"status": non_v4_status}
-        if non_v4_status == "merge_pending":
-            last_result["pr"] = {"url": "https://github.com/org/repo/pull/1"}
         task = self._make_running_task("NPK-1", stage=Stage.FINALIZE)
         apply_staged_decision(task, non_v4_status, last_result, self._clients(tmp_path))
 
+        assert len(attention_events) == 0
+
+    # -- GitHub #1117: attention signal on all blocked_on_user parks ---------
+
+    @pytest.mark.parametrize(
+        "stage_failure_status",
+        ["blocked", "merge_gate_blocked", "scope_exceeded", "forbidden_area"],
+    )
+    def test_stage_failure_status_emits_attention_with_matching_paused_status(
+        self,
+        stage_failure_status: str,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """STAGE_FAILURE_STATUSES park with paused_status mirroring status (#1117).
+
+        Rule 5's attention payload must distinguish a hard stage blocker from a
+        scope-boundary violation from a merge-gate CI failure -- paused_status
+        carries the originating status string verbatim (not a single collapsed
+        "blocked" literal for all four members), so an operator scanning the
+        event feed / board badge can tell them apart without opening the
+        session transcript. Driven at Stage.IMPL (not FINALIZE) so Rule 5a's
+        self-heal branch is never reached.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        captured: list[tuple[object, dict[str, object]]] = []
+
+        def capture_event(
+            event_type: object,
+            payload: dict[str, object] | None = None,
+            **_kwargs: object,
+        ) -> object:
+            if event_type == OrchestratorEventType.SESSION_NEEDS_ATTENTION:
+                captured.append((event_type, payload or {}))
+            return None
+
+        monkeypatch.setattr("cw.dispatch.record_event", capture_event)
+
+        task = self._make_running_task("SF-1", stage=Stage.IMPL)
+        task.session_id = "sess-sf1"
+        task.client = "test-client"
+        last_result: dict[str, object] = {"status": stage_failure_status}
+        apply_staged_decision(
+            task, stage_failure_status, last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert len(captured) == 1
+        _, payload = captured[0]
+        assert payload["paused_status"] == stage_failure_status
+        assert payload["ticket_id"] == "SF-1"
+        assert payload["client"] == "test-client"
+        assert payload["session_id"] == "sess-sf1"
+        assert payload["crashed"] is False
+
+    @pytest.mark.parametrize(
+        ("status", "blocker", "expected_breadcrumbs"),
+        [
+            pytest.param(
+                "blocked",
+                {"stage": "s1_plan", "reason": "plan_unreviewable"},
+                "plan_unreviewable",
+                id="blocked_with_blocker",
+            ),
+            pytest.param(
+                "merge_gate_blocked",
+                {"stage": "s4_finalize", "reason": "prior_pipeline_pr_open"},
+                "prior_pipeline_pr_open",
+                id="merge_gate_blocked_with_blocker",
+            ),
+            pytest.param(
+                "merge_gate_blocked",
+                None,
+                "",
+                id="merge_gate_blocked_without_blocker",
+            ),
+            pytest.param(
+                "scope_exceeded",
+                None,
+                "",
+                id="scope_exceeded_no_blocker",
+            ),
+            pytest.param(
+                "forbidden_area",
+                None,
+                "",
+                id="forbidden_area_no_blocker",
+            ),
+        ],
+    )
+    def test_stage_failure_breadcrumbs_gated_on_blocker_dict(
+        self,
+        status: str,
+        blocker: dict[str, str] | None,
+        expected_breadcrumbs: str,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Rule 5's breadcrumbs gate is "blocker is a dict", not status=="blocked" (#1117).
+
+        The validator (auto_dev_result.py) allows merge_gate_blocked to
+        optionally carry a non-null blocker (issue #777, prior_pipeline_pr_open
+        exception) -- gating breadcrumbs on status=="blocked" alone would
+        silently drop that case to "". Confirms breadcrumbs mirrors
+        blocker["reason"] whenever a blocker dict is present (blocked, always;
+        merge_gate_blocked, when populated), and stays "" when it isn't
+        (merge_gate_blocked with blocker=None, and scope_exceeded/
+        forbidden_area, which the validator forbids from ever carrying a
+        blocker).
+        """
+        from cw.dispatch import apply_staged_decision
+
+        captured: list[tuple[object, dict[str, object]]] = []
+
+        def capture_event(
+            event_type: object,
+            payload: dict[str, object] | None = None,
+            **_kwargs: object,
+        ) -> object:
+            if event_type == OrchestratorEventType.SESSION_NEEDS_ATTENTION:
+                captured.append((event_type, payload or {}))
+            return None
+
+        monkeypatch.setattr("cw.dispatch.record_event", capture_event)
+
+        task = self._make_running_task("SF-BC-1", stage=Stage.IMPL)
+        last_result: dict[str, object] = {"status": status, "blocker": blocker}
+        apply_staged_decision(task, status, last_result, self._clients(tmp_path))
+
+        assert len(captured) == 1
+        _, payload = captured[0]
+        assert payload["breadcrumbs"] == expected_breadcrumbs
+        assert payload["paused_status"] == status
+
+    def test_finalize_regress_self_heal_does_not_emit_attention(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """Rule 5a's self-heal early-return never emits SESSION_NEEDS_ATTENTION (#1117).
+
+        5a regresses a regress-eligible FINALIZE blocker back to IMPL and
+        returns True before ever reaching transition_task_status(...,
+        BLOCKED_ON_USER, ...) -- the task never actually parks, so paging the
+        operator here would fire for a condition the system is actively
+        self-healing (#770), defeating this ticket's own no-double-fire
+        acceptance criterion in the opposite direction (over-firing).
+        """
+        from cw.dispatch import apply_staged_decision
+
+        attention = capture_events(
+            "cw.dispatch", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+
+        task = self._make_running_task("REGRESS-ATTN-1", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "stage_reached": "stage4a_merge_gate",
+            "blocker": {"stage": "s4_finalize", "reason": "agent_block"},
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert len(attention) == 0
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.IMPL
+
+    def test_merge_pending_emits_attention(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """merge_pending emits SESSION_NEEDS_ATTENTION(merge_pending) (#1117).
+
+        Rule 3b parks BLOCKED_ON_USER for merge_pending (#899, PR open,
+        awaiting CI/merge gate) but previously left the pause invisible on
+        the operator event feed -- the same "invisible park" gap as Rule
+        5/6, now closed.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        captured: list[tuple[object, dict[str, object]]] = []
+
+        def capture_event(
+            event_type: object,
+            payload: dict[str, object] | None = None,
+            **_kwargs: object,
+        ) -> object:
+            if event_type == OrchestratorEventType.SESSION_NEEDS_ATTENTION:
+                captured.append((event_type, payload or {}))
+            return None
+
+        monkeypatch.setattr("cw.dispatch.record_event", capture_event)
+
+        task = self._make_running_task("MP-ATTN-1", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "merge_pending",
+            "pr": {"url": "https://github.com/org/repo/pull/1117"},
+        }
+        apply_staged_decision(
+            task, "merge_pending", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.pr_url == "https://github.com/org/repo/pull/1117"
+        assert len(captured) == 1
+        _, payload = captured[0]
+        assert payload["paused_status"] == "merge_pending"
+        assert payload["breadcrumbs"] == ""
+        assert payload["crashed"] is False
+
+    def test_unparseable_status_emits_attention(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Rule 6's unparseable-sentinel fallback emits SESSION_NEEDS_ATTENTION (#1117).
+
+        A None/missing status must never silently advance/complete (B2
+        correctness requirement) -- it must also page the operator, same as
+        every other BLOCKED_ON_USER park this ticket covers.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        captured: list[tuple[object, dict[str, object]]] = []
+
+        def capture_event(
+            event_type: object,
+            payload: dict[str, object] | None = None,
+            **_kwargs: object,
+        ) -> object:
+            if event_type == OrchestratorEventType.SESSION_NEEDS_ATTENTION:
+                captured.append((event_type, payload or {}))
+            return None
+
+        monkeypatch.setattr("cw.dispatch.record_event", capture_event)
+
+        task = self._make_running_task("UNPARSE-1", stage=Stage.IMPL)
+        apply_staged_decision(task, None, None, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "abandoned"
+        assert len(captured) == 1
+        _, payload = captured[0]
+        assert payload["paused_status"] == "blocked"
+        assert payload["breadcrumbs"] == ""
+
+    @pytest.mark.parametrize(
+        "scope_gated_status",
+        ["plan_pending_approval", "review_pending_approval"],
+    )
+    def test_scope_gated_large_tier_park_does_not_emit_attention(
+        self,
+        scope_gated_status: str,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Rule 1's large-tier scope-gated park still emits zero attention (#1117).
+
+        Regression guard pinning "no double-fire": Rule 1 fires before Rule 2
+        (SCOPE_GATED_APPROVAL_STATUSES is a subset of
+        PAUSED_FOR_USER_INPUT_STATUSES) and must remain silent on the
+        attention channel even after this ticket's Rule 3b/5/6 emissions are
+        added elsewhere in the same routing table.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        attention_events: list[object] = []
+
+        def capture_event(
+            event_type: object,
+            payload: dict[str, object] | None = None,
+            **_kwargs: object,
+        ) -> object:
+            if event_type == OrchestratorEventType.SESSION_NEEDS_ATTENTION:
+                attention_events.append(event_type)
+            return None
+
+        monkeypatch.setattr("cw.dispatch.record_event", capture_event)
+
+        task = self._make_running_task("SG-LARGE-ATTN-1", stage=Stage.PLAN)
+        task.scope_hint = "large"
+        last_result: dict[str, object] = {
+            "status": scope_gated_status,
+            "scope": {"tier": "large"},
+        }
+        apply_staged_decision(
+            task, scope_gated_status, last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert len(attention_events) == 0
 
     def test_scope_gate_hint_large_tier_small_blocks(
