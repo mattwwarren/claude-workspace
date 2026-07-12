@@ -198,6 +198,66 @@ class TestLoadSaveDevQueue:
         store = load_dev_queue()
         assert store.tasks[0].priority == 5
 
+    def test_save_dev_queue_first_write_creates_no_backup(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        save_dev_queue(DevQueueStore())
+        assert list(tmp_dev_queue.glob("dev_queue.json.bak-*")) == []
+
+    def test_save_dev_queue_rotates_backup_on_second_write(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        first = DevQueueStore(
+            tasks=[TicketTask(ticket_id="GEN-100", client="genhealth")]
+        )
+        save_dev_queue(first)
+        first_payload = (tmp_dev_queue / "dev_queue.json").read_text(
+            encoding="utf-8"
+        )
+
+        second = DevQueueStore(
+            tasks=[TicketTask(ticket_id="GEN-200", client="genhealth")]
+        )
+        save_dev_queue(second)
+
+        backups = list(tmp_dev_queue.glob("dev_queue.json.bak-*"))
+        assert len(backups) == 1
+        assert backups[0].read_text(encoding="utf-8") == first_payload
+
+    def test_save_dev_queue_backup_rotation_keeps_last_five(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        for i in range(7):
+            store = DevQueueStore(
+                tasks=[TicketTask(ticket_id=f"GEN-{i}", client="genhealth")]
+            )
+            save_dev_queue(store)
+
+        backups = list(tmp_dev_queue.glob("dev_queue.json.bak-*"))
+        assert len(backups) == 5
+
+    def test_save_dev_queue_refuses_real_path(
+        self,
+        tmp_dev_queue: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """save_dev_queue must refuse to write under the real state dir (#1017)."""
+        import cw.config
+        from unittest.mock import MagicMock
+
+        real_dev_queue_file = cw.config._REAL_STATE_DIR / "dev_queue.json"
+        monkeypatch.setattr("cw.config.DEV_QUEUE_FILE", real_dev_queue_file)
+        mock_write = MagicMock()
+        mock_rotate = MagicMock()
+        monkeypatch.setattr("cw.dev_queue.atomic_write_text", mock_write)
+        monkeypatch.setattr("cw.dev_queue.rotate_backup", mock_rotate)
+
+        with pytest.raises(CwError, match="refusing real-state write"):
+            save_dev_queue(DevQueueStore())
+
+        mock_write.assert_not_called()
+        mock_rotate.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # TestListTickets

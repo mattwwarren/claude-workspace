@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import os
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
 
+import cw.config
 from cw.config import (
     _backup_state_file,
+    _REAL_CONFIG_DIR,
+    _REAL_STATE_DIR,
+    _under_pytest,
     ensure_config,
     get_client,
     init_client,
@@ -16,6 +21,7 @@ from cw.config import (
     load_state,
     migrate_cw_state,
     mutate_state,
+    refuse_real_state_write,
     save_state,
     show_config,
 )
@@ -277,6 +283,53 @@ class TestLoadSaveState:
 
         save_state(CwState())
         assert state_file.exists()
+
+    def test_save_state_refuses_real_path(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """save_state must refuse to write under the real state dir (#1017)."""
+        real_state_file = _REAL_STATE_DIR / "sessions.json"
+        monkeypatch.setattr("cw.config.STATE_DIR", _REAL_STATE_DIR)
+        monkeypatch.setattr("cw.config.STATE_FILE", real_state_file)
+        mock_write = MagicMock()
+        monkeypatch.setattr("cw.config.atomic_write_text", mock_write)
+
+        with pytest.raises(CwError, match="refusing real-state write"):
+            save_state(CwState())
+
+        mock_write.assert_not_called()
+
+
+class TestRefuseRealStateWrite:
+    """Tests for refuse_real_state_write — the #1017 belt-and-suspenders guard."""
+
+    def test_raises_for_path_under_real_state_dir(self) -> None:
+        with pytest.raises(CwError, match=r"#1017"):
+            refuse_real_state_write(_REAL_STATE_DIR / "dev_queue.json")
+
+    def test_raises_for_path_under_real_config_dir(self) -> None:
+        with pytest.raises(CwError, match=r"pytest"):
+            refuse_real_state_write(_REAL_CONFIG_DIR / "clients.yaml")
+
+    def test_noop_for_tmp_path(self, tmp_path: Path) -> None:
+        refuse_real_state_write(tmp_path / "dev_queue.json")
+
+    def test_noop_when_not_under_pytest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(cw.config, "_under_pytest", lambda: False)
+        # Would raise if the guard were active; must be a silent no-op.
+        refuse_real_state_write(_REAL_STATE_DIR / "dev_queue.json")
+
+    def test_resolves_relative_and_symlinked_paths(self, tmp_path: Path) -> None:
+        assert _under_pytest() is True
+        escaping = (
+            _REAL_STATE_DIR.parent / "cw" / ".." / "cw" / "dev_queue.json"
+        )
+        with pytest.raises(CwError, match="refusing real-state write"):
+            refuse_real_state_write(escaping)
 
 
 class TestEnsureConfig:
@@ -587,6 +640,26 @@ class TestInitClient:
 
         with pytest.raises(CwError, match="no 'clients:' key"):
             init_client("test", repo)
+
+    def test_init_client_refuses_real_config_dir(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """init_client must refuse to write clients.yaml under the real config
+        dir (#1017)."""
+        repo = make_git_repo("repo")
+        real_clients_file = _REAL_CONFIG_DIR / "clients.yaml"
+        monkeypatch.setattr("cw.config.CONFIG_DIR", _REAL_CONFIG_DIR)
+        monkeypatch.setattr("cw.config.CLIENTS_FILE", real_clients_file)
+        mock_write = MagicMock()
+        monkeypatch.setattr("cw.config.atomic_write_text", mock_write)
+
+        with pytest.raises(CwError, match="refusing real-state write"):
+            init_client("test", repo)
+
+        mock_write.assert_not_called()
 
 
 class TestMigrateCwState:
@@ -1438,6 +1511,25 @@ class TestLoadEffectiveConfig:
         effective = load_effective_config()
         assert effective is not None
 
+    def test_save_concurrency_overrides_refuses_real_path(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """_save_concurrency_overrides must refuse a real-state write (#1017)."""
+        from cw.config import _save_concurrency_overrides
+        from cw.models import ConcurrencyOverrides
+
+        real_override_file = _REAL_STATE_DIR / "concurrency_overrides.json"
+        monkeypatch.setattr("cw.config.CONCURRENCY_OVERRIDE_FILE", real_override_file)
+        mock_write = MagicMock()
+        monkeypatch.setattr("cw.config.atomic_write_text", mock_write)
+
+        with pytest.raises(CwError, match="refusing real-state write"):
+            _save_concurrency_overrides(ConcurrencyOverrides())
+
+        mock_write.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # TestLoadEffectiveClients
@@ -1704,3 +1796,30 @@ class TestUsageLimitedUntilPersistence:
         future = datetime.now(UTC) + timedelta(hours=1)
         with patch("cw.config.atomic_write_text", side_effect=OSError("disk full")):
             save_usage_limited_until(future)
+
+    def test_save_usage_limited_until_refuses_real_path_and_does_not_swallow(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The #1017 CwError guard must propagate, unlike the OSError above.
+
+        save_usage_limited_until wraps its body in `except OSError`; CwError
+        is a distinct exception type and must NOT be swallowed by that guard.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        from cw.config import save_usage_limited_until
+
+        real_dispatch_state_file = _REAL_STATE_DIR / "dispatch_state.json"
+        monkeypatch.setattr(
+            "cw.config.DISPATCH_STATE_FILE", real_dispatch_state_file
+        )
+        mock_write = MagicMock()
+        monkeypatch.setattr("cw.config.atomic_write_text", mock_write)
+
+        future = datetime.now(UTC) + timedelta(hours=1)
+        with pytest.raises(CwError, match="refusing real-state write"):
+            save_usage_limited_until(future)
+
+        mock_write.assert_not_called()
