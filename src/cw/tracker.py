@@ -1,8 +1,13 @@
-"""Shared tracker-resolution utilities for spawn and session chokepoints.
+"""Shared project-config.yaml utilities.
 
-Centralises the ``tracking.primary.system`` read so that ``spawn.py`` and
-``session.py`` share one implementation rather than each duplicating the YAML
-walk that ``doctor.py`` already owned.
+Two layers: ``load_project_config_dict`` is the generic "read
+``.claude/project-config.yaml`` as a dict, safe-degrade to None on any
+failure" primitive shared by every consumer of that file — ``resolve_tracker``
+below (so ``spawn.py``/``session.py`` share one ``tracking.primary.system``
+resolution rather than each duplicating the YAML walk ``doctor.py`` also
+needs), ``cw.review_strategy.resolve_review_strategy`` (RFC 0010 P4), and
+``cw.doctor``'s config checks. ``resolve_tracker`` itself stays here as the
+tracker-specific resolution built on top of that shared primitive.
 """
 
 from __future__ import annotations
