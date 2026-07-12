@@ -306,9 +306,7 @@ def _current_gh_login(*, timeout: int) -> str | None:
     return login or None
 
 
-def _fetch_issue_comments(
-    ticket_id: str, timeout: int
-) -> list[dict[str, Any]] | None:
+def _fetch_issue_comments(ticket_id: str, timeout: int) -> list[dict[str, Any]] | None:
     """Return the issue's comments list, or None on any fetch/parse error."""
     try:
         result = _sp.run(

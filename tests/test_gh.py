@@ -753,9 +753,7 @@ class TestFetchApprovedPlanComment:
         comments = [{"body": plan_body, "author": {"login": "mattwwarren"}}]
         monkeypatch.setattr(
             "cw.gh._sp.run",
-            self._make_dispatched_run(
-                comments, subprocess.TimeoutExpired(["gh"], 30)
-            ),
+            self._make_dispatched_run(comments, subprocess.TimeoutExpired(["gh"], 30)),
         )
         result = fetch_approved_plan_comment("896")
         assert result is None
