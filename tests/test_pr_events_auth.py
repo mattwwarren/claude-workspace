@@ -65,12 +65,24 @@ class TestVerifySignature:
 
 
 class TestWarnIfUnsignedMode:
-    def test_warns_when_secret_unset(
+    def test_info_when_secret_unset_and_allow_unsigned_default(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
+        """Secret unset + default-deny (allow_unsigned=False) is now safe -- INFO, not WARNING."""
         monkeypatch.delenv(CW_PR_EVENTS_HMAC_SECRET_ENV, raising=False)
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.INFO):
             warn_if_unsigned_mode()
+        assert CW_PR_EVENTS_HMAC_SECRET_ENV in caplog.text
+        assert not any(r.levelno == logging.WARNING for r in caplog.records)
+
+    def test_warns_when_secret_unset_and_allow_unsigned_true(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Operator explicitly opted into the open posture -- WARNING."""
+        monkeypatch.delenv(CW_PR_EVENTS_HMAC_SECRET_ENV, raising=False)
+        with caplog.at_level(logging.INFO):
+            warn_if_unsigned_mode(allow_unsigned=True)
+        assert any(r.levelno == logging.WARNING for r in caplog.records)
         assert CW_PR_EVENTS_HMAC_SECRET_ENV in caplog.text
 
     def test_no_warning_when_secret_set(
@@ -81,11 +93,20 @@ class TestWarnIfUnsignedMode:
             warn_if_unsigned_mode()
         assert caplog.text == ""
 
+    def test_no_warning_when_secret_set_and_allow_unsigned_true(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """allow_unsigned is ignored once a secret is configured -- no log either way."""
+        monkeypatch.setenv(CW_PR_EVENTS_HMAC_SECRET_ENV, "s3cr3t")
+        with caplog.at_level(logging.WARNING):
+            warn_if_unsigned_mode(allow_unsigned=True)
+        assert caplog.text == ""
+
     def test_no_warning_when_secret_set_to_empty_string(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         """An empty-string env var is falsy — treated the same as unset."""
         monkeypatch.setenv(CW_PR_EVENTS_HMAC_SECRET_ENV, "")
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.INFO):
             warn_if_unsigned_mode()
         assert CW_PR_EVENTS_HMAC_SECRET_ENV in caplog.text
