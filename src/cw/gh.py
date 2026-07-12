@@ -306,25 +306,10 @@ def _current_gh_login(*, timeout: int) -> str | None:
     return login or None
 
 
-def fetch_approved_plan_comment(
-    ticket_id: str, *, timeout: int = _FETCH_COMMENTS_TIMEOUT
-) -> str | None:
-    """Return the body of the latest approved plan comment on a GitHub issue.
-
-    Scans issue comments in reverse order (newest first) for the first one
-    containing the ``<!-- plan-spec-reviewed`` marker written by auto-dev-plan
-    AND authored by the currently-authenticated ``gh`` identity. A
-    marker-bearing comment from any other commenter is skipped (not
-    scan-terminating) — it does not count as "no reviewed plan," it simply
-    isn't authoritative, so scanning continues for an older trusted match.
-
-    Returns None when:
-    - gh binary is absent or returns an error
-    - the response cannot be parsed
-    - no comment carries the plan marker (Stage 1 not yet complete)
-    - no marker-bearing comment is authored by the currently-authenticated
-      ``gh`` identity, or that identity cannot be resolved (fail-closed)
-    """
+def _fetch_issue_comments(
+    ticket_id: str, timeout: int
+) -> list[dict[str, Any]] | None:
+    """Return the issue's comments list, or None on any fetch/parse error."""
     try:
         result = _sp.run(
             ["gh", "issue", "view", ticket_id, "--json", "comments"],
@@ -345,6 +330,31 @@ def fetch_approved_plan_comment(
         data: dict[str, Any] = json.loads(result.stdout)
         comments: list[dict[str, Any]] = data.get("comments") or []
     except (ValueError, AttributeError):
+        return None
+    return comments
+
+
+def fetch_approved_plan_comment(
+    ticket_id: str, *, timeout: int = _FETCH_COMMENTS_TIMEOUT
+) -> str | None:
+    """Return the body of the latest approved plan comment on a GitHub issue.
+
+    Scans issue comments in reverse order (newest first) for the first one
+    containing the ``<!-- plan-spec-reviewed`` marker written by auto-dev-plan
+    AND authored by the currently-authenticated ``gh`` identity. A
+    marker-bearing comment from any other commenter is skipped (not
+    scan-terminating) — it does not count as "no reviewed plan," it simply
+    isn't authoritative, so scanning continues for an older trusted match.
+
+    Returns None when:
+    - gh binary is absent or returns an error
+    - the response cannot be parsed
+    - no comment carries the plan marker (Stage 1 not yet complete)
+    - no marker-bearing comment is authored by the currently-authenticated
+      ``gh`` identity, or that identity cannot be resolved (fail-closed)
+    """
+    comments = _fetch_issue_comments(ticket_id, timeout)
+    if comments is None:
         return None
 
     if not any(

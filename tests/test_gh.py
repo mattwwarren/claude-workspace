@@ -526,7 +526,8 @@ class TestFetchApprovedPlanComment:
                 if isinstance(identity, int):
                     return _make_run_result(identity, "")
                 return _make_run_result(0, identity)
-            raise AssertionError(f"unexpected _sp.run args: {argv}")
+            msg = f"unexpected _sp.run args: {argv}"
+            raise AssertionError(msg)
 
         return _fake_run
 
