@@ -9,7 +9,7 @@ import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
-from cw.atomic import atomic_write_text
+from cw.atomic import atomic_write_text, rotate_backup
 from cw.auto_dev_result import (
     PAUSED_FOR_USER_INPUT_STATUSES,
     STAGE_FAILURE_STATUSES,
@@ -20,6 +20,7 @@ from cw.config import (
     dev_plan_lock,
     dev_queue_file,
     get_client,
+    refuse_real_state_write,
 )
 from cw.config import (
     dev_queue_lock as _dev_queue_lock_file,
@@ -398,9 +399,18 @@ def load_dev_queue() -> DevQueueStore:
 
 
 def save_dev_queue(store: DevQueueStore) -> None:
-    """Persist the dev queue to disk atomically."""
+    """Persist the dev queue to disk atomically.
+
+    Write-ahead backs up the previous on-disk payload before overwriting,
+    rotating out anything past the last _DEFAULT_BACKUP_KEEP snapshots
+    (GitHub #1017) — the only reason the Jul 2026 GEN-A/GEN-B clobber
+    incident was recoverable was a manually-made backup; this makes that
+    protection automatic.
+    """
     path = dev_queue_file()
+    refuse_real_state_write(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    rotate_backup(path)
     atomic_write_text(path, store.model_dump_json(indent=2))
 
 

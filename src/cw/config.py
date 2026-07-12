@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
@@ -63,6 +64,14 @@ PR_WATCHER_DIR = STATE_DIR / "pr_watcher"
 REVIEW_MONITOR_DIR = Path.home() / ".claude" / "review-monitor"
 CLIENTS_FILE = CONFIG_DIR / "clients.yaml"
 STATE_FILE = STATE_DIR / "sessions.json"
+
+# Snapshot of the *real* (pre-monkeypatch) state/config roots, captured once
+# at import time. refuse_real_state_write() compares write targets against
+# these frozen values, so it still detects an escape even after the names
+# above have been monkeypatched to a tmp_path by the autouse
+# tmp_config_dir fixture (the ordinary, expected case) — see GitHub #1017.
+_REAL_STATE_DIR = STATE_DIR
+_REAL_CONFIG_DIR = CONFIG_DIR
 
 ORCHESTRATOR_CONFIG_DIR = Path.home() / ".claude-workspace"
 ORCHESTRATOR_CONFIG_FILE = ORCHESTRATOR_CONFIG_DIR / "orchestrator.yaml"
@@ -163,6 +172,47 @@ def concurrency_override_file() -> Path:
 
 def concurrency_override_lock_file() -> Path:
     return CONCURRENCY_OVERRIDE_LOCK
+
+
+def _under_pytest() -> bool:
+    """Return True when running inside a pytest process. Monkeypatchable seam."""
+    return "pytest" in sys.modules
+
+
+def refuse_real_state_write(path: Path) -> None:
+    """Raise CwError if *path* resolves under the real cw state/config dir
+    while pytest is running.
+
+    Belt-and-suspenders guard against GitHub #1017 (a live dev_queue.json
+    clobbered by GEN-A/GEN-B test-fixture data): ``save_state``,
+    ``save_usage_limited_until``, ``_save_concurrency_overrides``,
+    ``save_dev_queue``, and ``init_client`` call this immediately before
+    their atomic write, so a write that somehow escapes the autouse
+    ``tmp_config_dir`` fixture (a stale module-level path binding, or a
+    code path exercised before the fixture applies) fails loudly instead
+    of silently corrupting ``~/.local/share/cw`` or ``~/.config/cw``. A
+    no-op outside pytest — production ``cw`` runs are never affected.
+
+    Detection is in-process only (``sys.modules`` membership): a real
+    subprocess (e.g. a test that shells out to the installed ``cw``
+    binary) spawns a fresh interpreter that never imports pytest, so this
+    guard does not see or block writes from that process. See GitHub
+    #1017's root-cause notes, which point at a subprocess/integration
+    write path as a plausible cause of the original incident.
+    """
+    if not _under_pytest():
+        return
+    resolved = path.resolve()
+    for real_root in (_REAL_STATE_DIR, _REAL_CONFIG_DIR):
+        real_resolved = real_root.resolve()
+        if resolved == real_resolved or real_resolved in resolved.parents:
+            msg = (
+                f"refusing real-state write: {path} resolves under "
+                f"{real_root} while running under pytest (GitHub #1017 "
+                "guard). Check for a stale module-level path binding or a "
+                "write that runs before tmp_config_dir applies."
+            )
+            raise CwError(msg)
 
 
 @contextlib.contextmanager
@@ -529,6 +579,7 @@ def _backup_state_file(raw: dict[str, Any]) -> None:
 
 def save_state(state: CwState) -> None:
     """Persist session state to disk atomically."""
+    refuse_real_state_write(state_file())
     state_dir().mkdir(parents=True, exist_ok=True)
     atomic_write_text(state_file(), state.model_dump_json(indent=2))
 
@@ -563,6 +614,7 @@ def save_usage_limited_until(dt: datetime | None) -> None:
     the next loop start won't honour the backoff (acceptable degradation).
     """
     try:
+        refuse_real_state_write(DISPATCH_STATE_FILE)
         DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         payload = {"usage_limited_until": dt.isoformat() if dt is not None else None}
         atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
@@ -596,6 +648,7 @@ def _load_concurrency_overrides() -> ConcurrencyOverrides:
 def _save_concurrency_overrides(overrides: ConcurrencyOverrides) -> None:
     """Persist ConcurrencyOverrides to disk atomically (caller holds lock)."""
     path = concurrency_override_file()
+    refuse_real_state_write(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, overrides.model_dump_json())
 
@@ -842,4 +895,13 @@ def init_client(
 
         buf = StringIO()
         rt.dump(doc, buf)
+        # Why: guarded here (immediately before the content write) rather than
+        # before config_dir().mkdir()/clients_lock() above, unlike the other
+        # refuse_real_state_write call sites. A pre-guard escape only costs an
+        # idempotent mkdir(exist_ok=True) and a lock-file touch against the
+        # real config dir — not the data-clobbering content write this guard
+        # exists to prevent — so closing the lock-acquisition window wasn't
+        # judged worth the larger, differently-shaped change of guarding
+        # every *_lock() context manager. See GitHub #1017 plan decision.
+        refuse_real_state_write(clients_path)
         atomic_write_text(clients_path, buf.getvalue())

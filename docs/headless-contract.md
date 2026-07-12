@@ -155,6 +155,8 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
 | `blocker` | object \| null | See §4.2. Populated when `status = "blocked"`. |
 | `next_actions` | string[] | Advisory list cw can act on without prose-parsing. See §4.3. |
 
+**Note (A8, #1130):** `commits`, `friction_highlights`, and `next_actions` array items must be non-empty, non-whitespace strings; blank items are dropped at the parse boundary. Unlike A6/A7, no placeholder is injected when filtering leaves the array empty — none of these fields is gated behind a status-specific "must be non-empty" invariant (contrast `ambiguities`/`premises`, §4.4), so an empty result here is simply a valid empty list.
+
 ### 3.4 `pr_created` — Phase D pre-merge PR snapshot (issue #174)
 
 **Gap addressed:** Small-scope tickets reach S4 (PR creation) and immediately enable auto-merge. The sentinel block previously landed after the merge completes, so the orchestrator had no window to observe the PR number or CI state at PR-creation time — only the merged state in `pr`.
@@ -336,6 +338,8 @@ A degraded agent is one that returned ANY of:
 
 `downgrade_applied` and `fix_loop_escalated` are distinct signals — a run can have either, both, or neither.
 
+`health.shortcuts` items are filtered the same way (blank entries dropped at the parse boundary, no placeholder — A8, #1130).
+
 ### 5.3 `health.agent_health_summary` — Phase C per-agent breakdown (issue #174)
 
 **Gap addressed:** When the §5.1 health aggregation rule downgrades to `review_pending_approval`, the orchestrator sees `health.downgrade_applied=true` and `health.lowest_agent_confidence=LOW` but cannot tell *which* agent caused the degradation — a retry targeting the specific agent is not possible without that detail.
@@ -366,6 +370,8 @@ Each entry:
 | `scope` | string \| null | Scope tier the agent was operating under. Expected values `"small"` / `"large"`; free-form string to tolerate producer-side drift. `null` for agents without a scope concept (e.g. plan-reviewer). |
 
 **Advisory optional field.** Absent (empty list) on payloads from producers that predate Phase C. No schema version bump required (§8). Consumer use case: filter entries with `confidence=LOW` or `scope=large` to target retries.
+
+`agent_health_summary` entries with a blank `agent_id` are dropped at the parse boundary (A8, #1130) rather than coerced to a placeholder, for the same reason as above.
 
 ---
 
@@ -410,6 +416,7 @@ The parser applies several pre-validation coercions before handing the payload t
 | `blocked` + stray `next_actions` | `status=blocked` and `next_actions` is non-empty with non-user-directed verbs (not `user_resolve_*` / `user_decide_*` / `user_verify_*` prefixes; not `stage_reached=stage1_pre_flight`) | Drop `next_actions` (set to `[]`), preserve `blocker` | #371 |
 | `no_op` + stray `scope.lines_actual` | `status=no_op` and `stage_reached ∈ {stage1_pre_flight, stage1_plan}` and `scope.lines_actual` is non-null | Set `scope.lines_actual=null` | #399 |
 | empty-question ambiguity items | `status=ambiguities_pending_resolution` and one or more ambiguity items have a null/empty/whitespace question | Drop the empty item(s); if none remain, inject labeled placeholder `{"question": "(producer emitted no usable ambiguity … see #953)"}` | #953 |
+| blank items in commits / friction_highlights / next_actions / health.shortcuts, or blank agent_id in agent_health_summary entries | any status; an array item is a blank string (or an agent_health_summary entry has a blank agent_id) | Drop the blank item(s)/entry(ies); no placeholder is injected — these fields carry no status-gated non-empty invariant | #1130 |
 
 All coercions log a `WARNING` with the affected field names and ticket ID. The model-level invariants remain strict — coercion happens only at the parse boundary so existing test coverage for the invariants is unaffected.
 
@@ -439,6 +446,8 @@ Until then, cw must treat all non-terminal exits as fully manual recovery: the u
 **Note (A6, #953):** Rejecting empty-question ambiguity items and coercing an empty/missing ambiguities array to a labeled placeholder is a parser-side strictness tightening of an existing v4 invariant — **no version bump** (consistent with the #430 `_coerce_empty_pending_array` precedent).
 
 **Note (A7, #962):** Rejecting empty-claim/premise premise items and coercing an empty/missing premises array to a labeled placeholder is a parser-side strictness tightening of an existing v4 invariant — **no version bump** (same precedent as A6/#953 and #430).
+
+**Note (A8, #1130):** Filtering blank items from `commits`, `friction_highlights`, `next_actions`, `health.shortcuts`, and blank `agent_id` entries from `health.agent_health_summary` is a parser-side strictness tightening — **no version bump** (same precedent as A6/#953, A7/#962, and #430). Unlike A6/A7, no placeholder is injected: none of these five fields is gated behind a status-specific "must be non-empty" invariant, so an all-blank input simply filters down to an empty list/array.
 
 **Bump required when:**
 - Any field is removed or renamed.

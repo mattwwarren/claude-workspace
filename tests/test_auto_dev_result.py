@@ -21,8 +21,10 @@ from cw.auto_dev_result import (
     STAGE_FAILURE_STATUSES,
     STAGE_SUCCESS_STATUSES,
     SUPPORTED_SCHEMA_VERSIONS,
+    AgentHealthEntry,
     AutoDevResult,
     BlockedResult,
+    Health,
     Review,
     extract_block,
     is_documented_example,
@@ -2525,6 +2527,229 @@ class TestCase962EmptyClaimPremisesRejected:
         p["premises"] = [{"premise": "the premise text"}]
         result = AutoDevResult.model_validate(p)
         assert len(result.premises) == 1
+
+
+# ---------------------------------------------------------------------------
+# Issue #1130 — extend #953/#962 empty-item guards to the remaining list
+# fields: commits, friction_highlights, next_actions (AutoDevResult);
+# Health.shortcuts; and AgentHealthEntry.agent_id (health.agent_health_summary
+# entries). Unlike #953/#962, none of these five fields backs a status-gated
+# non-empty invariant, so filtering an all-blank array/list yields an empty
+# result — no placeholder is injected.
+# ---------------------------------------------------------------------------
+
+
+class TestCase1130EmptyStringListItemsRejected:
+    """Blank/whitespace-only items in commits/friction_highlights/next_actions
+    are rejected by strict model_validate and filtered at the parse boundary
+    (issue #1130, sibling of #953/#962).
+    """
+
+    def test_empty_string_commit_strict_rejects(self) -> None:
+        p = _shipped_payload()
+        p["commits"] = ["sha1", ""]
+        with pytest.raises(ValidationError, match="commits"):
+            AutoDevResult.model_validate(p)
+
+    def test_whitespace_only_commit_strict_rejects(self) -> None:
+        p = _shipped_payload()
+        p["commits"] = ["   "]
+        with pytest.raises(ValidationError, match="commits"):
+            AutoDevResult.model_validate(p)
+
+    def test_empty_string_friction_highlight_strict_rejects(self) -> None:
+        p = _shipped_payload()
+        p["friction_highlights"] = ["worked fine", ""]
+        with pytest.raises(ValidationError, match="friction_highlights"):
+            AutoDevResult.model_validate(p)
+
+    def test_empty_string_next_action_strict_rejects(self) -> None:
+        p = _shipped_payload()
+        p["next_actions"] = ["wait_for_ci", ""]
+        with pytest.raises(ValidationError, match="next_actions"):
+            AutoDevResult.model_validate(p)
+
+    def test_valid_list_items_untouched(self) -> None:
+        p = _shipped_payload()
+        p["commits"] = ["sha1", "sha2"]
+        p["friction_highlights"] = ["a friction note"]
+        p["next_actions"] = ["wait_for_ci"]
+        result = AutoDevResult.model_validate(p)
+        assert result.commits == ["sha1", "sha2"]
+        assert result.friction_highlights == ["a friction note"]
+        assert result.next_actions == ["wait_for_ci"]
+
+    def test_validator_message_names_field(self) -> None:
+        p1 = _shipped_payload()
+        p1["commits"] = [""]
+        with pytest.raises(ValidationError, match=r"commits\[0\]"):
+            AutoDevResult.model_validate(p1)
+
+        p2 = _shipped_payload()
+        p2["friction_highlights"] = [""]
+        with pytest.raises(ValidationError, match=r"friction_highlights\[0\]"):
+            AutoDevResult.model_validate(p2)
+
+    def test_parse_stdout_filters_empty_commit_with_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        p = _shipped_payload()
+        p["commits"] = ["sha1", "", "sha2"]
+        with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+            result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.commits == ["sha1", "sha2"]
+        assert any("#1130" in rec.message for rec in caplog.records)
+
+    def test_parse_stdout_filters_empty_friction_highlight(self) -> None:
+        p = _shipped_payload()
+        p["friction_highlights"] = ["", "real note"]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.friction_highlights == ["real note"]
+
+    def test_parse_stdout_filters_empty_next_action(self) -> None:
+        p = _shipped_payload()
+        p["next_actions"] = ["wait_for_ci", ""]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.next_actions == ["wait_for_ci"]
+
+    def test_parse_stdout_filters_next_action_before_blocked_coerce(self) -> None:
+        """The blank-item filter runs before ``_coerce_blocked_next_actions``
+        reads next_actions, so a blank item cannot cause a wrong coercion
+        decision: a user-directed blocked payload with one real action and one
+        blank action must keep the real action, not be wiped to [].
+        """
+        p = _blocked_payload()
+        p["next_actions"] = ["user_resolve_x", ""]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "blocked"
+        assert result.next_actions == ["user_resolve_x"]
+
+    def test_parse_stdout_all_blank_list_filters_to_empty(self) -> None:
+        """No placeholder is injected (unlike #953/#962) — an all-blank array
+        simply filters down to an empty list.
+        """
+        p = _shipped_payload()
+        p["friction_highlights"] = ["", "   "]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.friction_highlights == []
+
+    def test_non_string_item_survives_filter_and_fails_loudly(self) -> None:
+        p = _shipped_payload()
+        p["commits"] = ["sha1", 123]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, BlockedResult)
+        assert result.blocker.reason == BLOCKER_REASON_VALIDATION_FAILED
+
+
+class TestCase1130EmptyHealthShortcutRejected:
+    """Blank/whitespace-only ``Health.shortcuts`` items are rejected and
+    filtered the same way (issue #1130).
+    """
+
+    def test_empty_string_shortcut_strict_rejects(self) -> None:
+        with pytest.raises(ValidationError, match="shortcuts"):
+            Health(
+                shortcuts=["ok", ""],
+                any_incomplete_risk=False,
+                recommendation="PROCEED",
+            )
+
+    def test_whitespace_only_shortcut_strict_rejects(self) -> None:
+        with pytest.raises(ValidationError, match="shortcuts"):
+            Health(
+                shortcuts=["   "],
+                any_incomplete_risk=False,
+                recommendation="PROCEED",
+            )
+
+    def test_valid_shortcuts_untouched(self) -> None:
+        health = Health(
+            shortcuts=["skipped lint", "used TODO"],
+            any_incomplete_risk=False,
+            recommendation="PROCEED",
+        )
+        assert health.shortcuts == ["skipped lint", "used TODO"]
+
+    def test_parse_stdout_filters_empty_shortcut_with_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        p = _shipped_payload()
+        p["ticket_id"] = "GEN-shortcut-1130"
+        p["health"]["shortcuts"] = ["ok", ""]
+        with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+            result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.health.shortcuts == ["ok"]
+        assert any(
+            "GEN-shortcut-1130" in rec.message and "#1130" in rec.message
+            for rec in caplog.records
+        )
+
+
+class TestCase1130EmptyAgentIdRejected:
+    """Blank/whitespace-only ``AgentHealthEntry.agent_id`` values are rejected
+    and filtered at the parse boundary (issue #1130).
+    """
+
+    def test_empty_agent_id_strict_rejects(self) -> None:
+        with pytest.raises(ValidationError, match="agent_id"):
+            AgentHealthEntry(agent_id="", confidence="HIGH")
+
+    def test_whitespace_only_agent_id_strict_rejects(self) -> None:
+        with pytest.raises(ValidationError, match="agent_id"):
+            AgentHealthEntry(agent_id="   ", confidence="HIGH")
+
+    def test_valid_agent_id_untouched(self) -> None:
+        entry = AgentHealthEntry(agent_id="impl-agent-abc", confidence="HIGH")
+        assert entry.agent_id == "impl-agent-abc"
+
+    def test_parse_stdout_filters_empty_agent_id_entry_with_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        p = _shipped_payload()
+        p["ticket_id"] = "GEN-agentid-1130"
+        p["health"]["agent_health_summary"] = [
+            {"agent_id": "", "confidence": "LOW"},
+            {"agent_id": "impl-agent-abc", "confidence": "HIGH"},
+        ]
+        with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+            result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert len(result.health.agent_health_summary) == 1
+        assert result.health.agent_health_summary[0].agent_id == "impl-agent-abc"
+        assert any(
+            "GEN-agentid-1130" in rec.message and "#1130" in rec.message
+            for rec in caplog.records
+        )
+
+    def test_mixed_valid_and_blank_agent_id_filters_to_valid_only(self) -> None:
+        p = _shipped_payload()
+        p["health"]["agent_health_summary"] = [
+            {"agent_id": "   ", "confidence": "MEDIUM"},
+            {"agent_id": "plan-reviewer-xyz", "confidence": "HIGH"},
+        ]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert len(result.health.agent_health_summary) == 1
+        assert result.health.agent_health_summary[0].agent_id == "plan-reviewer-xyz"
+
+    def test_all_blank_agent_health_summary_filters_to_empty_list(self) -> None:
+        """No placeholder is injected (unlike #953/#962) — an all-blank array
+        simply filters down to an empty list.
+        """
+        p = _shipped_payload()
+        p["health"]["agent_health_summary"] = [
+            {"agent_id": "", "confidence": "LOW"},
+            {"agent_id": "   ", "confidence": "MEDIUM"},
+        ]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.health.agent_health_summary == []
 
 
 # ---------------------------------------------------------------------------
