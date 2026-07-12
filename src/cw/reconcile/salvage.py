@@ -282,7 +282,13 @@ def _salvage_low_path(
                     and s.last_result.get("paused_status") == _NEEDS_SALVAGE_REASON
                 )
                 if not already_flagged:
-                    s.last_result = {"paused_status": _NEEDS_SALVAGE_REASON}
+                    if isinstance(s.last_result, dict):
+                        s.last_result = {
+                            **s.last_result,
+                            "paused_status": _NEEDS_SALVAGE_REASON,
+                        }
+                    else:
+                        s.last_result = {"paused_status": _NEEDS_SALVAGE_REASON}
                     s.reap_reason = ReapReason.SALVAGE_PARKED
                 break
         save_state(fresh_state)
