@@ -311,6 +311,47 @@ class TestParseSentinelFromTranscriptToolResult:
         assert _parse_sentinel_from_transcript(str(worktree), "uuid-774b") is None
 
 
+class TestLastContentEntryTimestamp:
+    """Tests for _last_content_entry_timestamp (#1076 content-timestamp liveness).
+
+    Derives liveness from the last *content-bearing* transcript record's
+    timestamp rather than the file's mtime, so a trailing metadata-only
+    write (e.g. an ``ai-title`` record with no "message" field) does not
+    falsely bump liveness.
+    """
+
+    def test_missing_file_returns_none(self, tmp_path: Path) -> None:
+        from cw._util import _last_content_entry_timestamp
+
+        assert _last_content_entry_timestamp(tmp_path / "nope.jsonl") is None
+
+    def test_skips_malformed_json_line(self, tmp_path: Path) -> None:
+        """A malformed line is skipped, not scan-aborting; the last valid
+        content-bearing record's timestamp is returned."""
+        from datetime import UTC, datetime
+
+        from cw._util import _last_content_entry_timestamp
+
+        transcript = tmp_path / "t.jsonl"
+        ts = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        records = [
+            "{ not valid json",
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": ts.isoformat(),
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "hi"}],
+                    },
+                }
+            ),
+        ]
+        transcript.write_text("\n".join(records) + "\n")
+
+        assert _last_content_entry_timestamp(transcript) == ts
+
+
 class TestShortenWorktree:
     """Tests for _shorten_worktree (shared worktree-path display helper)."""
 
