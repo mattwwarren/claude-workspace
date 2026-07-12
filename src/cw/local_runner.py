@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import subprocess
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, TypedDict, runtime_checkable
 
 import psutil
@@ -31,14 +32,14 @@ from cw.gh import fetch_approved_plan_comment
 from cw.models import CONTEXT_JSON_RELATIVE_PATH
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from cw.models import TicketTask
 
 _SCHEMA_VERSION: Literal[4] = 4
 
 # --- Reason-string constants (exported for tests and callers) ---
 _NUMSTAT_MIN_COLS = 3  # git diff --numstat lines: <added> \t <removed> \t <file>
+_AIDER_LOG_RELATIVE_PATH: Path = Path(".cw", "aider.log")
+_AIDER_LOG_TAIL_CHARS = 4000  # matches codex_runner.py's stderr[-4000:] convention
 
 ENDPOINT_NOT_CONFIGURED = "endpoint_not_configured"
 AIDER_NOT_FOUND = "aider_not_found"
@@ -100,15 +101,21 @@ class RealAiderRunner:
         argv: list[str],
         env: dict[str, str],
     ) -> subprocess.Popen[bytes]:
-        # DEVNULL (never PIPE): a fire-and-forget process whose output nobody
-        # reads would deadlock on a full pipe buffer with no reader draining it.
-        return subprocess.Popen(
-            argv,
-            env=env,
-            cwd=worktree,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        # Redirect to a per-run log file (never PIPE — nothing reads the pipe on
+        # this fire-and-forget path, and an unread full pipe buffer deadlocks the
+        # child; a file has no such backpressure). Truncated ("w") on every call
+        # so a retry into the same worktree does not bleed a prior attempt's
+        # output into the next harvest read.
+        log_path = worktree / _AIDER_LOG_RELATIVE_PATH
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("w") as log_file:
+            return subprocess.Popen(
+                argv,
+                env=env,
+                cwd=worktree,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+            )
 
 
 class FakeAiderRunner:
@@ -419,10 +426,17 @@ def synthesize_git_result(
     facts = _git_facts(worktree, default_branch)
 
     if not facts["commits"]:
+        details = ""
+        log_path = worktree / _AIDER_LOG_RELATIVE_PATH
+        with contextlib.suppress(OSError):
+            details = log_path.read_text(encoding="utf-8", errors="replace")[
+                -_AIDER_LOG_TAIL_CHARS:
+            ]
         return make_blocked(
             ticket_id=task.ticket_id,
             worktree=worktree,
             reason=AIDER_NO_OUTPUT,
+            details=details,
             retry_eligible=True,
             retry_delay_seconds=0,
         )
