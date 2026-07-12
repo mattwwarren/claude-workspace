@@ -389,38 +389,6 @@ def test_synthesize_git_result_stage_complete(
     AutoDevResult.model_validate(result.model_dump(mode="json"))
 
 
-def test_synthesize_git_result_blocked_no_output(
-    tmp_config_dir: Path,
-    make_git_repo: Callable[[str], Path],
-) -> None:
-    """No new commits since fork point → blocked/aider_no_output."""
-    worktree = make_git_repo("wt-no-output")
-    subprocess.run(
-        ["git", "-C", str(worktree), "remote", "add", "origin", str(worktree)],
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(worktree), "fetch", "origin", "main"],
-        check=True,
-        capture_output=True,
-    )
-    task = _make_task()
-
-    result = synthesize_git_result(
-        task=task,
-        worktree=worktree,
-        default_branch="main",
-    )
-
-    assert result.status == "blocked"
-    assert result.blocker is not None
-    assert result.blocker.reason == AIDER_NO_OUTPUT
-    assert result.blocker.retry_eligible is True
-    assert result.blocker.details == ""
-    AutoDevResult.model_validate(result.model_dump(mode="json"))
-
-
 def _make_no_output_worktree(make_git_repo: Callable[[str], Path], name: str) -> Path:
     """Helper: git repo with a fetched origin/main and no new commits."""
     worktree = make_git_repo(name)
@@ -437,17 +405,46 @@ def _make_no_output_worktree(make_git_repo: Callable[[str], Path], name: str) ->
     return worktree
 
 
+def _write_aider_log(worktree: Path, content: bytes | str) -> None:
+    """Helper: write .cw/aider.log under worktree, creating .cw/ if needed."""
+    cw_dir = worktree / ".cw"
+    cw_dir.mkdir(exist_ok=True)
+    log_path = cw_dir / "aider.log"
+    if isinstance(content, bytes):
+        log_path.write_bytes(content)
+    else:
+        log_path.write_text(content, encoding="utf-8")
+
+
+def test_synthesize_git_result_blocked_no_output(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """No new commits since fork point → blocked/aider_no_output."""
+    worktree = _make_no_output_worktree(make_git_repo, "wt-no-output")
+    task = _make_task()
+
+    result = synthesize_git_result(
+        task=task,
+        worktree=worktree,
+        default_branch="main",
+    )
+
+    assert result.status == "blocked"
+    assert result.blocker is not None
+    assert result.blocker.reason == AIDER_NO_OUTPUT
+    assert result.blocker.retry_eligible is True
+    assert result.blocker.details == ""
+    AutoDevResult.model_validate(result.model_dump(mode="json"))
+
+
 def test_synthesize_git_result_no_output_with_log_populates_details(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
     """No commits + populated aider.log → blocker.details carries the log tail."""
     worktree = _make_no_output_worktree(make_git_repo, "wt-no-output-log")
-    cw_dir = worktree / ".cw"
-    cw_dir.mkdir(exist_ok=True)
-    (cw_dir / "aider.log").write_text(
-        "aider: some diagnostic output\n", encoding="utf-8"
-    )
+    _write_aider_log(worktree, "aider: some diagnostic output\n")
     task = _make_task()
 
     result = synthesize_git_result(
@@ -484,10 +481,8 @@ def test_synthesize_git_result_no_output_log_truncated_to_tail(
 ) -> None:
     """A log file over 4000 chars is truncated to exactly the last 4000 chars."""
     worktree = _make_no_output_worktree(make_git_repo, "wt-no-output-truncate")
-    cw_dir = worktree / ".cw"
-    cw_dir.mkdir(exist_ok=True)
     long_output = "x" * 5000
-    (cw_dir / "aider.log").write_text(long_output, encoding="utf-8")
+    _write_aider_log(worktree, long_output)
     task = _make_task()
 
     result = synthesize_git_result(
@@ -506,10 +501,9 @@ def test_synthesize_git_result_no_output_malformed_utf8_replaced(
 ) -> None:
     """Invalid/truncated UTF-8 bytes in the log degrade via replacement, not raise."""
     worktree = _make_no_output_worktree(make_git_repo, "wt-no-output-malformed")
-    cw_dir = worktree / ".cw"
-    cw_dir.mkdir(exist_ok=True)
-    (cw_dir / "aider.log").write_bytes(
-        b"partial output before crash: \xff\xfe truncated multi-byte tail \xe2\x98"
+    _write_aider_log(
+        worktree,
+        b"partial output before crash: \xff\xfe truncated multi-byte tail \xe2\x98",
     )
     task = _make_task()
 
