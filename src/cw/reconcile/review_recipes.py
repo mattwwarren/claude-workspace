@@ -437,6 +437,13 @@ def _prepare_dispatch_job(
         )
         return None
     wt = task.worktree_path
+    # Why fail LOUD on a missing/stale worktree: ported review-monitor lesson
+    # (session:8f738500, "Stale git worktrees cause check to fail silently") —
+    # review_monitor's git diff/fetch against a deleted worktree failed SILENTLY,
+    # so an /address-review dispatch would run against nothing with no signal.
+    # Here an absent worktree_path emits a durable PR_ACTION_FAILED correction
+    # (never a silent skip). See tests/test_reconcile_review_recipes.py::
+    # test_missing_worktree_emits_pr_action_failed.
     if wt is None or not wt.exists():
         _skip_with_anomaly(
             payload_base,
