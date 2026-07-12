@@ -3315,9 +3315,7 @@ class TestCheckCwDeps:
         assert result.ok is True
         assert result.warn is False
 
-    def test_stale_source_path_warns(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_stale_source_path_warns(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Non-existent source path → ok=True, warn=True, detail names path."""
         import json
 
@@ -3387,7 +3385,7 @@ class TestCheckCwDeps:
     def test_all_dependencies_present_ok(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Every declared dependency resolves via importlib.metadata → ok=True, warn=False."""
+        """Every declared dep resolves via importlib.metadata → ok=True, warn=False."""
         import importlib.metadata
         import json
 
