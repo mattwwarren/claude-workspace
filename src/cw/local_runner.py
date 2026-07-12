@@ -417,11 +417,12 @@ def synthesize_git_result(
 
     Called by reconcile/local harvest AFTER the fire-and-forget aider process
     has exited. The local model never emits a sentinel — cw synthesizes it from
-    git facts alone (no aider exit code or stdout is available in the harvest
-    path):
+    git facts, plus a best-effort tail of the process's captured log on the
+    no-commits path (no aider exit code is available in either case):
 
     - commits since fork point  → stage_complete (synthesized from git facts)
-    - no commits                → AIDER_NO_OUTPUT (blocked, retry_eligible)
+    - no commits                → AIDER_NO_OUTPUT (blocked, retry_eligible,
+      details populated from the .cw/aider.log tail when readable)
     """
     facts = _git_facts(worktree, default_branch)
 
