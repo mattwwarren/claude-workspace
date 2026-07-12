@@ -19,6 +19,7 @@ from cw.config import (
     load_state,
     orchestrator_config_file,
     save_state,
+    save_usage_limited_until,
 )
 from cw.dev_queue import (
     add_ticket,
@@ -69,6 +70,7 @@ from cw.native_daemon import FakeNativeDaemonClient
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from cw.native_daemon import NativeDaemonClient
     from tests.conftest import CapturedEvent
 
 
@@ -3328,7 +3330,7 @@ class TestDispatchUsageLimitBackoff:
         daemon = FakeNativeDaemonClient()
         saved: list[object] = []
 
-        real_save = cw.dispatch.save_usage_limited_until
+        real_save = save_usage_limited_until
 
         def capturing_save(dt: object) -> None:
             saved.append(dt)
@@ -6507,11 +6509,31 @@ class TestWaveCollisionDetection:
         def _spy(
             config: OrchestratorConfig,
             *,
+            use_plan: bool = False,
+            parent: str | None = None,
+            native_daemon: NativeDaemonClient | None = None,
+            emit: Callable[[str], None] | None = None,
+            warned_stale: set[tuple[str, str]] | None = None,
+            warned_fetch_fail: set[str] | None = None,
             warned_collision: set[frozenset[str]] | None = None,
-            **kwargs: object,
+            usage_limited_until: datetime | None = None,
+            auto_ff: bool = True,
+            client_filter: str | None = None,
         ) -> DispatchTickResult:
             captured_collision_sets.append(warned_collision)
-            return original(config, **kwargs)
+            return original(
+                config,
+                use_plan=use_plan,
+                parent=parent,
+                native_daemon=native_daemon,
+                emit=emit,
+                warned_stale=warned_stale,
+                warned_fetch_fail=warned_fetch_fail,
+                warned_collision=warned_collision,
+                usage_limited_until=usage_limited_until,
+                auto_ff=auto_ff,
+                client_filter=client_filter,
+            )
 
         monkeypatch.setattr("cw.dispatch.dispatch_tick", _spy)
         monkeypatch.setattr(
@@ -7294,7 +7316,7 @@ class TestLaneCircuitBreaker:
         import cw.dispatch as dispatch_mod
 
         loads: list[object] = []
-        real_load = dispatch_mod._load_concurrency_overrides
+        real_load = _load_concurrency_overrides
 
         def _counting_load() -> ConcurrencyOverrides:
             loads.append(None)
