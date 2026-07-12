@@ -10,9 +10,9 @@ import pytest
 
 import cw.config
 from cw.config import (
-    _backup_state_file,
     _REAL_CONFIG_DIR,
     _REAL_STATE_DIR,
+    _backup_state_file,
     _under_pytest,
     ensure_config,
     get_client,
@@ -325,9 +325,7 @@ class TestRefuseRealStateWrite:
 
     def test_resolves_relative_and_symlinked_paths(self, tmp_path: Path) -> None:
         assert _under_pytest() is True
-        escaping = (
-            _REAL_STATE_DIR.parent / "cw" / ".." / "cw" / "dev_queue.json"
-        )
+        escaping = _REAL_STATE_DIR.parent / "cw" / ".." / "cw" / "dev_queue.json"
         with pytest.raises(CwError, match="refusing real-state write"):
             refuse_real_state_write(escaping)
 
@@ -1812,9 +1810,7 @@ class TestUsageLimitedUntilPersistence:
         from cw.config import save_usage_limited_until
 
         real_dispatch_state_file = _REAL_STATE_DIR / "dispatch_state.json"
-        monkeypatch.setattr(
-            "cw.config.DISPATCH_STATE_FILE", real_dispatch_state_file
-        )
+        monkeypatch.setattr("cw.config.DISPATCH_STATE_FILE", real_dispatch_state_file)
         mock_write = MagicMock()
         monkeypatch.setattr("cw.config.atomic_write_text", mock_write)
 

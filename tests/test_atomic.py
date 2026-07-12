@@ -115,9 +115,9 @@ def test_rotate_backup_swallows_oserror_on_copy_failure(
         rotate_backup(target)
 
     assert _backup_files(target) == []
-    assert any(
-        record.levelno == logging.WARNING for record in caplog.records
-    ), "expected a warning to be logged on copy failure"
+    assert any(record.levelno == logging.WARNING for record in caplog.records), (
+        "expected a warning to be logged on copy failure"
+    )
 
 
 def test_rotate_backup_names_dont_collide_with_manual_snapshots(

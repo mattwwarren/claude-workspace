@@ -11,9 +11,16 @@ the prior complete file or the new complete file.
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
+import shutil
 import tempfile
+import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+_DEFAULT_BACKUP_KEEP = 5
 
 
 def atomic_write_text(path: Path, text: str) -> None:
@@ -39,3 +46,31 @@ def atomic_write_text(path: Path, text: str) -> None:
         with contextlib.suppress(FileNotFoundError):
             Path(tmp_name).unlink()
         raise
+
+
+def rotate_backup(path: Path, *, keep: int = _DEFAULT_BACKUP_KEEP) -> None:
+    """Snapshot *path* to a timestamped backup sibling before it is overwritten.
+
+    No-op if *path* doesn't exist yet (nothing to back up on the first write).
+    Backups are named ``<name>.bak-<time_ns>`` so concurrent writers never
+    collide. Keeps only the *keep* most recent snapshots (by mtime); older
+    ones are pruned. Best-effort: any OSError during snapshot or prune is
+    logged and swallowed — a failed backup must never block the primary
+    write. See GitHub #1017 (dev_queue.json write-ahead backup rotation).
+    """
+    if not path.exists():
+        return
+    backup = path.parent / f"{path.name}.bak-{time.time_ns()}"
+    try:
+        shutil.copy2(path, backup)
+    except OSError:
+        logger.warning("rotate_backup: failed to snapshot %s", path)
+        return
+    existing = sorted(
+        path.parent.glob(f"{path.name}.bak-*"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for stale in existing[keep:]:
+        with contextlib.suppress(OSError):
+            stale.unlink()

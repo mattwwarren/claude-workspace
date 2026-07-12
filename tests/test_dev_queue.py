@@ -211,9 +211,7 @@ class TestLoadSaveDevQueue:
             tasks=[TicketTask(ticket_id="GEN-100", client="genhealth")]
         )
         save_dev_queue(first)
-        first_payload = (tmp_dev_queue / "dev_queue.json").read_text(
-            encoding="utf-8"
-        )
+        first_payload = (tmp_dev_queue / "dev_queue.json").read_text(encoding="utf-8")
 
         second = DevQueueStore(
             tasks=[TicketTask(ticket_id="GEN-200", client="genhealth")]
@@ -242,8 +240,9 @@ class TestLoadSaveDevQueue:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """save_dev_queue must refuse to write under the real state dir (#1017)."""
-        import cw.config
         from unittest.mock import MagicMock
+
+        import cw.config
 
         real_dev_queue_file = cw.config._REAL_STATE_DIR / "dev_queue.json"
         monkeypatch.setattr("cw.config.DEV_QUEUE_FILE", real_dev_queue_file)
