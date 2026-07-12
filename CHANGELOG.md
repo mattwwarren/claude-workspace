@@ -6,6 +6,62 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.19.0] — 2026-07-12
+
+RFC 0010 native review-monitor — a native, event-driven port of the global
+`/review-monitor` skill into cw's `reconcile()` loop as config-gated **review
+recipes**. Four recipes (`address_review`, `auto_fix_ci`, `request_reviewer`,
+`escalate_merge_block`) detect a PR's attention-state and act on it — dispatch a
+fix, request a reviewer, escalate a merge block — each emitting auditable
+`PR_ACTION_TAKEN`/`PR_ACTION_FAILED` events. Ships **dark** behind a master
+`review_recipes_enabled=False` switch with a per-lane enablement map, so a fresh
+install auto-does nothing. Includes two finalize-pipeline hang fixes discovered
+while dogfooding the sprint's own dispatch.
+
+### Added
+
+- **RFC 0010 P1 — detect-only `address_review` recipe + `review_recipes.py`
+  skeleton** (#1096, #1107): the detect→act module (modeled on `concierge.py` /
+  `gate_recipes.py`) that reads a PR's `attention_state` from `pr_hydrate.py`'s
+  `_compute_attention_state`. Detect-only first; inert behind the master switch.
+- **RFC 0010 P2 — `PR_ACTION_TAKEN` / `PR_ACTION_FAILED` events + `address_review`
+  act-phase** (#1097, #1121): the act phase re-dispatches a `changes_requested`
+  PR, emitting the durable event *before* mutating and a `_FAILED` correction on
+  error (the concierge fail-safe pattern).
+- **RFC 0010 P3 — per-lane `review_recipes` config gate** (#1098, #1115):
+  `LaneConfig.review_recipes` + `TicketTask.review_recipes` +
+  `resolve_review_recipe_enabled()` 3-tier precedence (ticket > lane >
+  global default-off), mirroring `resolve_gate_recipe_enabled`.
+- **RFC 0010 P4 — remaining recipes** (#1099, #1123): `auto_fix_ci` (re-dispatch
+  on CI failure), `request_reviewer` (driven by a repo-committed
+  `review_strategy` key in `.claude/project-config.yaml` — modes
+  `ci | repo_owner | reviewer_team`, default `ci`), and `escalate_merge_block`
+  (one-shot-per-episode via a new `escalate_merge_block_fired_at` latch). Adds
+  `resolve_review_strategy` (`review_strategy.py`), an `add_pr_reviewer` gh
+  helper, a `cw doctor` WARNING on a misconfigured `review_strategy`, and retires
+  the coarse `pr.ci_failed` / `pr.review_received` orchestrator rows. Dev-queue
+  schema v13→14 (additive).
+- **RFC 0010 P5 — ported review-monitor operational lessons** (#1100, #1125): the
+  47 dated lessons from the global `review-monitor` skill audited against the
+  native port — `# Why:` comments at the guards they justify, regression tests
+  for the reproducible failure modes, and a durable `docs/review-recipes-lessons.md`
+  index tagging every lesson applies / N-A with where it landed.
+
+### Fixed
+
+- **Finalize isolation gate made non-skippable** (#1122): the `/auto-dev-finalize`
+  `#766` dispatch-detection was skippable prose after the spawn instruction; a
+  headless finalize defaulted to `isolation:"worktree"`, collided with the live
+  dispatch worktree, and hung ~40 min. Folded into mandatory numbered Steps
+  4c.1/4c.2.
+- **Finalize spawn moved out of the Step 4c intro** (#1124): #1122 numbered the
+  gate but left an actionable spawn instruction *leading* Step 4c, so a headless
+  finalize (even on Sonnet) still executed the spawn before reaching the gate and
+  hung on the same collision. Step 4c's first actionable line is now the gate
+  check; the spawn moves to 4c.2. Validated end-to-end on P5's own finalize.
+- **`uv.lock` re-locked as part of the cut** (#1101): the v1.18.0 release left
+  `uv.lock` lagging, tripping `main_checkout_drift`; this cut re-locks.
+
 ## [1.18.0] — 2026-07-09
 
 RFC 0009 gate-recipe automation — the first event-driven auto-actor. Two
