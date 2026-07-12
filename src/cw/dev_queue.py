@@ -34,6 +34,7 @@ from cw.exceptions import (
     RequeueStateError,
     UnblockStateError,
 )
+from cw.gh import fetch_approved_plan_comment
 from cw.models import (
     DEFAULT_LANE,
     DEFAULT_STAGE,
@@ -575,6 +576,15 @@ _REQUEUE_FROM_CANCELLED_STATUSES: frozenset[QueueItemStatus] = frozenset(
     [QueueItemStatus.CANCELLED]
 )
 
+# The two signoff markers auto-dev-plan appends to the plan-of-record body.
+# Local copy of cw.reconcile.gate_recipes._PLAN_SPEC_MARKER /
+# _PLAN_SOUNDNESS_MARKER -- importing gate_recipes from here would create an
+# import cycle (gate_recipes already imports from dev_queue), so this module
+# keeps its own copy. Keep the two pairs in sync; drift is caught by
+# test_approve_plan_reviewed_marker_constants_match_gate_recipes. See #968.
+_PLAN_SPEC_MARKER = "<!-- plan-spec-reviewed"
+_PLAN_SOUNDNESS_MARKER = "<!-- plan-soundness-reviewed"
+
 
 def move_ticket(ticket_id: str, client_name: str, to_lane: str) -> str:
     """Move a pending ticket to a different lane.
@@ -858,6 +868,46 @@ def _stage_regress(task: TicketTask, target_stage: Stage) -> None:
     _emit_stage_change(task, old_stage, target_stage, "regress")
 
 
+def _plan_is_reviewed(task: TicketTask) -> bool:
+    """True iff the plan-of-record for *task* carries both signoff markers.
+
+    Mirrors ``gate_recipes._plan_of_record_body``'s tracker-first,
+    ``.cw/plan.md``-fallback fetch shape: the tracker (GitHub issue comments)
+    is checked first via :func:`fetch_approved_plan_comment`, then the
+    worktree's ``.cw/plan.md`` if the tracker read returns ``None``. A row
+    with no materialized worktree, or a read failure between ``.exists()``
+    and ``.read_text()``, degrades to "not reviewed" (fail-closed) rather
+    than raising. See GitHub #968.
+    """
+    body = fetch_approved_plan_comment(task.ticket_id)
+    if body is None:
+        if task.worktree_path is None:
+            return False
+        plan_path = task.worktree_path / ".cw" / "plan.md"
+        if not plan_path.exists():
+            return False
+        try:
+            body = plan_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return False
+    return _PLAN_SPEC_MARKER in body and _PLAN_SOUNDNESS_MARKER in body
+
+
+def _reset_for_same_stage_requeue(task: TicketTask) -> None:
+    """Reset session anchors and revert *task* to PENDING for a non-advancing
+    requeue at its current stage.
+
+    Shared 3-line mutation extracted from ``requeue_ticket``'s forward/same-
+    stage tail: reused here for the #968 unreviewed-plan re-park path.
+    ``regress_attempts`` is intentionally NOT touched -- ``requeue_ticket``
+    resets it itself immediately after calling this helper; the approve path
+    never regresses, so it has no analogous reset to make.
+    """
+    transition_task_status(task, QueueItemStatus.PENDING)
+    task.session_id = None
+    task.stage_base_ref = None
+
+
 def _clear_signoff_gate(task: TicketTask, stages: list[Stage]) -> None:
     """Clear an operator-signoff gate parked on *task*, advancing the pipeline.
 
@@ -890,9 +940,12 @@ def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str | bool]:
         dispatch's staged-decision routing, or by the re-route above). No
         session/last_result validation -- clears via ``_clear_signoff_gate``.
 
-    Returns dict with from_stage, to_stage, ticket_id, client, and
-    awaiting_signoff (True iff *this* call parked the ticket at
-    AWAITING_OPERATOR_SIGNOFF rather than advancing/completing it).
+    Returns dict with from_stage, to_stage, ticket_id, client, awaiting_signoff
+    (True iff *this* call parked the ticket at AWAITING_OPERATOR_SIGNOFF
+    rather than advancing/completing it), and plan_requeued (True iff *this*
+    call re-parked a PLAN-stage ticket at Stage.PLAN/PENDING instead of
+    advancing to IMPL, because the plan-of-record was not yet quality-
+    reviewed -- see GitHub #968; always present, False on every other path).
 
     Raises:
         ApproveGateError: if ticket is not at either gate, session is missing,
@@ -959,6 +1012,7 @@ def _approve_ticket_locked(
     client_name: str,
     *,
     resolved_task: TicketTask | None = None,
+    plan_reviewed: bool | None = None,
 ) -> dict[str, str | bool]:
     """Lock-free body of :func:`approve_ticket`.
 
@@ -975,6 +1029,14 @@ def _approve_ticket_locked(
     mutation is pinned to the caller-validated physical row by stable identity
     rather than re-resolved via :func:`_find_ticket` -- see
     :func:`_resolve_approval_target`.
+
+    ``plan_reviewed`` (GitHub #968) governs the PLAN-stage review-completeness
+    gate: ``None`` (the public/CLI path's default) triggers a live
+    :func:`_plan_is_reviewed` check; the trusted gate-recipe caller
+    (``gate_recipes._act_auto_adopt_plan``) passes ``plan_reviewed=True``
+    explicitly so this function never re-fetches the plan-of-record itself,
+    preserving the no-refetch guarantee ``test_fetch_not_recalled_during_act``
+    enforces.
 
     Raises:
         ApproveGateError: if ticket is not at either gate, session is missing,
@@ -1019,6 +1081,7 @@ def _approve_ticket_locked(
             "ticket_id": ticket_id,
             "client": client_name,
             "awaiting_signoff": False,
+            "plan_requeued": False,
         }
 
     state = load_state()
@@ -1056,9 +1119,17 @@ def _approve_ticket_locked(
 
     from_stage = task.stage.value
     awaiting_signoff = False
-    # Why REVIEW-scoped: signoff is the ship checkpoint (RFC 0007's "gate a
-    # ticket before it ships"); it never reroutes the earlier
-    # plan_pending_approval->IMPL advance, only the review->FINALIZE one.
+    plan_requeued = False
+    # Two independent gates share this branch (#968):
+    #  - REVIEW-scoped signoff gate: reroutes the review->FINALIZE advance to
+    #    AWAITING_OPERATOR_SIGNOFF (RFC 0007's "gate a ticket before it
+    #    ships"). Never touches the plan_pending_approval->IMPL advance.
+    #  - PLAN-scoped review-completeness gate: reroutes the
+    #    plan_pending_approval->IMPL advance to a same-stage requeue when the
+    #    plan-of-record was never quality-reviewed (Large-scope plans park
+    #    for scope approval before the ambiguity scan / quality review /
+    #    persistence steps run) -- prevents Stage 2 from spawning against an
+    #    empty .cw/plan.md with no signoff markers.
     if task.stage == Stage.REVIEW and _should_gate_for_signoff(
         task, {client_name: client_cfg}
     ):
@@ -1068,6 +1139,11 @@ def _approve_ticket_locked(
             disposition=SIGNOFF_GATE_DISPOSITION,
         )
         awaiting_signoff = True
+    elif task.stage == Stage.PLAN and not (
+        plan_reviewed if plan_reviewed is not None else _plan_is_reviewed(task)
+    ):
+        _reset_for_same_stage_requeue(task)
+        plan_requeued = True
     else:
         _advance_task_pointer(task, stages)
     to_stage = task.stage.value
@@ -1080,6 +1156,7 @@ def _approve_ticket_locked(
         "ticket_id": ticket_id,
         "client": client_name,
         "awaiting_signoff": awaiting_signoff,
+        "plan_requeued": plan_requeued,
     }
 
 
@@ -1241,9 +1318,7 @@ def requeue_ticket(
                     _requeue_state_error_message(ticket_id, task.status)
                 )
             from_cancelled_applied = cancelled_ok
-            transition_task_status(task, QueueItemStatus.PENDING)
-            task.session_id = None
-            task.stage_base_ref = None
+            _reset_for_same_stage_requeue(task)
             task.regress_attempts = 0
 
         to_stage = task.stage
