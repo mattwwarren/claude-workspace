@@ -214,6 +214,7 @@ def dev_queue_approve(ticket_id: str, client: str | None) -> None:
             "from_stage": result["from_stage"],
             "to_stage": result["to_stage"],
             "awaiting_signoff": result["awaiting_signoff"],
+            "plan_requeued": result["plan_requeued"],
         },
     )
     if result["awaiting_signoff"]:
@@ -221,6 +222,12 @@ def dev_queue_approve(ticket_id: str, client: str | None) -> None:
             f"Approved {ticket_id} ({resolved}): parked at"
             f" {result['from_stage']} awaiting operator signoff before it ships."
             " Run 'approve' again to clear the gate."
+        )
+    elif result["plan_requeued"]:
+        click.echo(
+            f"Approved {ticket_id} ({resolved}): plan not yet quality-reviewed"
+            " — re-queued at plan stage to run Plan Quality Review."
+            " Re-run auto-dev-plan (or dispatch) to proceed."
         )
     else:
         click.echo(

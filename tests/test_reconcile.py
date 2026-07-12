@@ -80,13 +80,16 @@ from cw.reconcile.gate_recipes import (
     RECIPE_AUTO_ADOPT_PLAN,
     RECIPE_AUTO_APPROVE_REVIEW,
 )
-from tests.conftest import _make_daemon_session, _write_idle_transcript
+from tests.conftest import (
+    _make_daemon_session,
+    _write_idle_transcript,
+    plan_body,
+    stub_fetch_plan,
+)
 from tests.test_reconcile_gate_recipes import (
     _clean_result,
     _make_session,
-    _plan_body,
     _plan_result,
-    _stub_fetch_plan,
     _write_acme_clients_yaml,
 )
 
@@ -21194,7 +21197,7 @@ class TestReconcileGateRecipeIntegration:
         _write_acme_clients_yaml(tmp_config_dir, tmp_path)
         _write_gate_orchestrator_yaml(gate_recipes_enabled=True)
         _stub_gate_comment(monkeypatch)
-        _stub_fetch_plan(monkeypatch, _plan_body())
+        stub_fetch_plan(monkeypatch, plan_body())
         save_dev_queue(DevQueueStore(tasks=[self._blocked_task(Stage.PLAN)]))
         save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
 

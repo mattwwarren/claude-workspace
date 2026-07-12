@@ -86,7 +86,7 @@ transcript filename via `_csid_from_transcript`), then parse.
 | `no_op` | Done. Ticket already satisfied; close as completed. |
 | `ambiguities_pending_resolution` | Resolve ambiguities posted on the issue; re-dispatch. |
 | `premises_pending_verification` | Verify flagged premises, record on issue; re-dispatch. |
-| `plan_pending_approval` | Read the plan comment, post `<!-- auto-dev-plan-approved -->`; re-dispatch for impl. |
+| `plan_pending_approval` | Read the plan comment, post `<!-- auto-dev-plan-approved -->`; re-dispatch. Advances to impl only once quality-reviewed, else re-queues at plan stage (#968). |
 | `review_pending_approval` | Review the pushed branch diff, run gates, ship (PR + auto-merge). |
 | `merge_gate_blocked` | Prior pipeline PR still open; merge or close it; re-dispatch. |
 | `scope_exceeded` | Scope rejection; close or relax constraint. |

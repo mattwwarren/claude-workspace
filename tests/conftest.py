@@ -96,6 +96,40 @@ def _make_daemon_session(
     )
 
 
+def plan_body(*, spec: bool = True, soundness: bool = True) -> str:
+    """Build a plan-of-record body with optional signoff markers.
+
+    Markers match the verbatim shape auto-dev-plan.md appends:
+    ``<!-- plan-spec-reviewed: YYYY-MM-DD vN -->`` /
+    ``<!-- plan-soundness-reviewed: YYYY-MM-DD vN -->``. Shared by
+    test_reconcile_gate_recipes.py and test_dev_queue.py (#968) — both
+    modules independently need a plan-of-record body shaped for the
+    tracker-first/`.cw/plan.md`-fallback two-marker "plan reviewed" check.
+    """
+    lines = ["# Plan — some ticket", ""]
+    if spec:
+        lines.append("<!-- plan-spec-reviewed: 2026-07-08 v2 -->")
+    if soundness:
+        lines.append("<!-- plan-soundness-reviewed: 2026-07-08 v1 -->")
+    lines.extend(["", "body text"])
+    return "\n".join(lines)
+
+
+def stub_fetch_plan(
+    monkeypatch: pytest.MonkeyPatch,
+    body: str | None,
+    *,
+    target: str = "cw.reconcile.gate_recipes.fetch_approved_plan_comment",
+) -> None:
+    """Patch ``fetch_approved_plan_comment`` at *target* to return *body*.
+
+    Default target matches ``gate_recipes``' module-level import binding;
+    pass ``target="cw.dev_queue.fetch_approved_plan_comment"`` to stub the
+    binding ``_plan_is_reviewed`` reads instead (#968).
+    """
+    monkeypatch.setattr(target, lambda _ticket_id, **_k: body)
+
+
 @pytest.fixture(autouse=True)
 def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect every cw state/config path to ``tmp_path``.

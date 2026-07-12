@@ -752,8 +752,15 @@ def _act_auto_adopt_plan(
                 # RFC 0009 / #1083: pin the mutation to THIS validated row's
                 # identity so _approve_ticket_locked cannot re-resolve to a
                 # newer AWAITING_OPERATOR_SIGNOFF duplicate and clear a signoff
-                # gate this recipe never checked.
-                _approve_ticket_locked(task.ticket_id, task.client, resolved_task=task)
+                # gate this recipe never checked. plan_reviewed=True (#968)
+                # documents the no-refetch contract explicitly: this recipe's
+                # detect phase already proved the clean-plan predicate holds
+                # (both signoff markers present -- see _clean_plan_snapshot),
+                # so the act phase must not trigger a second, redundant live
+                # _plan_is_reviewed() fetch of the plan-of-record.
+                _approve_ticket_locked(
+                    task.ticket_id, task.client, resolved_task=task, plan_reviewed=True
+                )
             except CwError as exc:
                 _log.warning(
                     "gate_recipe_approve_failed ticket=%s client=%s",

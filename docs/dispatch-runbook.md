@@ -256,7 +256,7 @@ for a live view) and the transcript directly (see §6 in
 | `no_op` | Done. Ticket already satisfied; close as completed. |
 | `ambiguities_pending_resolution` | Resolve the ambiguities (post a `Pre-flight Resolutions` comment on the issue), then re-dispatch. |
 | `premises_pending_verification` | Verify the flagged premises, record results on the issue, re-dispatch. |
-| `plan_pending_approval` | Read the plan comment, verify it is faithful to the ticket, post `<!-- auto-dev-plan-approved -->` on the issue, re-dispatch for impl. |
+| `plan_pending_approval` | Read the plan comment, verify it is faithful to the ticket, post `<!-- auto-dev-plan-approved -->` on the issue, re-dispatch. Advances to impl only once the plan is quality-reviewed (both signoff markers present); otherwise `approve` re-queues at plan stage to run Plan Quality Review first (#968). |
 | `review_pending_approval` | Locate the branch, verify the diff and run gates yourself, then ship (PR + auto-merge). |
 | `plan_unreviewable` / `plan_unsound` | Resolve remaining plan issues. If the pipeline bounces repeatedly on an intricate ticket, use the **spec-driven subagent escape hatch** (§7) rather than retrying. |
 | `validation_failed` | Transient (malformed sentinel); re-dispatch. Use `cw result validate` to inspect the raw JSON before re-dispatch if the failure recurs. |
