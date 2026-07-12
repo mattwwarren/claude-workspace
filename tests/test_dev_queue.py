@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 import pytest
 from click.testing import CliRunner
 
+from cw.atomic import _BACKUP_SUFFIX
 from cw.cli import main
 from cw.config import clients_file, load_orchestrator_config
 from cw.dev_queue import (
@@ -202,7 +203,7 @@ class TestLoadSaveDevQueue:
         self, tmp_dev_queue: Path
     ) -> None:
         save_dev_queue(DevQueueStore())
-        assert list(tmp_dev_queue.glob("dev_queue.json.bak-*")) == []
+        assert list(tmp_dev_queue.glob(f"dev_queue.json{_BACKUP_SUFFIX}*")) == []
 
     def test_save_dev_queue_rotates_backup_on_second_write(
         self, tmp_dev_queue: Path
@@ -218,7 +219,7 @@ class TestLoadSaveDevQueue:
         )
         save_dev_queue(second)
 
-        backups = list(tmp_dev_queue.glob("dev_queue.json.bak-*"))
+        backups = list(tmp_dev_queue.glob(f"dev_queue.json{_BACKUP_SUFFIX}*"))
         assert len(backups) == 1
         assert backups[0].read_text(encoding="utf-8") == first_payload
 
@@ -231,7 +232,7 @@ class TestLoadSaveDevQueue:
             )
             save_dev_queue(store)
 
-        backups = list(tmp_dev_queue.glob("dev_queue.json.bak-*"))
+        backups = list(tmp_dev_queue.glob(f"dev_queue.json{_BACKUP_SUFFIX}*"))
         assert len(backups) == 5
 
     def test_save_dev_queue_refuses_real_path(
