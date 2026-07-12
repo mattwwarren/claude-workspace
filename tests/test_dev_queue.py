@@ -3558,6 +3558,65 @@ class TestApproveTicket:
         assert result["plan_requeued"] is False
         assert result["to_stage"] == "impl"
 
+    def test_approve_plan_pending_worktree_without_plan_md_requeues(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Tracker fetch returns None; worktree_path is set but `.cw/plan.md`
+        does not exist -> the `.cw/plan.md`-fallback's `.exists()` guard fails
+        closed and approve re-queues at plan stage (#968)."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        stub_fetch_plan(
+            monkeypatch, None, target="cw.dev_queue.fetch_approved_plan_comment"
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-noplanmd")
+        task.worktree_path = tmp_path / "wt-noplanmd"
+        task.worktree_path.mkdir(parents=True)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess-noplanmd",
+            last_result={"status": "plan_pending_approval"},
+        )
+        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["plan_requeued"] is True
+        assert result["to_stage"] == "plan"
+
+    def test_approve_plan_pending_plan_md_read_error_requeues(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`.cw/plan.md` exists but is unreadable as text (here: a directory,
+        triggering IsADirectoryError, an OSError subclass) -> the read failure
+        degrades to "not reviewed" rather than propagating, and approve
+        re-queues at plan stage (#968)."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        stub_fetch_plan(
+            monkeypatch, None, target="cw.dev_queue.fetch_approved_plan_comment"
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-planmderr")
+        task.worktree_path = tmp_path / "wt-planmderr"
+        (task.worktree_path / ".cw" / "plan.md").mkdir(parents=True)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess-planmderr",
+            last_result={"status": "plan_pending_approval"},
+        )
+        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["plan_requeued"] is True
+        assert result["to_stage"] == "plan"
+
     def test_approve_plan_reviewed_marker_constants_match_gate_recipes(self) -> None:
         """Drift guard: dev_queue's locally-duplicated marker constants must
         stay byte-identical to gate_recipes' pair (#968)."""
