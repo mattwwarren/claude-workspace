@@ -4944,6 +4944,78 @@ class TestDevQueueAddTimeout:
         assert task.headless_timeout_override is None
 
 
+# ---------------------------------------------------------------------------
+# TestDevQueueAddTicketIdValidation (GitHub issue #1129)
+# ---------------------------------------------------------------------------
+
+
+class TestDevQueueAddTicketIdValidation:
+    """A malformed ticket_id is rejected at ``cw dev-queue add`` admission
+    with a clean ClickException message, not a raw pydantic traceback."""
+
+    def test_dev_queue_add_rejects_ticket_id_with_slash(
+        self, tmp_config_dir: Path
+    ) -> None:
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "add", "foo/bar", "--client", "client-a"]
+        )
+        assert result.exit_code != 0
+        assert "Traceback" not in result.output
+        assert "foo/bar" in result.output
+
+    def test_dev_queue_add_rejects_ticket_id_with_leading_dash(
+        self, tmp_config_dir: Path
+    ) -> None:
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "add", "-x", "--client", "client-a"]
+        )
+        assert result.exit_code != 0
+        assert "Traceback" not in result.output
+
+    def test_dev_queue_add_rejects_ticket_id_with_dot_dot(
+        self, tmp_config_dir: Path
+    ) -> None:
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "add", "1..2", "--client", "client-a"]
+        )
+        assert result.exit_code != 0
+        assert "Traceback" not in result.output
+        assert "1..2" in result.output
+
+    def test_dev_queue_add_accepts_normal_ticket_id(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Regression: a well-formed ticket_id still enqueues successfully."""
+        from cw.dev_queue import load_dev_queue
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "add", "GEN-123", "--client", "client-a"]
+        )
+        assert result.exit_code == 0, result.output
+
+        store = load_dev_queue()
+        task = next((t for t in store.tasks if t.ticket_id == "GEN-123"), None)
+        assert task is not None
+
+    def test_dev_queue_add_rejected_ticket_not_persisted(
+        self, tmp_config_dir: Path
+    ) -> None:
+        from cw.dev_queue import load_dev_queue
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "add", "foo/bar", "--client", "client-a"]
+        )
+        assert result.exit_code != 0
+
+        store = load_dev_queue()
+        assert all(t.ticket_id != "foo/bar" for t in store.tasks)
+
+
 class TestDevQueueAddSignoff:
     """Tests for ``--signoff`` flag on ``cw dev-queue add`` (RFC 0007 Phase 3, #990)."""
 
