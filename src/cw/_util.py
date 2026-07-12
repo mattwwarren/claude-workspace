@@ -8,6 +8,7 @@ so those modules load without circular dependencies.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -167,3 +168,58 @@ def _iter_sentinel_text_blocks(transcript_path: Path) -> Iterator[str]:
                         yield from _iter_tool_result_text(block)
     except OSError:
         return
+
+
+def _last_content_entry_timestamp(transcript_path: Path) -> datetime | None:
+    """Return the timestamp of the last content-bearing transcript record.
+
+    Claude Code appends several non-conversational record types over a
+    session's lifetime — ``ai-title``, ``agent-name``, ``last-prompt``,
+    ``mode``, ``permission-mode``, ``bridge-session``, ``queue-operation``,
+    ``file-history-snapshot``, ``attachment``, ``system`` — none of which
+    carry a ``"message"`` field. These bump the transcript file's ``mtime``
+    without representing genuine model/user activity, causing mtime-based
+    liveness checks to false-positive on a stalled session (GitHub #1076).
+
+    A content-bearing record is a ``user`` or ``assistant`` record whose
+    ``message`` field is a ``dict`` — the same guard already used inline by
+    ``_awaiting_subagent`` (:mod:`cw.reconcile._shared`); any block type
+    (text, tool_use, tool_result) within such a message counts as activity.
+
+    Performs a full forward linear scan of the file (mirrors
+    ``_awaiting_subagent``'s existing full-scan cost profile — no tail-read,
+    no offset cache) so that the LAST content-bearing record with a
+    parseable ``"timestamp"`` wins. A content-bearing record with a missing
+    or malformed timestamp is skipped, not scan-aborting.
+
+    Returns ``None`` when the file is missing, an ``OSError`` occurs while
+    reading, or no content-bearing record anywhere in the file has a
+    parseable timestamp — callers must fall back to mtime-based liveness in
+    that case.
+    """
+    if not transcript_path.is_file():
+        return None
+    last_ts: datetime | None = None
+    try:
+        with transcript_path.open(encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                if record.get("type") not in {"user", "assistant"}:
+                    continue
+                if not isinstance(record.get("message"), dict):
+                    continue
+                ts = record.get("timestamp")
+                if not isinstance(ts, str):
+                    continue
+                try:
+                    last_ts = datetime.fromisoformat(ts)
+                except ValueError:
+                    continue
+    except OSError:
+        return None
+    return last_ts

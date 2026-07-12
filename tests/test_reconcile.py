@@ -6629,6 +6629,29 @@ def _write_idle_transcript_with_text(
     return path
 
 
+def _write_transcript_records(
+    home: Path,
+    worktree: Path,
+    records: list[dict[str, object]],
+    filename: str = "fake-short-id-sess-1076.jsonl",
+) -> Path:
+    """Write an arbitrary sequence of JSONL records under the project dir for
+    *worktree*.
+
+    Each element of *records* is dumped via ``json.dumps`` on its own line, in order.
+    Mirrors the project-dir encoding used by ``_write_idle_transcript`` /
+    ``_write_idle_transcript_with_text`` (double-replace, #463) and the
+    ``fake-short-id`` filename-prefix convention those helpers use so
+    ``_locate_session_transcript``'s surface_ref-prefix glob finds the file.
+    """
+    encoded = str(worktree).replace("/", "-").replace(".", "-")
+    project_dir = home / ".claude" / "projects" / encoded
+    project_dir.mkdir(parents=True, exist_ok=True)
+    path = project_dir / filename
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+    return path
+
+
 def test_flag_silently_idle_usage_limit_emits_distinct_cause(
     tmp_config_dir: Path,
     tmp_path: Path,
@@ -8256,9 +8279,12 @@ def test_transcript_recently_active_finds_dotted_worktree(
     # Write a transcript that is "recent" (mtime = now).
     session_uuid = "test-uuid-dotted"
     transcript = project_dir / f"{session_uuid}.jsonl"
+    # Content-bearing timestamp (#1076): liveness now prefers this over mtime.
+    now_ish = datetime.now(tz=UTC).isoformat()
     record = json.dumps(
         {
             "type": "assistant",
+            "timestamp": now_ish,
             "message": {
                 "role": "assistant",
                 "content": [{"type": "text", "text": "still working"}],
@@ -8356,6 +8382,110 @@ def test_awaiting_subagent_finds_dotted_worktree(
         "Expected _awaiting_subagent=True for dotted worktree path; "
         f"project_dir={project_dir!r} exists={project_dir.is_dir()}"
     )
+
+
+# ---------------------------------------------------------------------------
+# GitHub #1076: content-timestamp liveness (metadata-only transcript writes)
+# ---------------------------------------------------------------------------
+
+
+def _mk_content_ts_session(
+    sid: str, worktree: Path, started_at: datetime, surface_ref: str = "fake-short-id"
+) -> Session:
+    """Build a DAEMON ACTIVE session for the #1076 content-timestamp tests."""
+    return Session(
+        id=sid,
+        name=f"client-a/auto-dev/{sid}",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        worktree_path=worktree,
+        surface_ref=surface_ref,
+        started_at=started_at,
+    )
+
+
+def test_transcript_recently_active_ignores_trailing_metadata_write(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A trailing metadata-only write must not falsely resurrect liveness (#1076).
+
+    Claude Code appends non-conversational record types (``ai-title`` etc.)
+    that bump the transcript's mtime without representing genuine activity.
+    Liveness must be derived from the last content-bearing entry's timestamp,
+    not from mtime — otherwise a stale session's counter falsely resets.
+    """
+    from cw.reconcile import _transcript_age_seconds, _transcript_recently_active
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / "wt-trailing-meta"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    old_ts = now - timedelta(hours=3)
+
+    _write_transcript_records(
+        home,
+        worktree,
+        [
+            {
+                "type": "assistant",
+                "timestamp": old_ts.isoformat(),
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "working"}],
+                },
+            },
+            # Metadata-only record: no "message" field, bumps mtime on write.
+            {"type": "ai-title", "title": "Fix the thing"},
+        ],
+    )
+
+    sess = _mk_content_ts_session("trailing-meta-1", worktree, started_at)
+
+    assert _transcript_recently_active(sess, now, window_seconds=60) is False
+
+    age = _transcript_age_seconds(sess, now)
+    assert age is not None
+    assert abs(age - timedelta(hours=3).total_seconds()) < 5
+
+
+def test_transcript_age_seconds_falls_back_to_mtime_without_content_timestamp(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No parseable content timestamp anywhere → fall back to mtime (#1076).
+
+    Reuses ``_write_idle_transcript`` unmodified: its single record is
+    content-bearing (assistant + dict message) but carries no "timestamp"
+    key, exactly the "no content signal available" fallback case.
+    """
+    from cw.reconcile import _transcript_age_seconds, _transcript_recently_active
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / "wt-fallback-mtime"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    _write_idle_transcript(home, worktree)
+
+    sess = _mk_content_ts_session("fallback-mtime-1", worktree, started_at)
+
+    now = datetime.now(tz=UTC)
+    assert _transcript_recently_active(sess, now, window_seconds=60) is True
+    age = _transcript_age_seconds(sess, now)
+    assert age is not None
+    assert age < 60
 
 
 # ---------------------------------------------------------------------------
@@ -12368,6 +12498,73 @@ def test_detect_idle_candidates_recover_counter_when_liveness_restored(
     assert c.proposed_action == ProposedAction.RECOVER_COUNTER
     assert c.new_observation_count == 0
     assert _state_queue_snapshot() == snap
+
+
+def test_detect_idle_candidate_not_recover_counter_on_trailing_metadata_write(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real (unmocked) transcript: a trailing metadata write must not falsely
+    RECOVER_COUNTER (#1076, the ticket's 21-hour stranding repro).
+
+    The last content-bearing entry is old (beyond the liveness window); a
+    metadata-only record (no "message") is appended last with a fresh mtime.
+    Pre-fix, mtime-based liveness would see "recently active" and wrongly
+    reset the observation counter.
+    """
+    from cw.reconcile import ProposedAction, _detect_idle_candidates
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / "wt-idle-trailing-meta"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    old_ts = now - timedelta(hours=3)
+
+    _write_transcript_records(
+        home,
+        worktree,
+        [
+            {
+                "type": "assistant",
+                "timestamp": old_ts.isoformat(),
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "working"}],
+                },
+            },
+            {"type": "ai-title", "title": "Fix the thing"},
+        ],
+    )
+
+    config = _auto_config(idle_confirm_observations=5)
+    sess = _mk_live_idle_daemon_session(
+        "idle-trailing-meta-1",
+        "fake-short-id",
+        started_at,
+        idle_observation_count=1,
+        worktree_path=worktree,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+
+    candidates = _detect_idle_candidates(
+        state,
+        now=now,
+        native_live={"fake-short-id"},
+        config=config,
+        task_by_ticket={},
+    )
+
+    assert len(candidates) == 1
+    c = candidates[0]
+    assert c.proposed_action != ProposedAction.RECOVER_COUNTER
+    assert c.proposed_action == ProposedAction.INCREMENT_COUNTER
+    assert c.new_observation_count == 2
 
 
 def test_detect_idle_candidates_salvage_git(
