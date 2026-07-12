@@ -569,9 +569,11 @@ These thresholds determine guard levels, not rejection. Tune as trust grows:
 
 | Version | Small Tier Ceiling | Forbidden Areas (auto-escalate to Large) |
 |---------|-------------------|------------------------------------------|
-| v1 (current) | 10 files, 500 lines | migrations, auth/security, CI/CD, shared bases (3+ consumers) |
+| v1 (current) | 10 files, 500 lines | migrations, auth/security, CI/CD [^1], shared bases (3+ consumers) |
 | v2 (future) | 15 files, 800 lines | migrations, auth/security |
 | v3 (future) | 25 files, 1500 lines | migrations |
+
+[^1]: CI/CD auto-escalate requires diff content touching a pipeline-behavior YAML key, not merely a path match under `.github/workflows/**` — see `auto-dev-plan.md` Step 1d.2b.
 
 ---
 
