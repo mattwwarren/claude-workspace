@@ -731,15 +731,20 @@ Two repo-level settings gate the workflow (`.github/workflows/pr-events.yml`):
     (`export CW_PR_EVENTS_HMAC_SECRET=...` before `serve()` starts), consumed
     by `cw.pr_events_auth.verify_signature` to validate incoming requests.
 
-  If `CW_PR_EVENTS_HMAC_SECRET` is unset server-side, `/pr-event` accepts
-  **unsigned** requests (pre-#930 behavior) and `serve()` logs a startup
-  warning ("accepts unsigned requests") so the unauthenticated posture is
-  visible in the server logs, not silent. **Blast radius of running
-  unsigned behind a public tunnel**: any POST reaching the relay can mutate
-  `pr_state` for *any* `(repo, pr_number)` currently tracked across *all*
-  clients in `dev_queue.json`, with no rate limiting or origin check beyond
-  JSON shape. Relaying this endpoint over the open internet without the
-  secret set is not recommended.
+  If `CW_PR_EVENTS_HMAC_SECRET` is unset server-side, `/pr-event`
+  **default-denies unsigned requests with 401** (#1127) and `serve()` logs a
+  startup INFO line noting the safe posture. To restore the old open
+  behavior (pre-#1127, unsigned requests accepted), the operator must pass
+  `cw pr-channel serve --allow-unsigned` explicitly; doing so also flips the
+  startup log to a WARNING so the weakened posture is visible, not silent.
+  **`--allow-unsigned` never bypasses a configured secret** — when
+  `CW_PR_EVENTS_HMAC_SECRET` *is* set, HMAC verification is enforced
+  unconditionally regardless of the flag. **Blast radius of running
+  `--allow-unsigned` behind a public tunnel**: any POST reaching the relay
+  can mutate `pr_state` for *any* `(repo, pr_number)` currently tracked
+  across *all* clients in `dev_queue.json`, with no rate limiting or origin
+  check beyond JSON shape. Relaying this endpoint over the open internet
+  without the secret set (or with `--allow-unsigned`) is not recommended.
 - **Fork PRs cannot authenticate.** `pull_request`/`pull_request_review`
   events triggered by a fork-originated PR run with no access to repo
   secrets, so `secrets.CW_PR_EVENTS_HMAC_SECRET` resolves empty and the
@@ -749,6 +754,13 @@ Two repo-level settings gate the workflow (`.github/workflows/pr-events.yml`):
   that would expose secrets to untrusted fork checkout content — because
   this pipeline's tracked PRs are same-repo/bot-originated, never forks.
   The poll producer still covers fork PRs on its own schedule regardless.
+  Note the server-side auth posture this hits: when the server *has* a
+  secret configured, that unsigned `curl` request already failed closed
+  (401) before #1127 — unrelated, pre-existing behavior. When the server has
+  **no** secret configured, #1127 means it now also fails closed by default
+  (the same 401), whereas before it would have been silently accepted. Either
+  way the fork-PR push path is a no-op; the poll producer is what actually
+  covers it.
 
 ### 10.3 Config
 

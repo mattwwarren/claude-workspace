@@ -6,9 +6,11 @@ open internet (via a tunnel such as smee.io or cloudflared — see
 infrastructure, not code). When ``CW_PR_EVENTS_HMAC_SECRET`` is set, incoming
 POST bodies must carry a valid ``X-Cw-Signature`` header computed as
 ``"sha256=" + hexdigest(HMAC-SHA256(secret, raw_body))``; requests failing
-verification are rejected with 401. When the secret is unset the endpoint
-stays open (pre-#930 behavior) and ``warn_if_unsigned_mode`` logs an operator
-warning so the unauthenticated posture is visible, not silent.
+verification are rejected with 401. When the secret is unset the endpoint now
+default-denies with 401 (#1127) unless the operator has explicitly passed
+``cw pr-channel serve --allow-unsigned`` to restore the old open behavior.
+``warn_if_unsigned_mode`` logs INFO for the safe default-deny posture and
+WARNING only when ``--allow-unsigned`` has explicitly weakened it.
 """
 
 from __future__ import annotations
@@ -44,17 +46,33 @@ def verify_signature(raw_body: bytes, *, header_value: str | None, secret: str) 
     return hmac.compare_digest(provided, expected)
 
 
-def warn_if_unsigned_mode() -> None:
-    """Log a warning if ``CW_PR_EVENTS_HMAC_SECRET`` is unset.
+def warn_if_unsigned_mode(*, allow_unsigned: bool = False) -> None:
+    """Log if ``CW_PR_EVENTS_HMAC_SECRET`` is unset.
 
     Called once from ``serve()`` — NOT ``make_app()`` — so tests and callers
     that construct the app directly (e.g. ``TestClient(make_app())``) don't
-    spam this warning on every app construction (#930 operator correction).
+    spam this log on every app construction (#930 operator correction).
+
+    When the secret is unset, ``/pr-event`` now default-denies (#1127) unless
+    ``allow_unsigned=True`` (threaded from ``cw pr-channel serve
+    --allow-unsigned``). The log level reflects actual risk: INFO for the
+    now-safe default-deny posture, WARNING only when the operator has
+    explicitly opted into the open, unauthenticated behavior.
     """
-    if not os.environ.get(CW_PR_EVENTS_HMAC_SECRET_ENV):
+    if os.environ.get(CW_PR_EVENTS_HMAC_SECRET_ENV):
+        return
+    if allow_unsigned:
         logger.warning(
-            "%s is unset -- /pr-event accepts unsigned requests. Set this "
-            "env var to enable HMAC authentication (see "
+            "%s is unset and --allow-unsigned is set -- /pr-event accepts "
+            "unsigned requests. Set this env var to enable HMAC "
+            "authentication (see docs/dispatch-runbook.md).",
+            CW_PR_EVENTS_HMAC_SECRET_ENV,
+        )
+    else:
+        logger.info(
+            "%s is unset -- /pr-event rejects unsigned requests by default. "
+            "Set this env var to enable HMAC authentication, or pass "
+            "--allow-unsigned to restore the old open behavior (see "
             "docs/dispatch-runbook.md).",
             CW_PR_EVENTS_HMAC_SECRET_ENV,
         )
