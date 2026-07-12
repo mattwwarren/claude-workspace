@@ -3414,7 +3414,41 @@ class TestCheckCwDeps:
         result = _check_cw_deps()
         assert result.ok is True
         assert result.warn is False
-        assert "2" in result.detail
+        assert result.detail == "2 declared dependencies all installed"
+
+    def test_non_string_dependency_entry_skipped(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A non-string dependencies entry is skipped, not crashed on."""
+        import importlib.metadata
+        import json
+
+        from cw.doctor import _CW_PACKAGE_NAME, _check_cw_deps
+
+        source_dir = tmp_path / "claude-workspace"
+        source_dir.mkdir()
+        (source_dir / "pyproject.toml").write_text(
+            '[project]\nname = "claude-workspace"\nversion = "0.14.2"\n'
+            "dependencies = [1, 2]\n"
+        )
+        direct_url_text = json.dumps({"url": f"file://{source_dir}"})
+
+        class FakeDist:
+            def read_text(self, filename: str) -> str | None:
+                if filename == "direct_url.json":
+                    return direct_url_text
+                return None
+
+        def _dispatch(pkg: str) -> object:
+            if pkg == _CW_PACKAGE_NAME:
+                return FakeDist()
+            return object()
+
+        monkeypatch.setattr(importlib.metadata, "distribution", _dispatch)
+        result = _check_cw_deps()
+        assert result.ok is True
+        assert result.warn is False
+        assert result.detail == "2 declared dependencies all installed"
 
     def test_one_missing_dependency_warns_and_names_it(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
