@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 from cw.gh import (
+    add_pr_reviewer,
     branch_exists_on_origin,
     fetch_approved_plan_comment,
     fetch_pr_view,
@@ -694,3 +695,49 @@ class TestFetchPrView:
             lambda *_a, **_kw: _make_run_result(0, "[1, 2, 3]"),
         )
         assert fetch_pr_view("https://github.com/acme/widgets/pull/42") is None
+
+
+class TestAddPrReviewer:
+    """add_pr_reviewer mirrors post_issue_comment: policy-free, None on failure."""
+
+    _PR_URL = "https://github.com/acme/widgets/pull/42"
+
+    def test_success_returns_completed_process(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sentinel = _make_run_result(0, "")
+        monkeypatch.setattr("cw.gh._sp.run", lambda *_a, **_kw: sentinel)
+        result = add_pr_reviewer(self._PR_URL, "alice")
+        assert result is sentinel
+
+    def test_argv_carries_pr_url_and_reviewer(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: list[list[str]] = []
+
+        def _fake_run(args: list[str], **_kw: object) -> Any:
+            captured.append(list(args))
+            return _make_run_result(0, "")
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        add_pr_reviewer(self._PR_URL, "org/core")
+        assert len(captured) == 1
+        argv = captured[0]
+        assert argv[:3] == ["gh", "pr", "edit"]
+        assert self._PR_URL in argv
+        assert argv[argv.index("--add-reviewer") + 1] == "org/core"
+
+    def test_gh_missing_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raise(*_a: object, **_kw: object) -> Any:
+            msg = "gh"
+            raise FileNotFoundError(msg)
+
+        monkeypatch.setattr("cw.gh._sp.run", _raise)
+        assert add_pr_reviewer(self._PR_URL, "alice") is None
+
+    def test_timeout_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raise(*_a: object, **_kw: object) -> Any:
+            raise subprocess.TimeoutExpired(["gh"], 30)
+
+        monkeypatch.setattr("cw.gh._sp.run", _raise)
+        assert add_pr_reviewer(self._PR_URL, "alice") is None

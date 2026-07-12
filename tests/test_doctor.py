@@ -3815,6 +3815,108 @@ class TestCheckProjectConfigs:
         assert not any(n.startswith("project-config/") for n in names)
 
 
+class TestCheckReviewStrategy:
+    """_check_review_strategy warns (never hard-fails) on a misconfigured
+    review_strategy block in .claude/project-config.yaml (RFC 0010 P4, #1099)."""
+
+    def _write(self, root: Path, body: str) -> None:
+        cfg_dir = root / ".claude"
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        (cfg_dir / "project-config.yaml").write_text(body, encoding="utf-8")
+
+    def _client(self, root: Path) -> ClientConfig:
+        from cw.models import ClientConfig
+
+        return ClientConfig(name="client-a", workspace_path=root)
+
+    def test_absent_file_no_result(self, tmp_path: Path) -> None:
+        from cw.doctor import _check_review_strategy
+
+        assert _check_review_strategy({"client-a": self._client(tmp_path)}) == []
+
+    def test_ci_mode_no_result(self, tmp_path: Path) -> None:
+        from cw.doctor import _check_review_strategy
+
+        self._write(tmp_path, "review_strategy:\n  mode: ci\n")
+        assert _check_review_strategy({"client-a": self._client(tmp_path)}) == []
+
+    def test_absent_key_no_result(self, tmp_path: Path) -> None:
+        from cw.doctor import _check_review_strategy
+
+        self._write(tmp_path, "tracking:\n  primary:\n    system: github-issues\n")
+        assert _check_review_strategy({"client-a": self._client(tmp_path)}) == []
+
+    def test_repo_owner_with_handle_no_result(self, tmp_path: Path) -> None:
+        from cw.doctor import _check_review_strategy
+
+        self._write(tmp_path, "review_strategy:\n  mode: repo_owner\n  repo_owner: a\n")
+        assert _check_review_strategy({"client-a": self._client(tmp_path)}) == []
+
+    def test_unrecognized_mode_warns(self, tmp_path: Path) -> None:
+        from cw.doctor import _check_review_strategy
+
+        self._write(tmp_path, "review_strategy:\n  mode: bogus\n")
+        results = _check_review_strategy({"client-a": self._client(tmp_path)})
+        assert len(results) == 1
+        assert results[0].ok is True
+        assert results[0].warn is True
+        assert "bogus" in results[0].detail
+
+    def test_repo_owner_missing_handle_warns(self, tmp_path: Path) -> None:
+        from cw.doctor import _check_review_strategy
+
+        self._write(tmp_path, "review_strategy:\n  mode: repo_owner\n")
+        results = _check_review_strategy({"client-a": self._client(tmp_path)})
+        assert len(results) == 1
+        assert results[0].warn is True
+        assert "repo_owner" in results[0].detail
+
+    def test_reviewer_team_missing_handle_warns(self, tmp_path: Path) -> None:
+        from cw.doctor import _check_review_strategy
+
+        self._write(tmp_path, "review_strategy:\n  mode: reviewer_team\n")
+        results = _check_review_strategy({"client-a": self._client(tmp_path)})
+        assert len(results) == 1
+        assert results[0].warn is True
+        assert "reviewer_team" in results[0].detail
+
+    def test_non_dict_block_warns(self, tmp_path: Path) -> None:
+        from cw.doctor import _check_review_strategy
+
+        self._write(tmp_path, "review_strategy: not-a-dict\n")
+        results = _check_review_strategy({"client-a": self._client(tmp_path)})
+        assert len(results) == 1
+        assert results[0].warn is True
+
+    def test_malformed_yaml_no_result(self, tmp_path: Path) -> None:
+        # A parse failure is already surfaced by the tracker check; this check
+        # stays quiet rather than double-reporting.
+        from cw.doctor import _check_review_strategy
+
+        self._write(tmp_path, "review_strategy: [unclosed\n")
+        assert _check_review_strategy({"client-a": self._client(tmp_path)}) == []
+
+    def test_non_dict_root_no_result(self, tmp_path: Path) -> None:
+        from cw.doctor import _check_review_strategy
+
+        self._write(tmp_path, "just-a-string\n")
+        assert _check_review_strategy({"client-a": self._client(tmp_path)}) == []
+
+    def test_run_doctor_includes_review_strategy_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        _stub_claude_version_ok(monkeypatch)
+        monkeypatch.setattr("cw.doctor._gh_on_path", lambda: True)
+        self._write(tmp_path, "review_strategy:\n  mode: bogus\n")
+        monkeypatch.setattr(
+            "cw.doctor.load_clients",
+            lambda: {"client-a": self._client(tmp_path)},
+        )
+        report = run_doctor()
+        names = [c.name for c in report.checks]
+        assert any(n.startswith("review-strategy/") for n in names)
+
+
 class TestWedgeDeadSessionBlockedOnUser:
     """Dead-session BLOCKED_ON_USER tasks are detected and reaped by doctor."""
 

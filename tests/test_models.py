@@ -828,8 +828,8 @@ def test_session_lane_round_trips() -> None:
 class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
-    def test_dev_queue_schema_version_is_13(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 13
+    def test_dev_queue_schema_version_is_14(self) -> None:
+        assert DEV_QUEUE_SCHEMA_VERSION == 14
 
     def test_pr_state_defaults(self) -> None:
         state = PrState()
@@ -1076,6 +1076,17 @@ class TestConciergeAndEscalationModelSurface:
         assert task.escalation_parked_at == parked_at
         assert task.escalation_fired_at == fired_at
 
+    def test_ticket_task_escalate_merge_block_fired_at_defaults_none(self) -> None:
+        task = TicketTask(ticket_id="GEN-1", client="acme")
+        assert task.escalate_merge_block_fired_at is None
+
+    def test_ticket_task_carries_escalate_merge_block_fired_at(self) -> None:
+        stamp = datetime.now(UTC)
+        task = TicketTask(
+            ticket_id="GEN-1", client="acme", escalate_merge_block_fired_at=stamp
+        )
+        assert task.escalate_merge_block_fired_at == stamp
+
     def test_orchestrator_event_type_includes_concierge_recovered(self) -> None:
         assert OrchestratorEventType.CONCIERGE_RECOVERED == "concierge.recovered"
 
@@ -1179,3 +1190,35 @@ class TestConciergeAndEscalationModelSurface:
     def test_orchestrator_config_gate_recipes_enabled_accepts_true(self) -> None:
         cfg = OrchestratorConfig(gate_recipes_enabled=True)
         assert cfg.gate_recipes_enabled is True
+
+
+class TestReviewRecipeKeyValidation:
+    """RFC 0010 P4 (#1099): the review_recipes recognized-key set gains three
+    new recipe names; an unrecognized key still fails loud on both models."""
+
+    def test_ticket_task_accepts_all_review_recipe_names(self) -> None:
+        recipes = {
+            "address_review": True,
+            "auto_fix_ci": True,
+            "request_reviewer": False,
+            "escalate_merge_block": True,
+        }
+        task = TicketTask(ticket_id="X", client="acme", review_recipes=recipes)
+        assert task.review_recipes == recipes
+
+    def test_lane_config_accepts_all_review_recipe_names(self) -> None:
+        recipes = {
+            "auto_fix_ci": True,
+            "request_reviewer": True,
+            "escalate_merge_block": False,
+        }
+        lane = LaneConfig(name="default", review_recipes=recipes)
+        assert lane.review_recipes == recipes
+
+    def test_unrecognized_review_recipe_key_still_rejected(self) -> None:
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            TicketTask(ticket_id="X", client="acme", review_recipes={"bogus": True})
+        with pytest.raises(ValidationError):
+            LaneConfig(name="default", review_recipes={"bogus": True})

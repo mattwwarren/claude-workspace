@@ -159,7 +159,9 @@ CW_STATE_SCHEMA_VERSION = 14
 # v12: added TicketTask.gate_recipe_failed_at (GitHub #1065, RFC 0009).
 # v13: added TicketTask.gate_recipes + LaneConfig.gate_recipes (GitHub #1067,
 #      RFC 0009 P4).
-DEV_QUEUE_SCHEMA_VERSION = 13
+# v14: added TicketTask.escalate_merge_block_fired_at (GitHub #1099, RFC 0010
+#      P4) — one-shot latch for the escalate_merge_block review recipe.
+DEV_QUEUE_SCHEMA_VERSION = 14
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -397,7 +399,12 @@ def _validate_review_recipe_keys(value: dict[str, bool]) -> dict[str, bool]:
     resolve_review_recipe_enabled's plain ``in`` check, leaving the intended
     recipe disabled with zero error at config-load time.
     """
-    recognized = {"address_review"}
+    recognized = {
+        "address_review",
+        "auto_fix_ci",
+        "request_reviewer",
+        "escalate_merge_block",
+    }
     unknown = sorted(set(value) - recognized)
     if unknown:
         msg = (
@@ -513,9 +520,11 @@ class TicketTask(BaseModel):
     # Highest tier in resolve_review_recipe_enabled's 3-tier precedence: a
     # recipe present here wins over LaneConfig.review_recipes and the hardcoded
     # default-off. None (or a recipe absent from the map) defers to the lane
-    # map, then the default. Recognised key: "address_review". Sibling to
-    # gate_recipes, not a reuse: review recipes react to a changes_requested
-    # PR, a distinct action class from the approval-gate recipes above.
+    # map, then the default. Recognised keys: "address_review", "auto_fix_ci",
+    # "request_reviewer", "escalate_merge_block" (RFC 0010 P4, #1099). Sibling
+    # to gate_recipes, not a reuse: review recipes react to PR attention states
+    # (changes_requested / ci_failing / no_reviewer / merge_blocked), a distinct
+    # action class from the approval-gate recipes above.
     review_recipes: dict[str, bool] | None = None
     # RFC 0008 capstone (#1015) — durable escalation latch. Stamped by
     # cw.reconcile.escalation.run_escalation_sweep when this task first enters
@@ -542,6 +551,17 @@ class TicketTask(BaseModel):
     # episode (new session, new last_result re-parking the row at
     # BLOCKED_ON_USER) always starts with a clean latch.
     gate_recipe_failed_at: datetime | None = None
+    # RFC 0010 P4 (#1099) — one-shot latch for the escalate_merge_block review
+    # recipe (cw.reconcile.review_recipes). Stamped by _act_escalate_merge_block
+    # when it emits PR_ACTION_TAKEN for a merge_blocked PR, so the escalation
+    # fires exactly once per merge-blocked episode rather than every reconcile
+    # tick. Distinct from escalation_parked_at/escalation_fired_at above (whose
+    # eligibility keys off task.status/disposition — an orthogonal trigger to
+    # pr_state.attention_state): sharing the field would race two subsystems
+    # under different semantics. Cleared by _act_escalate_merge_block's own
+    # episode-end sweep when the row's pr_state leaves merge_blocked (or goes
+    # None), re-arming the latch for a genuine future re-entry.
+    escalate_merge_block_fired_at: datetime | None = None
 
     @field_validator("gate_recipes")
     @classmethod
@@ -665,7 +685,8 @@ class LaneConfig(BaseModel):
     # in resolve_review_recipe_enabled's 3-tier precedence: consulted when the
     # ticket carries no override for the recipe, and itself overridden by
     # TicketTask.review_recipes. A recipe absent from this map (or None) defers
-    # to the hardcoded default-off. Recognised key: "address_review".
+    # to the hardcoded default-off. Recognised keys: "address_review",
+    # "auto_fix_ci", "request_reviewer", "escalate_merge_block" (RFC 0010 P4).
     review_recipes: dict[str, bool] | None = None
 
     @field_validator("name")

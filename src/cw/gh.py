@@ -338,6 +338,29 @@ def post_issue_comment(
         return None
 
 
+def add_pr_reviewer(
+    pr_ref: str, reviewer: str, *, timeout: int = _POST_COMMENT_TIMEOUT_SECONDS
+) -> _sp.CompletedProcess[bytes] | None:
+    """Request *reviewer* on *pr_ref* via ``gh pr edit --add-reviewer``.
+
+    *pr_ref* may be a full PR URL (``gh`` infers owner/repo) or a PR number;
+    *reviewer* is a GitHub login or an ``org/team`` slug. Mirrors
+    ``post_issue_comment``: returns the completed subprocess (inspect
+    ``.returncode`` / ``.stderr``) or None if the subprocess could not run /
+    timed out. Policy-free: callers decide whether to log or swallow — this
+    neither logs nor raises on gh failure.
+    """
+    try:
+        return _sp.run(
+            ["gh", "pr", "edit", pr_ref, "--add-reviewer", reviewer],
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, _sp.TimeoutExpired):
+        return None
+
+
 def pr_exists_for_branch(
     branch: str, *, timeout: int = _PR_EXISTS_TIMEOUT
 ) -> tuple[bool | None, bool]:

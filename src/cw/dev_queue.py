@@ -355,6 +355,13 @@ def _fill_gate_recipe_failed_default(task_raw: dict[str, Any]) -> None:
         task_raw["gate_recipe_failed_at"] = None
 
 
+def _fill_escalate_merge_block_default(task_raw: dict[str, Any]) -> None:
+    """Fill escalate_merge_block_fired_at introduced in dev-queue schema v14
+    (GitHub #1099, RFC 0010 P4). Idempotent."""
+    if "escalate_merge_block_fired_at" not in task_raw:
+        task_raw["escalate_merge_block_fired_at"] = None
+
+
 def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
     """Normalise a raw dev_queue.json payload into a currently-valid shape."""
     tasks = raw.get("tasks")
@@ -375,6 +382,7 @@ def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
                 _fill_escalation_defaults(task_raw)
                 _fill_false_park_recovery_backoff_default(task_raw)
                 _fill_gate_recipe_failed_default(task_raw)
+                _fill_escalate_merge_block_default(task_raw)
     raw["schema_version"] = DEV_QUEUE_SCHEMA_VERSION
     return raw
 

@@ -508,13 +508,26 @@ Unrecognized recipe keys fail loud at config-load time (a typo like
 ## Review Recipe Enablement (RFC 0010 Phase 3)
 
 Review recipes (`cw.reconcile.review_recipes`) are the review-feedback analogue
-of the gate recipes above: the `address_review` recipe reacts to a PR whose
-review came back `changes_requested` by (in a future phase) dispatching an
-`/address-review` session to mechanically work the requested changes. They are a
-sibling of the gate recipes, **not** a reuse — a review recipe acts on review
-feedback, a distinct action class from advancing an approval gate, and operators
-configure the two independently. Whether the recipe fires for a given ticket is
-resolved with 3-tier precedence, highest first:
+of the gate recipes above: each recipe reacts to a distinct PR **attention
+state** (derived by `cw.pr_hydrate._compute_attention_state`) and takes a
+matching action. The routing is 1:1 — a single PR is never a candidate for more
+than one recipe. Recognized recipe keys (RFC 0010 P4, #1099):
+
+- `address_review` — PR review came back `changes_requested`; dispatch an
+  `/address-review` session to mechanically work the requested changes.
+- `auto_fix_ci` — PR CI is failing (`ci_failing`); re-enqueue the ticket and run
+  a dispatch tick to re-enter auto-dev (coarse re-dispatch, not a scoped fix).
+- `request_reviewer` — PR needs a reviewer (`no_reviewer`); request one per the
+  repo's [Review Strategy Config](#review-strategy-config-rfc-0010-phase-4)
+  (a `ci`-mode repo silent-skips — it relies on CI, requesting no reviewer).
+- `escalate_merge_block` — PR is `merge_blocked`; emit one durable
+  `PR_ACTION_TAKEN` escalation per merge-blocked episode (a one-shot latch on
+  `TicketTask.escalate_merge_block_fired_at` clears when the PR leaves the state).
+
+They are a sibling of the gate recipes, **not** a reuse — a review recipe acts on
+review/CI/merge feedback, a distinct action class from advancing an approval
+gate, and operators configure the two independently. Whether a recipe fires for a
+given ticket is resolved with 3-tier precedence, highest first:
 
 1. **Per-ticket** — a `review_recipes` map on the `TicketTask` (e.g.
    `{address_review: true}`). There is **no CLI flag** for this tier yet; it is a
@@ -531,7 +544,7 @@ setting. The per-lane resolution above only matters once the master switch is
 `true`.
 
 ```yaml
-# clients.yaml — enable address-review on one lane, leave the other off
+# clients.yaml — enable review recipes on one lane, leave the other off
 clients:
   my-project:
     workspace_path: /path/to/repo
@@ -539,11 +552,41 @@ clients:
       - name: fastlane
         review_recipes:
           address_review: true
-      - name: default   # recipe stays off (hardcoded default)
+          auto_fix_ci: true
+      - name: default   # recipes stay off (hardcoded default)
 ```
 
 Unrecognized recipe keys fail loud at config-load time (a typo like
 `adress_review` raises rather than silently no-opping).
+
+## Review Strategy Config (RFC 0010 Phase 4)
+
+The `request_reviewer` review recipe (above) needs to know **who** to request as
+a PR reviewer. That policy lives in the repo's `.claude/project-config.yaml`
+(repo-committed, sibling to the `tracking:` / `review:` / `pr:` keys) — **not**
+in `clients.yaml`, because it is a per-repo property, and **not** in the existing
+`review:` key (that is auto-dev's own self-review loop, a different concern).
+
+```yaml
+# .claude/project-config.yaml
+review_strategy:
+  mode: ci                       # ci | repo_owner | reviewer_team
+  repo_owner: <gh-login>         # required when mode: repo_owner
+  reviewer_team: <org>/<team>    # required when mode: reviewer_team
+```
+
+- `mode: ci` (the default when the key or file is absent) — rely on CI; the
+  `request_reviewer` recipe silent-skips, requesting no reviewer.
+- `mode: repo_owner` — request the `repo_owner` GitHub login.
+- `mode: reviewer_team` — request the `reviewer_team` `org/team` slug.
+
+Resolution is fail-safe (`cw.review_strategy.resolve_review_strategy`): a missing
+file, malformed YAML, or an unrecognized `mode` degrades silently to `ci` so
+reconcile never wedges on a typo. A `repo_owner` / `reviewer_team` mode whose
+handle is missing is surfaced by `cw doctor` as a **warning** (not a hard fail),
+and the recipe's act phase records a `PR_ACTION_FAILED` correction rather than
+requesting a bogus reviewer. For `claude-workspace` itself the key is set to
+`mode: ci`, so `request_reviewer` is a documented no-op here.
 
 ## Worktree Context File (`.claude/cw-context.json`)
 
