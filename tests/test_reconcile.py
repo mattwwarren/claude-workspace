@@ -6635,7 +6635,8 @@ def _write_transcript_records(
     records: list[dict[str, object]],
     filename: str = "fake-short-id-sess-1076.jsonl",
 ) -> Path:
-    """Write an arbitrary sequence of JSONL records under the project dir for *worktree*.
+    """Write an arbitrary sequence of JSONL records under the project dir for
+    *worktree*.
 
     Each element of *records* is dumped via ``json.dumps`` on its own line, in order.
     Mirrors the project-dir encoding used by ``_write_idle_transcript`` /

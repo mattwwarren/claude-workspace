@@ -19,7 +19,11 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw._transcript import locate_transcript
-from cw._util import _iter_sentinel_text_blocks, claude_project_dir
+from cw._util import (
+    _iter_sentinel_text_blocks,
+    _last_content_entry_timestamp,
+    claude_project_dir,
+)
 from cw.auto_dev_result import (
     BLOCKER_REASON_NO_RESULT_EMITTED,
     BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED,
@@ -912,17 +916,26 @@ def _transcript_recently_active(
     *,
     window_seconds: int = TRANSCRIPT_LIVENESS_WINDOW_SECONDS,
 ) -> bool:
-    """Return True if the session's transcript was written within *window_seconds* ago.
+    """Return True if the transcript shows activity within *window_seconds* ago.
 
     Uses :func:`_locate_session_transcript` for precise per-session lookup
     (surface_ref-prefix glob, #541).  Returns False — permitting the watchdog
     to proceed — when no transcript is found (pre-first-write or path
     unavailable).  See GitHub #340.
+
+    Prefers the timestamp of the last *content-bearing* transcript entry
+    (:func:`cw._util._last_content_entry_timestamp`) over the file's mtime,
+    so a trailing metadata-only write (e.g. an ``ai-title`` record) does not
+    falsely resurrect liveness (GitHub #1076). Falls back to mtime, unchanged
+    from prior behavior, when no content entry has a parseable timestamp.
     """
     try:
         transcript = _locate_session_transcript(session)
         if transcript is None:
             return False
+        content_ts = _last_content_entry_timestamp(transcript)
+        if content_ts is not None:
+            return (now - content_ts).total_seconds() < window_seconds
         mtime = datetime.fromtimestamp(transcript.stat().st_mtime, tz=UTC)
         return (now - mtime).total_seconds() < window_seconds
     except OSError:
@@ -933,16 +946,25 @@ def _transcript_age_seconds(
     session: Session,
     now: datetime,
 ) -> float | None:
-    """Return seconds since the session's transcript was last written, or None.
+    """Return seconds since the session's transcript last showed activity, or None.
 
     Returns None when the transcript file cannot be located.  Uses
     :func:`_locate_session_transcript` for precise per-session lookup
     (surface_ref-prefix glob, #541).
+
+    Prefers the timestamp of the last *content-bearing* transcript entry
+    (:func:`cw._util._last_content_entry_timestamp`) over the file's mtime,
+    so a trailing metadata-only write does not understate the session's true
+    idle age (GitHub #1076). Falls back to mtime, unchanged from prior
+    behavior, when no content entry has a parseable timestamp.
     """
     try:
         transcript = _locate_session_transcript(session)
         if transcript is None:
             return None
+        content_ts = _last_content_entry_timestamp(transcript)
+        if content_ts is not None:
+            return (now - content_ts).total_seconds()
         mtime = datetime.fromtimestamp(transcript.stat().st_mtime, tz=UTC)
         return (now - mtime).total_seconds()
     except OSError:
