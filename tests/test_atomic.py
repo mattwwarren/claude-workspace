@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from cw.atomic import atomic_write_text, rotate_backup
+from cw.atomic import _BACKUP_SUFFIX, atomic_write_text, rotate_backup
 
 
 def test_atomic_write_text_writes_payload(tmp_path: Path) -> None:
@@ -50,7 +50,7 @@ def test_atomic_write_text_cleans_temp_on_rename_failure(
 
 
 def _backup_files(path: Path) -> list[Path]:
-    return sorted(path.parent.glob(f"{path.name}.bak-*"))
+    return sorted(path.parent.glob(f"{path.name}{_BACKUP_SUFFIX}*"))
 
 
 def test_rotate_backup_noop_when_path_missing(tmp_path: Path) -> None:
@@ -81,10 +81,10 @@ def test_rotate_backup_prunes_to_keep_n(tmp_path: Path) -> None:
     backups = _backup_files(target)
     assert len(backups) == keep
     contents = {b.read_text(encoding="utf-8") for b in backups}
-    # The most recent `keep` snapshots correspond to writes 1..keep+1 (0-indexed
-    # payloads "1".."3" survive; "0" is pruned) — the oldest write's payload
-    # ("0") must not survive.
-    assert "0" not in contents
+    # Each iteration backs up the payload just written (write-then-rotate,
+    # unlike production's rotate-then-write order), so after 5 iterations
+    # (payloads "0".."4") the 3 most recent snapshots are "2", "3", "4".
+    assert contents == {"2", "3", "4"}
 
 
 def test_rotate_backup_default_keep_is_five(tmp_path: Path) -> None:
@@ -133,3 +133,26 @@ def test_rotate_backup_names_dont_collide_with_manual_snapshots(
     backups = _backup_files(target)
     assert manual_snapshot not in backups
     assert len(backups) == 1
+
+
+def test_rotate_backup_swallows_oserror_on_prune_listing_failure(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A backup file vanishing between glob() and .stat() (e.g. a concurrent
+    unlocked writer, modeled here as a broken symlink) must not raise out of
+    rotate_backup — the primary write it precedes must never be blocked by a
+    prune-step failure."""
+    target = tmp_path / "dev_queue.json"
+    target.write_text("A", encoding="utf-8")
+    rotate_backup(target)  # seed one real backup
+
+    broken = tmp_path / f"dev_queue.json{_BACKUP_SUFFIX}broken"
+    broken.symlink_to(tmp_path / "does-not-exist")
+
+    with caplog.at_level(logging.WARNING, logger="cw.atomic"):
+        rotate_backup(target)  # glob now includes the broken symlink
+
+    assert any(record.levelno == logging.WARNING for record in caplog.records), (
+        "expected a warning to be logged on prune-listing failure"
+    )

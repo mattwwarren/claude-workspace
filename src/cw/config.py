@@ -184,14 +184,21 @@ def refuse_real_state_write(path: Path) -> None:
     while pytest is running.
 
     Belt-and-suspenders guard against GitHub #1017 (a live dev_queue.json
-    clobbered by GEN-A/GEN-B test-fixture data): every writer of real cw
-    state calls this immediately before its atomic write, so a write that
-    somehow escapes the autouse ``tmp_config_dir`` fixture (a stale
-    module-level path binding, a code path exercised before the fixture
-    applies, a subprocess against the real environment) fails loudly
-    instead of silently corrupting ``~/.local/share/cw`` or
-    ``~/.config/cw``. A no-op outside pytest — production ``cw`` runs are
-    never affected.
+    clobbered by GEN-A/GEN-B test-fixture data): ``save_state``,
+    ``save_usage_limited_until``, ``_save_concurrency_overrides``,
+    ``save_dev_queue``, and ``init_client`` call this immediately before
+    their atomic write, so a write that somehow escapes the autouse
+    ``tmp_config_dir`` fixture (a stale module-level path binding, or a
+    code path exercised before the fixture applies) fails loudly instead
+    of silently corrupting ``~/.local/share/cw`` or ``~/.config/cw``. A
+    no-op outside pytest — production ``cw`` runs are never affected.
+
+    Detection is in-process only (``sys.modules`` membership): a real
+    subprocess (e.g. a test that shells out to the installed ``cw``
+    binary) spawns a fresh interpreter that never imports pytest, so this
+    guard does not see or block writes from that process. See GitHub
+    #1017's root-cause notes, which point at a subprocess/integration
+    write path as a plausible cause of the original incident.
     """
     if not _under_pytest():
         return
@@ -888,5 +895,13 @@ def init_client(
 
         buf = StringIO()
         rt.dump(doc, buf)
+        # Why: guarded here (immediately before the content write) rather than
+        # before config_dir().mkdir()/clients_lock() above, unlike the other
+        # refuse_real_state_write call sites. A pre-guard escape only costs an
+        # idempotent mkdir(exist_ok=True) and a lock-file touch against the
+        # real config dir — not the data-clobbering content write this guard
+        # exists to prevent — so closing the lock-acquisition window wasn't
+        # judged worth the larger, differently-shaped change of guarding
+        # every *_lock() context manager. See GitHub #1017 plan decision.
         refuse_real_state_write(clients_path)
         atomic_write_text(clients_path, buf.getvalue())

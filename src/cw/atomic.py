@@ -21,6 +21,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 _DEFAULT_BACKUP_KEEP = 5
+_BACKUP_SUFFIX = ".bak-"
 
 
 def atomic_write_text(path: Path, text: str) -> None:
@@ -60,17 +61,21 @@ def rotate_backup(path: Path, *, keep: int = _DEFAULT_BACKUP_KEEP) -> None:
     """
     if not path.exists():
         return
-    backup = path.parent / f"{path.name}.bak-{time.time_ns()}"
+    backup = path.parent / f"{path.name}{_BACKUP_SUFFIX}{time.time_ns()}"
     try:
         shutil.copy2(path, backup)
     except OSError:
         logger.warning("rotate_backup: failed to snapshot %s", path)
         return
-    existing = sorted(
-        path.parent.glob(f"{path.name}.bak-*"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
+    try:
+        existing = sorted(
+            path.parent.glob(f"{path.name}{_BACKUP_SUFFIX}*"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        logger.warning("rotate_backup: failed to list backups for %s", path)
+        return
     for stale in existing[keep:]:
         with contextlib.suppress(OSError):
             stale.unlink()

@@ -323,11 +323,20 @@ class TestRefuseRealStateWrite:
         # Would raise if the guard were active; must be a silent no-op.
         refuse_real_state_write(_REAL_STATE_DIR / "dev_queue.json")
 
-    def test_resolves_relative_and_symlinked_paths(self, tmp_path: Path) -> None:
+    def test_resolves_dotdot_relative_paths(self, tmp_path: Path) -> None:
         assert _under_pytest() is True
         escaping = _REAL_STATE_DIR.parent / "cw" / ".." / "cw" / "dev_queue.json"
         with pytest.raises(CwError, match="refusing real-state write"):
             refuse_real_state_write(escaping)
+
+    def test_resolves_symlinked_paths(self, tmp_path: Path) -> None:
+        """A symlink from a tmp-rooted path into the real state dir must
+        still be caught — the guard resolves via ``.resolve()``, not string
+        prefix matching, so a symlink-based evasion is not a bypass."""
+        link = tmp_path / "escape_link"
+        link.symlink_to(_REAL_STATE_DIR, target_is_directory=True)
+        with pytest.raises(CwError, match="refusing real-state write"):
+            refuse_real_state_write(link / "dev_queue.json")
 
 
 class TestEnsureConfig:
