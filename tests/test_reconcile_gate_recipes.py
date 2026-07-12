@@ -35,10 +35,12 @@ from cw.reconcile.gate_recipes import (
     GateRecipeCandidate,
     _act_auto_adopt_plan,
     _act_auto_approve_review,
+    _clean_review_snapshot,
     _detect_auto_adopt_plan,
     _detect_auto_approve_review,
     _find_blocked_task,
     _marker_version,
+    _predicate_holds,
     _stamp_gate_recipe_failure,
     resolve_gate_recipe_enabled,
     run_gate_recipes,
@@ -333,6 +335,53 @@ class TestDetect:
         task = _make_task()
         session = _make_session(last_result=_clean_result(**kwargs))
         state = CwState(sessions=[session])
+
+        assert (
+            _detect_auto_approve_review(
+                state, [task], clients=_SEAM1_CLIENTS, config=_config()
+            )
+            == []
+        )
+
+    def test_1091_shaped_corrected_snapshot_predicate_holds(self) -> None:
+        """#1104 regression: once Stage 1 correctly classifies a CI/CD content
+        change as non-pipeline-logic (forbidden_touched=False), the existing
+        auto-approve machinery already handles it correctly -- pinning the
+        #1091-shaped corrected scope block (11 files, 33 lines) at the layer
+        that actually enforces acceptance criterion 2."""
+        task = _make_task(lane="fastlane")
+        result = _clean_result(forbidden_touched=False)
+        result["scope"]["files"] = 11
+        result["scope"]["lines_actual"] = 33
+        session = _make_session(last_result=result)
+        state = CwState(sessions=[session])
+
+        snapshot = _clean_review_snapshot(result)
+        assert snapshot is not None
+        assert _predicate_holds(snapshot) is True
+
+        candidates = _detect_auto_approve_review(
+            state, [task], clients=_SEAM1_CLIENTS, config=_config()
+        )
+        assert len(candidates) == 1
+
+    def test_workflow_pipeline_logic_snapshot_still_blocks(self) -> None:
+        """#1104 regression, acceptance criterion 3: a workflow diff that DOES
+        touch pipeline-behavior YAML (e.g. a `run:` step body, contrasted with
+        the inert-payload #1091 case above) must still set
+        forbidden_touched=True and block auto-approve -- the content-vs-path
+        distinction narrows false positives on inert payloads without
+        weakening detection of genuine pipeline-logic edits."""
+        task = _make_task(lane="fastlane")
+        result = _clean_result(forbidden_touched=True)
+        result["scope"]["files"] = 1
+        result["scope"]["lines_actual"] = 2
+        session = _make_session(last_result=result)
+        state = CwState(sessions=[session])
+
+        snapshot = _clean_review_snapshot(result)
+        assert snapshot is not None
+        assert _predicate_holds(snapshot) is False
 
         assert (
             _detect_auto_approve_review(

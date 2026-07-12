@@ -177,7 +177,9 @@ If you catch yourself drafting prose that explains *why* the agent isn't needed 
 From the plan (existing or generated), classify scope:
 
 1. Count planned files and estimated line changes
-2. Check if any planned files touch forbidden areas (migrations, auth/security core, CI/CD, shared base classes with 3+ consumers)
+2. Check if any planned files touch forbidden areas (migrations, auth/security core, CI/CD, shared base classes with 3+ consumers):
+   - **Step 1d.2a — path pre-filter (unchanged in spirit):** flag any planned file under `migrations/**`, auth/security-core paths, `.github/workflows/**`, or shared base classes with 3+ consumers as a **candidate** forbidden-area hit.
+   - **Step 1d.2b — content gate (new, CI/CD only):** for every candidate hit specifically under `.github/workflows/**`, inspect the actual diff hunk — not just the file path — and only set `forbidden_touched=true` for that file if the hunk touches a YAML **key** that defines pipeline behavior: job `steps:`, `run:`, `uses:`, `permissions:`, `on:`/trigger blocks, or matrix definitions, or `env:` when it's consumed by a step. A hunk confined to a string/comment payload inside a step (e.g. a `body:`/`echo`/markdown text value, a `# comment`, install-command example text) does NOT set `forbidden_touched=true` for that file, even though the path pre-filter matched. Migrations, auth/security-core, and shared-base-class candidates are unaffected by this content gate — it narrows CI/CD only; see the Worked Examples below.
 3. Classify:
    - **Small:** ≤10 files AND ≤500 lines AND no forbidden-area touches
    - **Large:** >10 files OR >500 lines OR touches forbidden areas
@@ -187,6 +189,30 @@ From the plan (existing or generated), classify scope:
 
 5. **Constraint enforcement** (if `--forbidden <areas>` is active):
    - If plan touches any forbidden area: **AskUserQuestion:** "Ticket <id> touches forbidden area (<area>). Skip this ticket, or abort pipeline?"
+
+#### Worked Examples
+
+These calibrate Step 1d.2b's judgment call with concrete before/after cases, mirroring `plan-soundness-reviewer.md`'s Tier 1/2 shape catalog for a different lens.
+
+**Example 1 — inert payload, `forbidden_touched: false`.** The real #1091 diff hunk in `.github/workflows/release.yml`, inside a `steps[].with.body:` block (a multi-line markdown string, not `run:`/`uses:`/`permissions:`/triggers):
+
+```diff
+-            uv tool install git+https://github.com/${{ github.repository }}.git@${{ github.ref_name }}
++            uv tool install "claude-workspace[mcp] @ git+https://github.com/${{ github.repository }}.git@${{ github.ref_name }}"
+```
+
+The path pre-filter (1d.2a) matches (`.github/workflows/release.yml`), but the hunk only edits text inside a `body:` string value — no job step, `run:` command, `uses:` action, trigger, or permission changed. Content gate (1d.2b) does NOT set `forbidden_touched=true`.
+
+**Example 2 — pipeline logic, `forbidden_touched: true`.** A contrasting edit in the same file's `run:` step:
+
+```diff
+       - name: Publish
+         run:
+-          uv publish
++          uv publish --token ${{ secrets.PYPI_TOKEN }}
+```
+
+The path pre-filter matches, and the hunk touches a `run:` step's shell command — a pipeline-behavior YAML key. Content gate sets `forbidden_touched=true`.
 
 ### Checkpoint 1 (Plan Approval)
 
@@ -319,6 +345,14 @@ After plan is approved (or auto-skipped with existing plan) AND Plan Quality Rev
 ```
 
 Use today's date and each station's current marker version. By the time Step 1g runs, both markers are settled — a station that did not clear (and was not overridden) exits the pipeline before this step, so reaching Step 1g means both stations cleared or were overridden per Step 1f.3. These markers are the contract that lets future `/auto-dev` runs against the same ticket skip Step 1f.2 (the expensive reviewer spawns) — only the cheap marker grep needs to fire.
+
+**Scope tier marker requirement:** the persisted `.cw/plan.md` MUST also include a single canonical scope-tier line, near the scope classification, in the exact form:
+
+```
+**Scope tier:** <small|large> (<N> files, ~<M> lines, forbidden_touched=<bool>)
+```
+
+This is the one reliable, machine-greppable location the three downstream readers (`auto-dev-impl.md:61`, `auto-dev-review.md`'s tier-resolution step, `auto-dev-finalize.md:31` — all already loosely matching this shape via "or similar Stage-1c marker") depend on, rather than relying on free-text presentation happening to be greppable. Exactly one occurrence of this line must exist in the persisted plan — a later stage that rewrites it (see `auto-dev-review.md`'s one-time tier downgrade) replaces it in place rather than appending a second occurrence.
 
 If the plan was loaded from Linear in Step 1a and already contained a current marker, the marker can be preserved as-is (no need to re-stamp). If the plan was revised in Step 1f.4, stamp with today's date.
 
