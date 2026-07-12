@@ -219,6 +219,22 @@ def test_draft_pr_never_a_candidate() -> None:
     )
 
 
+def test_closed_pr_never_a_candidate() -> None:
+    # Ported wiki lesson "Abandoned PR auto-completion" (session:94a665a5): a PR
+    # closed on GitHub without merge is terminal, so _is_candidate is False and
+    # no review recipe ever fires on it — even with a stale changes_requested
+    # attention_state left on the row. cw's analogue of review_monitor auto-
+    # completing an abandoned PR out of the monitored queue.
+    task = _make_task(
+        pr_url="https://github.com/acme/widgets/pull/42",
+        pr_state=_pr_state(state="CLOSED", attention_state="changes_requested"),
+    )
+    assert (
+        _detect_address_review([task], clients=_enabling_clients(), config=_config())
+        == []
+    )
+
+
 def test_detect_address_review_surfaces_sessionless_candidate() -> None:
     task = _cr_task(session_id=None)
     candidates = _detect_address_review(
