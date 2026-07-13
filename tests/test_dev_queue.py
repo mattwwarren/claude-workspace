@@ -5460,9 +5460,7 @@ class TestRegisterWatchedPr:
     def test_register_allows_reregistration_after_dismissed(
         self, tmp_config_dir: Path
     ) -> None:
-        save_dev_queue(
-            DevQueueStore(watched_prs=[self._watched(status="dismissed")])
-        )
+        save_dev_queue(DevQueueStore(watched_prs=[self._watched(status="dismissed")]))
         assert register_watched_pr(self._watched()) is True
         store = load_dev_queue()
         assert len(store.watched_prs) == 2

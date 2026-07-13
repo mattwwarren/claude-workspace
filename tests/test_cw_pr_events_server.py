@@ -217,9 +217,7 @@ class TestReviewRequestedWebhook:
     def _make_client(self) -> TestClient:
         return TestClient(make_app(allow_unsigned=True))
 
-    def _post(
-        self, client: TestClient, payload: dict[str, Any]
-    ) -> Any:
+    def _post(self, client: TestClient, payload: dict[str, Any]) -> Any:
         return client.post(
             "/pr-event",
             json={
