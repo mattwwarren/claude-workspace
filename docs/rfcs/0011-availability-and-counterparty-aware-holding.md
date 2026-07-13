@@ -396,4 +396,9 @@ ticket-hardening if the code contradicts it.
   single-stage precedent A1/A2 generalize), `#636` (classifier-deny `gh pr create`,
   closed not_planned → #812), `#1140` (finalize auto-merge silent-fail)
 
-Issues: (to be filed — two epic issues + S1/S2 seam tickets, then children per wave)
+Issues (filed 2026-07-13, milestone
+[v1.20.0](https://github.com/mattwwarren/claude-workspace/milestone/11)):
+epics #1151 (Epic I) / #1152 (Epic II); seams #1153 (S1) / #1154 (S2); Wave 1 —
+#1155 (A1) / #1156 (A2) / #1157 (A5) / #1158 (B1) / #1159 (B2), plus pulled-in
+bug #1149 (same reconcile reap path); Wave 2 — #1160 (A3) / #1161 (A4) /
+#1162 (A6) / #1163 (B3) / #1164 (B4) / #1165 (B5).
