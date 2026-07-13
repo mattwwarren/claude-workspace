@@ -783,7 +783,8 @@ class TestCurrentGhLogin:
 
     def test_gh_not_found_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _raise(*_a: object, **_kw: object) -> Any:
-            raise FileNotFoundError("gh")
+            msg = "gh"
+            raise FileNotFoundError(msg)
 
         monkeypatch.setattr("cw.gh._sp.run", _raise)
         assert current_gh_login(timeout=10) is None
