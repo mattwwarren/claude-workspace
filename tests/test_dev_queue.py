@@ -26,6 +26,7 @@ from cw.dev_queue import (
     load_plan,
     migrate_dev_queue,
     plan_path,
+    register_watched_pr,
     remove_ticket,
     resolve_client,
     save_dev_queue,
@@ -39,20 +40,24 @@ from cw.dispatch import (
     FRESHNESS_MAIN_DIRTY_CHECKOUT,
     FRESHNESS_MAIN_DIVERGED,
     FRESHNESS_NON_MAIN_HEAD,
+    _lane_stats_for_client,
 )
 from cw.exceptions import CwError
 from cw.models import (
     DEFAULT_LANE,
     DEFAULT_STAGE,
     DEV_QUEUE_SCHEMA_VERSION,
+    ClientConfig,
     DevQueueStore,
     DispatchPlan,
     DispatchSkipReason,
+    LaneConfig,
     OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
     Stage,
     TicketTask,
+    WatchedPr,
 )
 from tests.conftest import plan_body, stub_fetch_plan
 
@@ -2081,7 +2086,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["pr_state"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 14
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 15
 
     def test_v8_pr_state_preserved_idempotently(self) -> None:
         """Existing pr_state survives a second migration pass (idempotent)."""
@@ -2125,7 +2130,7 @@ class TestMigrateDevQueue:
         """migrate_dev_queue bumps schema_version to current regardless of input."""
         raw: dict[str, object] = {"schema_version": 1, "tasks": []}
         migrated = migrate_dev_queue(raw)
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 14
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 15
 
     def test_v9_signoff_preserved_idempotently(self) -> None:
         """Existing signoff value survives a second migration pass."""
@@ -2160,7 +2165,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["escalation_parked_at"] is None
         assert migrated["tasks"][0]["escalation_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 14
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 15
 
     def test_v10_escalation_fields_preserved_idempotently(self) -> None:
         """Existing escalation timestamps survive a second migration pass."""
@@ -2203,7 +2208,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["false_park_recovery_count"] == 0
         assert migrated["tasks"][0]["false_park_recovery_next_eligible_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 14
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 15
 
     def test_v11_false_park_recovery_backoff_preserved_idempotently(self) -> None:
         """Existing false-park-recovery backoff state survives a second
@@ -2245,7 +2250,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["gate_recipe_failed_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 14
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 15
 
     def test_v12_gate_recipe_failed_at_preserved_idempotently(self) -> None:
         """Existing gate_recipe_failed_at timestamp survives a second
@@ -2283,12 +2288,12 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["escalate_merge_block_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 14
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 15
 
     def test_v14_escalate_merge_block_fired_at_preserved_idempotently(self) -> None:
         """Existing escalate_merge_block_fired_at survives a second migration."""
         raw: dict[str, object] = {
-            "schema_version": 14,
+            "schema_version": 15,
             "tasks": [
                 {
                     "ticket_id": "GEN-100",
@@ -2303,6 +2308,58 @@ class TestMigrateDevQueue:
         assert migrated["tasks"][0]["escalate_merge_block_fired_at"] == (
             "2026-07-11T00:00:00+00:00"
         )
+
+    def test_migrate_dev_queue_fills_watched_prs_default(self) -> None:
+        """migrate_dev_queue fills watched_prs=[] on a store missing the key (v15)."""
+        raw: dict[str, object] = {"schema_version": 14, "tasks": []}
+        migrated = migrate_dev_queue(raw)
+        assert migrated["watched_prs"] == []
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 15
+
+    def test_migrate_dev_queue_preserves_existing_watched_prs(self) -> None:
+        """An existing watched_prs list survives migration untouched (idempotent)."""
+        raw: dict[str, object] = {
+            "schema_version": 15,
+            "tasks": [],
+            "watched_prs": [
+                {
+                    "pr_url": "https://github.com/foo/bar/pull/3",
+                    "repo": "foo/bar",
+                    "pr_number": 3,
+                    "source": "cli",
+                    "status": "active",
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert isinstance(migrated["watched_prs"], list)
+        assert len(migrated["watched_prs"]) == 1
+        assert migrated["watched_prs"][0]["pr_number"] == 3
+
+    def test_load_dev_queue_migrates_old_file_watched_prs(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """load_dev_queue fills watched_prs=[] when loading a pre-v15 file."""
+        import json
+
+        from cw.config import dev_queue_file
+
+        pre_v15 = {
+            "schema_version": 14,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-200",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                }
+            ],
+        }
+        dev_queue_file().parent.mkdir(parents=True, exist_ok=True)
+        dev_queue_file().write_text(json.dumps(pre_v15))
+        store = load_dev_queue()
+        assert store.watched_prs == []
+        assert store.schema_version == DEV_QUEUE_SCHEMA_VERSION
 
     def test_load_dev_queue_migrates_v2_file_lane(self, tmp_config_dir: Path) -> None:
         """load_dev_queue applies lane migration when loading a v2 file from disk."""
@@ -5373,3 +5430,83 @@ class TestStageRegress:
         assert payload["old_stage"] == Stage.FINALIZE
         assert payload["new_stage"] == Stage.IMPL
         assert payload["direction"] == "regress"
+
+
+class TestRegisterWatchedPr:
+    """register_watched_pr idempotent insert (GitHub #1154, RFC 0011 S2, R7)."""
+
+    def _watched(self, pr_number: int = 5, status: str = "active") -> WatchedPr:
+        return WatchedPr(
+            pr_url=f"https://github.com/foo/bar/pull/{pr_number}",
+            repo="foo/bar",
+            pr_number=pr_number,
+            source="cli",
+            status=status,  # type: ignore[arg-type]
+        )
+
+    def test_register_inserts_new_watched_pr(self, tmp_config_dir: Path) -> None:
+        assert register_watched_pr(self._watched()) is True
+        store = load_dev_queue()
+        assert len(store.watched_prs) == 1
+        assert store.watched_prs[0].pr_number == 5
+
+    def test_register_idempotent_on_same_repo_pr_number(
+        self, tmp_config_dir: Path
+    ) -> None:
+        assert register_watched_pr(self._watched()) is True
+        assert register_watched_pr(self._watched()) is False
+        assert len(load_dev_queue().watched_prs) == 1
+
+    def test_register_allows_reregistration_after_dismissed(
+        self, tmp_config_dir: Path
+    ) -> None:
+        save_dev_queue(
+            DevQueueStore(watched_prs=[self._watched(status="dismissed")])
+        )
+        assert register_watched_pr(self._watched()) is True
+        store = load_dev_queue()
+        assert len(store.watched_prs) == 2
+        assert any(w.status == "active" for w in store.watched_prs)
+
+
+class TestLaneStatsUnaffectedByWatchedPr:
+    """Registering a watched PR must not shift lane slot accounting (R10)."""
+
+    def test_lane_stats_identical_before_and_after_registration(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        client = ClientConfig(
+            name="acme",
+            workspace_path=tmp_path / "ws",
+            default_branch="main",
+            lanes=[LaneConfig(name="impl", max_parallel=2)],
+        )
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1",
+                        client="acme",
+                        lane="impl",
+                        status=QueueItemStatus.RUNNING,
+                    ),
+                    TicketTask(
+                        ticket_id="GEN-2",
+                        client="acme",
+                        lane="impl",
+                        status=QueueItemStatus.PENDING,
+                    ),
+                ]
+            )
+        )
+        before = _lane_stats_for_client(client, load_dev_queue())
+        register_watched_pr(
+            WatchedPr(
+                pr_url="https://github.com/foo/bar/pull/9",
+                repo="foo/bar",
+                pr_number=9,
+                source="webhook",
+            )
+        )
+        after = _lane_stats_for_client(client, load_dev_queue())
+        assert before == after

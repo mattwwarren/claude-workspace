@@ -16,18 +16,23 @@ from cw.models import (
     OrchestratorEventType,
     PrState,
     TicketTask,
+    WatchedPr,
 )
 from cw.pr_hydrate import (
+    WATCHED_PR_COUNTERPARTY,
     _compute_attention_state,
     _diff_transitions,
+    _hydrate_watched_prs,
     _overlay_push_observation,
     _parse_pr_url,
     _resolve_task_by_pr_ref,
+    _reviewer_node_login,
     _summarize_status_checks,
     apply_pr_state_observation,
     derive_counterparty,
     hydrate_pr_states,
     observe_pushed_event,
+    resolve_and_register_review_request,
 )
 
 _URL = "https://github.com/acme/widgets/pull/42"
@@ -1206,3 +1211,193 @@ class TestApplyPrStateObservationOverlayFreshness:
     def test_neither_new_state_nor_overlay_given_raises(self) -> None:
         with pytest.raises(ValueError, match="exactly one"):
             apply_pr_state_observation(client="acme", ticket_id="GEN-1")
+
+
+def _watched(
+    pr_number: int = 42,
+    *,
+    status: str = "active",
+    source: str = "cli",
+    pr_state: PrState | None = None,
+) -> WatchedPr:
+    return WatchedPr(
+        pr_url=f"https://github.com/acme/widgets/pull/{pr_number}",
+        repo="acme/widgets",
+        pr_number=pr_number,
+        source=source,  # type: ignore[arg-type]
+        status=status,  # type: ignore[arg-type]
+        pr_state=pr_state,
+    )
+
+
+class TestWatchedPrCounterpartyConstant:
+    def test_watched_pr_counterparty_is_external(self) -> None:
+        assert WATCHED_PR_COUNTERPARTY == "external"
+
+
+class TestReviewerNodeLogin:
+    def test_user_node_returns_login(self) -> None:
+        assert _reviewer_node_login({"login": "alice"}) == "alice"
+
+    def test_team_node_returns_none(self) -> None:
+        assert _reviewer_node_login({"slug": "eng-team", "name": "Eng"}) is None
+
+    def test_non_dict_returns_none(self) -> None:
+        assert _reviewer_node_login("nope") is None
+
+    def test_empty_login_returns_none(self) -> None:
+        assert _reviewer_node_login({"login": ""}) is None
+
+
+class TestHydrateWatchedPrs:
+    """Watched-PR hydration inside hydrate_pr_states (R9)."""
+
+    def test_hydrate_watched_prs_persists_pr_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_dev_queue(DevQueueStore(watched_prs=[_watched()]))
+        monkeypatch.setattr(
+            "cw.pr_hydrate.fetch_pr_view",
+            lambda *_a, **_kw: _pr_view_payload(state="OPEN"),
+        )
+        hydrate_pr_states(OrchestratorConfig())
+        watched = load_dev_queue().watched_prs[0]
+        assert watched.pr_state is not None
+        assert watched.pr_state.state == "OPEN"
+
+    def test_hydrate_watched_prs_skips_dismissed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_dev_queue(DevQueueStore(watched_prs=[_watched(status="dismissed")]))
+        calls: list[Any] = []
+        monkeypatch.setattr(
+            "cw.pr_hydrate.fetch_pr_view",
+            lambda *a, **_k: calls.append(a) or _pr_view_payload(),
+        )
+        hydrate_pr_states(OrchestratorConfig())
+        assert calls == []
+        assert load_dev_queue().watched_prs[0].pr_state is None
+
+    def test_hydrate_watched_prs_runs_with_zero_task_candidates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_dev_queue(DevQueueStore(tasks=[], watched_prs=[_watched()]))
+        monkeypatch.setattr(
+            "cw.pr_hydrate.fetch_pr_view",
+            lambda *_a, **_kw: _pr_view_payload(state="OPEN"),
+        )
+        hydrate_pr_states(OrchestratorConfig())
+        assert load_dev_queue().watched_prs[0].pr_state is not None
+
+    def test_hydrate_watched_prs_transient_fetch_failure_leaves_prior_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        prior = PrState(state="OPEN", review_decision="APPROVED")
+        save_dev_queue(DevQueueStore(watched_prs=[_watched(pr_state=prior)]))
+        monkeypatch.setattr("cw.pr_hydrate.fetch_pr_view", lambda *_a, **_kw: None)
+        hydrate_pr_states(OrchestratorConfig())
+        watched = load_dev_queue().watched_prs[0]
+        assert watched.pr_state is not None
+        assert watched.pr_state.review_decision == "APPROVED"
+
+    def test_hydrate_pr_states_does_not_touch_task_pr_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A terminal-state task is never re-hydrated when watched PRs exist."""
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1",
+                        client="acme",
+                        pr_url="https://github.com/acme/widgets/pull/1",
+                        pr_state=PrState(
+                            state="MERGED",
+                            hydrated_at=datetime(2000, 1, 1, tzinfo=UTC),
+                        ),
+                    )
+                ],
+                watched_prs=[_watched()],
+            )
+        )
+        monkeypatch.setattr(
+            "cw.pr_hydrate.fetch_pr_view",
+            lambda *_a, **_kw: _pr_view_payload(state="OPEN"),
+        )
+        hydrate_pr_states(OrchestratorConfig())
+        store = load_dev_queue()
+        assert store.tasks[0].pr_state is not None
+        assert store.tasks[0].pr_state.state == "MERGED"
+        assert store.watched_prs[0].pr_state is not None
+
+    def test_hydrate_watched_prs_direct_no_op_on_empty(self) -> None:
+        """Calling the helper with an empty list is a safe no-op."""
+        _hydrate_watched_prs([])
+        assert load_dev_queue().watched_prs == []
+
+
+class TestResolveAndRegisterReviewRequest:
+    """Shared decision function for CLI + webhook review-request registration."""
+
+    _URL = "https://github.com/acme/widgets/pull/42"
+
+    def _resolve(
+        self,
+        reviewer_nodes: list[dict[str, Any]],
+        *,
+        operator_login: str | None = "mattwwarren",
+        source: str = "webhook",
+        requester_login: str | None = None,
+    ) -> tuple[bool, str]:
+        return resolve_and_register_review_request(
+            repo="acme/widgets",
+            pr_number=42,
+            pr_url=self._URL,
+            reviewer_nodes=reviewer_nodes,
+            operator_login=operator_login,
+            source=source,  # type: ignore[arg-type]
+            requester_login=requester_login,
+        )
+
+    def test_individual_node_matching_operator_registers(self) -> None:
+        result = self._resolve([{"login": "mattwwarren"}])
+        assert result == (True, "registered")
+        assert len(load_dev_queue().watched_prs) == 1
+
+    def test_team_node_ignored_with_reason(self) -> None:
+        result = self._resolve([{"slug": "eng-team", "name": "Engineering"}])
+        assert result == (False, "team_targeted")
+        assert load_dev_queue().watched_prs == []
+
+    def test_individual_node_not_matching_operator_ignored(self) -> None:
+        result = self._resolve([{"login": "someone-else"}])
+        assert result == (False, "not_operator_targeted")
+        assert load_dev_queue().watched_prs == []
+
+    def test_empty_reviewer_nodes_ignored(self) -> None:
+        result = self._resolve([])
+        assert result == (False, "no_reviewer")
+        assert load_dev_queue().watched_prs == []
+
+    def test_identity_unresolved_fails_closed(self) -> None:
+        result = self._resolve([{"login": "mattwwarren"}], operator_login=None)
+        assert result == (False, "identity_unresolved")
+        assert load_dev_queue().watched_prs == []
+
+    def test_already_registered_idempotent(self) -> None:
+        assert self._resolve([{"login": "mattwwarren"}]) == (True, "registered")
+        assert self._resolve([{"login": "mattwwarren"}]) == (
+            False,
+            "already_registered",
+        )
+        assert len(load_dev_queue().watched_prs) == 1
+
+    def test_source_and_requester_login_persisted(self) -> None:
+        self._resolve(
+            [{"login": "mattwwarren"}],
+            source="cli",
+            requester_login="bob",
+        )
+        watched = load_dev_queue().watched_prs[0]
+        assert watched.source == "cli"
+        assert watched.requester_login == "bob"
