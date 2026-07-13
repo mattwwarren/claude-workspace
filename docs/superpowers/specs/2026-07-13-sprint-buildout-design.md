@@ -73,11 +73,24 @@ a call.**
 
 New file. Required sections, each of which the validator checks by heading:
 
-- `## Phasing` — a wave→ticket table. The source of the sprint map and of each
-  ticket's Dependencies.
-- `## Resolved decisions` — `D-*` entries. The source of each ticket's Scope.
+- `## Tickets` — **the parse source.** One `### <CODE> — <name>` subsection per
+  ticket, each carrying explicit `Epic:`, `Wave:`, `Sprint:`, `Depends on:`,
+  `Context:`, `Scope:` (citing `D-*` ids), and `Acceptance:` fields.
+- `## Phasing` — a wave→track table. **Human-facing summary only; not parsed.**
+- `## Resolved decisions` — the `D-*` entries that `Scope:` cites.
 - `## References` — `file:line` refs. The source of the bug-pull-in overlap scan.
 - An `Issues:` footer placeholder, back-filled with real numbers post-apply.
+
+Why per-ticket blocks rather than parsing the phasing table: RFC 0011's table is
+not machine-readable — a cell reads
+`A1 (park class, keystone) · A2 (detector) · A5 (probe)`, mashing code, name, and
+role together with epic membership implied by column position. Parsing that means
+inferring, and inference is the thing this design exists to remove. Worse, **no RFC
+has a source for Acceptance criteria at all** — the exit bars on the RFC 0011
+sprint pages were model-written during that session, not transcribed. An explicit
+`## Tickets` section is what makes buildout true transcription with zero inference.
+It costs the RFC author more up front, but RFC authoring is model-assisted and
+already includes a hardening pass (RFC 0011 got one the day before its buildout).
 
 Existing RFCs are not migrated; the validator only runs on RFCs passed to the skill.
 
@@ -106,10 +119,11 @@ Pure function of (RFC text, project config, pyproject version). No network excep
 3. Derive the milestone title from the config pattern + pyproject version +
    latest release.
 4. Build epics from the RFC's `### Epic` sections; build children from the
-   Phasing table rows.
-5. Assemble each ticket body by transcription: Context ← RFC section prose,
-   Scope ← the `D-*` decisions it cites, Dependencies ← the phasing table,
-   Acceptance ← exit-bar bullets, footer ← the configured pattern.
+   `## Tickets` subsections.
+5. Assemble each ticket body by transcription — every field maps 1:1 from an
+   explicit `## Tickets` field (Context, Scope, Depends on, Acceptance), with the
+   `Scope:` `D-*` citations expanded from `## Resolved decisions` and the footer
+   rendered from the configured pattern. No inference anywhere.
 6. Emit `plan.json` (a Pydantic model) plus a human-readable summary.
 
 **This is the unit-test surface** — fixture RFC in, expected plan out. It covers
@@ -216,15 +230,23 @@ No speculative code is written for it now.
 
 ## Open risks
 
-- **Body assembly is the fuzziest step.** "Context ← RFC section prose" assumes
-  the RFC's Epic sections are cleanly delimited. If the first real dry-run (on
-  RFC 0012) produces bodies that need hand-editing, the fix is to tighten the
-  template further, not to add inference to the parser.
 - **The template only helps future RFCs.** The next buildout is only as cheap as
-  RFC 0012 is well-formed.
+  RFC 0012 is well-formed. This is the intended trade: cost moves from buildout
+  (where it recurs, unreviewed, under time pressure) to RFC authoring (where it is
+  reviewed once, and where a hardening pass already happens).
+- **The `## Tickets` section is real authoring work.** If it proves onerous in
+  practice, the escape hatch is to generate a *draft* `## Tickets` section from the
+  RFC's Design prose as a separate, explicitly-reviewed step — never as silent
+  inference inside `cw sprint plan`.
 
 ## Validation
 
-Dry-run `cw sprint plan` on RFC 0011 and diff its output against the artifacts
-this session actually produced (#1151–#1165). A faithful reproduction is the
-acceptance bar; divergence points at either a template gap or a parser gap.
+`tests/fixtures/rfc-0011-tickets.md` — RFC 0011 with a `## Tickets` section
+back-filled to describe the tickets that session actually produced. `cw sprint
+plan` against it must reproduce the real artifacts: 2 epics, 13 children, their
+codes (S1, S2, A1–A6, B1–B5), wave→sprint map, and dependency edges as filed in
+#1151–#1165. A faithful reproduction is the acceptance bar; divergence points at
+either a template gap or a parser gap.
+
+Back-filling the *live* `docs/rfcs/0011-*.md` is not required — it is already
+ticketed, and the fixture is what the tests bind to.
