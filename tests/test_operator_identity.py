@@ -119,9 +119,7 @@ class TestResolveOperatorLogin:
     def test_no_override_falls_back_to_runtime_login(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(
-            "cw.gh._sp.run", _make_identity_dispatch("runtime-user")
-        )
+        monkeypatch.setattr("cw.gh._sp.run", _make_identity_dispatch("runtime-user"))
         client = ClientConfig(name="acme", workspace_path=Path("/dev/null"))
 
         result = operator_identity.resolve_operator_login(client)
