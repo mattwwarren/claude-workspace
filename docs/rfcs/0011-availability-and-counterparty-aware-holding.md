@@ -29,20 +29,28 @@ addresses:
 
 The seam that couples both is a **counterparty axis** on the hold model
 (`self | external`): the *same* unavailability condition demands *opposite*
-handling depending on who is blocked. This RFC defines that seam once, then
-builds two independent epics on top of it:
+handling depending on who is blocked. This RFC defines that seam once, adds the
+narrow native surface needed to see teammate review-requests at all, then builds
+two independent epics on top:
 
 - **Epic I — Availability-aware holding** (inward): detect the unavailable
   condition anywhere in the pipeline, hold as a distinct `awaiting_operator`
   class, batch the notification, and resume in one motion on return.
 - **Epic II — Counterparty-aware collaboration** (outward): never silently
-  hold/reap a wait whose counterparty is a teammate; and, behind a **2-party
-  opt-in**, act on others' PRs under strict anti-spam and self-fact-checking
-  rules.
+  hold/reap a wait whose counterparty is a teammate; and, under a **two-party
+  consent** model — *my* configured enablement × *the target's explicit in-band
+  GitHub action* — respond (never initiate) under strict anti-spam and
+  self-fact-checking rules.
 
-Both epics ride the attention-routing contract that epic #1120's workstream 3
-is chartered to own, and reuse the `session.needs_attention` bus that #1117
-just broadened.
+**Guiding constraint (repo principle): do not force our processes on others.**
+Epic II adds no registry, label, or config a teammate must adopt. Consent for
+automation-in-general is already settled by the team accepting my use of this
+tool; per-interaction consent is carried by the target's own normal GitHub
+actions. Every Epic II outbound is a *response to* something the target did.
+
+Both epics ride the attention-routing contract that epic #1120's workstream 3 is
+chartered to own, and reuse the `session.needs_attention` bus that #1117 just
+broadened.
 
 ## Motivation
 
@@ -73,18 +81,19 @@ from the ones needing thought.
 *who is blocked by the quiet*. A session mid-review of a **teammate's** PR
 legitimately goes idle (waiting on CI, reading a diff) and can be reaped at the
 flat 900s floor — literally blocking the teammate on our idleness, the exact
-inverse of the courtesy the inward half provides. And there is no gate, no
-anti-spam rule, and no response-quality contract for the outward writes at all,
-because the native reactor never had to make them (RFC 0010 §Scope: auto-dev PRs
-only).
+inverse of the courtesy the inward half provides. Worse, cw **cannot even see** a
+teammate's review request today: `_is_candidate` (`pr_hydrate.py:281-295`) only
+tracks dev-queue `TicketTask`s with a `pr_url`, and the webhook accepts only
+`{ci_failed, review_received, mergeable, merged}` (`cw_pr_events_server.py:36`) —
+no `review_requested`. The `external`-counterparty PR has no entry point at all.
 
 **The plumbing to fix both already half-exists.** `#1117` made every
 `blocked_on_user` park emit `session.needs_attention` — the notification
 backbone. `--resume <ticket>` + `detect_current_stage()` is a cold-resume path
 that derives stage from git/tracker state with no session file — the resume
 backbone. RFC 0009's `gate_recipes.py` and RFC 0010's `review_recipes.py` are the
-detect→act reactor template. What's missing is the *counterparty seam* and the
-two policy layers built on it.
+detect→act reactor template. What's missing is the *counterparty seam*, the
+*narrow native surface* to see review-requests, and the two policy layers.
 
 ## Design
 
@@ -95,23 +104,44 @@ by it?**
 
 - `self` — only the operator/fleet is waiting (our own auto-dev PR; our own
   overnight wave). Holding is safe and courteous.
-- `external` — a teammate is waiting (they requested our review; their PR gates
-  on our merge/reply). Holding on *our* unavailability is a defect.
+- `external` — a teammate is waiting (they requested our review). Holding on
+  *our* unavailability is a defect.
 
-**Shape (open — see OQ-S1):** the leading candidate is a derived classification
-computed where cw already knows PR authorship — `pr_hydrate` — plus an explicit
-field on the hold record for cases with no PR yet. For auto-dev-originated work
-the counterparty is `self` by construction (`_is_candidate` already fences the
-auto-dev PR set, `pr_hydrate.py:257-261`); `external` only arises for
-review-of-teammate-PR work, which today lives outside the reactor.
+**Shape (OQ-S1):** derived where cw already knows PR authorship — `pr_hydrate` —
+rather than a stored field, to avoid drift. Auto-dev work is `self` by
+construction (`_is_candidate` fences the auto-dev PR set, `pr_hydrate.py:257-261`);
+`external` arises only for a review-requested teammate PR, which S2 makes visible.
+A hold with no PR yet defaults to `self`.
 
-Every downstream policy branches on this axis:
+**Self-identity resolution (shared with S2).** cw has no stored GitHub self-login
+today — `[cw identity]` is client-name-based (`prompts.py:64`). Both "author ≠ us"
+(S1) and "requested of *me* vs my team" (S2) need a resolved operator login.
+Storage location is OQ-S2b.
 
-| Condition | `self` | `external` |
-|-----------|--------|------------|
-| Unavailability hold (Epic I) | batch, hold, resume on return | escalate with urgency; never silent indefinite hold |
-| Idle watchdog (Epic II B1) | park per policy | **exempt from silent reap**; surface that a teammate waits |
-| Outward write (Epic II B2) | unrestricted (own PR) | 2-party opt-in gated |
+### S2 — Native review-requested register (individually-targeted; PR-level first cut)
+
+The narrowest possible slice of the `register` store RFC 0010 deferred — just
+enough to let cw *see* a teammate review-request and route it through existing
+rails. No `discover` (no scanning all PRs), no ported thread-state machine.
+
+- **Trigger — individually-targeted only.** A new `review_requested` webhook type
+  (+ a `cw review register <pr>` CLI entry) fires **only when the requested
+  reviewer is the operator's own identity.** A team-review request the operator
+  merely belongs to is explicitly **not** an action point (operator decision,
+  2026-07-12). Requires S1's self-identity resolution.
+- **Tracked entity.** A registered teammate PR becomes a "watched PR" record so
+  `_is_candidate`-equivalent logic hydrates it through
+  `pr_hydrate → attention-state → reactor/idle-watchdog` with `counterparty=external`.
+  Sibling record vs extending `TicketTask` is OQ-S2a (lean: sibling — a watched PR
+  consumes no dispatch slot and shouldn't distort lane/slot accounting).
+- **First cut is PR-level.** The register + review-submission path lands first:
+  respond to the individual review request with one self-fact-checked review (B4);
+  re-review only on explicit individual re-request (B3). **Thread-level reply
+  back-and-forth is deferred to a later slice** — it needs thread-event awareness
+  (the bulk RFC 0010 deferred) and is infrequent (operator decision, 2026-07-12).
+
+Everything downstream (idle-reap exemption, consent gate, response contract) rides
+this entity — RFC 0010's machinery pointed outward, no new reactor.
 
 ### Epic I — Availability-aware holding (inward)
 
@@ -123,12 +153,9 @@ disposition** from a generic `blocked`. It still routes to `BLOCKED_ON_USER`
 attention layer and the resume path can treat it as *waiting-on-you*, not
 *broken*. Like `push_auth_failed`, it MUST stay out of
 `FINALIZE_REGRESS_BLOCKER_REASONS` (`auto_dev_result.py:114-119`) — an unavailable
-operator is not fixed by re-running IMPL.
-
-**Shape (open — see OQ-A1):** a new `blocker.reason` value + a disposition tag,
-vs a first-class dimension on the park record. Whatever the shape, `#1049`'s
-`push_auth_failed` becomes the first *instance* of this class, not a parallel
-one-off.
+operator is not fixed by re-running IMPL. Shape (new `blocker.reason` + disposition
+tag vs a first-class park dimension) is OQ-A1; `#1049`'s `push_auth_failed` becomes
+the first *instance* of this class.
 
 #### A2 — Generalize the unavailability detector
 
@@ -137,9 +164,9 @@ one-off.
 `Host key verification failed`, `Authentication failed`). Generalize to a shared
 classifier over the full failure family — {network-unreachable, GitHub
 5xx/secondary-rate-limit, auth-failure, MCP-github-unreachable, auto-mode
-classifier-deny (`tool_denied`, #636)} — mapping all of them to the A1 class,
-applied wherever a leg touches the remote or the `gh`/MCP-github surface: intake
-fetch, PR-hygiene sweep, tracker read/write, CI poll, and the push sites.
+classifier-deny (`tool_denied`, #636)} — mapping all to the A1 class, applied
+wherever a leg touches the remote or the `gh`/MCP-github surface: intake fetch,
+PR-hygiene sweep, tracker read/write, CI poll, and the push sites.
 
 #### A3 — Proactive stop-before-finalize hold
 
@@ -148,150 +175,169 @@ manual`) that, for an operator-away wave, runs intake→review to completion (no
 of which needs the key) and holds **every** leg at the Stage 3→4 boundary as
 `awaiting_operator`, emitting one digest instead of N noisy per-leg auth walls.
 Morning = one `/auto-dev-finalize --resume` pass per held ticket under live auth.
-(Whether "operator away" is *declared* by the flag or *detected* by A5 is OQ-A3.)
+Declared (flag) vs detected (A5 probe) arming is OQ-A3.
 
 #### A4 — Auto-resume-on-return
 
 `cw dev-queue resume --held` (name TBD): re-fire every `awaiting_operator` ticket
 through the existing `--resume <ticket>` path (which jumps to
-`detect_current_stage()` and picks up mid-pipeline). Closes the loop: hold
-overnight → digest → one-command drain under live biometric auth.
+`detect_current_stage()`). Closes the loop: hold overnight → digest → one-command
+drain under live biometric auth.
 
 #### A5 — Availability preflight probe
 
-A cheap probe (`git ls-remote` dry-run / `gh auth status`) run at dispatch/tick
-time. If the remote/auth is down, **do not spin up a full session that will just
-die** — hold at the queue level. Detects "GitHub unavailable" at the front door
-instead of at the wall; biggest efficiency win overnight. Cadence/caching is
-OQ-A5 (per-tick network cost is real).
+A cheap probe (`git ls-remote` dry-run / `gh auth status`) at dispatch/tick time.
+If the remote/auth is down, **do not spin up a full session that will just die** —
+hold at the queue level. Cadence/caching is OQ-A5 (per-tick network cost is real).
 
 #### A6 — Digest / batch on the attention channel
 
-Coalesce N `awaiting_operator` parks into **one** operator signal ("12 legs held
-pending your auth, resume with `cw … resume --held`") rather than N
-`session.needs_attention` pushes at 3am. Client-side of #1117; may live in
-`attention_monitor` or as a cw-side coalescer (OQ-A6).
+Coalesce N `awaiting_operator` parks into **one** operator signal rather than N
+`session.needs_attention` pushes at 3am. Also the delivery vehicle for B5's
+rejection flags. Client-side of #1117; ownership (cw-side coalescer vs
+`attention_monitor`) is OQ-A6.
 
 ### Epic II — Counterparty-aware collaboration (outward)
 
+Everything here rides S1 (counterparty axis) + S2 (native review-request
+visibility). All outbound is a **response to** the target's in-band action.
+
 #### B1 — Teammate-review idle-reap exemption
 
-A session whose counterparty (S1) is `external` is **exempt from silent
+A watched-PR session whose counterparty (S1) is `external` is **exempt from silent
 idle-reap** (`reconcile/idle.py`, gated by `resolve_idle_watchdog_budget`,
 `_shared.py:1143`). Instead of reaping a quiet review-of-a-teammate's-PR session,
-surface that a teammate is waiting and escalate. Coordinates with the already-open
-per-stage idle axis (#1061) — this adds the counterparty axis alongside the
-stage/tier axes.
+surface that a teammate is waiting and escalate. Coordinates with the per-stage
+idle axis (#1061) — this adds the counterparty axis alongside stage/tier.
 
-#### B2 — 2-party opt-in outward-signal gate
+#### B2 — Two-party consent: *my enable* × *their in-band action*
 
-All outward writes to **others'** PRs (review submissions, thread replies,
-`request_reviewer`-style actions) are gated by a **2-party opt-in**: enabled in
-*our* cw settings **and** the counterparty has opted in. Default off; no
-unilateral outward writes. **Our own authored PRs are unrestricted** — the gate
-guards only acting on someone else's PR. How the counterparty's opt-in is
-recorded/discovered is OQ-B2 (the crux of "2-party").
+Consent is **not** a registry, label, or opt-in record a teammate must maintain —
+that would force our tooling on them (repo principle) and re-litigate consent the
+team already gave by accepting my use of this tool. Instead:
 
-#### B3 — Request-gated re-review (anti-spam)
+- **Party 1 (operator):** outbound acting enabled in cw settings (the existing
+  `review_recipes` master-switch/lane plumbing, default off).
+- **Party 2 (target):** consent is an **explicit in-band GitHub action that opens
+  the channel** — the individual review request itself (S2), or a re-review
+  re-engagement (e.g. moving off "request changes" to re-review after we
+  addressed feedback). Every outbound is a **scoped response to** that action.
+  **We never initiate unsolicited outbound.**
 
-A re-review fires **only** on an explicit review *request*. New commits pushed to
-a PR we've already reviewed do **not** auto-retrigger — a re-request is required.
-This is the anti-spam boundary on the outward reactor; it deliberately diverges
-from the inward reactor's "act on every transition" posture.
+Our own authored PRs remain **unrestricted** — B2 governs acting *toward others*,
+not our own PRs.
 
-#### B4 — Thread-response contract
+#### B3 — Individual re-request gates re-review (anti-spam)
 
-Outward thread responses are **succinct and answer-first**, lean toward *"here's
-how you can validate this claim,"* and are **self-fact-checked before posting** —
-each asserted claim verified against the diff/CI/source first (reuses the repo's
-existing No-Unverified-Claims + completion-artifacts discipline, and the
-adversarial-verify pattern). Applied to the `address-review` vendored skill and
-any outward-reply path. Mechanism for the pre-post check is OQ-B4.
+A re-review fires **only** on an explicit **individual** re-request. New commits
+pushed to a PR we already reviewed do **not** auto-retrigger — and a *team*
+re-request is never our action point. Deliberately diverges from the inward
+reactor's "act on every transition" posture.
+
+#### B4 — Response contract
+
+The review we submit (and, later, thread replies) is **succinct and answer-first**,
+leans toward *"here's how you can validate this claim,"* and is **self-fact-checked
+before posting** — each asserted claim verified against the diff/CI/source first
+(reuses the repo's No-Unverified-Claims + completion-artifacts discipline and the
+adversarial-verify pattern). Pre-post check mechanism is OQ-B4.
+
+#### B5 — Graceful rejection (accept, don't argue)
+
+If the target rejects/dismisses a section of our review, the default is to
+**accept it — no push-back reply.** Instead, emit an **inbound** operator signal
+(via `session.needs_attention` / the A6 digest) so the operator ensures follow-up
+tickets/work are captured. Rejection is never an outbound trigger.
 
 ## Resolved constraints (operator, 2026-07-12)
 
-- **Two epics, not one.** The inward (availability) and outward (counterparty)
-  concerns have different blast radii and reviewers; #1120 stays discovery/audit
-  shaped and is not the home for either build. This RFC is the shared spec; each
-  epic is filed as a sibling issue.
-- **Shared seam (S1) lands solo, first.** Both epics read the counterparty axis.
-- **Outward signal is opt-in and 2-party** (B2). Default off.
-- **Re-review only when requested; anti-spam on new commits** (B3).
-- **Anything we author is fair game** — the opt-in gate guards only others' PRs.
-- **Thread responses: succinct, validate-our-claims, self-fact-check** (B4).
+- **Two epics, not one**, over a shared seam; #1120 stays discovery/audit shaped.
+- **Shared seams (S1 + S2) land first.** Both epics read the counterparty axis;
+  Epic II needs S2 to see review-requests.
+- **In-house, minimally.** Epic II rides a *scoped* native register (S2), not the
+  full RFC-0006 legacy port (#678/#686–690) — that stays available as separate
+  cleanup.
+- **Do not force our processes on others.** No collaborator registry / label /
+  opt-in file a teammate must adopt. Automation consent is already settled by the
+  team accepting the tool; per-interaction consent is the target's own in-band
+  GitHub action.
+- **Two-party consent = operator config-enable × target's explicit in-band
+  channel-opening action.** Outbound is always a scoped *response*, never
+  initiated.
+- **Review requests act on the operator's individual identity only** — team
+  requests are ignored (S2, B3).
+- **Rejection of a review section ⇒ accept + flag operator for follow-up**, never
+  push back (B5).
+- **Thread-reply back-and-forth deferred** to a later slice (infrequent).
+- **Anything we author is fair game** — the consent model guards only acting
+  toward others' PRs.
 - **Tracker of record is RFC + GitHub epic issues + milestone**, matching RFC
-  0010. Notion is an optional roadmap layer above execution, not where cw sprints
-  live.
+  0010. Notion is an optional roadmap layer, not where cw sprints live.
 
 ## Explicitly out of scope
 
-- **The full teammate-PR tracking store** (`register`/`discover`, the bulk of the
-  legacy `review_monitor.py`) — same Option-A boundary RFC 0010 drew. Epic II
-  acts on *review-requested* teammate PRs; it does not build a general PR
-  registry.
-- **Outbound nudge/DM queue** — B2/B4 write to the PR the request came from; they
-  do not build a general outbound-message drain (RFC 0010 out-of-scope, retained).
+- **A collaborator opt-in registry / standing per-teammate consent record** —
+  explicitly rejected (forces our process on others; consent is in-band).
+- **Acting on team-directed review requests** — individual-target only.
+- **Free-form thread-reply back-and-forth** — deferred to a later slice, not this
+  RFC's first cut.
+- **Pushing back on a rejected review section** — we accept and flag, never argue.
+- **The full teammate-PR tracking store** (`discover`, thread-level delta-review —
+  the bulk of the legacy `review_monitor.py`). S2 is `register`-on-individual-
+  review-request only.
+- **Outbound nudge/DM queue** — outbound writes go to the PR the request came
+  from; no general outbound-message drain (RFC 0010 boundary, retained).
 - **Multi-operator / delegation** — "hand a teammate-blocking review to a
-  *different* reviewer when I'm away" is a tempting A×B interaction but is
-  deferred; Epic II escalates/signals, it does not reroute work to other humans.
-- **Making unavailability *recoverable without the operator*** — we detect and
-  hold; we do not, e.g., cache credentials or hold the key unlocked (that would
-  defeat the compliance posture that motivates the whole RFC).
+  *different* reviewer when I'm away" is deferred; Epic II escalates/signals, it
+  does not reroute work to other humans.
+- **Making unavailability recoverable without the operator** — we detect and hold;
+  we do not cache credentials or keep the key unlocked (that would defeat the
+  compliance posture that motivates the RFC).
 
 ## Phasing
 
-Two epics over the shared seam. After S1, the two tracks run largely in parallel;
-within each track the keystone gates the rest.
+Two epics over the shared seams. After the seams, the two tracks run largely in
+parallel; within each track the keystone gates the rest.
 
 | Wave | Track A (availability) | Track B (counterparty) |
 |------|------------------------|------------------------|
-| 0 (solo, blocking) | **S1 — counterparty axis** | — |
-| 1 | A1 (park class, keystone) · A2 (detector) · A5 (probe) | B2 (opt-in gate, keystone) · B1 (idle exemption) |
-| 2 | A3 (stop-before-finalize) · A4 (auto-resume) · A6 (digest) | B3 (request-gated re-review) · B4 (response contract) |
+| 0 (seams, blocking) | **S1 — counterparty axis + self-identity** | **S2 — native review-request register** (rides S1) |
+| 1 | A1 (park class, keystone) · A2 (detector) · A5 (probe) | B2 (consent gate) · B1 (idle exemption) |
+| 2 | A3 (stop-before-finalize) · A4 (auto-resume) · A6 (digest) | B3 (individual re-request) · B4 (response contract) · B5 (graceful rejection) |
 
 Independent, any lane, no dependency on the above: RFC 0010 P5 (#1100), the
 RFC-0006 B-series legacy-script consolidation (#678, #686–#690), #1140.
 
 ## Open questions
 
-- **OQ-S1 — Counterparty representation.** Derived at `pr_hydrate` from PR
-  authorship + review-requested-of-us, a stored field on the hold record, or
-  both? How is `external` determined for a hold that has no PR yet? (Auto-dev work
-  is `self` by construction — is that assumption safe in every path?)
-- **OQ-A1 — Park-class shape.** New `blocker.reason` + disposition tag, vs a
-  first-class dimension on the park record? Must compose with the existing
-  `push_auth_failed` handling and the `FINALIZE_REGRESS_BLOCKER_REASONS`
-  exclusion without a parser bump if possible.
-- **OQ-A2 — Detector reach in v1.** Ship the generalized classifier across all
-  five surfaces at once, or start with finalize+intake and widen? Which surfaces
-  can even *emit* a structured blocker today vs die?
-- **OQ-A3 — Declared vs detected "away."** Is stop-before-finalize armed by an
-  explicit flag/config, by the A5 probe, or both (flag forces; probe
-  auto-detects)? Interaction with existing scope-tier auto-advance (Small tickets
-  never park today — do they need to be force-held here?).
+- **OQ-S1 — Counterparty edge cases.** Derivation at `pr_hydrate` is the lean; is
+  the `self`-by-default for a not-yet-PR hold safe in every path?
+- **OQ-S2a — Watched-PR entity.** Sibling record (lean) vs extend `TicketTask`
+  with a non-auto-dev origin. Sibling keeps dev-queue slot accounting clean.
+- **OQ-S2b — Self-identity storage.** Where does the resolved operator GitHub login
+  live — `clients.yaml`, a new cw config, resolved-and-cached at runtime?
+- **OQ-A1 — Park-class shape.** New `blocker.reason` + disposition tag (lean; no
+  parser bump) vs a first-class park dimension; must compose with existing
+  `push_auth_failed` handling and the `FINALIZE_REGRESS_BLOCKER_REASONS` exclusion.
+- **OQ-A2 — Detector reach in v1.** All five surfaces at once, or finalize+intake
+  first then widen? Which surfaces can emit a structured blocker today vs die?
+- **OQ-A3 — Declared vs detected "away."** Flag forces, probe auto-detects, or
+  both? Interaction with Small-scope auto-advance (Small tickets never park today —
+  do they need force-holding here?).
 - **OQ-A5 — Probe cost/cadence.** Per-tick network probing is expensive. Per
-  dispatch only? Cached with a short TTL? Where does the probe live relative to
-  the reconcile tick?
-- **OQ-A6 — Digest ownership.** cw-side coalescer vs client-side
-  `attention_monitor` batching. How is a "batch window" defined without delaying a
-  genuinely urgent (broken, not held) signal?
-- **OQ-B1 — Does Epic II require the legacy port first?** Review-of-teammate-PR
-  work lives on the legacy `/review-monitor` skill, outside the reactor. Can B1/B2
-  ride the legacy path, or do they depend on the RFC-0006 B-series (`cw review`
-  subcommands, #678/#686–690) landing first?
-- **OQ-B2 — How is the counterparty's opt-in recorded?** A per-repo/per-org
-  allowlist in cw settings, a label/marker the teammate adds, a shared registry?
-  This is the crux of "2-party" and the highest-uncertainty item in the RFC.
+  dispatch only? Cached with a short TTL? Where relative to the reconcile tick?
+- **OQ-A6 — Digest ownership.** cw-side coalescer vs client-side `attention_monitor`
+  batching; how to define a batch window without delaying a genuinely urgent
+  (broken, not held) signal?
 - **OQ-B4 — Self-fact-check mechanism.** A pre-post verification pass (spawn a
-  checker that validates each claim against diff/CI/source before the reply
-  posts), reusing the adversarial-verify pattern? What's the failure mode when a
-  claim can't be verified — hold the reply, or post with the unverified claim
-  flagged?
+  checker validating each claim against diff/CI/source before the review posts),
+  reusing the adversarial-verify pattern? Failure mode when a claim can't be
+  verified — hold the review, or post with the claim flagged/dropped?
 
 ## References
 
-- `src/cw/reconcile/tasks.py:112` — `record_event(SESSION_NEEDS_ATTENTION)`, the
-  attention emit broadened by #1117 (edge-triggered on the BLOCKED_ON_USER write)
+- `src/cw/reconcile/tasks.py:112` — `record_event(SESSION_NEEDS_ATTENTION)`,
+  the attention emit broadened by #1117 (edge-triggered on the BLOCKED_ON_USER write)
 - `src/cw/reconcile/_shared.py:104,1143` — `IDLE_WATCHDOG_SECONDS = 900`,
   `resolve_idle_watchdog_budget` (the idle budget B1 adds a counterparty axis to)
 - `src/cw/reconcile/idle.py:311,352,610` — idle detect / route-by-policy / act
@@ -300,15 +346,21 @@ RFC-0006 B-series legacy-script consolidation (#678, #686–#690), #1140.
   (the regress set A1/`push_auth_failed` must stay out of)
 - `.claude/commands/auto-dev-finalize.md` — the `push_auth_failed` classifier &
   two push sites (#1049), the first instance A2 generalizes
-- `src/cw/pr_hydrate.py:97-143,257-261` — `_compute_attention_state`,
-  `_is_candidate` (where S1 counterparty derivation would live)
-- `src/cw/reconcile/review_recipes.py` — RFC 0010 reactor; `request_reviewer` /
-  `address_review` are the outward actors Epic II gates
+- `src/cw/pr_hydrate.py:257-261,281-295` — `_is_candidate` (auto-dev-PR fencing);
+  where S1 counterparty derivation and S2 hydration would live
+- `src/cw/cw_pr_events_server.py:36` — `_VALID_EVENT_TYPES` (no `review_requested`
+  today; S2 adds it)
+- `src/cw/review_strategy.py:48` — existing `ReviewStrategyMode` reviewer-config
+  pattern (`repo_owner`/`reviewer_team`) to mirror, not duplicate
+- `src/cw/prompts.py:64` — client-name `[cw identity]` (no GitHub self-login yet;
+  S1/S2 self-identity dependency)
+- `src/cw/reconcile/review_recipes.py` — RFC 0010 reactor; the machinery S2 points
+  outward
 - `src/cw/reconcile/gate_recipes.py` — the detect/act/resolve template (RFC 0009)
 - `docs/rfcs/0010-native-review-monitor.md` — the reactor this builds on; its
-  Option-A (auto-dev-PRs-only) boundary is what Epic II extends outward
+  Option-A (auto-dev-PRs-only) boundary is what S2/Epic II extends outward
 - `#1117` (attention on all parks, shipped), `#1049` (push-auth park, shipped),
   `#1061`/`#1020` (idle/budget axes), `#1120` (orchestration epic; workstream-3
   attention-routing contract)
 
-Issues: (to be filed — two epic issues + S1 seam ticket, then children per wave)
+Issues: (to be filed — two epic issues + S1/S2 seam tickets, then children per wave)
