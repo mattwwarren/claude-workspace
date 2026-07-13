@@ -1262,6 +1262,15 @@ class ClientConfig(BaseModel):
     # Default ``None`` inherits the user's logged-in default model.
     # See issue #248.
     worker_model: str | None = None
+    # RFC 0011 S1 D-S2b — override for the GitHub login used in counterparty
+    # (self|external) and self-identity resolution (see
+    # cw.operator_identity.resolve_operator_login). Opaque string — no
+    # validation. Default None: the runtime-resolved `gh api user` login
+    # (cw.gh.current_gh_login, process-lifetime cached) is authoritative.
+    # Set this only for the rare multi-account case where the operator's
+    # logged-in gh identity differs from the login this client should treat
+    # as "self."
+    operator_github_login: str | None = None
     auto_background_threshold: int | None = None
     notifications: bool = False
     lanes: list[LaneConfig] = Field(default_factory=list)
