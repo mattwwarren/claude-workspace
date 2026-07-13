@@ -33,7 +33,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_PORT = 8788
 DEFAULT_HOST = "127.0.0.1"
-_VALID_EVENT_TYPES = frozenset({"ci_failed", "review_received", "mergeable", "merged"})
+_VALID_EVENT_TYPES = frozenset(
+    {"ci_failed", "review_received", "mergeable", "merged", "review_requested"}
+)
 _NOTIFICATION_TYPE = "cw-pr-event"
 
 
@@ -219,6 +221,44 @@ def _build_notification(event: PREventRequest) -> dict[str, Any]:
     }
 
 
+def _handle_review_requested_sync(
+    *, repo: str, pr_number: int, payload: dict[str, Any]
+) -> tuple[bool, str]:
+    """Resolve identity + register a review_requested webhook (RFC 0011 S2).
+
+    Runs entirely inside the ``anyio.to_thread.run_sync`` offload boundary
+    because ``cached_gh_login()`` may shell out to ``gh api user`` (a blocking
+    subprocess) and ``register_watched_pr`` takes a blocking ``fcntl.flock``.
+    Returns ``(registered, reason)`` for the JSON response body.
+
+    Payload contract (adopted #2): ``{"reviewer": {<node>},
+    "requester_login": "<optional>"}`` — one reviewer node per delivery,
+    mirroring one element of ``gh pr view --json reviewRequests``.
+    """
+    from cw.operator_identity import cached_gh_login
+    from cw.pr_hydrate import resolve_and_register_review_request
+
+    # Why: bypass resolve_operator_login's operator_github_login override — no
+    # client context exists at this PR-scoped webhook entry point, so there is
+    # no ClientConfig to consult. Honoring the override here is blocked on the
+    # repo->client mapping and lands via follow-up #1171.
+    operator_login = cached_gh_login()
+    reviewer = payload.get("reviewer")
+    reviewer_nodes = [reviewer] if isinstance(reviewer, dict) else []
+    requester = payload.get("requester_login")
+    requester_login = requester if isinstance(requester, str) else None
+    pr_url = f"https://github.com/{repo}/pull/{pr_number}"
+    return resolve_and_register_review_request(
+        repo=repo,
+        pr_number=pr_number,
+        pr_url=pr_url,
+        reviewer_nodes=reviewer_nodes,
+        operator_login=operator_login,
+        source="webhook",
+        requester_login=requester_login,
+    )
+
+
 async def handle_post_pr_event(request: Request) -> Response:
     """Handle POST /pr-event (#930): authenticate, validate, broadcast, observe.
 
@@ -265,6 +305,17 @@ async def handle_post_pr_event(request: Request) -> Response:
     broadcast(notification)
 
     import anyio
+
+    if event.event_type == "review_requested":
+        registered, reason = await anyio.to_thread.run_sync(
+            functools.partial(
+                _handle_review_requested_sync,
+                repo=event.repo,
+                pr_number=event.pr_number,
+                payload=event.payload,
+            )
+        )
+        return JSONResponse({"registered": registered, "reason": reason})
 
     from cw.pr_hydrate import observe_pushed_event
 
