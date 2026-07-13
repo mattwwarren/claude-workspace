@@ -47,6 +47,7 @@ from cw.models import (
     QueueItemStatus,
     Stage,
     TicketTask,
+    WatchedPr,
 )
 
 if TYPE_CHECKING:
@@ -364,6 +365,16 @@ def _fill_escalate_merge_block_default(task_raw: dict[str, Any]) -> None:
         task_raw["escalate_merge_block_fired_at"] = None
 
 
+def _fill_watched_prs_default(raw: dict[str, Any]) -> None:
+    """Fill the top-level watched_prs list introduced in schema v15 (#1154).
+
+    Store-level (not per-task), so this takes the raw store dict rather than a
+    task dict and is called once outside migrate_dev_queue's per-task loop.
+    Idempotent."""
+    if "watched_prs" not in raw:
+        raw["watched_prs"] = []
+
+
 def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
     """Normalise a raw dev_queue.json payload into a currently-valid shape."""
     tasks = raw.get("tasks")
@@ -385,6 +396,7 @@ def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
                 _fill_false_park_recovery_backoff_default(task_raw)
                 _fill_gate_recipe_failed_default(task_raw)
                 _fill_escalate_merge_block_default(task_raw)
+    _fill_watched_prs_default(raw)
     raw["schema_version"] = DEV_QUEUE_SCHEMA_VERSION
     return raw
 
@@ -451,6 +463,29 @@ def add_ticket(task: TicketTask) -> bool:
             if existing.status in _terminal and existing.stage == task.stage:
                 return False
         store.tasks.append(task)
+        save_dev_queue(store)
+    return True
+
+
+def register_watched_pr(watched: WatchedPr) -> bool:
+    """Insert a WatchedPr into the store's watched_prs list, atomically.
+
+    Returns True if inserted, False if an ``active`` watched PR with the same
+    ``(repo, pr_number)`` already exists (idempotency dedup, RFC 0011 S2 R7 —
+    mirrors ``add_ticket``'s ``with _lock(): load -> scan -> append/return
+    False -> save`` shape). The guard is scoped to ``status == "active"`` so a
+    future ``dismissed`` transition can re-open registration (adopted #5).
+    """
+    with _lock():
+        store = load_dev_queue()
+        for existing in store.watched_prs:
+            if (
+                existing.repo == watched.repo
+                and existing.pr_number == watched.pr_number
+                and existing.status == "active"
+            ):
+                return False
+        store.watched_prs.append(watched)
         save_dev_queue(store)
     return True
 
