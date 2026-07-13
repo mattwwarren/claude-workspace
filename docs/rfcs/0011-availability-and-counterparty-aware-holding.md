@@ -2,11 +2,11 @@
 
 | Field | Value |
 |-------|-------|
-| Status | Draft |
+| Status | Proposed |
 | Owner | Matt Warren |
 | Date | 2026-07-12 |
 | Supersedes | — |
-| Related | RFC 0008 (orchestrator push channel), RFC 0009 (gate-recipe automation), RFC 0010 (native review-monitor), ADR-0006 (reap-policy fail-safe); epic #1120; #1117 (attention-signal-on-blocked, shipped); #1049 (push-auth park, shipped); #1061 / #1020 (idle/budget axes) |
+| Related | RFC 0008 (orchestrator push channel), RFC 0009 (gate-recipe automation), RFC 0010 (native review-monitor), ADR-0006 (reap-policy fail-safe); epic #1120; epic #813 / #812 (finalize-resiliency escalation — the single-stage precedent A1/A2 generalize); #1117 (attention-signal-on-blocked, shipped); #1049 (push-auth park, shipped); #636 (classifier-deny observation, closed not_planned → #812); #1061 / #1020 (idle/budget axes); #1140 (finalize auto-merge silent-fail) |
 
 ## Summary
 
@@ -107,16 +107,18 @@ by it?**
 - `external` — a teammate is waiting (they requested our review). Holding on
   *our* unavailability is a defect.
 
-**Shape (OQ-S1):** derived where cw already knows PR authorship — `pr_hydrate` —
+**Shape (D-S1):** derived where cw already knows PR authorship — `pr_hydrate` —
 rather than a stored field, to avoid drift. Auto-dev work is `self` by
 construction (`_is_candidate` fences the auto-dev PR set, `pr_hydrate.py:257-261`);
 `external` arises only for a review-requested teammate PR, which S2 makes visible.
-A hold with no PR yet defaults to `self`.
+A hold with no PR yet is always `self` — `external` cannot arise without a review
+request, and a review request always carries a PR.
 
 **Self-identity resolution (shared with S2).** cw has no stored GitHub self-login
 today — `[cw identity]` is client-name-based (`prompts.py:64`). Both "author ≠ us"
 (S1) and "requested of *me* vs my team" (S2) need a resolved operator login.
-Storage location is OQ-S2b.
+Resolved at runtime and cached, with a `clients.yaml` override for multi-account
+edges (D-S2b).
 
 ### S2 — Native review-requested register (individually-targeted; PR-level first cut)
 
@@ -129,11 +131,10 @@ rails. No `discover` (no scanning all PRs), no ported thread-state machine.
   reviewer is the operator's own identity.** A team-review request the operator
   merely belongs to is explicitly **not** an action point (operator decision,
   2026-07-12). Requires S1's self-identity resolution.
-- **Tracked entity.** A registered teammate PR becomes a "watched PR" record so
-  `_is_candidate`-equivalent logic hydrates it through
-  `pr_hydrate → attention-state → reactor/idle-watchdog` with `counterparty=external`.
-  Sibling record vs extending `TicketTask` is OQ-S2a (lean: sibling — a watched PR
-  consumes no dispatch slot and shouldn't distort lane/slot accounting).
+- **Tracked entity.** A registered teammate PR becomes a **sibling "watched PR"
+  record** (D-S2a) — *not* a `TicketTask` extension — so it hydrates through
+  `pr_hydrate → attention-state → reactor/idle-watchdog` with `counterparty=external`
+  while consuming no dispatch slot (keeps dev-queue lane/slot accounting clean).
 - **First cut is PR-level.** The register + review-submission path lands first:
   respond to the individual review request with one self-fact-checked review (B4);
   re-review only on explicit individual re-request (B3). **Thread-level reply
@@ -153,9 +154,11 @@ disposition** from a generic `blocked`. It still routes to `BLOCKED_ON_USER`
 attention layer and the resume path can treat it as *waiting-on-you*, not
 *broken*. Like `push_auth_failed`, it MUST stay out of
 `FINALIZE_REGRESS_BLOCKER_REASONS` (`auto_dev_result.py:114-119`) — an unavailable
-operator is not fixed by re-running IMPL. Shape (new `blocker.reason` + disposition
-tag vs a first-class park dimension) is OQ-A1; `#1049`'s `push_auth_failed` becomes
-the first *instance* of this class.
+operator is not fixed by re-running IMPL. **Shape (D-A1): a new `blocker.reason`
+value + a disposition tag on the existing `BLOCKED_ON_USER` route — no new
+`QueueItemStatus`, no parser bump.** `#1049`'s `push_auth_failed` is retro-classified
+as the first *instance* of this class. This generalizes the finalize-resiliency
+escalation (epic #813 / #812) from one stage to any stage.
 
 #### A2 — Generalize the unavailability detector
 
@@ -166,7 +169,11 @@ classifier over the full failure family — {network-unreachable, GitHub
 5xx/secondary-rate-limit, auth-failure, MCP-github-unreachable, auto-mode
 classifier-deny (`tool_denied`, #636)} — mapping all to the A1 class, applied
 wherever a leg touches the remote or the `gh`/MCP-github surface: intake fetch,
-PR-hygiene sweep, tracker read/write, CI poll, and the push sites.
+PR-hygiene sweep, tracker read/write, CI poll, and the push sites. **Rollout
+(D-A2): one shared classifier, staged surface-by-surface — push sites first
+(generalize #1049's already-shipped classifier), then intake / hygiene / tracker /
+CI-poll.** The per-surface list of what can emit a structured blocker today vs.
+what still dies silently is enumerated at ticket time (deferred detail).
 
 #### A3 — Proactive stop-before-finalize hold
 
@@ -175,7 +182,9 @@ manual`) that, for an operator-away wave, runs intake→review to completion (no
 of which needs the key) and holds **every** leg at the Stage 3→4 boundary as
 `awaiting_operator`, emitting one digest instead of N noisy per-leg auth walls.
 Morning = one `/auto-dev-finalize --resume` pass per held ticket under live auth.
-Declared (flag) vs detected (A5 probe) arming is OQ-A3.
+**Arming (D-A3): both, layered** — the A5 probe auto-detects and holds; the
+flag/config force-holds even when auth is live at dispatch. Under a force-hold,
+Small-scope tickets (which never park today) are held too.
 
 #### A4 — Auto-resume-on-return
 
@@ -188,14 +197,17 @@ drain under live biometric auth.
 
 A cheap probe (`git ls-remote` dry-run / `gh auth status`) at dispatch/tick time.
 If the remote/auth is down, **do not spin up a full session that will just die** —
-hold at the queue level. Cadence/caching is OQ-A5 (per-tick network cost is real).
+hold at the queue level. **Cadence (D-A5): probe at dispatch and immediately
+before finalize — not on every reconcile tick — and cache the result with a short
+(~1 min) TTL** so the network cost stays bounded.
 
 #### A6 — Digest / batch on the attention channel
 
 Coalesce N `awaiting_operator` parks into **one** operator signal rather than N
 `session.needs_attention` pushes at 3am. Also the delivery vehicle for B5's
-rejection flags. Client-side of #1117; ownership (cw-side coalescer vs
-`attention_monitor`) is OQ-A6.
+rejection flags. **Ownership (D-A6): a cw-side coalescer in the same layer as
+#1117's emit; coalesce only `awaiting_operator` (held) signals — genuine
+`blocked`/broken parks stay immediate so batching never delays an urgent signal.**
 
 ### Epic II — Counterparty-aware collaboration (outward)
 
@@ -240,7 +252,10 @@ The review we submit (and, later, thread replies) is **succinct and answer-first
 leans toward *"here's how you can validate this claim,"* and is **self-fact-checked
 before posting** — each asserted claim verified against the diff/CI/source first
 (reuses the repo's No-Unverified-Claims + completion-artifacts discipline and the
-adversarial-verify pattern). Pre-post check mechanism is OQ-B4.
+adversarial-verify pattern). **Mechanism (D-B4): a pre-post verification pass
+checks each claim against diff/CI/source; an unverifiable claim is dropped or
+flagged-as-unverified and the rest posts — we do NOT hold the whole review on one
+bad claim, since holding would block the teammate (the counterparty ethos).**
 
 #### B5 — Graceful rejection (accept, don't argue)
 
@@ -308,31 +323,46 @@ parallel; within each track the keystone gates the rest.
 Independent, any lane, no dependency on the above: RFC 0010 P5 (#1100), the
 RFC-0006 B-series legacy-script consolidation (#678, #686–#690), #1140.
 
-## Open questions
+## Resolved decisions (hardening pass, operator, 2026-07-12)
 
-- **OQ-S1 — Counterparty edge cases.** Derivation at `pr_hydrate` is the lean; is
-  the `self`-by-default for a not-yet-PR hold safe in every path?
-- **OQ-S2a — Watched-PR entity.** Sibling record (lean) vs extend `TicketTask`
-  with a non-auto-dev origin. Sibling keeps dev-queue slot accounting clean.
-- **OQ-S2b — Self-identity storage.** Where does the resolved operator GitHub login
-  live — `clients.yaml`, a new cw config, resolved-and-cached at runtime?
-- **OQ-A1 — Park-class shape.** New `blocker.reason` + disposition tag (lean; no
-  parser bump) vs a first-class park dimension; must compose with existing
-  `push_auth_failed` handling and the `FINALIZE_REGRESS_BLOCKER_REASONS` exclusion.
-- **OQ-A2 — Detector reach in v1.** All five surfaces at once, or finalize+intake
-  first then widen? Which surfaces can emit a structured blocker today vs die?
-- **OQ-A3 — Declared vs detected "away."** Flag forces, probe auto-detects, or
-  both? Interaction with Small-scope auto-advance (Small tickets never park today —
-  do they need force-holding here?).
-- **OQ-A5 — Probe cost/cadence.** Per-tick network probing is expensive. Per
-  dispatch only? Cached with a short TTL? Where relative to the reconcile tick?
-- **OQ-A6 — Digest ownership.** cw-side coalescer vs client-side `attention_monitor`
-  batching; how to define a batch window without delaying a genuinely urgent
-  (broken, not held) signal?
-- **OQ-B4 — Self-fact-check mechanism.** A pre-post verification pass (spawn a
-  checker validating each claim against diff/CI/source before the review posts),
-  reusing the adversarial-verify pattern? Failure mode when a claim can't be
-  verified — hold the review, or post with the claim flagged/dropped?
+Firm leans, decided to unblock sprint breakout. Each is reversible at
+ticket-hardening if the code contradicts it.
+
+- **D-S1 — Counterparty derivation.** Derive at `pr_hydrate`, no stored field. A
+  hold with no PR is always `self` (`external` cannot arise without a review
+  request, which always carries a PR).
+- **D-S2a — Watched-PR entity.** A sibling "watched PR" record, *not* a
+  `TicketTask` extension — consumes no dispatch slot, keeps dev-queue lane/slot
+  accounting clean.
+- **D-S2b — Self-identity.** Resolve the operator GitHub login at runtime
+  (`get_me`-equivalent) and cache it; allow a `clients.yaml` override for the rare
+  multi-account case.
+- **D-A1 — Park-class shape.** New `blocker.reason` value + a disposition tag on
+  the existing `BLOCKED_ON_USER` route. No new `QueueItemStatus`, no schema/parser
+  bump. `push_auth_failed` is retro-classified as the first instance; it and the
+  new reason both stay out of `FINALIZE_REGRESS_BLOCKER_REASONS`.
+- **D-A2 — Detector rollout.** One shared classifier over the failure family,
+  staged surface-by-surface: push sites first (generalize #1049), then intake /
+  hygiene / tracker / CI-poll.
+- **D-A3 — Arming.** Both, layered: A5 probe auto-detects and holds;
+  `--hold-finalize` / `finalize_gate: manual` force-holds even when auth is live.
+  Force-hold also holds Small-scope tickets (which never park today).
+- **D-A5 — Probe cadence.** Probe at dispatch and immediately before finalize —
+  not every reconcile tick — cached with a ~1 min TTL.
+- **D-A6 — Digest ownership.** cw-side coalescer in #1117's layer; coalesce only
+  `awaiting_operator` (held) signals — genuine `blocked`/broken parks stay
+  immediate.
+- **D-B4 — Self-fact-check.** A pre-post verification pass validates each claim
+  against diff/CI/source; an unverifiable claim is dropped/flagged and the rest
+  posts. Never hold the whole review on one bad claim (would block the teammate).
+
+### Deferred to ticket-hardening (code-dependent; not blocking this RFC)
+
+- The per-surface list for D-A2 of what can emit a structured blocker today vs.
+  what still dies silently.
+- Digest window/threshold tuning for D-A6.
+- The exact `blocker.reason` string(s) and disposition-tag field name for D-A1,
+  validated against the `Blocker` model and the headless contract.
 
 ## References
 
@@ -362,5 +392,8 @@ RFC-0006 B-series legacy-script consolidation (#678, #686–#690), #1140.
 - `#1117` (attention on all parks, shipped), `#1049` (push-auth park, shipped),
   `#1061`/`#1020` (idle/budget axes), `#1120` (orchestration epic; workstream-3
   attention-routing contract)
+- `#813` / `#812` (finalize-resiliency epic; blocked-finalize escalation — the
+  single-stage precedent A1/A2 generalize), `#636` (classifier-deny `gh pr create`,
+  closed not_planned → #812), `#1140` (finalize auto-merge silent-fail)
 
 Issues: (to be filed — two epic issues + S1/S2 seam tickets, then children per wave)
