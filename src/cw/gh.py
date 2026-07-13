@@ -276,7 +276,7 @@ def branch_exists_on_origin(
     return _fetch_branch_exists_on_origin(branch, timeout)
 
 
-def _current_gh_login(*, timeout: int) -> str | None:
+def current_gh_login(*, timeout: int) -> str | None:
     """Return the login of the currently-authenticated ``gh`` identity.
 
     This is the identity ``auto-dev-plan`` posts plan-review comments as
@@ -285,6 +285,9 @@ def _current_gh_login(*, timeout: int) -> str | None:
     None on any failure to resolve it — gh binary absent, non-zero exit,
     a timeout, or empty stdout after stripping. Callers MUST fail closed
     on None; do not treat it as "trust anyone."
+
+    Also the identity source for :mod:`cw.operator_identity`'s
+    process-lifetime GitHub-login cache (RFC 0011 S1).
     """
     try:
         result = _sp.run(
@@ -364,7 +367,7 @@ def fetch_approved_plan_comment(
     if not any(_comment_has_marker(c) for c in comments):
         return None
 
-    trusted_login = _current_gh_login(timeout=timeout)
+    trusted_login = current_gh_login(timeout=timeout)
     if trusted_login is None:
         return None
 

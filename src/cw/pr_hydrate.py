@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
@@ -59,6 +59,12 @@ _MERGEABLE_STATES: frozenset[str] = frozenset({"CLEAN", "UNSTABLE", "HAS_HOOKS"}
 _TERMINAL_PR_STATES: frozenset[str] = frozenset({_GH_PR_STATE_MERGED, "CLOSED"})
 
 _PR_URL_RE = re.compile(r"github\.com/([^/]+/[^/]+)/pull/(\d+)")
+
+# RFC 0011 S1 D-S1 — the counterparty axis for a hold's PR: "self" (the
+# operator's own work) or "external" (someone else's). Mirrors
+# cw.review_strategy.ReviewStrategyMode's shape: a bare module-level Literal
+# alias living in the module that owns its derivation function.
+Counterparty = Literal["self", "external"]
 
 
 def _summarize_status_checks(rollup: list[dict[str, Any]]) -> dict[str, Any]:
@@ -293,6 +299,30 @@ def _is_candidate(task: TicketTask) -> bool:
     if not task.pr_url:
         return False
     return task.pr_state is None or task.pr_state.state not in _TERMINAL_PR_STATES
+
+
+def derive_counterparty(
+    task: TicketTask | None, *, operator_login: str | None
+) -> Counterparty:
+    """Return the counterparty axis (RFC 0011 S1 D-S1) for *task*'s PR.
+
+    ``task is None`` (nothing dispatched yet) and a PR-less task
+    (``pr_url is None``) both resolve "self" for the same reason: there is
+    no other party's PR to be "external" to. *operator_login* is accepted
+    for observability (logged below) and to keep the call site's intent
+    explicit; it does not yet affect the branch outcome.
+    """
+    logger.debug(
+        "derive_counterparty: task=%s operator_login=%s",
+        task.ticket_id if task is not None else None,
+        operator_login,
+    )
+    # Why: D-S1/D-S2a scope this ticket to always resolving "self" — no PR
+    # authored by anyone other than the auto-dev worker (itself always the
+    # operator's own gh identity, per _is_candidate/_PR_VIEW_FIELDS above) is
+    # reachable through today's candidate-selection pass. "external" has no
+    # producer yet; wiring a real author-comparison is a future ticket.
+    return "self"
 
 
 def _throttled(tasks: list[TicketTask], interval_seconds: int) -> bool:
