@@ -25,6 +25,7 @@ from cw.pr_hydrate import (
     _resolve_task_by_pr_ref,
     _summarize_status_checks,
     apply_pr_state_observation,
+    derive_counterparty,
     hydrate_pr_states,
     observe_pushed_event,
 )
@@ -489,6 +490,28 @@ class TestCandidateSelection:
         )
         hydrate_pr_states(OrchestratorConfig())
         assert calls == []
+
+
+class TestDeriveCounterparty:
+    """Tests for derive_counterparty (RFC 0011 S1 D-S1)."""
+
+    def test_no_pr_task_is_self(self) -> None:
+        assert derive_counterparty(None, operator_login=None) == "self"
+
+    def test_hold_with_no_pr_url_is_self(self) -> None:
+        task = TicketTask(ticket_id="GEN-1", client="acme", pr_url=None)
+        assert derive_counterparty(task, operator_login=None) == "self"
+
+    def test_auto_dev_candidate_pr_is_self(self) -> None:
+        task = TicketTask(ticket_id="GEN-1", client="acme", pr_url=_URL)
+        assert derive_counterparty(task, operator_login=None) == "self"
+
+    def test_operator_login_argument_does_not_change_result(self) -> None:
+        task = TicketTask(ticket_id="GEN-1", client="acme", pr_url=_URL)
+        with_login = derive_counterparty(task, operator_login="alice")
+        without_login = derive_counterparty(task, operator_login=None)
+        assert with_login == "self"
+        assert without_login == "self"
 
 
 class TestThrottle:

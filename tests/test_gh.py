@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 from cw.gh import (
     add_pr_reviewer,
     branch_exists_on_origin,
+    current_gh_login,
     fetch_approved_plan_comment,
     fetch_pr_view,
     pr_exists_for_branch,
@@ -769,6 +770,23 @@ class TestFetchApprovedPlanComment:
         )
         result = fetch_approved_plan_comment("896")
         assert result is None
+
+
+class TestCurrentGhLogin:
+    """Direct tests for current_gh_login (public since #1153)."""
+
+    def test_success_returns_login(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "cw.gh._sp.run", lambda *_a, **_kw: _make_run_result(0, "mattwwarren\n")
+        )
+        assert current_gh_login(timeout=10) == "mattwwarren"
+
+    def test_gh_not_found_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raise(*_a: object, **_kw: object) -> Any:
+            raise FileNotFoundError("gh")
+
+        monkeypatch.setattr("cw.gh._sp.run", _raise)
+        assert current_gh_login(timeout=10) is None
 
 
 _PR_VIEW_FIELDS = (
