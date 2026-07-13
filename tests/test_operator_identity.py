@@ -10,15 +10,7 @@ import pytest
 
 from cw import operator_identity
 from cw.models import ClientConfig
-
-
-def _make_run_result(returncode: int = 0, stdout: str = "") -> Any:
-    class _Result:
-        def __init__(self, rc: int, out: str) -> None:
-            self.returncode = rc
-            self.stdout = out
-
-    return _Result(returncode, stdout)
+from tests.test_gh import _make_run_result
 
 
 def _make_identity_dispatch(identity: str | int | BaseException) -> Any:
