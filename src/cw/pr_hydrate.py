@@ -435,13 +435,20 @@ def _hydrate_watched_prs(watched_prs: list[WatchedPr]) -> None:
                 save_dev_queue(store)
 
 
-def _throttled(tasks: list[TicketTask], interval_seconds: int) -> bool:
+def _throttled(
+    tasks: list[TicketTask], watched_prs: list[WatchedPr], interval_seconds: int
+) -> bool:
     """True if the last hydration pass was under *interval_seconds* ago.
 
-    The baseline is ``max(pr_state.hydrated_at)`` across all tasks — no separate
-    persisted timer state (consistent with the plan's R6/R10 resolution).
+    The baseline is ``max(pr_state.hydrated_at)`` across all tasks and watched
+    PRs — no separate persisted timer state (consistent with the plan's
+    R6/R10 resolution). Watched PRs (RFC 0011 S2) must be sampled too: a
+    watched-PR-only store has no tasks, so sampling tasks alone would never
+    throttle and ``_hydrate_watched_prs`` would refetch every active watched
+    PR via ``gh pr view`` on every call.
     """
     stamps = [t.pr_state.hydrated_at for t in tasks if t.pr_state is not None]
+    stamps += [w.pr_state.hydrated_at for w in watched_prs if w.pr_state is not None]
     if not stamps:
         return False
     elapsed = (datetime.now(UTC) - max(stamps)).total_seconds()
@@ -687,7 +694,7 @@ def hydrate_pr_states(config: OrchestratorConfig) -> None:
     ``_hydrate_watched_prs``, independently of whether any task is a candidate.
     """
     store = load_dev_queue()
-    if _throttled(store.tasks, config.pr_hydration_interval_seconds):
+    if _throttled(store.tasks, store.watched_prs, config.pr_hydration_interval_seconds):
         return
     candidates = [t for t in store.tasks if _is_candidate(t)]
     derived: list[tuple[TicketTask, PrState]] = []

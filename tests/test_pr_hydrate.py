@@ -1330,10 +1330,44 @@ class TestHydrateWatchedPrs:
         assert store.tasks[0].pr_state.state == "MERGED"
         assert store.watched_prs[0].pr_state is not None
 
-    def test_hydrate_watched_prs_direct_no_op_on_empty(self) -> None:
-        """Calling the helper with an empty list is a safe no-op."""
+    def test_hydrate_watched_prs_direct_no_op_on_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Calling the helper with an empty list never fetches anything."""
+        calls: list[Any] = []
+        monkeypatch.setattr(
+            "cw.pr_hydrate.fetch_pr_view",
+            lambda *a, **_k: calls.append(a) or _pr_view_payload(),
+        )
         _hydrate_watched_prs([])
-        assert load_dev_queue().watched_prs == []
+        assert calls == []
+
+    def test_watched_pr_only_store_second_pass_within_interval_is_throttled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A store with zero tasks still throttles watched-PR hydration (#1154 fix).
+
+        Regression guard: ``_throttled`` used to sample only
+        ``TicketTask.pr_state.hydrated_at``, so a watched-PR-only store (no
+        tasks at all) was never throttled and refetched every active watched
+        PR via ``gh pr view`` on every call.
+        """
+        save_dev_queue(DevQueueStore(tasks=[], watched_prs=[_watched()]))
+        calls: list[Any] = []
+        monkeypatch.setattr(
+            "cw.pr_hydrate.fetch_pr_view",
+            lambda *a, **_k: calls.append(a) or _pr_view_payload(state="OPEN"),
+        )
+        config = OrchestratorConfig(pr_hydration_interval_seconds=150)
+        with freeze_time("2026-07-04 12:00:00") as frozen:
+            hydrate_pr_states(config)
+            assert len(calls) == 1
+            frozen.tick(delta=timedelta(seconds=60))
+            hydrate_pr_states(config)
+            assert len(calls) == 1  # throttled — no second fetch
+            frozen.tick(delta=timedelta(seconds=120))
+            hydrate_pr_states(config)
+            assert len(calls) == 2  # interval elapsed — fetched again
 
 
 class TestResolveAndRegisterReviewRequest:
