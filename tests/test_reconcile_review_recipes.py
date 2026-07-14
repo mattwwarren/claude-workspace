@@ -953,10 +953,15 @@ def test_act_request_reviewer_configured_mode_calls_gh_helper(
     assert payload["review_strategy_mode"] == mode
     assert payload["reviewer_handle"] == handle
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
-    # request_reviewer's stated acceptance criterion is "no dev-queue mutation"
-    # — confirm the store is byte-for-byte unchanged, not just that no code
-    # path *looks* like it writes.
-    assert load_dev_queue() == store_before
+    # request_reviewer's only dev-queue mutation is the one-shot
+    # request_reviewer_fired_at latch (GitHub #1197); everything else on the
+    # row must stay byte-for-byte unchanged.
+    after_task = load_dev_queue().tasks[0]
+    assert after_task.request_reviewer_fired_at is not None
+    assert (
+        after_task.model_copy(update={"request_reviewer_fired_at": None})
+        == store_before.tasks[0]
+    )
 
 
 def test_act_request_reviewer_gh_call_fails_emits_failed(
@@ -1039,6 +1044,68 @@ def test_act_request_reviewer_misconfigured_mode_missing_handle_emits_failed(
     failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
     assert len(failed) == 1
     assert failed[0].correlation_id == task.ticket_id
+
+
+def test_request_reviewer_fires_once_per_episode(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_acme_clients_yaml(tmp_config_dir)
+    task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="no_reviewer"))
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    _stub_strategy(monkeypatch, ReviewStrategy("repo_owner", "alice"))
+    monkeypatch.setattr(
+        "cw.gh.add_pr_reviewer",
+        lambda *_a, **_kw: subprocess.CompletedProcess(args=[], returncode=0),
+    )
+    clients = load_effective_clients()
+    candidate = _candidate(task, RECIPE_REQUEST_REVIEWER, "no_reviewer")
+
+    acted1 = _act_request_reviewer([candidate], clients=clients)
+    assert acted1 == [task.ticket_id]
+    assert load_dev_queue().tasks[0].request_reviewer_fired_at is not None
+
+    # Second tick, state unchanged: detect still yields a candidate, but the
+    # latch blocks a re-fire.
+    acted2 = _act_request_reviewer([candidate], clients=clients)
+    assert acted2 == []
+    taken = [
+        e
+        for e in read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+        if e.correlation_id == task.ticket_id
+    ]
+    assert len(taken) == 1
+
+
+def test_request_reviewer_latch_clears_on_episode_end(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_acme_clients_yaml(tmp_config_dir)
+    task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="no_reviewer"))
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    _stub_strategy(monkeypatch, ReviewStrategy("repo_owner", "alice"))
+    monkeypatch.setattr(
+        "cw.gh.add_pr_reviewer",
+        lambda *_a, **_kw: subprocess.CompletedProcess(args=[], returncode=0),
+    )
+    clients = load_effective_clients()
+    candidate = _candidate(task, RECIPE_REQUEST_REVIEWER, "no_reviewer")
+
+    assert _act_request_reviewer([candidate], clients=clients) == [task.ticket_id]
+
+    # Episode ends: hydration moves the PR off no_reviewer.
+    store = load_dev_queue()
+    store.tasks[0].pr_state = _pr_state(attention_state="ready_to_approve")
+    save_dev_queue(store)
+
+    # Clear pass runs even with zero candidates.
+    assert _act_request_reviewer([], clients=clients) == []
+    assert load_dev_queue().tasks[0].request_reviewer_fired_at is None
+
+    # Genuine re-entry into no_reviewer fires again (episode semantics).
+    store = load_dev_queue()
+    store.tasks[0].pr_state = _pr_state(attention_state="no_reviewer")
+    save_dev_queue(store)
+    assert _act_request_reviewer([candidate], clients=clients) == [task.ticket_id]
 
 
 # --- escalate_merge_block --------------------------------------------------
