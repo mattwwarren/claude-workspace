@@ -347,28 +347,69 @@ class BuildoutConfig(BaseModel):
         milestone = _require_mapping(block, "milestone")
         epic = _require_mapping(block, "epic")
         ticket = _require_mapping(block, "ticket")
-        notion_raw = block.get("notion")
         return cls(
-            milestone_title_pattern=str(milestone["title_pattern"]),
-            epic_title_pattern=str(epic["title_pattern"]),
+            milestone_title_pattern=str(
+                _require_key(milestone, "milestone", "title_pattern")
+            ),
+            epic_title_pattern=str(_require_key(epic, "epic", "title_pattern")),
             epic_labels=_str_list(epic.get("labels")),
-            children_marker=str(epic["children_marker"]),
-            ticket_title_pattern=str(ticket["title_pattern"]),
+            children_marker=str(_require_key(epic, "epic", "children_marker")),
+            ticket_title_pattern=str(_require_key(ticket, "ticket", "title_pattern")),
             ticket_labels=_str_list(ticket.get("labels")),
-            ticket_footer_pattern=str(ticket["footer_pattern"]),
-            ticket_footer_epic_clause=str(ticket["footer_epic_clause"]),
-            notion=NotionConfig.model_validate(notion_raw)
-            if isinstance(notion_raw, dict)
-            else None,
+            ticket_footer_pattern=str(_require_key(ticket, "ticket", "footer_pattern")),
+            ticket_footer_epic_clause=str(
+                _require_key(ticket, "ticket", "footer_epic_clause")
+            ),
+            notion=_require_notion(block.get("notion")),
         )
 
 
 def _require_mapping(block: dict[str, object], key: str) -> dict[str, object]:
     value = block.get(key)
     if not isinstance(value, dict):
-        msg = f"sprint_buildout: missing or malformed section: {key}"
+        msg = (
+            f"sprint_buildout: missing or malformed section: {key} — "
+            "see config/CONFIG_REFERENCE.md"
+        )
         raise RfcContractError(msg)
     return value
+
+
+def _require_key(mapping: dict[str, object], section: str, key: str) -> object:
+    """Return ``mapping[key]``, or raise RfcContractError — never a bare KeyError.
+
+    A missing key inside a present ``milestone:``/``epic:``/``ticket:`` section
+    (e.g. ``epic:`` without ``children_marker``) must fail the same guided way
+    as a missing section: config/CONFIG_REFERENCE.md promises a hard refusal
+    pointing here, not a raw traceback.
+    """
+    if key not in mapping:
+        msg = (
+            f"sprint_buildout.{section}: missing required key: {key} — "
+            "see config/CONFIG_REFERENCE.md"
+        )
+        raise RfcContractError(msg)
+    return mapping[key]
+
+
+def _require_notion(notion_raw: object) -> NotionConfig | None:
+    """Parse the optional ``notion:`` sub-block, or refuse if present-but-malformed.
+
+    Absent (or explicitly ``null``) means "skip the Notion phase" — that is the
+    documented enablement signal. A *present* value that isn't a mapping (e.g. a
+    stray ``notion: true``) is a config typo, not an opt-out, so it must refuse
+    loudly like every other malformed section rather than silently degrading to
+    "absent."
+    """
+    if notion_raw is None:
+        return None
+    if not isinstance(notion_raw, dict):
+        msg = (
+            "sprint_buildout.notion: malformed — must be a mapping, or omit the "
+            "key entirely to skip the Notion phase — see config/CONFIG_REFERENCE.md"
+        )
+        raise RfcContractError(msg)
+    return NotionConfig.model_validate(notion_raw)
 
 
 def _str_list(value: object) -> list[str]:

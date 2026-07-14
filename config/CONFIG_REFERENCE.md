@@ -622,11 +622,16 @@ sprint_buildout:
       Repo: claude-workspace
 ```
 
-Every key is required except `notion:`. Omitting the `notion:` block entirely
-is how the skill knows to skip its Notion mirroring phase — there is no
-separate boolean flag; presence of the block is the enablement signal. A
-missing `sprint_buildout:` block itself (or a missing/malformed `milestone:`,
-`epic:`, or `ticket:` section within it) is a hard refusal
+Every key is required except `notion:` and the two `labels:` lists (`epic.labels`,
+`ticket.labels`), which default to `[]` when omitted — an empty label set is a
+valid convention, not a config error. Omitting the `notion:` block entirely is
+how the skill knows to skip its Notion mirroring phase — there is no separate
+boolean flag; presence of the block is the enablement signal, but a *present*
+`notion:` value that isn't a mapping (e.g. a stray `notion: true`) is treated
+as malformed, not as an opt-out. A missing `sprint_buildout:` block itself, a
+missing/malformed `milestone:`, `epic:`, or `ticket:` section, a missing
+required key within one of those sections (e.g. `epic:` without
+`children_marker`), or a malformed `notion:` value is a hard refusal
 (`RfcContractError`), not a silent default — buildout output would otherwise
 depend on guessed conventions.
 

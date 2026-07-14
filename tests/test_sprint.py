@@ -364,3 +364,64 @@ def test_build_plan_omits_the_epic_clause_for_an_epic_less_ticket() -> None:
 def test_build_plan_maps_sprints_to_ticket_codes() -> None:
     plan = build_plan(parse_rfc(MINIMAL_RFC), _config(), version="1.20.0")
     assert plan.sprint_map == {0: ["S1"], 1: ["A1"]}
+
+
+def test_build_plan_maps_epics_to_child_ticket_codes() -> None:
+    plan = build_plan(parse_rfc(MINIMAL_RFC), _config(), version="1.20.0")
+    assert plan.epic_children == {"I": ["A1"]}
+
+
+def test_load_buildout_config_refuses_when_a_required_key_is_missing_from_a_section(
+    tmp_path: Path,
+) -> None:
+    """`epic:` is present, but `children_marker` is missing — this must raise the
+    same guided RfcContractError as a missing section, not a bare KeyError."""
+    _write_project_config_yaml(
+        tmp_path,
+        """\
+sprint_buildout:
+  milestone:
+    title_pattern: "v{version} — {rfc_title}"
+  epic:
+    title_pattern: "epic: {name}"
+  ticket:
+    title_pattern: "RFC {rfc_num} {code} — {name}"
+    footer_pattern: "Part of RFC {rfc_num} Wave {wave} (Sprint {sprint})"
+    footer_epic_clause: ", Epic #{epic}"
+""",
+    )
+    with pytest.raises(
+        RfcContractError,
+        match=r"sprint_buildout\.epic: missing required key: children_marker",
+    ):
+        load_buildout_config(tmp_path)
+
+
+def test_load_buildout_config_refuses_a_malformed_notion_value(tmp_path: Path) -> None:
+    """A present-but-non-mapping `notion:` is a config typo, not an opt-out —
+    it must refuse, not silently degrade to "Notion phase skipped"."""
+    _write_project_config_yaml(
+        tmp_path,
+        CONFIG_YAML + "  notion: true\n",
+    )
+    with pytest.raises(RfcContractError, match=r"sprint_buildout\.notion: malformed"):
+        load_buildout_config(tmp_path)
+
+
+def test_load_buildout_config_parses_a_present_notion_block(tmp_path: Path) -> None:
+    _write_project_config_yaml(
+        tmp_path,
+        CONFIG_YAML
+        + """\
+  notion:
+    data_source: "collection://abc"
+    project_page: "def"
+    sprint_page_properties:
+      Type: Sprint
+""",
+    )
+    cfg = load_buildout_config(tmp_path)
+    assert cfg.notion is not None
+    assert cfg.notion.data_source == "collection://abc"
+    assert cfg.notion.project_page == "def"
+    assert cfg.notion.sprint_page_properties == {"Type": "Sprint"}
