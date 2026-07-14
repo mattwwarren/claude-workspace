@@ -51,3 +51,26 @@ pr:
 
 plan_exit:
   mode: suggest
+
+# Consumed by `cw sprint plan` (/sprint-buildout). These are the conventions the
+# RFC 0011 buildout recovered by reading prior issues — recorded here so buildout
+# is transcription, not archaeology. Documented in config/CONFIG_REFERENCE.md.
+sprint_buildout:
+  milestone:
+    title_pattern: "v{version} — {rfc_title}"
+  epic:
+    title_pattern: "epic: {name}"
+    labels: []                          # epics are deliberately unlabeled
+    children_marker: "<!-- children -->"
+  ticket:
+    title_pattern: "RFC {rfc_num} {code} — {name}"
+    labels: [feature]
+    footer_pattern: "Part of RFC {rfc_num} Wave {wave} (Sprint {sprint})"
+    footer_epic_clause: ", Epic #{epic}"  # appended only when the ticket has an epic
+  notion:                               # omit this block ⇒ the Notion phase skips
+    data_source: "collection://673ac7cd-797a-4c76-b9eb-fb5bc7ee050a"
+    project_page: "38b59b27-0a42-81da-b234-ea951daa0216"
+    sprint_page_properties:
+      Type: Sprint
+      Status: Planning
+      Repo: claude-workspace

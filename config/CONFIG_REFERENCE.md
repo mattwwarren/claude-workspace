@@ -589,6 +589,59 @@ and the recipe's act phase records a `PR_ACTION_FAILED` correction rather than
 requesting a bogus reviewer. For `claude-workspace` itself the key is set to
 `mode: ci`, so `request_reviewer` is a documented no-op here.
 
+## Sprint Buildout Config
+
+`cw sprint plan` (driven by `/sprint-buildout`) turns an RFC's `## Tickets`
+section into GitHub milestone/epic/ticket drafts. It needs to know this repo's
+title/label/footer conventions — the `sprint_buildout:` block in
+`.claude/project-config.yaml` (repo-committed, sibling to `tracking:` /
+`review_strategy:` / `pr:`) records them so buildout is transcription, not
+archaeology; it does not rediscover these conventions by reading prior issues
+each time.
+
+```yaml
+# .claude/project-config.yaml
+sprint_buildout:
+  milestone:
+    title_pattern: "v{version} — {rfc_title}"
+  epic:
+    title_pattern: "epic: {name}"
+    labels: []                          # epics are deliberately unlabeled
+    children_marker: "<!-- children -->"
+  ticket:
+    title_pattern: "RFC {rfc_num} {code} — {name}"
+    labels: [feature]
+    footer_pattern: "Part of RFC {rfc_num} Wave {wave} (Sprint {sprint})"
+    footer_epic_clause: ", Epic #{epic}"  # appended only when the ticket has an epic
+  notion:                               # omit this block ⇒ the Notion phase skips
+    data_source: "collection://673ac7cd-797a-4c76-b9eb-fb5bc7ee050a"
+    project_page: "38b59b27-0a42-81da-b234-ea951daa0216"
+    sprint_page_properties:
+      Type: Sprint
+      Status: Planning
+      Repo: claude-workspace
+```
+
+Every key is required except `notion:` and the two `labels:` lists (`epic.labels`,
+`ticket.labels`), which default to `[]` when omitted — an empty label set is a
+valid convention, not a config error. Omitting the `notion:` block entirely is
+how the skill knows to skip its Notion mirroring phase — there is no separate
+boolean flag; presence of the block is the enablement signal, but a *present*
+`notion:` value that isn't a mapping (e.g. a stray `notion: true`) is treated
+as malformed, not as an opt-out. A missing `sprint_buildout:` block itself, a
+missing/malformed `milestone:`, `epic:`, or `ticket:` section, a missing
+required key within one of those sections (e.g. `epic:` without
+`children_marker`), or a malformed `notion:` value is a hard refusal
+(`RfcContractError`), not a silent default — buildout output would otherwise
+depend on guessed conventions.
+
+`ticket.footer_epic_clause` is appended to `ticket.footer_pattern` **only**
+when a ticket declares an epic. An epic-less ticket's footer omits the clause
+entirely — it is not a template substitution rendering an empty or em-dash
+placeholder value. For example, with the config above, a ticket with no epic
+gets `Part of RFC 0011 Wave 0 (Sprint 0)`; a ticket with `Epic: I` gets `Part
+of RFC 0011 Wave 1 (Sprint 1), Epic #I`.
+
 ## Worktree Context File (`.claude/cw-context.json`)
 
 Written by `cw` into each DAEMON worktree at spawn time. The Stop hook reads it
