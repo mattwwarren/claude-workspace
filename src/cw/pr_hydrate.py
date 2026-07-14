@@ -221,6 +221,8 @@ def _derive_pr_state(pr_url: str) -> PrState | None:
     merge_state_status = str(data.get("mergeStateStatus") or "UNKNOWN")
     review_decision = str(data.get("reviewDecision") or "")
     reviewer_count = len(data.get("reviewRequests") or [])
+    is_draft = bool(data.get("isDraft", False))
+    pending_count = summary["pending_count"]
     # Terminal PRs (MERGED/CLOSED) need no operator attention — the decision
     # table is a candidate-selection filter that never runs for them (#929).
     attention_state = (
@@ -228,10 +230,10 @@ def _derive_pr_state(pr_url: str) -> PrState | None:
         if state in _TERMINAL_PR_STATES
         else _compute_attention_state(
             ci_ok=ci_ok,
-            pending_count=summary["pending_count"],
+            pending_count=pending_count,
             merge_state_status=merge_state_status,
             review_decision=review_decision,
-            is_draft=bool(data.get("isDraft", False)),
+            is_draft=is_draft,
             reviewer_count=reviewer_count,
         )
     )
@@ -243,9 +245,9 @@ def _derive_pr_state(pr_url: str) -> PrState | None:
         ci_ok=ci_ok,
         review_decision=review_decision,
         attention_state=attention_state,
-        is_draft=bool(data.get("isDraft", False)),
+        is_draft=is_draft,
         reviewer_count=reviewer_count,
-        pending_count=summary["pending_count"],
+        pending_count=pending_count,
         failing_checks=[str(f["name"]) for f in summary["failing"]],
         hydrated_at=datetime.now(UTC),
     )
