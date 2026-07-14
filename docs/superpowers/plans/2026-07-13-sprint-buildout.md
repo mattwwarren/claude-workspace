@@ -1109,13 +1109,18 @@ Append to `tests/test_gh.py`, following that file's existing monkeypatch-of-`_sp
 ```python
 def test_create_issue_writes_the_body_to_a_temp_file_not_the_argv(monkeypatch) -> None:
     """Bodies never ride argv: RFC titles carry em-dashes and ampersands."""
+    calls: list[list[str]] = []
     seen: dict[str, object] = {}
 
     def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        seen["cmd"] = cmd
-        body_file = Path(cmd[cmd.index("--body-file") + 1])
-        seen["body"] = body_file.read_text(encoding="utf-8")
-        return subprocess.CompletedProcess(cmd, 0, b"https://github.com/o/r/issues/42\n", b"")
+        calls.append(cmd)
+        if "--body-file" in cmd:
+            body_file = Path(cmd[cmd.index("--body-file") + 1])
+            seen["body"] = body_file.read_text(encoding="utf-8")
+            return subprocess.CompletedProcess(
+                cmd, 0, b"https://github.com/o/r/issues/42\n", b""
+            )
+        return subprocess.CompletedProcess(cmd, 0, b"{}", b"")
 
     monkeypatch.setattr(gh._sp, "run", fake_run)
     number = gh.create_issue(
@@ -1123,8 +1128,50 @@ def test_create_issue_writes_the_body_to_a_temp_file_not_the_argv(monkeypatch) -
     )
 
     assert number == 42
-    assert "--body" not in seen["cmd"]  # only --body-file
+    assert "--body" not in calls[0]  # only --body-file
     assert seen["body"] == "## Context\n\nBody & more."
+
+
+def test_create_issue_attaches_the_milestone_by_id_not_by_name(monkeypatch) -> None:
+    """`gh issue create -m` resolves a milestone BY NAME, so the id cannot ride it.
+
+    Passing str(11) there would hunt for a milestone *titled* "11". The id goes
+    through the REST endpoint instead, as a typed (-F) field so it lands as a
+    JSON number rather than the string "11".
+    """
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        calls.append(cmd)
+        if "--body-file" in cmd:
+            return subprocess.CompletedProcess(
+                cmd, 0, b"https://github.com/o/r/issues/42\n", b""
+            )
+        return subprocess.CompletedProcess(cmd, 0, b"{}", b"")
+
+    monkeypatch.setattr(gh._sp, "run", fake_run)
+    assert gh.create_issue("t", "b", labels=[], milestone=11) == 42
+
+    create, attach = calls
+    assert "--milestone" not in create  # the id must NOT ride `gh issue create`
+    assert attach[:2] == ["gh", "api"]
+    assert "repos/{owner}/{repo}/issues/42" in attach
+    assert "-X" in attach and attach[attach.index("-X") + 1] == "PATCH"
+    assert "-F" in attach and attach[attach.index("-F") + 1] == "milestone=11"
+
+
+def test_create_issue_returns_none_when_the_milestone_attach_fails(monkeypatch) -> None:
+    """A created issue with no milestone is a half-applied buildout — report it."""
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        if "--body-file" in cmd:
+            return subprocess.CompletedProcess(
+                cmd, 0, b"https://github.com/o/r/issues/42\n", b""
+            )
+        return subprocess.CompletedProcess(cmd, 1, b"", b"gh: HTTP 422")
+
+    monkeypatch.setattr(gh._sp, "run", fake_run)
+    assert gh.create_issue("t", "b", labels=[], milestone=11) is None
 
 
 def test_create_issue_returns_none_when_gh_fails(monkeypatch) -> None:
@@ -1244,8 +1291,19 @@ def create_issue(
     milestone: int,
     timeout: int = _CREATE_TIMEOUT,
 ) -> int | None:
-    """Create an issue via ``gh issue create``; return its number, or None on failure."""
-    cmd = ["gh", "issue", "create", "--title", title, "--milestone", str(milestone)]
+    """Create an issue and attach it to *milestone*; return its number, or None.
+
+    Two calls, deliberately. ``gh issue create --milestone`` resolves a milestone
+    BY NAME (``-m, --milestone name``), not by id — handing it ``str(11)`` would
+    look for a milestone *titled* "11" and fail. ``gh issue edit -m`` is name-only
+    too. So the milestone is attached afterwards through the REST endpoint, which
+    does take the numeric id. This keeps ``milestone: int`` in the signature (the
+    id is what ``apply_plan`` holds, and it is unambiguous where a title is not).
+
+    ``-F`` (not ``-f``) sends a *typed* field, so ``milestone`` arrives as a JSON
+    number rather than the string "11", which is what the API expects.
+    """
+    cmd = ["gh", "issue", "create", "--title", title]
     for label in labels:
         cmd += ["--label", label]
     try:
@@ -1257,7 +1315,29 @@ def create_issue(
     if result.returncode != 0:
         return None
     match = _ISSUE_URL_NUMBER_RE.search(result.stdout.decode("utf-8", "replace"))
-    return int(match.group(1)) if match else None
+    if not match:
+        return None
+    number = int(match.group(1))
+    return number if _attach_milestone(number, milestone, timeout) else None
+
+
+def _attach_milestone(number: int, milestone: int, timeout: int) -> bool:
+    """Attach *number* to *milestone* by numeric id via the REST endpoint."""
+    try:
+        result = _sp.run(
+            [
+                "gh", "api",
+                f"repos/{{owner}}/{{repo}}/issues/{number}",
+                "-X", "PATCH",
+                "-F", f"milestone={milestone}",
+            ],
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, _sp.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 def update_issue_body(number: int, body: str, *, timeout: int = _CREATE_TIMEOUT) -> bool:
@@ -1346,6 +1426,11 @@ def milestone_issue_titles(
     Note: if two issues under *milestone* share the exact same title, this dict
     comprehension keeps only the last one seen. The idempotent re-entry check
     in ``apply_plan`` assumes ticket/epic titles are unique within a milestone.
+
+    Passing the numeric id to ``gh issue list --milestone`` is correct here and
+    is NOT the same bug as in ``create_issue``: list documents its flag as
+    "Filter by milestone number or title", whereas ``issue create``/``issue
+    edit`` take a name only. Do not "fix" this one.
     """
     try:
         result = _sp.run(
