@@ -13113,16 +13113,22 @@ def test_phantom_route_emitted_sentinel_refusal_preserves_existing_park_marker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A stage-mismatch refusal must not clobber a pre-existing paused_status
-    marker from another sweep (GitHub #1149 review finding).
+    marker from another sweep, AND must still latch the refusal so the doomed
+    candidate isn't re-offered forever (GitHub #1149 review findings).
 
     Unlike idle.py (whose detect phase only builds a ROUTE_EMITTED_SENTINEL
     candidate when session.last_result is already None), phantom.py's detect
     phase has no such precondition -- a session already legitimately parked by
     idle.py's watchdog (_SILENTLY_IDLE_REASON) can reach the refusal branch
-    with last_result already set. Overwriting it unconditionally would destroy
-    that marker and defeat stalled.py's SKIP_PARKED check (which reads
+    with last_result already set. Overwriting it wholesale would destroy that
+    marker and defeat stalled.py's SKIP_PARKED check (which reads
     last_result.get("paused_status") for exactly that reason), silently
-    un-parking a session another sweep correctly parked.
+    un-parking a session another sweep correctly parked -- but *skipping* the
+    stamp entirely in that case would re-open the refusal-loop this stamp
+    exists to close (the doomed candidate would be re-offered every tick
+    forever, since already_refused could never become True). The fix merges a
+    second, independent flag (_SENTINEL_ADVANCE_REFUSED_KEY) into the existing
+    dict instead of choosing between the two.
     """
     from cw.reconcile import ProposedAction, _detect_phantom_candidates
     from cw.reconcile.phantom import _apply_phantom_routed_mutations
@@ -13172,8 +13178,22 @@ def test_phantom_route_emitted_sentinel_refusal_preserves_existing_park_marker(
     assert accepted == []
     reloaded = session_by_id["phantom-preserve-1"]
     # The pre-existing idle-watchdog park marker must survive the refusal --
-    # not be overwritten with the #1149 refusal marker.
-    assert reloaded.last_result == {"paused_status": _SILENTLY_IDLE_REASON}
+    # not be overwritten -- with the refusal flag merged in alongside it.
+    assert reloaded.last_result == {
+        "paused_status": _SILENTLY_IDLE_REASON,
+        "sentinel_advance_refused": True,
+    }
+    assert _has_terminal_sentinel(reloaded) is False
+
+    # Second detect pass over the now-marked session: already_refused must
+    # still stop offering the same doomed advance candidate even though the
+    # marker's paused_status value is idle.py's, not the #1149 refusal
+    # reason -- it falls through to CRASH_COMPLETE instead.
+    candidates_2 = _detect_phantom_candidates(
+        state, phantom_set={sess.id}, task_by_ticket={"phantom-preserve-1": task}
+    )
+    assert len(candidates_2) == 1
+    assert candidates_2[0].proposed_action == ProposedAction.CRASH_COMPLETE
 
 
 def test_phantom_later_stage_sentinel_routes_forward_instead_of_looping(

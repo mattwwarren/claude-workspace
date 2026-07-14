@@ -35,6 +35,7 @@ from cw.reconcile._shared import (
     _GH_CHECK_BLOCKED_REASON,
     _PAUSED_STATUS_KEY,
     _PHANTOM_REAP_MERGED_REASON,
+    _SENTINEL_ADVANCE_REFUSED_KEY,
     _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
     ProposedAction,
     ReapCandidate,
@@ -154,10 +155,10 @@ def _detect_phantom_candidates(
         # it falls through to the ordinary CRASH_COMPLETE construction below.
         # Unlike idle.py, phantom.py's detect phase has no `last_result is None`
         # precondition, so the apply-phase stamp alone would be inert here.
-        already_refused = (
-            isinstance(session.last_result, dict)
-            and session.last_result.get(_PAUSED_STATUS_KEY)
+        already_refused = isinstance(session.last_result, dict) and (
+            session.last_result.get(_PAUSED_STATUS_KEY)
             == _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
+            or session.last_result.get(_SENTINEL_ADVANCE_REFUSED_KEY) is True
         )
         if session.origin is SessionOrigin.DAEMON and not already_refused:
             advance = _phantom_advance_sentinel_candidate(session, ticket_id, lane)
@@ -520,21 +521,34 @@ def _apply_phantom_routed_mutations(
         if not routed:
             # #1149: mirror idle.py's refusal stamp — a stage-mismatch refusal
             # (earlier-stage replay / unresolvable position) leaves the task
-            # untouched. Stamp a paused_status-only marker so the detect-phase
-            # skip check in _detect_phantom_candidates stops re-offering this
-            # same doomed candidate to _phantom_advance_sentinel_candidate.
+            # untouched. Stamp a marker so the detect-phase skip check in
+            # _detect_phantom_candidates stops re-offering this same doomed
+            # candidate to _phantom_advance_sentinel_candidate.
             #
             # Unlike idle.py (whose detect phase only builds a candidate when
-            # last_result is already None, so this write can never clobber
-            # anything), phantom.py's detect phase has no such precondition --
-            # a session already legitimately parked by another sweep (idle.py's
-            # _SILENTLY_IDLE_REASON, salvage.py's _NEEDS_SALVAGE_REASON) can
-            # reach here with last_result already set. Overwriting it
-            # unconditionally would destroy that marker and defeat stalled.py's
-            # SKIP_PARKED check, which reads last_result.get("paused_status")
-            # for exactly those two reasons -- silently un-parking a session
-            # another sweep correctly parked. Only stamp when nothing is there.
-            if session_by_id[candidate.session_id].last_result is None:
+            # last_result is already None, so an unconditional overwrite can
+            # never clobber anything), phantom.py's detect phase has no such
+            # precondition -- a session already legitimately parked by another
+            # sweep (idle.py's _SILENTLY_IDLE_REASON, salvage.py's
+            # _NEEDS_SALVAGE_REASON) can reach here with last_result already
+            # set. Overwriting it wholesale would destroy that marker and
+            # defeat stalled.py's SKIP_PARKED check, which reads
+            # last_result.get("paused_status") for exactly those two reasons --
+            # silently un-parking a session another sweep correctly parked.
+            # But merely skipping the stamp in that case (rather than merging
+            # it in) would re-open the very refusal-loop this stamp exists to
+            # close for that overlap: already_refused would never become True,
+            # so the doomed candidate re-offers forever. So: start from a
+            # pre-existing dict and merge the refusal flag in under its own
+            # key (never touching the caller's own paused_status value);
+            # only a None last_result gets the original single-key stamp.
+            existing = session_by_id[candidate.session_id].last_result
+            if isinstance(existing, dict):
+                session_by_id[candidate.session_id].last_result = {
+                    **existing,
+                    _SENTINEL_ADVANCE_REFUSED_KEY: True,
+                }
+            else:
                 session_by_id[candidate.session_id].last_result = {
                     _PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
                 }

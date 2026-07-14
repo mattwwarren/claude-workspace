@@ -169,10 +169,22 @@ _MAIN_CHECKOUT_DRIFT_REASON = "main_checkout_drift"
 # (GitHub #1149). Carries no "status" key, so _has_terminal_sentinel stays
 # False and the session is not mistaken for genuinely terminal.
 _SENTINEL_STAGE_MISMATCH_REFUSED_REASON = "sentinel_stage_mismatch_refused"
-# Dict key the paused_status markers above (and session.last_result callers in
-# idle.py/phantom.py/stalled.py/salvage.py) are stored under. Shared so the
-# producer (stamp) and consumer (read-back) sides can't drift independently.
+# Dict key the paused_status markers above are stored under in idle.py's and
+# phantom.py's session.last_result refusal-stamp sites (GitHub #1149). Shared
+# so the producer (stamp) and consumer (read-back) sides can't drift
+# independently. stalled.py's and salvage.py's own "paused_status" writers
+# predate this ticket and are unrelated reasons (_NEEDS_SALVAGE_REASON,
+# _FINALIZE_BLOCKED_REASON, etc.) -- out of this ticket's scope, not converted.
 _PAUSED_STATUS_KEY = "paused_status"
+# Merged-in (never overwriting) flag stamped alongside a pre-existing
+# session.last_result dict when a ROUTE_EMITTED_SENTINEL refusal must not
+# clobber that dict's own paused_status marker (e.g. idle.py's park marker on
+# a session that later becomes a phantom candidate, GitHub #1149 review
+# finding). _detect_phantom_candidates' already_refused check reads this in
+# addition to _PAUSED_STATUS_KEY so the refusal still latches (stops
+# re-offering the doomed candidate) even when the marker itself can't be
+# written without destroying pre-existing content.
+_SENTINEL_ADVANCE_REFUSED_KEY = "sentinel_advance_refused"
 # Git-state salvage constants (GitHub issue #497).
 _NEEDS_SALVAGE_REASON = "needs_salvage"
 _SALVAGE_KIND_GIT_STATE = "git_state_salvage"
