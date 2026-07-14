@@ -6820,6 +6820,62 @@ class TestApplyStagedDecision:
         directions = [p.get("direction") for _, p, _ in stage_changed]
         assert directions == ["advance", "advance", "regress"]
 
+    def test_later_stage_terminal_status_walks_then_completes(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """A later-stage sentinel with a TERMINAL status (not just intermediate
+        `blocked`/`stage_complete`) composes correctly with the multi-hop walk
+        (#1149 decision-table coverage gap: earlier/same-position tests exist
+        for terminal status via Rule 1/3's ordinary same-stage path, and
+        later-position tests exist for intermediate status, but no test pinned
+        later-position + terminal-status together before this).
+
+        PLAN task + FINALIZE `shipped` sentinel walks PLAN->IMPL->REVIEW->
+        FINALIZE (three advances, no signoff configured), then Rule 3's
+        _stage_advance_unchecked sees FINALIZE is the terminal pipeline stage
+        and marks the task COMPLETED with disposition="shipped" -- proving the
+        walk and the terminal-completion path compose without the sentinel's
+        terminal status leaking into an intermediate rung.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        stage_changed = capture_events(
+            "cw.dev_queue", OrchestratorEventType.TASK_STAGE_CHANGED
+        )
+
+        task = self._make_running_task("WALK-TERMINAL-1", stage=Stage.PLAN)
+        task.session_id = "sess-walk-terminal-1"
+        last_result: dict[str, object] = {
+            "status": "shipped",
+            "stage_reached": "stage4b_pr_create",
+            "pr": {
+                "number": 42,
+                "url": "https://github.com/foo/bar/pull/42",
+                "auto_merge": True,
+                "base": "main",
+            },
+        }
+        routed = apply_staged_decision(
+            task, "shipped", last_result, self._clients(tmp_path)
+        )
+
+        assert routed is True
+        assert task.stage == Stage.FINALIZE
+        assert task.status == QueueItemStatus.COMPLETED
+        assert task.disposition == "shipped"
+        assert task.pr_url == "https://github.com/foo/bar/pull/42"
+        advances = [p for _, p, _ in stage_changed if p.get("direction") == "advance"]
+        assert len(advances) == 3
+        assert advances[0]["old_stage"] == Stage.PLAN
+        assert advances[0]["new_stage"] == Stage.IMPL
+        assert advances[1]["old_stage"] == Stage.IMPL
+        assert advances[1]["new_stage"] == Stage.REVIEW
+        assert advances[2]["old_stage"] == Stage.REVIEW
+        assert advances[2]["new_stage"] == Stage.FINALIZE
+
 
 # ---------------------------------------------------------------------------
 # TestPersistCarriedContext

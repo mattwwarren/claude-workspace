@@ -13107,6 +13107,75 @@ def test_phantom_route_emitted_sentinel_refusal_marker_is_not_terminal_sentinel(
     assert _has_terminal_sentinel(reloaded) is False
 
 
+def test_phantom_route_emitted_sentinel_refusal_preserves_existing_park_marker(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stage-mismatch refusal must not clobber a pre-existing paused_status
+    marker from another sweep (GitHub #1149 review finding).
+
+    Unlike idle.py (whose detect phase only builds a ROUTE_EMITTED_SENTINEL
+    candidate when session.last_result is already None), phantom.py's detect
+    phase has no such precondition -- a session already legitimately parked by
+    idle.py's watchdog (_SILENTLY_IDLE_REASON) can reach the refusal branch
+    with last_result already set. Overwriting it unconditionally would destroy
+    that marker and defeat stalled.py's SKIP_PARKED check (which reads
+    last_result.get("paused_status") for exactly that reason), silently
+    un-parking a session another sweep correctly parked.
+    """
+    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+    from cw.reconcile.phantom import _apply_phantom_routed_mutations
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-phantom-preserve-marker"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+    sess = _mk_phantom_daemon_session(
+        "phantom-preserve-1",
+        started_at,
+        surface_ref="fake-short-id",
+        worktree_path=worktree,
+    )
+    # Already parked by idle.py's watchdog on a prior tick.
+    sess.last_result = {"paused_status": _SILENTLY_IDLE_REASON}
+    payload = _stage_complete_payload()  # stage_reached="stage2_impl" (IMPL)
+    payload["ticket_id"] = "phantom-preserve-1"
+    _write_salvage_transcript(home, worktree, "csid-phantom-preserve", payload)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    task = TicketTask(
+        ticket_id="phantom-preserve-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="phantom-preserve-1",
+        # Row already advanced past IMPL by the time this stale IMPL-leg
+        # sentinel is discovered -- the #986 shape -- so this refuses.
+        stage=Stage.REVIEW,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidates = _detect_phantom_candidates(
+        state, phantom_set={sess.id}, task_by_ticket={"phantom-preserve-1": task}
+    )
+    assert len(candidates) == 1
+    assert candidates[0].proposed_action == ProposedAction.ROUTE_EMITTED_SENTINEL
+
+    session_by_id = {s.id: s for s in state.sessions}
+    accepted = _apply_phantom_routed_mutations(
+        session_by_id, candidates, now=started_at, phantom_names=[]
+    )
+
+    assert accepted == []
+    reloaded = session_by_id["phantom-preserve-1"]
+    # The pre-existing idle-watchdog park marker must survive the refusal --
+    # not be overwritten with the #1149 refusal marker.
+    assert reloaded.last_result == {"paused_status": _SILENTLY_IDLE_REASON}
+
+
 def test_phantom_later_stage_sentinel_routes_forward_instead_of_looping(
     tmp_config_dir: Path,
     tmp_path: Path,
@@ -14241,6 +14310,80 @@ def test_stalled_wall_clock_reap_harvests_stage_complete_instead_of_reverting(
     task_after = next(
         t for t in load_dev_queue().tasks if t.ticket_id == "1149-harvest"
     )
+    assert task_after.stage == Stage.REVIEW
+    assert task_after.status == QueueItemStatus.PENDING
+    assert task_after.session_id is None
+
+
+def test_stalled_backstop_later_stage_sentinel_harvested_and_walked(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wall-clock-expired session whose transcript carries a LATER-stage
+    stage_complete sentinel (task row hasn't caught up to a legitimate
+    self-escalation) is also harvested -- `_stalled_advance_sentinel_
+    candidate` accepts both "same" and "later" positions, not just "same".
+    Exercises the previously-untested "later" branch of its `if position not
+    in ("same", "later"): return None` gate (#1149 review finding)."""
+    from cw.reconcile import ProposedAction, _act_on_stalled_candidates
+    from cw.reconcile.stalled import _detect_stalled_candidates
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-1149-harvest-later"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(seconds=7300)  # past every per-stage
+    # headless_timeout_by_stage default (PLAN 3600/IMPL 4200/REVIEW 7200/
+    # FINALIZE 5400) -- HEADLESS_TIMEOUT_SECONDS alone is the PLAN-only
+    # global fallback and understates the budget once task.stage is set.
+
+    sess = _mk_headless_daemon_session("1149-harvest-later", worktree, started_at)
+    payload = _stage_complete_payload()  # stage_reached="stage2_impl" (IMPL)
+    payload["ticket_id"] = "1149-harvest-later"
+    _write_salvage_transcript(home, worktree, "claude-1149-harvest-later", payload)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    task = TicketTask(
+        ticket_id="1149-harvest-later",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="1149-harvest-later",
+        # PLAN is EARLIER than the sentinel's mapped IMPL stage -> "later"
+        # position from the sentinel's perspective: a legitimate
+        # self-escalation the row hasn't caught up to.
+        stage=Stage.PLAN,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidates = _detect_stalled_candidates(
+        state,
+        now=now,
+        config=_auto_config(),
+        task_by_ticket={"1149-harvest-later": task},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].proposed_action == ProposedAction.ROUTE_EMITTED_SENTINEL
+    assert not any(c.proposed_action == ProposedAction.REVERT_TASK for c in candidates)
+
+    reverted, merged_completed = _act_on_stalled_candidates(
+        state, candidates, now=now, config=_auto_config()
+    )
+
+    assert reverted == []
+    assert merged_completed == []
+    reloaded = next(s for s in load_state().sessions if s.id == "1149-harvest-later")
+    assert reloaded.status == SessionStatus.COMPLETED
+    assert reloaded.completed_reason == CompletionReason.NORMAL
+
+    task_after = next(
+        t for t in load_dev_queue().tasks if t.ticket_id == "1149-harvest-later"
+    )
+    # Walk PLAN -> IMPL (matching sentinel's stage), then Rule 3's own
+    # stage_complete advance moves IMPL -> REVIEW.
     assert task_after.stage == Stage.REVIEW
     assert task_after.status == QueueItemStatus.PENDING
     assert task_after.session_id is None
@@ -17369,6 +17512,85 @@ class TestRouteEmittedSentinel:
             "paused_status": _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
         }
         assert _has_terminal_sentinel(reloaded) is False
+
+    def test_idle_later_stage_sentinel_routes_forward_instead_of_looping(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """GitHub #1149 R1, idle.py wiring: a later-stage sentinel (a legitimate
+        self-escalation the row hasn't caught up to) routes forward via the
+        shared staged-advance authority through the full alive-idle sweep
+        (flag_silently_idle_daemon_sessions -> _detect_idle_candidates ->
+        _apply_idle_routed_mutations) -- it does NOT hit the #1149 R4 refusal
+        branch, so no paused_status marker is stamped and the session
+        completes normally. Mirrors
+        test_phantom_later_stage_sentinel_routes_forward_instead_of_looping's
+        coverage for the idle-sweep call path, which was previously untested.
+        """
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        worktree = tmp_path / "wt-1149-idle-later"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = started_at + timedelta(seconds=400)
+
+        sess = _mk_headless_daemon_session("1149-idle-later", worktree, started_at)
+        sess.last_result = None  # sentinel NOT yet consumed -> ROUTE_EMITTED eligible
+        payload = _stage_complete_payload()
+        payload["ticket_id"] = "1149-idle-later"
+        payload["status"] = "blocked"
+        payload["stage_reached"] = "stage4b_pr_create"  # FINALIZE
+        payload["blocker"] = {
+            "stage": "stage4b_pr_create",
+            "reason": "merge_gate_failed",
+            "retry_eligible": False,
+            "details": "self-escalated",
+            "next_actions": [],
+        }
+        _write_salvage_transcript(home, worktree, "claude-1149-idle-later", payload)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+        task = TicketTask(
+            ticket_id="1149-idle-later",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="1149-idle-later",
+            # IMPL is EARLIER than the sentinel's mapped FINALIZE stage ->
+            # "later" position: a legitimate self-escalation, walked forward.
+            stage=Stage.IMPL,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        mock_daemon = MagicMock()
+        with patch(
+            "cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon
+        ):
+            blocked, _salvage = flag_silently_idle_daemon_sessions(
+                state,
+                now=now,
+                native_live={"fake-short-id"},
+                config=_auto_config(),
+                task_by_ticket={"1149-idle-later": task},
+            )
+
+        assert blocked == []
+        reloaded = next(s for s in load_state().sessions if s.id == "1149-idle-later")
+        assert reloaded.status == SessionStatus.COMPLETED
+        assert reloaded.completed_reason == CompletionReason.NORMAL
+        assert reloaded.last_result is not None
+        assert reloaded.last_result.get("paused_status") is None
+        mock_daemon.stop.assert_called_once_with("fake-short-id")
+
+        task_after = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == "1149-idle-later"
+        )
+        # Walk IMPL -> REVIEW -> FINALIZE, then Rule 5 routes the blocked
+        # status at the landed FINALIZE stage.
+        assert task_after.stage == Stage.FINALIZE
+        assert task_after.status == QueueItemStatus.BLOCKED_ON_USER
 
 
 # ---------------------------------------------------------------------------
