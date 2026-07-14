@@ -1121,6 +1121,10 @@ def test_create_issue_writes_the_body_to_a_temp_file_not_the_argv(monkeypatch) -
     calls: list[list[str]] = []
     seen: dict[str, object] = {}
 
+    # The PATCH echoes the updated issue back; _attach_milestone reads the
+    # milestone off it to confirm the change actually stuck (see below).
+    attached = b'{"number": 42, "milestone": {"number": 11}}'
+
     def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
         calls.append(cmd)
         if "--body-file" in cmd:
@@ -1129,7 +1133,7 @@ def test_create_issue_writes_the_body_to_a_temp_file_not_the_argv(monkeypatch) -
             return subprocess.CompletedProcess(
                 cmd, 0, b"https://github.com/o/r/issues/42\n", b""
             )
-        return subprocess.CompletedProcess(cmd, 0, b"{}", b"")
+        return subprocess.CompletedProcess(cmd, 0, attached, b"")
 
     monkeypatch.setattr(gh._sp, "run", fake_run)
     number = gh.create_issue(
@@ -1156,7 +1160,9 @@ def test_create_issue_attaches_the_milestone_by_id_not_by_name(monkeypatch) -> N
             return subprocess.CompletedProcess(
                 cmd, 0, b"https://github.com/o/r/issues/42\n", b""
             )
-        return subprocess.CompletedProcess(cmd, 0, b"{}", b"")
+        return subprocess.CompletedProcess(
+            cmd, 0, b'{"number": 42, "milestone": {"number": 11}}', b""
+        )
 
     monkeypatch.setattr(gh._sp, "run", fake_run)
     assert gh.create_issue("t", "b", labels=[], milestone=11) == 42
@@ -1178,6 +1184,26 @@ def test_create_issue_returns_none_when_the_milestone_attach_fails(monkeypatch) 
                 cmd, 0, b"https://github.com/o/r/issues/42\n", b""
             )
         return subprocess.CompletedProcess(cmd, 1, b"", b"gh: HTTP 422")
+
+    monkeypatch.setattr(gh._sp, "run", fake_run)
+    assert gh.create_issue("t", "b", labels=[], milestone=11) is None
+
+
+def test_create_issue_catches_a_silently_dropped_milestone(monkeypatch) -> None:
+    """A 200 whose echoed issue has NO milestone is a silent drop, not a success.
+
+    GitHub: "without push access to the repository, milestone changes are
+    silently dropped." Exit-code-only would report success and leave the issue
+    off the milestone — a half-applied buildout that apply_plan could not see.
+    """
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        if "--body-file" in cmd:
+            return subprocess.CompletedProcess(
+                cmd, 0, b"https://github.com/o/r/issues/42\n", b""
+            )
+        # 200 OK, but the milestone never applied.
+        return subprocess.CompletedProcess(cmd, 0, b'{"number": 42, "milestone": null}', b"")
 
     monkeypatch.setattr(gh._sp, "run", fake_run)
     assert gh.create_issue("t", "b", labels=[], milestone=11) is None
@@ -1331,7 +1357,15 @@ def create_issue(
 
 
 def _attach_milestone(number: int, milestone: int, timeout: int) -> bool:
-    """Attach *number* to *milestone* by numeric id via the REST endpoint."""
+    """Attach *number* to *milestone* by numeric id; confirm it actually stuck.
+
+    Why read the response back instead of trusting the exit code: GitHub's
+    "Update an issue" reference states that "without push access to the
+    repository, milestone changes are silently dropped" — a 200 with the
+    milestone simply not applied. Exit-code-only would report success and leave
+    the issue off the milestone, which is precisely the half-applied buildout
+    apply_plan exists to prevent. So confirm the echoed milestone number.
+    """
     try:
         result = _sp.run(
             [
@@ -1346,7 +1380,16 @@ def _attach_milestone(number: int, milestone: int, timeout: int) -> bool:
         )
     except (OSError, _sp.TimeoutExpired):
         return False
-    return result.returncode == 0
+    if result.returncode != 0:
+        return False
+    try:
+        payload = json.loads(result.stdout.decode("utf-8", "replace"))
+    except json.JSONDecodeError:
+        return False
+    attached = payload.get("milestone") if isinstance(payload, dict) else None
+    if not isinstance(attached, dict):
+        return False
+    return attached.get("number") == milestone
 
 
 def update_issue_body(number: int, body: str, *, timeout: int = _CREATE_TIMEOUT) -> bool:
