@@ -9,7 +9,14 @@ import pytest
 
 from cw import sprint
 from cw.exceptions import RfcContractError
-from cw.sprint import load_rfc_text, parse_rfc
+from cw.sprint import (
+    BuildoutConfig,
+    build_plan,
+    load_buildout_config,
+    load_rfc_text,
+    parse_rfc,
+)
+from tests.conftest import _write_project_config_yaml
 
 MINIMAL_RFC = """\
 # RFC 0011 — Availability- & Counterparty-Aware Holding
@@ -250,3 +257,106 @@ def test_parse_rfc_refuses_acceptance_header_with_zero_bullets() -> None:
     )
     with pytest.raises(RfcContractError, match="ticket S1: missing field: Acceptance"):
         parse_rfc(mangled)
+
+
+CONFIG_YAML = """\
+sprint_buildout:
+  milestone:
+    title_pattern: "v{version} — {rfc_title}"
+  epic:
+    title_pattern: "epic: {name}"
+    labels: []
+    children_marker: "<!-- children -->"
+  ticket:
+    title_pattern: "RFC {rfc_num} {code} — {name}"
+    labels: [feature]
+    footer_pattern: "Part of RFC {rfc_num} Wave {wave} (Sprint {sprint})"
+    footer_epic_clause: ", Epic #{epic}"
+"""
+
+
+def test_load_buildout_config_reads_the_sprint_buildout_block(tmp_path: Path) -> None:
+    _write_project_config_yaml(tmp_path, CONFIG_YAML)
+    cfg = load_buildout_config(tmp_path)
+    assert cfg.ticket_labels == ["feature"]
+    assert cfg.epic_labels == []
+    assert cfg.children_marker == "<!-- children -->"
+    assert cfg.notion is None
+
+
+def test_load_buildout_config_refuses_when_the_block_is_absent(tmp_path: Path) -> None:
+    _write_project_config_yaml(
+        tmp_path, "tracking:\n  primary:\n    system: github-issues\n"
+    )
+    with pytest.raises(RfcContractError, match="missing sprint_buildout block"):
+        load_buildout_config(tmp_path)
+
+
+def _config() -> BuildoutConfig:
+    """Build from the nested YAML shape — the model itself is flat, so this must
+    go through from_block(), not model_validate()."""
+    return BuildoutConfig.from_block(
+        {
+            "milestone": {"title_pattern": "v{version} — {rfc_title}"},
+            "epic": {
+                "title_pattern": "epic: {name}",
+                "labels": [],
+                "children_marker": "<!-- children -->",
+            },
+            "ticket": {
+                "title_pattern": "RFC {rfc_num} {code} — {name}",
+                "labels": ["feature"],
+                "footer_pattern": "Part of RFC {rfc_num} Wave {wave} (Sprint {sprint})",
+                "footer_epic_clause": ", Epic #{epic}",
+            },
+        }
+    )
+
+
+def test_build_plan_renders_the_milestone_title() -> None:
+    plan = build_plan(parse_rfc(MINIMAL_RFC), _config(), version="1.20.0")
+    assert plan.milestone_title == "v1.20.0 — Availability- & Counterparty-Aware Holding"
+
+
+def test_build_plan_renders_epic_titles_and_embeds_the_children_marker() -> None:
+    plan = build_plan(parse_rfc(MINIMAL_RFC), _config(), version="1.20.0")
+    assert [e.title for e in plan.epics] == ["epic: Availability-aware holding (inward)"]
+    # The marker is templated in from the start so the checklist backfill is a
+    # marker replacement, not a fragile string-surgery pass.
+    assert "<!-- children -->" in plan.epics[0].body
+
+
+def test_build_plan_renders_ticket_titles_and_bodies() -> None:
+    plan = build_plan(parse_rfc(MINIMAL_RFC), _config(), version="1.20.0")
+    titles = [t.title for t in plan.tickets]
+    assert titles == [
+        "RFC 0011 S1 — counterparty axis + self-identity",
+        "RFC 0011 A1 — park class (keystone)",
+    ]
+
+    a1 = plan.tickets[1]
+    assert a1.labels == ["feature"]
+    assert "## Context" in a1.body
+    assert "The keystone park class." in a1.body
+    # Scope cites D-A1, so the decision's full text is transcribed into the body.
+    assert "Park-class shape" in a1.body
+    assert "## Acceptance" in a1.body
+    assert "- [ ] A held task routes to BLOCKED_ON_USER." in a1.body
+    assert "## Dependencies" in a1.body
+    assert "S1" in a1.body
+
+
+def test_build_plan_omits_the_epic_clause_for_an_epic_less_ticket() -> None:
+    """S1 has no epic. Its footer must not carry an `Epic #—` placeholder —
+    the clause is omitted entirely, not rendered with an em-dash default."""
+    plan = build_plan(parse_rfc(MINIMAL_RFC), _config(), version="1.20.0")
+    s1, a1 = plan.tickets
+
+    assert "Epic #" not in s1.body
+    assert "Part of RFC 0011 Wave 0 (Sprint 0)" in s1.body
+    assert "Epic #I" in a1.body
+
+
+def test_build_plan_maps_sprints_to_ticket_codes() -> None:
+    plan = build_plan(parse_rfc(MINIMAL_RFC), _config(), version="1.20.0")
+    assert plan.sprint_map == {0: ["S1"], 1: ["A1"]}
