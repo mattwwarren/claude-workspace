@@ -4,7 +4,7 @@
 
 **Goal:** Turn an RFC into a fully-ticketed sprint block (milestone + epics + children + Notion pages + RFC footer PR) via `cw sprint plan|apply` behind a single operator confirmation, replacing a ~1-hour hand-driven pipeline that re-derives its conventions from prior issues every time.
 
-**Architecture:** Three layers split on one rule — *the code owns anything with a shell-quoting hazard or an ordering constraint; the skill owns anything requiring a judgment call.* `docs/rfcs/TEMPLATE.md` is a strict input contract (a `## Tickets` section is the sole parse source, so buildout is transcription with zero inference). `src/cw/sprint.py` parses + builds a plan (pure, unit-testable) and applies it (the three-pass `gh` dance GitHub's number assignment forces). `.claude/skills/sprint-buildout/SKILL.md` drives the pipeline, runs the adjacent-bug scan, and owns the one operator gate.
+**Architecture:** Three layers split on one rule — *the code owns anything with a shell-quoting hazard or an ordering constraint; the skill owns anything requiring a judgment call.* `docs/rfcs/TEMPLATE.md` is a strict input contract (a `## Tickets` section is the sole parse source, so buildout is transcription with zero inference). `src/cw/sprint.py` parses + builds a plan (pure, unit-testable) and applies it (the four-pass `gh` dance GitHub's number assignment forces). `.claude/skills/sprint-buildout/SKILL.md` drives the pipeline, runs the adjacent-bug scan, and owns the one operator gate.
 
 **Tech Stack:** Python 3.12+, Click, Pydantic v2, `gh` CLI (via the existing `cw.gh` subprocess wrapper), PyYAML (via the existing `cw.tracker` loader), pytest + `CliRunner`.
 
@@ -64,7 +64,17 @@ The `## Tickets` section is the sole parse source. `## Phasing` is a human-facin
 summary and is **not** parsed — that is deliberate: RFC 0011's phasing table packs
 code, name, and role into one cell (`A1 (park class, keystone) · A2 (detector)`)
 with epic membership implied by column position, which cannot be read without
-inference.
+inference. `## Design` is also required and parsed — epics are transcribed from
+its `### Epic` subsections, scoped to that section so a stray `### Epic`-shaped
+line elsewhere in the document can't be picked up by accident.
+
+Required headings (`## Tickets`, `## Design`, `## Resolved decisions`,
+`## References`) are matched by **prefix**, tolerating trailing annotation text
+on the same line — this repo's RFC house style annotates level-2 headings (e.g.
+`## Resolved decisions (hardening pass, operator, 2026-07-12)`, RFC 0011 line
+326), and a byte-exact match would reject RFC 0011 itself. This tolerance is
+cosmetic only: it forgives what a heading is *called*, not what a ticket
+*contains* — it does not extend to inferring ticket content.
 
 ````markdown
 # RFC NNNN — <Title>
@@ -78,6 +88,8 @@ inference.
 <The problem. Evidence, not assertion.>
 
 ## Design
+
+<REQUIRED. Epics are parsed from the `### Epic` subsections below.>
 
 ### Epic I — <Epic name>
 
@@ -110,7 +122,10 @@ ticket's `Scope:` field.>
 
 <REQUIRED and PARSED. One `###` subsection per ticket. Every field is required
 except `Depends on:`, which may be `none`. `Epic:` may be `none` for shared seams
-that belong to no epic. Buildout transcribes these verbatim — it infers nothing.>
+that belong to no epic. Buildout transcribes these verbatim — it infers nothing.
+Every field value (`Context:`, `Scope:`, etc.) must fit on a single line — do
+not hard-wrap it across two physical lines. A wrapped continuation line is not
+silently dropped: it is a contract violation and buildout refuses the RFC.>
 
 ### S1 — <ticket name>
 
@@ -152,10 +167,14 @@ Issues: _(filled by `/sprint-buildout`)_
 
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
+
 import pytest
 
+from cw import sprint
 from cw.exceptions import RfcContractError
-from cw.sprint import parse_rfc
+from cw.sprint import load_rfc_text, parse_rfc
 
 MINIMAL_RFC = """\
 # RFC 0011 — Availability- & Counterparty-Aware Holding
@@ -259,7 +278,7 @@ def test_parse_rfc_extracts_references() -> None:
 
 @pytest.mark.parametrize(
     "heading",
-    ["## Tickets", "## Resolved decisions", "## References"],
+    ["## Tickets", "## Design", "## Resolved decisions", "## References"],
 )
 def test_parse_rfc_refuses_rfc_missing_a_required_section(heading: str) -> None:
     mangled = MINIMAL_RFC.replace(heading, "## Something Else")
@@ -289,6 +308,58 @@ def test_parse_rfc_refuses_ticket_naming_an_undefined_epic() -> None:
     mangled = MINIMAL_RFC.replace("- **Epic:** I\n", "- **Epic:** IX\n")
     with pytest.raises(RfcContractError, match="ticket A1: unknown epic: IX"):
         parse_rfc(mangled)
+
+
+def test_parse_rfc_refuses_a_hard_wrapped_field_continuation_line() -> None:
+    """A field value split across two physical lines must be a loud refusal,
+    not a silent drop — ``_FIELD_RE`` only ever captures the first line."""
+    mangled = MINIMAL_RFC.replace(
+        "- **Context:** The shared seam both epics build on.",
+        "- **Context:** The shared seam both epics\nbuild on.",
+    )
+    with pytest.raises(
+        RfcContractError,
+        match=r"ticket S1: unparseable line \(fields must be single-line\): build on\.",
+    ):
+        parse_rfc(mangled)
+
+
+def test_load_rfc_text_prefers_origin_main(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(cmd, 0, b"origin/main content", b"")
+
+    monkeypatch.setattr(sprint._sp, "run", fake_run)
+    assert load_rfc_text("docs/rfcs/0011-x.md", tmp_path) == "origin/main content"
+
+
+def test_load_rfc_text_falls_back_to_the_working_tree_on_a_nonzero_exit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Absent from origin/main (e.g. a brand-new, unmerged RFC) -> read from disk."""
+    rfc = tmp_path / "docs" / "rfcs" / "0011-x.md"
+    rfc.parent.mkdir(parents=True)
+    rfc.write_text("working tree content", encoding="utf-8")
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(cmd, 1, b"", b"fatal: path not in origin/main")
+
+    monkeypatch.setattr(sprint._sp, "run", fake_run)
+    assert load_rfc_text("docs/rfcs/0011-x.md", tmp_path) == "working tree content"
+
+
+def test_load_rfc_text_falls_back_to_the_working_tree_on_a_git_show_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """git binary missing/hung (OSError/TimeoutExpired) -> same fallback as a miss."""
+    rfc = tmp_path / "docs" / "rfcs" / "0011-x.md"
+    rfc.parent.mkdir(parents=True)
+    rfc.write_text("working tree content", encoding="utf-8")
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        raise OSError("git not found")
+
+    monkeypatch.setattr(sprint._sp, "run", fake_run)
+    assert load_rfc_text("docs/rfcs/0011-x.md", tmp_path) == "working tree content"
 ```
 
 - [ ] **Step 3: Run tests to verify they fail**
@@ -309,6 +380,8 @@ class RfcContractError(CwError):
     does not define. The message always names the exact defect (e.g. "missing
     section: ## Tickets") so the operator can fix the RFC rather than guess.
     """
+
+    __slots__ = ()
 ```
 
 - [ ] **Step 5: Implement models + parser**
@@ -345,7 +418,7 @@ _REFERENCE_RE = re.compile(r"^-\s+`(?P<ref>[^`]+)`", re.M)
 _FIELD_RE = re.compile(r"^-\s+\*\*(?P<key>[A-Za-z ]+):\*\*\s*(?P<value>.*)$", re.M)
 _BULLET_RE = re.compile(r"^\s+-\s+(?P<item>.+?)\s*$", re.M)
 
-_REQUIRED_SECTIONS = ("## Tickets", "## Resolved decisions", "## References")
+_REQUIRED_SECTIONS = ("## Design", "## Tickets", "## Resolved decisions", "## References")
 _REQUIRED_TICKET_FIELDS = (
     "Epic",
     "Wave",
@@ -398,8 +471,10 @@ def load_rfc_text(rfc_path: str, root: Path) -> str:
     Why origin/main first: an RFC commonly merges to main *after* the worktree
     doing the buildout was created, so the file is simply absent from disk here.
     That exact trap cost the RFC 0011 session its first several minutes. Falls
-    back to the working tree when the path is not on origin/main (a brand-new,
-    unmerged RFC).
+    back to reading the working-tree file whenever ``git show`` cannot produce
+    the origin/main copy — a non-zero exit (the path isn't on origin/main yet,
+    e.g. a brand-new, unmerged RFC) or a raised OSError/TimeoutExpired (git
+    binary missing, or hung past the timeout).
     """
     try:
         result = _sp.run(
@@ -417,9 +492,16 @@ def load_rfc_text(rfc_path: str, root: Path) -> str:
 
 
 def _section(text: str, heading: str) -> str:
-    """Return the body of a ``## Heading`` section, or raise RfcContractError."""
+    """Return the body of a ``## Heading`` section, or raise RfcContractError.
+
+    Matches the heading by *prefix*, tolerating trailing annotation text on the
+    same line (e.g. ``## Resolved decisions (hardening pass, operator,
+    2026-07-12)`` — this repo's RFC house style annotates level-2 headings this
+    way; RFC 0011 line 326 is a real example). This tolerance is cosmetic only:
+    it forgives what a heading is called, not what a ticket contains.
+    """
     pattern = re.compile(
-        rf"^{re.escape(heading)}\s*$(?P<body>.*?)(?=^##\s|\Z)", re.M | re.S
+        rf"^{re.escape(heading)}\b[^\n]*$(?P<body>.*?)(?=^## |\Z)", re.M | re.S
     )
     match = pattern.search(text)
     if match is None:
@@ -474,7 +556,25 @@ def _parse_int_field(code: str, key: str, value: str) -> int:
         raise RfcContractError(msg) from exc
 
 
+def _check_ticket_block_lines(code: str, block: str) -> None:
+    """Raise if *block* has a non-blank line that is neither a field nor a bullet.
+
+    ``_FIELD_RE`` captures only the first physical line of a field's value — a
+    hard-wrapped ``Context:`` continuation onto a second line would otherwise be
+    silently dropped, which is worse than a refusal. Every non-blank line in a
+    ticket block must therefore be recognizable as a field line or a bullet line.
+    """
+    for line in block.splitlines():
+        if not line.strip():
+            continue
+        if _FIELD_RE.match(line) or _BULLET_RE.match(line):
+            continue
+        msg = f"ticket {code}: unparseable line (fields must be single-line): {line}"
+        raise RfcContractError(msg)
+
+
 def _parse_ticket(code: str, name: str, block: str) -> TicketSpec:
+    _check_ticket_block_lines(code, block)
     fields = _ticket_fields(code, block)
     epic_raw = fields["Epic"].strip()
     return TicketSpec(
@@ -509,12 +609,17 @@ def _validate_cross_references(doc: RfcDoc) -> None:
 
 
 def _parse_epics(text: str) -> list[EpicSpec]:
+    """Parse ``### Epic`` subsections. *text* must already be scoped to the
+    ``## Design`` section body (via ``_section(text, "## Design")``) — every
+    sibling parser in this module is scoped the same way, so a stray
+    ``### Epic``-shaped line elsewhere in the document is never picked up."""
     matches = list(_EPIC_RE.finditer(text))
     epics: list[EpicSpec] = []
     for i, match in enumerate(matches):
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
         intent = text[match.end() : end]
-        # Stop the intent at the next ## section so it never swallows ## Phasing.
+        # Belt-and-suspenders: the caller already scopes `text` to ## Design, so
+        # this never matches — kept in case _parse_epics is ever called unscoped.
         intent = re.split(r"^##\s", intent, maxsplit=1, flags=re.M)[0]
         epics.append(
             EpicSpec(
@@ -554,7 +659,7 @@ def parse_rfc(text: str) -> RfcDoc:
     doc = RfcDoc(
         number=title_match.group("number"),
         title=title_match.group("title"),
-        epics=_parse_epics(text),
+        epics=_parse_epics(_section(text, "## Design")),
         tickets=[
             _parse_ticket(code, name, block)
             for code, name, block in _split_ticket_blocks(tickets_section)
@@ -623,7 +728,8 @@ sprint_buildout:
   ticket:
     title_pattern: "RFC {rfc_num} {code} — {name}"
     labels: [feature]
-    footer_pattern: "Part of RFC {rfc_num} Wave {wave} (Sprint {sprint}), Epic #{epic}"
+    footer_pattern: "Part of RFC {rfc_num} Wave {wave} (Sprint {sprint})"
+    footer_epic_clause: ", Epic #{epic}"  # appended only when the ticket has an epic
   notion:                               # omit this block ⇒ the Notion phase skips
     data_source: "collection://673ac7cd-797a-4c76-b9eb-fb5bc7ee050a"
     project_page: "38b59b27-0a42-81da-b234-ea951daa0216"
@@ -638,8 +744,6 @@ sprint_buildout:
 Append to `tests/test_sprint.py`:
 
 ```python
-from pathlib import Path
-
 from cw.sprint import BuildoutConfig, build_plan, load_buildout_config
 
 CONFIG_YAML = """\
@@ -653,7 +757,8 @@ sprint_buildout:
   ticket:
     title_pattern: "RFC {rfc_num} {code} — {name}"
     labels: [feature]
-    footer_pattern: "Part of RFC {rfc_num} Wave {wave} (Sprint {sprint}), Epic #{epic}"
+    footer_pattern: "Part of RFC {rfc_num} Wave {wave} (Sprint {sprint})"
+    footer_epic_clause: ", Epic #{epic}"
 """
 
 
@@ -692,9 +797,8 @@ def _config() -> BuildoutConfig:
             "ticket": {
                 "title_pattern": "RFC {rfc_num} {code} — {name}",
                 "labels": ["feature"],
-                "footer_pattern": (
-                    "Part of RFC {rfc_num} Wave {wave} (Sprint {sprint}), Epic #{epic}"
-                ),
+                "footer_pattern": "Part of RFC {rfc_num} Wave {wave} (Sprint {sprint})",
+                "footer_epic_clause": ", Epic #{epic}",
             },
         }
     )
@@ -731,6 +835,17 @@ def test_build_plan_renders_ticket_titles_and_bodies() -> None:
     assert "- [ ] A held task routes to BLOCKED_ON_USER." in a1.body
     assert "## Dependencies" in a1.body
     assert "S1" in a1.body
+
+
+def test_build_plan_omits_the_epic_clause_for_an_epic_less_ticket() -> None:
+    """S1 has no epic. Its footer must not carry an `Epic #—` placeholder —
+    the clause is omitted entirely, not rendered with an em-dash default."""
+    plan = build_plan(parse_rfc(MINIMAL_RFC), _config(), version="1.20.0")
+    s1, a1 = plan.tickets
+
+    assert "Epic #" not in s1.body
+    assert "Part of RFC 0011 Wave 0 (Sprint 0)" in s1.body
+    assert "Epic #I" in a1.body
 
 
 def test_build_plan_maps_sprints_to_ticket_codes() -> None:
@@ -774,6 +889,7 @@ class BuildoutConfig(BaseModel):
     ticket_title_pattern: str
     ticket_labels: list[str] = Field(default_factory=list)
     ticket_footer_pattern: str
+    ticket_footer_epic_clause: str
     notion: NotionConfig | None = None
 
     @classmethod
@@ -797,6 +913,7 @@ class BuildoutConfig(BaseModel):
             ticket_title_pattern=str(ticket["title_pattern"]),
             ticket_labels=[str(x) for x in ticket.get("labels", []) or []],
             ticket_footer_pattern=str(ticket["footer_pattern"]),
+            ticket_footer_epic_clause=str(ticket["footer_epic_clause"]),
             notion=NotionConfig.model_validate(notion_raw)
             if isinstance(notion_raw, dict)
             else None,
@@ -869,8 +986,12 @@ def _ticket_body(ticket: TicketSpec, doc: RfcDoc, cfg: BuildoutConfig) -> str:
         rfc_num=doc.number,
         wave=ticket.wave,
         sprint=ticket.sprint,
-        epic=ticket.epic or "—",
     )
+    # Epic-less tickets (RFC 0011's S1/S2) omit the clause entirely — no
+    # `Epic #—` placeholder ships. A ticket's footer either names its real
+    # epic or says nothing about epics at all.
+    if ticket.epic is not None:
+        footer += cfg.ticket_footer_epic_clause.format(epic=ticket.epic)
     return (
         f"## Context\n\n{ticket.context}\n\n"
         f"## Scope\n\n{scope}\n\n"
@@ -927,9 +1048,11 @@ def build_plan(doc: RfcDoc, cfg: BuildoutConfig, version: str) -> BuildoutPlan:
     )
 ```
 
-Note: the ticket footer's `Epic #{epic}` renders the epic *key* (`I`) at plan
-time, not an issue number — the number does not exist until `apply` creates the
-epic. `apply` rewrites it via `_resolve_epic_refs` in Task 4.
+Note: for a ticket with an epic, the footer's `Epic #{epic}` clause renders the
+epic *key* (`I`) at plan time, not an issue number — the number does not exist
+until `apply` creates the epic. `apply` rewrites it via `_resolve_epic_refs` in
+Task 4. For an epic-less ticket (`ticket.epic is None`), the clause is omitted
+entirely at plan time — there is nothing for `apply` to rewrite.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -941,7 +1064,10 @@ Expected: PASS
 Add a "Sprint Buildout Config" section to `config/CONFIG_REFERENCE.md`, matching
 the style of the existing "Review Strategy Config" section: show the full block,
 state that every key is required except `notion:`, and state the consequence of
-omitting `notion:` (the skill's Notion phase silently skips). Say plainly that
+omitting `notion:` (the skill's Notion phase silently skips). Note specifically
+that `ticket.footer_epic_clause` is appended to `ticket.footer_pattern` only
+when a ticket has an epic — an epic-less ticket's footer omits it entirely, it
+is not a template substitution with an empty/placeholder value. Say plainly that
 these values exist so buildout does not have to rediscover them by reading prior
 issues.
 
@@ -964,10 +1090,17 @@ git commit -m "feat(sprint): buildout config block and plan builder"
 **Interfaces:**
 - Produces (all policy-free: return the value or `None`, never log, never raise):
   - `cw.gh.create_milestone(title: str, *, timeout: int = ...) -> int | None`
-  - `cw.gh.find_milestone(title: str, *, timeout: int = ...) -> int | None`
+  - `cw.gh.find_milestone(title: str, *, timeout: int = ...) -> tuple[int | None, bool]`
   - `cw.gh.create_issue(title: str, body: str, *, labels: list[str], milestone: int, timeout: int = ...) -> int | None`
   - `cw.gh.update_issue_body(number: int, body: str, *, timeout: int = ...) -> bool`
-  - `cw.gh.milestone_issue_titles(milestone: int, *, timeout: int = ...) -> dict[str, int] | None`
+  - `cw.gh.milestone_issue_titles(milestone: int, *, timeout: int = ...) -> tuple[dict[str, int] | None, bool]`
+
+  `find_milestone` and `milestone_issue_titles` return `(value, ok)`: `ok=False`
+  means the gh call itself failed (non-zero exit, exception, unparseable JSON) —
+  the caller must not read that as "doesn't exist yet" — while `ok=True` with a
+  `None`/empty value is a genuine miss. `create_milestone`, `create_issue`, and
+  `update_issue_body` are mutations: a `None`/`False` there is unambiguously a
+  failure, so they keep their plain return type.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1010,14 +1143,57 @@ def test_create_milestone_returns_the_number(monkeypatch) -> None:
     assert gh.create_milestone("v1.20.0 — Availability & Counterparty") == 11
 
 
-def test_milestone_issue_titles_maps_title_to_number(monkeypatch) -> None:
-    payload = b'[{"number": 1155, "title": "RFC 0011 A1 — park class"}]'
+def test_find_milestone_returns_the_number_and_ok_true_when_found(monkeypatch) -> None:
+    payload = b'{"number": 11, "title": "v1.20.0 milestone"}\n'
 
     def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
         return subprocess.CompletedProcess(cmd, 0, payload, b"")
 
     monkeypatch.setattr(gh._sp, "run", fake_run)
-    assert gh.milestone_issue_titles(11) == {"RFC 0011 A1 — park class": 1155}
+    assert gh.find_milestone("v1.20.0 milestone") == (11, True)
+
+
+def test_find_milestone_returns_none_true_on_a_genuine_miss(monkeypatch) -> None:
+    """The call succeeded; no milestone with this title exists yet."""
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        payload = b'{"number": 3, "title": "unrelated milestone"}\n'
+        return subprocess.CompletedProcess(cmd, 0, payload, b"")
+
+    monkeypatch.setattr(gh._sp, "run", fake_run)
+    assert gh.find_milestone("v1.20.0 milestone") == (None, True)
+
+
+def test_find_milestone_returns_none_false_when_the_gh_call_fails(monkeypatch) -> None:
+    """A non-zero gh exit must be distinguishable from a genuine miss — reading
+    it as "doesn't exist" would make apply_plan re-file a duplicate milestone
+    on a re-run after a transient failure."""
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(cmd, 1, b"", b"gh: rate limited")
+
+    monkeypatch.setattr(gh._sp, "run", fake_run)
+    assert gh.find_milestone("v1.20.0 milestone") == (None, False)
+
+
+def test_milestone_issue_titles_maps_title_to_number(monkeypatch) -> None:
+    # Why: the em-dash is non-ASCII, so this cannot be a bytes literal — `gh`
+    # emits UTF-8 and the helper must decode it, so encode the fixture the same way.
+    payload = '[{"number": 1155, "title": "RFC 0011 A1 — park class"}]'.encode()
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(cmd, 0, payload, b"")
+
+    monkeypatch.setattr(gh._sp, "run", fake_run)
+    assert gh.milestone_issue_titles(11) == ({"RFC 0011 A1 — park class": 1155}, True)
+
+
+def test_milestone_issue_titles_returns_none_false_when_the_gh_call_fails(monkeypatch) -> None:
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(cmd, 1, b"", b"gh: not authenticated")
+
+    monkeypatch.setattr(gh._sp, "run", fake_run)
+    assert gh.milestone_issue_titles(11) == (None, False)
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1123,8 +1299,16 @@ def create_milestone(title: str, *, timeout: int = _CREATE_TIMEOUT) -> int | Non
     return number if isinstance(number, int) else None
 
 
-def find_milestone(title: str, *, timeout: int = _CREATE_TIMEOUT) -> int | None:
-    """Return the number of an existing open milestone titled *title*, else None."""
+def find_milestone(title: str, *, timeout: int = _CREATE_TIMEOUT) -> tuple[int | None, bool]:
+    """Return (number, ok) for an existing open milestone titled *title*.
+
+    ``ok=False`` means the gh call itself failed (non-zero exit, OSError,
+    timeout) — the caller cannot conclude the milestone is absent, only that it
+    could not check. ``ok=True`` with ``number=None`` is a genuine miss: the
+    call succeeded and no milestone with this title exists yet. Conflating
+    these two is exactly what breaks idempotency on a re-run after a transient
+    gh failure (see ``cw.sprint.apply_plan``).
+    """
     try:
         result = _sp.run(
             ["gh", "api", "repos/{owner}/{repo}/milestones", "--jq", ".[] | {number, title}"],
@@ -1133,9 +1317,9 @@ def find_milestone(title: str, *, timeout: int = _CREATE_TIMEOUT) -> int | None:
             check=False,
         )
     except (OSError, _sp.TimeoutExpired):
-        return None
+        return None, False
     if result.returncode != 0:
-        return None
+        return None, False
     for line in result.stdout.decode("utf-8", "replace").splitlines():
         try:
             entry = json.loads(line)
@@ -1143,15 +1327,25 @@ def find_milestone(title: str, *, timeout: int = _CREATE_TIMEOUT) -> int | None:
             continue
         if entry.get("title") == title and isinstance(entry.get("number"), int):
             number: int = entry["number"]
-            return number
-    return None
+            return number, True
+    return None, True
 
 
-def milestone_issue_titles(milestone: int, *, timeout: int = _CREATE_TIMEOUT) -> dict[str, int] | None:
-    """Return {issue title: number} for every issue on *milestone*, or None on failure.
+def milestone_issue_titles(
+    milestone: int, *, timeout: int = _CREATE_TIMEOUT
+) -> tuple[dict[str, int] | None, bool]:
+    """Return ({issue title: number}, ok) for every issue on *milestone*.
 
-    This is what makes ``cw sprint apply`` idempotent: a re-run after a partial
-    failure skips issues that already exist rather than filing duplicates.
+    ``ok=False`` means the gh call itself failed (non-zero exit, OSError,
+    timeout, unparseable JSON) — this is what makes ``cw sprint apply``
+    idempotent: a caller must not read a failed lookup as "milestone has no
+    issues yet" and re-file everything as duplicates. On success the dict may
+    legitimately be empty (milestone exists but nothing has been filed under it
+    yet); that is ``({}, True)``, not ``(None, True)``.
+
+    Note: if two issues under *milestone* share the exact same title, this dict
+    comprehension keeps only the last one seen. The idempotent re-entry check
+    in ``apply_plan`` assumes ticket/epic titles are unique within a milestone.
     """
     try:
         result = _sp.run(
@@ -1167,20 +1361,21 @@ def milestone_issue_titles(milestone: int, *, timeout: int = _CREATE_TIMEOUT) ->
             check=False,
         )
     except (OSError, _sp.TimeoutExpired):
-        return None
+        return None, False
     if result.returncode != 0:
-        return None
+        return None, False
     try:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError:
-        return None
+        return None, False
     if not isinstance(payload, list):
-        return None
-    return {
+        return None, False
+    titles = {
         str(item["title"]): int(item["number"])
         for item in payload
         if isinstance(item, dict) and "title" in item and "number" in item
     }
+    return titles, True
 ```
 
 Add `import re` to `gh.py`'s imports if absent.
@@ -1200,7 +1395,7 @@ git commit -m "feat(gh): issue and milestone creation helpers, bodies via --body
 
 ---
 
-### Task 4: Apply — the three-pass dance, idempotent
+### Task 4: Apply — the four-pass dance, idempotent
 
 **Files:**
 - Modify: `src/cw/sprint.py`
@@ -1212,7 +1407,12 @@ git commit -m "feat(gh): issue and milestone creation helpers, bodies via --body
   - `cw.sprint.GhSurface` (Protocol) and `cw.sprint.GhClient` (its default `cw.gh`-backed impl)
   - `cw.sprint.AppliedBuildout` (Pydantic model: `milestone_number: int`, `epic_numbers: dict[str, int]`, `ticket_numbers: dict[str, int]`, `created: list[str]`, `skipped: list[str]`)
   - `cw.sprint.apply_plan(plan: BuildoutPlan, *, client: GhSurface | None = None) -> AppliedBuildout` — raises `SprintApplyError` on any unrecoverable `gh` failure
-  - `cw.exceptions.SprintApplyError(CwError)`
+  - `cw.exceptions.SprintApplyError(CwError)` — carries the partial `AppliedBuildout` (as `applied`) so the CLI can report what was created before the failure
+
+`GhSurface.find_milestone` and `.milestone_issue_titles` mirror Task 3's
+`(value, ok)` tuple returns exactly — `apply_plan` must refuse
+(`SprintApplyError`) rather than proceed when `ok` is `False`, since proceeding
+would read a failed lookup as "nothing exists yet" and re-file duplicates.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1231,23 +1431,31 @@ from cw.sprint import apply_plan
 class FakeGh:
     """A GhSurface test double. Records call order; hands out issue numbers."""
 
-    def __init__(self, *, existing: dict[str, int] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        existing: dict[str, int] | None = None,
+        milestone_exists: bool = False,
+    ) -> None:
         self.calls: list[str] = []
         self.bodies: dict[int, str] = {}
         self.existing = existing or {}
+        # Decoupled from `existing` on purpose: a milestone can exist with zero
+        # issues yet (a partial run that died between pass 1 and pass 2).
+        self.milestone_exists = milestone_exists or bool(self.existing)
         self._next = 100
 
-    def find_milestone(self, title: str) -> int | None:
+    def find_milestone(self, title: str) -> tuple[int | None, bool]:
         self.calls.append(f"find_milestone:{title}")
-        return 11 if self.existing else None
+        return (11, True) if self.milestone_exists else (None, True)
 
     def create_milestone(self, title: str) -> int | None:
         self.calls.append(f"create_milestone:{title}")
         return 11
 
-    def milestone_issue_titles(self, milestone: int) -> dict[str, int] | None:
+    def milestone_issue_titles(self, milestone: int) -> tuple[dict[str, int] | None, bool]:
         self.calls.append(f"list:{milestone}")
-        return dict(self.existing)
+        return dict(self.existing), True
 
     def create_issue(
         self, title: str, body: str, *, labels: list[str], milestone: int
@@ -1265,6 +1473,80 @@ class FakeGh:
 
 def _plan() -> BuildoutPlan:
     return build_plan(parse_rfc(MINIMAL_RFC), _config(), version="1.20.0")
+
+
+TWO_EPIC_RFC = """\
+# RFC 0011 — Availability- & Counterparty-Aware Holding
+
+## Summary
+
+Body.
+
+## Design
+
+### Epic I — Availability-aware holding (inward)
+
+Hold work when the environment cannot carry it.
+
+### Epic II — Counterparty-aware collaboration (outward)
+
+Collaborate when the counterparty can't proceed.
+
+## Phasing
+
+| Wave | Track A | Track B |
+|------|---------|---------|
+| 0 | S1 | |
+
+## Resolved decisions
+
+- **D-S1 — Counterparty derivation.** Derive at pr_hydrate, no stored field.
+- **D-A1 — Park-class shape.** New blocker.reason value.
+- **D-B1 — Idle exemption.** Idle counterparties are exempt from holds.
+
+## Tickets
+
+### S1 — counterparty axis + self-identity
+
+- **Epic:** none
+- **Wave:** 0
+- **Sprint:** 0
+- **Depends on:** none
+- **Context:** The shared seam both epics build on.
+- **Scope:** D-S1
+- **Acceptance:**
+  - Counterparty resolves to self when no PR exists.
+
+### A1 — park class (keystone)
+
+- **Epic:** I
+- **Wave:** 1
+- **Sprint:** 1
+- **Depends on:** S1
+- **Context:** The keystone park class.
+- **Scope:** D-A1
+- **Acceptance:**
+  - A held task routes to BLOCKED_ON_USER.
+
+### B1 — idle exemption
+
+- **Epic:** II
+- **Wave:** 1
+- **Sprint:** 1
+- **Depends on:** S1
+- **Context:** Idle counterparties should not hold work.
+- **Scope:** D-B1
+- **Acceptance:**
+  - An idle counterparty's ticket is exempt from the hold.
+
+## References
+
+- `src/cw/pr_hydrate.py:257` — where counterparty derivation lands
+
+## Issues
+
+Issues: _(filled by `/sprint-buildout`)_
+"""
 
 
 def test_apply_plan_creates_milestone_then_epics_then_tickets_then_backfills() -> None:
@@ -1322,6 +1604,97 @@ def test_apply_plan_raises_when_milestone_creation_fails() -> None:
 
     with pytest.raises(SprintApplyError, match="could not create milestone"):
         apply_plan(_plan(), client=DeadGh())
+
+
+def test_apply_plan_raises_when_the_milestone_lookup_itself_fails() -> None:
+    """A non-zero gh exit on find_milestone is NOT a genuine miss — apply_plan
+    must refuse rather than try to create a (possibly duplicate) milestone."""
+
+    class FlakyGh(FakeGh):
+        def find_milestone(self, title: str) -> tuple[int | None, bool]:
+            self.calls.append(f"find_milestone:{title}")
+            return None, False
+
+    fake = FlakyGh()
+    with pytest.raises(
+        SprintApplyError, match="could not determine whether milestone exists"
+    ):
+        apply_plan(_plan(), client=fake)
+
+    assert not any(c.startswith("create_issue") for c in fake.calls)
+
+
+def test_apply_plan_raises_when_the_milestone_issue_lookup_fails() -> None:
+    """Same principle for `milestone_issue_titles`: ok=False must not be read
+    as "the milestone has no issues yet"."""
+
+    class FlakyGh(FakeGh):
+        def milestone_issue_titles(self, milestone: int) -> tuple[dict[str, int] | None, bool]:
+            self.calls.append(f"list:{milestone}")
+            return None, False
+
+    fake = FlakyGh()
+    with pytest.raises(SprintApplyError, match="could not list existing issues"):
+        apply_plan(_plan(), client=fake)
+
+    assert not any(c.startswith("create_issue") for c in fake.calls)
+
+
+def test_apply_plan_reuses_a_milestone_that_exists_with_zero_issues_yet() -> None:
+    """A prior partial run created the milestone but died before pass 2 (epic
+    creation) ever ran — `milestone_issue_titles` legitimately returns an empty
+    dict for an existing milestone. `milestone_exists` is decoupled from
+    `existing` on FakeGh precisely so this re-entry shape is testable."""
+    fake = FakeGh(milestone_exists=True)
+    applied = apply_plan(_plan(), client=fake)
+
+    kinds = [c.split(":")[0] for c in fake.calls]
+    assert kinds[0] == "find_milestone"
+    assert "create_milestone" not in kinds
+    assert applied.milestone_number == 11
+    assert set(applied.ticket_numbers) == {"S1", "A1"}
+
+
+def test_sprint_apply_error_carries_the_partial_applied_state() -> None:
+    class DeadBackfillGh(FakeGh):
+        def update_issue_body(self, number: int, body: str) -> bool:
+            self.calls.append(f"update_issue_body:{number}")
+            return False
+
+    fake = DeadBackfillGh()
+    with pytest.raises(SprintApplyError) as exc_info:
+        apply_plan(_plan(), client=fake)
+
+    applied = exc_info.value.applied
+    assert applied is not None
+    assert applied.milestone_number == 11
+    assert set(applied.ticket_numbers) == {"S1", "A1"}
+
+
+def test_apply_plan_resolves_epic_ii_refs_without_corruption_from_epic_i() -> None:
+    """Epic keys are Roman numerals, so "Epic #I" is a literal prefix of
+    "Epic #II". A plain substring replace over Epic I's number first corrupts
+    B1's footer into "Epic #101I" — verified by execution before the fix. The
+    single-epic MINIMAL_RFC fixture cannot catch this; it needs two epics."""
+    plan = build_plan(parse_rfc(TWO_EPIC_RFC), _config(), version="1.20.0")
+    fake = FakeGh()
+    applied = apply_plan(plan, client=fake)
+
+    b1_body = fake.bodies[applied.ticket_numbers["B1"]]
+    assert f"Epic #{applied.epic_numbers['II']}" in b1_body
+    assert "Epic #I" not in b1_body
+    assert "Epic #II" not in b1_body
+
+
+def test_apply_plan_leaves_the_epic_less_ticket_footer_epic_free() -> None:
+    """S1 has no epic. `_resolve_epic_refs` must leave its footer untouched —
+    no `Epic #` substring should appear, resolved or otherwise."""
+    fake = FakeGh()
+    applied = apply_plan(_plan(), client=fake)
+
+    s1_body = fake.bodies[applied.ticket_numbers["S1"]]
+    assert "Epic #" not in s1_body
+    assert "Part of RFC 0011 Wave 0 (Sprint 0)" in s1_body
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1340,7 +1713,20 @@ class SprintApplyError(CwError):
     Raised rather than silently half-applying. ``apply_plan`` is idempotent, so
     the operator's remedy is always the same: fix the cause (auth, rate limit)
     and re-run — already-created issues are skipped, not duplicated.
+
+    Carries the partial ``AppliedBuildout`` as ``applied`` (default ``None``) so
+    the CLI can report what was created before the failure. Typed as
+    ``object | None`` here rather than ``AppliedBuildout | None`` to avoid an
+    import cycle — ``cw.sprint`` imports from ``cw.exceptions``, not the other
+    way around. Callers that need the concrete type narrow it themselves (e.g.
+    ``isinstance(e.applied, AppliedBuildout)``).
     """
+
+    __slots__ = ("applied",)
+
+    def __init__(self, message: str, *, applied: object | None = None) -> None:
+        super().__init__(message)
+        self.applied = applied
 ```
 
 - [ ] **Step 4: Implement apply**
@@ -1348,11 +1734,12 @@ class SprintApplyError(CwError):
 Append to `src/cw/sprint.py`:
 
 ```python
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from cw import gh
 
 
+@runtime_checkable
 class GhSurface(Protocol):
     """The slice of `gh` that apply_plan needs.
 
@@ -1360,11 +1747,13 @@ class GhSurface(Protocol):
     object against a call site, and the alternative — `gh_mod: object` plus a
     `# type: ignore[union-attr]` on every call — is a suppression, which this repo
     does not permit. The Protocol gives real type-checking AND a clean test double.
+    `@runtime_checkable` matches every other Protocol in this codebase
+    (`executor.StageExecutor`, `native_daemon.NativeDaemonClient`, etc.).
     """
 
-    def find_milestone(self, title: str) -> int | None: ...
+    def find_milestone(self, title: str) -> tuple[int | None, bool]: ...
     def create_milestone(self, title: str) -> int | None: ...
-    def milestone_issue_titles(self, milestone: int) -> dict[str, int] | None: ...
+    def milestone_issue_titles(self, milestone: int) -> tuple[dict[str, int] | None, bool]: ...
     def create_issue(
         self, title: str, body: str, *, labels: list[str], milestone: int
     ) -> int | None: ...
@@ -1374,13 +1763,13 @@ class GhSurface(Protocol):
 class GhClient:
     """Default GhSurface — delegates to :mod:`cw.gh`."""
 
-    def find_milestone(self, title: str) -> int | None:
+    def find_milestone(self, title: str) -> tuple[int | None, bool]:
         return gh.find_milestone(title)
 
     def create_milestone(self, title: str) -> int | None:
         return gh.create_milestone(title)
 
-    def milestone_issue_titles(self, milestone: int) -> dict[str, int] | None:
+    def milestone_issue_titles(self, milestone: int) -> tuple[dict[str, int] | None, bool]:
         return gh.milestone_issue_titles(milestone)
 
     def create_issue(
@@ -1403,7 +1792,10 @@ class AppliedBuildout(BaseModel):
 
 
 def _resolve_milestone(plan: BuildoutPlan, client: GhSurface) -> int:
-    existing = client.find_milestone(plan.milestone_title)
+    existing, ok = client.find_milestone(plan.milestone_title)
+    if not ok:
+        msg = f"could not determine whether milestone exists: {plan.milestone_title}"
+        raise SprintApplyError(msg)
     if existing is not None:
         return existing
     created = client.create_milestone(plan.milestone_title)
@@ -1429,7 +1821,7 @@ def _create_or_skip(
     )
     if number is None:
         msg = f"could not create issue: {draft.title}"
-        raise SprintApplyError(msg)
+        raise SprintApplyError(msg, applied=applied)
     applied.created.append(draft.code)
     return number
 
@@ -1439,10 +1831,18 @@ def _resolve_epic_refs(ticket: IssueDraft, epic_numbers: dict[str, int]) -> Issu
 
     build_plan renders ``Epic #I`` because the epic's number does not exist until
     apply creates it — GitHub assigns numbers at creation time.
+
+    Uses a boundary-safe regex, not a plain substring replace: epic keys are
+    Roman numerals, so ``"Epic #I"`` is a literal *prefix* of ``"Epic #II"``. A
+    naive ``body.replace(f"Epic #{key}", ...)`` loop corrupts every Epic II
+    ticket into ``"Epic #101I"`` once Epic I's replacement runs first — verified
+    by execution. The ``(?!\\w)`` negative lookahead stops the match before it
+    can swallow the next Roman-numeral character. An epic-less ticket's body
+    has no ``Epic #`` substring at all, so this loop is a no-op for it.
     """
     body = ticket.body
     for key, number in epic_numbers.items():
-        body = body.replace(f"Epic #{key}", f"Epic #{number}")
+        body = re.sub(rf"Epic #{re.escape(key)}(?!\w)", f"Epic #{number}", body)
     return ticket.model_copy(update={"body": body})
 
 
@@ -1459,7 +1859,7 @@ def _backfill_children(
         body = epic.body.replace(plan.children_marker, checklist)
         if not client.update_issue_body(applied.epic_numbers[epic.code], body):
             msg = f"could not backfill children checklist on epic: {epic.title}"
-            raise SprintApplyError(msg)
+            raise SprintApplyError(msg, applied=applied)
 
 
 def apply_plan(plan: BuildoutPlan, *, client: GhSurface | None = None) -> AppliedBuildout:
@@ -1472,8 +1872,13 @@ def apply_plan(plan: BuildoutPlan, *, client: GhSurface | None = None) -> Applie
     """
     gh_client: GhSurface = client if client is not None else GhClient()
     milestone = _resolve_milestone(plan, gh_client)
-    existing = gh_client.milestone_issue_titles(milestone) or {}
     applied = AppliedBuildout(milestone_number=milestone)
+
+    existing, ok = gh_client.milestone_issue_titles(milestone)
+    if not ok:
+        msg = f"could not list existing issues on milestone #{milestone}"
+        raise SprintApplyError(msg, applied=applied)
+    existing = existing or {}
 
     for epic in plan.epics:
         applied.epic_numbers[epic.code] = _create_or_skip(
@@ -1524,7 +1929,8 @@ cross-file test imports are already used here (see
 `tests/test_reconcile_review_recipes.py`, which imports from `tests.test_pr_hydrate`):
 
 ```python
-from cw.sprint import BuildoutPlan, build_plan, parse_rfc
+from cw.exceptions import SprintApplyError
+from cw.sprint import AppliedBuildout, BuildoutPlan, build_plan, parse_rfc
 from tests.test_sprint import CONFIG_YAML, MINIMAL_RFC, _config, _write_config
 
 
@@ -1574,6 +1980,26 @@ def test_sprint_apply_dry_run_makes_no_gh_calls(tmp_path, monkeypatch) -> None:
     assert result.exit_code == 0
     assert called == []
     assert "would create" in result.output.lower()
+
+
+def test_sprint_apply_prints_partial_progress_on_a_mid_run_failure(tmp_path, monkeypatch) -> None:
+    def fake_apply_plan(plan: BuildoutPlan) -> BuildoutPlan:
+        raise SprintApplyError(
+            "could not backfill children checklist on epic: epic: x",
+            applied=AppliedBuildout(milestone_number=11, ticket_numbers={"S1": 101}),
+        )
+
+    monkeypatch.setattr("cw.cli.sprint.apply_plan", fake_apply_plan)
+
+    plan = build_plan(parse_rfc(MINIMAL_RFC), _config(), version="1.20.0")
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(plan.model_dump_json(), encoding="utf-8")
+
+    result = CliRunner().invoke(main, ["sprint", "apply", str(plan_file)])
+
+    assert result.exit_code != 0
+    assert "Partial progress before failure" in result.output
+    assert "S1: #101" in result.output
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1596,7 +2022,9 @@ from pathlib import Path
 import click
 
 from cw.cli._base import handle_errors, main
+from cw.exceptions import SprintApplyError
 from cw.sprint import (
+    AppliedBuildout,
     BuildoutPlan,
     apply_plan,
     build_plan,
@@ -1657,6 +2085,15 @@ def sprint_plan(rfc_path: str, out: Path, root: Path, version_override: str | No
     click.echo(f"\nPlan written to {out}. Review it, then: cw sprint apply {out}")
 
 
+def _echo_applied(applied: AppliedBuildout) -> None:
+    for code, number in applied.epic_numbers.items():
+        click.echo(f"  epic {code}: #{number}")
+    for code, number in applied.ticket_numbers.items():
+        click.echo(f"  {code}: #{number}")
+    if applied.skipped:
+        click.echo(f"Skipped (already existed): {', '.join(applied.skipped)}")
+
+
 @sprint.command("apply")
 @click.argument("plan_file", type=click.Path(exists=True, path_type=Path))
 @click.option("--dry-run", is_flag=True, help="Print what would be created; touch nothing.")
@@ -1671,14 +2108,19 @@ def sprint_apply(plan_file: Path, dry_run: bool) -> None:
             click.echo(f"  would create {draft.kind}: {draft.title}")
         return
 
-    applied = apply_plan(plan)
+    try:
+        applied = apply_plan(plan)
+    except SprintApplyError as exc:
+        # A mid-run failure still leaves useful state behind (what got created
+        # before the gh call that failed) — surface it before handle_errors
+        # converts the exception to a plain ClickException(str(exc)).
+        if isinstance(exc.applied, AppliedBuildout):
+            click.echo("Partial progress before failure:")
+            _echo_applied(exc.applied)
+        raise
+
     click.echo(f"Milestone #{applied.milestone_number}")
-    for code, number in applied.epic_numbers.items():
-        click.echo(f"  epic {code}: #{number}")
-    for code, number in applied.ticket_numbers.items():
-        click.echo(f"  {code}: #{number}")
-    if applied.skipped:
-        click.echo(f"Skipped (already existed): {', '.join(applied.skipped)}")
+    _echo_applied(applied)
 ```
 
 - [ ] **Step 4: Register the group**
