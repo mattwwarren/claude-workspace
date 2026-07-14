@@ -452,7 +452,15 @@ def _validate_review_recipe_keys(value: dict[str, bool]) -> dict[str, bool]:
 # imports from cw.models). No '/': ticket_id is a path *component*, the
 # branch prefix supplies the separator. No '..': blocks the gh-api
 # path-segment-confusion case in _fetch_branch_exists_on_origin. See #1129.
-_SAFE_TICKET_ID = re.compile(r"^(?!.*\.\.)[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+#
+# '#' IS permitted: `repo#N` is a real tracker id shape in production use, and
+# #1129's original charset outlawed it, which bricked load_dev_queue() for every
+# client the moment one such row hit disk. '#' is legal in a git ref name and
+# inert in argv (subprocess takes a list — no shell). Its one real hazard is
+# acting as a URL fragment inside a `gh api` path, and that is handled by
+# percent-encoding at the sink (cw.gh._fetch_branch_exists_on_origin) rather
+# than by outlawing an id the tracker already assigned.
+_SAFE_TICKET_ID = re.compile(r"^(?!.*\.\.)[a-zA-Z0-9][a-zA-Z0-9._#-]*$")
 
 
 class TicketTask(BaseModel):
