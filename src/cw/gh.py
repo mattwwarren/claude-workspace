@@ -558,10 +558,13 @@ def _attach_milestone(number: int, milestone: int, timeout: int) -> bool:
     try:
         result = _sp.run(
             [
-                "gh", "api",
+                "gh",
+                "api",
                 f"repos/{{owner}}/{{repo}}/issues/{number}",
-                "-X", "PATCH",
-                "-F", f"milestone={milestone}",
+                "-X",
+                "PATCH",
+                "-F",
+                f"milestone={milestone}",
             ],
             capture_output=True,
             timeout=timeout,
@@ -581,7 +584,9 @@ def _attach_milestone(number: int, milestone: int, timeout: int) -> bool:
     return attached.get("number") == milestone
 
 
-def update_issue_body(number: int, body: str, *, timeout: int = _CREATE_TIMEOUT) -> bool:
+def update_issue_body(
+    number: int, body: str, *, timeout: int = _CREATE_TIMEOUT
+) -> bool:
     """Replace an issue's body via ``gh issue edit --body-file``. True on success."""
     try:
         with _body_file(body) as path:
@@ -601,8 +606,11 @@ def create_milestone(title: str, *, timeout: int = _CREATE_TIMEOUT) -> int | Non
     try:
         result = _sp.run(
             [
-                "gh", "api", "repos/{owner}/{repo}/milestones",
-                "-f", f"title={title}",
+                "gh",
+                "api",
+                "repos/{owner}/{repo}/milestones",
+                "-f",
+                f"title={title}",
             ],
             capture_output=True,
             timeout=timeout,
@@ -620,7 +628,9 @@ def create_milestone(title: str, *, timeout: int = _CREATE_TIMEOUT) -> int | Non
     return number if isinstance(number, int) else None
 
 
-def find_milestone(title: str, *, timeout: int = _CREATE_TIMEOUT) -> tuple[int | None, bool]:
+def find_milestone(
+    title: str, *, timeout: int = _CREATE_TIMEOUT
+) -> tuple[int | None, bool]:
     """Return (number, ok) for an existing milestone titled *title*, open OR closed.
 
     ``?state=all`` is load-bearing, not decoration. GitHub's "List milestones"
@@ -648,9 +658,11 @@ def find_milestone(title: str, *, timeout: int = _CREATE_TIMEOUT) -> tuple[int |
     try:
         result = _sp.run(
             [
-                "gh", "api",
+                "gh",
+                "api",
                 "repos/{owner}/{repo}/milestones?state=all&per_page=100",
-                "--jq", ".[] | {number, title}",
+                "--jq",
+                ".[] | {number, title}",
             ],
             capture_output=True,
             timeout=timeout,
@@ -699,11 +711,17 @@ def milestone_issue_titles(
     try:
         result = _sp.run(
             [
-                "gh", "issue", "list",
-                "--milestone", str(milestone),
-                "--state", "all",
-                "--limit", "200",
-                "--json", "number,title",
+                "gh",
+                "issue",
+                "list",
+                "--milestone",
+                str(milestone),
+                "--state",
+                "all",
+                "--limit",
+                "200",
+                "--json",
+                "number,title",
             ],
             capture_output=True,
             timeout=timeout,
