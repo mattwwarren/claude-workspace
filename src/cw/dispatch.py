@@ -1781,18 +1781,20 @@ def _classify_sentinel_stage_position(
         if isinstance(stage_reached, str)
         else None
     )
-    client_cfg = clients.get(task.client)
-    if mapped is None or client_cfg is None:
+    if mapped is None:
         return "unresolvable", None, None
-    stages = client_cfg.pipeline.stages
-    if task.stage not in stages or mapped not in stages:
-        return "unresolvable", None, None
-    task_idx = stages.index(task.stage)
-    sentinel_idx = stages.index(mapped)
-    if sentinel_idx < task_idx:
-        return "earlier", None, None
-    if sentinel_idx == task_idx:
+    if mapped == task.stage:
+        # Exact match routes regardless of client/pipeline resolvability --
+        # preserves the pre-#1149 equality guard, which never consulted clients.
         return "same", None, None
+    # A non-matching stage needs the pipeline order to decide earlier vs later.
+    client_cfg = clients.get(task.client)
+    stages = client_cfg.pipeline.stages if client_cfg is not None else None
+    if stages is None or task.stage not in stages or mapped not in stages:
+        return "unresolvable", None, None
+    sentinel_idx = stages.index(mapped)
+    if sentinel_idx < stages.index(task.stage):
+        return "earlier", None, None
     return "later", stages, sentinel_idx
 
 
