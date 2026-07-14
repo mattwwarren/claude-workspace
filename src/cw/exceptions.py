@@ -172,3 +172,15 @@ class VersionDriftError(DispatchServeError):
     """
 
     __slots__ = ()
+
+
+class RfcContractError(CwError):
+    """An RFC does not satisfy the buildout input contract.
+
+    Raised by :func:`cw.sprint.parse_rfc` when a required section or ticket
+    field is absent, or when a ticket cites a decision/ticket/epic that the RFC
+    does not define. The message always names the exact defect (e.g. "missing
+    section: ## Tickets") so the operator can fix the RFC rather than guess.
+    """
+
+    __slots__ = ()
