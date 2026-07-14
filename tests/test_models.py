@@ -28,6 +28,7 @@ from cw.models import (
     SessionPurpose,
     SessionStatus,
     TicketTask,
+    WatchedPr,
 )
 
 
@@ -829,8 +830,8 @@ def test_session_lane_round_trips() -> None:
 class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
-    def test_dev_queue_schema_version_is_14(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 14
+    def test_dev_queue_schema_version_is_15(self) -> None:
+        assert DEV_QUEUE_SCHEMA_VERSION == 15
 
     def test_pr_state_defaults(self) -> None:
         state = PrState()
@@ -857,6 +858,63 @@ class TestPrStateAndSchemaV8:
 
     def test_config_pr_hydration_interval_default(self) -> None:
         assert OrchestratorConfig().pr_hydration_interval_seconds == 150
+
+
+class TestWatchedPrModel:
+    """WatchedPr model + DevQueueStore.watched_prs field (GitHub #1154, RFC 0011 S2)."""
+
+    def test_watched_pr_construct_all_fields(self) -> None:
+        watched = WatchedPr(
+            pr_url="https://github.com/acme/widgets/pull/42",
+            repo="acme/widgets",
+            pr_number=42,
+            requester_login="alice",
+            source="cli",
+            status="active",
+            pr_state=PrState(state="OPEN"),
+        )
+        assert watched.pr_url == "https://github.com/acme/widgets/pull/42"
+        assert watched.repo == "acme/widgets"
+        assert watched.pr_number == 42
+        assert watched.requester_login == "alice"
+        assert watched.source == "cli"
+        assert watched.status == "active"
+        assert watched.pr_state is not None
+        assert watched.pr_state.state == "OPEN"
+
+    def test_watched_pr_defaults(self) -> None:
+        watched = WatchedPr(
+            pr_url="https://github.com/acme/widgets/pull/7",
+            repo="acme/widgets",
+            pr_number=7,
+            source="webhook",
+        )
+        assert watched.status == "active"
+        assert watched.requester_login is None
+        assert watched.pr_state is None
+        assert isinstance(watched.requested_at, datetime)
+
+    def test_watched_pr_rejects_bad_source(self) -> None:
+        with pytest.raises(ValidationError):
+            WatchedPr(
+                pr_url="https://github.com/acme/widgets/pull/7",
+                repo="acme/widgets",
+                pr_number=7,
+                source="carrier-pigeon",  # type: ignore[arg-type]
+            )
+
+    def test_watched_pr_rejects_bad_status(self) -> None:
+        with pytest.raises(ValidationError):
+            WatchedPr(
+                pr_url="https://github.com/acme/widgets/pull/7",
+                repo="acme/widgets",
+                pr_number=7,
+                source="cli",
+                status="paused",  # type: ignore[arg-type]
+            )
+
+    def test_dev_queue_store_watched_prs_default_empty(self) -> None:
+        assert DevQueueStore().watched_prs == []
 
 
 class TestOperatorSignoffGates:

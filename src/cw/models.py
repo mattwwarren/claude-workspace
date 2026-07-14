@@ -162,7 +162,10 @@ CW_STATE_SCHEMA_VERSION = 14
 #      RFC 0009 P4).
 # v14: added TicketTask.escalate_merge_block_fired_at (GitHub #1099, RFC 0010
 #      P4) — one-shot latch for the escalate_merge_block review recipe.
-DEV_QUEUE_SCHEMA_VERSION = 14
+# v15: added DevQueueStore.watched_prs (GitHub #1154, RFC 0011 S2) — a
+#      top-level list of externally-requested PRs the operator is watching,
+#      distinct from the per-task queue.
+DEV_QUEUE_SCHEMA_VERSION = 15
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -361,6 +364,32 @@ class PrState(BaseModel):
     attention_state: str | None = None
     failing_checks: list[str] = Field(default_factory=list)
     hydrated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class WatchedPr(BaseModel):
+    """An externally-requested PR the operator is watching (GitHub #1154).
+
+    Registered when someone requests the operator's review on a PR the queue
+    does not otherwise track — via ``cw review register <pr>`` (``source="cli"``)
+    or the ``review_requested`` webhook (``source="webhook"``). Persisted as a
+    top-level ``DevQueueStore.watched_prs`` entry (RFC 0011 S2), deliberately
+    NOT a ``TicketTask``: it carries no ``client``/``lane`` and never occupies a
+    dispatch lane slot. ``pr_state`` is hydrated by the serve-tick pass
+    (``cw.pr_hydrate._hydrate_watched_prs``) exactly like ``TicketTask.pr_state``.
+
+    ``status`` reserves a ``"dismissed"`` terminal that no code sets this slice —
+    the ``(repo, pr_number)`` dedup guard is scoped to ``"active"`` so a future
+    dismiss transition can re-open registration (RFC 0011 S2, adopted #5).
+    """
+
+    pr_url: str
+    repo: str
+    pr_number: int
+    requested_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    requester_login: str | None = None
+    source: Literal["webhook", "cli"]
+    status: Literal["active", "dismissed"] = "active"
+    pr_state: PrState | None = None
 
 
 def _validate_gate_recipe_keys(value: dict[str, bool]) -> dict[str, bool]:
@@ -619,6 +648,7 @@ class DevQueueStore(BaseModel):
 
     schema_version: int = DEV_QUEUE_SCHEMA_VERSION
     tasks: list[TicketTask] = Field(default_factory=list)
+    watched_prs: list[WatchedPr] = Field(default_factory=list)
 
     def pending(self) -> list[TicketTask]:
         return [t for t in self.tasks if t.status == QueueItemStatus.PENDING]

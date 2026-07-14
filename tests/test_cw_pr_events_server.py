@@ -120,7 +120,8 @@ class TestMCPNotificationShape:
         assert isinstance(notif["title"], str)
 
     @pytest.mark.parametrize(
-        "event_type", ["ci_failed", "review_received", "mergeable", "merged"]
+        "event_type",
+        ["ci_failed", "review_received", "mergeable", "merged", "review_requested"],
     )
     def test_all_known_event_types_produce_title(self, event_type: str) -> None:
         event = self._make_event(event_type)
@@ -206,6 +207,99 @@ class TestHandlePostPrEvent:
 
         app = make_app()
         assert isinstance(app, Starlette)
+
+
+class TestReviewRequestedWebhook:
+    """review_requested webhook registration (GitHub #1154, RFC 0011 S2, R4)."""
+
+    _OPERATOR = "mattwwarren"
+
+    def _make_client(self) -> TestClient:
+        return TestClient(make_app(allow_unsigned=True))
+
+    def _post(self, client: TestClient, payload: dict[str, Any]) -> Any:
+        return client.post(
+            "/pr-event",
+            json={
+                "repo": "acme/widgets",
+                "pr_number": 42,
+                "event_type": "review_requested",
+                "payload": payload,
+            },
+        )
+
+    def test_individual_review_request_registers(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.operator_identity.cached_gh_login", lambda: self._OPERATOR
+        )
+        resp = self._post(self._make_client(), {"reviewer": {"login": self._OPERATOR}})
+        assert resp.status_code == 200
+        assert resp.json() == {"registered": True, "reason": "registered"}
+        watched = load_dev_queue().watched_prs
+        assert len(watched) == 1
+        assert watched[0].status == "active"
+        assert watched[0].source == "webhook"
+
+    def test_team_review_request_ignored_with_reason(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.operator_identity.cached_gh_login", lambda: self._OPERATOR
+        )
+        resp = self._post(self._make_client(), {"reviewer": {"slug": "eng-team"}})
+        assert resp.status_code == 200
+        assert resp.json() == {"registered": False, "reason": "team_targeted"}
+        assert load_dev_queue().watched_prs == []
+
+    def test_identity_unresolved_fails_closed_on_webhook(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("cw.operator_identity.cached_gh_login", lambda: None)
+        resp = self._post(self._make_client(), {"reviewer": {"login": self._OPERATOR}})
+        assert resp.status_code == 200
+        assert resp.json() == {"registered": False, "reason": "identity_unresolved"}
+        assert load_dev_queue().watched_prs == []
+
+    def test_review_requested_idempotent_on_replay(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.operator_identity.cached_gh_login", lambda: self._OPERATOR
+        )
+        client = self._make_client()
+        first = self._post(client, {"reviewer": {"login": self._OPERATOR}})
+        assert first.json() == {"registered": True, "reason": "registered"}
+        second = self._post(client, {"reviewer": {"login": self._OPERATOR}})
+        assert second.json() == {"registered": False, "reason": "already_registered"}
+
+    def test_review_requested_still_broadcasts_mcp_notification(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.operator_identity.cached_gh_login", lambda: self._OPERATOR
+        )
+        q = subscribe()
+        try:
+            self._post(self._make_client(), {"reviewer": {"login": self._OPERATOR}})
+            notif = q.get_nowait()
+            assert notif["notification_type"] == _NOTIFICATION_TYPE
+            data = json.loads(notif["message"])
+            assert data["event_type"] == "review_requested"
+        finally:
+            unsubscribe(q)
+
+    def test_review_requested_missing_reviewer_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.operator_identity.cached_gh_login", lambda: self._OPERATOR
+        )
+        resp = self._post(self._make_client(), {})
+        assert resp.status_code == 200
+        assert resp.json() == {"registered": False, "reason": "no_reviewer"}
+        assert load_dev_queue().watched_prs == []
 
 
 class TestServe:
