@@ -243,6 +243,9 @@ def _derive_pr_state(pr_url: str) -> PrState | None:
         ci_ok=ci_ok,
         review_decision=review_decision,
         attention_state=attention_state,
+        is_draft=bool(data.get("isDraft", False)),
+        reviewer_count=reviewer_count,
+        pending_count=summary["pending_count"],
         failing_checks=[str(f["name"]) for f in summary["failing"]],
         hydrated_at=datetime.now(UTC),
     )
@@ -580,6 +583,15 @@ def _overlay_push_observation(
     Called from inside ``apply_pr_state_observation``'s ``dev_queue_lock()``
     with the freshly-locked task state as *old* — never a pre-lock snapshot —
     so this overlay can't clobber a concurrent writer (#930 fix).
+
+    After the field(s) implied by *event_type* are overlaid, ``attention_state``
+    is always recomputed (#1196) — mirroring the poll path (``_derive_pr_state``),
+    which always recomputes it via ``_compute_attention_state``. Terminal states
+    (MERGED/CLOSED) short-circuit straight to None; otherwise the ladder is
+    recomputed from the (possibly just-overlaid) ci_ok/merge_state_status/
+    review_decision plus ``is_draft``/``reviewer_count``/``pending_count``,
+    which are only ever carried forward from *base* — no wire payload ever
+    carries them, so they are never themselves overlaid.
     """
     base = old if old is not None else PrState()
     updates: dict[str, Any] = {"hydrated_at": datetime.now(UTC)}
@@ -598,6 +610,20 @@ def _overlay_push_observation(
         merge_state_status = payload.get("merge_state_status")
         if merge_state_status is not None:
             updates["merge_state_status"] = str(merge_state_status)
+    merged_state = updates.get("state", base.state)
+    if merged_state in _TERMINAL_PR_STATES:
+        updates["attention_state"] = None
+    else:
+        updates["attention_state"] = _compute_attention_state(
+            ci_ok=updates.get("ci_ok", base.ci_ok),
+            pending_count=base.pending_count,
+            merge_state_status=updates.get(
+                "merge_state_status", base.merge_state_status
+            ),
+            review_decision=updates.get("review_decision", base.review_decision),
+            is_draft=base.is_draft,
+            reviewer_count=base.reviewer_count,
+        )
     return base.model_copy(update=updates)
 
 
