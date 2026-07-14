@@ -1235,6 +1235,25 @@ def test_find_milestone_returns_the_number_and_ok_true_when_found(monkeypatch) -
     assert gh.find_milestone("v1.20.0 milestone") == (11, True)
 
 
+def test_find_milestone_asks_for_closed_milestones_too(monkeypatch) -> None:
+    """Without ?state=all, GitHub lists only OPEN milestones (documented default).
+
+    A finished sprint's milestone is CLOSED. If find_milestone can't see it, a
+    re-run of apply_plan reads "no such milestone", creates a duplicate under
+    the same title, and orphans every issue filed under the first one.
+    """
+    seen: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        seen.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+    monkeypatch.setattr(gh._sp, "run", fake_run)
+    gh.find_milestone("v1.20.0 milestone")
+
+    assert "repos/{owner}/{repo}/milestones?state=all" in seen[0]
+
+
 def test_find_milestone_returns_none_true_on_a_genuine_miss(monkeypatch) -> None:
     """The call succeeded; no milestone with this title exists yet."""
 
@@ -1432,7 +1451,16 @@ def create_milestone(title: str, *, timeout: int = _CREATE_TIMEOUT) -> int | Non
 
 
 def find_milestone(title: str, *, timeout: int = _CREATE_TIMEOUT) -> tuple[int | None, bool]:
-    """Return (number, ok) for an existing open milestone titled *title*.
+    """Return (number, ok) for an existing milestone titled *title*, open OR closed.
+
+    ``?state=all`` is load-bearing, not decoration. GitHub's "List milestones"
+    defaults ``state`` to ``open``, so without it a milestone that has been
+    CLOSED (which is what happens to a sprint's milestone once the sprint ends)
+    is invisible here — apply_plan would read that as "no such milestone",
+    create a SECOND one with the same title, and orphan the issues filed under
+    the first. That is precisely the duplicate-filing this function exists to
+    prevent. It goes in the path as a query string: ``-f state=all`` would flip
+    gh's auto-method from GET to POST.
 
     ``ok=False`` means the gh call itself failed (non-zero exit, OSError,
     timeout) — the caller cannot conclude the milestone is absent, only that it
@@ -1443,7 +1471,11 @@ def find_milestone(title: str, *, timeout: int = _CREATE_TIMEOUT) -> tuple[int |
     """
     try:
         result = _sp.run(
-            ["gh", "api", "repos/{owner}/{repo}/milestones", "--jq", ".[] | {number, title}"],
+            [
+                "gh", "api",
+                "repos/{owner}/{repo}/milestones?state=all",
+                "--jq", ".[] | {number, title}",
+            ],
             capture_output=True,
             timeout=timeout,
             check=False,
