@@ -1104,7 +1104,11 @@ git commit -m "feat(sprint): buildout config block and plan builder"
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `tests/test_gh.py`, following that file's existing monkeypatch-of-`_sp.run` pattern:
+Append to `tests/test_gh.py`, following that file's existing monkeypatch-of-`_sp.run`
+pattern AND its existing `class Test<FunctionName>:` grouping (all 7 existing test
+groups in the file use this shape — do not add bare top-level test functions).
+Every test method annotates `monkeypatch: pytest.MonkeyPatch`, matching the file's
+existing `if TYPE_CHECKING: import pytest` header import.
 
 ```python
 # Add to tests/test_gh.py's header. The file already imports `subprocess`, but
@@ -1116,166 +1120,365 @@ from pathlib import Path
 from cw import gh
 
 
-def test_create_issue_writes_the_body_to_a_temp_file_not_the_argv(monkeypatch) -> None:
-    """Bodies never ride argv: RFC titles carry em-dashes and ampersands."""
-    calls: list[list[str]] = []
-    seen: dict[str, object] = {}
+class TestCreateIssue:
+    """Tests for create_issue (and _attach_milestone, exercised through it)."""
 
-    # The PATCH echoes the updated issue back; _attach_milestone reads the
-    # milestone off it to confirm the change actually stuck (see below).
-    attached = b'{"number": 42, "milestone": {"number": 11}}'
+    def test_writes_the_body_to_a_temp_file_not_the_argv(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bodies never ride argv: RFC titles carry em-dashes and ampersands."""
+        calls: list[list[str]] = []
+        seen: dict[str, object] = {}
 
-    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        calls.append(cmd)
-        if "--body-file" in cmd:
-            body_file = Path(cmd[cmd.index("--body-file") + 1])
-            seen["body"] = body_file.read_text(encoding="utf-8")
-            return subprocess.CompletedProcess(
-                cmd, 0, b"https://github.com/o/r/issues/42\n", b""
-            )
-        return subprocess.CompletedProcess(cmd, 0, attached, b"")
+        # The PATCH echoes the updated issue back; _attach_milestone reads the
+        # milestone off it to confirm the change actually stuck (see below).
+        attached = b'{"number": 42, "milestone": {"number": 11}}'
 
-    monkeypatch.setattr(gh._sp, "run", fake_run)
-    number = gh.create_issue(
-        "RFC 0011 A1 — park class", "## Context\n\nBody & more.", labels=["feature"], milestone=11
-    )
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            calls.append(cmd)
+            if "--body-file" in cmd:
+                body_file = Path(cmd[cmd.index("--body-file") + 1])
+                seen["body"] = body_file.read_text(encoding="utf-8")
+                return subprocess.CompletedProcess(
+                    cmd, 0, b"https://github.com/o/r/issues/42\n", b""
+                )
+            return subprocess.CompletedProcess(cmd, 0, attached, b"")
 
-    assert number == 42
-    assert "--body" not in calls[0]  # only --body-file
-    assert seen["body"] == "## Context\n\nBody & more."
-
-
-def test_create_issue_attaches_the_milestone_by_id_not_by_name(monkeypatch) -> None:
-    """`gh issue create -m` resolves a milestone BY NAME, so the id cannot ride it.
-
-    Passing str(11) there would hunt for a milestone *titled* "11". The id goes
-    through the REST endpoint instead, as a typed (-F) field so it lands as a
-    JSON number rather than the string "11".
-    """
-    calls: list[list[str]] = []
-
-    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        calls.append(cmd)
-        if "--body-file" in cmd:
-            return subprocess.CompletedProcess(
-                cmd, 0, b"https://github.com/o/r/issues/42\n", b""
-            )
-        return subprocess.CompletedProcess(
-            cmd, 0, b'{"number": 42, "milestone": {"number": 11}}', b""
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        number = gh.create_issue(
+            "RFC 0011 A1 — park class",
+            "## Context\n\nBody & more.",
+            labels=["feature"],
+            milestone=11,
         )
 
-    monkeypatch.setattr(gh._sp, "run", fake_run)
-    assert gh.create_issue("t", "b", labels=[], milestone=11) == 42
+        assert number == 42
+        assert "--body" not in calls[0]  # only --body-file
+        assert seen["body"] == "## Context\n\nBody & more."
 
-    create, attach = calls
-    assert "--milestone" not in create  # the id must NOT ride `gh issue create`
-    assert attach[:2] == ["gh", "api"]
-    assert "repos/{owner}/{repo}/issues/42" in attach
-    assert "-X" in attach and attach[attach.index("-X") + 1] == "PATCH"
-    assert "-F" in attach and attach[attach.index("-F") + 1] == "milestone=11"
+    def test_attaches_the_milestone_by_id_not_by_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`gh issue create -m` resolves a milestone BY NAME, so the id cannot ride it.
 
+        Passing str(11) there would hunt for a milestone *titled* "11". The id goes
+        through the REST endpoint instead, as a typed (-F) field so it lands as a
+        JSON number rather than the string "11".
+        """
+        calls: list[list[str]] = []
 
-def test_create_issue_returns_none_when_the_milestone_attach_fails(monkeypatch) -> None:
-    """A created issue with no milestone is a half-applied buildout — report it."""
-
-    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        if "--body-file" in cmd:
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            calls.append(cmd)
+            if "--body-file" in cmd:
+                return subprocess.CompletedProcess(
+                    cmd, 0, b"https://github.com/o/r/issues/42\n", b""
+                )
             return subprocess.CompletedProcess(
-                cmd, 0, b"https://github.com/o/r/issues/42\n", b""
+                cmd, 0, b'{"number": 42, "milestone": {"number": 11}}', b""
             )
-        return subprocess.CompletedProcess(cmd, 1, b"", b"gh: HTTP 422")
 
-    monkeypatch.setattr(gh._sp, "run", fake_run)
-    assert gh.create_issue("t", "b", labels=[], milestone=11) is None
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.create_issue("t", "b", labels=[], milestone=11) == 42
+
+        create, attach = calls
+        assert "--milestone" not in create  # the id must NOT ride `gh issue create`
+        assert attach[:2] == ["gh", "api"]
+        assert "repos/{owner}/{repo}/issues/42" in attach
+        assert "-X" in attach and attach[attach.index("-X") + 1] == "PATCH"
+        assert "-F" in attach and attach[attach.index("-F") + 1] == "milestone=11"
+
+    def test_returns_none_when_the_milestone_attach_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A created issue with no milestone is a half-applied buildout — report it."""
+
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            if "--body-file" in cmd:
+                return subprocess.CompletedProcess(
+                    cmd, 0, b"https://github.com/o/r/issues/42\n", b""
+                )
+            return subprocess.CompletedProcess(cmd, 1, b"", b"gh: HTTP 422")
+
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.create_issue("t", "b", labels=[], milestone=11) is None
+
+    def test_catches_a_silently_dropped_milestone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 200 whose echoed issue has NO milestone is a silent drop, not a success.
+
+        GitHub: "without push access to the repository, milestone changes are
+        silently dropped." Exit-code-only would report success and leave the issue
+        off the milestone — a half-applied buildout that apply_plan could not see.
+        """
+
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            if "--body-file" in cmd:
+                return subprocess.CompletedProcess(
+                    cmd, 0, b"https://github.com/o/r/issues/42\n", b""
+                )
+            # 200 OK, but the milestone never applied.
+            return subprocess.CompletedProcess(cmd, 0, b'{"number": 42, "milestone": null}', b"")
+
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.create_issue("t", "b", labels=[], milestone=11) is None
+
+    def test_returns_none_when_gh_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.CompletedProcess(cmd, 1, b"", b"gh: not authenticated")
+
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.create_issue("t", "b", labels=[], milestone=1) is None
+
+    # Why: no text=True — gh emits UTF-8; decoding via the platform locale would
+    # mangle em-dashes in RFC titles, so these fakes hand back raw bytes instead.
+    def test_returns_none_when_the_create_call_times_out(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            raise subprocess.TimeoutExpired(cmd, 30)
+
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.create_issue("t", "b", labels=[], milestone=1) is None
+
+    def test_returns_none_when_the_create_call_stdout_has_no_issue_number(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.CompletedProcess(cmd, 0, b"no url here\n", b"")
+
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.create_issue("t", "b", labels=[], milestone=1) is None
+
+    def test_returns_none_when_the_attach_call_times_out(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            if "--body-file" in cmd:
+                return subprocess.CompletedProcess(
+                    cmd, 0, b"https://github.com/o/r/issues/42\n", b""
+                )
+            raise subprocess.TimeoutExpired(cmd, 30)
+
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.create_issue("t", "b", labels=[], milestone=11) is None
+
+    def test_returns_none_when_the_attach_response_is_malformed_json(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            if "--body-file" in cmd:
+                return subprocess.CompletedProcess(
+                    cmd, 0, b"https://github.com/o/r/issues/42\n", b""
+                )
+            return subprocess.CompletedProcess(cmd, 0, b"not json", b"")
+
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.create_issue("t", "b", labels=[], milestone=11) is None
 
 
-def test_create_issue_catches_a_silently_dropped_milestone(monkeypatch) -> None:
-    """A 200 whose echoed issue has NO milestone is a silent drop, not a success.
+class TestUpdateIssueBody:
+    """Tests for update_issue_body."""
 
-    GitHub: "without push access to the repository, milestone changes are
-    silently dropped." Exit-code-only would report success and leave the issue
-    off the milestone — a half-applied buildout that apply_plan could not see.
-    """
+    def test_writes_the_body_to_a_temp_file_and_returns_true(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: dict[str, object] = {}
 
-    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        if "--body-file" in cmd:
-            return subprocess.CompletedProcess(
-                cmd, 0, b"https://github.com/o/r/issues/42\n", b""
-            )
-        # 200 OK, but the milestone never applied.
-        return subprocess.CompletedProcess(cmd, 0, b'{"number": 42, "milestone": null}', b"")
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            body_file = Path(cmd[cmd.index("--body-file") + 1])
+            seen["body"] = body_file.read_text(encoding="utf-8")
+            return subprocess.CompletedProcess(cmd, 0, b"", b"")
 
-    monkeypatch.setattr(gh._sp, "run", fake_run)
-    assert gh.create_issue("t", "b", labels=[], milestone=11) is None
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.update_issue_body(42, "new body & stuff") is True
+        assert seen["body"] == "new body & stuff"
 
+    def test_returns_false_when_gh_exits_nonzero(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.CompletedProcess(cmd, 1, b"", b"gh: HTTP 404")
 
-def test_create_issue_returns_none_when_gh_fails(monkeypatch) -> None:
-    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.CompletedProcess(cmd, 1, b"", b"gh: not authenticated")
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.update_issue_body(42, "body") is False
 
-    monkeypatch.setattr(gh._sp, "run", fake_run)
-    assert gh.create_issue("t", "b", labels=[], milestone=1) is None
+    def test_returns_false_on_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            raise subprocess.TimeoutExpired(cmd, 30)
 
-
-def test_create_milestone_returns_the_number(monkeypatch) -> None:
-    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.CompletedProcess(cmd, 0, b'{"number": 11}', b"")
-
-    monkeypatch.setattr(gh._sp, "run", fake_run)
-    assert gh.create_milestone("v1.20.0 — Availability & Counterparty") == 11
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.update_issue_body(42, "body") is False
 
 
-def test_find_milestone_returns_the_number_and_ok_true_when_found(monkeypatch) -> None:
-    payload = b'{"number": 11, "title": "v1.20.0 milestone"}\n'
+class TestCreateMilestone:
+    """Tests for create_milestone."""
 
-    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.CompletedProcess(cmd, 0, payload, b"")
+    def test_returns_the_number(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.CompletedProcess(cmd, 0, b'{"number": 11}', b"")
 
-    monkeypatch.setattr(gh._sp, "run", fake_run)
-    assert gh.find_milestone("v1.20.0 milestone") == (11, True)
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.create_milestone("v1.20.0 — Availability & Counterparty") == 11
 
+    def test_returns_none_on_nonzero_exit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.CompletedProcess(cmd, 1, b"", b"gh: HTTP 422")
 
-def test_find_milestone_returns_none_true_on_a_genuine_miss(monkeypatch) -> None:
-    """The call succeeded; no milestone with this title exists yet."""
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.create_milestone("t") is None
 
-    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        payload = b'{"number": 3, "title": "unrelated milestone"}\n'
-        return subprocess.CompletedProcess(cmd, 0, payload, b"")
+    def test_returns_none_on_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            raise subprocess.TimeoutExpired(cmd, 30)
 
-    monkeypatch.setattr(gh._sp, "run", fake_run)
-    assert gh.find_milestone("v1.20.0 milestone") == (None, True)
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.create_milestone("t") is None
 
+    def test_returns_none_on_malformed_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.CompletedProcess(cmd, 0, b"not json", b"")
 
-def test_find_milestone_returns_none_false_when_the_gh_call_fails(monkeypatch) -> None:
-    """A non-zero gh exit must be distinguishable from a genuine miss — reading
-    it as "doesn't exist" would make apply_plan re-file a duplicate milestone
-    on a re-run after a transient failure."""
-
-    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.CompletedProcess(cmd, 1, b"", b"gh: rate limited")
-
-    monkeypatch.setattr(gh._sp, "run", fake_run)
-    assert gh.find_milestone("v1.20.0 milestone") == (None, False)
-
-
-def test_milestone_issue_titles_maps_title_to_number(monkeypatch) -> None:
-    # Why: the em-dash is non-ASCII, so this cannot be a bytes literal — `gh`
-    # emits UTF-8 and the helper must decode it, so encode the fixture the same way.
-    payload = '[{"number": 1155, "title": "RFC 0011 A1 — park class"}]'.encode()
-
-    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.CompletedProcess(cmd, 0, payload, b"")
-
-    monkeypatch.setattr(gh._sp, "run", fake_run)
-    assert gh.milestone_issue_titles(11) == ({"RFC 0011 A1 — park class": 1155}, True)
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.create_milestone("t") is None
 
 
-def test_milestone_issue_titles_returns_none_false_when_the_gh_call_fails(monkeypatch) -> None:
-    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.CompletedProcess(cmd, 1, b"", b"gh: not authenticated")
+class TestFindMilestone:
+    """Tests for find_milestone."""
 
-    monkeypatch.setattr(gh._sp, "run", fake_run)
-    assert gh.milestone_issue_titles(11) == (None, False)
+    def test_returns_the_number_and_ok_true_when_found(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        payload = b'{"number": 11, "title": "v1.20.0 milestone"}\n'
+
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.CompletedProcess(cmd, 0, payload, b"")
+
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.find_milestone("v1.20.0 milestone") == (11, True)
+
+    def test_asks_for_closed_milestones_too(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Without ?state=all, GitHub lists only OPEN milestones (documented default).
+
+        A finished sprint's milestone is CLOSED. If find_milestone can't see it, a
+        re-run of apply_plan reads "no such milestone", creates a duplicate under
+        the same title, and orphans every issue filed under the first one.
+        """
+        seen: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            seen.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        gh.find_milestone("v1.20.0 milestone")
+
+        assert "repos/{owner}/{repo}/milestones?state=all&per_page=100" in seen[0]
+
+    def test_returns_none_true_on_a_genuine_miss(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The call succeeded; no milestone with this title exists yet."""
+
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            payload = b'{"number": 3, "title": "unrelated milestone"}\n'
+            return subprocess.CompletedProcess(cmd, 0, payload, b"")
+
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.find_milestone("v1.20.0 milestone") == (None, True)
+
+    def test_returns_none_false_when_the_gh_call_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-zero gh exit must be distinguishable from a genuine miss — reading
+        it as "doesn't exist" would make apply_plan re-file a duplicate milestone
+        on a re-run after a transient failure."""
+
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.CompletedProcess(cmd, 1, b"", b"gh: rate limited")
+
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.find_milestone("v1.20.0 milestone") == (None, False)
+
+    def test_returns_none_false_on_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            raise subprocess.TimeoutExpired(cmd, 30)
+
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.find_milestone("v1.20.0 milestone") == (None, False)
+
+    def test_skips_an_unparseable_jq_line_and_still_finds_a_later_match(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One malformed line in the --jq stream must not abort the scan — a
+        later, well-formed line with the matching title still resolves."""
+        payload = b"not json\n" + b'{"number": 11, "title": "v1.20.0 milestone"}\n'
+
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.CompletedProcess(cmd, 0, payload, b"")
+
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.find_milestone("v1.20.0 milestone") == (11, True)
+
+
+class TestMilestoneIssueTitles:
+    """Tests for milestone_issue_titles."""
+
+    def test_maps_title_to_number(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Why: the em-dash is non-ASCII, so this cannot be a bytes literal — `gh`
+        # emits UTF-8 and the helper must decode it, so encode the fixture the same way.
+        payload = '[{"number": 1155, "title": "RFC 0011 A1 — park class"}]'.encode()
+
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.CompletedProcess(cmd, 0, payload, b"")
+
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.milestone_issue_titles(11) == ({"RFC 0011 A1 — park class": 1155}, True)
+
+    def test_returns_none_false_when_the_gh_call_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.CompletedProcess(cmd, 1, b"", b"gh: not authenticated")
+
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.milestone_issue_titles(11) == (None, False)
+
+    def test_returns_none_false_on_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            raise subprocess.TimeoutExpired(cmd, 30)
+
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.milestone_issue_titles(11) == (None, False)
+
+    def test_returns_none_false_on_malformed_json(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.CompletedProcess(cmd, 0, b"not json", b"")
+
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.milestone_issue_titles(11) == (None, False)
+
+    def test_returns_none_false_when_the_payload_is_not_a_list(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.CompletedProcess(cmd, 0, b'{"not": "a list"}', b"")
+
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.milestone_issue_titles(11) == (None, False)
+
+    def test_a_milestone_with_no_issues_returns_an_empty_dict_not_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A milestone that exists but has nothing filed under it yet is
+        ``({}, True)`` — NOT ``(None, True)``. Conflating the two would make
+        apply_plan treat a genuinely-empty milestone as a failed lookup."""
+
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.CompletedProcess(cmd, 0, b"[]", b"")
+
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.milestone_issue_titles(11) == ({}, True)
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1285,16 +1488,46 @@ Expected: FAIL — `AttributeError: module 'cw.gh' has no attribute 'create_issu
 
 - [ ] **Step 3: Implement the helpers**
 
-Append to `src/cw/gh.py`. Match the file's established shape: module-level timeout
-constants, `_sp.run(..., capture_output=True, check=False)`, `except (OSError,
+First, edit `src/cw/gh.py`'s EXISTING top-of-file import block — the one that
+currently ends at `from urllib.parse import quote as _urlquote` (line 8) — to
+add `tempfile`, `re`, `contextmanager`, and `Path`. Do **not** add these at the
+insertion point below with the appended functions: landing new imports after
+~478 lines of existing code trips ruff's E402 (no per-file ignore exists for
+`src/cw/gh.py`). `Iterator` is used only inside the annotation
+`def _body_file(body: str) -> Iterator[Path]:` — with `from __future__ import
+annotations` already at the top of the file, annotations are strings at
+runtime, so `Iterator` only needs to be visible to type checkers. Ruff's TCH003
+therefore requires it under `TYPE_CHECKING` rather than a real import; this is
+the same shape already used in `src/cw/_util.py` and `src/cw/history.py`.
+`Path`, `tempfile`, and `contextmanager` ARE used at runtime (`Path(handle.name)`,
+`path.unlink(...)`, the `@contextmanager` decorator), so they stay real imports.
+
+The whole header becomes:
+
+```python
+"""GitHub CLI helpers for cw."""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess as _sp
+import tempfile
+from contextlib import contextmanager
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+from urllib.parse import quote as _urlquote
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+```
+
+Then append the following to the end of `src/cw/gh.py`, below its existing code.
+Match the file's established shape: module-level timeout constants,
+`_sp.run(..., capture_output=True, check=False)`, `except (OSError,
 _sp.TimeoutExpired)` → `None`.
 
 ```python
-import tempfile
-from contextlib import contextmanager
-from collections.abc import Iterator
-from pathlib import Path
-
 _CREATE_TIMEOUT = 30
 _ISSUE_URL_NUMBER_RE = re.compile(r"/(\d+)\s*$")
 
@@ -1432,7 +1665,22 @@ def create_milestone(title: str, *, timeout: int = _CREATE_TIMEOUT) -> int | Non
 
 
 def find_milestone(title: str, *, timeout: int = _CREATE_TIMEOUT) -> tuple[int | None, bool]:
-    """Return (number, ok) for an existing open milestone titled *title*.
+    """Return (number, ok) for an existing milestone titled *title*, open OR closed.
+
+    ``?state=all`` is load-bearing, not decoration. GitHub's "List milestones"
+    defaults ``state`` to ``open``, so without it a milestone that has been
+    CLOSED (which is what happens to a sprint's milestone once the sprint ends)
+    is invisible here — apply_plan would read that as "no such milestone",
+    create a SECOND one with the same title, and orphan the issues filed under
+    the first. That is precisely the duplicate-filing this function exists to
+    prevent. It goes in the path as a query string: ``-f state=all`` would flip
+    gh's auto-method from GET to POST.
+
+    ``&per_page=100`` is equally load-bearing. ``gh api`` pagination is
+    opt-in — without an explicit ``per_page``, GitHub returns only the first
+    page (30 items) of milestones. A repo with more than 30 milestones would
+    silently drop the older ones from this scan, reintroducing the exact
+    duplicate-milestone bug ``?state=all`` was added to prevent.
 
     ``ok=False`` means the gh call itself failed (non-zero exit, OSError,
     timeout) — the caller cannot conclude the milestone is absent, only that it
@@ -1443,7 +1691,11 @@ def find_milestone(title: str, *, timeout: int = _CREATE_TIMEOUT) -> tuple[int |
     """
     try:
         result = _sp.run(
-            ["gh", "api", "repos/{owner}/{repo}/milestones", "--jq", ".[] | {number, title}"],
+            [
+                "gh", "api",
+                "repos/{owner}/{repo}/milestones?state=all&per_page=100",
+                "--jq", ".[] | {number, title}",
+            ],
             capture_output=True,
             timeout=timeout,
             check=False,
@@ -1478,6 +1730,10 @@ def milestone_issue_titles(
     Note: if two issues under *milestone* share the exact same title, this dict
     comprehension keeps only the last one seen. The idempotent re-entry check
     in ``apply_plan`` assumes ticket/epic titles are unique within a milestone.
+
+    Note also the ``--limit 200`` cap below: only the 200 most recent issues
+    under *milestone* are considered. A milestone with more than 200 issues
+    filed against it will silently omit the older ones from the returned dict.
 
     Passing the numeric id to ``gh issue list --milestone`` is correct here and
     is NOT the same bug as in ``create_issue``: list documents its flag as
@@ -1514,8 +1770,6 @@ def milestone_issue_titles(
     }
     return titles, True
 ```
-
-Add `import re` to `gh.py`'s imports if absent.
 
 - [ ] **Step 4: Run tests to verify they pass**
 

@@ -96,6 +96,21 @@ def _make_daemon_session(
     )
 
 
+def _write_project_config_yaml(root: Path, content: str) -> None:
+    """Write .claude/project-config.yaml under *root*.
+
+    Shared by test_tracker.py's and test_review_strategy.py's own private
+    `_write_config` copies in shape (write a project-config.yaml under a tmp
+    root); this is the canonical version new tests should import instead of
+    adding a fourth copy. The two existing private copies in test_tracker.py
+    and test_review_strategy.py are left as-is — pre-existing duplication,
+    out of scope for this ticket.
+    """
+    config_dir = root / ".claude"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "project-config.yaml").write_text(content, encoding="utf-8")
+
+
 def plan_body(*, spec: bool = True, soundness: bool = True) -> str:
     """Build a plan-of-record body with optional signoff markers.
 
