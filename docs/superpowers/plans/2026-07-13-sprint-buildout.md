@@ -1102,6 +1102,36 @@ git commit -m "feat(sprint): buildout config block and plan builder"
   `update_issue_body` are mutations: a `None`/`False` there is unambiguously a
   failure, so they keep their plain return type.
 
+## Touch-point Contract
+
+- Touch-point: `src/cw/gh.py` import-block insertion point
+  File:line: `src/cw/gh.py:1-8`
+  Read: `"""GitHub CLI helpers for cw."""` / `from __future__ import annotations` / `import json` / `import subprocess as _sp` / `from typing import Any` / `from urllib.parse import quote as _urlquote` (the last line of the existing top-of-file import block; the file is currently 477 lines total)
+  Plan asserts: new imports (`tempfile`, `re`, `contextmanager`, `Path`, `TYPE_CHECKING`) must be added to this existing header, not appended near the new functions at the end of the ~478-line file, to avoid tripping ruff's E402.
+  Match: CONFIRMED
+
+- Touch-point: `TYPE_CHECKING`-guarded `Iterator` import precedent
+  File:line: `src/cw/_util.py:13,15-16`; `src/cw/history.py:11,19-20`
+  Read: `_util.py` — `from typing import TYPE_CHECKING` (13) ... `if TYPE_CHECKING:` / `    from collections.abc import Iterator` (15-16). `history.py` — `from typing import TYPE_CHECKING` (11) ... `if TYPE_CHECKING:` / `    from collections.abc import Iterator` (19-20).
+  Plan asserts: `gh.py`'s new `def _body_file(body: str) -> Iterator[Path]:` annotation should guard `Iterator` under `TYPE_CHECKING` — "the same shape already used in `src/cw/_util.py` and `src/cw/history.py`."
+  Match: CONFIRMED
+
+- Touch-point: `tests/test_gh.py`'s 7 existing `class Test*:` groups
+  File:line: `tests/test_gh.py:44,358,415,533,812,852,921`
+  Read: `class TestPrIsMergedForTicket:` (44), `class TestPrExistsForBranch:` (358), `class TestBranchExistsOnOrigin:` (415), `class TestFetchApprovedPlanComment:` (533), `class TestCurrentGhLogin:` (812), `class TestFetchPrView:` (852), `class TestAddPrReviewer:` (921) — seven `class Test<FunctionName>:` groups; no bare top-level test functions exist in the file.
+  Plan asserts: "following that file's existing monkeypatch-of-`_sp.run` pattern AND its existing `class Test<FunctionName>:` grouping (all 7 existing test groups in the file use this shape — do not add bare top-level test functions)."
+  Match: CONFIRMED
+
+## Pre-flight Resolution Conformance
+
+- R1: LOOKUP helpers (`find_milestone`, `milestone_issue_titles`) return `tuple[T | None, bool]`, not bare `T | None`, so a transient `gh` failure is distinguishable from a genuine miss — the plan's Interfaces block and implementation both use this exact shape, with docstrings explaining the `(None, False)` vs `(None, True)` split. [SATISFIED]
+- R2: MUTATION helpers (`create_milestone`, `create_issue`, `update_issue_body`) keep simple, non-tupled returns — plan interfaces show `int | None`, `int | None`, `bool` respectively, with no tuple-ification. [SATISFIED]
+- R3: Policy-free convention (return value/failure sentinel, never log, never raise, caller decides meaning) — stated verbatim in the Interfaces block preamble and followed in every implemented function (`except (OSError, _sp.TimeoutExpired): return None`/`False`, no logging calls anywhere). [SATISFIED]
+- R4: Bodies always go through `--body-file`, never `--body`/argv/heredoc — `_body_file` context manager is implemented and used by both `create_issue` and `update_issue_body`; `test_writes_the_body_to_a_temp_file_not_the_argv` explicitly asserts `"--body" not in calls[0]`. [SATISFIED]
+- R5: Test seam is `monkeypatch.setattr(gh._sp, "run", fake_run)`, with a test distinguishing call-failure `(None, False)` from genuine-miss `(None, True)` — used throughout; `TestFindMilestone.test_returns_none_true_on_a_genuine_miss` and `test_returns_none_false_when_the_gh_call_fails` cover exactly this pair (mirrored in `TestMilestoneIssueTitles`). [SATISFIED]
+- R6: Avoid non-ASCII bytes literals (`b'... — ...'` is a `SyntaxError`); build byte fixtures via `'...'.encode()` — `test_maps_title_to_number` does exactly this for the em-dash title, with an explanatory comment. [SATISFIED]
+- R7: Document (don't solve) the known limitation that duplicate issue titles collapse to one entry in `milestone_issue_titles` — the function's docstring states the assumption explicitly: "if two issues under *milestone* share the exact same title, this dict comprehension keeps only the last one seen. The idempotent re-entry check in `apply_plan` assumes ticket/epic titles are unique within a milestone." [SATISFIED]
+
 - [ ] **Step 1: Write the failing tests**
 
 Append to `tests/test_gh.py`, following that file's existing monkeypatch-of-`_sp.run`
@@ -1109,6 +1139,14 @@ pattern AND its existing `class Test<FunctionName>:` grouping (all 7 existing te
 groups in the file use this shape — do not add bare top-level test functions).
 Every test method annotates `monkeypatch: pytest.MonkeyPatch`, matching the file's
 existing `if TYPE_CHECKING: import pytest` header import.
+
+These new tests deliberately build ad hoc `fake_run` closures rather than reusing
+the file's existing `_make_run_result`/`_make_issue_result`/`_make_pr_result`
+helpers (lines 24-41): those helpers hand back `str` stdout via `MagicMock` with
+no `text=True` on the `_sp.run` call, whereas the new call sites intentionally
+omit `text=True` and return raw `bytes` (per the "Why: no text=True" comment
+already in this plan's test code), so a raw `CompletedProcess(cmd, code, bytes,
+bytes)` closure is the correct fake here, not the string-based helpers.
 
 ```python
 # Add to tests/test_gh.py's header. The file already imports `subprocess`, but
