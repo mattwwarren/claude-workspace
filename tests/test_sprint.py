@@ -139,7 +139,9 @@ def test_parse_rfc_refuses_scope_citing_an_undefined_decision() -> None:
 
 def test_parse_rfc_refuses_depends_on_an_unknown_ticket() -> None:
     mangled = MINIMAL_RFC.replace("- **Depends on:** S1", "- **Depends on:** ZZ9")
-    with pytest.raises(RfcContractError, match="ticket A1: Depends on unknown ticket: ZZ9"):
+    with pytest.raises(
+        RfcContractError, match="ticket A1: Depends on unknown ticket: ZZ9"
+    ):
         parse_rfc(mangled)
 
 
@@ -166,7 +168,9 @@ def test_parse_rfc_refuses_a_hard_wrapped_field_continuation_line() -> None:
 def test_load_rfc_text_prefers_origin_main(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+    def fake_run(
+        cmd: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[bytes]:
         return subprocess.CompletedProcess(cmd, 0, b"origin/main content", b"")
 
     monkeypatch.setattr(sprint._sp, "run", fake_run)
@@ -181,8 +185,12 @@ def test_load_rfc_text_falls_back_to_the_working_tree_on_a_nonzero_exit(
     rfc.parent.mkdir(parents=True)
     rfc.write_text("working tree content", encoding="utf-8")
 
-    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.CompletedProcess(cmd, 1, b"", b"fatal: path not in origin/main")
+    def fake_run(
+        cmd: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(
+            cmd, 1, b"", b"fatal: path not in origin/main"
+        )
 
     monkeypatch.setattr(sprint._sp, "run", fake_run)
     assert load_rfc_text("docs/rfcs/0011-x.md", tmp_path) == "working tree content"
@@ -196,8 +204,11 @@ def test_load_rfc_text_falls_back_to_the_working_tree_on_a_git_show_failure(
     rfc.parent.mkdir(parents=True)
     rfc.write_text("working tree content", encoding="utf-8")
 
-    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        raise OSError("git not found")
+    def fake_run(
+        cmd: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        msg = "git not found"
+        raise OSError(msg)
 
     monkeypatch.setattr(sprint._sp, "run", fake_run)
     assert load_rfc_text("docs/rfcs/0011-x.md", tmp_path) == "working tree content"
@@ -210,7 +221,9 @@ def test_parse_rfc_refuses_a_mangled_title_line() -> None:
         "# RFC 0011 — Availability- & Counterparty-Aware Holding",
         "# Not An RFC Title",
     )
-    with pytest.raises(RfcContractError, match=r"missing section: # RFC NNNN — <title>"):
+    with pytest.raises(
+        RfcContractError, match=r"missing section: # RFC NNNN — <title>"
+    ):
         parse_rfc(mangled)
 
 
