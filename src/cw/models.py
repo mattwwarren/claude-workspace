@@ -353,7 +353,12 @@ class PrState(BaseModel):
     ``gh pr view --json`` response. ``attention_state`` is the operator-facing
     escalation signal derived by ``_compute_attention_state``; None for drafts
     and terminal (MERGED/CLOSED) PRs. ``failing_checks`` carries the failing
-    check names for the ``pr.ci_failed`` event payload.
+    check names for the ``pr.ci_failed`` event payload. ``is_draft``,
+    ``reviewer_count``, and ``pending_count`` are the remaining
+    ``_compute_attention_state`` ladder inputs the poll path always computes
+    but previously never persisted (#1196) — storing them lets the webhook
+    push path recompute ``attention_state`` from the carried baseline without
+    re-fetching GitHub.
     """
 
     state: str = "OPEN"
@@ -362,6 +367,9 @@ class PrState(BaseModel):
     ci_ok: bool = True
     review_decision: str = ""
     attention_state: str | None = None
+    is_draft: bool = False
+    reviewer_count: int = 0
+    pending_count: int = 0
     failing_checks: list[str] = Field(default_factory=list)
     hydrated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
