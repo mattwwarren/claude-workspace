@@ -1707,9 +1707,10 @@ def _stage_advance_unchecked(
 
 # Maps a sentinel's ``AutoDevResult.stage_reached`` (the closed 7-value
 # StageReached literal, see cw.auto_dev_result) to the pipeline Stage it
-# represents completion of. Used by ``_sentinel_stage_matches`` to guard
-# against a late/replayed sentinel from a previous leg being routed against
-# whatever stage the task's row currently holds (#986 incident, GitHub #1019).
+# represents completion of. Used by ``_classify_sentinel_stage_position`` to
+# guard against a late/replayed sentinel from a previous leg being routed
+# against whatever stage the task's row currently holds (#986 incident, GitHub
+# #1019), and to classify a legitimate later-stage self-escalation (#1149).
 #
 # Stage.HARDEN is deliberately absent: it has no legitimate stage_reached
 # counterpart (RFC 0005 A1, dormant stage) -- every one of the 7 canonical
@@ -1737,24 +1738,124 @@ if set(_STAGE_REACHED_TO_STAGE) != _STAGE_REACHED_CANONICAL:
     raise AssertionError(_drift_msg)
 
 
-def _sentinel_stage_matches(
-    task: TicketTask, last_result: dict[str, object] | None
-) -> bool:
-    """True iff the sentinel's ``stage_reached`` agrees with ``task.stage``.
+_StagePosition = Literal["bypass", "earlier", "same", "later", "unresolvable"]
 
-    A missing/``None`` ``stage_reached`` (e.g. a ``BlockedResult``-derived
-    payload, which has no such field) bypasses this guard entirely -- Rule
-    1-6 routing proceeds exactly as before #1019. See
-    ``_STAGE_REACHED_TO_STAGE`` for the HARDEN-always-mismatches rationale.
+
+def _classify_sentinel_stage_position(
+    task: TicketTask,
+    last_result: dict[str, object] | None,
+    clients: dict[str, ClientConfig],
+) -> tuple[_StagePosition, list[Stage] | None, int | None]:
+    """Classify the sentinel's mapped stage relative to ``task.stage`` (#1149).
+
+    Returns ``(position, stages, target_idx)``. ``stages`` and ``target_idx``
+    are populated only for the ``"later"`` case (the pipeline stage list and
+    the walk's destination index); all other positions return ``(pos, None,
+    None)``.
+
+    - ``"bypass"``       -- no ``stage_reached`` to check (e.g. a
+      ``BlockedResult``-derived payload). Routing proceeds exactly as before
+      #1019.
+    - ``"earlier"``      -- the sentinel's stage precedes ``task.stage``: a
+      late/replayed sentinel from a previous leg (the #986 incident). Refuse.
+    - ``"same"``         -- exact match. Routes normally via the Rule 1-6 table,
+      exactly as the pre-#1149 equality guard did.
+    - ``"later"``        -- the sentinel's stage follows ``task.stage``: a
+      legitimate self-escalation the row has not yet caught up to. Walk forward.
+    - ``"unresolvable"`` -- a non-str ``stage_reached``, an unmapped value, an
+      unknown client, or a stage absent from the client's pipeline. Fail-closed
+      refuse, matching the pre-#1149 equality check's behavior for these cases.
+
+    Position is computed via ``pipeline.stages.index`` (R2) -- never the
+    ``Stage`` StrEnum's own ordering, which is alphabetical and unrelated to
+    pipeline order. See ``_STAGE_REACHED_TO_STAGE`` for the
+    HARDEN-always-mismatches rationale.
     """
-    if not isinstance(last_result, dict):
-        return True
-    stage_reached = last_result.get("stage_reached")
+    stage_reached = (
+        last_result.get("stage_reached") if isinstance(last_result, dict) else None
+    )
     if stage_reached is None:
-        return True
-    if not isinstance(stage_reached, str):
-        return False
-    return _STAGE_REACHED_TO_STAGE.get(stage_reached) == task.stage
+        return "bypass", None, None
+    mapped = (
+        _STAGE_REACHED_TO_STAGE.get(stage_reached)
+        if isinstance(stage_reached, str)
+        else None
+    )
+    client_cfg = clients.get(task.client)
+    if mapped is None or client_cfg is None:
+        return "unresolvable", None, None
+    stages = client_cfg.pipeline.stages
+    if task.stage not in stages or mapped not in stages:
+        return "unresolvable", None, None
+    task_idx = stages.index(task.stage)
+    sentinel_idx = stages.index(mapped)
+    if sentinel_idx < task_idx:
+        return "earlier", None, None
+    if sentinel_idx == task_idx:
+        return "same", None, None
+    return "later", stages, sentinel_idx
+
+
+def _walk_stage_pointer_forward(
+    task: TicketTask,
+    stages: list[Stage],
+    target_idx: int,
+    clients: dict[str, ClientConfig],
+) -> Literal["proceed", "parked"]:
+    """Walk ``task.stage`` forward to ``stages[target_idx]``, one rung at a time.
+
+    Each rung advances through ``_advance_task_pointer`` (the shared
+    ``TASK_STAGE_CHANGED`` chokepoint, dev_queue.py), so every real stage move
+    emits exactly one event. Before crossing a REVIEW rung, the operator-signoff
+    gate is checked -- if it applies, the walk stops at REVIEW and parks the
+    task ``AWAITING_OPERATOR_SIGNOFF`` (signoff is the ship checkpoint,
+    REVIEW->FINALIZE; RFC 0007 Phase 3, #990).
+
+    ``_advance_task_pointer`` unconditionally clears ``task.session_id`` on
+    every hop ("R6: clear session_id on advance"). That is correct for a genuine
+    single-hop advance, but a multi-hop walk must not blank the id before the
+    landing Rule 1-6 body reads it for its ``SESSION_NEEDS_ATTENTION`` event --
+    so the real id is captured once and restored after each hop. The landing
+    Rule's own genuine advance (Rule 3) still clears it, exactly as pre-#1149
+    single-hop behavior. See GitHub #1149 (plan-review MUST_FIX #1).
+    """
+    original_session_id = task.session_id
+    while stages.index(task.stage) < target_idx:
+        if task.stage == Stage.REVIEW and _should_gate_for_signoff(task, clients):
+            transition_task_status(
+                task,
+                QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+                disposition=SIGNOFF_GATE_DISPOSITION,
+            )
+            return "parked"
+        _advance_task_pointer(task, stages)
+        task.session_id = original_session_id
+    return "proceed"
+
+
+def _resolve_stage_walk(
+    task: TicketTask,
+    last_result: dict[str, object] | None,
+    clients: dict[str, ClientConfig],
+) -> Literal["refuse", "proceed", "parked"]:
+    """Decide how a sentinel's stage position routes against ``task.stage`` (#1149).
+
+    Earlier-stage replays and unresolvable positions refuse (fail-closed, the
+    #1019/#986 guard, preserved); same-stage and bypass proceed to the ordinary
+    Rule 1-6 table (unchanged); a later-stage sentinel walks ``task.stage``
+    forward to the sentinel's stage via ``_walk_stage_pointer_forward``, then
+    proceeds (or parks at a REVIEW signoff gate). The walk mutates ``task.stage``
+    in place as a side effect -- the caller then applies the Rule 1-6 table at
+    the now-matching stage.
+    """
+    position, stages, target_idx = _classify_sentinel_stage_position(
+        task, last_result, clients
+    )
+    if position == "later" and stages is not None and target_idx is not None:
+        return _walk_stage_pointer_forward(task, stages, target_idx, clients)
+    if position in ("earlier", "unresolvable"):
+        return "refuse"
+    return "proceed"
 
 
 def apply_staged_decision(
@@ -1863,15 +1964,21 @@ def _route_staged_decision(
     a late-sentinel rescue lands in exactly the state its live counterpart would
     (#918). No status precondition — callers gate as needed. Mutates in place.
 
-    First checks the sentinel's ``stage_reached`` against ``task.stage``
-    (GitHub #1019, the #986 incident): a late/replayed sentinel from a
-    previous leg must not be routed against whatever stage the row currently
-    holds. On mismatch this is a true no-op -- no status transition, no
-    ``save_dev_queue`` by callers that gate on the return value -- and
-    ``SENTINEL_STAGE_MISMATCH`` is emitted for observability. Returns
-    ``False`` on refusal, ``True`` for every other path (routed normally).
+    First classifies the sentinel's ``stage_reached`` against ``task.stage`` by
+    pipeline position (``_resolve_stage_walk``, GitHub #1149, extending #1019).
+    An *earlier*-stage or unresolvable sentinel (a late/replayed sentinel from a
+    previous leg, the #986 incident) is refused: a true no-op -- no status
+    transition, no ``save_dev_queue`` by callers that gate on the return value
+    -- and ``SENTINEL_STAGE_MISMATCH`` is emitted for observability. A *later*-
+    stage sentinel (a legitimate self-escalation the row lags behind) walks
+    ``task.stage`` forward one rung at a time to the sentinel's stage, then the
+    Rule 1-6 table applies at the now-matching stage; if a REVIEW signoff gate
+    intervenes the walk parks the task and returns without applying the table.
+    Same-stage and no-``stage_reached`` sentinels route through Rule 1-6 exactly
+    as before. Returns ``False`` on refusal, ``True`` for every routed path.
     """
-    if not _sentinel_stage_matches(task, last_result):
+    walk_outcome = _resolve_stage_walk(task, last_result, clients)
+    if walk_outcome == "refuse":
         stage_reached = (
             last_result.get("stage_reached") if isinstance(last_result, dict) else None
         )
@@ -1888,6 +1995,12 @@ def _route_staged_decision(
         )
         return False
     _persist_carried_context(task, last_result)
+    if walk_outcome == "parked":
+        # A later-stage sentinel that stopped at a REVIEW signoff gate: the task
+        # is already parked AWAITING_OPERATOR_SIGNOFF by the walk. Do not apply
+        # the Rule 1-6 status table (the sentinel's status was never observed at
+        # this stage). Routed, so callers persist the parked state (#1149).
+        return True
     disposition = _derive_disposition(status)
     pr_url = _extract_pr_url(last_result)
     if status in SCOPE_GATED_APPROVAL_STATUSES:
