@@ -315,12 +315,16 @@ def _config() -> BuildoutConfig:
 
 def test_build_plan_renders_the_milestone_title() -> None:
     plan = build_plan(parse_rfc(MINIMAL_RFC), _config(), version="1.20.0")
-    assert plan.milestone_title == "v1.20.0 — Availability- & Counterparty-Aware Holding"
+    assert (
+        plan.milestone_title == "v1.20.0 — Availability- & Counterparty-Aware Holding"
+    )
 
 
 def test_build_plan_renders_epic_titles_and_embeds_the_children_marker() -> None:
     plan = build_plan(parse_rfc(MINIMAL_RFC), _config(), version="1.20.0")
-    assert [e.title for e in plan.epics] == ["epic: Availability-aware holding (inward)"]
+    assert [e.title for e in plan.epics] == [
+        "epic: Availability-aware holding (inward)"
+    ]
     # The marker is templated in from the start so the checklist backfill is a
     # marker replacement, not a fragile string-surgery pass.
     assert "<!-- children -->" in plan.epics[0].body

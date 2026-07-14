@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from cw.exceptions import RfcContractError
+from cw.tracker import load_project_config_dict
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -305,3 +306,199 @@ def parse_rfc(text: str) -> RfcDoc:
     )
     _validate_cross_references(doc)
     return doc
+
+
+_EPIC_FOOTER_NOTE = (
+    "Children are listed below. This checklist is maintained by "
+    "`cw sprint apply`; the marker comment is its insertion point."
+)
+
+
+class NotionConfig(BaseModel):
+    """Optional Notion mirror settings. Absent ⇒ the skill skips the Notion phase."""
+
+    data_source: str
+    project_page: str
+    sprint_page_properties: dict[str, str] = Field(default_factory=dict)
+
+
+class BuildoutConfig(BaseModel):
+    """The ``sprint_buildout:`` block of .claude/project-config.yaml."""
+
+    milestone_title_pattern: str
+    epic_title_pattern: str
+    epic_labels: list[str] = Field(default_factory=list)
+    children_marker: str
+    ticket_title_pattern: str
+    ticket_labels: list[str] = Field(default_factory=list)
+    ticket_footer_pattern: str
+    ticket_footer_epic_clause: str
+    notion: NotionConfig | None = None
+
+    @classmethod
+    def from_block(cls, block: dict[str, object]) -> BuildoutConfig:
+        """Build from the nested YAML shape (milestone:/epic:/ticket:/notion:).
+
+        The model is deliberately flat while the YAML is nested — the YAML groups
+        keys for the human reader; the code wants them addressable. Not named
+        ``model_validate_*``: that namespace is Pydantic's, and shadowing it invites
+        a caller to reach for ``model_validate`` (which would reject this shape).
+        """
+        milestone = _require_mapping(block, "milestone")
+        epic = _require_mapping(block, "epic")
+        ticket = _require_mapping(block, "ticket")
+        notion_raw = block.get("notion")
+        return cls(
+            milestone_title_pattern=str(milestone["title_pattern"]),
+            epic_title_pattern=str(epic["title_pattern"]),
+            epic_labels=_str_list(epic.get("labels")),
+            children_marker=str(epic["children_marker"]),
+            ticket_title_pattern=str(ticket["title_pattern"]),
+            ticket_labels=_str_list(ticket.get("labels")),
+            ticket_footer_pattern=str(ticket["footer_pattern"]),
+            ticket_footer_epic_clause=str(ticket["footer_epic_clause"]),
+            notion=NotionConfig.model_validate(notion_raw)
+            if isinstance(notion_raw, dict)
+            else None,
+        )
+
+
+def _require_mapping(block: dict[str, object], key: str) -> dict[str, object]:
+    value = block.get(key)
+    if not isinstance(value, dict):
+        msg = f"sprint_buildout: missing or malformed section: {key}"
+        raise RfcContractError(msg)
+    return value
+
+
+def _str_list(value: object) -> list[str]:
+    """Coerce an optional/absent YAML list field to ``list[str]``.
+
+    ``labels:`` is declared as a YAML list but read back through
+    ``dict[str, object]`` (no schema-typed intermediate), so mypy sees
+    ``object`` at this seam — narrow explicitly rather than trusting the
+    YAML shape. Absent or falsy (``None``, empty list) both degrade to ``[]``.
+    """
+    if not isinstance(value, list):
+        return []
+    return [str(x) for x in value]
+
+
+def load_buildout_config(root: Path) -> BuildoutConfig:
+    """Read the sprint_buildout block, or raise with a pointer to the reference doc."""
+    raw = load_project_config_dict(root)
+    block = raw.get("sprint_buildout") if raw is not None else None
+    if not isinstance(block, dict):
+        msg = (
+            "missing sprint_buildout block in .claude/project-config.yaml — "
+            "see config/CONFIG_REFERENCE.md"
+        )
+        raise RfcContractError(msg)
+    return BuildoutConfig.from_block(block)
+
+
+class IssueDraft(BaseModel):
+    """One issue to create. ``code`` is the RFC ticket code, or the epic key."""
+
+    kind: str  # "epic" | "ticket"
+    code: str
+    title: str
+    body: str
+    labels: list[str] = Field(default_factory=list)
+
+
+class BuildoutPlan(BaseModel):
+    """Everything `cw sprint apply` needs. Written to disk; reviewed by a human.
+
+    Self-contained on purpose — including ``children_marker``, which is a config
+    value. The plan is written, reviewed by the operator, then applied, possibly by
+    a later invocation; apply must not depend on config having stayed unchanged in
+    between. The artifact carries everything it needs.
+    """
+
+    rfc_number: str
+    rfc_title: str
+    milestone_title: str
+    children_marker: str
+    epics: list[IssueDraft] = Field(default_factory=list)
+    tickets: list[IssueDraft] = Field(default_factory=list)
+    sprint_map: dict[int, list[str]] = Field(default_factory=dict)
+    epic_children: dict[str, list[str]] = Field(default_factory=dict)
+    references: list[str] = Field(default_factory=list)
+
+
+def _epic_body(epic: EpicSpec, marker: str) -> str:
+    return (
+        f"## Intent\n\n{epic.intent}\n\n"
+        f"## Workstreams\n\n{_EPIC_FOOTER_NOTE}\n\n{marker}\n"
+    )
+
+
+def _ticket_body(ticket: TicketSpec, doc: RfcDoc, cfg: BuildoutConfig) -> str:
+    scope = "\n".join(f"- {doc.decisions[d]}" for d in ticket.scope) or "- (none cited)"
+    deps = "\n".join(f"- {d}" for d in ticket.depends_on) or "- none"
+    acceptance = "\n".join(f"- [ ] {a}" for a in ticket.acceptance)
+    footer = cfg.ticket_footer_pattern.format(
+        rfc_num=doc.number,
+        wave=ticket.wave,
+        sprint=ticket.sprint,
+    )
+    # Epic-less tickets (RFC 0011's S1/S2) omit the clause entirely — no
+    # `Epic #—` placeholder ships. A ticket's footer either names its real
+    # epic or says nothing about epics at all.
+    if ticket.epic is not None:
+        footer += cfg.ticket_footer_epic_clause.format(epic=ticket.epic)
+    return (
+        f"## Context\n\n{ticket.context}\n\n"
+        f"## Scope\n\n{scope}\n\n"
+        f"## Dependencies\n\n{deps}\n\n"
+        f"## Acceptance\n\n{acceptance}\n\n"
+        f"---\n\n{footer}\n"
+    )
+
+
+def build_plan(doc: RfcDoc, cfg: BuildoutConfig, version: str) -> BuildoutPlan:
+    """Render every issue body from the RFC. Pure — no network, no side effects."""
+    epics = [
+        IssueDraft(
+            kind="epic",
+            code=epic.key,
+            title=cfg.epic_title_pattern.format(name=epic.name),
+            body=_epic_body(epic, cfg.children_marker),
+            labels=list(cfg.epic_labels),
+        )
+        for epic in doc.epics
+    ]
+    tickets = [
+        IssueDraft(
+            kind="ticket",
+            code=ticket.code,
+            title=cfg.ticket_title_pattern.format(
+                rfc_num=doc.number, code=ticket.code, name=ticket.name
+            ),
+            body=_ticket_body(ticket, doc, cfg),
+            labels=list(cfg.ticket_labels),
+        )
+        for ticket in doc.tickets
+    ]
+
+    sprint_map: dict[int, list[str]] = {}
+    epic_children: dict[str, list[str]] = {}
+    for ticket in doc.tickets:
+        sprint_map.setdefault(ticket.sprint, []).append(ticket.code)
+        if ticket.epic is not None:
+            epic_children.setdefault(ticket.epic, []).append(ticket.code)
+
+    return BuildoutPlan(
+        rfc_number=doc.number,
+        rfc_title=doc.title,
+        milestone_title=cfg.milestone_title_pattern.format(
+            version=version, rfc_title=doc.title
+        ),
+        children_marker=cfg.children_marker,
+        epics=epics,
+        tickets=tickets,
+        sprint_map=sprint_map,
+        epic_children=epic_children,
+        references=list(doc.references),
+    )
