@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from cw.exceptions import RfcContractError
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 _RFC_TITLE_RE = re.compile(
@@ -36,11 +37,15 @@ _FIELD_RE = re.compile(
 )
 _BULLET_RE = re.compile(r"^\s+-\s+(?P<item>.+?)\s*$", re.MULTILINE)
 
+_SEC_DESIGN = "## Design"
+_SEC_TICKETS = "## Tickets"
+_SEC_RESOLVED_DECISIONS = "## Resolved decisions"
+_SEC_REFERENCES = "## References"
 _REQUIRED_SECTIONS = (
-    "## Design",
-    "## Tickets",
-    "## Resolved decisions",
-    "## References",
+    _SEC_DESIGN,
+    _SEC_TICKETS,
+    _SEC_RESOLVED_DECISIONS,
+    _SEC_REFERENCES,
 )
 _REQUIRED_TICKET_FIELDS = (
     "Epic",
@@ -134,15 +139,27 @@ def _section(text: str, heading: str) -> str:
     return match.group("body")
 
 
+def _iter_matches_with_end(
+    pattern: re.Pattern[str], text: str
+) -> Iterator[tuple[re.Match[str], int]]:
+    """Yield each match of *pattern* in *text* paired with where its slice ends.
+
+    A match's body runs until the next match's start, or the end of *text* for
+    the last match — the boundary every ``###``/decision block parser in this
+    module needs to isolate one block from the next.
+    """
+    matches = list(pattern.finditer(text))
+    for i, match in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        yield match, end
+
+
 def _split_ticket_blocks(tickets_section: str) -> list[tuple[str, str, str]]:
     """Return [(code, name, block_body)] in document order."""
-    matches = list(_TICKET_RE.finditer(tickets_section))
-    blocks: list[tuple[str, str, str]] = []
-    for i, match in enumerate(matches):
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(tickets_section)
-        body = tickets_section[match.end() : end]
-        blocks.append((match.group("code"), match.group("name"), body))
-    return blocks
+    return [
+        (match.group("code"), match.group("name"), tickets_section[match.end() : end])
+        for match, end in _iter_matches_with_end(_TICKET_RE, tickets_section)
+    ]
 
 
 def _ticket_fields(code: str, block: str) -> dict[str, str]:
@@ -242,31 +259,21 @@ def _parse_epics(text: str) -> list[EpicSpec]:
     ``## Design`` section body (via ``_section(text, "## Design")``) — every
     sibling parser in this module is scoped the same way, so a stray
     ``### Epic``-shaped line elsewhere in the document is never picked up."""
-    matches = list(_EPIC_RE.finditer(text))
-    epics: list[EpicSpec] = []
-    for i, match in enumerate(matches):
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        intent = text[match.end() : end]
-        # Belt-and-suspenders: the caller already scopes `text` to ## Design, so
-        # this never matches — kept in case _parse_epics is ever called unscoped.
-        intent = re.split(r"^##\s", intent, maxsplit=1, flags=re.MULTILINE)[0]
-        epics.append(
-            EpicSpec(
-                key=match.group("key"),
-                name=match.group("name"),
-                intent=intent.strip(),
-            )
+    return [
+        EpicSpec(
+            key=match.group("key"),
+            name=match.group("name"),
+            intent=text[match.end() : end].strip(),
         )
-    return epics
+        for match, end in _iter_matches_with_end(_EPIC_RE, text)
+    ]
 
 
 def _parse_decisions(section: str) -> dict[str, str]:
-    matches = list(_DECISION_RE.finditer(section))
-    decisions: dict[str, str] = {}
-    for i, match in enumerate(matches):
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(section)
-        decisions[match.group("id")] = section[match.start() : end].strip().lstrip("- ")
-    return decisions
+    return {
+        match.group("id"): section[match.start() : end].strip().lstrip("- ")
+        for match, end in _iter_matches_with_end(_DECISION_RE, section)
+    }
 
 
 def parse_rfc(text: str) -> RfcDoc:
@@ -281,22 +288,19 @@ def parse_rfc(text: str) -> RfcDoc:
         msg = "missing section: # RFC NNNN — <title>"
         raise RfcContractError(msg)
 
-    for heading in _REQUIRED_SECTIONS:
-        _section(text, heading)  # raises on absence
+    sections = {heading: _section(text, heading) for heading in _REQUIRED_SECTIONS}
 
-    tickets_section = _section(text, "## Tickets")
     doc = RfcDoc(
         number=title_match.group("number"),
         title=title_match.group("title"),
-        epics=_parse_epics(_section(text, "## Design")),
+        epics=_parse_epics(sections[_SEC_DESIGN]),
         tickets=[
             _parse_ticket(code, name, block)
-            for code, name, block in _split_ticket_blocks(tickets_section)
+            for code, name, block in _split_ticket_blocks(sections[_SEC_TICKETS])
         ],
-        decisions=_parse_decisions(_section(text, "## Resolved decisions")),
+        decisions=_parse_decisions(sections[_SEC_RESOLVED_DECISIONS]),
         references=[
-            m.group("ref")
-            for m in _REFERENCE_RE.finditer(_section(text, "## References"))
+            m.group("ref") for m in _REFERENCE_RE.finditer(sections[_SEC_REFERENCES])
         ],
     )
     _validate_cross_references(doc)

@@ -88,16 +88,19 @@ def test_parse_rfc_extracts_tickets_in_document_order() -> None:
     assert [t.code for t in doc.tickets] == ["S1", "A1"]
 
     s1, a1 = doc.tickets
+    assert s1.name == "counterparty axis + self-identity"
     assert s1.epic is None
     assert s1.wave == 0
     assert s1.sprint == 0
     assert s1.depends_on == []
+    assert s1.context == "The shared seam both epics build on."
     assert s1.scope == ["D-S1"]
     assert s1.acceptance == ["Counterparty resolves to self when no PR exists."]
 
     assert a1.name == "park class (keystone)"
     assert a1.epic == "I"
     assert a1.depends_on == ["S1"]
+    assert a1.context == "The keystone park class."
     assert len(a1.acceptance) == 2
 
 
