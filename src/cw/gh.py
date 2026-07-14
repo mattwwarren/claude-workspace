@@ -621,7 +621,7 @@ def create_milestone(title: str, *, timeout: int = _CREATE_TIMEOUT) -> int | Non
     if result.returncode != 0:
         return None
     try:
-        payload = json.loads(result.stdout)
+        payload = json.loads(result.stdout.decode("utf-8", "replace"))
     except json.JSONDecodeError:
         return None
     number = payload.get("number") if isinstance(payload, dict) else None
@@ -732,7 +732,7 @@ def milestone_issue_titles(
     if result.returncode != 0:
         return None, False
     try:
-        payload = json.loads(result.stdout)
+        payload = json.loads(result.stdout.decode("utf-8", "replace"))
     except json.JSONDecodeError:
         return None, False
     if not isinstance(payload, list):
