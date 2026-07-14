@@ -34,6 +34,7 @@ from cw.reconcile import _deps, _shared
 from cw.reconcile._shared import (
     _GH_CHECK_BLOCKED_REASON,
     _PHANTOM_REAP_MERGED_REASON,
+    _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
     ProposedAction,
     ReapCandidate,
     _apply_queue_mutations,
@@ -146,7 +147,18 @@ def _detect_phantom_candidates(
         # Non-terminal advance sentinel (stage_complete): the worker finished a
         # stage and exited. Route it to advance the stage instead of reverting it
         # as a crash (DAEMON only; USER sessions have no staged task). See #716.
-        if session.origin is SessionOrigin.DAEMON:
+        # #1149: skip a session already marked refused (an earlier-stage replay /
+        # unresolvable position stamped by _apply_phantom_routed_mutations on a
+        # prior tick) so the same doomed candidate is not re-offered forever;
+        # it falls through to the ordinary CRASH_COMPLETE construction below.
+        # Unlike idle.py, phantom.py's detect phase has no `last_result is None`
+        # precondition, so the apply-phase stamp alone would be inert here.
+        already_refused = (
+            isinstance(session.last_result, dict)
+            and session.last_result.get("paused_status")
+            == _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
+        )
+        if session.origin is SessionOrigin.DAEMON and not already_refused:
             advance = _phantom_advance_sentinel_candidate(session, ticket_id, lane)
             if advance is not None:
                 candidates.append(advance)
@@ -505,6 +517,14 @@ def _apply_phantom_routed_mutations(
             )
             routed = outcome.routed
         if not routed:
+            # #1149: mirror idle.py's refusal stamp — a stage-mismatch refusal
+            # (earlier-stage replay / unresolvable position) leaves the task
+            # untouched. Stamp a paused_status-only marker so the detect-phase
+            # skip check in _detect_phantom_candidates stops re-offering this
+            # same doomed candidate to _phantom_advance_sentinel_candidate.
+            session_by_id[candidate.session_id].last_result = {
+                "paused_status": _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
+            }
             continue
         session = session_by_id[candidate.session_id]
         session.status = SessionStatus.COMPLETED

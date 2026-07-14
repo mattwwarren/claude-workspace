@@ -38,6 +38,7 @@ from cw.reconcile._shared import (
     _GH_CHECK_BLOCKED_REASON,
     _LIVE_STATUSES,
     _PHANTOM_REAP_MERGED_REASON,
+    _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
     _SILENTLY_IDLE_REASON,
     ProposedAction,
     ReapCandidate,
@@ -432,6 +433,15 @@ def _apply_idle_routed_mutations(
             )
             routed = outcome.routed
         if not routed:
+            # #1149: a stage-mismatch refusal (earlier-stage replay / unresolvable
+            # position) leaves the task untouched. Stamp a paused_status-only
+            # marker so the next tick's `session.last_result is None` unrouted-check
+            # gate (_detect_idle_candidate_for_session) stops re-proposing this same
+            # doomed candidate forever. No "status" key -> _has_terminal_sentinel
+            # stays False and the ordinary idle-stall machinery still runs.
+            session_by_id[candidate.session_id].last_result = {
+                "paused_status": _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
+            }
             continue
         session = session_by_id[candidate.session_id]
         session.status = SessionStatus.COMPLETED

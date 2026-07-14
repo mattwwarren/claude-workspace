@@ -161,6 +161,13 @@ _FINALIZE_BLOCKED_REASON = "finalize_blocked"
 # checkout is dirty or ahead/diverged from origin — the #925/#940 isolation
 # breach (a worker escaped its worktree and committed on the main checkout).
 _MAIN_CHECKOUT_DRIFT_REASON = "main_checkout_drift"
+# paused_status written to session.last_result when a ROUTE_EMITTED_SENTINEL
+# candidate is refused by the shared staged-advance guard (an earlier-stage
+# replay or unresolvable position, #1019). Flips the "last_result is None"
+# unrouted-check gate false so the doomed candidate stops re-firing every tick
+# (GitHub #1149). Carries no "status" key, so _has_terminal_sentinel stays
+# False and the session is not mistaken for genuinely terminal.
+_SENTINEL_STAGE_MISMATCH_REFUSED_REASON = "sentinel_stage_mismatch_refused"
 # Git-state salvage constants (GitHub issue #497).
 _NEEDS_SALVAGE_REASON = "needs_salvage"
 _SALVAGE_KIND_GIT_STATE = "git_state_salvage"
@@ -693,6 +700,26 @@ def _parse_any_sentinel_from_transcript(
             return _try(surface_transcript)
 
     return None
+
+
+def classify_sentinel_stage_position(
+    task: TicketTask,
+    last_result: dict[str, object] | None,
+    clients: dict[str, ClientConfig],
+) -> tuple[str, list[Stage] | None, int | None]:
+    """Circular-safe re-export of dispatch's stage-position classifier (#1149).
+
+    ``cw.dispatch`` imports ``cw.reconcile`` at module level, so a top-level
+    import of the classifier from a reconcile sweep would create a cycle. This
+    thin wrapper (co-located with ``_apply_sentinel_to_task``, which delegates to
+    dispatch the same way) lets stalled.py's Path 1 backstop resolve a sentinel's
+    stage position against ``task.stage`` without an inline import at its own call
+    site. Returns ``(position, stages, target_idx)``; see
+    ``dispatch._classify_sentinel_stage_position`` for the semantics.
+    """
+    from cw.dispatch import _classify_sentinel_stage_position
+
+    return _classify_sentinel_stage_position(task, last_result, clients)
 
 
 class SentinelRouteOutcome(NamedTuple):
