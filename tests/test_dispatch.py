@@ -6555,9 +6555,7 @@ class TestApplyStagedDecision:
         assert routed is True
         assert task.stage == Stage.FINALIZE
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
-        advances = [
-            p for _, p, _ in stage_changed if p.get("direction") == "advance"
-        ]
+        advances = [p for _, p, _ in stage_changed if p.get("direction") == "advance"]
         assert len(advances) == 2
         assert advances[0]["old_stage"] == Stage.IMPL
         assert advances[0]["new_stage"] == Stage.REVIEW
@@ -6598,9 +6596,7 @@ class TestApplyStagedDecision:
         assert task.stage == Stage.REVIEW
         assert task.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
         assert task.disposition == SIGNOFF_GATE_DISPOSITION
-        advances = [
-            p for _, p, _ in stage_changed if p.get("direction") == "advance"
-        ]
+        advances = [p for _, p, _ in stage_changed if p.get("direction") == "advance"]
         assert len(advances) == 1
         assert advances[0]["old_stage"] == Stage.IMPL
         assert advances[0]["new_stage"] == Stage.REVIEW
@@ -6767,13 +6763,9 @@ class TestApplyStagedDecision:
             "status": "blocked",
             "stage_reached": "stage3_review",
         }
-        apply_staged_decision(
-            task, "blocked", last_result, self._clients(tmp_path)
-        )
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
 
-        advances = [
-            p for _, p, _ in stage_changed if p.get("direction") == "advance"
-        ]
+        advances = [p for _, p, _ in stage_changed if p.get("direction") == "advance"]
         # PLAN->IMPL, IMPL->REVIEW: exactly one event per real rung.
         assert len(advances) == 2
         assert task.stage == Stage.REVIEW
