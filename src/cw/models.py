@@ -165,7 +165,9 @@ CW_STATE_SCHEMA_VERSION = 14
 # v15: added DevQueueStore.watched_prs (GitHub #1154, RFC 0011 S2) — a
 #      top-level list of externally-requested PRs the operator is watching,
 #      distinct from the per-task queue.
-DEV_QUEUE_SCHEMA_VERSION = 15
+# v16: added TicketTask.request_reviewer_fired_at (GitHub #1197) — one-shot
+#      latch for the request_reviewer review recipe.
+DEV_QUEUE_SCHEMA_VERSION = 16
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -610,6 +612,15 @@ class TicketTask(BaseModel):
     # episode-end sweep when the row's pr_state leaves merge_blocked (or goes
     # None), re-arming the latch for a genuine future re-entry.
     escalate_merge_block_fired_at: datetime | None = None
+    # GitHub #1197 — one-shot latch for the request_reviewer review recipe
+    # (cw.reconcile.review_recipes). Stamped by _prepare_request_reviewer_job
+    # when it emits PR_ACTION_TAKEN for a no_reviewer PR, so the reviewer
+    # request fires exactly once per no-reviewer episode rather than every
+    # reconcile tick. Cleared by _act_request_reviewer's own episode-end sweep
+    # when the row's pr_state leaves no_reviewer (or goes None), re-arming the
+    # latch for a genuine future re-entry — mirrors
+    # escalate_merge_block_fired_at above.
+    request_reviewer_fired_at: datetime | None = None
 
     @field_validator("gate_recipes")
     @classmethod
