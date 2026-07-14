@@ -3007,6 +3007,90 @@ class TestSignalStop:
             e.payload.get("session_id") == session.id for e in timed_out_events
         )
 
+    def test_signal_stop_later_stage_sentinel_completes_session(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """GitHub #1149 incident repro: a LATER-stage sentinel
+        (stage_reached=stage4b_pr_create/FINALIZE against an IMPL-stage task,
+        no signoff gate configured) must route via the shared staged-advance
+        authority's "later" walk and complete the session -- not silently
+        no-op and re-fire on every subsequent Stop-hook turn, as it did
+        before the #1149 R1 walk was added (the row would sit at IMPL
+        forever, `apply_staged_decision`'s equality-only stage check would
+        reject the FINALIZE-stage payload every time).
+        """
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        worktree, session = self._setup_headless_session(
+            tmp_path, "sess-1149-later", "worktree-1149-later"
+        )
+        _write_staged_clients_yaml_for_test(tmp_config_dir, "test-client")
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=self.SEED_TICKET_ID,
+                        client="test-client",
+                        status=QueueItemStatus.RUNNING,
+                        session_id=session.id,
+                        # Row sits at IMPL; the sentinel self-escalated to
+                        # FINALIZE. No task.signoff configured, so the walk
+                        # crosses REVIEW without gating.
+                        stage=Stage.IMPL,
+                        attempts=1,
+                    )
+                ]
+            )
+        )
+        self._write_headless_context(worktree, session_id=session.id)
+
+        claude_session_id = "uuid-1149-later"
+        fake_home = tmp_path / "fake-home-1149-later"
+        self._write_transcript(
+            worktree, claude_session_id, _SENTINEL_1149_LATER_STAGE_BLOCKED, fake_home
+        )
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
+
+        runner = CliRunner()
+        with freeze_time(datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)):
+            result = runner.invoke(
+                main,
+                ["signal-stop"],
+                input=json.dumps(
+                    {
+                        "session_id": claude_session_id,
+                        "cwd": str(worktree),
+                        "hook_event_name": "Stop",
+                    }
+                ),
+            )
+        assert result.exit_code == 0, result.output
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status == SessionStatus.COMPLETED
+
+        task = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == self.SEED_TICKET_ID
+        )
+        # The walk landed at FINALIZE and Rule 5 routed the blocked status
+        # there -- the row is no longer stuck at IMPL.
+        assert task.stage == Stage.FINALIZE
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+
+        events = read_events(
+            consumer="test-1149-later",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert len(events) == 1
+        assert events[0].payload["session_id"] == session.id
+
 
 class TestSentinelPresentInTranscript:
     """Direct tests for the real _sentinel_present_in_transcript helper.
@@ -3598,6 +3682,37 @@ _SENTINEL_918_STAGE_COMPLETE = (
 _SENTINEL_918_MALFORMED = (
     "<<<AUTO_DEV_RESULT\n"
     '{"schema_version": 4, "ticket_id": "137", "status": "proceed"}\n'
+    "AUTO_DEV_RESULT>>>"
+)
+
+# GitHub #1149: a LATER-stage sentinel -- stage_reached=stage4b_pr_create
+# (FINALIZE) against an IMPL-stage task row -- a legitimate self-escalation
+# the row hasn't caught up to. Mirrors test_dispatch.py's
+# test_later_stage_walks_forward_one_rung_at_a_time fixture shape.
+_SENTINEL_1149_LATER_STAGE_BLOCKED = (
+    "<<<AUTO_DEV_RESULT\n"
+    "{\n"
+    '  "schema_version": 4,\n'
+    '  "ticket_id": "137",\n'
+    '  "status": "blocked",\n'
+    '  "stage_reached": "stage4b_pr_create",\n'
+    '  "scope": {"tier": "small", "files": 3, "lines_estimate": 60, '
+    '"lines_actual": 55, "forbidden_touched": false},\n'
+    '  "plan_source": "github_issue_existing",\n'
+    '  "branch": "dev/137",\n'
+    '  "worktree_path": null,\n'
+    '  "fork_point_sha": "abc1149",\n'
+    '  "commits": ["sha1149"],\n'
+    '  "pr": null,\n'
+    '  "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},\n'
+    '  "health": {"lowest_agent_confidence": "HIGH", "any_incomplete_risk": false, '
+    '"shortcuts": [], "recommendation": "PROCEED", "downgrade_applied": false, '
+    '"fix_loop_escalated": false},\n'
+    '  "friction_highlights": [],\n'
+    '  "blocker": {"stage": "stage4b_pr_create", "reason": "merge_gate_failed", '
+    '"retry_eligible": false, "details": "self-escalated", "next_actions": []},\n'
+    '  "next_actions": []\n'
+    "}\n"
     "AUTO_DEV_RESULT>>>"
 )
 
