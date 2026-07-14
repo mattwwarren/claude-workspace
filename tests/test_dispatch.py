@@ -6500,6 +6500,334 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.PENDING
         assert task.stage == Stage.IMPL
 
+    # ------------------------------------------------------------------
+    # GitHub #1149 Path 2: later-stage self-escalation walks forward
+    # instead of refusing. Earlier-stage replays stay refused (#1019).
+    # ------------------------------------------------------------------
+
+    def _reordered_clients(
+        self, tmp_path: Path, stages: list[Stage]
+    ) -> dict[str, ClientConfig]:
+        """A client whose pipeline.stages is explicitly ordered as *stages*."""
+        from cw.models import StagePipelineConfig
+
+        return {
+            "test-client": ClientConfig(
+                name="test-client",
+                workspace_path=tmp_path,
+                pipeline=StagePipelineConfig(stages=stages),
+            )
+        }
+
+    def test_later_stage_walks_forward_one_rung_at_a_time(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """IMPL task + FINALIZE sentinel walks IMPL->REVIEW->FINALIZE (#1149).
+
+        The Path 2 repro shape: a worker self-escalated to FINALIZE while the
+        row stayed at IMPL. The walk advances one rung at a time (two
+        TASK_STAGE_CHANGED events) and Rule 5 then routes the blocked status at
+        the landed FINALIZE stage. Pins that the walk preserves task.session_id
+        across each _advance_task_pointer hop (plan-review MUST_FIX #1).
+        """
+        from cw.dispatch import apply_staged_decision
+
+        attention = capture_events(
+            "cw.dispatch", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+        stage_changed = capture_events(
+            "cw.dev_queue", OrchestratorEventType.TASK_STAGE_CHANGED
+        )
+
+        task = self._make_running_task("WALK-1", stage=Stage.IMPL)
+        task.session_id = "sess-walk-1"
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "stage_reached": "stage4b_pr_create",
+        }
+        routed = apply_staged_decision(
+            task, "blocked", last_result, self._clients(tmp_path)
+        )
+
+        assert routed is True
+        assert task.stage == Stage.FINALIZE
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        advances = [
+            p for _, p, _ in stage_changed if p.get("direction") == "advance"
+        ]
+        assert len(advances) == 2
+        assert advances[0]["old_stage"] == Stage.IMPL
+        assert advances[0]["new_stage"] == Stage.REVIEW
+        assert advances[1]["old_stage"] == Stage.REVIEW
+        assert advances[1]["new_stage"] == Stage.FINALIZE
+        # The landing Rule's SESSION_NEEDS_ATTENTION must carry the real
+        # session id, not "" (dev_queue.py's per-hop session_id clear must not
+        # leak through the walk).
+        assert len(attention) == 1
+        assert attention[0][1]["session_id"] == "sess-walk-1"
+
+    def test_later_stage_stops_at_review_signoff_gate(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """A signoff gate stops the walk at REVIEW instead of crossing it (#1149)."""
+        from cw.dev_queue import SIGNOFF_GATE_DISPOSITION
+        from cw.dispatch import apply_staged_decision
+
+        stage_changed = capture_events(
+            "cw.dev_queue", OrchestratorEventType.TASK_STAGE_CHANGED
+        )
+
+        task = self._make_running_task("WALK-SIGNOFF-1", stage=Stage.IMPL)
+        task.session_id = "sess-walk-signoff-1"
+        task.signoff = "operator"
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "stage_reached": "stage4b_pr_create",
+        }
+        routed = apply_staged_decision(
+            task, "blocked", last_result, self._clients(tmp_path)
+        )
+
+        assert routed is True
+        assert task.stage == Stage.REVIEW
+        assert task.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+        assert task.disposition == SIGNOFF_GATE_DISPOSITION
+        advances = [
+            p for _, p, _ in stage_changed if p.get("direction") == "advance"
+        ]
+        assert len(advances) == 1
+        assert advances[0]["old_stage"] == Stage.IMPL
+        assert advances[0]["new_stage"] == Stage.REVIEW
+        # Park outcome must not leak the per-hop session_id clear either.
+        assert task.session_id == "sess-walk-signoff-1"
+
+    def test_later_stage_stage_complete_walks_then_advances_once_more(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """PLAN task + IMPL stage_complete sentinel: walk PLAN->IMPL, then Rule 3
+        advances IMPL->REVIEW (#1149).
+
+        Proves the walk and the existing Rule 3 stage-success advance compose
+        without double- or under-advancing. Rule 3's own genuine advance clears
+        session_id exactly as pre-ticket single-hop behavior does.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("WALK-SC-1", stage=Stage.PLAN)
+        task.session_id = "sess-walk-sc-1"
+        last_result: dict[str, object] = {
+            "status": "stage_complete",
+            "stage_reached": "stage2_impl",
+        }
+        routed = apply_staged_decision(
+            task, "stage_complete", last_result, self._clients(tmp_path)
+        )
+
+        assert routed is True
+        assert task.stage == Stage.REVIEW
+        # Rule 3's own IMPL->REVIEW advance clears session_id (the walk's
+        # session-id preserve applies only to its own intermediate hops).
+        assert task.session_id is None
+
+    def test_later_stage_positional_not_alphabetical(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Stage position is by pipeline-list index, not StrEnum string order (#1149).
+
+        Pipeline is reordered [REVIEW, IMPL] so a naive ``sentinel_stage <
+        task.stage`` string compare (``"impl" < "review"``) would misclassify
+        an IMPL sentinel against a REVIEW-stage task as *earlier* (and refuse
+        it). Positional index (REVIEW=0, IMPL=1) correctly classifies it as
+        *later* and walks forward. R2 regression guard.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("WALK-POS-1", stage=Stage.REVIEW)
+        task.session_id = "sess-walk-pos-1"
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "stage_reached": "stage2_impl",
+        }
+        routed = apply_staged_decision(
+            task,
+            "blocked",
+            last_result,
+            self._reordered_clients(tmp_path, [Stage.REVIEW, Stage.IMPL]),
+        )
+
+        assert routed is True
+        assert task.stage == Stage.IMPL
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_earlier_stage_replay_still_refused_unchanged(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Earlier-stage replay (#1019) stays refused after the #1149 walk lands.
+
+        Restates the two pinned refusal cases without adding assertions to
+        them: an IMPL-mapped sentinel against a REVIEW task, and a
+        PLAN-mapped sentinel against an IMPL task, both refuse with no
+        transition.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        task_a = self._make_running_task("REPLAY-A", stage=Stage.REVIEW)
+        routed_a = apply_staged_decision(
+            task_a,
+            "stage_complete",
+            {"status": "stage_complete", "stage_reached": "stage2_impl"},
+            self._clients(tmp_path),
+        )
+        assert routed_a is False
+        assert task_a.status == QueueItemStatus.RUNNING
+        assert task_a.stage == Stage.REVIEW
+
+        task_b = self._make_running_task("REPLAY-B", stage=Stage.IMPL)
+        routed_b = apply_staged_decision(
+            task_b,
+            "stage_complete",
+            {"status": "stage_complete", "stage_reached": "stage1_plan"},
+            self._clients(tmp_path),
+        )
+        assert routed_b is False
+        assert task_b.status == QueueItemStatus.RUNNING
+        assert task_b.stage == Stage.IMPL
+
+    def test_unresolvable_stage_position_falls_back_to_refuse(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Sentinel stage not present in the client's pipeline → fail-closed refuse.
+
+        A subset pipeline [PLAN, IMPL] cannot resolve a FINALIZE-mapped
+        sentinel's position, so the walk falls back to a refusal (fail-closed,
+        matching pre-#1149 equality-check behavior).
+        """
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("UNRESOLVABLE-1", stage=Stage.IMPL)
+        routed = apply_staged_decision(
+            task,
+            "blocked",
+            {"status": "blocked", "stage_reached": "stage4b_pr_create"},
+            self._reordered_clients(tmp_path, [Stage.PLAN, Stage.IMPL]),
+        )
+
+        assert routed is False
+        assert task.status == QueueItemStatus.RUNNING
+        assert task.stage == Stage.IMPL
+
+    def test_later_stage_walk_unknown_client_falls_back_to_refuse(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Task's client absent from clients dict → fail-closed refuse (#1149).
+
+        Distinct code path from the stage-not-in-pipeline case: the client
+        itself cannot be resolved, so pipeline.stages is unavailable.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("UNKNOWN-CLIENT-1", stage=Stage.IMPL)
+        routed = apply_staged_decision(
+            task,
+            "blocked",
+            {"status": "blocked", "stage_reached": "stage4b_pr_create"},
+            {},
+        )
+
+        assert routed is False
+        assert task.status == QueueItemStatus.RUNNING
+        assert task.stage == Stage.IMPL
+
+    def test_later_stage_walk_uses_advance_task_pointer_chokepoint(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """The walk never bypasses the stage chokepoint with a direct assignment.
+
+        Each rung must emit a TASK_STAGE_CHANGED (from cw.dev_queue's
+        _emit_stage_change), proving the walk routes through
+        _advance_task_pointer rather than assigning task.stage directly.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        stage_changed = capture_events(
+            "cw.dev_queue", OrchestratorEventType.TASK_STAGE_CHANGED
+        )
+
+        task = self._make_running_task("WALK-CHOKE-1", stage=Stage.PLAN)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "stage_reached": "stage3_review",
+        }
+        apply_staged_decision(
+            task, "blocked", last_result, self._clients(tmp_path)
+        )
+
+        advances = [
+            p for _, p, _ in stage_changed if p.get("direction") == "advance"
+        ]
+        # PLAN->IMPL, IMPL->REVIEW: exactly one event per real rung.
+        assert len(advances) == 2
+        assert task.stage == Stage.REVIEW
+
+    def test_later_stage_walk_to_finalize_then_regresses_on_blocked_agent_block(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Walk to FINALIZE composes with Rule 5a's finalize-regress self-heal (#1149).
+
+        IMPL task + FINALIZE sentinel with a regress-eligible agent_block →
+        walk advances IMPL->REVIEW->FINALIZE, then Rule 5a regresses
+        FINALIZE->IMPL. Event sequence: [advance IMPL->REVIEW, advance
+        REVIEW->FINALIZE, regress FINALIZE->IMPL]. session_id must still be the
+        real value at the moment Rule 5a's regress condition is evaluated.
+        """
+        import cw.dispatch as dispatch_mod
+        from cw.dispatch import apply_staged_decision
+
+        stage_changed = capture_events(
+            "cw.dev_queue", OrchestratorEventType.TASK_STAGE_CHANGED
+        )
+
+        captured_session_id: list[str | None] = []
+        real_stage_regress = dispatch_mod._stage_regress
+
+        def _spy_stage_regress(task: TicketTask, target_stage: Stage) -> None:
+            captured_session_id.append(task.session_id)
+            real_stage_regress(task, target_stage)
+
+        monkeypatch.setattr(dispatch_mod, "_stage_regress", _spy_stage_regress)
+
+        task = self._make_running_task("WALK-REGRESS-1", stage=Stage.IMPL)
+        task.session_id = "sess-walk-regress-1"
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "stage_reached": "stage4b_pr_create",
+            "blocker": {"stage": "s4_finalize", "reason": "agent_block"},
+        }
+        routed = apply_staged_decision(
+            task, "blocked", last_result, self._clients(tmp_path)
+        )
+
+        assert routed is True
+        assert task.stage == Stage.IMPL
+        assert task.regress_attempts == 1
+        # session_id was the real value when Rule 5a's regress fired.
+        assert captured_session_id == ["sess-walk-regress-1"]
+        directions = [p.get("direction") for _, p, _ in stage_changed]
+        assert directions == ["advance", "advance", "regress"]
+
 
 # ---------------------------------------------------------------------------
 # TestPersistCarriedContext
