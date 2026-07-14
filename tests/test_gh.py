@@ -415,6 +415,43 @@ class TestPrExistsForBranch:
 class TestBranchExistsOnOrigin:
     """Tests for branch_exists_on_origin / _fetch_branch_exists_on_origin."""
 
+    def test_branch_with_hash_is_percent_encoded_in_the_api_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A '#' in the branch must not truncate the gh api path as a fragment.
+
+        ticket_id feeds the branch name, and some trackers emit `repo#N` ids.
+        Unencoded, `refs/heads/dev/redact-api#1` would be sent as
+        `refs/heads/dev/redact-api` — a query for the WRONG ref.
+        """
+        seen: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
+            seen.append(cmd)
+            return _make_run_result(0, "{}")
+
+        monkeypatch.setattr("cw.gh._sp.run", fake_run)
+        branch_exists_on_origin("dev/redact-api#1")
+
+        path = seen[0][-1]
+        assert path.endswith("refs/heads/dev/redact-api%231")
+        assert "#" not in path
+
+    def test_branch_slashes_survive_encoding(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """'/' is a real path separator in the refs endpoint — do not encode it."""
+        seen: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
+            seen.append(cmd)
+            return _make_run_result(0, "{}")
+
+        monkeypatch.setattr("cw.gh._sp.run", fake_run)
+        branch_exists_on_origin("dev/808")
+
+        assert seen[0][-1].endswith("refs/heads/dev/808")
+
     def test_branch_present_returns_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """returncode 0 → (True, True)."""
         monkeypatch.setattr(

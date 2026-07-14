@@ -1302,6 +1302,20 @@ class TestTicketIdValidation:
         task = TicketTask(ticket_id="", client="acme")
         assert task.ticket_id == ""
 
+    @pytest.mark.parametrize("ticket_id", ["redact-api#1", "dev-workspace#20"])
+    def test_ticket_task_accepts_cross_repo_hash_ids(self, ticket_id: str) -> None:
+        """`repo#N` is a real tracker id shape in production use.
+
+        #1129 outlawed it, which bricked load_dev_queue() for every client the
+        moment one such row was on disk. '#' is legal in a git ref name and is
+        inert in argv (subprocess takes a list, no shell); its one genuine
+        hazard is as a URL fragment in a `gh api` path segment, which is now
+        handled by percent-encoding at that sink (cw.gh) rather than by
+        outlawing the id here.
+        """
+        task = TicketTask(ticket_id=ticket_id, client="acme")
+        assert task.ticket_id == ticket_id
+
     def test_ticket_task_rejects_slash(self) -> None:
         with pytest.raises(ValidationError):
             TicketTask(ticket_id="foo/bar", client="acme")

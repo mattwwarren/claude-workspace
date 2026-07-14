@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess as _sp
 from typing import Any
+from urllib.parse import quote as _urlquote
 
 _GH_PR_STATE_MERGED = "MERGED"
 _PR_EXISTS_TIMEOUT = 10
@@ -232,12 +233,17 @@ def _fetch_branch_exists_on_origin(
       (None, True)   — transient error (unexpected non-zero, JSON parse failure)
       (None, False)  — gh binary not found (FileNotFoundError)
     """
+    # Why: branch carries ticket_id, and some trackers emit `repo#N` ids. An
+    # unencoded '#' is read as a URL fragment, so `heads/dev/redact-api#1`
+    # would query `heads/dev/redact-api` — a different ref, silently. Encode
+    # everything except '/', which is a real separator in the refs path.
+    ref_path = _urlquote(branch, safe="/")
     try:
         result = _sp.run(
             [
                 "gh",
                 "api",
-                f"repos/{{owner}}/{{repo}}/git/refs/heads/{branch}",
+                f"repos/{{owner}}/{{repo}}/git/refs/heads/{ref_path}",
             ],
             capture_output=True,
             text=True,
