@@ -132,7 +132,7 @@ which is how the ≥90% patch-coverage gate gets met honestly.
 
 **`cw sprint apply plan.json`**
 
-The three-pass `gh` dance that GitHub's number assignment forces, executed
+The four-pass `gh` dance that GitHub's number assignment forces, executed
 deterministically:
 
 1. Create the milestone; **capture its number** (needed for the URLs used in both
@@ -191,7 +191,8 @@ sprint_buildout:
   ticket:
     title_pattern: "RFC {rfc_num} {code} — {name}"
     labels: [feature]
-    footer_pattern: "Part of RFC {rfc_num} Wave {wave} (Sprint {sprint}), Epic #{epic}"
+    footer_pattern: "Part of RFC {rfc_num} Wave {wave} (Sprint {sprint})"
+    footer_epic_clause: ", Epic #{epic}"  # appended only when the ticket has an epic
   notion:                               # omit ⇒ Notion phase skips
     data_source: "collection://673ac7cd-797a-4c76-b9eb-fb5bc7ee050a"
     project_page: "38b59b27-0a42-81da-b234-ea951daa0216"
