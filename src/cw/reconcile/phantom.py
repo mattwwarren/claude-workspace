@@ -33,6 +33,7 @@ from cw.models import (
 from cw.reconcile import _deps, _shared
 from cw.reconcile._shared import (
     _GH_CHECK_BLOCKED_REASON,
+    _PAUSED_STATUS_KEY,
     _PHANTOM_REAP_MERGED_REASON,
     _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
     ProposedAction,
@@ -155,7 +156,7 @@ def _detect_phantom_candidates(
         # precondition, so the apply-phase stamp alone would be inert here.
         already_refused = (
             isinstance(session.last_result, dict)
-            and session.last_result.get("paused_status")
+            and session.last_result.get(_PAUSED_STATUS_KEY)
             == _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
         )
         if session.origin is SessionOrigin.DAEMON and not already_refused:
@@ -522,9 +523,21 @@ def _apply_phantom_routed_mutations(
             # untouched. Stamp a paused_status-only marker so the detect-phase
             # skip check in _detect_phantom_candidates stops re-offering this
             # same doomed candidate to _phantom_advance_sentinel_candidate.
-            session_by_id[candidate.session_id].last_result = {
-                "paused_status": _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
-            }
+            #
+            # Unlike idle.py (whose detect phase only builds a candidate when
+            # last_result is already None, so this write can never clobber
+            # anything), phantom.py's detect phase has no such precondition --
+            # a session already legitimately parked by another sweep (idle.py's
+            # _SILENTLY_IDLE_REASON, salvage.py's _NEEDS_SALVAGE_REASON) can
+            # reach here with last_result already set. Overwriting it
+            # unconditionally would destroy that marker and defeat stalled.py's
+            # SKIP_PARKED check, which reads last_result.get("paused_status")
+            # for exactly those two reasons -- silently un-parking a session
+            # another sweep correctly parked. Only stamp when nothing is there.
+            if session_by_id[candidate.session_id].last_result is None:
+                session_by_id[candidate.session_id].last_result = {
+                    _PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
+                }
             continue
         session = session_by_id[candidate.session_id]
         session.status = SessionStatus.COMPLETED

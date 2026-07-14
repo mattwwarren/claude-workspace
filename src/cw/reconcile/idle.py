@@ -37,6 +37,7 @@ from cw.reconcile._shared import (
     _CAUSE_USAGE_LIMIT,
     _GH_CHECK_BLOCKED_REASON,
     _LIVE_STATUSES,
+    _PAUSED_STATUS_KEY,
     _PHANTOM_REAP_MERGED_REASON,
     _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
     _SILENTLY_IDLE_REASON,
@@ -449,7 +450,7 @@ def _apply_idle_routed_mutations(
             # doomed candidate forever. No "status" key -> _has_terminal_sentinel
             # stays False and the ordinary idle-stall machinery still runs.
             session_by_id[candidate.session_id].last_result = {
-                "paused_status": _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
+                _PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
             }
             state_mutated = True
             continue

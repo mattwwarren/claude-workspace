@@ -75,6 +75,7 @@ from cw.worktree import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from cw.dispatch import _StagePosition
     from cw.models import CwState, Session
 
 _log = logging.getLogger(__name__)
@@ -168,6 +169,10 @@ _MAIN_CHECKOUT_DRIFT_REASON = "main_checkout_drift"
 # (GitHub #1149). Carries no "status" key, so _has_terminal_sentinel stays
 # False and the session is not mistaken for genuinely terminal.
 _SENTINEL_STAGE_MISMATCH_REFUSED_REASON = "sentinel_stage_mismatch_refused"
+# Dict key the paused_status markers above (and session.last_result callers in
+# idle.py/phantom.py/stalled.py/salvage.py) are stored under. Shared so the
+# producer (stamp) and consumer (read-back) sides can't drift independently.
+_PAUSED_STATUS_KEY = "paused_status"
 # Git-state salvage constants (GitHub issue #497).
 _NEEDS_SALVAGE_REASON = "needs_salvage"
 _SALVAGE_KIND_GIT_STATE = "git_state_salvage"
@@ -706,7 +711,7 @@ def classify_sentinel_stage_position(
     task: TicketTask,
     last_result: dict[str, object] | None,
     clients: dict[str, ClientConfig],
-) -> tuple[str, list[Stage] | None, int | None]:
+) -> tuple[_StagePosition, list[Stage] | None, int | None]:
     """Circular-safe re-export of dispatch's stage-position classifier (#1149).
 
     ``cw.dispatch`` imports ``cw.reconcile`` at module level, so a top-level
