@@ -1107,6 +1107,15 @@ git commit -m "feat(sprint): buildout config block and plan builder"
 Append to `tests/test_gh.py`, following that file's existing monkeypatch-of-`_sp.run` pattern:
 
 ```python
+# Add to tests/test_gh.py's header. The file already imports `subprocess`, but
+# it imports gh's functions by name (`from cw.gh import ...`) and never the
+# module — so `gh._sp` / `gh.create_issue` below need the module import, and the
+# temp-file assertion needs Path. Without these two lines the block NameErrors.
+from pathlib import Path
+
+from cw import gh
+
+
 def test_create_issue_writes_the_body_to_a_temp_file_not_the_argv(monkeypatch) -> None:
     """Bodies never ride argv: RFC titles carry em-dashes and ampersands."""
     calls: list[list[str]] = []
@@ -1509,8 +1518,12 @@ written once the children have numbers.
 Append to `tests/test_sprint.py`:
 
 ```python
+# Add to tests/test_sprint.py's header. `_plan()` below is annotated
+# `-> BuildoutPlan`, but BuildoutPlan was never imported by name — Task 2's
+# append only imported BuildoutConfig/build_plan/load_buildout_config.
+# Without this, the return annotation NameErrors.
 from cw.exceptions import SprintApplyError
-from cw.sprint import apply_plan
+from cw.sprint import BuildoutPlan, apply_plan
 
 
 class FakeGh:
@@ -1819,9 +1832,14 @@ class SprintApplyError(CwError):
 Append to `src/cw/sprint.py`:
 
 ```python
+# Add to src/cw/sprint.py's import block. This append raises SprintApplyError
+# throughout (_resolve_milestone, _create_or_skip, _backfill_children) but
+# never imports it — Task 1/2's appends only imported RfcContractError.
+# Without this, the block NameErrors.
 from typing import Protocol, runtime_checkable
 
 from cw import gh
+from cw.exceptions import SprintApplyError
 
 
 @runtime_checkable
