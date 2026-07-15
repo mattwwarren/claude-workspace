@@ -11,6 +11,7 @@ grants-github-review-approvals.md for the invariant this test enforces.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -35,9 +36,21 @@ _REST_APPROVE_EVENT_RE = re.compile(r"""["']event["']\s*:\s*["']APPROVE["']""")
 # same file.
 _CALL_WINDOW_LINES = 6
 
+# Char window for the GraphQL/REST co-occurrence scans: mutation bodies and
+# JSON payload construction don't reliably follow the argv-per-line shape
+# _CALL_WINDOW_LINES targets, so these scans use a symmetric character
+# window instead. 200 chars comfortably spans a single mutation/call
+# construction without crossing into unrelated code.
+_CALL_WINDOW_CHARS = 200
+
 
 def _iter_src_files() -> list[Path]:
     return sorted(_SRC_ROOT.rglob("*.py"))
+
+
+def _line_no(text: str, pos: int) -> int:
+    """Return the 1-based line number of *pos* within *text*."""
+    return text.count("\n", 0, pos) + 1
 
 
 def _find_gh_pr_review_approve(text: str, path: Path) -> list[str]:
@@ -51,41 +64,61 @@ def _find_gh_pr_review_approve(text: str, path: Path) -> list[str]:
     lines = text.splitlines()
     violations: list[str] = []
     for match in _GH_PR_REVIEW_RE.finditer(text):
-        start_line = text.count("\n", 0, match.start())
-        window = "\n".join(lines[start_line : start_line + _CALL_WINDOW_LINES])
+        line_no = _line_no(text, match.start())
+        window = "\n".join(lines[line_no - 1 : line_no - 1 + _CALL_WINDOW_LINES])
         if _APPROVE_FLAG_RE.search(window):
             violations.append(
-                f"{path}:{start_line + 1}: 'gh pr review' co-occurs with "
+                f"{path}:{line_no}: 'gh pr review' co-occurs with "
                 f"--approve within {_CALL_WINDOW_LINES} lines"
             )
     return violations
 
 
-def _find_graphql_approve(text: str, path: Path) -> list[str]:
+def _find_cooccurrence(
+    text: str,
+    path: Path,
+    primary_re: re.Pattern[str],
+    secondary_re: re.Pattern[str],
+    message: str,
+) -> list[str]:
+    """Return violation messages where *secondary_re* appears within
+    _CALL_WINDOW_CHARS characters of a *primary_re* match.
+    """
     violations: list[str] = []
-    for match in _GRAPHQL_APPROVE_RE.finditer(text):
-        line_no = text.count("\n", 0, match.start()) + 1
-        window_start = max(0, match.start() - 200)
-        window_end = min(len(text), match.end() + 200)
+    for match in primary_re.finditer(text):
+        window_start = max(0, match.start() - _CALL_WINDOW_CHARS)
+        window_end = min(len(text), match.end() + _CALL_WINDOW_CHARS)
         window = text[window_start:window_end]
-        if _GRAPHQL_APPROVE_EVENT_RE.search(window):
-            violations.append(
-                f"{path}:{line_no}: addPullRequestReview co-occurs with event: APPROVE"
-            )
+        if secondary_re.search(window):
+            violations.append(f"{path}:{_line_no(text, match.start())}: {message}")
     return violations
 
 
+def _find_graphql_approve(text: str, path: Path) -> list[str]:
+    return _find_cooccurrence(
+        text,
+        path,
+        _GRAPHQL_APPROVE_RE,
+        _GRAPHQL_APPROVE_EVENT_RE,
+        "addPullRequestReview co-occurs with event: APPROVE",
+    )
+
+
 def _find_rest_approve(text: str, path: Path) -> list[str]:
+    return _find_cooccurrence(
+        text,
+        path,
+        _REST_REVIEWS_ENDPOINT_RE,
+        _REST_APPROVE_EVENT_RE,
+        'POST .../reviews co-occurs with "event": "APPROVE"',
+    )
+
+
+def _run_scan(finder: Callable[[str, Path], list[str]]) -> list[str]:
     violations: list[str] = []
-    for match in _REST_REVIEWS_ENDPOINT_RE.finditer(text):
-        line_no = text.count("\n", 0, match.start()) + 1
-        window_start = max(0, match.start() - 200)
-        window_end = min(len(text), match.end() + 200)
-        window = text[window_start:window_end]
-        if _REST_APPROVE_EVENT_RE.search(window):
-            violations.append(
-                f'{path}:{line_no}: POST .../reviews co-occurs with "event": "APPROVE"'
-            )
+    for path in _iter_src_files():
+        text = path.read_text(encoding="utf-8")
+        violations.extend(finder(text, path))
     return violations
 
 
@@ -93,24 +126,15 @@ class TestNoReviewApprovalCallPath:
     """Deny-list scan: no approving-review call path anywhere in src/."""
 
     def test_no_gh_pr_review_approve(self) -> None:
-        violations: list[str] = []
-        for path in _iter_src_files():
-            text = path.read_text(encoding="utf-8")
-            violations.extend(_find_gh_pr_review_approve(text, path))
+        violations = _run_scan(_find_gh_pr_review_approve)
         assert not violations, "\n".join(violations)
 
     def test_no_graphql_approve_review(self) -> None:
-        violations: list[str] = []
-        for path in _iter_src_files():
-            text = path.read_text(encoding="utf-8")
-            violations.extend(_find_graphql_approve(text, path))
+        violations = _run_scan(_find_graphql_approve)
         assert not violations, "\n".join(violations)
 
     def test_no_rest_approve_review(self) -> None:
-        violations: list[str] = []
-        for path in _iter_src_files():
-            text = path.read_text(encoding="utf-8")
-            violations.extend(_find_rest_approve(text, path))
+        violations = _run_scan(_find_rest_approve)
         assert not violations, "\n".join(violations)
 
     def test_legitimate_gh_pr_neighbors_stay_green(self) -> None:
