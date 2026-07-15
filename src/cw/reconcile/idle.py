@@ -31,10 +31,12 @@ from cw.models import (
     SessionStatus,
     Stage,
 )
+from cw.pr_hydrate import derive_counterparty
 from cw.reconcile import _deps, _shared
 from cw.reconcile._shared import (
     _CAUSE_IDLE_STALL,
     _CAUSE_USAGE_LIMIT,
+    _EXTERNAL_COUNTERPARTY_IDLE_REASON,
     _GH_CHECK_BLOCKED_REASON,
     _LIVE_STATUSES,
     _PAUSED_STATUS_KEY,
@@ -65,6 +67,7 @@ if TYPE_CHECKING:
 
     from cw.auto_dev_result import AutoDevResult
     from cw.models import CwState, Session, TicketTask
+    from cw.pr_hydrate import Counterparty
 
 
 def _revert_task_candidate(
@@ -104,16 +107,18 @@ def _classify_idle_threshold(
     elapsed: float,
     new_count: int,
     merged_client_ticket_ids: frozenset[tuple[str, str]] = frozenset(),
+    counterparty: Counterparty = "self",
 ) -> ReapCandidate | None:
     """Classify the final disposition for an idle session past the confirm threshold.
 
     Returns a single ReapCandidate: REVERT_TASK when the ticket's PR is already
     merged (shipped ground truth, checked before any other classification),
-    SALVAGE_GIT when a worktree branch exists, REVERT_TASK when the owning
-    task is below its retry cap, else PARK_BLOCKED_ON_USER. Returns None when
-    the session is at Stage.FINALIZE with a live worktree branch -- that
-    disposition is owned by stalled.py's finalize-blocked path. Makes zero
-    writes. See GitHub #552, ADR-0006, #1054.
+    ESCALATE_EXTERNAL_IDLE when the session is reviewing a teammate's PR
+    (RFC 0011 B1), SALVAGE_GIT when a worktree branch exists, REVERT_TASK when
+    the owning task is below its retry cap, else PARK_BLOCKED_ON_USER. Returns
+    None when the session is at Stage.FINALIZE with a live worktree branch --
+    that disposition is owned by stalled.py's finalize-blocked path. Makes
+    zero writes. See GitHub #552, ADR-0006, #1054, #1158.
     """
     lane = task.lane if task else DEFAULT_LANE
     # Merged-first check (#1054): a ticket whose PR already merged is shipped
@@ -136,6 +141,20 @@ def _classify_idle_threshold(
             elapsed=elapsed,
             new_count=new_count,
             lane=lane,
+        )
+    # RFC 0011 B1 (#1158): an `external`-counterparty session (reviewing a
+    # teammate's PR) is exempt from silent idle-reap. Checked after the
+    # merged-first ground-truth check (a shipped ticket has nothing left to
+    # escalate) and before every reap/park disposition below.
+    if counterparty == "external":
+        return ReapCandidate(
+            session_id=session.id,
+            proposed_action=ProposedAction.ESCALATE_EXTERNAL_IDLE,
+            ticket_id=ticket_id,
+            new_observation_count=new_count,
+            lane=lane,
+            client=session.client,
+            paused_status=_EXTERNAL_COUNTERPARTY_IDLE_REASON,
         )
     # Git-state salvage path.
     if session.worktree_path is not None:
@@ -203,6 +222,7 @@ def _detect_idle_confirmed_candidate(
     config: OrchestratorConfig,
     elapsed: float,
     merged_client_ticket_ids: frozenset[tuple[str, str]],
+    counterparty: Counterparty = "self",
 ) -> ReapCandidate | None:
     """Classify a session that already passed the liveness check.
 
@@ -244,6 +264,7 @@ def _detect_idle_confirmed_candidate(
         elapsed=elapsed,
         new_count=new_count,
         merged_client_ticket_ids=merged_client_ticket_ids,
+        counterparty=counterparty,
     )
 
 
@@ -255,6 +276,7 @@ def _detect_idle_candidate_for_session(
     task: TicketTask | None,
     ticket_id: str | None,
     merged_client_ticket_ids: frozenset[tuple[str, str]],
+    counterparty: Counterparty = "self",
 ) -> ReapCandidate | None:
     """Classify a single live DAEMON session for idle disposition, or None.
 
@@ -307,6 +329,7 @@ def _detect_idle_candidate_for_session(
         config=config,
         elapsed=elapsed,
         merged_client_ticket_ids=merged_client_ticket_ids,
+        counterparty=counterparty,
     )
 
 
@@ -338,6 +361,7 @@ def _detect_idle_candidates(
             continue
         ticket_id = ticket_id_for_session(session.name)
         task = task_by_ticket.get(ticket_id) if ticket_id else None
+        counterparty = derive_counterparty(task, operator_login=None)
         candidate = _detect_idle_candidate_for_session(
             session,
             now=now,
@@ -345,6 +369,7 @@ def _detect_idle_candidates(
             task=task,
             ticket_id=ticket_id,
             merged_client_ticket_ids=merged_client_ticket_ids,
+            counterparty=counterparty,
         )
         if candidate is not None:
             candidates.append(candidate)
@@ -722,6 +747,11 @@ def _act_on_idle_candidates(
         for c in candidates
         if c.proposed_action == ProposedAction.PARK_BLOCKED_ON_USER
     ]
+    escalate_external_candidates = [
+        c
+        for c in candidates
+        if c.proposed_action == ProposedAction.ESCALATE_EXTERNAL_IDLE
+    ]
     salvage_git_candidates_list = [
         c for c in candidates if c.proposed_action == ProposedAction.SALVAGE_GIT
     ]
@@ -769,6 +799,7 @@ def _act_on_idle_candidates(
         or merged_revert_candidates
         or gh_blocked_revert_candidates
         or park_candidates
+        or escalate_external_candidates
         or salvage_git_candidates_list
         or routed_sentinel_candidates
     )
@@ -801,6 +832,7 @@ def _act_on_idle_candidates(
         gh_blocked_revert_candidates,
         salvage_candidates,
         routed_sentinel_candidates,
+        escalate_external_candidates=escalate_external_candidates,
         already_parked_ids=already_parked_ids,
     )
 
@@ -828,14 +860,17 @@ def _emit_idle_events(
     salvage_candidates: list[ReapCandidate],
     routed_sentinel_candidates: list[ReapCandidate],
     *,
+    escalate_external_candidates: list[ReapCandidate],
     already_parked_ids: frozenset[str] | set[str] = frozenset(),
 ) -> None:
     """Emit lifecycle events and stop/cleanup surfaces for idle dispositions.
 
     Mirrors the post-queue side effects of the original act phase:
     SESSION_TIMED_OUT + worktree cleanup for reverts, SESSION_NEEDS_ATTENTION
-    (with push) for parks, SESSION_COMPLETED for merged/salvage/routed, and
-    SESSION_NEEDS_ATTENTION for gh-blocked candidates.
+    (with push) for parks, SESSION_COMPLETED for merged/salvage/routed,
+    SESSION_NEEDS_ATTENTION for gh-blocked candidates, and
+    SESSION_NEEDS_ATTENTION (with push, no mutation) for external-counterparty
+    escalations (RFC 0011 B1, #1158).
 
     ``already_parked_ids`` is the set of session_ids that already had a
     paused_status marker before this tick's mutations.  SESSION_NEEDS_ATTENTION
@@ -881,6 +916,23 @@ def _emit_idle_events(
                 "ticket_id": candidate.ticket_id,
                 "claude_session_id": session.claude_session_id,
                 "paused_status": _SILENTLY_IDLE_REASON,
+                "breadcrumbs": "",
+                "crashed": False,
+            },
+        )
+        _deps.fire_push_notification(session.name, session.client)
+
+    for candidate in escalate_external_candidates:
+        session = session_by_id[candidate.session_id]
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": session.client,
+                "ticket_id": candidate.ticket_id,
+                "claude_session_id": session.claude_session_id,
+                "paused_status": _EXTERNAL_COUNTERPARTY_IDLE_REASON,
                 "breadcrumbs": "",
                 "crashed": False,
             },
