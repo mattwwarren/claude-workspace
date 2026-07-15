@@ -229,3 +229,23 @@ class SprintApplyError(CwError):
     def __init__(self, message: str, *, applied: AppliedBuildout | None = None) -> None:
         super().__init__(message)
         self.applied = applied
+
+
+class SessionsLockReentryError(CwError):
+    """Raised when ``sessions_lock()`` is re-entered on the same thread while
+    already held.
+
+    ``sessions_lock`` is a per-open-fd ``fcntl.flock``, which is not
+    reentrant: a second acquisition on the same thread blocks forever in
+    ``flock()`` against the fd already held by the outer acquisition
+    (GitHub #1228 — the review-recipe act phase transitively re-entering
+    ``reconcile()`` from inside its own locked body). Raising here, guarded
+    by a thread-local flag checked before any second ``flock()`` syscall,
+    converts that hang into a catchable error. Existing callers on the
+    reentrant paths (``_dispatch_auto_fix_ci``, ``_dispatch_address_review``,
+    ``_reconcile_usage_limited``) already catch ``CwError`` / broad
+    ``Exception`` around the call that would otherwise re-enter, so no
+    call-site changes are needed elsewhere.
+    """
+
+    __slots__ = ()
