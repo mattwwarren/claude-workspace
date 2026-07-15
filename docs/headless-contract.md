@@ -209,7 +209,7 @@ The `status` field is a closed set. Consumers MUST treat unknown statuses as a p
 
 The same object shape MAY also appear on a `merge_gate_blocked` result to surface the gate reason (e.g. `prior_pipeline_pr_open`, issue #777) — `blocker = null` remains accepted for that status.
 
-Minimum shape (v1+):
+Minimum shape (v1+; `stage` and `reason` are required, `details` is optional):
 
 ```json
 {"stage": "stage2_impl", "reason": "agent_block", "details": "<verbatim blocker text>"}
