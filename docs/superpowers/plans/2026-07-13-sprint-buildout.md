@@ -2878,27 +2878,119 @@ This is the task that proves the design. The RFC 0011 buildout really produced
 conforming RFC, either the template or the parser is wrong, and we want to know
 before the next RFC — not during it.
 
+## Touch-point Contract
+
+- Touch-point: `build_plan`'s `sprint_map`/`epic_children` construction — document
+  order, not sorted
+  File:line: `src/cw/sprint.py:528-531`
+  Read: `for ticket in doc.tickets:` (528) / `    sprint_map.setdefault(ticket.sprint, []).append(ticket.code)` (529) / `    if ticket.epic is not None:` (530) / `        epic_children.setdefault(ticket.epic, []).append(ticket.code)` (531) —
+  a plain `.setdefault(...).append(...)` over `doc.tickets` in the order `parse_rfc`
+  produced them (document order — `_split_ticket_blocks`'s docstring: "Return
+  [(code, name, block_body)] in document order"). Nothing sorts `sprint_map`'s
+  per-key lists.
+  Plan asserts: THIS IS LOAD-BEARING for the fixture. The acceptance test (Step 2)
+  asserts `plan.sprint_map[0] == ["S1", "S2"]` — an *unsorted* equality check, not
+  `sorted(...)`. That only passes if the fixture's `### S1` ticket block precedes
+  its `### S2` block in `## Tickets`. (`sprint_map[1]` and `sprint_map[2]` are
+  asserted via `sorted(...)`, so intra-sprint ordering doesn't matter there —
+  only the Sprint-0 pair is order-sensitive, because it's the only sprint
+  asserted unsorted.)
+  Match: CONFIRMED
+
+- Touch-point: `parse_rfc`'s required-sections and required-per-ticket-fields
+  contract
+  File:line: `src/cw/sprint.py:45-59`
+  Read: `_REQUIRED_SECTIONS = (` (45) `_SEC_DESIGN, _SEC_TICKETS, _SEC_RESOLVED_DECISIONS, _SEC_REFERENCES,` (46-49) `)` (50) — the fixture must contain all four `##` sections (`## Design`, `## Tickets`, `## Resolved decisions`, `## References`; `_section()`'s prefix-tolerant match, `sprint.py:126-130`, accepts the real RFC's annotated heading `## Resolved decisions (hardening pass, operator, 2026-07-12)` verbatim). `_REQUIRED_TICKET_FIELDS = (` (51) `"Epic", "Wave", "Sprint", "Depends on", "Context", "Scope", "Acceptance",` (52-58) `)` (59) — every one of the 13 ticket blocks must carry all seven `- **Field:** value` bullets or `_ticket_fields` raises `RfcContractError: ticket {code}: missing field: {required}`.
+  Plan asserts: the fixture must not omit any required section or any required
+  per-ticket field, even for tickets whose `Depends on`/`Scope` value is the
+  literal `none` (see `_NONE_VALUES`, `sprint.py:59` — `"none"`, `"-"`, `"—"`,
+  `""` are the only accepted null spellings; the field itself must still be
+  present).
+  Match: CONFIRMED
+
+- Touch-point: milestone-title format — test fixture vs. real project config
+  File:line: `tests/test_sprint.py:295-312` (`_config()`) vs. `.claude/project-config.yaml:58-69` (`sprint_buildout:` block)
+  Read: `_config()`'s `"milestone": {"title_pattern": "v{version} — {rfc_title}"}` (test_sprint.py:301) is byte-for-byte identical to `.claude/project-config.yaml:60`'s `title_pattern: "v{version} — {rfc_title}"`; likewise `_config()`'s `epic`/`ticket` blocks (test_sprint.py:302-311) match `project-config.yaml:61-69` field-for-field (the `notion:` block at `project-config.yaml:70-76` has no counterpart in `_config()` — `BuildoutConfig.notion` is optional and `_config()` omits it deliberately).
+  Plan asserts: `_config()` is not an arbitrary test fixture — it is the real
+  `sprint_buildout` config transcribed, so `plan.milestone_title` in the Step 2
+  acceptance test resolves exactly as `cw sprint plan` would against the live
+  config: `"v1.20.0 — Availability- & Counterparty-Aware Holding"`. The
+  `{rfc_title}` half is the real RFC 0011 title line 1 verbatim
+  (`docs/rfcs/0011-availability-and-counterparty-aware-holding.md:1` —
+  `# RFC 0011 — Availability- & Counterparty-Aware Holding`), so the fixture's
+  own `# RFC 0011 — ...` line must reproduce that title exactly or the assertion
+  fails on the `{rfc_title}` substitution, not on anything sprint-map-related.
+  Match: CONFIRMED
+
 - [ ] **Step 1: Write the fixture**
 
-Create `tests/fixtures/rfc-0011-tickets.md`: RFC 0011's real content with a
-`## Tickets` section back-filled to describe what that session actually filed.
-Source the codes, epics, waves, and dependencies from the buildout handoff
-(`.handoffs/handoff-sprint-kickoff-2026-07-13-1306.md`), which records them:
+Create `tests/fixtures/rfc-0011-tickets.md`: RFC 0011's real content
+(`docs/rfcs/0011-availability-and-counterparty-aware-holding.md` — tracked, read
+it directly for the `## Summary`/`## Design`/`## Resolved constraints`/
+`## Explicitly out of scope` prose) with a `## Tickets` section back-filled to
+describe what that session actually filed, since the real RFC predates the
+`## Tickets` contract and doesn't have one yet.
 
-- Sprint 0 (Wave 0), no epic: `S1` (counterparty axis + self-identity),
-  `S2` (native review-request register; depends on S1)
-- Epic I (`## Design` → `### Epic I — Availability-aware holding (inward)`):
-  Sprint 1 — `A1` (park class, keystone; depends on S1), `A2` (detector; depends
-  on A1), `A5` (probe; depends on A1). Sprint 2 — `A3` (stop-before-finalize),
-  `A4` (auto-resume), `A6` (digest).
-- Epic II (`### Epic II — Counterparty-aware collaboration (outward)`):
-  Sprint 1 — `B1` (idle exemption; depends on S1), `B2` (consent gate; depends on
-  S1). Sprint 2 — `B3` (individual re-request), `B4` (response contract),
-  `B5` (graceful rejection).
+**Provenance:** the codes/epics/waves/dependencies below are transcribed from
+RFC 0011's own `## Phasing` table
+(`docs/rfcs/0011-availability-and-counterparty-aware-holding.md:317-321`) and
+`## Resolved decisions` section (same file, lines 326-357) — both tracked and
+on `origin/main`. A local handoff document
+(`.handoffs/handoff-sprint-kickoff-2026-07-13-1306.md`) also records this
+buildout, but **it is `.gitignore`d and does not exist on a fresh worktree — it
+is local-only provenance, not required reading.** Everything the worker needs
+is inlined in the table below; do not `Read` the handoff path.
 
-Each ticket's `Context:` and `Acceptance:` come from the corresponding RFC prose;
-each `Scope:` cites the `D-*` ids that already exist in RFC 0011's "Resolved
-decisions" section (D-S1, D-S2a, D-S2b, D-A1, D-A2, D-A3, D-A5, D-A6, D-B4).
+**Fixture ordering requirement (load-bearing — see Touch-point Contract):** the
+`### S1` ticket block MUST appear before the `### S2` ticket block in the
+fixture's `## Tickets` section. `sprint_map[0]` is asserted unsorted
+(`["S1", "S2"]`); document order is the only thing that produces that order.
+All other tickets may appear in any order — their sprints are asserted via
+`sorted(...)`.
+
+**Wave == Sprint for every ticket in this RFC.** RFC 0011's `## Phasing` table
+has a single "Wave" axis (0/1/2) that both epics share; every ticket's `Wave:`
+field value equals its `Sprint:` field value. Do not treat these as
+independently-chosen numbers — for this RFC they are always the same integer.
+
+**Per-ticket data** (13 tickets, 2 epics — all fields required by
+`_REQUIRED_TICKET_FIELDS`; `Depends on` and `Scope` use the literal value
+`none` where there is nothing to cite, per `_NONE_VALUES`):
+
+| Code | Name | Epic | Wave | Sprint | Depends on | Scope |
+|------|------|------|------|--------|------------|-------|
+| S1 | counterparty axis + self-identity | none | 0 | 0 | none | D-S1 |
+| S2 | native review-request register | none | 0 | 0 | S1 | D-S2a, D-S2b |
+| A1 | park class (keystone) | I | 1 | 1 | S1 | D-A1 |
+| A2 | unavailability detector | I | 1 | 1 | A1 | D-A2 |
+| A5 | availability preflight probe | I | 1 | 1 | A1 | D-A5 |
+| A3 | stop-before-finalize hold | I | 2 | 2 | none | D-A3 |
+| A4 | auto-resume-on-return | I | 2 | 2 | none | none |
+| A6 | digest / batch on attention channel | I | 2 | 2 | none | D-A6 |
+| B1 | teammate-review idle-reap exemption | II | 1 | 1 | S1 | none |
+| B2 | two-party consent gate | II | 1 | 1 | S1 | none |
+| B3 | individual re-request gate | II | 2 | 2 | none | none |
+| B4 | response contract | II | 2 | 2 | none | D-B4 |
+| B5 | graceful rejection | II | 2 | 2 | none | none |
+
+Epics (`### Epic <key> — <name>` under `## Design`):
+
+| Key | Name |
+|-----|------|
+| I | Availability-aware holding (inward) |
+| II | Counterparty-aware collaboration (outward) |
+
+This `Scope:` mapping was cross-checked against RFC 0011's actual
+`## Resolved decisions` list (D-S1, D-S2a, D-S2b, D-A1, D-A2, D-A3, D-A5, D-A6,
+D-B4 — nine decisions, no more, no fewer): every decision id is cited by
+exactly one ticket above, and the five tickets with no matching decision
+(A4, B1, B2, B3, B5) cite `none`. If the RFC's decisions list is ever amended,
+re-verify this table against it before trusting the fixture.
+
+Each ticket's `Context:` and `Acceptance:` bullets come from the corresponding
+RFC prose in `## Design` (the `#### <Code> — ...` subsection for that ticket,
+or the `### S1`/`### S2` prose for the two seam tickets) — write them from that
+tracked source, not from the handoff.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -2924,7 +3016,7 @@ def test_rfc_0011_fixture_reproduces_the_real_buildout() -> None:
     assert sorted(plan.epic_children["I"]) == ["A1", "A2", "A3", "A4", "A5", "A6"]
     assert sorted(plan.epic_children["II"]) == ["B1", "B2", "B3", "B4", "B5"]
 
-    # The dependency the handoff calls out: S2 rides S1.
+    # The dependency the RFC's Phasing table calls out: S2 rides S1.
     s2 = next(t for t in doc.tickets if t.code == "S2")
     assert s2.depends_on == ["S1"]
 ```
@@ -2937,11 +3029,17 @@ faithful. **If it cannot be made to pass without changing the parser, stop and
 report** — that means the template is missing something the RFC genuinely needs,
 which is a design finding, not an implementation bug.
 
-- [ ] **Step 4: Run the full gates and commit**
+- [ ] **Step 4: Run all seven CI gates and commit**
+
+Per this plan's Done criteria ("all seven CI gates pass"), run all seven, in the
+order `CLAUDE.md`'s Quality Gates section specifies — not just the first three
+plus coverage:
 
 ```bash
 uv run ruff check src/ tests/ && uv run ruff format --check src/ tests/ && uv run mypy --strict src/
+uv run pre-commit run --all-files
 uv run --extra mcp pytest tests/ -m 'not integration' --cov=cw --cov-report=xml --cov-fail-under=88
+uv run pytest tests/ -m integration
 uv run diff-cover coverage.xml --compare-branch=origin/main --fail-under=90
 git add tests/fixtures/rfc-0011-tickets.md tests/test_sprint.py
 git commit -m "test(sprint): acceptance — RFC 0011 fixture reproduces the real buildout"
