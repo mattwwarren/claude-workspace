@@ -128,6 +128,11 @@ SUBAGENT_LIVENESS_WINDOW_SECONDS = 1800
 # the watchdog flags (no sentinel ever emitted, daemon surface still live).
 _SILENTLY_IDLE_REASON = "silently_idle"
 _SALVAGE_SKIP_REASON = "park_marker_blocks_salvage"
+# Paused-status written to SESSION_NEEDS_ATTENTION events when an
+# `external`-counterparty session (reviewing a teammate's PR) reaches the
+# confirmed-idle threshold. Escalated rather than reaped/parked. RFC 0011 B1
+# (#1158).
+_EXTERNAL_COUNTERPARTY_IDLE_REASON = "external_counterparty_idle"
 # paused_status written to SESSION_NEEDS_ATTENTION when a client's
 # consecutive freshness-gate-block latch trips (RFC 0007 §W2).
 _FRESHNESS_BLOCK_ESCALATED_REASON = "freshness_gate_blocked"
@@ -268,6 +273,11 @@ class ProposedAction(StrEnum):
     # the session's freshly-classified liveness bucket is still LIVE. Closes
     # #976.
     PARK_VETOED = "park_vetoed"
+    # Side-effect-only candidate — emits `session.needs_attention`, mutates
+    # nothing. An `external`-counterparty session (teammate-review idle-reap
+    # exemption) that reaches the confirmed-idle threshold is escalated, not
+    # reaped/parked. Closes #1158, RFC 0011 B1.
+    ESCALATE_EXTERNAL_IDLE = "escalate_external_idle"
 
 
 @dataclass(frozen=True)
