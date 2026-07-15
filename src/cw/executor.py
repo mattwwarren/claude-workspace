@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import shutil
 import subprocess
+import tempfile
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
+
+from pydantic import ValidationError
 
 from cw.auto_dev_result import (
     AutoDevResult,
     Health,
+    Review,
     Scope,
     StageReached,
 )
@@ -18,7 +24,6 @@ from cw.config import load_state, save_state, sessions_lock
 from cw.events import record_event as _record_orchestrator_event
 from cw.gh import post_issue_comment
 from cw.local_runner import (
-    _FIXED_REVIEW,
     _SCHEMA_VERSION,
     AIDER_NOT_FOUND,
     ENDPOINT_NOT_CONFIGURED,
@@ -57,8 +62,6 @@ from cw.spawn import spawn_create_impl
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from cw.native_daemon import NativeDaemonClient
 
 # CodexExecutor blocker reason codes (RFC 0005 F1).
@@ -66,8 +69,30 @@ CODEX_NOT_FOUND = "codex_not_found"
 CODEX_REVIEW_ONLY = "codex_review_only"
 CODEX_TIMEOUT = "codex_timeout"
 CODEX_ERROR = "codex_error"
+# Issue #1203: codex's -o output file was missing/unreadable, not valid JSON,
+# or did not validate as a Review payload.
+CODEX_REVIEW_UNPARSEABLE = "codex_review_unparseable"
+# Issue #1203: codex reported one or more must-fix findings (R3) — never
+# reaches stage_complete regardless of should_fix/deferred counts.
+CODEX_MUST_FIX_FINDINGS = "codex_must_fix_findings"
 
 STAGE3_REVIEW: StageReached = "stage3_review"
+
+# JSON Schema handed to `codex exec review --output-schema` so codex's final
+# message reports structured finding counts instead of raw markdown (#1203).
+# `deferred` is marked required here for a maximally explicit contract with
+# codex, but _parse_codex_findings treats it as optional (defaults to 0) —
+# intentional defensive permissiveness, not a bug: behavior is identical
+# either way since Review.deferred already defaults to 0.
+_CODEX_FINDINGS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "must_fix_initial": {"type": "integer"},
+        "should_fix": {"type": "integer"},
+        "deferred": {"type": "integer"},
+    },
+    "required": ["must_fix_initial", "should_fix", "deferred"],
+}
 
 
 def resolve_executor_config(
@@ -469,8 +494,13 @@ class CodexExecutor:
         try:
             if result is None:
                 # Step 3: Run codex (only reached when pre-flight checks pass).
-                argv = _build_codex_argv(self._config.model, client.default_branch)
-                run_result = self._runner.run(worktree, argv, wall_clock_budget_seconds)
+                run_result = _run_codex_review(
+                    runner=self._runner,
+                    worktree=worktree,
+                    model=self._config.model,
+                    default_branch=client.default_branch,
+                    wall_clock_budget_seconds=wall_clock_budget_seconds,
+                )
                 result = _synthesize_codex_result(
                     task=task,
                     worktree=worktree,
@@ -533,12 +563,89 @@ class CodexExecutor:
         return AutoDevResult.model_json_schema()
 
 
-def _build_codex_argv(model: str | None, default_branch: str) -> list[str]:
-    """Return the ``codex exec review`` argv for the given model and base branch."""
-    argv = ["codex", "exec", "review", "--base", default_branch]
+def _build_codex_argv(
+    *,
+    model: str | None,
+    default_branch: str,
+    schema_path: Path,
+    output_path: Path,
+) -> list[str]:
+    """Return the ``codex exec review`` argv for the given model/base branch.
+
+    ``--output-schema``/``-o`` steer codex's structured final message into
+    *output_path* (validated against *schema_path*) so the caller can parse
+    finding counts instead of raw markdown (#1203).
+    """
+    argv = [
+        "codex",
+        "exec",
+        "review",
+        "--base",
+        default_branch,
+        "--output-schema",
+        str(schema_path),
+        "-o",
+        str(output_path),
+    ]
     if model:
         argv += ["-m", model]
     return argv
+
+
+def _run_codex_review(
+    *,
+    runner: CodexRunner,
+    worktree: Path,
+    model: str | None,
+    default_branch: str,
+    wall_clock_budget_seconds: int | None,
+) -> CodexRunResult:
+    """Write the findings schema, build argv, and invoke the codex runner.
+
+    Both the schema file (written here) and the output file (written by
+    codex, read by ``RealCodexRunner.run`` before it returns) live in a
+    ``TemporaryDirectory`` scoped to this call — the directory outlives the
+    ``runner.run`` invocation and is cleaned up once this function returns.
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        schema_path = Path(tmp_dir) / "findings-schema.json"
+        output_path = Path(tmp_dir) / "findings-output.json"
+        schema_path.write_text(json.dumps(_CODEX_FINDINGS_SCHEMA), encoding="utf-8")
+        argv = _build_codex_argv(
+            model=model,
+            default_branch=default_branch,
+            schema_path=schema_path,
+            output_path=output_path,
+        )
+        return runner.run(worktree, argv, wall_clock_budget_seconds)
+
+
+def _parse_codex_findings(output_file_content: str | None) -> Review | None:
+    """Parse codex's ``-o`` output file content into a :class:`Review`.
+
+    Fails closed (returns ``None``) on any of: no output file content, invalid
+    JSON, a non-dict payload, missing/wrong-typed required keys, or a
+    ``Review`` that fails Pydantic validation. codex's ``CodexExecutor`` is
+    single-shot (no fix loop), so ``fix_cycles_used`` is always hardcoded to
+    0 — codex is never asked to report it.
+    """
+    if output_file_content is None:
+        return None
+    try:
+        data = json.loads(output_file_content)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    try:
+        return Review(
+            must_fix_initial=data["must_fix_initial"],
+            should_fix=data["should_fix"],
+            fix_cycles_used=0,
+            deferred=data.get("deferred", 0),
+        )
+    except (KeyError, TypeError, ValidationError):
+        return None
 
 
 def _synthesize_codex_result(
@@ -550,9 +657,11 @@ def _synthesize_codex_result(
     """Map a CodexRunResult to a typed AutoDevResult at stage3_review.
 
     Disposition table:
-    - timed_out         → CODEX_TIMEOUT (blocked, retry_eligible)
-    - returncode != 0   → CODEX_ERROR (blocked, stderr tail in details)
-    - exit 0            → stage_complete (raw findings posted by the caller)
+    - timed_out                     → CODEX_TIMEOUT (blocked, retry_eligible)
+    - returncode != 0                → CODEX_ERROR (blocked, stderr tail in details)
+    - -o output missing/unparseable  → CODEX_REVIEW_UNPARSEABLE (blocked)
+    - must_fix_initial > 0           → CODEX_MUST_FIX_FINDINGS (blocked)
+    - exit 0, no must-fix findings   → stage_complete (raw findings posted by caller)
     """
     if run_result.timed_out:
         return make_blocked(
@@ -570,6 +679,29 @@ def _synthesize_codex_result(
             details=run_result.stderr[-2000:],
             stage_reached=STAGE3_REVIEW,
         )
+    review = _parse_codex_findings(run_result.output_file_content)
+    if review is None:
+        return make_blocked(
+            ticket_id=task.ticket_id,
+            worktree=worktree,
+            reason=CODEX_REVIEW_UNPARSEABLE,
+            stage_reached=STAGE3_REVIEW,
+        )
+    if review.must_fix_initial > 0:
+        # make_blocked() has no review override (out of scope for #1203: its
+        # _FIXED_REVIEW default serves the LocalExecutor/aider path, which has
+        # no codex findings to report). Override the field on its result
+        # instead of threading a new param through local_runner.py, so the
+        # already-parsed counts survive onto the blocked sentinel rather than
+        # reverting to 0/0/0/0 — the same bug #1203 exists to fix, just on
+        # the blocked disposition instead of stage_complete.
+        blocked = make_blocked(
+            ticket_id=task.ticket_id,
+            worktree=worktree,
+            reason=CODEX_MUST_FIX_FINDINGS,
+            stage_reached=STAGE3_REVIEW,
+        )
+        return blocked.model_copy(update={"review": review})
     branch = subprocess.check_output(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
         cwd=worktree,
@@ -591,7 +723,7 @@ def _synthesize_codex_result(
         branch=branch,
         fork_point_sha=None,
         commits=[],
-        review=_FIXED_REVIEW,
+        review=review,
         health=Health(
             lowest_agent_confidence="HIGH",
             any_incomplete_risk=False,
