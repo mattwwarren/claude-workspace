@@ -43,13 +43,14 @@ from inside its own ``dev_queue_lock()`` acquisition — never the public
 flock-based lock (see #1065 and ``dev_queue._approve_ticket_locked``).
 
 **Invariant (GitHub #1199):** cw never grants a GitHub pull-request review
-approval — no ``gh pr review --approve``, GraphQL ``addPullRequestReview``
-with ``event: APPROVE``, or REST ``POST /pulls/{n}/reviews`` with
-``"event": "APPROVE"`` call path exists anywhere in ``src/``, and this
+approval — no ``gh pr review --approve``, no GraphQL mutation that adds a
+pull-request review with an approving event, and no REST reviews-endpoint
+call with an approving event exists anywhere in ``src/``, and this
 module's own ``auto_approve_clean_review`` recipe does not touch GitHub
 review state at all — it advances only cw's internal dev-queue gate via
 ``_approve_ticket_locked``. See ADR-0012 and
-``tests/test_review_approval_guard.py``.
+``tests/test_review_approval_guard.py`` for the exact call shapes this
+invariant covers.
 """
 
 from __future__ import annotations
