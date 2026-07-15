@@ -175,6 +175,7 @@ DEFAULT_STAGE: Stage = Stage.PLAN
 class LaneConcurrencyOverride(BaseModel):
     """Per-lane overrides from the concurrency override store."""
 
+    # NOT extra=forbid — persisted/runtime state, see #1200
     max_parallel: int | None = None
     paused: bool | None = None
     # Consecutive spawn_error count for the per-lane circuit breaker (#875).
@@ -185,6 +186,7 @@ class LaneConcurrencyOverride(BaseModel):
 class ClientConcurrencyOverride(BaseModel):
     """Per-client ceiling override from the concurrency override store."""
 
+    # NOT extra=forbid — persisted/runtime state, see #1200
     ceiling: int | None = None
     # Consecutive freshness-gate-block count for the per-client attention latch
     # (RFC 0007 §W2). Incremented once per tick the client is skipped with
@@ -200,6 +202,7 @@ class ConcurrencyOverrides(BaseModel):
     NOT added to schema.REGISTRY — test_schema.py must stay unchanged.
     """
 
+    # NOT extra=forbid — persisted/runtime state, see #1200
     max_parallel_clients: int | None = None
     clients: dict[str, ClientConcurrencyOverride] = Field(default_factory=dict)
     lanes: dict[str, LaneConcurrencyOverride] = Field(default_factory=dict)
@@ -340,6 +343,7 @@ class DispatchSkipReason(StrEnum):
 class OrchestratorEvent(BaseModel):
     """A single event on the orchestrator event bus."""
 
+    # NOT extra=forbid — persisted/runtime state, see #1200
     id: str = Field(default_factory=lambda: uuid4().hex[:16])
     type: OrchestratorEventType
     payload: dict[str, Any] = Field(default_factory=dict)
@@ -363,6 +367,7 @@ class PrState(BaseModel):
     re-fetching GitHub.
     """
 
+    # NOT extra=forbid — persisted/runtime state, see #1200
     state: str = "OPEN"
     mergeable: str | None = None
     merge_state_status: str = "UNKNOWN"
@@ -392,6 +397,7 @@ class WatchedPr(BaseModel):
     dismiss transition can re-open registration (RFC 0011 S2, adopted #5).
     """
 
+    # NOT extra=forbid — persisted/runtime state, see #1200
     pr_url: str
     repo: str
     pr_number: int
@@ -476,6 +482,7 @@ _SAFE_TICKET_ID = re.compile(r"^(?!.*\.\.)[a-zA-Z0-9][a-zA-Z0-9._#-]*$")
 class TicketTask(BaseModel):
     """A ticket queued for dispatch to a Claude session."""
 
+    # NOT extra=forbid — persisted/runtime state, see #1200
     ticket_id: str
     client: str
     priority: int = 0
@@ -666,6 +673,7 @@ class TicketTask(BaseModel):
 class DispatchPlan(BaseModel):
     """Ordered list of tickets to dispatch, with optional grouping hints."""
 
+    # NOT extra=forbid — persisted/runtime state, see #1200
     tasks: list[TicketTask] = Field(default_factory=list)
     grouping_hints: dict[str, str] = Field(default_factory=dict)
 
@@ -673,6 +681,7 @@ class DispatchPlan(BaseModel):
 class DevQueueStore(BaseModel):
     """Persisted dev-queue state holding TicketTasks."""
 
+    # NOT extra=forbid — persisted/runtime state, see #1200
     schema_version: int = DEV_QUEUE_SCHEMA_VERSION
     tasks: list[TicketTask] = Field(default_factory=list)
     watched_prs: list[WatchedPr] = Field(default_factory=list)
@@ -718,6 +727,8 @@ CONTEXT_JSON_RELATIVE_PATH: Path = Path(".cw", "context.json")
 class StageExecutorConfig(BaseModel):
     """Executor configuration for a single pipeline stage (RFC 0005 A1, dormant)."""
 
+    model_config = ConfigDict(extra="forbid")
+
     backend: str = CLAUDE_NATIVE_BACKEND
     model: str | None = None
     endpoint: str | None = None  # OpenAI-compatible base URL for local backend
@@ -725,6 +736,8 @@ class StageExecutorConfig(BaseModel):
 
 class StagePipelineConfig(BaseModel):
     """Per-client (or per-lane) pipeline configuration (RFC 0005 A1, dormant)."""
+
+    model_config = ConfigDict(extra="forbid")
 
     stages: list[Stage] = Field(
         default_factory=lambda: [Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE]
@@ -745,6 +758,8 @@ class LaneConfig(BaseModel):
     Lanes provide a scheduling boundary for TicketTasks.
     Phase 1 (data model only): no dispatch wiring yet — see #558.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     name: str
     max_parallel: int = 1
@@ -863,6 +878,8 @@ class OperatorChannelForward(BaseModel):
     ``OrchestratorConfig.operator_channel_forward``. See GitHub #1002.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     event_types: frozenset[OrchestratorEventType] = Field(
         default_factory=lambda: frozenset(_DEFAULT_OPERATOR_EVENT_TYPES)
     )
@@ -882,6 +899,8 @@ class OrchestratorConfig(BaseModel):
     A model validator migrates any stray ``default`` key into the new
     top-level field so old configs keep working with a one-time warning.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     tick_interval_seconds: int = 30
     usage_limit_backoff_seconds: int = _USAGE_LIMIT_BACKOFF_SECONDS
@@ -1197,6 +1216,7 @@ class LocalLivenessHandle(BaseModel):
 class Session(BaseModel):
     """A tracked Claude Code session."""
 
+    # NOT extra=forbid — persisted/runtime state, see #1200
     id: str = Field(default_factory=lambda: uuid4().hex[:8])
     name: str  # Human-readable: "client-a/impl"
     client: str
@@ -1291,6 +1311,8 @@ class ClientConfig(BaseModel):
       resolved at session start time.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     # Typed as Path but defaults to None; the model validator below guarantees
     # it is always set after construction (from either the user or repo_path).
@@ -1365,6 +1387,7 @@ class ClientConfig(BaseModel):
 class CwState(BaseModel):
     """Persisted state across all sessions."""
 
+    # NOT extra=forbid — persisted/runtime state, see #1200
     schema_version: int = CW_STATE_SCHEMA_VERSION
     sessions: list[Session] = Field(default_factory=list)
 

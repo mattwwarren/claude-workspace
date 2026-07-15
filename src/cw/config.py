@@ -18,11 +18,12 @@ from typing import TYPE_CHECKING, Any
 
 import click
 import yaml
+from pydantic import ValidationError
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 
 from cw.atomic import atomic_write_text
-from cw.exceptions import CwError
+from cw.exceptions import ConfigValidationError, CwError
 from cw.models import (
     CW_STATE_SCHEMA_VERSION,
     DEFAULT_AUTO_PURPOSES,
@@ -325,7 +326,11 @@ def load_clients() -> dict[str, ClientConfig]:
                 " must start with alphanumeric and contain only [a-zA-Z0-9._-]"
             )
             raise CwError(msg)
-        client = ClientConfig(name=name, **data)
+        try:
+            client = ClientConfig(name=name, **data)
+        except ValidationError as exc:
+            msg = f"{path}: invalid config for client '{name}': {exc}"
+            raise ConfigValidationError(msg) from exc
         # Apply global notification default if not set per-client
         if "notifications" not in data and global_notifications:
             client.notifications = True
@@ -631,7 +636,11 @@ def load_orchestrator_config() -> OrchestratorConfig:
     raw = yaml.safe_load(path.read_text())
     if not raw:
         return OrchestratorConfig()
-    return OrchestratorConfig.model_validate(raw)
+    try:
+        return OrchestratorConfig.model_validate(raw)
+    except ValidationError as exc:
+        msg = f"{path}: {exc}"
+        raise ConfigValidationError(msg) from exc
 
 
 def _load_concurrency_overrides() -> ConcurrencyOverrides:

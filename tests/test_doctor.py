@@ -1198,6 +1198,41 @@ class TestCheckConfigFileLoaderFailure:
         assert yaml_msg in result.detail
 
 
+class TestCheckOrchestratorConfigLoaderFailure:
+    """_check_orchestrator_config mirrors _check_config_file's loader-failure
+    reporting (#1200) — the pre-#1200 body never actually called
+    load_orchestrator_config(), so a typo'd orchestrator.yaml key crashed
+    `cw doctor` via an unguarded traceback rather than reporting ok=False
+    here."""
+
+    def test_config_validation_error_from_loader_is_reported_as_fail(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """ConfigValidationError from load_orchestrator_config → ok=False,
+        parse-failure detail."""
+        from cw.config import orchestrator_config_file
+        from cw.doctor import _check_orchestrator_config
+        from cw.exceptions import ConfigValidationError
+
+        # File must exist so the try/except path runs (existence-true branch
+        # short-circuits to ok=True before reaching the loader).
+        orchestrator_config_file().parent.mkdir(parents=True, exist_ok=True)
+        orchestrator_config_file().write_text("bogus_field: 1\n")
+
+        error_msg = "malformed orchestrator.yaml"
+
+        def fake_load_orchestrator_config() -> object:
+            raise ConfigValidationError(error_msg)
+
+        monkeypatch.setattr(
+            "cw.doctor.load_orchestrator_config", fake_load_orchestrator_config
+        )
+        result = _check_orchestrator_config()
+        assert result.ok is False
+        assert "parse failed" in result.detail
+        assert error_msg in result.detail
+
+
 class TestCheckDevQueueLoaderFailure:
     """_check_dev_queue returns ok=False when load_dev_queue raises a narrowed type."""
 
@@ -5424,3 +5459,29 @@ class TestCheckInboxSize:
         report = run_doctor()
         names = {c.name for c in report.checks}
         assert "inbox-size" in names
+
+    def test_bad_orchestrator_config_degrades_instead_of_raising(
+        self, tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A typo'd orchestrator.yaml must not crash _check_inbox_size via an
+        unguarded load_orchestrator_config() call — it degrades to
+        OrchestratorConfig() defaults instead (#1200). Without this guard, a
+        raised ConfigValidationError here would propagate out of run_doctor()
+        before the correct _check_orchestrator_config() ok=False result is
+        ever printed, defeating the ticket's own acceptance criterion."""
+        from cw.doctor import _check_inbox_size
+        from cw.exceptions import ConfigValidationError
+
+        (tmp_events_dir / "inbox.jsonl").write_text('{"a": 1}\n')
+
+        error_msg = "simulated bad orchestrator.yaml"
+
+        def fake_load_orchestrator_config() -> object:
+            raise ConfigValidationError(error_msg)
+
+        monkeypatch.setattr(
+            "cw.doctor.load_orchestrator_config", fake_load_orchestrator_config
+        )
+        result = _check_inbox_size()
+        assert isinstance(result, CheckResult)
+        assert result.ok is True

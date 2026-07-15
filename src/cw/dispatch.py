@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal
 
-import pydantic
 import yaml
 
 from cw.auto_dev_result import (
@@ -58,6 +57,7 @@ from cw.dev_queue import (
 )
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import (
+    ConfigValidationError,
     MissingWorkspaceError,
     StaleWorktreeError,
     UsageLimitError,
@@ -2380,7 +2380,7 @@ def run_dispatch_loop(
                     config = config.model_copy(
                         update={"per_client_ceiling": overridden}
                     )
-            except (yaml.YAMLError, pydantic.ValidationError):
+            except (yaml.YAMLError, ConfigValidationError):
                 _log.warning("dispatch: config reload failed; using last-good config")
 
             consume_completed_sessions()

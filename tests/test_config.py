@@ -190,6 +190,33 @@ class TestLoadClients:
         result = load_clients()
         assert result["acme"].operator_github_login is None
 
+    def test_typo_lane_key_raises_config_validation_error(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """A typo'd lane key (review_recipies) is wrapped as ConfigValidationError,
+        naming the offending file and key, instead of a raw pydantic
+        ValidationError leaking out of load_clients() (#1200)."""
+        from cw.exceptions import ConfigValidationError
+
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
+        clients_file.write_text(
+            "clients:\n"
+            "  acme:\n"
+            f"    workspace_path: {ws_dir}\n"
+            "    lanes:\n"
+            "      - name: default\n"
+            "        review_recipies:\n"
+            "          address_review: true\n"
+        )
+        with pytest.raises(
+            ConfigValidationError, match=r"(?s)clients\.yaml.*review_recipies"
+        ):
+            load_clients()
+
 
 class TestLoadWorktreeClients:
     def test_worktree_client_from_yaml(
@@ -1357,6 +1384,19 @@ class TestOrchestratorConfigReapPolicy:
 
         config = OrchestratorConfig.model_validate({"reap_policy": 42})
         assert config.reap_policy == ReapPolicy.SIGNAL_ONLY
+
+    def test_unknown_key_raises_config_validation_error(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """load_orchestrator_config() wraps a pydantic ValidationError from an
+        unrecognized top-level key as ConfigValidationError (#1200)."""
+        from cw.config import load_orchestrator_config, orchestrator_config_file
+        from cw.exceptions import ConfigValidationError
+
+        orchestrator_config_file().parent.mkdir(parents=True, exist_ok=True)
+        orchestrator_config_file().write_text("bogus_field: 1\n")
+        with pytest.raises(ConfigValidationError, match=r"orchestrator\.yaml"):
+            load_orchestrator_config()
 
 
 class TestMutateState:
