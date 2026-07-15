@@ -52,6 +52,7 @@ from cw.reconcile.review_recipes import (
     _detect_auto_fix_ci,
     _detect_escalate_merge_block,
     _detect_request_reviewer,
+    resolve_outbound_consent_allowed,
     resolve_review_recipe_enabled,
     run_review_recipes,
 )
@@ -62,7 +63,7 @@ from cw.review_strategy import ReviewStrategy
 # client / lane), _pr_state builds a PrState with sensible OPEN defaults.
 # _client_with_lanes builds a ClientConfig with the given lanes (reused by the
 # resolve-precedence tests below).
-from tests.test_pr_hydrate import _pr_state
+from tests.test_pr_hydrate import _pr_state, _watched
 from tests.test_reconcile_gate_recipes import _client_with_lanes, _make_task
 
 _SKILL_PATH = (
@@ -1378,3 +1379,71 @@ def test_act_escalate_merge_block_stale_row_silent_skip(tmp_config_dir: Path) ->
     assert acted == []
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
     assert load_dev_queue().tasks[0].escalate_merge_block_fired_at is None
+
+
+# --- outbound consent gate (RFC 0011 B2, #1159) -----------------------------
+
+
+class TestResolveOutboundConsentAllowed:
+    """Two-party consent gate for outbound acting toward another's PR.
+
+    Party 1 (operator): ``config.review_recipes_enabled``, the existing
+    review-recipes master switch (RFC 0010 P3). Party 2 (target): an active
+    ``WatchedPr`` for the queried ``pr_url`` (RFC 0011 S2). See R1-R4.
+    """
+
+    _PR_URL = "https://github.com/acme/widgets/pull/42"
+
+    def test_switch_off_returns_false_regardless_of_watched_pr(self) -> None:
+        """The master switch off gates outbound action shut, even with an
+        active WatchedPr match present."""
+        assert (
+            resolve_outbound_consent_allowed(
+                self._PR_URL,
+                config=_config(review_recipes_enabled=False),
+                watched_prs=[_watched(pr_number=42)],
+            )
+            is False
+        )
+
+    def test_switch_on_active_match_returns_true(self) -> None:
+        """Switch on + an active WatchedPr for this pr_url -> True."""
+        assert (
+            resolve_outbound_consent_allowed(
+                self._PR_URL,
+                config=_config(),
+                watched_prs=[_watched(pr_number=42)],
+            )
+            is True
+        )
+
+    def test_switch_on_no_match_returns_false(self) -> None:
+        """Switch on but no WatchedPr for this pr_url -> False."""
+        assert (
+            resolve_outbound_consent_allowed(
+                self._PR_URL,
+                config=_config(),
+                watched_prs=[_watched(pr_number=99)],
+            )
+            is False
+        )
+        assert (
+            resolve_outbound_consent_allowed(
+                self._PR_URL,
+                config=_config(),
+                watched_prs=[],
+            )
+            is False
+        )
+
+    def test_switch_on_dismissed_watched_pr_returns_false(self) -> None:
+        """A dismissed WatchedPr matching this pr_url does not open the
+        channel -- only an active one does."""
+        assert (
+            resolve_outbound_consent_allowed(
+                self._PR_URL,
+                config=_config(),
+                watched_prs=[_watched(pr_number=42, status="dismissed")],
+            )
+            is False
+        )
