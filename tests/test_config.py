@@ -1490,10 +1490,8 @@ class TestSessionsLockReentrancy:
         time here would HANG the whole test run (not just fail an
         assertion) — the guard must raise before any second flock() syscall.
         """
-        with sessions_lock():
-            with pytest.raises(SessionsLockReentryError):
-                with sessions_lock():
-                    pytest.fail("must not reach body")
+        with sessions_lock(), pytest.raises(SessionsLockReentryError), sessions_lock():
+            pytest.fail("must not reach body")
 
     def test_sessions_lock_sequential_reacquire_still_succeeds(
         self, tmp_config_dir: Path
@@ -1508,9 +1506,9 @@ class TestSessionsLockReentrancy:
         self, tmp_config_dir: Path
     ) -> None:
         """The held flag resets via finally even on exceptional exit."""
-        with pytest.raises(ValueError, match="boom"):
-            with sessions_lock():
-                raise ValueError("boom")
+        msg = "boom"
+        with pytest.raises(ValueError, match="boom"), sessions_lock():
+            raise ValueError(msg)
 
         # A second call must succeed — no stuck "held" flag from the raise.
         with sessions_lock():

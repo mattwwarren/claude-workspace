@@ -607,6 +607,7 @@ def test_reconcile_reentry_guard_fires_and_is_swallowed(
     monkeypatch.setattr("cw.dev_queue.add_ticket", lambda _t: True)
 
     probed = {"lock_held": False}
+    captured: list[BaseException] = []
 
     def _fake_dispatch_loop(**_kwargs: Any) -> None:
         # Non-blocking probe proves the outer sessions_lock() is genuinely
@@ -620,10 +621,13 @@ def test_reconcile_reentry_guard_fires_and_is_swallowed(
             fd.close()
         try:
             reconcile()
-        except SessionsLockReentryError:
+        except SessionsLockReentryError as exc:
+            # Record the exact exception raised (not just "some CwError")
+            # before letting it propagate into _dispatch_auto_fix_ci's
+            # `except CwError` handler, so the outer assertions below can
+            # confirm the guard — not some other failure — fired.
+            captured.append(exc)
             raise
-        else:
-            pytest.fail("reconcile() should have raised SessionsLockReentryError")
 
     monkeypatch.setattr("cw.dispatch.run_dispatch_loop", _fake_dispatch_loop)
 
@@ -632,6 +636,8 @@ def test_reconcile_reentry_guard_fires_and_is_swallowed(
 
     assert acted == []
     assert probed["lock_held"] is True
+    assert len(captured) == 1
+    assert isinstance(captured[0], SessionsLockReentryError)
     failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
     assert len(failed) == 1
     assert failed[0].correlation_id == task.ticket_id
