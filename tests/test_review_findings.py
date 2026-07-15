@@ -16,10 +16,7 @@ from pydantic import ValidationError
 
 from cw.review_findings import (
     AcceptedFinding,
-    CapturedDiff,
-    EscalationMetadata,
     Finding,
-    RejectedFinding,
     ReviewerFindingsDocument,
     ReviewerRunFailure,
     ReviewerRunRecord,
@@ -87,9 +84,7 @@ class TestRejectionReasonLiteral:
             _make_reviewer_doc(bad), diff
         )
         assert rejected
-        assert all(
-            r.reason != "escalation_evidence_not_in_diff" for r in rejected
-        )
+        assert all(r.reason != "escalation_evidence_not_in_diff" for r in rejected)
 
 
 def _finding_kwargs(**overrides: object) -> dict[str, object]:
@@ -239,9 +234,7 @@ class TestValidateReviewerDocument:
 
     def test_rejected_preserves_raw_payload(self) -> None:
         f = _make_finding(file="src/cw/other.py", summary="raw kept")
-        _, rejected, _ = validate_reviewer_document(
-            _make_reviewer_doc(f), _make_diff()
-        )
+        _, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), _make_diff())
         assert rejected[0].raw["summary"] == "raw kept"
         assert rejected[0].reviewer_role == "Test Reviewer"
 
@@ -256,9 +249,7 @@ class TestEscalationStripOnInvalidEvidence:
         f = _make_finding(severity="MUST_FIX", escalation=esc)
         doc = _make_reviewer_doc(f, reviewer_role="Security Reviewer")
         with caplog.at_level(logging.WARNING):
-            accepted, rejected, stripped = validate_reviewer_document(
-                doc, _make_diff()
-            )
+            accepted, rejected, stripped = validate_reviewer_document(doc, _make_diff())
         assert not rejected
         assert len(accepted) == 1
         assert accepted[0].escalation is None
@@ -280,9 +271,7 @@ class TestEscalationStripOnInvalidEvidence:
         )
         assert review.must_fix_initial == 1
 
-    def test_valid_quote_preserved(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_valid_quote_preserved(self, caplog: pytest.LogCaptureFixture) -> None:
         esc = _make_escalation(evidence_quote="def broken():")
         f = _make_finding(escalation=esc)
         with caplog.at_level(logging.WARNING):
@@ -293,9 +282,7 @@ class TestEscalationStripOnInvalidEvidence:
         assert not stripped
         assert not [r for r in caplog.records if r.levelno == logging.WARNING]
 
-    def test_no_escalation_untouched(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_no_escalation_untouched(self, caplog: pytest.LogCaptureFixture) -> None:
         f = _make_finding(escalation=None)
         with caplog.at_level(logging.WARNING):
             accepted, _, stripped = validate_reviewer_document(
@@ -311,9 +298,7 @@ class TestEscalationStripOnInvalidEvidence:
         # Finding is itself rejected (blank evidence via model_construct) AND
         # carries an escalation with a bad quote — no strip is produced.
         esc = _make_escalation(evidence_quote="ghost")
-        bad = Finding.model_construct(
-            **_finding_kwargs(evidence="   ", escalation=esc)
-        )
+        bad = Finding.model_construct(**_finding_kwargs(evidence="   ", escalation=esc))
         with caplog.at_level(logging.WARNING):
             accepted, rejected, stripped = validate_reviewer_document(
                 _make_reviewer_doc(bad), _make_diff()
@@ -328,9 +313,7 @@ class TestEscalationStripOnInvalidEvidence:
         diff = _make_diff(extra_text="-removed_context_line = 1")
         esc = _make_escalation(evidence_quote="removed_context_line = 1")
         f = _make_finding(escalation=esc)
-        accepted, _, stripped = validate_reviewer_document(
-            _make_reviewer_doc(f), diff
-        )
+        accepted, _, stripped = validate_reviewer_document(_make_reviewer_doc(f), diff)
         assert accepted[0].escalation is not None
         assert not stripped
 
@@ -352,12 +335,12 @@ class TestDedupeFindings:
     def test_deterministic_order_across_permutations(self) -> None:
         f1 = _make_finding(line_start=10, line_end=10)
         f2 = _make_finding(line_start=20, line_end=20, evidence="def broken():")
-        order1 = [af.finding.line_start for af in dedupe_findings(
-            [("A", f1), ("B", f2)]
-        )]
-        order2 = [af.finding.line_start for af in dedupe_findings(
-            [("B", f2), ("A", f1)]
-        )]
+        order1 = [
+            af.finding.line_start for af in dedupe_findings([("A", f1), ("B", f2)])
+        ]
+        order2 = [
+            af.finding.line_start for af in dedupe_findings([("B", f2), ("A", f1)])
+        ]
         assert order1 == order2
 
     def test_escalation_non_null_wins_when_one_side_set(self) -> None:
@@ -387,10 +370,12 @@ class TestDedupeFindings:
 class TestDeriveReviewCounts:
     def test_counts_by_severity(self) -> None:
         findings = [
-            AcceptedFinding(finding=_make_finding(severity="MUST_FIX"),
-                            reviewers=["a"]),
-            AcceptedFinding(finding=_make_finding(severity="SHOULD_FIX"),
-                            reviewers=["a"]),
+            AcceptedFinding(
+                finding=_make_finding(severity="MUST_FIX"), reviewers=["a"]
+            ),
+            AcceptedFinding(
+                finding=_make_finding(severity="SHOULD_FIX"), reviewers=["a"]
+            ),
         ]
         review = derive_review_counts(findings, fix_cycles_used=2, agents_run=3)
         assert review.must_fix_initial == 1
@@ -477,9 +462,7 @@ class TestConsolidateVerdictFailedReviewers:
             [],
             diff,
             reviewed_sha="sha",
-            failed_reviewers=[
-                ReviewerRunFailure(role="Solo", reason="crash")
-            ],
+            failed_reviewers=[ReviewerRunFailure(role="Solo", reason="crash")],
         )
         assert len(verdict.agents_run) == 1
         assert verdict.agents_run[0].status == "failed"
@@ -487,12 +470,8 @@ class TestConsolidateVerdictFailedReviewers:
     def test_stripped_escalations_union_in_document_order(self) -> None:
         diff = _make_diff()
         esc = _make_escalation(evidence_quote="ghost")
-        doc1 = _make_reviewer_doc(
-            _make_finding(escalation=esc), reviewer_role="R1"
-        )
-        doc2 = _make_reviewer_doc(
-            _make_finding(escalation=esc), reviewer_role="R2"
-        )
+        doc1 = _make_reviewer_doc(_make_finding(escalation=esc), reviewer_role="R1")
+        doc2 = _make_reviewer_doc(_make_finding(escalation=esc), reviewer_role="R2")
         verdict = consolidate_verdict([doc1, doc2], diff, reviewed_sha="sha")
         assert len(verdict.stripped_escalations) == 2
         assert verdict.stripped_escalations[0].reviewer_role == "R1"
@@ -544,16 +523,22 @@ class TestExecutorNeutralContract:
         claude_doc = _make_reviewer_doc(
             _make_finding(severity="MUST_FIX", escalation=good_esc),
             _make_finding(
-                severity="SHOULD_FIX", line_start=10, line_end=10,
-                evidence="def broken():", escalation=bad_esc,
+                severity="SHOULD_FIX",
+                line_start=10,
+                line_end=10,
+                evidence="def broken():",
+                escalation=bad_esc,
             ),
             reviewer_role="Reviewer",
         )
         codex_doc = _make_reviewer_doc(
             _make_finding(severity="MUST_FIX", escalation=good_esc),
             _make_finding(
-                severity="SHOULD_FIX", line_start=10, line_end=10,
-                evidence="def broken():", escalation=bad_esc,
+                severity="SHOULD_FIX",
+                line_start=10,
+                line_end=10,
+                evidence="def broken():",
+                escalation=bad_esc,
             ),
             reviewer_role="Reviewer",
         )
