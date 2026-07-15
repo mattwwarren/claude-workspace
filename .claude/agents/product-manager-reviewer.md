@@ -74,6 +74,8 @@ assumption confidently — confidence is not evidence. Watch for the
 contradiction-in-place case: the handoff/investigation states the true
 fact, and the plan a few lines later builds the opposite.
 
+**Self-verification (`Verified: YES`) evidence bar.** A premise may be resolved without the human by your OWN investigation *in this session* — but only against a specific evidence bar: official vendor documentation (cite the URL), a `<tool> --help` excerpt (quote it), the tool's own source code (cite file:line or quote the excerpt), or the verbatim output of a command you actually ran in this session, together with the exact invocation, so a reviewer can re-check it. A bare "I ran it and it works" without the quoted output does not qualify. Reserve `Verified: NO` whenever your evidence is absent, ambiguous, or self-contradictory (e.g. two runs of the same command disagreed), or whenever the answer turns on operator intent rather than external fact — even confident recall is NO.
+
 ### Output format
 
 ```
@@ -107,13 +109,18 @@ PREMISES TO VERIFY — N items
    - Plan depends on it for: <what was chosen / what breaks if false>
    - Evidence in plan or ticket: <verbatim quote, or "none — asserted without source">
    - Verify before building by: <capture a payload / check Datadog / read the API stub / ask the integration owner>
+   - Verified: YES — <authoritative citation: the quoted --help excerpt, doc URL, source excerpt, or the exact command + verbatim output that settles the claim> | NO — <why your own evidence is absent, ambiguous, self-contradictory, or turns on operator intent>
 
 2. ...
 ```
 
+**Verified is mandatory on every item — never omit it.** `Verified: YES` is only for premises your own investigation settled against the evidence bar above. Consumer-side default: a missing or malformed `Verified` line (wrong token, absent sub-bullet, anything other than a leading `YES`/`NO` token) is treated as NO downstream — a deliberate fail-closed default, mirroring the ambiguities `Recommendation` field, and never a shortcut for writing YES.
+
 Omit the block entirely when there are none. A premise is not resolved by
-revising the plan — it is resolved by verifying the fact — so this block is
-routed to the human, not the plan-revision loop.
+revising the plan — it is resolved by verifying the fact. A `Verified: YES`
+premise was resolved by your own authoritative evidence in this session and
+proceeds without the human; a `Verified: NO` premise is still routed to the
+human, not the plan-revision loop.
 
 ## Mode 2: Spec Compliance Review
 
