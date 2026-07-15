@@ -683,6 +683,32 @@ def find_milestone(
     return None, True
 
 
+def latest_release_tag(*, timeout: int = _CREATE_TIMEOUT) -> tuple[str | None, bool]:
+    """Return (tag, ok) for the repo's latest GitHub release.
+
+    Policy-free: never logs, raises, or defaults a version — that judgment
+    belongs to the caller (``cw.cli.sprint._resolve_version``). ``ok=False``
+    means the gh call itself failed (non-zero exit, OSError, timeout, or
+    empty output) — never a signal that no version has ever been released;
+    the caller decides what "could not determine the latest tag" means.
+    """
+    try:
+        result = _sp.run(
+            ["gh", "release", "view", "--json", "tagName", "--jq", ".tagName"],
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, _sp.TimeoutExpired):
+        return None, False
+    if result.returncode != 0:
+        return None, False
+    tag = result.stdout.decode("utf-8", "replace").strip()
+    if not tag:
+        return None, False
+    return tag, True
+
+
 def milestone_issue_titles(
     milestone: int, *, timeout: int = _CREATE_TIMEOUT
 ) -> tuple[dict[str, int] | None, bool]:

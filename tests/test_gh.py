@@ -1400,3 +1400,51 @@ class TestMilestoneIssueTitles:
 
         monkeypatch.setattr(gh._sp, "run", fake_run)
         assert gh.milestone_issue_titles(11) == ({}, True)
+
+
+class TestLatestReleaseTag:
+    """Tests for latest_release_tag."""
+
+    def test_returns_the_tag_and_ok_true_on_success(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fake_run(
+            cmd: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.CompletedProcess(cmd, 0, b"v1.20.0\n", b"")
+
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.latest_release_tag() == ("v1.20.0", True)
+
+    def test_returns_none_false_when_the_gh_call_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fake_run(
+            cmd: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.CompletedProcess(cmd, 1, b"", b"gh: no releases found")
+
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.latest_release_tag() == (None, False)
+
+    def test_returns_none_false_on_timeout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fake_run(
+            cmd: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[bytes]:
+            raise subprocess.TimeoutExpired(cmd, 30)
+
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.latest_release_tag() == (None, False)
+
+    def test_returns_none_false_on_empty_output(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fake_run(
+            cmd: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.CompletedProcess(cmd, 0, b"\n", b"")
+
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.latest_release_tag() == (None, False)
