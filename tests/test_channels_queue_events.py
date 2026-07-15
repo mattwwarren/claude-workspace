@@ -1392,15 +1392,14 @@ class TestStartPollerConfigValidation:
     """A malformed operator_channel_forward must crash _start_poller (fail-loud)."""
 
     def test_malformed_operator_channel_forward_crashes_at_startup(self) -> None:
-        import pydantic
-
         from cw.config import orchestrator_config_file
+        from cw.exceptions import ConfigValidationError
 
         path = orchestrator_config_file()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("operator_channel_forward:\n  event_types:\n  - bogus.event\n")
 
-        with pytest.raises(pydantic.ValidationError, match=re.escape("bogus.event")):
+        with pytest.raises(ConfigValidationError, match=re.escape("bogus.event")):
             _server_mod._start_poller()
         assert _server_mod._poller_started[0] is False
 
@@ -1412,9 +1411,8 @@ class TestStartPollerConfigValidation:
         assert _server_mod._poller_started[0] is True
 
     def test_revalidates_on_every_call_even_when_already_started(self) -> None:
-        import pydantic
-
         from cw.config import orchestrator_config_file
+        from cw.exceptions import ConfigValidationError
 
         _server_mod._start_poller()
         assert _server_mod._poller_started[0] is True
@@ -1422,7 +1420,7 @@ class TestStartPollerConfigValidation:
         path = orchestrator_config_file()
         path.write_text("operator_channel_forward:\n  event_types:\n  - bogus.event\n")
 
-        with pytest.raises(pydantic.ValidationError, match=re.escape("bogus.event")):
+        with pytest.raises(ConfigValidationError, match=re.escape("bogus.event")):
             _server_mod._start_poller()
 
 

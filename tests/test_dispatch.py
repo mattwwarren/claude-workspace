@@ -42,7 +42,12 @@ from cw.dispatch import (
     run_dispatch_loop,
 )
 from cw.events import read_events, record_event
-from cw.exceptions import StaleWorktreeError, VersionDriftError, WorktreeError
+from cw.exceptions import (
+    ConfigValidationError,
+    StaleWorktreeError,
+    VersionDriftError,
+    WorktreeError,
+)
 from cw.models import (
     DEFAULT_GLOBAL_ATTEMPT_CEILING,
     DEFAULT_LANE,
@@ -3488,6 +3493,45 @@ class TestConfigReloadedEachTick:
             if call_count >= 2:
                 msg = "simulated corrupt yaml"
                 raise yaml.YAMLError(msg)
+            return real_load()
+
+        monkeypatch.setattr("cw.dispatch.load_effective_config", patched_load)
+
+        daemon = FakeNativeDaemonClient()
+        # Should NOT raise despite the in-loop reload failing
+        with caplog.at_level(logging.WARNING, logger="cw.dispatch"):
+            run_dispatch_loop(once=True, native_daemon=daemon)
+
+        assert any(
+            "config reload failed" in record.message
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+        )
+
+    def test_config_last_good_on_config_validation_error(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """In-loop reload failure from a bad config-model value (extra='forbid'
+        typo etc, wrapped as ConfigValidationError) logs WARNING and continues
+        with last-good config — mirrors test_config_last_good_on_corrupt's
+        yaml.YAMLError case for the pydantic-validation failure mode (#1200)."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        real_load = load_effective_config
+        call_count = 0
+
+        def patched_load() -> OrchestratorConfig:
+            nonlocal call_count
+            call_count += 1
+            # First call (startup): succeed normally
+            # Second call (in-loop reload): simulate a wrapped ValidationError
+            if call_count >= 2:
+                msg = "simulated invalid orchestrator config"
+                raise ConfigValidationError(msg)
             return real_load()
 
         monkeypatch.setattr("cw.dispatch.load_effective_config", patched_load)

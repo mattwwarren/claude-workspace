@@ -50,6 +50,7 @@ from cw.gh import TIMED_OUT_MERGED_LOOKBACK_DAYS, pr_is_merged_for_ticket
 from cw.models import (
     CompletionReason,
     DispatchSkipReason,
+    OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
     SessionOrigin,
@@ -342,6 +343,7 @@ def _check_config_file() -> CheckResult:
 
 
 def _check_orchestrator_config() -> CheckResult:
+    """Verify orchestrator.yaml parses, mirroring _check_config_file above."""
     path = orchestrator_config_file()
     if not path.exists():
         return CheckResult(
@@ -349,6 +351,10 @@ def _check_orchestrator_config() -> CheckResult:
             ok=True,
             detail=f"not yet created at {path} (will be generated on first use)",
         )
+    try:
+        load_orchestrator_config()
+    except (OSError, yaml.YAMLError, CwError, ValidationError) as exc:
+        return CheckResult("orchestrator.yaml", ok=False, detail=f"parse failed: {exc}")
     return CheckResult("orchestrator.yaml", ok=True, detail=str(path))
 
 
@@ -390,7 +396,14 @@ def _check_inbox_size() -> CheckResult:
     if not inbox.exists():
         return CheckResult("inbox-size", ok=True, detail="no inbox file")
 
-    config = load_orchestrator_config()
+    try:
+        config = load_orchestrator_config()
+    except (OSError, yaml.YAMLError, CwError, ValidationError):
+        # Degrade to defaults rather than raising: a bad orchestrator.yaml is
+        # already reported by _check_orchestrator_config() above. Letting it
+        # propagate here would crash run_doctor() before that ok=False
+        # result is ever printed. See GitHub #1200.
+        config = OrchestratorConfig()
     size_bytes = inbox.stat().st_size
     with inbox.open("r", encoding="utf-8") as f:
         line_count = sum(1 for _ in f)
