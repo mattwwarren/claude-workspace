@@ -35,8 +35,10 @@ task-by-task build log; this file does not duplicate either.
 
 Pure orchestration on the operator-judgment side — the skill adds no
 RFC-parsing or issue-shaping logic of its own (that's `src/cw/sprint.py`'s
-job). It sequences the CLI, one subagent, one human gate, and two `gh` side
-calls the CLI does not make.
+job). It sequences the CLI, one subagent, one human gate, the pull-in
+filing calls (`gh issue edit`/`gh issue comment`), and the footer-PR calls
+(`gh repo view`/`gh pr create`) — none of which `cw sprint plan|apply` do
+themselves.
 
 ## Pipeline
 
@@ -134,16 +136,16 @@ calls the CLI does not make.
      ever reach this step, and that refusal is reported like any other
      step-1 CLI error.
 
-7. **RFC footer PR.** Back-fill the RFC's `Issues:` footer with the real
-   numbers from step 4. Construct the milestone URL yourself — no pipeline
-   step returns one:
+7. **RFC footer PR.** Back-fill the RFC's `Issues:` footer with both the
+   real numbers from step 4 and the milestone URL. Construct the URL
+   yourself — no pipeline step returns one:
 
    ```bash
    OWNER_REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
    # https://github.com/${OWNER_REPO}/milestone/<milestone_number from step 4>
    ```
 
-   Open a docs-only PR containing just the RFC footer edit.
+   Open a docs-only PR (`gh pr create`) containing just the RFC footer edit.
 
 ## What this skill must NOT do
 
@@ -178,7 +180,8 @@ irreversibly:
 guesses around. See `config/CONFIG_REFERENCE.md` for the full block shape
 (`milestone:`, `epic:`, `ticket:` sections, plus the optional `notion:`
 sub-block covered in pipeline step 6). Only `notion:` and the two `labels:`
-lists are optional within an otherwise-present `sprint_buildout:` block.
+lists (`epic.labels`, `ticket.labels`) are optional within an
+otherwise-present `sprint_buildout:` block.
 
 ## Example
 
