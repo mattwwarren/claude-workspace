@@ -96,6 +96,25 @@ class LaneNotFoundError(CwError):
     __slots__ = ()
 
 
+class ConfigValidationError(CwError):
+    """A config-facing Pydantic model (``ClientConfig``, ``OrchestratorConfig``,
+    etc.) failed validation while loading ``clients.yaml`` or
+    ``orchestrator.yaml`` (GitHub #1200).
+
+    Raised by :func:`cw.config.load_clients` and
+    :func:`cw.config.load_orchestrator_config`, wrapping the underlying
+    ``pydantic.ValidationError`` so callers (the CLI boundary's
+    ``handle_errors``, the dispatch loop's guarded config reload, ``cw
+    doctor``'s loader-failure checks) can catch one ``CwError`` subclass
+    instead of reaching across the pydantic import boundary. The message
+    names the offending file and, via the wrapped pydantic error text, the
+    specific field/key that failed -- e.g. an ``extra="forbid"`` rejection of
+    a typo'd config key.
+    """
+
+    __slots__ = ()
+
+
 class UsageLimitError(CwError):
     """Raised when ``claude --bg`` fails because a fleet-wide usage limit is active.
 
