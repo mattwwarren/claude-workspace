@@ -2621,13 +2621,188 @@ git commit -m "feat(sprint): idempotent apply — milestone, epics, tickets, che
 **Files:**
 - Create: `src/cw/cli/sprint.py`
 - Modify: `src/cw/cli/__init__.py`
+- Modify: `src/cw/gh.py`
+- Modify: `tests/test_gh.py`
 - Modify: `tests/test_cli.py`
 
 **Interfaces:**
-- Consumes: everything from Tasks 1–4; `cw.cli._base.main` and `handle_errors` (existing).
-- Produces: the `cw sprint` command group. `cw sprint plan <rfc-path> --out <file>`; `cw sprint apply <plan-file>`.
+- Consumes: everything from Tasks 1–4; `cw.cli._base.main` and `handle_errors`
+  (existing); `cw.gh.find_milestone`'s `(value, ok)` pattern (existing, Task 3)
+  as the shape the new gh helper mirrors.
+- Produces:
+  - `cw.gh.latest_release_tag(*, timeout: int = _CREATE_TIMEOUT) -> tuple[str | None, bool]`
+    — a policy-free `gh release view` wrapper, added to `src/cw/gh.py` so the
+    CLI never shells out to `gh` directly (this repo's standing rule: reuse
+    `cw.gh` for every `gh` subprocess call). Never logs, raises, or falls back
+    to a default version — that decision belongs to the caller.
+  - the `cw sprint` command group: `cw sprint plan <rfc-path> --out <file>`;
+    `cw sprint apply <plan-file>`.
 
-- [ ] **Step 1: Write the failing tests**
+## Touch-point Contract
+
+- Touch-point: `src/cw/cli/__init__.py`'s submodule import tuple and `__all__`
+  File:line: `src/cw/cli/__init__.py:16-26` (import tuple), `:90-99` (`__all__` tail)
+  Read: the real import tuple is `channels, config_cmds, guard, maintenance,
+  queues, review, session_inspect, watchdog, worktree,` (line 16-26) — `review`
+  IS present (registers the `cw review` group by import side-effect; dropping
+  it breaks `tests/test_cli_review.py`). The real `__all__` tail (alphabetical
+  over the whole list, not just submodule names) is `..., "review",
+  "session_group", "session_inspect", "watchdog", "worktree",`.
+  Plan asserts: `sprint` is inserted into BOTH lists in its true alphabetical
+  slot — between `session_inspect` and `watchdog` in each, NOT between
+  `review` and `session_inspect`. Verified directly:
+  `sorted(["session_inspect", "sprint", "watchdog"])` orders
+  `session_inspect` before `sprint` (comparing the two names character by
+  character, `"session_inspect"[1] == "e"` sorts before `"sprint"[1] == "p"`,
+  so `session_inspect < sprint`), and `sprint < watchdog` trivially (`s <
+  w`). `review` is untouched — it stays exactly where it already is, in both
+  lists.
+  Match: CONFIRMED
+
+- Touch-point: `src/cw/cli/_base.py`'s `handle_errors` boundary decorator
+  File:line: `src/cw/cli/_base.py:40-50`
+  Read:
+
+```python
+def handle_errors[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
+    """Convert CwError exceptions to click.ClickException at the CLI boundary."""
+
+    @functools.wraps(fn)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        try:
+            return fn(*args, **kwargs)
+        except CwError as e:
+            raise click.ClickException(str(e)) from e
+
+    return wrapper
+```
+
+  Plan asserts: both `sprint plan` and `sprint apply` rely on this existing
+  boundary, not a bespoke one. `@handle_errors` on `sprint_plan` converts any
+  `RfcContractError` raised inside `parse_rfc`/`load_buildout_config` (both
+  `CwError` subclasses) into a clean `ClickException`, giving `sprint plan` a
+  nonzero exit with the message on stdout —
+  `test_sprint_plan_reports_a_contract_violation_as_a_clean_cli_error` asserts
+  exactly this. `sprint_apply`'s inner `try/except SprintApplyError: ... raise`
+  re-raises inside the SAME function body that `@handle_errors` wraps, so the
+  re-raised `SprintApplyError` (a `CwError` subclass, per Task 4) still passes
+  through `except CwError as e` in `wrapper` and becomes
+  `ClickException(str(e))` — the nonzero-exit path is uniform whether the
+  error surfaces before or after the partial-progress echo.
+  Match: CONFIRMED
+
+- Touch-point: `tests/test_sprint.py`'s exported fixtures and
+  `tests/conftest.py`'s `_write_project_config_yaml`
+  File:line: `tests/test_sprint.py:21` (`MINIMAL_RFC`), `:262` (`CONFIG_YAML`),
+  `:295` (`_config()`); `tests/conftest.py:99-111`
+  (`_write_project_config_yaml`)
+  Read: `tests/test_sprint.py` imports config-writing via
+  `from tests.conftest import _write_project_config_yaml` at its own top —
+  it does NOT define, wrap, or re-export a `_write_config` name anywhere in
+  the file. `tests/conftest.py:99` defines
+  `def _write_project_config_yaml(root: Path, content: str) -> None:`, whose
+  docstring states it is "the canonical version new tests should import
+  instead of adding a fourth copy."
+  Plan asserts: Task 5's cross-file test import is
+  `from tests.test_sprint import CONFIG_YAML, MINIMAL_RFC, _config` plus a
+  separate `from tests.conftest import _write_project_config_yaml` — call
+  sites use `_write_project_config_yaml(...)`, never `_write_config(...)`
+  (which does not exist anywhere in the test suite and would `ImportError` at
+  collection time, failing every test in `tests/test_cli.py`, not just the
+  sprint ones).
+  Match: CONFIRMED
+
+- [ ] **Step 1: Add `latest_release_tag` to `cw.gh`, with tests**
+
+`_resolve_version` (Step 5 below) needs the latest release tag to derive the
+next milestone version. Per this repo's standing rule — reuse `cw.gh` for
+every `gh` subprocess call, never shell out from a CLI module directly — that
+`gh` invocation belongs in `src/cw/gh.py`, as a new helper mirroring
+`find_milestone`'s `(value, ok)` shape.
+
+Add to `src/cw/gh.py`, next to the other milestone/release helpers:
+
+```python
+def latest_release_tag(*, timeout: int = _CREATE_TIMEOUT) -> tuple[str | None, bool]:
+    """Return (tag, ok) for the repo's latest GitHub release.
+
+    Mirrors ``find_milestone``'s ``(value, ok)`` shape: ``ok=False`` means the
+    ``gh`` call itself failed (non-zero exit, OSError, timeout) — the caller
+    cannot conclude there is no release, only that it could not check.
+    Conflating the two would make a version-bump computation silently fall
+    back to ``0.0.0`` after a transient ``gh`` failure, exactly the kind of
+    trap ``find_milestone``'s docstring warns about for milestones.
+
+    Policy-free by design: never logs, raises, or falls back to a default
+    version. That decision belongs to the caller
+    (``cw.cli.sprint._resolve_version``), which is the one place that knows
+    what a missing tag should become.
+    """
+    try:
+        result = _sp.run(
+            ["gh", "release", "view", "--json", "tagName", "--jq", ".tagName"],
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, _sp.TimeoutExpired):
+        return None, False
+    if result.returncode != 0:
+        return None, False
+    tag = result.stdout.decode("utf-8", "replace").strip()
+    if not tag:
+        return None, False
+    return tag, True
+```
+
+Append to `tests/test_gh.py`, following the existing `TestFindMilestone`
+class-per-helper, `monkeypatch.setattr(gh._sp, "run", fake_run)` pattern
+(see `tests/test_gh.py:1233` on `origin/main`):
+
+```python
+class TestLatestReleaseTag:
+    """Tests for latest_release_tag."""
+
+    def test_returns_the_tag_and_ok_true_on_success(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fake_run(
+            cmd: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.CompletedProcess(cmd, 0, b"v1.4.0\n", b"")
+
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.latest_release_tag() == ("v1.4.0", True)
+
+    def test_returns_none_false_when_the_gh_call_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fake_run(
+            cmd: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.CompletedProcess(cmd, 1, b"", b"gh: no releases found")
+
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.latest_release_tag() == (None, False)
+
+    def test_returns_none_false_on_timeout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fake_run(
+            cmd: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[bytes]:
+            raise subprocess.TimeoutExpired(cmd, 10)
+
+        monkeypatch.setattr(gh._sp, "run", fake_run)
+        assert gh.latest_release_tag() == (None, False)
+```
+
+- [ ] **Step 2: Run tests to verify they pass**
+
+Run: `uv run pytest tests/test_gh.py -v -k LatestReleaseTag`
+Expected: PASS
+
+- [ ] **Step 3: Write the failing CLI tests**
 
 Append to `tests/test_cli.py`, following its existing `CliRunner` pattern. Reuse
 the sprint fixtures rather than duplicating them — `tests` is a package and
@@ -2635,21 +2810,95 @@ cross-file test imports are already used here (see
 `tests/test_reconcile_review_recipes.py`, which imports from `tests.test_pr_hydrate`):
 
 ```python
-from cw.exceptions import SprintApplyError
-from cw.sprint import AppliedBuildout, BuildoutPlan, build_plan, parse_rfc
-from tests.test_sprint import CONFIG_YAML, MINIMAL_RFC, _config, _write_config
+# Merge into tests/test_cli.py's EXISTING top-of-file import block — do NOT
+# append these as new lines near the test functions below (the file already
+# has ~9000 lines of class/function code by this point, so a bare
+# module-level import statement placed there is ruff's E402; and even
+# hoisted-but-unsorted at the top, I001). The existing header is:
+#     from cw.cli import (
+#         _complete_client,
+#         _complete_session,
+#         _configure_logging,
+#         _display_sessions,
+#         _display_status,
+#         main,
+#     )
+#     from cw.config import load_clients, load_state, save_state
+#     from cw.events import read_events
+#     from cw.exceptions import CwError
+#     from cw.models import (
+#         ClientConfig,
+#         CwState,
+#         OrchestratorEventType,
+#         Session,
+#         SessionOrigin,
+#         SessionPurpose,
+#         SessionStatus,
+#         Stage,
+#         TicketTask,
+#     )
+#     from tests.test_result import _valid_payload
+# `_resolve_version` needs `cw.cli.sprint` imported by name; `SprintApplyError`
+# merges into the existing `cw.exceptions` import (do not add a second
+# `from cw.exceptions import` line — merge into one, alphabetized:
+# `CwError, SprintApplyError`); `AppliedBuildout`/`BuildoutPlan`/`build_plan`/
+# `parse_rfc` are new from `cw.sprint`; `_write_project_config_yaml` is new
+# from `tests.conftest`; `CONFIG_YAML`/`MINIMAL_RFC`/`_config` are new from
+# `tests.test_sprint`. Resulting first-party block, alphabetized in full
+# (ruff's isort treats both `src` and `tests` as first-party per this repo's
+# `pyproject.toml`, so `cw.*` and `tests.*` sort together):
+#     from cw.cli import (
+#         _complete_client,
+#         _complete_session,
+#         _configure_logging,
+#         _display_sessions,
+#         _display_status,
+#         main,
+#     )
+#     from cw.cli.sprint import _resolve_version
+#     from cw.config import load_clients, load_state, save_state
+#     from cw.events import read_events
+#     from cw.exceptions import CwError, SprintApplyError
+#     from cw.models import (
+#         ClientConfig,
+#         CwState,
+#         OrchestratorEventType,
+#         Session,
+#         SessionOrigin,
+#         SessionPurpose,
+#         SessionStatus,
+#         Stage,
+#         TicketTask,
+#     )
+#     from cw.sprint import AppliedBuildout, BuildoutPlan, build_plan, parse_rfc
+#     from tests.conftest import _write_project_config_yaml
+#     from tests.test_result import _valid_payload
+#     from tests.test_sprint import CONFIG_YAML, MINIMAL_RFC, _config
+# Only the new test functions below are actually appended near the bottom of
+# the file — no import statements down there.
 
 
-def test_sprint_plan_writes_a_plan_file_and_prints_a_summary(tmp_path, monkeypatch) -> None:
+def test_sprint_plan_writes_a_plan_file_and_prints_a_summary(
+    tmp_path, monkeypatch
+) -> None:
     rfc = tmp_path / "docs" / "rfcs" / "0011-x.md"
     rfc.parent.mkdir(parents=True)
     rfc.write_text(MINIMAL_RFC, encoding="utf-8")
-    _write_config(tmp_path, CONFIG_YAML)
-    monkeypatch.setattr("cw.cli.sprint._resolve_version", lambda root: "1.20.0")
+    _write_project_config_yaml(tmp_path, CONFIG_YAML)
+    monkeypatch.setattr("cw.cli.sprint._resolve_version", lambda _root: "1.20.0")
 
     out = tmp_path / "plan.json"
     result = CliRunner().invoke(
-        main, ["sprint", "plan", "docs/rfcs/0011-x.md", "--out", str(out), "--root", str(tmp_path)]
+        main,
+        [
+            "sprint",
+            "plan",
+            "docs/rfcs/0011-x.md",
+            "--out",
+            str(out),
+            "--root",
+            str(tmp_path),
+        ],
     )
 
     assert result.exit_code == 0
@@ -2659,23 +2908,91 @@ def test_sprint_plan_writes_a_plan_file_and_prints_a_summary(tmp_path, monkeypat
     assert [t.code for t in plan.tickets] == ["S1", "A1"]
 
 
-def test_sprint_plan_reports_a_contract_violation_as_a_clean_cli_error(tmp_path, monkeypatch) -> None:
+def test_sprint_plan_reports_a_contract_violation_as_a_clean_cli_error(
+    tmp_path, monkeypatch
+) -> None:
     rfc = tmp_path / "docs" / "rfcs" / "0011-x.md"
     rfc.parent.mkdir(parents=True)
     rfc.write_text(MINIMAL_RFC.replace("## Tickets", "## Nope"), encoding="utf-8")
-    _write_config(tmp_path, CONFIG_YAML)
+    _write_project_config_yaml(tmp_path, CONFIG_YAML)
 
     result = CliRunner().invoke(
-        main, ["sprint", "plan", "docs/rfcs/0011-x.md", "--out", str(tmp_path / "p.json"), "--root", str(tmp_path)]
+        main,
+        [
+            "sprint",
+            "plan",
+            "docs/rfcs/0011-x.md",
+            "--out",
+            str(tmp_path / "p.json"),
+            "--root",
+            str(tmp_path),
+        ],
     )
 
     assert result.exit_code != 0
     assert "missing section: ## Tickets" in result.output
 
 
+def test_sprint_plan_version_override_wins_over_resolve_version(
+    tmp_path, monkeypatch
+) -> None:
+    """--version must short-circuit before _resolve_version is ever called —
+    ``version_override or _resolve_version(root)`` only evaluates the second
+    operand when the first is falsy, so a real gh subprocess call never
+    happens when an operator supplies an explicit version."""
+    rfc = tmp_path / "docs" / "rfcs" / "0011-x.md"
+    rfc.parent.mkdir(parents=True)
+    rfc.write_text(MINIMAL_RFC, encoding="utf-8")
+    _write_project_config_yaml(tmp_path, CONFIG_YAML)
+
+    out = tmp_path / "plan.json"
+    result = CliRunner().invoke(
+        main,
+        [
+            "sprint",
+            "plan",
+            "docs/rfcs/0011-x.md",
+            "--out",
+            str(out),
+            "--root",
+            str(tmp_path),
+            "--version",
+            "9.9.9",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "v9.9.9" in result.output
+
+
+def test_resolve_version_minor_bumps_the_latest_release_tag(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "cw.cli.sprint.latest_release_tag", lambda **_: ("v1.4.0", True)
+    )
+    assert _resolve_version(tmp_path) == "1.5.0"
+
+
+def test_resolve_version_falls_back_when_the_gh_call_fails(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr("cw.cli.sprint.latest_release_tag", lambda **_: (None, False))
+    assert _resolve_version(tmp_path) == "0.0.0"
+
+
+def test_resolve_version_falls_back_on_a_malformed_tag(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "cw.cli.sprint.latest_release_tag", lambda **_: ("not-a-version", True)
+    )
+    assert _resolve_version(tmp_path) == "0.0.0"
+
+
 def test_sprint_apply_dry_run_makes_no_gh_calls(tmp_path, monkeypatch) -> None:
     called: list[str] = []
-    monkeypatch.setattr("cw.gh.create_milestone", lambda *a, **k: called.append("boom"))
+    monkeypatch.setattr(
+        "cw.gh.create_milestone", lambda *_a, **_k: called.append("boom")
+    )
 
     plan = build_plan(parse_rfc(MINIMAL_RFC), _config(), version="1.20.0")
     plan_file = tmp_path / "plan.json"
@@ -2688,10 +3005,13 @@ def test_sprint_apply_dry_run_makes_no_gh_calls(tmp_path, monkeypatch) -> None:
     assert "would create" in result.output.lower()
 
 
-def test_sprint_apply_prints_partial_progress_on_a_mid_run_failure(tmp_path, monkeypatch) -> None:
-    def fake_apply_plan(plan: BuildoutPlan) -> BuildoutPlan:
+def test_sprint_apply_prints_partial_progress_on_a_mid_run_failure(
+    tmp_path, monkeypatch
+) -> None:
+    def fake_apply_plan(plan: BuildoutPlan) -> AppliedBuildout:
+        msg = "could not backfill children checklist on epic: epic: x"
         raise SprintApplyError(
-            "could not backfill children checklist on epic: epic: x",
+            msg,
             applied=AppliedBuildout(milestone_number=11, ticket_numbers={"S1": 101}),
         )
 
@@ -2706,14 +3026,64 @@ def test_sprint_apply_prints_partial_progress_on_a_mid_run_failure(tmp_path, mon
     assert result.exit_code != 0
     assert "Partial progress before failure" in result.output
     assert "S1: #101" in result.output
+
+
+def test_sprint_apply_error_without_partial_state_prints_no_partial_banner(
+    tmp_path, monkeypatch
+) -> None:
+    """SprintApplyError.applied defaults to None — e.g. a failure before the
+    milestone itself could even be created/found. isinstance(None,
+    AppliedBuildout) is False, so the "Partial progress" banner must not
+    print; there is nothing partial to report."""
+
+    def fake_apply_plan(plan: BuildoutPlan) -> AppliedBuildout:
+        msg = "could not create milestone: boom"
+        raise SprintApplyError(msg, applied=None)
+
+    monkeypatch.setattr("cw.cli.sprint.apply_plan", fake_apply_plan)
+
+    plan = build_plan(parse_rfc(MINIMAL_RFC), _config(), version="1.20.0")
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(plan.model_dump_json(), encoding="utf-8")
+
+    result = CliRunner().invoke(main, ["sprint", "apply", str(plan_file)])
+
+    assert result.exit_code != 0
+    assert "Partial progress" not in result.output
+
+
+def test_sprint_apply_prints_the_created_issue_numbers_on_success(
+    tmp_path, monkeypatch
+) -> None:
+    def fake_apply_plan(plan: BuildoutPlan) -> AppliedBuildout:
+        return AppliedBuildout(
+            milestone_number=11,
+            epic_numbers={"I": 100},
+            ticket_numbers={"S1": 101},
+            created=["I", "S1"],
+            skipped=[],
+        )
+
+    monkeypatch.setattr("cw.cli.sprint.apply_plan", fake_apply_plan)
+
+    plan = build_plan(parse_rfc(MINIMAL_RFC), _config(), version="1.20.0")
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(plan.model_dump_json(), encoding="utf-8")
+
+    result = CliRunner().invoke(main, ["sprint", "apply", str(plan_file)])
+
+    assert result.exit_code == 0
+    assert "Milestone #11" in result.output
+    assert "S1: #101" in result.output
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [ ] **Step 4: Run tests to verify they fail**
 
 Run: `uv run pytest tests/test_cli.py -v -k sprint`
-Expected: FAIL — `Error: No such command 'sprint'`
+Expected: FAIL — `Error: No such command 'sprint'` (and `ImportError` on
+`cw.cli.sprint`, which does not exist yet)
 
-- [ ] **Step 3: Implement the CLI**
+- [ ] **Step 5: Implement the CLI**
 
 Create `src/cw/cli/sprint.py`:
 
@@ -2722,13 +3092,13 @@ Create `src/cw/cli/sprint.py`:
 
 from __future__ import annotations
 
-import subprocess as _sp
 from pathlib import Path
 
 import click
 
 from cw.cli._base import handle_errors, main
 from cw.exceptions import SprintApplyError
+from cw.gh import latest_release_tag
 from cw.sprint import (
     AppliedBuildout,
     BuildoutPlan,
@@ -2741,25 +3111,25 @@ from cw.sprint import (
 
 _VERSION_TIMEOUT = 10
 _FALLBACK_VERSION = "0.0.0"
+_SEMVER_PARTS = 3  # major.minor.patch — ruff PLR2004 forbids the bare `3`
 
 
-def _resolve_version(root: Path) -> str:
-    """Derive the milestone version from the latest release tag, minor-bumped."""
-    try:
-        result = _sp.run(
-            ["gh", "release", "view", "--json", "tagName", "--jq", ".tagName"],
-            capture_output=True,
-            cwd=root,
-            timeout=_VERSION_TIMEOUT,
-            check=False,
-        )
-    except (OSError, _sp.TimeoutExpired):
+def _resolve_version(_root: Path) -> str:
+    """Derive the milestone version from the latest release tag, minor-bumped.
+
+    ``_root`` is accepted but unused: it keeps this a drop-in replacement for
+    ``sprint_plan``'s ``root`` argument, but ``cw.gh.latest_release_tag`` —
+    like every other ``cw.gh`` helper — never threads a working directory
+    through. ``gh`` targets the repo from the process's own cwd; there is
+    nothing left for a repo root to do here once the subprocess call lives in
+    ``cw.gh`` instead of being shelled out to directly from this module.
+    """
+    tag, ok = latest_release_tag(timeout=_VERSION_TIMEOUT)
+    if not ok or tag is None:
         return _FALLBACK_VERSION
-    if result.returncode != 0:
-        return _FALLBACK_VERSION
-    tag = result.stdout.decode("utf-8", "replace").strip().lstrip("v")
+    tag = tag.lstrip("v")
     parts = tag.split(".")
-    if len(parts) != 3 or not all(p.isdigit() for p in parts):
+    if len(parts) != _SEMVER_PARTS or not all(p.isdigit() for p in parts):
         return _FALLBACK_VERSION
     return f"{parts[0]}.{int(parts[1]) + 1}.0"
 
@@ -2771,11 +3141,23 @@ def sprint() -> None:
 
 @sprint.command("plan")
 @click.argument("rfc_path")
-@click.option("--out", required=True, type=click.Path(path_type=Path), help="Where to write plan JSON.")
+@click.option(
+    "--out",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="Where to write plan JSON.",
+)
 @click.option("--root", default=".", type=click.Path(path_type=Path), help="Repo root.")
-@click.option("--version", "version_override", default=None, help="Override the milestone version.")
+@click.option(
+    "--version",
+    "version_override",
+    default=None,
+    help="Override the milestone version.",
+)
 @handle_errors
-def sprint_plan(rfc_path: str, out: Path, root: Path, version_override: str | None) -> None:
+def sprint_plan(
+    rfc_path: str, out: Path, root: Path, version_override: str | None
+) -> None:
     """Parse RFC_PATH and draft every issue. Makes no changes to GitHub."""
     cfg = load_buildout_config(root)
     doc = parse_rfc(load_rfc_text(rfc_path, root))
@@ -2802,7 +3184,9 @@ def _echo_applied(applied: AppliedBuildout) -> None:
 
 @sprint.command("apply")
 @click.argument("plan_file", type=click.Path(exists=True, path_type=Path))
-@click.option("--dry-run", is_flag=True, help="Print what would be created; touch nothing.")
+@click.option(
+    "--dry-run", is_flag=True, help="Print what would be created; touch nothing."
+)
 @handle_errors
 def sprint_apply(plan_file: Path, dry_run: bool) -> None:
     """Execute PLAN_FILE against GitHub. Idempotent — safe to re-run."""
@@ -2829,10 +3213,13 @@ def sprint_apply(plan_file: Path, dry_run: bool) -> None:
     _echo_applied(applied)
 ```
 
-- [ ] **Step 4: Register the group**
+- [ ] **Step 6: Register the group**
 
 In `src/cw/cli/__init__.py`, add `sprint` to the submodule import block (imported
-for its registration side effect) and to `__all__`, keeping both alphabetical:
+for its registration side effect) and to `__all__`, keeping both alphabetical.
+`review` stays exactly where it already is — `sprint` slots in between
+`session_inspect` and `watchdog` (see the Touch-point Contract above for why
+that slot, not the one adjacent to `review`):
 
 ```python
 from cw.cli import (
@@ -2841,6 +3228,7 @@ from cw.cli import (
     guard,
     maintenance,
     queues,
+    review,
     session_inspect,
     sprint,
     watchdog,
@@ -2848,16 +3236,30 @@ from cw.cli import (
 )
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+And in the same file's `__all__` list, insert `"sprint",` between
+`"session_inspect",` and `"watchdog",` (excerpt — the tail of the existing
+list, not the whole thing):
+
+```text
+    "review",
+    "session_group",
+    "session_inspect",
+    "sprint",
+    "watchdog",
+    "worktree",
+]
+```
+
+- [ ] **Step 7: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_cli.py -v -k sprint && uv run cw sprint --help`
 Expected: PASS; help lists `plan` and `apply`.
 
-- [ ] **Step 6: Run the gates and commit**
+- [ ] **Step 8: Run the gates and commit**
 
 ```bash
 uv run ruff check src/ tests/ && uv run ruff format src/ tests/ && uv run mypy --strict src/
-git add src/cw/cli/sprint.py src/cw/cli/__init__.py tests/test_cli.py
+git add src/cw/cli/sprint.py src/cw/cli/__init__.py src/cw/gh.py tests/test_gh.py tests/test_cli.py
 git commit -m "feat(cli): cw sprint plan|apply"
 ```
 
