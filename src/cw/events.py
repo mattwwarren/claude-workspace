@@ -10,7 +10,7 @@ import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from cw.atomic import atomic_write_text
 from cw.config import events_dir
@@ -291,6 +291,14 @@ def _parse_lines(lines: list[str]) -> list[OrchestratorEvent]:
     Tolerates a malformed trailing line (torn write): if the last non-empty
     line fails JSON parsing, it is skipped with a warning.  Interior corrupt
     lines re-raise so callers see real corruption.
+
+    Also tolerates a well-formed line whose ``type`` is not a member of the
+    in-memory ``OrchestratorEventType`` enum (issue #1210): a newer producer
+    may emit an event type an older, long-running consumer's process does not
+    yet know about.  Such lines are skipped and summarized in a single
+    warning per call.  Any other validation failure -- including an unknown
+    type combined with a second, unrelated bad field -- still raises, so
+    genuine interior corruption stays loud (issue #393's contract).
     """
     # Precompute last non-empty index so trailing blank lines don't cause the
     # torn-write check to misfire on an interior corrupt line.
@@ -298,6 +306,8 @@ def _parse_lines(lines: list[str]) -> list[OrchestratorEvent]:
         (j for j, line in enumerate(lines) if line.strip()), default=-1
     )
     results: list[OrchestratorEvent] = []
+    unknown_types: set[str] = set()
+    unknown_type_count = 0
     for i, raw_line in enumerate(lines):
         stripped = raw_line.strip()
         if not stripped:
@@ -310,7 +320,21 @@ def _parse_lines(lines: list[str]) -> list[OrchestratorEvent]:
                 logger.warning("skipping malformed trailing line in inbox: %s", exc)
                 continue
             raise
-        results.append(OrchestratorEvent.model_validate(raw))
+        try:
+            results.append(OrchestratorEvent.model_validate(raw))
+        except ValidationError as exc:
+            errors = exc.errors()
+            if all(err["type"] == "enum" and err["loc"] == ("type",) for err in errors):
+                unknown_types.add(raw.get("type", "<missing>"))
+                unknown_type_count += 1
+                continue
+            raise
+    if unknown_types:
+        logger.warning(
+            "skipping %d event(s) with unknown type: %s",
+            unknown_type_count,
+            ", ".join(sorted(unknown_types)),
+        )
     return results
 
 

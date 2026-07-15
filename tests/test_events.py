@@ -10,10 +10,12 @@ import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import pytest
 from click.testing import CliRunner
 from freezegun import freeze_time
+from pydantic import ValidationError
 
 from cw.cli import main
 from cw.events import (
@@ -605,6 +607,168 @@ def test_read_events_normal_cursor_semantics_unchanged(tmp_events_dir: Path) -> 
     ids = {e.id for e in result}
     assert ev_a.id not in ids
     assert ev_b.id not in ids
+
+
+# ---------------------------------------------------------------------------
+# Robustness: forward-compatible unknown event type (issue #1210)
+# ---------------------------------------------------------------------------
+
+
+def _append_raw_event(inbox: Path, **overrides: object) -> None:
+    """Hand-append a full valid-shape event dict, with *overrides* applied.
+
+    Mirrors the hand-append pattern used by the issue #393 torn-line tests,
+    but writes a complete (well-formed JSON, full-schema) event line so only
+    the fields in *overrides* are deliberately broken.
+    """
+    event: dict[str, object] = {
+        "id": uuid4().hex[:16],
+        "type": "pr.registered",
+        "payload": {},
+        "correlation_id": None,
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    event.update(overrides)
+    with inbox.open("a") as f:
+        f.write(json.dumps(event) + "\n")
+
+
+def test_read_events_unknown_type_line_skipped_with_warning(
+    tmp_events_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A line with an unrecognized ``type`` is skipped, not raised, with a warning."""
+    ev1 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+
+    inbox = tmp_events_dir / "inbox.jsonl"
+    _append_raw_event(inbox, type="future.event.type")
+
+    ev2 = events_record_event(OrchestratorEventType.PR_MERGED, {"n": 2})
+
+    with caplog.at_level(logging.WARNING, logger="cw.events"):
+        result = read_events()
+
+    assert [e.id for e in result] == [ev1.id, ev2.id]
+    warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warning_records) == 1
+    assert "future.event.type" in warning_records[0].message
+
+
+def test_read_events_multiple_unknown_types_single_summary_warning(
+    tmp_events_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Multiple unknown-type lines are all skipped but summarized in one warning."""
+    ev1 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+
+    inbox = tmp_events_dir / "inbox.jsonl"
+    _append_raw_event(inbox, type="future.event.type")
+    _append_raw_event(inbox, type="another.new.type")
+
+    ev2 = events_record_event(OrchestratorEventType.PR_MERGED, {"n": 2})
+
+    with caplog.at_level(logging.WARNING, logger="cw.events"):
+        result = read_events()
+
+    assert [e.id for e in result] == [ev1.id, ev2.id]
+    warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warning_records) == 1
+    assert "future.event.type" in warning_records[0].message
+    assert "another.new.type" in warning_records[0].message
+
+
+def test_read_events_repeated_unknown_type_counts_events_not_types(
+    tmp_events_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The warning's event count reflects skipped lines, not distinct type strings."""
+    ev1 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+
+    inbox = tmp_events_dir / "inbox.jsonl"
+    _append_raw_event(inbox, type="future.event.type")
+    _append_raw_event(inbox, type="future.event.type")
+    _append_raw_event(inbox, type="future.event.type")
+
+    ev2 = events_record_event(OrchestratorEventType.PR_MERGED, {"n": 2})
+
+    with caplog.at_level(logging.WARNING, logger="cw.events"):
+        result = read_events()
+
+    assert [e.id for e in result] == [ev1.id, ev2.id]
+    warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warning_records) == 1
+    assert "skipping 3 event(s)" in warning_records[0].message
+
+
+def test_read_events_known_type_other_validation_failure_raises(
+    tmp_events_dir: Path,
+) -> None:
+    """A known type combined with an unrelated bad field still raises."""
+    events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+
+    inbox = tmp_events_dir / "inbox.jsonl"
+    _append_raw_event(
+        inbox, type=OrchestratorEventType.PR_REGISTERED.value, created_at="not-a-date"
+    )
+
+    with pytest.raises(ValidationError):
+        read_events()
+
+
+def test_read_events_unknown_type_plus_other_bad_field_raises(
+    tmp_events_dir: Path,
+) -> None:
+    """An unknown type PLUS a second bad field still raises (uses all(), not any())."""
+    events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+
+    inbox = tmp_events_dir / "inbox.jsonl"
+    _append_raw_event(inbox, type="future.event.type", created_at="not-a-date")
+
+    with pytest.raises(ValidationError):
+        read_events()
+
+
+def test_read_events_unknown_type_interspersed_with_cursor(
+    tmp_events_dir: Path,
+) -> None:
+    """An unknown-type line does not disrupt normal cursor-based filtering."""
+    ev_a = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+    ev_b = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 2})
+
+    inbox = tmp_events_dir / "inbox.jsonl"
+    _append_raw_event(inbox, type="future.event.type")
+
+    ev_c = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 3})
+
+    advance_cursor("unknown_type_consumer", ev_b.id)
+    result = read_events(consumer="unknown_type_consumer")
+
+    assert [e.id for e in result] == [ev_c.id]
+    ids = {e.id for e in result}
+    assert ev_a.id not in ids
+    assert ev_b.id not in ids
+
+
+def test_prune_events_skips_unknown_type_line(
+    tmp_events_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """prune_events tolerates an unknown-type line among the events it prunes."""
+    for i in range(3):
+        events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i})
+
+    inbox = tmp_events_dir / "inbox.jsonl"
+    _append_raw_event(inbox, type="future.event.type")
+
+    ev_last = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 3})
+
+    with caplog.at_level(logging.WARNING, logger="cw.events"):
+        result = prune_events(keep=1)
+
+    assert result.archived_count == 3
+    assert result.kept_count == 1
+    assert result.archive_path is not None
+    remaining = read_events()
+    assert [e.id for e in remaining] == [ev_last.id]
+    warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warning_records) == 1
+    assert "future.event.type" in warning_records[0].message
 
 
 # ---------------------------------------------------------------------------
