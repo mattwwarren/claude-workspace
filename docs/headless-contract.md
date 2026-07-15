@@ -130,7 +130,7 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
 
 | Field | Type | Notes |
 |---|---|---|
-| `schema_version` | int | Currently `4` (legacy `1`, `2`, `3` accepted during the rollout window). Bump rules in §8. |
+| `schema_version` | int | Currently `5` (legacy `1`, `2`, `3`, `4` accepted during the rollout window). Bump rules in §8. |
 | `ticket_id` | string | Linear ID, or synthetic for free-text invocations. |
 | `status` | string enum | See §4. Closed set; parsers MUST treat unknown values as §6 (5) errors. |
 | `stage_reached` | string enum | Pipeline-stage marker. Closed set: `stage1_pre_flight`, `stage1_plan`, `stage2_impl`, `stage3_review`, `stage4a_merge_gate`, `stage4b_pr_create`, `stage5_post_create`. Pre-flight exits (e.g. already-satisfied tickets) use `stage1_pre_flight`. Producer and parser must keep this list in lockstep — adding a stage is a `schema_version` bump (see §8). |
@@ -150,6 +150,7 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
 | `review.should_fix` | int | SHOULD_FIX count carried out of the loop. |
 | `review.fix_cycles_used` | int | 0 when first pass was clean. |
 | `review.deferred` | int | Count of findings deferred to .cw/deferred-findings.md; 0 or absent on pre-Stage-3 exits (default). |
+| `review.agents_run` | int | **v5** (#1237) — count of reviewer agents that ran, reconciled against the executor-neutral review-verdict's `agents_run` list (`len(verdict.agents_run)`, including failed reviewer entries). Advisory optional field; defaults to `0` on payloads from producers that predate v5. |
 | `health` | object | See §5. |
 | `friction_highlights` | string[] | Surfaced highlights from agent friction reports. |
 | `blocker` | object \| null | See §4.2. Populated when `status = "blocked"`. |
@@ -433,7 +434,7 @@ Until then, cw must treat all non-terminal exits as fully manual recovery: the u
 
 ## 8. Versioning
 
-`schema_version: 4` is the current contract. Parsers also accept `schema_version: 1`, `2`, and `3` during the rollout window.
+`schema_version: 5` is the current contract. Parsers also accept `schema_version: 1`, `2`, `3`, and `4` during the rollout window.
 
 **Version history:**
 
@@ -443,6 +444,7 @@ Until then, cw must treat all non-terminal exits as fully manual recovery: the u
 | 2 | Added `no_op` status (§4.1) and `close_issue_as_completed` advisory action (§4.3). v1-tagged payloads with `status=no_op` are rejected as `validation_failed`. |
 | 3 | Added `stage1_pre_flight` value to `stage_reached` enum (§3.3) and `none` value to `plan_source` enum (§3.3). Used together for pre-flight no_op exits. Parsers also accept this pair under v2 as a one-time rollout exception (the skill emitted them at v2 before the parser caught up — see #103). Also added `github_issue_existing` to `plan_source` (the post-Linear analog of `linear_existing`; treated identically). Accepted under v2 and v3 — same rollout-exception treatment, since the producer emits this value at v2 today (see #190). |
 | 4 | Promoted `ambiguities_pending_resolution` and `premises_pending_verification` from §4.4 interim states (not in closed enum) to canonical `Status` values (§4.1). Added `ambiguities` and `premises` top-level fields with cross-field invariants (non-empty when corresponding status is set, §4.4). Added `user_resolve_ambiguities` and `user_verify_premises` to §4.3 vocabulary. v3-tagged payloads with either new status are rejected as `validation_failed`. Tracked in #191. |
+| 5 | Added the advisory optional `review.agents_run` int (§3.3) — count of reviewer agents that ran, reconciled against the executor-neutral review-verdict contract's `agents_run` list (#1237). Purely advisory (defaults to `0`); v1-v4 payloads that omit it parse unchanged. The review-verdict model group itself (`Finding`, `EscalationMetadata`, `ReviewVerdict`, ...) lives in `cw.review_findings` / the `.claude/review-verdict.json` artifact (#1108), not the sentinel block. |
 
 **Note (A6, #953):** Rejecting empty-question ambiguity items and coercing an empty/missing ambiguities array to a labeled placeholder is a parser-side strictness tightening of an existing v4 invariant — **no version bump** (consistent with the #430 `_coerce_empty_pending_array` precedent).
 
