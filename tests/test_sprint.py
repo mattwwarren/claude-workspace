@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from cw import sprint
-from cw.exceptions import RfcContractError
+from cw.exceptions import RfcContractError, SprintApplyError
 from cw.sprint import (
+    AppliedBuildout,
     BuildoutConfig,
+    BuildoutPlan,
+    GhSurface,
+    apply_plan,
     build_plan,
     load_buildout_config,
     load_rfc_text,
@@ -450,3 +455,363 @@ def test_rfc_0011_fixture_reproduces_the_real_buildout() -> None:
     # The dependency the RFC's Phasing table calls out: S2 rides S1.
     s2 = next(t for t in doc.tickets if t.code == "S2")
     assert s2.depends_on == ["S1"]
+
+
+# --- apply_plan --------------------------------------------------------
+
+TWO_EPIC_RFC = """\
+# RFC 0012 — Two-Epic Fixture
+
+## Summary
+
+Body.
+
+## Design
+
+### Epic I — First epic
+
+Intent one.
+
+### Epic II — Second epic
+
+Intent two.
+
+## Phasing
+
+| Wave | Track A |
+|------|---------|
+| 0 | B1 |
+
+## Resolved decisions
+
+- **D-B1 — Some decision.** Some text.
+
+## Tickets
+
+### B1 — ticket under epic two
+
+- **Epic:** II
+- **Wave:** 0
+- **Sprint:** 0
+- **Depends on:** none
+- **Context:** Some context for B1.
+- **Scope:** D-B1
+- **Acceptance:**
+  - Some acceptance bullet.
+
+## References
+
+- `src/cw/example.py:1` — example reference
+
+## Issues
+
+Issues: _(filled by `/sprint-buildout`)_
+"""
+
+
+def _plan() -> BuildoutPlan:
+    """Thin wrapper reusing this file's existing MINIMAL_RFC + _config()
+    fixtures, so apply_plan tests aren't re-deriving a plan by hand."""
+    return build_plan(parse_rfc(MINIMAL_RFC), _config(), version="1.20.0")
+
+
+class FakeGh:
+    """Test double for GhSurface. Records call order (title-qualified for
+    create_issue, number-qualified for the milestone-scoped lookups) and
+    every issue body created/updated, so tests can assert on both call
+    sequencing and content without a real `gh` binary.
+
+    ``existing`` seeds titles already filed under the milestone (idempotent
+    re-entry); ``milestone_exists`` is deliberately decoupled from it so a
+    milestone that already exists but has zero issues filed yet (R6) can be
+    modeled distinctly from "milestone + all issues already exist".
+    """
+
+    def __init__(
+        self,
+        *,
+        existing: dict[str, int] | None = None,
+        milestone_exists: bool = False,
+    ) -> None:
+        self.existing: dict[str, int] = dict(existing or {})
+        self.milestone_exists = milestone_exists
+        self.milestone_number = 1
+        self.calls: list[str] = []
+        self.bodies: dict[int, str] = {}
+        self.fail_find_milestone = False
+        self.fail_create_milestone = False
+        self.fail_milestone_issue_titles = False
+        self.fail_create_issue: set[str] = set()
+        self._next_number = 100
+
+    def find_milestone(self, title: str) -> tuple[int | None, bool]:
+        self.calls.append(f"find_milestone:{title}")
+        if self.fail_find_milestone:
+            return None, False
+        if self.milestone_exists:
+            return self.milestone_number, True
+        return None, True
+
+    def create_milestone(self, title: str) -> int | None:
+        self.calls.append(f"create_milestone:{title}")
+        if self.fail_create_milestone:
+            return None
+        return self.milestone_number
+
+    def milestone_issue_titles(
+        self, milestone: int
+    ) -> tuple[dict[str, int] | None, bool]:
+        self.calls.append(f"milestone_issue_titles:{milestone}")
+        if self.fail_milestone_issue_titles:
+            return None, False
+        return dict(self.existing), True
+
+    def create_issue(
+        self, title: str, body: str, *, labels: list[str], milestone: int
+    ) -> int | None:
+        self.calls.append(f"create_issue:{title}")
+        if title in self.fail_create_issue:
+            return None
+        number = self._next_number
+        self._next_number += 1
+        self.existing[title] = number
+        self.bodies[number] = body
+        return number
+
+    def update_issue_body(self, number: int, body: str) -> bool:
+        self.calls.append(f"update_issue_body:{number}")
+        self.bodies[number] = body
+        return True
+
+
+def test_apply_plan_creates_milestone_then_epics_then_tickets_then_backfills() -> None:
+    plan = _plan()
+    gh = FakeGh()
+    result = apply_plan(plan, client=gh)
+
+    epic_number = result.epic_numbers["I"]
+    assert gh.calls == [
+        f"find_milestone:{plan.milestone_title}",
+        f"create_milestone:{plan.milestone_title}",
+        f"milestone_issue_titles:{result.milestone_number}",
+        f"create_issue:{plan.epics[0].title}",
+        f"create_issue:{plan.tickets[0].title}",
+        f"create_issue:{plan.tickets[1].title}",
+        f"update_issue_body:{epic_number}",
+    ]
+
+
+def test_apply_plan_backfills_the_children_checklist_into_the_marker() -> None:
+    plan = _plan()
+    gh = FakeGh()
+    result = apply_plan(plan, client=gh)
+
+    epic_number = result.epic_numbers["I"]
+    body = gh.bodies[epic_number]
+    assert "<!-- children -->" in body
+    assert "- [ ] A1" in body
+
+
+def test_apply_plan_rewrites_the_ticket_footer_with_the_real_epic_number() -> None:
+    plan = _plan()
+    gh = FakeGh()
+    result = apply_plan(plan, client=gh)
+
+    a1_number = result.ticket_numbers["A1"]
+    epic_number = result.epic_numbers["I"]
+    body = gh.bodies[a1_number]
+    assert f"Epic #{epic_number}" in body
+    assert "Epic #I" not in body
+
+
+def test_apply_plan_is_idempotent_and_skips_issues_that_already_exist() -> None:
+    plan = _plan()
+    existing = {
+        plan.epics[0].title: 501,
+        plan.tickets[0].title: 502,
+        plan.tickets[1].title: 503,
+    }
+    gh = FakeGh(existing=existing, milestone_exists=True)
+
+    result = apply_plan(plan, client=gh)
+
+    assert result.epic_numbers["I"] == 501
+    assert result.ticket_numbers["S1"] == 502
+    assert result.ticket_numbers["A1"] == 503
+    assert result.created == []
+    assert set(result.skipped) == {
+        plan.epics[0].title,
+        plan.tickets[0].title,
+        plan.tickets[1].title,
+    }
+    assert not any(call.startswith("create_issue") for call in gh.calls)
+    assert not any(call.startswith("create_milestone") for call in gh.calls)
+
+
+def test_apply_plan_raises_when_milestone_creation_fails() -> None:
+    plan = _plan()
+    gh = FakeGh()
+    gh.fail_create_milestone = True
+
+    with pytest.raises(SprintApplyError, match="failed to create milestone"):
+        apply_plan(plan, client=gh)
+
+
+def test_apply_plan_raises_when_the_milestone_lookup_itself_fails() -> None:
+    plan = _plan()
+    gh = FakeGh()
+    gh.fail_find_milestone = True
+
+    with pytest.raises(SprintApplyError, match="failed to look up milestone"):
+        apply_plan(plan, client=gh)
+
+
+def test_apply_plan_raises_when_the_milestone_issue_lookup_fails() -> None:
+    plan = _plan()
+    gh = FakeGh(milestone_exists=True)
+    gh.fail_milestone_issue_titles = True
+
+    with pytest.raises(SprintApplyError, match="failed to list issues"):
+        apply_plan(plan, client=gh)
+
+
+def test_apply_plan_reuses_a_milestone_that_exists_with_zero_issues_yet() -> None:
+    plan = _plan()
+    gh = FakeGh(milestone_exists=True)
+
+    result = apply_plan(plan, client=gh)
+
+    assert result.milestone_number == gh.milestone_number
+    assert not any(call.startswith("create_milestone") for call in gh.calls)
+    assert len(result.created) == 3
+
+
+def test_sprint_apply_error_carries_the_partial_applied_state() -> None:
+    plan = _plan()
+    gh = FakeGh()
+    gh.fail_create_issue = {plan.tickets[1].title}
+
+    with pytest.raises(SprintApplyError) as exc_info:
+        apply_plan(plan, client=gh)
+
+    applied = exc_info.value.applied
+    assert isinstance(applied, AppliedBuildout)
+    assert plan.epics[0].title in applied.created
+    assert plan.tickets[0].title in applied.created
+    assert plan.tickets[1].title not in applied.created
+    assert "I" in applied.epic_numbers
+
+
+def test_apply_plan_raises_when_epic_creation_fails() -> None:
+    plan = _plan()
+    gh = FakeGh()
+    gh.fail_create_issue = {plan.epics[0].title}
+
+    with pytest.raises(SprintApplyError, match="failed to create issue"):
+        apply_plan(plan, client=gh)
+
+
+def test_apply_plan_is_idempotent_and_skips_an_epic_that_already_exists() -> None:
+    plan = _plan()
+    gh = FakeGh(existing={plan.epics[0].title: 777}, milestone_exists=True)
+
+    result = apply_plan(plan, client=gh)
+
+    assert result.epic_numbers["I"] == 777
+    assert plan.epics[0].title in result.skipped
+    assert not any(
+        call == f"create_issue:{plan.epics[0].title}" for call in gh.calls
+    )
+    assert "S1" in result.ticket_numbers
+    assert "A1" in result.ticket_numbers
+
+
+def test_apply_plan_uses_ghclient_by_default_and_forwards_calls_to_cw_gh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _plan()
+    calls: list[str] = []
+
+    def fake_find_milestone(title: str) -> tuple[int | None, bool]:
+        calls.append("find_milestone")
+        return None, True
+
+    def fake_create_milestone(title: str) -> int | None:
+        calls.append("create_milestone")
+        return 1
+
+    def fake_milestone_issue_titles(
+        milestone: int,
+    ) -> tuple[dict[str, int] | None, bool]:
+        calls.append("milestone_issue_titles")
+        return {}, True
+
+    def fake_create_issue(
+        title: str, body: str, *, labels: list[str], milestone: int
+    ) -> int | None:
+        calls.append("create_issue")
+        return 42
+
+    def fake_update_issue_body(number: int, body: str) -> bool:
+        calls.append("update_issue_body")
+        return True
+
+    monkeypatch.setattr(sprint.gh, "find_milestone", fake_find_milestone)
+    monkeypatch.setattr(sprint.gh, "create_milestone", fake_create_milestone)
+    monkeypatch.setattr(
+        sprint.gh, "milestone_issue_titles", fake_milestone_issue_titles
+    )
+    monkeypatch.setattr(sprint.gh, "create_issue", fake_create_issue)
+    monkeypatch.setattr(sprint.gh, "update_issue_body", fake_update_issue_body)
+
+    result = apply_plan(plan)
+
+    assert result.milestone_number == 1
+    assert calls == [
+        "find_milestone",
+        "create_milestone",
+        "milestone_issue_titles",
+        "create_issue",
+        "create_issue",
+        "create_issue",
+        "update_issue_body",
+    ]
+
+
+def test_fake_gh_satisfies_the_ghsurface_protocol() -> None:
+    assert isinstance(FakeGh(), GhSurface)
+
+
+def test_backfill_children_handles_an_epic_with_zero_children() -> None:
+    plan = build_plan(parse_rfc(TWO_EPIC_RFC), _config(), version="1.20.0")
+    gh = FakeGh()
+    applied = AppliedBuildout(milestone_number=1, epic_numbers={"I": 501, "II": 502})
+
+    sprint._backfill_children(plan, applied, gh)
+
+    body = gh.bodies[501]
+    assert "<!-- children -->" in body
+    assert "(no children)" in body
+
+
+def test_apply_plan_resolves_epic_ii_refs_without_corruption_from_epic_i() -> None:
+    plan = build_plan(parse_rfc(TWO_EPIC_RFC), _config(), version="1.20.0")
+    gh = FakeGh()
+
+    result = apply_plan(plan, client=gh)
+
+    epic_ii_number = result.epic_numbers["II"]
+    b1_number = result.ticket_numbers["B1"]
+    body = gh.bodies[b1_number]
+    assert re.search(rf"Epic #{epic_ii_number}(?!\w)", body)
+    assert "Epic #II" not in body
+
+
+def test_apply_plan_leaves_the_epic_less_ticket_footer_epic_free() -> None:
+    plan = _plan()
+    gh = FakeGh()
+
+    result = apply_plan(plan, client=gh)
+
+    s1_number = result.ticket_numbers["S1"]
+    assert "Epic #" not in gh.bodies[s1_number]
