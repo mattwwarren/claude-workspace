@@ -30,9 +30,11 @@ class CodexRunResult:
 def _read_output_file(argv: list[str]) -> str | None:
     """Return the contents of the file following "-o" in *argv*, or None.
 
-    Returns None when "-o" is absent from argv, has no following element, or
-    the target file cannot be read (missing, permissions, etc.) — the caller
-    treats None as "no structured output available".
+    Returns None when "-o" is absent from argv, has no following element, the
+    target file cannot be read (missing, permissions, etc.), or its bytes
+    aren't valid UTF-8 — the caller treats None as "no structured output
+    available". The content originates from an external process (codex), so
+    a decode failure is a real possibility, not just a missing-file case.
     """
     if "-o" not in argv:
         return None
@@ -42,7 +44,7 @@ def _read_output_file(argv: list[str]) -> str | None:
     output_path = Path(argv[idx + 1])
     try:
         return output_path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
 
 

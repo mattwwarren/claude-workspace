@@ -495,11 +495,11 @@ class CodexExecutor:
             if result is None:
                 # Step 3: Run codex (only reached when pre-flight checks pass).
                 run_result = _run_codex_review(
-                    self._runner,
-                    worktree,
-                    self._config.model,
-                    client.default_branch,
-                    wall_clock_budget_seconds,
+                    runner=self._runner,
+                    worktree=worktree,
+                    model=self._config.model,
+                    default_branch=client.default_branch,
+                    wall_clock_budget_seconds=wall_clock_budget_seconds,
                 )
                 result = _synthesize_codex_result(
                     task=task,
@@ -564,6 +564,7 @@ class CodexExecutor:
 
 
 def _build_codex_argv(
+    *,
     model: str | None,
     default_branch: str,
     schema_path: Path,
@@ -592,6 +593,7 @@ def _build_codex_argv(
 
 
 def _run_codex_review(
+    *,
     runner: CodexRunner,
     worktree: Path,
     model: str | None,
@@ -609,7 +611,12 @@ def _run_codex_review(
         schema_path = Path(tmp_dir) / "findings-schema.json"
         output_path = Path(tmp_dir) / "findings-output.json"
         schema_path.write_text(json.dumps(_CODEX_FINDINGS_SCHEMA), encoding="utf-8")
-        argv = _build_codex_argv(model, default_branch, schema_path, output_path)
+        argv = _build_codex_argv(
+            model=model,
+            default_branch=default_branch,
+            schema_path=schema_path,
+            output_path=output_path,
+        )
         return runner.run(worktree, argv, wall_clock_budget_seconds)
 
 
@@ -681,12 +688,20 @@ def _synthesize_codex_result(
             stage_reached=STAGE3_REVIEW,
         )
     if review.must_fix_initial > 0:
-        return make_blocked(
+        # make_blocked() has no review override (out of scope for #1203: its
+        # _FIXED_REVIEW default serves the LocalExecutor/aider path, which has
+        # no codex findings to report). Override the field on its result
+        # instead of threading a new param through local_runner.py, so the
+        # already-parsed counts survive onto the blocked sentinel rather than
+        # reverting to 0/0/0/0 — the same bug #1203 exists to fix, just on
+        # the blocked disposition instead of stage_complete.
+        blocked = make_blocked(
             ticket_id=task.ticket_id,
             worktree=worktree,
             reason=CODEX_MUST_FIX_FINDINGS,
             stage_reached=STAGE3_REVIEW,
         )
+        return blocked.model_copy(update={"review": review})
     branch = subprocess.check_output(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
         cwd=worktree,

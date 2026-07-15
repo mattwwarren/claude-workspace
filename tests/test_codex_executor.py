@@ -211,6 +211,12 @@ def test_codex_executor_must_fix_findings_blocked(
     assert result.stage_reached == "stage3_review"
     assert result.blocker is not None
     assert result.blocker.reason == CODEX_MUST_FIX_FINDINGS
+    # #1203's own bug, reproduced in the blocked path: the parsed counts must
+    # survive onto the sentinel, not fall back to the hardcoded 0/0/0/0.
+    assert result.review.must_fix_initial == 2
+    assert result.review.should_fix == 1
+    assert result.review.deferred == 0
+    assert result.review.fix_cycles_used == 0
 
 
 def test_codex_executor_missing_output_file_blocked(
@@ -329,7 +335,12 @@ def test_build_codex_argv_with_model() -> None:
     """A model maps to a trailing -m flag, after --output-schema/-o."""
     schema_path = Path("/tmp/schema.json")
     output_path = Path("/tmp/output.json")
-    argv = _build_codex_argv("gpt-4", "main", schema_path, output_path)
+    argv = _build_codex_argv(
+        model="gpt-4",
+        default_branch="main",
+        schema_path=schema_path,
+        output_path=output_path,
+    )
     assert argv == [
         "codex",
         "exec",
@@ -349,7 +360,12 @@ def test_build_codex_argv_no_model() -> None:
     """A None model omits the -m flag."""
     schema_path = Path("/tmp/schema.json")
     output_path = Path("/tmp/output.json")
-    argv = _build_codex_argv(None, "main", schema_path, output_path)
+    argv = _build_codex_argv(
+        model=None,
+        default_branch="main",
+        schema_path=schema_path,
+        output_path=output_path,
+    )
     assert argv == [
         "codex",
         "exec",

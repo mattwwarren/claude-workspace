@@ -99,3 +99,12 @@ def test_real_runner_missing_output_file_returns_none(tmp_path: Path) -> None:
     runner = RealCodexRunner()
     result = runner.run(tmp_path, ["echo", "hi", "-o", str(missing_path)], None)
     assert result.output_file_content is None
+
+
+def test_real_runner_non_utf8_output_file_returns_none(tmp_path: Path) -> None:
+    """RealCodexRunner.run() returns None when the '-o' file isn't valid UTF-8."""
+    output_path = tmp_path / "output.json"
+    output_path.write_bytes(b"\xff\xfe\x00\x01")
+    runner = RealCodexRunner()
+    result = runner.run(tmp_path, ["echo", "hi", "-o", str(output_path)], None)
+    assert result.output_file_content is None
