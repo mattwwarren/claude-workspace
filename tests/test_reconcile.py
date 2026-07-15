@@ -19875,14 +19875,16 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         """A terminal row whose session_id was cleared must not match the
         excluded-status branch (post-review amendment A3, soundness pin).
 
-        Every write that lands a task terminal with a cleared session_id
+        The R3 lookup split's safety rests on an assumed precondition: every
+        write that lands a task terminal with a cleared session_id
         (``cancel_ticket``/``cancel_task_for_session``/the PENDING branches of
         ``_route_blocked_result_to_task``) clears ``session_id`` in the SAME
-        write as the status transition -- so a terminal row can never carry a
-        session_id that still matches an in-flight caller's lookup. This pins
-        that invariant: a CANCELLED task with session_id=None must fall
-        through to the truly-absent (routed=True) case, not the excluded-
-        status-match (routed=False) case.
+        write as the status transition, so a terminal row should never carry a
+        session_id that still matches an in-flight caller's lookup. This test
+        exercises that assumed precondition directly (not a system-wide
+        guarantee across every write site): given a CANCELLED task with
+        session_id=None, the lookup must fall through to the truly-absent
+        (routed=True) case, not the excluded-status-match (routed=False) case.
         """
         _write_staged_clients_yaml(tmp_config_dir, "staged-client")
         ticket_id, session_id = "GH-1189-cleared", "sess-1189-cleared"

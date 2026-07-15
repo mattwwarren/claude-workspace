@@ -804,6 +804,16 @@ def _apply_sentinel_to_task(
                     break
                 matched_excluded = True
         if target is None:
+            if matched_excluded:
+                # #1189: surface the race so an operator can tell "raced to
+                # terminal by a concurrent caller" apart from "no such task
+                # ever existed" -- both silently returned routed=True before
+                # this fix, with no signal a race had occurred at all.
+                _log.info(
+                    "sentinel_race_miss_detected: ticket=%s session=%s",
+                    ticket_id,
+                    cw_session_id,
+                )
             return SentinelRouteOutcome(rescued=False, routed=not matched_excluded)
 
         rescued = False
