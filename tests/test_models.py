@@ -292,9 +292,7 @@ class TestClientConfig:
     def test_unknown_key_raises(self) -> None:
         """extra='forbid' rejects an unrecognized top-level key (#1200)."""
         with pytest.raises(ValidationError):
-            ClientConfig(
-                name="test", workspace_path=Path("/dev/null"), bogus_field="x"
-            )
+            ClientConfig(name="test", workspace_path=Path("/dev/null"), bogus_field="x")
 
 
 class TestCwState:
