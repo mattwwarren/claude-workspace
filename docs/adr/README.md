@@ -54,6 +54,7 @@ When an ADR is superseded, edit the old one's status line — don't delete it.
 | [0009](0009-branch-absence-is-diagnostic-not-completion.md) | Branch-absence is a diagnostic signal, never a completion signal | Accepted |
 | [0010](0010-live-dashboard-extends-orchestrate-watch.md) | The live work dashboard extends `cw orchestrate watch`, not a new surface *(deprecated — see `cw board`)* | Accepted |
 | [0011](0011-ticket-status-transitions-through-one-seam.md) | TicketTask status transitions go through a single seam | Accepted |
+| [0012](0012-cw-never-grants-github-review-approvals.md) | cw never grants a GitHub review approval | Accepted |
 
 ADR-0000 is the foundational record — the trajectory it captures is
 assumed as ground truth by every subsequent ADR.
