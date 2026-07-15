@@ -46,6 +46,13 @@ def test_fake_runner_simulate_timeout_flag(tmp_path: Path) -> None:
     assert result.returncode == -1
 
 
+def test_fake_runner_returns_output_file_content(tmp_path: Path) -> None:
+    """FakeCodexRunner returns the configured output_file_content directly."""
+    runner = FakeCodexRunner(output_file_content='{"x": 1}')
+    result = runner.run(tmp_path, ["codex"], None)
+    assert result.output_file_content == '{"x": 1}'
+
+
 # ---------------------------------------------------------------------------
 # RealCodexRunner — subprocess handling
 # ---------------------------------------------------------------------------
@@ -75,3 +82,20 @@ def test_run_codex_timeout(tmp_path: Path) -> None:
     # "sleep 60" will be killed by a 0-second timeout.
     result = runner.run(tmp_path, ["sleep", "60"], 0)
     assert result.timed_out is True
+
+
+def test_real_runner_reads_output_file(tmp_path: Path) -> None:
+    """RealCodexRunner.run() reads the file at the argv '-o' path after exit."""
+    output_path = tmp_path / "output.json"
+    output_path.write_text('{"x": 1}', encoding="utf-8")
+    runner = RealCodexRunner()
+    result = runner.run(tmp_path, ["echo", "hi", "-o", str(output_path)], None)
+    assert result.output_file_content == '{"x": 1}'
+
+
+def test_real_runner_missing_output_file_returns_none(tmp_path: Path) -> None:
+    """RealCodexRunner.run() returns None when the '-o' path was never written."""
+    missing_path = tmp_path / "missing-output.json"
+    runner = RealCodexRunner()
+    result = runner.run(tmp_path, ["echo", "hi", "-o", str(missing_path)], None)
+    assert result.output_file_content is None
