@@ -142,10 +142,10 @@ Use the `/cw-session-watch` skill to read a session's exit status without hand-g
 | `cw dev-queue approve <ticket>` | Approve a plan/review gate, or clear an operator-signoff hold |
 | `cw dev-queue requeue <ticket>` | Requeue a `BLOCKED_ON_USER` ticket back to pending |
 | `cw dev-queue unblock <ticket>` | Clear salvage/park markers and requeue a `SALVAGE_PARKED` ticket |
-| `cw dev-queue move <ticket> --to-lane <lane>` | Re-lane a ticket |
+| `cw dev-queue move <ticket> --to <lane>` | Re-lane a ticket |
 | `cw dev-queue cancel <ticket>` | Cancel a pending ticket and stop any running session |
 | `cw dev-queue remove <ticket> --all` | Remove a ticket from the queue |
-| `cw dev-queue clear -c <client>` | Clear completed/cancelled tickets |
+| `cw dev-queue clear -c <client> [-s <status>]` | Clear tasks for a client, optionally filtered to one status (e.g. `completed`) |
 | `cw dev-queue plan` | Spawn `/orchestrate-plan` to produce a DispatchPlan |
 | `cw dev-queue refresh-all` | Fast-forward all client repos to origin/main |
 | `cw queue peek` | In-flight inspection of RUNNING dev-queue sessions (age, idle gap, sentinel, PR state) |
