@@ -15,8 +15,8 @@ The core loop: **harden a ticket → dispatch it → workers implement, review, 
 # Install from GitHub
 uv tool install "claude-workspace[mcp] @ git+https://github.com/mattwwarren/claude-workspace.git"
 
-# Pin to a specific release
-uv tool install "claude-workspace[mcp] @ git+https://github.com/mattwwarren/claude-workspace.git@v1.3.0"
+# Pin to a specific release (see github.com/mattwwarren/claude-workspace/tags for the latest)
+uv tool install "claude-workspace[mcp] @ git+https://github.com/mattwwarren/claude-workspace.git@v1.20.0"
 
 # Install from local clone (development)
 git clone https://github.com/mattwwarren/claude-workspace.git
@@ -101,6 +101,8 @@ You (coordinator)
 |---|---|
 | `shipped` | Done. PR is live with auto-merge. |
 | `no_op` | Ticket already satisfied. Close as completed. |
+| `stage_complete` | Staged pipeline: one stage (HARDEN/PLAN/IMPL/REVIEW) finished cleanly — not terminal. `cw` auto-advances the ticket to the next stage. |
+| `merge_pending` | PR created but CI/merge gate hasn't cleared yet. Not a failure — don't re-dispatch, just monitor the PR. |
 | `ambiguities_pending_resolution` | Answer questions on the issue, re-dispatch. |
 | `premises_pending_verification` | Verify flagged premises on the issue, re-dispatch. |
 | `plan_pending_approval` | Read the plan comment, post `<!-- auto-dev-plan-approved -->`, re-dispatch. |
@@ -148,9 +150,11 @@ Use the `/cw-session-watch` skill to read a session's exit status without hand-g
 | `cw dev-queue refresh-all` | Fast-forward all client repos to origin/main |
 | `cw queue peek` | In-flight inspection of RUNNING dev-queue sessions (age, idle gap, sentinel, PR state) |
 
-`cw dev-queue wait` exit codes: `0`=shipped/no_op · `1`=failed/cancelled · `2`=blocked/pending-human · `3`=attention (stale transcript) · `124`=timeout
+`cw dev-queue wait` exit codes: `0`=shipped/no_op · `1`=failed/cancelled · `2`=blocked/pending-human · `3`=attention (stale transcript) · `4`=parked awaiting operator signoff · `124`=timeout
 
 For a wave of tickets, the `/cw-fanout` skill wraps this whole table — pre-flight, enqueue, dispatch, and monitor — into one orchestrated motion, using the `/cw-queue-peek` skill's WAIT/PEEK/STOP ladder to decide whether to keep a long-running session alive.
+
+**Operator signoff gate** (RFC 0007 Phase 3): configure `--signoff operator` on `cw dev-queue add`, a lane, or the global default to force a ship checkpoint a ticket can't clear on its own. A gated ticket parks as `AWAITING_OPERATOR_SIGNOFF` at the REVIEW→FINALIZE boundary; `cw dev-queue approve` clears it forward (large-tier tickets need it twice — once for the ordinary review gate, once for signoff), and `cw dev-queue requeue --stage <earlier> --regress` sends it backward instead.
 
 ### Orchestrator
 
@@ -306,15 +310,19 @@ Stage 5: CI Wait         ← skipped headless (orchestrator concern)
   "ticket_id": "PROJ-123",
   "status": "shipped",
   "stage_reached": "stage5_post_create",
-  "scope": {"tier": "small", "files": 3, "lines_actual": 47},
+  "scope": {"tier": "small", "files": 3, "lines_estimate": 40, "lines_actual": 47, "forbidden_touched": false},
+  "plan_source": "github_issue_existing",
   "branch": "dev/proj-123-fix-login",
-  "pr": {"number": 42, "url": "...", "auto_merge": true},
+  "pr": {"number": 42, "url": "https://github.com/org/repo/pull/42", "base": "main", "auto_merge": true},
   "review": {"must_fix_initial": 0, "should_fix": 1, "fix_cycles_used": 0},
+  "health": {"lowest_agent_confidence": "HIGH", "any_incomplete_risk": false, "recommendation": "PROCEED"},
   "blocker": null,
-  "next_actions": []
+  "next_actions": ["wait_for_ci"]
 }
 AUTO_DEV_RESULT>>>
 ```
+
+This is the minimum payload that actually passes `cw result validate -` — `scope.lines_estimate`, `scope.forbidden_touched`, `plan_source`, `pr.base`, and `health` are all required once `stage_reached` is past `stage1_plan`/`stage1_pre_flight`, and a `shipped` status requires `"wait_for_ci"` in `next_actions`.
 
 `cw` parses this sentinel via `reconcile()` to route tasks to terminal queue states. See [`docs/headless-contract.md`](docs/headless-contract.md) for the full schema.
 
