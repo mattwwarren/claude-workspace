@@ -19670,7 +19670,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
     independently landed FAILED.
     """
 
-    def test_running_task_blocked_result_deterministic_parse_failure_returns_routed_false(
+    def test_running_task_blocked_result_deterministic_failure_returns_routed_false(
         self, tmp_config_dir: Path
     ) -> None:
         """RUNNING + deterministic parse-failure BlockedResult → routed=False."""

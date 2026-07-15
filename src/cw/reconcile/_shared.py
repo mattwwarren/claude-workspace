@@ -753,13 +753,13 @@ class SentinelRouteOutcome(NamedTuple):
     """Result of routing a sentinel through ``_apply_sentinel_to_task`` (#1019).
 
     ``rescued`` is True iff a parked (non-RUNNING) task was rescued via the
-    #918 AutoDevResult arm. ``routed`` is False iff the shared staged-advance
-    guard (``_route_staged_decision``) refused the sentinel due to a
-    stage_reached/task.stage mismatch (#1019, the #986 incident) -- callers
-    (notably the phantom sweep's ``_apply_phantom_routed_mutations``) must not
-    complete/tear down the session when ``routed`` is False. A target-not-found
-    lookup miss has nothing to refuse, so it reports ``routed=True`` (the
-    caller's existing completion behavior for that case is unaffected).
+    #918 AutoDevResult arm. ``routed`` is False iff (a) the shared
+    staged-advance guard refused the sentinel's stage position, (b)
+    ``_route_blocked_result_to_task`` just landed the task terminal-FAILED via
+    a BlockedResult, or (c) the lookup matched a same-ticket/session task
+    outside ``OCCUPIED_LANE_STATUSES`` (raced to terminal by a concurrent
+    caller). A truly-absent task is the only remaining ``routed=True`` miss
+    shape (#1189).
     """
 
     rescued: bool
@@ -789,17 +789,22 @@ def _apply_sentinel_to_task(
         store = load_dev_queue()
         target: TicketTask | None = None
         target_status: QueueItemStatus | None = None
+        # #1189: track whether a same-ticket/session task was seen at all
+        # (regardless of status) that did not win the occupied match --
+        # distinguishes "raced to terminal by a concurrent caller" (R3a) from
+        # "no such task anywhere" (R3b). Keep scanning past an excluded-status
+        # match in case a later row has the occupied match (post-review
+        # amendment A2).
+        matched_excluded = False
         for task in store.tasks:
-            if (
-                task.ticket_id == ticket_id
-                and task.session_id == cw_session_id
-                and task.status in OCCUPIED_LANE_STATUSES
-            ):
-                target = task
-                target_status = task.status
-                break
+            if task.ticket_id == ticket_id and task.session_id == cw_session_id:
+                if task.status in OCCUPIED_LANE_STATUSES:
+                    target = task
+                    target_status = task.status
+                    break
+                matched_excluded = True
         if target is None:
-            return SentinelRouteOutcome(rescued=False, routed=True)
+            return SentinelRouteOutcome(rescued=False, routed=not matched_excluded)
 
         rescued = False
         routed = True
@@ -835,7 +840,15 @@ def _apply_sentinel_to_task(
             # to an implicit no-op — a BlockedResult carries no success signal,
             # so leave it parked (never a false FAILED/COMPLETED on a rescue
             # miss, #918/Comment 9).
-            _route_blocked_result_to_task(target, sentinel)
+            # #1189: `routed` reflects whether this call landed the task
+            # terminal-FAILED (False) or re-queued it PENDING (True) --
+            # callers must not complete/rescue the session on a FAILED
+            # landing. Do NOT set `mutated = routed` here (unlike the
+            # AutoDevResult arm above): _route_blocked_result_to_task ALWAYS
+            # writes a real transition (FAILED or PENDING) that must be
+            # persisted below even when routed=False -- routed=False means
+            # "don't also complete the session," not "don't write the task."
+            routed = _route_blocked_result_to_task(target, sentinel)
         else:
             # True no-op: a late BlockedResult against an already-parked task
             # carries no success signal and must not write (#918).
@@ -846,7 +859,7 @@ def _apply_sentinel_to_task(
         return SentinelRouteOutcome(rescued=rescued, routed=routed)
 
 
-def _route_blocked_result_to_task(target: TicketTask, sentinel: BlockedResult) -> None:
+def _route_blocked_result_to_task(target: TicketTask, sentinel: BlockedResult) -> bool:
     """Route a malformed/unparseable BlockedResult to a RUNNING task's status.
 
     A BlockedResult means the sentinel failed to parse or was malformed.
@@ -854,27 +867,34 @@ def _route_blocked_result_to_task(target: TicketTask, sentinel: BlockedResult) -
     validation_failed and transient failures re-queue to PENDING (clearing
     session_id) until the attempt cap. Extracted from _apply_sentinel_to_task
     to keep that function under the branch cap (#918).
+
+    Returns False when this call just landed the task terminal-FAILED (the
+    caller must not also complete the owning session on that outcome), True
+    when it re-queued to PENDING instead (#1189).
     """
     if sentinel.blocker.reason in _DETERMINISTIC_PARSE_FAILURES:
         transition_task_status(target, QueueItemStatus.FAILED, disposition="abandoned")
-    elif sentinel.blocker.reason == BLOCKER_REASON_VALIDATION_FAILED:
+        return False
+    if sentinel.blocker.reason == BLOCKER_REASON_VALIDATION_FAILED:
         if target.attempts >= _VALIDATION_FAILED_MAX_ATTEMPTS:
             transition_task_status(
                 target, QueueItemStatus.FAILED, disposition="abandoned"
             )
-        else:
-            transition_task_status(target, QueueItemStatus.PENDING)
-            target.session_id = None
-    elif sentinel.blocker.reason in _TRANSIENT_PARSE_FAILURES:
+            return False
         transition_task_status(target, QueueItemStatus.PENDING)
         target.session_id = None
-    else:
-        # An unparseable/unknown-status sentinel (status_unknown,
-        # multiple_result_blocks, any unrecognized reason) carries NO success
-        # signal. Never mark it COMPLETED — that silently retires unshipped work
-        # as "shipped" (#750, the #728 loss). Surface as FAILED so the operator
-        # sees it instead of a phantom completion.
-        transition_task_status(target, QueueItemStatus.FAILED, disposition="abandoned")
+        return True
+    if sentinel.blocker.reason in _TRANSIENT_PARSE_FAILURES:
+        transition_task_status(target, QueueItemStatus.PENDING)
+        target.session_id = None
+        return True
+    # An unparseable/unknown-status sentinel (status_unknown,
+    # multiple_result_blocks, any unrecognized reason) carries NO success
+    # signal. Never mark it COMPLETED — that silently retires unshipped work
+    # as "shipped" (#750, the #728 loss). Surface as FAILED so the operator
+    # sees it instead of a phantom completion.
+    transition_task_status(target, QueueItemStatus.FAILED, disposition="abandoned")
+    return False
 
 
 def _session_project_dir(session: Session) -> Path | None:
