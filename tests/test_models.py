@@ -27,6 +27,9 @@ from cw.models import (
     Session,
     SessionPurpose,
     SessionStatus,
+    Stage,
+    StageExecutorConfig,
+    StagePipelineConfig,
     TicketTask,
     WatchedPr,
 )
@@ -286,6 +289,13 @@ class TestClientConfig:
         restored = ClientConfig.model_validate(data)
         assert restored.worker_model == "claude-haiku-4-5-20251001"
 
+    def test_unknown_key_raises(self) -> None:
+        """extra='forbid' rejects an unrecognized top-level key (#1200)."""
+        with pytest.raises(ValidationError):
+            ClientConfig(
+                name="test", workspace_path=Path("/dev/null"), bogus_field="x"
+            )
+
 
 class TestCwState:
     def test_empty_state(self) -> None:
@@ -540,6 +550,11 @@ class TestOrchestratorConfigLegacyDefault:
         config = OrchestratorConfig()
         assert config.default_max_parallel == 1
 
+    def test_unknown_key_raises(self) -> None:
+        """extra='forbid' rejects an unrecognized top-level key (#1200)."""
+        with pytest.raises(ValidationError):
+            OrchestratorConfig.model_validate({"bogus_field": "x"})
+
 
 @pytest.mark.parametrize(
     ("event_type", "payload"),
@@ -730,6 +745,45 @@ class TestLaneConfig:
 
         with pytest.raises(ValidationError):
             LaneConfig(name="")
+
+    def test_unknown_key_raises(self) -> None:
+        """extra='forbid' rejects an unrecognized top-level key (#1200)."""
+        with pytest.raises(ValidationError):
+            LaneConfig(name="x", bogus_field="x")
+
+    def test_typo_review_recipies_raises(self) -> None:
+        """The ticket's own motivating typo (review_recipies) is caught at the
+        model level via extra='forbid', not just the field validator's
+        recognized-key check on the correctly-spelled field (#1200)."""
+        with pytest.raises(ValidationError):
+            LaneConfig(name="x", review_recipies={"address_review": True})  # type: ignore[call-arg]
+
+
+class TestStageExecutorConfigExtraForbid:
+    """RFC 0005 A1 (dormant); extra='forbid' coverage added by #1200."""
+
+    def test_defaults(self) -> None:
+        executor = StageExecutorConfig()
+        assert executor.backend == "claude-native"
+        assert executor.model is None
+        assert executor.endpoint is None
+
+    def test_unknown_key_raises(self) -> None:
+        with pytest.raises(ValidationError):
+            StageExecutorConfig(bogus_field="x")
+
+
+class TestStagePipelineConfigExtraForbid:
+    """RFC 0005 A1 (dormant); extra='forbid' coverage added by #1200."""
+
+    def test_defaults(self) -> None:
+        pipeline = StagePipelineConfig()
+        assert pipeline.stages == [Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE]
+        assert pipeline.executors == {}
+
+    def test_unknown_key_raises(self) -> None:
+        with pytest.raises(ValidationError):
+            StagePipelineConfig(bogus_field="x")
 
 
 class TestClientConfigEffectiveLanes:
@@ -1075,6 +1129,13 @@ class TestOperatorChannelForward:
 
         with pytest.raises(pydantic.ValidationError):
             OperatorChannelForward(liveness_min_bucket="bogus_bucket")  # type: ignore[arg-type]
+
+    def test_unknown_key_raises(self) -> None:
+        """extra='forbid' rejects an unrecognized top-level key (#1200)."""
+        from cw.models import OperatorChannelForward
+
+        with pytest.raises(ValidationError):
+            OperatorChannelForward(bogus_field="x")
 
     def test_override_narrows_event_types(self) -> None:
         from cw.models import OperatorChannelForward
