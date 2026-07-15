@@ -356,6 +356,26 @@ via `cw dev-queue cancel` as a duplicate or superseded ticket) rather than
 stranded by `spawn close`, check `cw dev-queue show <T>` / the event history
 before requeuing it.
 
+### FAILED row recovery (`--from-failed`)
+
+A ticket's row can land on `FAILED` even when the underlying session
+actually completed clean — the row itself just has no requeue path once
+FAILED, since `cw dev-queue requeue` normally only accepts
+`BLOCKED_ON_USER`/`AWAITING_OPERATOR_SIGNOFF` (#1190).
+
+Fix: requeue it explicitly with the escape hatch, which moves it back to
+PENDING at its current stage and clears `session_id`/`stage_base_ref`
+(mirrors `--from-cancelled` above):
+
+```bash
+cw dev-queue requeue <T> -c <CLIENT> --from-failed
+```
+
+**Caveat:** `--from-failed` accepts *any* FAILED row, regardless of why it
+failed — the row carries no record of provenance by the time it reaches this
+flag. Check `cw dev-queue show <T>` / the event history before requeuing it
+to confirm the failure isn't a genuine, still-unresolved defect.
+
 ### Attempt-cap reset (environmental burn)
 
 See also: CANCELLED row recovery (above) — a different terminal condition
