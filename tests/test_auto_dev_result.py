@@ -3586,3 +3586,36 @@ class TestOperatorUnavailableBlockerReasons:
         assert result.blocker is not None
         assert result.blocker.reason == "operator_unavailable"
         assert result.schema_version == p["schema_version"]
+
+
+class TestReviewAgentsRun:
+    """#1237 — Review.agents_run field (count of reviewer agents that ran)."""
+
+    def test_agents_run_defaults_to_zero_when_omitted(self) -> None:
+        review = Review(must_fix_initial=0, should_fix=0, fix_cycles_used=0)
+        assert review.agents_run == 0
+
+    def test_agents_run_parses_explicit_value(self) -> None:
+        review = Review.model_validate(
+            {
+                "must_fix_initial": 1,
+                "should_fix": 0,
+                "fix_cycles_used": 0,
+                "agents_run": 4,
+            }
+        )
+        assert review.agents_run == 4
+
+
+class TestSchemaVersionV5:
+    """#1237 — schema_version 5 is a supported version."""
+
+    def test_v5_in_supported_versions(self) -> None:
+        assert 5 in SUPPORTED_SCHEMA_VERSIONS
+
+    def test_v5_payload_parses(self) -> None:
+        payload = _shipped_payload()
+        payload["schema_version"] = 5
+        result = parse_stdout(_wrap_sentinel(payload))
+        assert isinstance(result, AutoDevResult)
+        assert result.schema_version == 5
