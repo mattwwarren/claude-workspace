@@ -134,17 +134,17 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
 | `ticket_id` | string | Linear ID, or synthetic for free-text invocations. |
 | `status` | string enum | See §4. Closed set; parsers MUST treat unknown values as §6 (5) errors. |
 | `stage_reached` | string enum | Pipeline-stage marker. Closed set: `stage1_pre_flight`, `stage1_plan`, `stage2_impl`, `stage3_review`, `stage4a_merge_gate`, `stage4b_pr_create`, `stage5_post_create`. Pre-flight exits (e.g. already-satisfied tickets) use `stage1_pre_flight`. Producer and parser must keep this list in lockstep — adding a stage is a `schema_version` bump (see §8). |
-| `scope.tier` | `"small"` \| `"large"` | Per the Guard Matrix in `commands/auto-dev.md`. |
+| `scope.tier` | `"small"` \| `"large"` \| null | Per the Guard Matrix in `commands/auto-dev.md`. `null` is accepted only on pre-impl exits (`stage_reached` of `stage1_plan` or `stage1_pre_flight`); required non-null at every later stage (#416). |
 | `scope.files` | int | File count touched (or planned, if exited pre-impl). |
 | `scope.lines_estimate` | int | Plan-time line estimate. |
-| `scope.lines_actual` | int \| null | Actual lines touched; `null` if exited before impl. |
+| `scope.lines_actual` | int \| null | Actual lines touched. MUST be `null` on pre-impl exits (`stage1_plan` / `stage1_pre_flight`) and non-null at every later stage. |
 | `scope.forbidden_touched` | bool | Whether any `--forbidden` area was touched. |
 | `plan_source` | `"linear_existing"` \| `"github_issue_existing"` \| `"generated"` \| `"free_text"` \| `"none"` | How the plan was sourced. `"linear_existing"` and `"github_issue_existing"` are equivalent (the latter is the post-Linear, GitHub-Issues-era label — producers should emit whichever matches their tracker). `"none"` is used for pre-flight exits where no plan was produced. |
 | `branch` | string \| null | The **feature branch** where the impl agent pushed (e.g. `dev/<ticket-id>`). `null` if exited before branch creation (e.g. `plan_pending_approval`). Distinct from the cw session branch (`auto-dev/<ticket>`) that hosts the orchestrating skill run. |
 | `worktree_path` | string \| null | Absolute path of the **cw session worktree** (e.g. `~/.cw/wt/<hash>/auto-dev-<ticket>`). This is the worktree that cw creates on the session branch for the skill to run in — not the impl feature branch. `null` if no worktree was created. |
 | `fork_point_sha` | string \| null | Base commit at branch creation. |
 | `commits` | string[] | Commit SHAs created during this run. |
-| `pr` | object \| null | Non-null **only** when `status = shipped`. All other statuses — including `review_pending_approval` (whether reached via the large-scope path or the §5.1 downgrade), `merge_gate_blocked`, `plan_pending_approval`, the rejects, and `blocked` — leave `pr` as `null`. `branch` may still be non-null on these (see `branch` row). |
+| `pr` | object \| null | Non-null **iff** `status` is `shipped` or `merge_pending` (#899). All other statuses — including `review_pending_approval` (whether reached via the large-scope path or the §5.1 downgrade), `merge_gate_blocked`, `plan_pending_approval`, `stage_complete`, the rejects, and `blocked` — leave `pr` as `null`. `branch` may still be non-null on these (see `branch` row). |
 | `pr_created` | object \| null | **Phase D** — pre-merge PR snapshot emitted before auto-merge is triggered (§3.4). Optional; absent on payloads from older producers. When present, expected only on `status=shipped` runs. |
 | `review.must_fix_initial` | int | MUST_FIX count from first review pass. |
 | `review.should_fix` | int | SHOULD_FIX count carried out of the loop. |
@@ -152,8 +152,9 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
 | `review.deferred` | int | Count of findings deferred to .cw/deferred-findings.md; 0 or absent on pre-Stage-3 exits (default). |
 | `health` | object | See §5. |
 | `friction_highlights` | string[] | Surfaced highlights from agent friction reports. |
-| `blocker` | object \| null | See §4.2. Populated when `status = "blocked"`. |
+| `blocker` | object \| null | See §4.2. Required non-null when `status = "blocked"`. Exception (#777): `merge_gate_blocked` MAY also carry a non-null blocker to surface the gate reason (e.g. `prior_pipeline_pr_open`); `blocker` must be `null` for every other status. |
 | `next_actions` | string[] | Advisory list cw can act on without prose-parsing. See §4.3. |
+| `cost_usd` | number \| null | Total USD cost of the run (#124). Optional — producers that don't track cost omit it; consumers treat `null` as "cost unknown". Must be non-negative when present. |
 
 **Note (A8, #1130):** `commits`, `friction_highlights`, and `next_actions` array items must be non-empty, non-whitespace strings; blank items are dropped at the parse boundary. Unlike A6/A7, no placeholder is injected when filtering leaves the array empty — none of these fields is gated behind a status-specific "must be non-empty" invariant (contrast `ambiguities`/`premises`, §4.4), so an empty result here is simply a valid empty list.
 
@@ -192,9 +193,11 @@ The `status` field is a closed set. Consumers MUST treat unknown statuses as a p
 | Status | Meaning |
 |---|---|
 | `shipped` | PR created with auto-merge enabled; CI wait skipped. |
+| `stage_complete` | Staged pipeline (cw dev-queue stages, RFC 0005 B2, #699) — one stage (HARDEN/PLAN/IMPL/REVIEW) finished cleanly. **Not a terminal outcome**: cw auto-advances the ticket to the next stage. PR-less by design — IMPL pushes a branch but FINALIZE creates the PR, so `pr` is `null` (`branch` may be non-null). Never a salvage-terminal status: a crashed worker whose last sentinel was `stage_complete` is routed through the stage-advance path, not dispositioned. Accepted under all supported schema versions (rollout exception, same treatment as the v4 statuses) until the producer bumps its emitted `schema_version`. |
 | `plan_pending_approval` | Large scope — plan generated and posted to Linear; no branch created; awaiting human approval. |
 | `review_pending_approval` | Large scope — fix loop complete, branch pushed, no PR; awaiting human review approval. |
 | `merge_gate_blocked` | Small scope — prior pipeline PR still open; cannot create next PR until gate clears. |
+| `merge_pending` | PR created but the CI/merge gate hasn't cleared yet (#899). **Not a failure** — cw does not re-dispatch the ticket; the operator just monitors the PR. `pr` MUST be non-null (the only status besides `shipped` that carries one); `blocker` and `next_actions` are empty. Note the parse-boundary coercion: a `blocked` sentinel arriving with a non-null `pr` is auto-coerced to `merge_pending` to preserve the PR URL (see "Parse-boundary coercions", §6). Accepted under all supported schema versions (rollout exception). |
 | `scope_exceeded` | `--scope-limit small` rejected a Large ticket before impl started. |
 | `forbidden_area` | `--forbidden` constraint matched a planned file; ticket rejected before impl started. |
 | `blocked` | Unrecoverable error mid-pipeline; see `blocker` field for details. |
@@ -203,6 +206,8 @@ The `status` field is a closed set. Consumers MUST treat unknown statuses as a p
 | `premises_pending_verification` | Planning halted because the Plan Soundness Reviewer flagged unverified premises; no branch created. The `premises` array is non-empty. Promoted from §4.4 interim state at `schema_version=4`. |
 
 ### 4.2 `blocker.reason` (when `status = "blocked"`)
+
+The same object shape MAY also appear on a `merge_gate_blocked` result to surface the gate reason (e.g. `prior_pipeline_pr_open`, issue #777) — `blocker = null` remains accepted for that status.
 
 Minimum shape (v1+):
 
@@ -271,7 +276,7 @@ Advisory only. cw acts on these without parsing prose.
 | `user_resolve_ambiguities` | `status = ambiguities_pending_resolution` | Notify user that the ambiguity scan surfaced questions requiring human disposition. The `ambiguities` array holds the structured questions. Re-dispatch the ticket after answers are recorded on the issue. |
 | `user_verify_premises` | `status = premises_pending_verification` | Notify user that one or more premises must be verified before the plan can proceed. The `premises` array holds the structured entries. Re-dispatch after verification results are recorded on the issue. |
 
-Empty list for terminal-reject (`scope_exceeded`, `forbidden_area`, `blocked`). For `shipped`, `next_actions` always contains `wait_for_ci`. For `ambiguities_pending_resolution` and `premises_pending_verification`, `next_actions` is non-empty. `next_actions` is otherwise an open vocabulary — parsers MUST pass unknown actions through unchanged (do not act on them, do not reject the payload).
+Empty list for terminal-reject (`scope_exceeded`, `forbidden_area`, `blocked`), with two `blocked` exceptions: a pre-flight block (`stage_reached = stage1_pre_flight`, e.g. the Origin Sync gate, #226) MUST carry a non-empty `next_actions` drawn from `{sync_local_main, manual_intervention}`, and a blocked result whose actions all start with a `user_resolve_*` / `user_decide_*` / `user_verify_*` prefix is a paused-for-human shape, not a terminal reject (#328). `stage_complete` and `merge_pending` carry no defined actions (typically empty). For `shipped`, `next_actions` always contains `wait_for_ci` — and `wait_for_ci` MUST NOT appear on any other status. For `ambiguities_pending_resolution` and `premises_pending_verification`, `next_actions` is non-empty. `next_actions` is otherwise an open vocabulary — parsers MUST pass unknown actions through unchanged (do not act on them, do not reject the payload).
 
 ### 4.4 `ambiguities` and `premises` payload arrays (v4)
 
@@ -329,7 +334,7 @@ A degraded agent is one that returned ANY of:
 
 | Field | Notes |
 |---|---|
-| `lowest_agent_confidence` | `HIGH` \| `MEDIUM` \| `LOW` — minimum across all agent reports. |
+| `lowest_agent_confidence` | `HIGH` \| `MEDIUM` \| `LOW` — minimum across all agent reports. `null` accepted only on pre-impl exits (`stage1_plan` / `stage1_pre_flight`, #416); required non-null at every later stage. |
 | `any_incomplete_risk` | `true` if any agent reported `MAYBE` or `YES` for `Could work be incomplete?`. |
 | `shortcuts` | Flat list of all `Shortcuts taken under pressure` entries across agents. |
 | `recommendation` | `PROCEED` if all agents recommended PROCEED; otherwise `EXIT_FOR_HUMAN_REVIEW`. |
@@ -415,8 +420,14 @@ The parser applies several pre-validation coercions before handing the payload t
 |---|---|---|---|
 | `no_op` + stray `pr` / `branch` / `commits` | `status=no_op` and `pr`, `branch`, or `commits` is non-null/non-empty | Set `pr=null`, `branch=null`, `commits=[]` | #367 |
 | `blocked` + stray `next_actions` | `status=blocked` and `next_actions` is non-empty with non-user-directed verbs (not `user_resolve_*` / `user_decide_*` / `user_verify_*` prefixes; not `stage_reached=stage1_pre_flight`) | Drop `next_actions` (set to `[]`), preserve `blocker` | #371 |
+| `blocked` + non-null `pr` | `status=blocked` and `pr` is non-null (FINALIZE created a PR then couldn't merge — CI pending). Skipped when `health.downgrade_applied=true` (would trade one validation failure for another under §5.1) | **Rewrite `status` to `merge_pending`**; set `blocker=null`, `next_actions=[]`, preserving the PR URL instead of recording a failure | #899 |
 | `no_op` + stray `scope.lines_actual` | `status=no_op` and `stage_reached ∈ {stage1_pre_flight, stage1_plan}` and `scope.lines_actual` is non-null | Set `scope.lines_actual=null` | #399 |
+| terminal-reject strays | `status ∈ {scope_exceeded, forbidden_area}` and `branch`/`commits` non-null/non-empty, or `scope.lines_actual` non-null on a pre-impl stage | Set `branch=null`, `commits=[]`; null `scope.lines_actual` (pre-impl only) | #430 |
+| pre-impl `lines_actual=0` | any status; `stage_reached ∈ {stage1_pre_flight, stage1_plan}` and `scope.lines_actual` is exactly `0` (other non-null values still hard-error) | Set `scope.lines_actual=null` | #416 |
+| `shipped` missing `wait_for_ci` | `status=shipped` and `next_actions` lacks `wait_for_ci` | Append `wait_for_ci` to `next_actions` | #417 |
+| near-miss `stage_reached` label | `stage_reached` is non-canonical but starts with a known `stage<1-5>` prefix (e.g. `stage4_pr_creation`) | Coerce to that stage's canonical value; genuine garbage (no stage prefix) still rejects | #748 |
 | empty-question ambiguity items | `status=ambiguities_pending_resolution` and one or more ambiguity items have a null/empty/whitespace question | Drop the empty item(s); if none remain, inject labeled placeholder `{"question": "(producer emitted no usable ambiguity … see #953)"}` | #953 |
+| empty-claim premise items | `status=premises_pending_verification` and one or more premise items have no usable `claim`/`premise` text | Drop the empty item(s); if none remain, inject labeled placeholder `{"claim": "(producer emitted no usable premise … see #962)"}` | #962 |
 | blank items in commits / friction_highlights / next_actions / health.shortcuts, or blank agent_id in agent_health_summary entries | any status; an array item is a blank string (or an agent_health_summary entry has a blank agent_id) | Drop the blank item(s)/entry(ies); no placeholder is injected — these fields carry no status-gated non-empty invariant | #1130 |
 
 All coercions log a `WARNING` with the affected field names and ticket ID. The model-level invariants remain strict — coercion happens only at the parse boundary so existing test coverage for the invariants is unaffected.
@@ -461,7 +472,7 @@ Until then, cw must treat all non-terminal exits as fully manual recovery: the u
 - A new `next_actions` entry is added (parsers already treat unknown actions as advisory).
 - A new `blocker.reason` value is added (open enum — see §4.2).
 
-**Cross-version status compatibility:** A status introduced at version N is invalid under any `schema_version < N`. Parsers MUST reject mismatched payloads (e.g., v1 + `no_op` → `validation_failed`). **Exception (one-time):** `stage_reached='stage1_pre_flight'`, `plan_source='none'`, and `plan_source='github_issue_existing'` are accepted under both v2 and v3. This is documented under v3 in the table above; the v2 acceptance covers in-flight skill emissions that predate the parser's v3 awareness.
+**Cross-version status compatibility:** A status introduced at version N is invalid under any `schema_version < N`. Parsers MUST reject mismatched payloads (e.g., v1 + `no_op` → `validation_failed`). **Exception (one-time):** `stage_reached='stage1_pre_flight'`, `plan_source='none'`, and `plan_source='github_issue_existing'` are accepted under both v2 and v3. This is documented under v3 in the table above; the v2 acceptance covers in-flight skill emissions that predate the parser's v3 awareness. Similarly, the `ambiguities_pending_resolution` / `premises_pending_verification` statuses (officially v4) and the `stage_complete` (#699) / `merge_pending` (#899) statuses are accepted under **all** supported schema versions as a rollout exception until the producer skill bumps its emitted version.
 
 When bumping, update this doc, `commands/auto-dev.md`, and the cw parser in lockstep. **Order matters:** the parser must accept the new version BEFORE the skill emits it, otherwise in-flight emissions land in deployed parsers that don't recognize them. Parsers MUST defensively reject unknown `schema_version` values per §6 (4).
 
@@ -473,14 +484,15 @@ When bumping, update this doc, `commands/auto-dev.md`, and the cw parser in lock
 
 **Three trigger conditions:**
 
-1. **Paused sentinel** — `wrapper.py` receives an `AutoDevResult` with `status` in `{ambiguities_pending_resolution, premises_pending_verification}`, or `status=blocked` with `next_actions` containing a `user_resolve_*/user_decide_*/user_verify_*` item. `signal_needs_attention` fires.
+1. **Paused sentinel** — the dispatch sentinel router (`apply_staged_decision` in `cw.dispatch`) receives an `AutoDevResult` with `status` in `{ambiguities_pending_resolution, premises_pending_verification}`, or `status=blocked` with `next_actions` containing a `user_resolve_*/user_decide_*/user_verify_*` item. A `session.needs_attention` event fires.
 
-2. **Silent exit** — `wrapper.py` receives headless exit code 0 but no AUTO_DEV_RESULT sentinel in stdout (the child self-backgrounded a subagent and exited early). `signal_needs_attention` fires.
+2. **Silent exit** — the consume path sees headless exit code 0 but no AUTO_DEV_RESULT sentinel in stdout (the child self-backgrounded a subagent and exited early). A `session.needs_attention` event fires.
 
-3. **Watchdog** — `reconcile()` finds a DAEMON RUNNING session with no `last_result`, surface still live in the native daemon, and `(now - started_at) > budget`. `flag_silently_idle_daemon_sessions` fires. The budget follows a three-level lookup via `resolve_idle_watchdog_budget`:
+3. **Watchdog** — `reconcile()` finds a DAEMON RUNNING session with no `last_result`, surface still live in the native daemon, and `(now - started_at) > budget`. `flag_silently_idle_daemon_sessions` fires. The budget follows a four-level lookup via `resolve_idle_watchdog_budget`:
    - **Per-ticket** (`TicketTask.idle_watchdog_override`) — explicit escape hatch; beats everything.
-   - **Per-tier** (`OrchestratorConfig.idle_watchdog_by_tier[task.scope_hint]`) — keyed by `TicketTask.scope_hint` (e.g., `"large": 1800`). Default config ships `{"large": 1800}` so large-tier sessions, which can legitimately stall on slow tests/mypy, get a 30-minute window.
-   - **Global fallback** (`IDLE_WATCHDOG_SECONDS = 900`) — used when no task is found or scope_hint is unset. NB: on first dispatch attempt `scope_hint` is always `None` (only retries inherit it from the prior sentinel), so attempt 1 always uses this fallback.
+   - **Per-tier** (`OrchestratorConfig.idle_watchdog_by_tier[task.scope_hint]`) — keyed by `TicketTask.scope_hint`. Default config ships `{"large": 3600}` so large-tier sessions, which can legitimately stall on slow tests/mypy, get a 60-minute window.
+   - **Operator-tunable global** (`OrchestratorConfig.idle_watchdog_seconds`) — applies when no per-ticket or per-tier budget resolves; unset (`null`) falls through to the constant below.
+   - **Hardcoded fallback** (`IDLE_WATCHDOG_SECONDS = 900`) — used when no task is found or scope_hint is unset and no global is configured. NB: on first dispatch attempt `scope_hint` is always `None` (only retries inherit it from the prior sentinel), so attempt 1 uses the global/fallback budget.
 
 ### SESSION_NEEDS_ATTENTION Event
 
@@ -541,7 +553,7 @@ re-dispatch and must not be double-counted as free capacity.
 
 ### queue.session_reaped Bus Event (GitHub #380)
 
-Emitted on the **queue-events bus** (`cw event tail`, MCP `queue.session_reaped`) whenever reconcile disposes of a session. The bus server polls `session.reap_reason` off the state snapshot and fires exactly once per new reason stamp.
+Emitted on the **queue-events channel** (the `cw-queue-events` MCP/SSE server, event string `queue.session_reaped`) whenever reconcile disposes of a session. The channel server polls `session.reap_reason` off the state snapshot and fires exactly once per new reason stamp. Note: this is a channel-server event, NOT written to the orchestrator inbox — it does **not** appear in `cw event tail` (the inbox carries the related `session.reap_proposed` / `session.timed_out` / `session.needs_attention` events instead).
 
 Event string: `queue.session_reaped`
 
@@ -563,8 +575,11 @@ Event string: `queue.session_reaped`
 | `phantom_surface` | Daemon surface absent from roster (`_reconcile_locked` phantom sweep). |
 | `idle_stall` | Watchdog fired, no usage-limit message found; task reverted to PENDING for retry. |
 | `usage_limit_cutoff` | Watchdog fired; transcript contained a Claude usage-limit message; task reverted for retry. |
-| `retry_cap_parked` | Watchdog fired; retry cap reached; task set BLOCKED_ON_USER. |
+| `retry_cap_parked` | Idle watchdog fired; retry cap reached; task set BLOCKED_ON_USER. |
+| `stalled_retry_cap_parked` | Stalled (wall-clock) sweep fired; `task.attempts` reached the per-tier stalled retry cap; task set BLOCKED_ON_USER instead of reverted. |
 | `wall_clock_budget` | Wall-clock budget exceeded (`revert_stalled_headless_sessions`); task reverted for retry. |
+| `finalize_blocked` | Stalled FINALIZE-stage session with commits beyond base but a confirmed absence of an open PR; parked (paused_status `finalize_blocked`) for salvage rather than reverted. |
+| `terminal_sibling` | A PENDING row was parked/cancelled because the same (client, ticket) already has a COMPLETED or CANCELLED sibling row (#876). Queue-only disposition — surfaces via `session.reap_proposed` and the task's `disposition`, not via a session reap. |
 | `completed_backstop` | Backstop path (`revert_timed_out_tasks` / `revert_completed_silent_tasks`) found a TIMED_OUT or COMPLETED DAEMON session with a still-RUNNING queue task and no prior reap_reason. |
 | `salvage_completed` | Git-state HIGH path: committed branch, no open PR, post-review-clean; draft PR auto-created, task COMPLETED. |
 | `salvage_parked` | Git-state LOW path: committed branch, no open PR, not post-review-clean; task set BLOCKED_ON_USER for human salvage. |
