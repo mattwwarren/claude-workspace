@@ -124,6 +124,15 @@ STAGE_FAILURE_STATUSES: frozenset[str] = frozenset(
 # "no_result_emitted") stay BLOCKED_ON_USER. Open enum per §4.2 — add reasons
 # as the producer skill evolves. See GitHub #770.
 FINALIZE_REGRESS_BLOCKER_REASONS: frozenset[str] = frozenset({"agent_block"})
+# Blocker reasons that mean "we can't reach the operator/a dependency right
+# now", not "this leg is broken" (RFC 0011 A1). Distinct axis from
+# FINALIZE_REGRESS_BLOCKER_REASONS above -- self-heals nothing, just tags the
+# park so the attention layer and (later, A4) auto-resume can tell it apart
+# from a genuine `blocked`. push_auth_failed (#1049) is retro-classified as
+# the first instance.
+OPERATOR_UNAVAILABLE_BLOCKER_REASONS: frozenset[str] = frozenset(
+    {"push_auth_failed", "operator_unavailable"}
+)
 # Max automatic FINALIZE→IMPL regressions per ticket; prevents ping-pong.
 FINALIZE_REGRESS_CAP: int = 2
 SCOPE_TIER_SMALL: Literal["small"] = "small"

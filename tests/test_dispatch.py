@@ -6876,6 +6876,83 @@ class TestApplyStagedDecision:
         assert advances[2]["old_stage"] == Stage.REVIEW
         assert advances[2]["new_stage"] == Stage.FINALIZE
 
+    # -- RFC 0011 A1: distinct awaiting_operator park class (#1155) ---------
+
+    @pytest.mark.parametrize(
+        "reason",
+        ["push_auth_failed", "operator_unavailable"],
+    )
+    def test_operator_unavailable_blocker_sets_awaiting_operator_paused_status(
+        self,
+        reason: str,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A blocked status with an operator-unavailable blocker reason tags the
+        attention payload's paused_status as awaiting_operator_availability
+        instead of the generic "blocked" (RFC 0011 A1). breadcrumbs still
+        carries the specific blocker reason verbatim.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        captured: list[tuple[object, dict[str, object]]] = []
+
+        def capture_event(
+            event_type: object,
+            payload: dict[str, object] | None = None,
+            **_kwargs: object,
+        ) -> object:
+            if event_type == OrchestratorEventType.SESSION_NEEDS_ATTENTION:
+                captured.append((event_type, payload or {}))
+            return None
+
+        monkeypatch.setattr("cw.dispatch.record_event", capture_event)
+
+        task = self._make_running_task("AO-1", stage=Stage.IMPL)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "s2_impl", "reason": reason},
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert len(captured) == 1
+        _, payload = captured[0]
+        assert payload["paused_status"] == "awaiting_operator_availability"
+        assert payload["breadcrumbs"] == reason
+
+    @pytest.mark.parametrize(
+        "reason",
+        ["push_auth_failed", "operator_unavailable"],
+    )
+    def test_blocked_at_finalize_operator_unavailable_reason_parks_without_regress(
+        self,
+        reason: str,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+    ) -> None:
+        """blocked at FINALIZE with an operator-unavailable reason parks
+        BLOCKED_ON_USER without regressing to IMPL (R5 non-regression proof
+        for the FINALIZE stage; operator-unavailable reasons are absent from
+        FINALIZE_REGRESS_BLOCKER_REASONS, RFC 0011 A1).
+        """
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("AO-FIN-1", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "s4_finalize", "reason": reason},
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.stage == Stage.FINALIZE
+
+    def test_awaiting_operator_reason_constant_value(self) -> None:
+        from cw.dispatch import _AWAITING_OPERATOR_REASON
+
+        assert _AWAITING_OPERATOR_REASON == "awaiting_operator_availability"
+
 
 # ---------------------------------------------------------------------------
 # TestPersistCarriedContext

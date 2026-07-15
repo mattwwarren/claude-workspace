@@ -231,6 +231,7 @@ Full v3 shape with Phase B and Phase E fields (issue #174):
 | `review_blocked` | MUST_FIX findings persisted after 5 fix-loop cycles (the hard cap). |
 | `plan_deviation` | A non-deferrable Stage-3 finding (impl deviates from an explicit plan requirement/prohibition) survived the fix loop or was judged beyond fix-loop scope. The pipeline does not assign plan-vs-impl blame — it exits `blocked`; the operator uses `cw dev-queue requeue --regress` to send it back to impl, or revisits the plan. |
 | `agent_block` | Any other agent returned friction level BLOCK that the pipeline could not auto-resolve. |
+| `operator_unavailable` | Operator/dependency currently unreachable (e.g. locked push key, network/GitHub outage) — not a broken implementation leg. cw classifies this via `OPERATOR_UNAVAILABLE_BLOCKER_REASONS` and tags the park distinctly (RFC 0011 A1). |
 
 `blocker.reason` is an **open enum** — the producer may add new reasons without a `schema_version` bump. Consumers MUST treat unknown reasons as opaque strings and surface verbatim. (Unlike `status`, which is closed: see §4 and §8.)
 
