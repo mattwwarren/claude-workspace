@@ -20,6 +20,7 @@ from cw.cli import (
     queues,
     review,
     session_inspect,
+    sprint,
     watchdog,
     worktree,
 )
@@ -95,6 +96,7 @@ __all__ = [
     "review",
     "session_group",
     "session_inspect",
+    "sprint",
     "watchdog",
     "worktree",
 ]
