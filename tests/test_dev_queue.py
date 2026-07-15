@@ -5199,6 +5199,44 @@ class TestCLIRequeue:
         assert payload["reason"] == "cli_requeue_from_failed"
         assert payload["regressed"] is False
 
+    def test_requeue_from_failed_flag_on_approvable_row_emits_plain_reason(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`--from-failed` passed defensively on an already-approvable
+        (BLOCKED_ON_USER) row must NOT emit the cli_requeue_from_failed
+        reason — that would falsely claim the row was recovered from FAILED
+        when the FAILED branch never fired."""
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.IMPL,
+            session_id="sess6304",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        captured: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.record_event",
+            lambda _type, payload=None, **__: captured.append(payload or {}),
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "requeue",
+                "GEN-500",
+                "--client",
+                "genhealth",
+                "--from-failed",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert len(captured) == 1
+        payload = captured[0]
+        assert payload["reason"] == "cli_requeue"
+
 
 # ---------------------------------------------------------------------------
 # TestCLIUnblock — cw dev-queue unblock
