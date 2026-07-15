@@ -1064,10 +1064,12 @@ def test_request_reviewer_fires_once_per_episode(
     assert acted1 == [task.ticket_id]
     assert load_dev_queue().tasks[0].request_reviewer_fired_at is not None
 
-    # Second tick, state unchanged: detect still yields a candidate, but the
-    # latch blocks a re-fire.
-    acted2 = _act_request_reviewer([candidate], clients=clients)
-    assert acted2 == []
+    # Hold the hydrated row at reviewer_count == 0 across N further ticks
+    # (simulating hydration lag, per the ticket's acceptance criterion): detect
+    # still yields a candidate every tick, but the latch blocks a re-fire.
+    for _ in range(5):
+        acted_n = _act_request_reviewer([candidate], clients=clients)
+        assert acted_n == []
     taken = [
         e
         for e in read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
