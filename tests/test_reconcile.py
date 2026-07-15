@@ -19800,6 +19800,40 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         assert t.disposition == "abandoned"
         assert t.completed_at == completed_at
 
+    def test_apply_sentinel_to_task_race_miss_logs_warning(
+        self, tmp_config_dir: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A race-miss (matched-but-excluded lookup) logs a WARNING.
+
+        Companion to ``test_apply_sentinel_to_task_race_already_failed_task_
+        returns_routed_false``: this pins the operator-visibility signal
+        added alongside that fix -- before it, this branch resolved with no
+        signal at all distinguishing it from "no such task ever existed."
+        """
+        import logging
+
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-1189-race-log", "sess-1189-race-log"
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.FAILED,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            disposition="abandoned",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+
+        with caplog.at_level(logging.WARNING):
+            outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert outcome.routed is False
+        assert any(
+            "sentinel_race_miss_detected" in rec.message for rec in caplog.records
+        )
+        assert any(ticket_id in rec.message for rec in caplog.records)
+
     def test_apply_sentinel_to_task_unrelated_task_present_still_returns_routed_true(
         self, tmp_config_dir: Path
     ) -> None:
