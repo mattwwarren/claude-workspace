@@ -35,6 +35,10 @@ operator_channel_forward:
     - pr.merged
     - session.liveness_changed
     - operator.escalation
+    - gate.auto_approved
+    - gate.auto_approve_failed
+    - pr.action_taken
+    - pr.action_failed
   task_transition_statuses:
     - blocked_on_user
     - awaiting_operator_signoff
@@ -61,9 +65,12 @@ in `orchestrator.yaml` unless you want to override it.
   default (`stale_30m`) skips the earliest, most speculative staleness
   signal (`stale_15m`) and only surfaces once a session has been quiet for a
   more concerning window.
-- Every other admitted type (`task.deleted`, `session.needs_attention`, all
-  five `pr.*` types, `operator.escalation`) forwards unconditionally once
-  present in `event_types` — there is no sub-condition for them.
+- Every other admitted type (`task.deleted`, `session.needs_attention`, the
+  five PR-lifecycle types `pr.registered`/`pr.ci_failed`/`pr.review_received`/
+  `pr.mergeable`/`pr.merged`, `operator.escalation`, `gate.auto_approved`,
+  `gate.auto_approve_failed`, `pr.action_taken`, `pr.action_failed`) forwards
+  unconditionally once present in `event_types` — there is no sub-condition
+  for them.
 
 `operator.escalation` (RFC 0008 capstone, #1015) was added to the default
 forward set: it is the durable-escalation-latch's operator-facing signal,
@@ -72,6 +79,15 @@ firing once per parked episode past a 45-minute threshold (see
 recovery reactor's audit trail), is deliberately **excluded** from the
 default set — it records a non-destructive, already-resolved recovery the
 operator does not need paging for.
+
+Four autonomous-action signals were later added to the default set:
+`gate.auto_approved` / `gate.auto_approve_failed` (RFC 0009 P1+P2, #1065 — a
+gate recipe approving a plan/review with no human in the loop, and its
+failed-mutation companion so a lone "approved" never stands uncorrected) and
+`pr.action_taken` / `pr.action_failed` (RFC 0010 P2, #1097 — a review recipe
+dispatching an `/address-review` action, with the same failed-companion
+rationale). Each is operator-attention-worthy precisely because no human was
+in the loop when it fired.
 
 **Fail-loud validation:** unlike `reap_policy` (which silently coerces an
 invalid value to its safe default per ADR-0006), an invalid
@@ -133,8 +149,12 @@ available on the same host/port automatically.
 
 Like `cw-queue-events`, the `cw-operator` proxy accepts an optional
 `--client-id` to scope the subscription to one client's events (matched
-against each admitted event's `client` payload field). Omitting it relays
-every admitted event across all clients.
+against each admitted event's `client` payload field). The
+`CW_OPERATOR_EVENTS_CLIENT_ID` env var is an equivalent alternative
+(`--client-id` wins when both are set). Omitting both relays every admitted
+event across all clients. The same value doubles as the proxy's durable
+replay-cursor identity on the server; when neither is set, the hostname is
+used for cursor tracking, so reconnects still resume where they left off.
 
 **Known gap:** `pr.registered`'s payload has no `client` key (a pre-existing
 producer gap; fixing the producer is out of scope for this channel — see

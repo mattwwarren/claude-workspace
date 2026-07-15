@@ -353,7 +353,7 @@ Key fields:
 | `workspace_path` | Absolute path to the project repo (or use `repo_path` + `branch` for worktree mode) |
 | `worker_model` | Model for DAEMON-origin workers (`claude --bg`). USER-origin sessions inherit the operator's default. |
 | `lanes` | Named dispatch lanes with `max_parallel`, `reap_policy`, and `priority` |
-| `auto_purposes` | Session purposes to start with `cw start`: `impl`, `idea`, `debt`, `explore` |
+| `auto_purposes` | Session purposes to start with `cw start`: `impl`, `idea`, `debt` (a fourth purpose, `orchestrate`, exists only for `cw orchestrate start` and is never selected via `auto_purposes`) |
 
 See [config/CONFIG_REFERENCE.md](config/CONFIG_REFERENCE.md) for all options and worktree-mode configuration.
 
