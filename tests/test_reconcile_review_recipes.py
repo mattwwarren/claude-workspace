@@ -26,10 +26,10 @@ import pytest
 from pydantic import ValidationError
 
 from cw.config import dev_queue_lock as _dev_queue_lock_path
-from cw.config import load_effective_clients
+from cw.config import load_effective_clients, sessions_lock, sessions_lock_file
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
-from cw.exceptions import CwError
+from cw.exceptions import CwError, SessionsLockReentryError
 from cw.models import (
     ClientConfig,
     DevQueueStore,
@@ -38,6 +38,7 @@ from cw.models import (
     OrchestratorEventType,
     TicketTask,
 )
+from cw.reconcile import reconcile
 from cw.reconcile.review_recipes import (
     RECIPE_ADDRESS_REVIEW,
     RECIPE_AUTO_FIX_CI,
@@ -575,6 +576,65 @@ def test_no_self_deadlock_under_dev_queue_lock(
     assert _act_address_review(
         [_candidate_for(task)], clients=load_effective_clients()
     ) == [task.ticket_id]
+
+
+def test_reconcile_reentry_guard_fires_and_is_swallowed(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RFC 0010 P4's act phase re-entering reconcile() raises, not hangs.
+
+    Stands in for the real chain (GitHub #1228): reconcile() holds
+    sessions_lock() -> ... -> run_review_recipes -> _act_auto_fix_ci ->
+    _dispatch_auto_fix_ci -> run_dispatch_loop -> a nested reconcile() /
+    sessions_lock() acquisition on the same thread. The outer
+    ``with sessions_lock():`` below stands in for reconcile()'s own lock
+    hold. Before the #1228 fix this scenario hangs forever in flock(); after
+    the fix, SessionsLockReentryError propagates out of the inner
+    reconcile() call, into _dispatch_auto_fix_ci's ``except CwError``, and is
+    converted to a logged PR_ACTION_FAILED correction instead of a call-site
+    change.
+    """
+    _write_acme_clients_yaml(tmp_config_dir)
+    task = _cr_task(
+        pr_state=_pr_state(
+            state="OPEN", attention_state="ci_failing", failing_checks=["lint"]
+        )
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda _t: True)
+
+    probed = {"lock_held": False}
+
+    def _fake_dispatch_loop(**_kwargs: Any) -> None:
+        # Non-blocking probe proves the outer sessions_lock() is genuinely
+        # held (not just assumed) before exercising the real reentry path.
+        fd = sessions_lock_file().open("w")
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            probed["lock_held"] = True
+        finally:
+            fd.close()
+        try:
+            reconcile()
+        except SessionsLockReentryError:
+            raise
+        else:
+            pytest.fail("reconcile() should have raised SessionsLockReentryError")
+
+    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", _fake_dispatch_loop)
+
+    with sessions_lock():
+        acted = _act_auto_fix_ci([_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")])
+
+    assert acted == []
+    assert probed["lock_held"] is True
+    failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+    assert len(failed) == 1
+    assert failed[0].correlation_id == task.ticket_id
 
 
 def test_action_failure_emits_pr_action_failed(
