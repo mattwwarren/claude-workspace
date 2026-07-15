@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Premise gate gains a self-verified-→-proceed path** (#1192): the auto-dev
+  plan stage's premise contract now distinguishes evidence quality instead of
+  treating every unverified factual claim identically. A premise the
+  plan-stage agent settled itself with authoritative evidence (official docs,
+  `<tool> --help` output, source, or a quoted command + its verbatim output
+  from this session) is recorded under a new `## Self-Verified Premises` plan
+  section and `friction_highlights`, and the run proceeds; a premise with
+  absent, ambiguous, self-contradictory evidence, or one turning on operator
+  intent still parks with `premises_pending_verification` exactly as before.
+  Headless-only, mirrors the existing ambiguity `Recommendation: ADOPT | PARK`
+  fast path. Skill-markdown only — no `src/cw` or schema changes.
+
 ## [1.19.0] — 2026-07-12
 
 RFC 0010 native review-monitor — a native, event-driven port of the global
