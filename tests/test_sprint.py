@@ -18,6 +18,8 @@ from cw.sprint import (
 )
 from tests.conftest import _write_project_config_yaml
 
+FIXTURES = Path(__file__).parent / "fixtures"
+
 MINIMAL_RFC = """\
 # RFC 0011 — Availability- & Counterparty-Aware Holding
 
@@ -425,3 +427,26 @@ def test_load_buildout_config_parses_a_present_notion_block(tmp_path: Path) -> N
     assert cfg.notion.data_source == "collection://abc"
     assert cfg.notion.project_page == "def"
     assert cfg.notion.sprint_page_properties == {"Type": "Sprint"}
+
+
+def test_rfc_0011_fixture_reproduces_the_real_buildout() -> None:
+    """The acceptance bar: a conforming RFC 0011 yields the block that was filed."""
+    doc = parse_rfc((FIXTURES / "rfc-0011-tickets.md").read_text(encoding="utf-8"))
+    plan = build_plan(doc, _config(), version="1.20.0")
+
+    assert plan.milestone_title == (
+        "v1.20.0 — Availability- & Counterparty-Aware Holding"
+    )
+    assert [e.code for e in plan.epics] == ["I", "II"]
+    assert len(plan.tickets) == 13
+
+    assert plan.sprint_map[0] == ["S1", "S2"]
+    assert sorted(plan.sprint_map[1]) == ["A1", "A2", "A5", "B1", "B2"]
+    assert sorted(plan.sprint_map[2]) == ["A3", "A4", "A6", "B3", "B4", "B5"]
+
+    assert sorted(plan.epic_children["I"]) == ["A1", "A2", "A3", "A4", "A5", "A6"]
+    assert sorted(plan.epic_children["II"]) == ["B1", "B2", "B3", "B4", "B5"]
+
+    # The dependency the RFC's Phasing table calls out: S2 rides S1.
+    s2 = next(t for t in doc.tickets if t.code == "S2")
+    assert s2.depends_on == ["S1"]
