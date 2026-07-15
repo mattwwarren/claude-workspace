@@ -4,9 +4,12 @@ Complete reference for `cw` client configuration.
 
 ## Prerequisites
 
-- **[Zellij](https://zellij.dev/)** - Terminal multiplexer (required)
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** - AI coding assistant (required)
 - **[uv](https://docs.astral.sh/uv/)** - Python package manager (for installation)
+
+No terminal multiplexer is required — cw 1.0 removed the tmux/cmux backend and
+spawns workers directly via `claude --bg` (see
+[docs/MIGRATION-0.x-to-1.0.md](../docs/MIGRATION-0.x-to-1.0.md)).
 
 ## Quick Start
 
@@ -43,15 +46,18 @@ State is stored at `~/.local/share/cw/` (or `$XDG_DATA_HOME/cw/`).
 |-------|------|---------|-------------|
 | `workspace_path` | path | *required* | Absolute path to the project repository |
 | `default_branch` | string | `"main"` | Default git branch |
+| `feature_branch_prefix` | string | `"dev"` | Prefix for the per-ticket feature branch the staged pipeline provisions and auto-dev workers push to: `<prefix>/<ticket_id>` (e.g. `dev/662`) |
 | `auto_purposes` | list | `[idea, impl, debt]` | Session purposes to auto-start with `cw start` |
 | `purpose_prompts` | dict | `{}` | Custom prompts per session purpose |
 | `worktree_base` | path | *none* | Base directory for git worktree isolation |
+| `notifications` | bool | `false` | Desktop notifications on session events. A top-level `notifications: true` key in `clients.yaml` (sibling of `clients:`) turns it on for every client that doesn't set it explicitly |
+| `auto_background_threshold` | int \| null | `null` | Auto-background the session after N conversation turns |
 | `worker_model` | string \| null | `null` | Pin the model for DAEMON-origin worker spawns (auto-dev). Forwarded as `--model <id>` to `claude --bg` from both initial spawn and DAEMON-origin resume. USER-origin sessions (interactive `cw start` / `cw resume`) always inherit the operator's logged-in default model. Opaque string — no validation. |
 | `operator_github_login` | string \| null | `null` | Override the runtime-resolved GitHub login used for counterparty/self-identity resolution (RFC 0011 S1). Rare multi-account case; the runtime `gh api user` login is authoritative when unset. |
 | `repo_path` | path | *none** | Shared repo path (worktree mode) |
 | `branch` | string | *none** | Branch name (worktree mode) |
-| `lanes` | list[LaneConfig] | `[]` | Named dispatch lanes. Phase 1 (data model only); dispatch wiring in #558. Each lane has `name` (required), `max_parallel: int = 1`, `priority: int = 0`, `paused: bool = false`, `description: str = ""`, `reap_policy: str = "signal_only"`, `signoff: "operator" | null = null` (RFC 0007 Phase 3 — see [Operator Signoff Gates](#operator-signoff-gates-rfc-0007-phase-3) below), `gate_recipes: dict[str,bool] | null = null` (RFC 0009 Phase 4 — per-lane gate-recipe enablement; see [Gate Recipe Enablement](#gate-recipe-enablement-rfc-0009-phase-4) below), `review_recipes: dict[str,bool] | null = null` (RFC 0010 Phase 3 — per-lane review-recipe enablement; see [Review Recipe Enablement](#review-recipe-enablement-rfc-0010-phase-3) below). |
-| `pipeline` | PipelineConfig \| null | `null` | Per-stage executor configuration (RFC 0005). See [Pipeline Configuration](#pipeline-configuration--per-stage-model-pinning) below. |
+| `lanes` | list[LaneConfig] | `[]` | Named dispatch lanes (a scheduling boundary for dev-queue tickets; manage with `cw lane add/ls/pause/resume/rm`, target with `cw dev-queue add --lane` / `cw dev-queue move`). Each lane has `name` (required), `max_parallel: int = 1`, `priority: int = 0`, `paused: bool = false`, `description: str = ""`, `reap_policy: "signal_only" | "auto" | null = null` (null inherits the global `reap_policy` from `orchestrator.yaml`), `pipeline: PipelineConfig | null = null` (per-lane per-stage executor override — see [Pipeline Configuration](#pipeline-configuration--per-stage-model-pinning) below), `signoff: "operator" | null = null` (RFC 0007 Phase 3 — see [Operator Signoff Gates](#operator-signoff-gates-rfc-0007-phase-3) below), `gate_recipes: dict[str,bool] | null = null` (RFC 0009 Phase 4 — per-lane gate-recipe enablement; see [Gate Recipe Enablement](#gate-recipe-enablement-rfc-0009-phase-4) below), `review_recipes: dict[str,bool] | null = null` (RFC 0010 Phase 3 — per-lane review-recipe enablement; see [Review Recipe Enablement](#review-recipe-enablement-rfc-0010-phase-3) below). When no lanes are declared, a single implicit `default` lane is synthesized. |
+| `pipeline` | PipelineConfig | standard 4-stage pipeline, no per-stage models | Per-stage executor configuration (RFC 0005): `stages` (default `[plan, impl, review, finalize]`) and `executors` (default `{}`). See [Pipeline Configuration](#pipeline-configuration--per-stage-model-pinning) below. |
 
 \* Either `workspace_path` OR both `repo_path` + `branch` must be set.
 
@@ -64,7 +70,10 @@ Each client can have sessions for different purposes:
 | `impl` | Implementation — writing features, fixing bugs |
 | `idea` | Ideation — brainstorming, architecture, design |
 | `debt` | Debt — refactoring, cleanup, tech debt |
-| `explore` | Exploration — research, codebase navigation |
+
+(A fourth purpose, `orchestrate`, exists for the session created by
+`cw orchestrate start` / `cw orchestrator-start`; it is excluded from the
+worker purposes and is not meant for `auto_purposes`.)
 
 ## Modes
 
@@ -270,8 +279,16 @@ Controls the autonomous dispatch loop. Created with defaults on first run.
 
 ```yaml
 tick_interval_seconds: 30
-default_max_parallel: 2
-per_client_max_parallel: {}
+
+# Two-knob scheduler (RFC 0004 Phase 2). default_ceiling caps concurrent
+# sessions per client (per_client_ceiling overrides per client);
+# max_parallel_clients caps how many clients are eligible per tick
+# (null = no limit). The legacy names default_max_parallel /
+# per_client_max_parallel are deprecated aliases, still read on load.
+default_ceiling: 2
+per_client_ceiling: {}
+max_parallel_clients: null
+
 linear_prefix_map: {}
 
 # Per-tier headless timeout budgets (seconds). Sessions whose scope.tier is
@@ -308,6 +325,50 @@ headless_timeout_by_stage:
 # IDLE_WATCHDOG_SECONDS (900s). See GitHub issues #326, #340.
 idle_watchdog_by_tier:
   large: 3600   # 60 min — above worst-case FINALIZE gate-run (pytest+mypy); #918
+
+# Global idle-watchdog budget (seconds) when a session has no per-tier
+# budget (e.g. it stalled before Stage 1 set a scope_hint).
+# null falls back to the built-in 900s constant.
+idle_watchdog_seconds: null
+
+# Number of consecutive failed idle-watchdog observations before a session
+# is dispositioned (confirm-before-reap, #545). 1 reproduces the old
+# single-observation behavior.
+idle_confirm_observations: 2
+
+# Retry caps. idle_retry_cap_by_tier / stalled_retry_cap_by_tier cap
+# idle-stall (#384) and wall-clock-budget (#756) auto-retries per scope
+# tier before a ticket is parked BLOCKED_ON_USER (built-in default: 2 for
+# unknown tiers). global_attempt_ceiling is the absolute ceiling on
+# task.attempts across ALL kill causes (#786).
+idle_retry_cap_by_tier: {}
+stalled_retry_cap_by_tier: {}
+global_attempt_ceiling: 10
+
+# Consecutive spawn errors at which a lane's circuit breaker trips and
+# pauses the lane (resume via `cw lane resume`). See #875.
+lane_circuit_breaker_threshold: 3
+
+# Seconds to wait after a usage-limit cutoff before retrying.
+usage_limit_backoff_seconds: 3600
+
+# Elapsed seconds before reconcile routes an emitted-but-unrouted sentinel
+# (the Stop hook never fired). See #578.
+sentinel_unrouted_check_seconds: 300
+
+# Transcript-staleness ladder for Session.liveness_bucket (RFC 0008 W2):
+# thresholds in minutes for [stale_15m, stale_30m, stale_45m], plus a
+# per-stage override of the entry-point floor (default: impl 35 min, so
+# normal impl-stage quiet spells don't emit spurious stale_15m noise).
+liveness_buckets_minutes: [15, 30, 45]
+liveness_first_bucket_by_stage:
+  impl: 35
+
+# session.needs_attention escalation latches: consecutive per-client
+# freshness-gate blocks (RFC 0007 W2) / consecutive per-session salvage
+# skips (#974) at which a needs_attention event fires exactly once.
+freshness_block_attention_threshold: 5
+salvage_skip_attention_threshold: 5
 
 # Reap policy: controls whether the reconciler destroys a stalled session
 # or only signals for human intervention (ADR-0006 invariant 4).
@@ -370,12 +431,12 @@ concierge_recoveries: {}
 # Gate Recipe Enablement below.
 gate_recipes_enabled: false
 
-# Review-recipe automation master switch (RFC 0010 P1, GitHub #1096). Default
-# false, mirroring gate_recipes_enabled's fail-safe posture. P1 ships only the
-# address_review recipe's detect phase (classifies changes_requested PRs into
-# candidates) with no act/dispatch/event-emission phase yet, so setting this
-# true today is inert by construction -- it has no observable effect until
-# P2 adds the act phase.
+# Review-recipe automation master switch (RFC 0010, GitHub #1096/#1097).
+# Default false, mirroring gate_recipes_enabled's fail-safe posture: when
+# true, enabled review recipes react to PR review/CI/merge feedback with NO
+# human in the loop (e.g. dispatching an /address-review session). Per-recipe
+# enablement is still resolved per-lane / per-ticket -- see Review Recipe
+# Enablement below.
 review_recipes_enabled: false
 
 # Minimum elapsed seconds between PR-state hydration passes in the serve tick
@@ -421,6 +482,10 @@ operator_channel_forward:
     - pr.merged
     - session.liveness_changed
     - operator.escalation
+    - gate.auto_approved        # RFC 0009 — a gate recipe approved with no human review
+    - gate.auto_approve_failed
+    - pr.action_taken           # RFC 0010 — a review recipe acted on a PR
+    - pr.action_failed
   task_transition_statuses:
     - blocked_on_user
     - awaiting_operator_signoff
@@ -430,11 +495,13 @@ operator_channel_forward:
   liveness_min_bucket: stale_30m
 ```
 
-Override a single ticket's budget at enqueue time:
+Override a single ticket's budget or tier at enqueue time (there is no
+per-ticket idle-watchdog flag — the idle budget resolves from
+`idle_watchdog_by_tier` / `idle_watchdog_seconds` above):
 
 ```bash
 cw dev-queue add GEN-123 --client my-project --timeout 7200
-cw dev-queue add GEN-456 --client my-project --idle-watchdog 600
+cw dev-queue add GEN-456 --client my-project --scope large
 ```
 
 ## Operator Signoff Gates (RFC 0007 Phase 3)
@@ -651,14 +718,18 @@ are `null` when not applicable.
 
 ### Always-present fields
 
-- `schema_version` — integer, currently `1`. Increment when the shape changes.
-- `session_id` — cw session ID (UUID).
+- `schema_version` — integer, currently `2`. Increment when the shape changes.
+- `session_id` — cw session ID (8-char hex).
 - `session_name` — human-readable `<client>/<label>`.
 - `client` — client name from `clients.yaml`.
 - `purpose` — session purpose string (e.g. `"impl"`).
 - `ticket_id` — Linear/GitHub issue ID, or `null` for non-ticket sessions.
 - `headless` — `true` when spawned by the orchestrator dispatch loop.
 - `worktree_path` — absolute, canonicalized path to the worktree root.
+- `workspace_path` — the operator's main checkout — the FORBIDDEN path for any
+  git mutation from a dispatch worker (guards read it to block `git commit`/
+  `push` against the shared checkout, #766). `null` for USER-origin sessions
+  without a client workspace.
 
 ### DAEMON task fields (present when `headless: true` and a `TicketTask` exists)
 
@@ -667,8 +738,9 @@ are `null` when not applicable.
   calling `spawn_create_impl`); `2` on the first retry, etc.
 - `wall_clock_budget_seconds` — seconds this session is allowed to run before
   the orchestrator reaps it. Computed by `resolve_headless_budget` (#314):
-  priority is (1) per-ticket override, (2) last sentinel's `scope.tier`, (2.5)
-  `task.scope_hint`, (3) global default.
+  priority is (1) per-ticket override, (1.5) `headless_timeout_by_stage`
+  (#1020), (2) last sentinel's `scope.tier`, (2.5) `task.scope_hint`,
+  (3) global default.
 - `stage_started_at` — ISO 8601 UTC timestamp (`datetime.now(UTC).isoformat()`)
   written at spawn. Workers can use it to compute elapsed time without relying
   on wall-clock calls.
@@ -679,26 +751,31 @@ are `null` when not applicable.
   - `version` — `4`
 - `queue_metadata` — snapshot of the task's scheduling fields at spawn:
   - `scope_hint` — `"small"` | `"large"` | `null`
-  - `plan_source` — always `null` today; reserved for a future `cw dev-queue plan` command.
+  - `plan_source` — the task's plan provenance (e.g. `"generated"`,
+    `"github_issue_existing"`), carried through from a prior stage's sentinel
+    or a `cw dev-queue plan` run; `null` when none is set.
   - `headless_timeout_override` — per-ticket timeout in seconds, or `null`.
 - `world_state_snapshot` — git context captured at spawn:
-  - `origin_main_sha_at_spawn` — SHA of `origin/main` at spawn time, or `null` if the git call fails.
-  - `origin_main_branch` — always `"main"`.
-  - `prior_attempts_summary` — always `[]` today; reserved for retry context.
+  - `origin_main_sha_at_spawn` — SHA of `origin/<default_branch>` at spawn time, or `null` if the git call fails.
+  - `origin_main_branch` — the client's `default_branch` (usually `"main"`).
+  - `prior_attempts_summary` — compact outcome summaries (status,
+    stage_reached, blocker reason/details, friction highlights) of this
+    ticket's prior terminal sessions, oldest first; `[]` on the first attempt.
 
 ### Example (DAEMON, scope_hint=large)
 
 ```json
 {
-  "schema_version": 1,
-  "session_id": "a1b2c3d4-...",
+  "schema_version": 2,
+  "session_id": "a1b2c3d4",
   "session_name": "my-project/auto-dev-GEN-314",
   "client": "my-project",
   "purpose": "impl",
   "ticket_id": "GEN-314",
   "headless": true,
   "worktree_path": "/path/to/.claude/worktrees/my-worktree",
-  "attempt": 0,
+  "workspace_path": "/home/user/projects/my-project",
+  "attempt": 1,
   "wall_clock_budget_seconds": 5400,
   "stage_started_at": "2026-06-10T14:32:00.123456+00:00",
   "expected_sentinel_schema_ref": {

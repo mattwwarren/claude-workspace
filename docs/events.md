@@ -46,7 +46,7 @@ A new ticket has been added to the work queue for an orchestrator client.
 ### `ticket.needs_sync`
 
 **Emitter:** `dispatch_tick`
-**Payload:** `{"ticket_id": "<str>", "client": "<str>"}`
+**Payload:** `{"ticket_id": "<str>", "client": "<str>", "lane": "<str>"}`
 **Semantics:** Emitted once per PENDING task when the client's local
 `<default_branch>` is behind `origin/<default_branch>`. The task stays
 PENDING; the slot is skipped for this tick. Operator should run
@@ -55,33 +55,51 @@ PENDING; the slot is skipped for this tick. Operator should run
 ```json
 {
   "ticket_id": "CW-42",
-  "client": "my-client"
+  "client": "my-client",
+  "lane": "default"
 }
 ```
 
 ### `session.spawned`
 
-An orchestrator-managed session was started.
+A dev-queue worker session was spawned for a claimed ticket.
+
+**Emitter:** the dispatch claim loop in `cw.dispatch`.
 
 ```json
 {
-  "session_id": "<str>",
+  "ticket_id": "<str>",
   "client": "<str>",
-  "purpose": "impl|idea|debt|explore"
+  "session_id": "<str>",
+  "lane": "<str>"
 }
 ```
 
 ### `session.completed`
 
-An orchestrator-managed session completed (normal or handoff).
+An orchestrator-managed session completed.
+
+**Emitters:** the Stop-hook consumer (`cw signal-stop`, the canonical path),
+the executor's synchronous completion path, and reconcile's salvage/routed
+paths. Payload keys vary slightly by emitter; the Stop-hook shape is:
 
 ```json
 {
   "session_id": "<str>",
-  "client": "<str>",
-  "reason": "user|handoff|crashed"
+  "session_name": "<str>",
+  "client": "<str | null>",
+  "ticket_id": "<str | null>",
+  "claude_session_id": "<str | null>",
+  "hook_event": "<str | null>",
+  "crashed": false
 }
 ```
+
+Optional keys: `rescued: true` + `rescue_reason: "late_sentinel"` when a late
+Stop-hook sentinel salvaged an idle-parked task (#918); `salvaged: true` +
+`status: "<sentinel status>"` on reconcile's routed-sentinel backstop paths.
+The dispatch loop consumes this event (consumer cursor `"dispatch"`) to
+transition the matching `TicketTask` to COMPLETED.
 
 ### `pr.registered`
 
@@ -252,21 +270,168 @@ worker may recover and continue. Visible in `cw event tail` and
   "pending": 2,
   "running": 1,
   "cap": 3,
-  "skip_reason": "freshness_gate | cap_full | lane_cap_blocked | attempt_cap_blocked | spawn_error_backoff | spawn_error | no_pending | none"
+  "skip_reason": "freshness_gate | usage_limited | cap_full | lane_cap_blocked | attempt_cap_blocked | spawn_error | lane_circuit_paused | spawn_error_backoff | no_pending | none"
 }
 ```
 **Semantics:** Emitted once per client per tick. `claimed` is the number of
 tasks newly spawned this tick. `pending` is the pre-claim count (read before
 the claim loop). `running` is the count of RUNNING tasks at tick start.
 `skip_reason` follows first-match precedence: `freshness_gate` (local branch
-behind origin, checked before anything else) → `cap_full` (running ≥ cap) →
-`usage_limited` (API rate limit) → `lane_cap_blocked` (pending tasks exist but all
-lane slots occupied) → `attempt_cap_blocked` (task parked at attempt ceiling) →
-`spawn_error_backoff` (pending tasks exist but all in exponential backoff after
-spawn_error, next_eligible_at in the future) → `spawn_error` (exception during
-spawn) → `no_pending` (nothing to claim) → `none` (at least one session spawned). `correlation_id` is `None` (per-client
-aggregate, not per-ticket). Consumers MUST tolerate unknown `skip_reason`
-values.
+behind origin, checked before anything else) → `usage_limited` (API rate
+limit; backoff armed) → `cap_full` (running ≥ cap) → `lane_cap_blocked`
+(pending tasks exist but all lane slots occupied) → `spawn_error` (exception
+during spawn) → `lane_circuit_paused` (per-lane circuit breaker tripped after
+consecutive spawn errors, #875) → `spawn_error_backoff` (pending tasks exist
+but all in exponential backoff after spawn_error, next_eligible_at in the
+future) → `no_pending` (nothing to claim) → `none` (at least one session
+spawned). `attempt_cap_blocked` sits outside this per-client precedence
+chain: it is emitted **per task** (payload carries `ticket_id`) when the
+global attempt ceiling parks a task. Optional extra keys: `lanes` (per-lane
+breakdown), and on freshness-gate ticks `freshness_detail`
+(`non_main_head | main_behind_origin | main_dirty_checkout |
+main_diverged_from_origin | main_detached_head`) plus `blocked_branch`.
+`correlation_id` is `None` (per-client aggregate, not per-ticket). Consumers
+MUST tolerate unknown `skip_reason` values.
+
+### `dispatch.loop_exited`
+
+**Emitter:** the `cw dev-queue run` loop in `cw.dispatch` (a `finally` guard)
+**Payload:**
+```json
+{
+  "normal": true,
+  "exception_type": "<str | null>"
+}
+```
+**Semantics:** Fires whenever the dispatch loop exits, cleanly or not —
+`normal` is `true` for a clean exit or Ctrl-C, `false` with
+`exception_type` set otherwise. When the loop exits because the installed
+cw package version drifted from the loaded one, the payload also carries
+`reason: "version_drift"` plus `loaded_version`/`installed_version`.
+Operator-relevant: if you see this without having stopped the loop yourself,
+dispatch is down and pending tickets will not be claimed until it is
+restarted.
+
+### `session.timed_out`
+
+**Emitter:** the idle watchdog (`cw.reconcile.idle`) and the stalled
+wall-clock sweep (`cw.reconcile.stalled`) when a REVERT_TASK disposition is
+acted on; also `cw spawn close` when an operator closes a RUNNING session.
+**Payload:**
+```json
+{
+  "session_id": "<str>",
+  "session_name": "<str>",
+  "client": "<str>",
+  "ticket_id": "<str | null>",
+  "claude_session_id": "<str | null>",
+  "elapsed_seconds": 1234.5,
+  "last_assistant_message_excerpt": ""
+}
+```
+**Semantics:** The session was stopped and its owning RUNNING task reverted
+to PENDING for retry. Idle-watchdog emissions add a `cause` key
+(`idle_stall_recovered` or `usage_limit_cutoff`); stalled-sweep emissions may
+add `branch_state: "absent_no_merged_pr"` when the feature branch is gone
+with no merged PR. This is a retry signal, not a park — parks emit
+`session.needs_attention` instead.
+
+### `session.stage_timed_out_retried`
+
+**Emitter:** the stalled sweep in `cw.reconcile.stalled`
+**Payload:**
+```json
+{
+  "ticket_id": "<str>",
+  "session_id": "<str>",
+  "stage": "harden | plan | impl | review | finalize",
+  "client": "<str>",
+  "elapsed_seconds": 1234.5,
+  "attempts": 1
+}
+```
+**Semantics:** Visibility-only companion to a stage-timeout revert (#724):
+a stage blew its wall-clock budget and the ticket is being retried at the
+same stage. Edge-triggered — fires only on the tick that first proposes the
+revert, not on every re-detect (#782). Skipped for merged-PR and gh-blocked
+tickets (those are not genuine timeouts). `correlation_id` is the
+`ticket_id`.
+
+### `session.reap_authorized`
+
+**Emitter:** `cw doctor --reap` (and the automated reap consumer) in
+`cw.doctor`
+**Payload:**
+```json
+{
+  "session_id": "<str>",
+  "session_name": "<str>",
+  "client": "<str>",
+  "ticket_id": "<str | null>",
+  "lane": "<str>",
+  "authority": "<str>",
+  "proposed_action": "<str>",
+  "mutations": ["<str>", "..."]
+}
+```
+**Semantics:** ADR-0006 audit companion to `session.reap_proposed`: records
+that a proposed reap was explicitly authorized and acted on, so the
+propose → authorize → act chain is fully traceable in the inbox. `mutations`
+lists the destructive actions actually performed (e.g.
+`blocked_task_reverted_to_pending`).
+
+### `session.spawn_unregistered`
+
+**Emitter:** `cw.spawn` roster-registration poll
+**Payload:**
+```json
+{
+  "surface_ref": "<str>",
+  "ticket_id": "<str>",
+  "reason": "unregistered_worker",
+  "poll_timeout_secs": 30.0
+}
+```
+**Semantics:** A spawned `claude --bg` worker never appeared in the daemon
+roster within the poll timeout — the spawn is treated as failed (the
+dispatch tick reports `spawn_error` and the task re-enters backoff).
+`correlation_id` is the `ticket_id`.
+
+### `wave.collision`
+
+**Emitter:** `detect_wave_collisions` in `cw.collision` (run from the
+dispatch loop)
+**Payload:**
+```json
+{
+  "ticket_ids": ["CW-41", "CW-42"],
+  "files": ["src/cw/models.py"],
+  "client": "my-client"
+}
+```
+**Semantics:** Two RUNNING tasks for the same client have overlapping
+changed-file sets in the current wave — their PRs are likely to conflict.
+Emitted once per colliding pair per loop run (deduped in-memory). Purely
+advisory: nothing is paused or reverted; the operator can serialize or
+reorder the tickets.
+
+### Operator-command events (`lane.*`, `ticket.*`)
+
+CLI commands emit thin audit events; payloads carry the obvious fields:
+
+| Event | Emitted by | Payload |
+|---|---|---|
+| `lane.created` | `cw lane add` | `{client, lane, max_parallel, priority}` |
+| `lane.paused` | `cw lane pause`, or the per-lane circuit breaker after consecutive spawn errors (#875) | `{client, lane, source: "operator" \| "circuit_breaker"}`; circuit-breaker emissions add `consecutive_count` and `last_error` |
+| `lane.resumed` | `cw lane resume` (also resets the circuit-breaker counter) | `{client, lane, source: "operator"}` |
+| `ticket.enqueued` | `cw dev-queue add` | `{ticket_id, client, priority}` (see top of file) |
+| `ticket.moved` | `cw dev-queue move` | `{ticket_id, client, from_lane, to_lane}` |
+| `ticket.approved` | `cw dev-queue approve` | `{ticket_id, client, from_stage, to_stage}` |
+| `ticket.requeued` | `cw dev-queue requeue`, and dispatch's automatic FINALIZE→IMPL regress path (#770) | `{ticket_id, client, from_stage, to_stage, reason}` |
+| `ticket.unblocked` | `cw dev-queue unblock` | `{ticket_id, client}` |
+
+See the "Known legacy gap" note under `task.deleted`: the `ticket.*` family
+carries `correlation_id=None` — read `payload["ticket_id"]` to correlate.
 
 ### `session.phantom_reverted`
 
@@ -898,13 +1063,17 @@ gate-recipe failure path, this emits no latch and performs no mutation.
 
 A server-side filter (`cw.cw_operator_events`) forwards a declarative subset
 of this bus — `task.transition` (only for terminal/attention-worthy
-`new_status` values), `task.deleted`, `session.needs_attention`, all five
-`pr.*` types, and `session.liveness_changed` (only at `new_bucket >=
-stale_30m`) — onto a distinct `cw-operator` SSE topic on the existing
-`cw_queue_events_server`, consumed with cursor name
-`"operator-channel-bridge"`. See
-[`docs/operator-channel.md`](operator-channel.md) for the filter reference,
-subscription instructions, and degradation contract.
+`new_status` values: `blocked_on_user`, `awaiting_operator_signoff`,
+`completed`, `failed`, `cancelled` by default), `task.deleted`,
+`session.needs_attention`, all seven `pr.*` types (the five PR-lifecycle
+events plus `pr.action_taken`/`pr.action_failed`), `session.liveness_changed`
+(only at `new_bucket >= stale_30m`), `operator.escalation`,
+`gate.auto_approved`, and `gate.auto_approve_failed` — onto a distinct
+`cw-operator` SSE topic on the existing `cw_queue_events_server`, consumed
+with cursor name `"operator-channel-bridge"`. `concierge.recovered` and
+`concierge.recovery_backoff_armed` are deliberately excluded (audit-only).
+See [`docs/operator-channel.md`](operator-channel.md) for the filter
+reference, subscription instructions, and degradation contract.
 
 ## CLI
 
@@ -915,6 +1084,13 @@ cw event record pr.registered --payload '{"pr": 42, "repo": "owner/repo"}'
 cw event record pr.ci_failed --payload '{"pr": 42, "repo": "owner/repo", "run_id": "r1", "failed_checks": ["lint"]}' \
     --correlation-id "corr-abc"
 ```
+
+`cw event record` accepts only the producer-facing subset of event types:
+`ticket.enqueued`, `session.spawned`, `session.completed`,
+`session.timed_out`, `stage.entered`, `stage.errored`, `pr.registered`,
+`pr.ci_failed`, `pr.review_received`, `pr.mergeable`, `pr.merged`. The
+orchestrator-internal types (`task.*`, `dispatch.*`, reconcile events, etc.)
+are emitted only from inside cw and cannot be recorded from the CLI.
 
 ### Tail events
 
@@ -931,9 +1107,19 @@ cw event tail --since 2025-01-01T00:00:00Z
 # Filter by type (repeatable)
 cw event tail --type pr.ci_failed --type pr.review_received
 
+# Filter by payload.client (repeatable; comma-separated also accepted)
+cw event tail --client my-client
+
+# Collapse repeated terminal re-fires (timed_out, reap_proposed,
+# needs_attention, stage_timed_out_retried) for the same session
+cw event tail --dedup-terminal
+
 # Machine-readable JSON output
 cw event tail --json
 ```
+
+One-shot `--since <consumer>` with an unknown consumer initializes the cursor
+at the end of the inbox (no history replay) instead of replaying everything.
 
 ### Follow mode
 
@@ -946,7 +1132,7 @@ so piping to `jq --unbuffered` or `grep` works without stalling.
 cw event tail --follow
 
 # Combine with --since, --type, --json
-cw event tail --since now --type session.completed --json --follow
+cw event tail --since 2026-07-15T00:00:00Z --type session.completed --json --follow
 cw event tail --since daemon --type pr.mergeable --follow
 ```
 
@@ -958,7 +1144,35 @@ Behaviour notes:
   warning is printed to stderr and replay starts from the beginning of the inbox.
 - Exits with code 130 on SIGINT (`Ctrl-C`), 0 on broken pipe.
 - Out of scope: persistent cursor advance on `--follow`; `--since now` semantics
-  (treats `now` as a consumer name, unchanged).
+  (`now` is treated as a consumer name — use an ISO timestamp instead).
+
+### Wait for an event
+
+`cw event wait` blocks until a matching event arrives — the scripting
+primitive for "tell me when ticket X does anything":
+
+```bash
+# Block until any event correlates to ticket CW-42 (correlation_id match)
+cw event wait --ticket CW-42
+
+# Wait for a specific session to complete, with a 10-minute ceiling
+cw event wait --session ab12cd34 --type session.completed --timeout 600
+
+# Wait for the next attention-worthy signal on a client
+cw event wait --client my-client --type session.needs_attention,session.timed_out
+
+# Stream every match instead of exiting on the first
+cw event wait --ticket CW-42 --follow
+```
+
+Behaviour notes:
+- Reads from the **beginning** of the inbox, so events recorded before the
+  command started also match — safe to start after the fact.
+- Outputs one JSON line per match. Exits 0 on match (or `--follow`
+  exhaustion); non-zero on timeout (default ceiling 3600 s).
+- `--ticket` matches the event's `correlation_id`; `--session` and `--client`
+  match the payload's `session_id` / `client` fields. `--type` is repeatable
+  and accepts comma-separated values.
 
 ### Prune events
 
