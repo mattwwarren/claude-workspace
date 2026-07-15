@@ -360,13 +360,15 @@ class ReconcileReport:
 def _claude_agents_json() -> list[dict[str, object]]:
     """Call ``claude agents --json`` and return the parsed list.
 
-    Raises ``subprocess.CalledProcessError`` when the daemon is not running.
+    Raises ``subprocess.CalledProcessError`` when the daemon is not running,
+    or ``subprocess.TimeoutExpired`` if the call hangs past the timeout (#1230).
     """
     proc = subprocess.run(
         ["claude", "agents", "--json"],
         capture_output=True,
         text=True,
         check=True,
+        timeout=15,
     )
     data = json.loads(proc.stdout)
     return data if isinstance(data, list) else []
