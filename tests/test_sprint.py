@@ -719,9 +719,7 @@ def test_apply_plan_is_idempotent_and_skips_an_epic_that_already_exists() -> Non
 
     assert result.epic_numbers["I"] == 777
     assert plan.epics[0].title in result.skipped
-    assert not any(
-        call == f"create_issue:{plan.epics[0].title}" for call in gh.calls
-    )
+    assert not any(call == f"create_issue:{plan.epics[0].title}" for call in gh.calls)
     assert "S1" in result.ticket_numbers
     assert "A1" in result.ticket_numbers
 
