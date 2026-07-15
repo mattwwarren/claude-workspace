@@ -4358,6 +4358,125 @@ class TestRequeueTicket:
                 from_cancelled=True,
             )
 
+    def test_requeue_from_failed_without_flag_raises(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """FAILED row without from_failed=True raises RequeueStateError
+        naming the --from-failed escape hatch."""
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStateError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.IMPL,
+            session_id="sess-failed-2",
+            status=QueueItemStatus.FAILED,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(RequeueStateError, match="--from-failed"):
+            requeue_ticket("GEN-500", "genhealth")
+
+    def test_requeue_from_failed_succeeds(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """FAILED row + from_failed=True -> PENDING at current stage."""
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.IMPL,
+            session_id="sess-failed-1",
+            status=QueueItemStatus.FAILED,
+        )
+        task.regress_attempts = 2
+        task.disposition = "abandoned"
+        task.pr_url = "https://github.com/example/repo/pull/1"
+        task.completed_at = datetime.now(UTC)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket("GEN-500", "genhealth", from_failed=True)
+
+        assert result["from_stage"] == "impl"
+        assert result["to_stage"] == "impl"
+        assert result["from_failed_applied"] is True
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+        assert t.session_id is None
+        assert t.stage_base_ref is None
+        assert t.regress_attempts == 0
+        assert t.disposition is None
+        assert t.pr_url is None
+        assert t.completed_at is None
+
+    def test_requeue_from_failed_flag_does_not_broaden_running(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """from_failed=True does not admit a RUNNING row (flag is narrow)."""
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStateError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.IMPL,
+            session_id="sess-failed-3",
+            status=QueueItemStatus.RUNNING,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(RequeueStateError, match="expected BLOCKED_ON_USER"):
+            requeue_ticket("GEN-500", "genhealth", from_failed=True)
+
+    def test_requeue_from_failed_flag_on_approvable_row_not_applied(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """from_failed=True passed defensively on an already-approvable
+        (BLOCKED_ON_USER) row is a harmless no-op for the state gate, but
+        from_failed_applied must be False — the FAILED branch never fired,
+        so callers must not attribute the requeue to it."""
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.IMPL,
+            session_id="sess-failed-5",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket("GEN-500", "genhealth", from_failed=True)
+
+        assert result["from_failed_applied"] is False
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_requeue_from_failed_regress_backward_rejected(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """from_failed=True + backward --stage on a FAILED row still fails:
+        the regress gate is untouched and does not accept FAILED."""
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStageError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.REVIEW,
+            session_id="sess-failed-4",
+            status=QueueItemStatus.FAILED,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(RequeueStageError):
+            requeue_ticket(
+                "GEN-500",
+                "genhealth",
+                stage_override="plan",
+                allow_regress=True,
+                from_failed=True,
+            )
+
 
 # ---------------------------------------------------------------------------
 # TestUnblockTicket — unblock_ticket() mutation function
@@ -4985,6 +5104,132 @@ class TestCLIRequeue:
                 "--client",
                 "genhealth",
                 "--from-cancelled",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert len(captured) == 1
+        payload = captured[0]
+        assert payload["reason"] == "cli_requeue"
+
+    def test_requeue_from_failed_cli_succeeds(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """`--from-failed` on a FAILED ticket exits 0 and moves PENDING."""
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.IMPL,
+            session_id="sess6301",
+            status=QueueItemStatus.FAILED,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "requeue",
+                "GEN-500",
+                "--client",
+                "genhealth",
+                "--from-failed",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "impl -> impl" in result.output
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_requeue_from_failed_cli_without_flag_exits_nonzero(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """FAILED ticket without --from-failed exits nonzero and names the
+        escape hatch in the printed error."""
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.IMPL,
+            session_id="sess6302",
+            status=QueueItemStatus.FAILED,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "requeue", "GEN-500", "--client", "genhealth"],
+        )
+        assert result.exit_code != 0
+        assert "--from-failed" in result.output
+
+    def test_requeue_from_failed_emits_reason_event(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`--from-failed` emits TICKET_REQUEUED with the
+        cli_requeue_from_failed provenance reason."""
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.IMPL,
+            session_id="sess6303",
+            status=QueueItemStatus.FAILED,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        captured: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.record_event",
+            lambda _type, payload=None, **__: captured.append(payload or {}),
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "requeue",
+                "GEN-500",
+                "--client",
+                "genhealth",
+                "--from-failed",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert len(captured) == 1
+        payload = captured[0]
+        assert payload["reason"] == "cli_requeue_from_failed"
+        assert payload["regressed"] is False
+
+    def test_requeue_from_failed_flag_on_approvable_row_emits_plain_reason(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`--from-failed` passed defensively on an already-approvable
+        (BLOCKED_ON_USER) row must NOT emit the cli_requeue_from_failed
+        reason — that would falsely claim the row was recovered from FAILED
+        when the FAILED branch never fired."""
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.IMPL,
+            session_id="sess6304",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        captured: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.record_event",
+            lambda _type, payload=None, **__: captured.append(payload or {}),
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "requeue",
+                "GEN-500",
+                "--client",
+                "genhealth",
+                "--from-failed",
             ],
         )
         assert result.exit_code == 0, result.output

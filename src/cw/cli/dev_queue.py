@@ -267,6 +267,19 @@ def dev_queue_approve(ticket_id: str, client: str | None) -> None:
         " docs/dispatch-runbook.md."
     ),
 )
+@click.option(
+    "--from-failed",
+    "from_failed",
+    is_flag=True,
+    default=False,
+    help=(
+        "Allow requeuing a FAILED ticket back to PENDING at its current"
+        " stage (e.g. an abandoned row whose underlying session actually"
+        " completed clean). Accepts any FAILED row regardless of why it"
+        " failed — check `cw dev-queue show` / event history first. See"
+        " docs/dispatch-runbook.md."
+    ),
+)
 @handle_errors
 def dev_queue_requeue(
     ticket_id: str,
@@ -274,13 +287,15 @@ def dev_queue_requeue(
     stage_override: str | None,
     regress: bool,
     from_cancelled: bool,
+    from_failed: bool,
 ) -> None:
     """Requeue a BLOCKED_ON_USER ticket back to PENDING.
 
     Defaults to re-running the current stage. Use --stage to advance forward.
     Use --regress with a backward --stage to move a blocked ticket backward
     (e.g. a plan-deviation review exit back to impl). Use --from-cancelled
-    to recover a CANCELLED ticket (forward/same-stage only).
+    to recover a CANCELLED ticket, or --from-failed to recover a FAILED
+    ticket (forward/same-stage only).
     """
     config = load_orchestrator_config()
     resolved = resolve_client(ticket_id, config, client)
@@ -290,11 +305,14 @@ def dev_queue_requeue(
         stage_override,
         allow_regress=regress,
         from_cancelled=from_cancelled,
+        from_failed=from_failed,
     )
     if result["regressed"]:
         reason = "cli_regress"
     elif result["from_cancelled_applied"]:
         reason = "cli_requeue_from_cancelled"
+    elif result["from_failed_applied"]:
+        reason = "cli_requeue_from_failed"
     else:
         reason = "cli_requeue"
     record_event(

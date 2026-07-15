@@ -629,6 +629,16 @@ _REQUEUE_FROM_CANCELLED_STATUSES: frozenset[QueueItemStatus] = frozenset(
     [QueueItemStatus.CANCELLED]
 )
 
+# Mirrors _REQUEUE_FROM_CANCELLED_STATUSES above for FAILED/abandoned rows
+# whose underlying session may have actually completed clean (a valid
+# terminal sentinel) but the row itself has no requeue path today. Same
+# "deliberately NOT folded into _APPROVABLE_STATUSES" rationale -- this is
+# a blind operator-trust escape hatch (CLI: --from-failed), not automatic
+# sentinel re-verification. See GitHub #1190.
+_REQUEUE_FROM_FAILED_STATUSES: frozenset[QueueItemStatus] = frozenset(
+    [QueueItemStatus.FAILED]
+)
+
 # The two signoff markers auto-dev-plan appends to the plan-of-record body.
 # Local copy of cw.reconcile.gate_recipes._PLAN_SPEC_MARKER /
 # _PLAN_SOUNDNESS_MARKER -- importing gate_recipes from here would create an
@@ -1282,9 +1292,10 @@ def _apply_requeue_stage(
 def _requeue_state_error_message(ticket_id: str, status: QueueItemStatus) -> str:
     """Build the RequeueStateError message for the forward/same-stage gate.
 
-    Names the --from-cancelled escape hatch only when it would actually apply
-    (status is CANCELLED) so the message doesn't mislead callers hitting the
-    gate from PENDING/RUNNING/etc. See GitHub #1018.
+    Names the --from-cancelled or --from-failed escape hatch only when it
+    would actually apply (status is CANCELLED or FAILED, respectively) so
+    the message doesn't mislead callers hitting the gate from PENDING/
+    RUNNING/etc. See GitHub #1018, #1190.
     """
     base = (
         f"Cannot requeue ticket '{ticket_id}':"
@@ -1293,6 +1304,8 @@ def _requeue_state_error_message(ticket_id: str, status: QueueItemStatus) -> str
     )
     if status in _REQUEUE_FROM_CANCELLED_STATUSES:
         return base + " (or CANCELLED with --from-cancelled)."
+    if status in _REQUEUE_FROM_FAILED_STATUSES:
+        return base + " (or FAILED with --from-failed)."
     return base + "."
 
 
@@ -1303,21 +1316,25 @@ def requeue_ticket(
     *,
     allow_regress: bool = False,
     from_cancelled: bool = False,
+    from_failed: bool = False,
 ) -> dict[str, str | bool | int]:
     """Requeue a BLOCKED_ON_USER or AWAITING_OPERATOR_SIGNOFF ticket, optionally
     at a specific stage.
 
     Returns dict with from_stage, to_stage, ticket_id, client, regressed,
-    regress_attempts, and from_cancelled_applied for event emission.
-    ``regressed`` is True only on a genuine backward regress (``allow_regress``
-    + backward ``stage_override`` + blocked task); ``regress_attempts`` is the
-    post-mutation attempt count (0 on the forward/same-stage path).
+    regress_attempts, from_cancelled_applied, and from_failed_applied for
+    event emission. ``regressed`` is True only on a genuine backward regress
+    (``allow_regress`` + backward ``stage_override`` + blocked task);
+    ``regress_attempts`` is the post-mutation attempt count (0 on the
+    forward/same-stage path).
     ``from_cancelled_applied`` is True only when the CANCELLED-acceptance
     branch actually admitted the row — i.e. ``from_cancelled=True`` AND the
     row's status was CANCELLED — not merely when the caller passed
-    ``from_cancelled=True``. Callers must key any "recovered from CANCELLED"
-    provenance signal (e.g. an event ``reason``) off this field, not off the
-    raw ``from_cancelled`` argument, since the flag is harmlessly additive on
+    ``from_cancelled=True``. ``from_failed_applied`` is the analogous field
+    for the FAILED-acceptance branch. Callers must key any "recovered from
+    CANCELLED"/"recovered from FAILED" provenance signal (e.g. an event
+    ``reason``) off these fields, not off the raw ``from_cancelled``/
+    ``from_failed`` arguments, since either flag is harmlessly additive on
     an already-approvable row.
 
     Args:
@@ -1328,11 +1345,19 @@ def requeue_ticket(
             row combined with a backward stage_override still raises
             RequeueStageError, since _apply_requeue_stage's regress check is
             unchanged.
+        from_failed: when True, the forward/same-stage path also accepts a
+            FAILED row (CLI: --from-failed). Recovers a ticket whose row was
+            marked FAILED even though the underlying session may have
+            actually completed clean (#1190). Does NOT widen the
+            backward-regress gate: a FAILED row combined with a backward
+            stage_override still raises RequeueStageError, since
+            _apply_requeue_stage's regress check is unchanged.
 
     Raises:
         RequeueStateError: if ticket is not BLOCKED_ON_USER or
             AWAITING_OPERATOR_SIGNOFF (forward path), unless from_cancelled
-            is True and the ticket is CANCELLED.
+            is True and the ticket is CANCELLED, or from_failed is True and
+            the ticket is FAILED.
         RequeueStageError: if stage_override would regress without allow_regress,
             is not in the client pipeline, regresses a non-blocked task, or if
             allow_regress is set with no backward stage_override.
@@ -1358,19 +1383,22 @@ def requeue_ticket(
         )
 
         from_cancelled_applied = False
+        from_failed_applied = False
         if not regressed:
             # Forward/same-stage path (including inert allow_regress forward
             # targets) requires the ticket to be at a BLOCKED_ON_USER or
-            # AWAITING_OPERATOR_SIGNOFF gate, OR (opt-in) CANCELLED.
+            # AWAITING_OPERATOR_SIGNOFF gate, OR (opt-in) CANCELLED/FAILED.
             approvable = task.status in _APPROVABLE_STATUSES
             cancelled_ok = (
                 from_cancelled and task.status in _REQUEUE_FROM_CANCELLED_STATUSES
             )
-            if not (approvable or cancelled_ok):
+            failed_ok = from_failed and task.status in _REQUEUE_FROM_FAILED_STATUSES
+            if not (approvable or cancelled_ok or failed_ok):
                 raise RequeueStateError(
                     _requeue_state_error_message(ticket_id, task.status)
                 )
             from_cancelled_applied = cancelled_ok
+            from_failed_applied = failed_ok
             _reset_for_same_stage_requeue(task)
             task.regress_attempts = 0
 
@@ -1386,6 +1414,7 @@ def requeue_ticket(
         "regressed": regressed,
         "regress_attempts": regress_attempts,
         "from_cancelled_applied": from_cancelled_applied,
+        "from_failed_applied": from_failed_applied,
     }
 
 
