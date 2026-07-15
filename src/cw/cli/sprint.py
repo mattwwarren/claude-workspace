@@ -109,6 +109,8 @@ def _echo_applied(applied: AppliedBuildout) -> None:
         click.echo(f"  Ticket {code}: #{number}")
     if applied.skipped:
         click.echo(f"Skipped (already existed): {', '.join(applied.skipped)}")
+    if applied.backfilled:
+        click.echo(f"Backfilled children checklist: {', '.join(applied.backfilled)}")
 
 
 @sprint.command("apply")

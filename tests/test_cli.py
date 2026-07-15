@@ -40,10 +40,10 @@ from cw.models import (
     Stage,
     TicketTask,
 )
-from cw.sprint import AppliedBuildout, BuildoutPlan, build_plan, parse_rfc
+from cw.sprint import AppliedBuildout, BuildoutPlan
 from tests.conftest import _write_project_config_yaml
 from tests.test_result import _valid_payload
-from tests.test_sprint import CONFIG_YAML, MINIMAL_RFC, _config
+from tests.test_sprint import CONFIG_YAML, MINIMAL_RFC, _plan
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -9099,7 +9099,7 @@ class TestSprintPlanCli:
 
         assert result.exit_code == 0, result.output
         assert out_file.exists()
-        expected = build_plan(parse_rfc(MINIMAL_RFC), _config(), version="1.20.0")
+        expected = _plan()
         written = BuildoutPlan.model_validate_json(out_file.read_text(encoding="utf-8"))
         assert written == expected
         assert "Milestone:" in result.output
@@ -9178,7 +9178,7 @@ class TestResolveVersion:
 
 class TestSprintApplyCli:
     def test_dry_run_makes_no_gh_calls(self, tmp_path: Path) -> None:
-        plan = build_plan(parse_rfc(MINIMAL_RFC), _config(), version="1.20.0")
+        plan = _plan()
         plan_file = tmp_path / "plan.json"
         plan_file.write_text(plan.model_dump_json(), encoding="utf-8")
 
@@ -9194,7 +9194,7 @@ class TestSprintApplyCli:
         assert "Would create" in result.output
 
     def test_prints_partial_progress_on_a_mid_run_failure(self, tmp_path: Path) -> None:
-        plan = build_plan(parse_rfc(MINIMAL_RFC), _config(), version="1.20.0")
+        plan = _plan()
         plan_file = tmp_path / "plan.json"
         plan_file.write_text(plan.model_dump_json(), encoding="utf-8")
 
@@ -9204,6 +9204,7 @@ class TestSprintApplyCli:
             ticket_numbers={"S1": 7},
             created=["epic: Availability-aware holding (inward)"],
             skipped=[],
+            backfilled=["I"],
         )
 
         with patch(
@@ -9217,13 +9218,14 @@ class TestSprintApplyCli:
         assert "#5" in result.output
         assert "#6" in result.output
         assert "#7" in result.output
+        assert "Backfilled children checklist: I" in result.output
         assert "boom: create failed" in result.output
         assert "Traceback" not in result.output
 
     def test_error_without_partial_state_prints_no_partial_banner(
         self, tmp_path: Path
     ) -> None:
-        plan = build_plan(parse_rfc(MINIMAL_RFC), _config(), version="1.20.0")
+        plan = _plan()
         plan_file = tmp_path / "plan.json"
         plan_file.write_text(plan.model_dump_json(), encoding="utf-8")
 
@@ -9238,7 +9240,7 @@ class TestSprintApplyCli:
         assert "milestone lookup failed" in result.output
 
     def test_prints_the_created_issue_numbers_on_success(self, tmp_path: Path) -> None:
-        plan = build_plan(parse_rfc(MINIMAL_RFC), _config(), version="1.20.0")
+        plan = _plan()
         plan_file = tmp_path / "plan.json"
         plan_file.write_text(plan.model_dump_json(), encoding="utf-8")
 
