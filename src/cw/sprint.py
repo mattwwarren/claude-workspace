@@ -599,7 +599,9 @@ class GhClient:
     def create_issue(
         self, title: str, body: str, *, labels: list[str], milestone: int
     ) -> int | None:
-        return gh.create_issue(title, body, labels=labels, milestone=milestone)
+        return gh.create_issue(
+            title=title, body=body, labels=labels, milestone=milestone
+        )
 
     def update_issue_body(self, number: int, body: str) -> bool:
         return gh.update_issue_body(number, body)
@@ -619,6 +621,7 @@ class AppliedBuildout(BaseModel):
     ticket_numbers: dict[str, int] = Field(default_factory=dict)
     created: list[str] = Field(default_factory=list)
     skipped: list[str] = Field(default_factory=list)
+    backfilled: list[str] = Field(default_factory=list)
 
 
 def _resolve_milestone(plan: BuildoutPlan, client: GhSurface) -> int:
@@ -659,7 +662,7 @@ def _create_or_skip(
         applied.skipped.append(draft.title)
         return existing[draft.title]
     created = client.create_issue(
-        draft.title, draft.body, labels=draft.labels, milestone=milestone
+        title=draft.title, body=draft.body, labels=draft.labels, milestone=milestone
     )
     if created is None:
         msg = f"failed to create issue: {draft.title}"
@@ -704,14 +707,17 @@ def _backfill_children(
         number = applied.epic_numbers[epic.code]
         children = plan.epic_children.get(epic.code, [])
         checklist = (
-            "\n".join(f"- [ ] {code}" for code in children)
+            "\n".join(f"- [ ] #{applied.ticket_numbers[code]}" for code in children)
             if children
             else "- (no children)"
         )
         body = epic.body.replace(
             plan.children_marker, f"{plan.children_marker}\n{checklist}"
         )
-        client.update_issue_body(number, body)
+        if not client.update_issue_body(number, body):
+            msg = f"failed to backfill children checklist for epic: {epic.title}"
+            raise SprintApplyError(msg, applied=applied)
+        applied.backfilled.append(epic.code)
 
 
 def apply_plan(

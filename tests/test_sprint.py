@@ -538,10 +538,12 @@ class FakeGh:
         self.milestone_number = 1
         self.calls: list[str] = []
         self.bodies: dict[int, str] = {}
+        self.issue_labels: dict[str, list[str]] = {}
         self.fail_find_milestone = False
         self.fail_create_milestone = False
         self.fail_milestone_issue_titles = False
         self.fail_create_issue: set[str] = set()
+        self.fail_update_issue_body = False
         self._next_number = 100
 
     def find_milestone(self, title: str) -> tuple[int | None, bool]:
@@ -576,10 +578,13 @@ class FakeGh:
         self._next_number += 1
         self.existing[title] = number
         self.bodies[number] = body
+        self.issue_labels[title] = labels
         return number
 
     def update_issue_body(self, number: int, body: str) -> bool:
         self.calls.append(f"update_issue_body:{number}")
+        if self.fail_update_issue_body:
+            return False
         self.bodies[number] = body
         return True
 
@@ -599,6 +604,8 @@ def test_apply_plan_creates_milestone_then_epics_then_tickets_then_backfills() -
         f"create_issue:{plan.tickets[1].title}",
         f"update_issue_body:{epic_number}",
     ]
+    assert gh.issue_labels[plan.epics[0].title] == plan.epics[0].labels
+    assert gh.issue_labels[plan.tickets[0].title] == plan.tickets[0].labels
 
 
 def test_apply_plan_backfills_the_children_checklist_into_the_marker() -> None:
@@ -607,9 +614,12 @@ def test_apply_plan_backfills_the_children_checklist_into_the_marker() -> None:
     result = apply_plan(plan, client=gh)
 
     epic_number = result.epic_numbers["I"]
+    a1_number = result.ticket_numbers["A1"]
     body = gh.bodies[epic_number]
     assert "<!-- children -->" in body
-    assert "- [ ] A1" in body
+    assert f"- [ ] #{a1_number}" in body
+    assert "- [ ] A1" not in body
+    assert "I" in result.backfilled
 
 
 def test_apply_plan_rewrites_the_ticket_footer_with_the_real_epic_number() -> None:
@@ -665,6 +675,8 @@ def test_apply_plan_raises_when_the_milestone_lookup_itself_fails() -> None:
     with pytest.raises(SprintApplyError, match="failed to look up milestone"):
         apply_plan(plan, client=gh)
 
+    assert not any(call.startswith("create_issue") for call in gh.calls)
+
 
 def test_apply_plan_raises_when_the_milestone_issue_lookup_fails() -> None:
     plan = _plan()
@@ -673,6 +685,8 @@ def test_apply_plan_raises_when_the_milestone_issue_lookup_fails() -> None:
 
     with pytest.raises(SprintApplyError, match="failed to list issues"):
         apply_plan(plan, client=gh)
+
+    assert not any(call.startswith("create_issue") for call in gh.calls)
 
 
 def test_apply_plan_reuses_a_milestone_that_exists_with_zero_issues_yet() -> None:
@@ -709,6 +723,28 @@ def test_apply_plan_raises_when_epic_creation_fails() -> None:
 
     with pytest.raises(SprintApplyError, match="failed to create issue"):
         apply_plan(plan, client=gh)
+
+
+def test_apply_plan_raises_when_the_children_backfill_fails() -> None:
+    plan = _plan()
+    gh = FakeGh()
+    gh.fail_update_issue_body = True
+
+    with pytest.raises(SprintApplyError, match="failed to backfill children"):
+        apply_plan(plan, client=gh)
+
+
+def test_backfill_failure_carries_no_backfilled_epics_in_applied() -> None:
+    plan = _plan()
+    gh = FakeGh()
+    gh.fail_update_issue_body = True
+
+    with pytest.raises(SprintApplyError) as exc_info:
+        apply_plan(plan, client=gh)
+
+    applied = exc_info.value.applied
+    assert isinstance(applied, AppliedBuildout)
+    assert applied.backfilled == []
 
 
 def test_apply_plan_is_idempotent_and_skips_an_epic_that_already_exists() -> None:
@@ -783,13 +819,19 @@ def test_fake_gh_satisfies_the_ghsurface_protocol() -> None:
 def test_backfill_children_handles_an_epic_with_zero_children() -> None:
     plan = build_plan(parse_rfc(TWO_EPIC_RFC), _config(), version="1.20.0")
     gh = FakeGh()
-    applied = AppliedBuildout(milestone_number=1, epic_numbers={"I": 501, "II": 502})
+    applied = AppliedBuildout(
+        milestone_number=1,
+        epic_numbers={"I": 501, "II": 502},
+        ticket_numbers={"B1": 601},
+    )
 
     sprint._backfill_children(plan, applied, gh)
 
     body = gh.bodies[501]
     assert "<!-- children -->" in body
     assert "(no children)" in body
+    assert "- [ ] #601" in gh.bodies[502]
+    assert set(applied.backfilled) == {"I", "II"}
 
 
 def test_apply_plan_resolves_epic_ii_refs_without_corruption_from_epic_i() -> None:
