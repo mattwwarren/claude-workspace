@@ -676,24 +676,32 @@ def _prepare_request_reviewer_job(
     task: TicketTask,
     session_id: str | None,
     clients: dict[str, ClientConfig],
+    now: datetime,
 ) -> _ReviewerJob | None:
     """Re-validate under the lock, resolve the review strategy, emit + build job.
 
     Skip flavours:
 
     * **Silent** (no event) when the row is stale (``pr_state`` gone / no longer
-      ``no_reviewer``) OR the resolved strategy ``mode == "ci"`` — an intentional
-      "rely on CI, request no reviewer" policy, not an anomaly.
+      ``no_reviewer``) OR already fired this episode (``request_reviewer_fired_at``
+      is not None — not an anomaly, mirrors ``_fire_escalate_merge_block``'s
+      already-fired check) OR the resolved strategy ``mode == "ci"`` — an
+      intentional "rely on CI, request no reviewer" policy, not an anomaly.
     * **Anomaly** (``PR_ACTION_FAILED`` + warning) when the client is
       unresolvable, or the strategy names a ``repo_owner``/``reviewer_team`` mode
       whose handle is missing (a configured-but-broken repo), or the PR url is
       absent — a fail-safe correction.
 
     Otherwise records ``PR_ACTION_TAKEN`` (payload carries the strategy mode +
-    reviewer handle) and returns the deferred gh-call job. No dev-queue mutation.
+    reviewer handle), stamps the ``request_reviewer_fired_at`` latch to *now*,
+    and returns the deferred gh-call job.
     """
     pr_state = task.pr_state
-    if pr_state is None or pr_state.attention_state != _ATTENTION_NO_REVIEWER:
+    if (
+        pr_state is None
+        or pr_state.attention_state != _ATTENTION_NO_REVIEWER
+        or task.request_reviewer_fired_at is not None
+    ):
         return None
     payload_base = _review_payload_base(
         task,
@@ -735,6 +743,7 @@ def _prepare_request_reviewer_job(
         payload_base,
         correlation_id=task.ticket_id,
     )
+    task.request_reviewer_fired_at = now
     return _ReviewerJob(
         pr_url=task.pr_url,
         handle=strategy.handle,
@@ -779,35 +788,71 @@ def _dispatch_request_reviewer(job: _ReviewerJob) -> str | None:
 
 
 def _act_request_reviewer(
-    candidates: list[ReviewRecipeCandidate], *, clients: dict[str, ClientConfig]
+    candidates: list[ReviewRecipeCandidate],
+    *,
+    clients: dict[str, ClientConfig],
+    now: datetime | None = None,
 ) -> list[str]:
     """Act phase for request_reviewer: re-validate + resolve strategy, then gh.
 
     Mirrors ``_act_address_review``'s lock/re-load/emit-before-action/deferred-
-    side-effect shape. The ``add_pr_reviewer`` gh call runs strictly after the
-    lock releases. No dev-queue mutation (the ticket's "no ticket state change").
-    Returns the ticket_ids for which a reviewer request actually succeeded (a
-    failed gh call is excluded and corrected via ``PR_ACTION_FAILED``).
+    side-effect shape. Under one ``dev_queue_lock()``:
+
+    1. **Episode-end clear** — scan every freshly-loaded row and clear
+       ``request_reviewer_fired_at`` where it is set but the current
+       ``pr_state`` is None or no longer ``no_reviewer`` (the episode ended;
+       this re-arms the latch for a genuine future re-entry). Runs regardless
+       of whether *candidates* is empty.
+    2. **Fire** — for each candidate, ``_prepare_request_reviewer_job``
+       re-validates, emits ``PR_ACTION_TAKEN``, and stamps the latch.
+
+    Stamping/clearing the latch IS a dev-queue write (the one exception to the
+    "no dev-queue mutation" rule — a latch field, not a status transition),
+    saved before the lock releases. The ``add_pr_reviewer`` gh call runs
+    strictly after the lock releases. Returns the ticket_ids for which a
+    reviewer request actually succeeded (a failed gh call is excluded and
+    corrected via ``PR_ACTION_FAILED``).
     """
-    if not candidates:
-        return []
+    from datetime import UTC
+    from datetime import datetime as _datetime
+
+    resolved_now = now if now is not None else _datetime.now(UTC)
     by_key = {(c.ticket_id, c.client): c for c in candidates}
     jobs: list[_ReviewerJob] = []
     with dev_queue_lock():
         store = load_dev_queue()
+        changed = _clear_ended_request_reviewer_episodes(store)
         for candidate in by_key.values():
             task = _find_review_task(store, candidate.ticket_id, candidate.client)
             if task is None:
                 continue
-            job = _prepare_request_reviewer_job(task, candidate.session_id, clients)
+            job = _prepare_request_reviewer_job(
+                task, candidate.session_id, clients, resolved_now
+            )
             if job is not None:
                 jobs.append(job)
+                changed = True
+        if changed:
+            save_dev_queue(store)
     acted: list[str] = []
     for job in jobs:
         ticket_id = _dispatch_request_reviewer(job)
         if ticket_id is not None:
             acted.append(ticket_id)
     return acted
+
+
+def _clear_ended_request_reviewer_episodes(store: DevQueueStore) -> bool:
+    """Clear the latch on rows whose no-reviewer episode has ended. Returns dirty."""
+    changed = False
+    for task in store.tasks:
+        if task.request_reviewer_fired_at is None:
+            continue
+        pr_state = task.pr_state
+        if pr_state is None or pr_state.attention_state != _ATTENTION_NO_REVIEWER:
+            task.request_reviewer_fired_at = None
+            changed = True
+    return changed
 
 
 # --- escalate_merge_block act phase (RFC 0010 P4, #1099) -------------------
@@ -924,9 +969,10 @@ def run_review_recipes(*, config: OrchestratorConfig) -> list[str]:
     a reviewer per the repo's review_strategy on a no_reviewer PR), and
     ``escalate_merge_block`` (fires one durable escalation per merge-blocked
     episode). Each detect->act pair runs against the same fresh ``tasks``
-    snapshot; the escalate act phase performs a small latch write (the sole
-    dev-queue mutation in this module — a one-shot field, not a status
-    transition), every other act phase is read-only under its lock. Returns the
+    snapshot; the ``request_reviewer`` and ``escalate_merge_block`` act phases
+    each perform a small latch write (the two exceptions to this module's "no
+    dev-queue mutation" rule — a one-shot field, not a status transition),
+    every other act phase is read-only under its lock. Returns the
     concatenated ticket_ids each recipe reports as acted.
     """
     if not config.review_recipes_enabled:
