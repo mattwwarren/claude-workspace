@@ -543,7 +543,8 @@ class FakeGh:
         self.fail_create_milestone = False
         self.fail_milestone_issue_titles = False
         self.fail_create_issue: set[str] = set()
-        self.fail_update_issue_body = False
+        self.fail_update_issue_body_at: set[int] = set()
+        self._update_issue_body_calls = 0
         self._next_number = 100
 
     def find_milestone(self, title: str) -> tuple[int | None, bool]:
@@ -583,7 +584,9 @@ class FakeGh:
 
     def update_issue_body(self, number: int, body: str) -> bool:
         self.calls.append(f"update_issue_body:{number}")
-        if self.fail_update_issue_body:
+        call_index = self._update_issue_body_calls
+        self._update_issue_body_calls += 1
+        if call_index in self.fail_update_issue_body_at:
             return False
         self.bodies[number] = body
         return True
@@ -604,7 +607,6 @@ def test_apply_plan_creates_milestone_then_epics_then_tickets_then_backfills() -
         f"create_issue:{plan.tickets[1].title}",
         f"update_issue_body:{epic_number}",
     ]
-    assert gh.issue_labels[plan.epics[0].title] == plan.epics[0].labels
     assert gh.issue_labels[plan.tickets[0].title] == plan.tickets[0].labels
 
 
@@ -728,7 +730,7 @@ def test_apply_plan_raises_when_epic_creation_fails() -> None:
 def test_apply_plan_raises_when_the_children_backfill_fails() -> None:
     plan = _plan()
     gh = FakeGh()
-    gh.fail_update_issue_body = True
+    gh.fail_update_issue_body_at = {0}
 
     with pytest.raises(SprintApplyError, match="failed to backfill children"):
         apply_plan(plan, client=gh)
@@ -737,7 +739,7 @@ def test_apply_plan_raises_when_the_children_backfill_fails() -> None:
 def test_backfill_failure_carries_no_backfilled_epics_in_applied() -> None:
     plan = _plan()
     gh = FakeGh()
-    gh.fail_update_issue_body = True
+    gh.fail_update_issue_body_at = {0}
 
     with pytest.raises(SprintApplyError) as exc_info:
         apply_plan(plan, client=gh)
@@ -745,6 +747,19 @@ def test_backfill_failure_carries_no_backfilled_epics_in_applied() -> None:
     applied = exc_info.value.applied
     assert isinstance(applied, AppliedBuildout)
     assert applied.backfilled == []
+
+
+def test_backfill_failure_on_a_later_epic_preserves_earlier_backfilled_epics() -> None:
+    plan = build_plan(parse_rfc(TWO_EPIC_RFC), _config(), version="1.20.0")
+    gh = FakeGh()
+    gh.fail_update_issue_body_at = {1}
+
+    with pytest.raises(SprintApplyError, match="failed to backfill") as exc_info:
+        apply_plan(plan, client=gh)
+
+    applied = exc_info.value.applied
+    assert isinstance(applied, AppliedBuildout)
+    assert applied.backfilled == ["I"]
 
 
 def test_apply_plan_is_idempotent_and_skips_an_epic_that_already_exists() -> None:

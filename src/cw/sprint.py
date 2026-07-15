@@ -706,6 +706,11 @@ def _backfill_children(
     for epic in plan.epics:
         number = applied.epic_numbers[epic.code]
         children = plan.epic_children.get(epic.code, [])
+        # Why: every code in plan.epic_children is guaranteed to be in
+        # applied.ticket_numbers by this point — build_plan derives both
+        # epic_children and plan.tickets from the same doc.tickets pass, and
+        # apply_plan's ticket-creation loop (which raises on any failure)
+        # always completes before _backfill_children runs.
         checklist = (
             "\n".join(f"- [ ] #{applied.ticket_numbers[code]}" for code in children)
             if children
