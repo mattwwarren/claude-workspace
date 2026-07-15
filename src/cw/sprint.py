@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import re
 import subprocess as _sp
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
-from cw.exceptions import RfcContractError
+from cw import gh
+from cw.exceptions import RfcContractError, SprintApplyError
 from cw.tracker import load_project_config_dict
 
 if TYPE_CHECKING:
@@ -543,3 +544,221 @@ def build_plan(doc: RfcDoc, cfg: BuildoutConfig, version: str) -> BuildoutPlan:
         epic_children=epic_children,
         references=list(doc.references),
     )
+
+
+@runtime_checkable
+class GhSurface(Protocol):
+    """Testability seam for the `gh`-issue-creation calls `apply_plan` makes.
+
+    A structural subset of ``cw.gh``'s real functions — each method omits the
+    `timeout` kwarg (a legitimate narrower match; ``apply_plan`` never needs
+    to override it). ``@runtime_checkable`` matches every other Protocol in
+    this codebase (``StageExecutor``, ``NativeDaemonClient``, ``CodexRunner``,
+    ``AiderRunner``/``PlanFetcher``).
+    """
+
+    def find_milestone(self, title: str) -> tuple[int | None, bool]:
+        """Return (number, ok) for an existing milestone titled *title*."""
+        ...
+
+    def create_milestone(self, title: str) -> int | None:
+        """Create a milestone; return its number, or None on failure."""
+        ...
+
+    def milestone_issue_titles(
+        self, milestone: int
+    ) -> tuple[dict[str, int] | None, bool]:
+        """Return ({issue title: number}, ok) for every issue on *milestone*."""
+        ...
+
+    def create_issue(
+        self, title: str, body: str, *, labels: list[str], milestone: int
+    ) -> int | None:
+        """Create an issue and attach it to *milestone*; return its number."""
+        ...
+
+    def update_issue_body(self, number: int, body: str) -> bool:
+        """Replace an issue's body via ``gh issue edit``. True on success."""
+        ...
+
+
+class GhClient:
+    """Production GhSurface: thin delegations to :mod:`cw.gh`."""
+
+    def find_milestone(self, title: str) -> tuple[int | None, bool]:
+        return gh.find_milestone(title)
+
+    def create_milestone(self, title: str) -> int | None:
+        return gh.create_milestone(title)
+
+    def milestone_issue_titles(
+        self, milestone: int
+    ) -> tuple[dict[str, int] | None, bool]:
+        return gh.milestone_issue_titles(milestone)
+
+    def create_issue(
+        self, title: str, body: str, *, labels: list[str], milestone: int
+    ) -> int | None:
+        return gh.create_issue(
+            title=title, body=body, labels=labels, milestone=milestone
+        )
+
+    def update_issue_body(self, number: int, body: str) -> bool:
+        return gh.update_issue_body(number, body)
+
+
+class AppliedBuildout(BaseModel):
+    """What `apply_plan` has created, reused, or is about to.
+
+    Carried by ``SprintApplyError.applied`` on a mid-apply failure so the
+    operator can see exactly how far the buildout got before it stopped, and
+    re-run ``cw sprint apply`` to resume (creation is idempotent by title)
+    rather than starting over.
+    """
+
+    milestone_number: int
+    epic_numbers: dict[str, int] = Field(default_factory=dict)
+    ticket_numbers: dict[str, int] = Field(default_factory=dict)
+    created: list[str] = Field(default_factory=list)
+    skipped: list[str] = Field(default_factory=list)
+    backfilled: list[str] = Field(default_factory=list)
+
+
+def _resolve_milestone(plan: BuildoutPlan, client: GhSurface) -> int:
+    """Resolve or create *plan*'s milestone; return its number.
+
+    ``ok=False`` from ``find_milestone`` is a transient lookup failure, never
+    a "does not exist" signal (see ``cw.gh.find_milestone``'s own docstring)
+    — reading it as "absent" would create a duplicate milestone on a re-run,
+    so it raises instead. A ``None`` number with ``ok=True`` is a genuine
+    miss, so the milestone is created; a ``None`` return from that create is
+    likewise a hard failure.
+    """
+    number, ok = client.find_milestone(plan.milestone_title)
+    if not ok:
+        msg = f"failed to look up milestone: {plan.milestone_title}"
+        raise SprintApplyError(msg)
+    if number is not None:
+        return number
+    created = client.create_milestone(plan.milestone_title)
+    if created is None:
+        msg = f"failed to create milestone: {plan.milestone_title}"
+        raise SprintApplyError(msg)
+    return created
+
+
+def _create_or_skip(
+    draft: IssueDraft,
+    milestone: int,
+    existing: dict[str, int],
+    client: GhSurface,
+    applied: AppliedBuildout,
+) -> int:
+    """Create *draft* under *milestone*, or reuse an issue with the same
+    title that already exists (idempotent re-entry). Raises
+    ``SprintApplyError``, carrying *applied*'s partial state, if creation
+    fails."""
+    if draft.title in existing:
+        applied.skipped.append(draft.title)
+        return existing[draft.title]
+    created = client.create_issue(
+        title=draft.title, body=draft.body, labels=draft.labels, milestone=milestone
+    )
+    if created is None:
+        msg = f"failed to create issue: {draft.title}"
+        raise SprintApplyError(msg, applied=applied)
+    existing[draft.title] = created
+    applied.created.append(draft.title)
+    return created
+
+
+def _resolve_epic_refs(ticket: IssueDraft, epic_numbers: dict[str, int]) -> IssueDraft:
+    """Return *ticket* with its ``Epic #<key>`` footer clause (if any)
+    rewritten to the real GitHub issue number.
+
+    Boundary-safe by construction (R1): a plain ``.replace("Epic #I", ...)``
+    would also match the "I" prefix of "Epic #II", corrupting Epic II's
+    ticket footers whenever Epic I happens to be resolved first. The
+    ``(?!\\w)`` negative lookahead requires the key not be followed by
+    another word character, so "Epic #I" only ever matches a standalone "I",
+    never the "II" it is a substring of.
+    """
+    body = ticket.body
+    for key, number in epic_numbers.items():
+        body = re.sub(rf"Epic #{re.escape(key)}(?!\w)", f"Epic #{number}", body)
+    return ticket.model_copy(update={"body": body})
+
+
+def _backfill_children(
+    plan: BuildoutPlan, applied: AppliedBuildout, client: GhSurface
+) -> None:
+    """Rewrite every epic's children checklist from *plan*'s pristine data.
+
+    # Why: this pass is idempotent by recomputation, not skip-checking — it
+    # always rebuilds the checklist from `plan.epic_children` and
+    # unconditionally overwrites the epic's body, rather than reading the
+    # issue's current body back from GitHub and checking whether the
+    # checklist already looks right. Recomputing from the RFC's pristine
+    # ticket list is what makes re-running this pass safe: there is no
+    # previously-written Markdown checklist to parse back out and diff
+    # against, so "run it again" always produces the same, correct result.
+    """
+    for epic in plan.epics:
+        number = applied.epic_numbers[epic.code]
+        children = plan.epic_children.get(epic.code, [])
+        # Why: every code in plan.epic_children is guaranteed to be in
+        # applied.ticket_numbers by this point — build_plan derives both
+        # epic_children and plan.tickets from the same doc.tickets pass, and
+        # apply_plan's ticket-creation loop (which raises on any failure)
+        # always completes before _backfill_children runs.
+        checklist = (
+            "\n".join(f"- [ ] #{applied.ticket_numbers[code]}" for code in children)
+            if children
+            else "- (no children)"
+        )
+        body = epic.body.replace(
+            plan.children_marker, f"{plan.children_marker}\n{checklist}"
+        )
+        if not client.update_issue_body(number, body):
+            msg = f"failed to backfill children checklist for epic: {epic.title}"
+            raise SprintApplyError(msg, applied=applied)
+        applied.backfilled.append(epic.code)
+
+
+def apply_plan(
+    plan: BuildoutPlan, *, client: GhSurface | None = None
+) -> AppliedBuildout:
+    """Idempotently apply *plan* to GitHub in 4 passes: milestone -> epics ->
+    tickets -> children-checklist backfill.
+
+    Safe to re-run: an issue whose title already exists under the milestone
+    is skipped, not recreated. Raises ``SprintApplyError``, carrying whatever
+    ``AppliedBuildout`` state was accumulated before the failure, the moment
+    any `gh` call reports it could not complete (``ok=False`` or a ``None``
+    return) — never guesses at what a failed lookup means.
+    """
+    gh_client: GhSurface = client if client is not None else GhClient()
+
+    milestone_number = _resolve_milestone(plan, gh_client)
+
+    existing, ok = gh_client.milestone_issue_titles(milestone_number)
+    if not ok or existing is None:
+        msg = f"failed to list issues under milestone {milestone_number}"
+        raise SprintApplyError(msg)
+
+    applied = AppliedBuildout(milestone_number=milestone_number)
+
+    for epic in plan.epics:
+        number = _create_or_skip(epic, milestone_number, existing, gh_client, applied)
+        applied.epic_numbers[epic.code] = number
+
+    for ticket in plan.tickets:
+        resolved = _resolve_epic_refs(ticket, applied.epic_numbers)
+        number = _create_or_skip(
+            resolved, milestone_number, existing, gh_client, applied
+        )
+        applied.ticket_numbers[ticket.code] = number
+
+    _backfill_children(plan, applied, gh_client)
+
+    return applied
