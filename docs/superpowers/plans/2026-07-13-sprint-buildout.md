@@ -3491,8 +3491,11 @@ is the whole point of the design:
    the configured properties. The page's Goal / risk-annotated ticket list / exit
    bar / dependency chain is prose you write; the skeleton and properties come from
    config.
-7. **RFC footer PR.** Back-fill the RFC's `Issues:` footer with the real numbers
-   and the milestone URL; open a docs-only PR.
+7. **RFC footer PR.** Back-fill the RFC's `Issues:` footer with the real issue
+   numbers from step 4. No pipeline step returns a milestone URL — construct it
+   yourself from the milestone number `cw sprint apply` reported and the repo's
+   `owner/repo` (`gh repo view --json nameWithOwner --jq .nameWithOwner`):
+   `https://github.com/<owner>/<repo>/milestone/<number>`. Open a docs-only PR.
 
 Also state what the skill must **not** do: decide the wave→sprint granularity (the
 RFC's `Sprint:` fields decide it), decide the pull-in (the operator decides), or
