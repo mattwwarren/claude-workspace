@@ -20,6 +20,7 @@ from cw.models import (
 )
 from cw.pr_hydrate import (
     WATCHED_PR_COUNTERPARTY,
+    _blocked_attention_state,
     _compute_attention_state,
     _diff_transitions,
     _hydrate_watched_prs,
@@ -297,6 +298,36 @@ class TestAttentionState:
             )
             == "ready_to_approve"
         )
+
+
+class TestPushPollParity:
+    """Poll (_compute_attention_state) and push (_overlay_push_observation)
+    must agree on attention_state for the same GitHub-facts combo (#1196).
+
+    Fixes the bug where the push overlay never recomputed attention_state,
+    leaving it stale after a webhook-driven update.
+    """
+
+    def test_poll_and_push_agree_on_merge_blocked(self) -> None:
+        poll_answer = _compute_attention_state(
+            ci_ok=True,
+            pending_count=0,
+            merge_state_status="BEHIND",
+            review_decision="REVIEW_REQUIRED",
+            is_draft=False,
+            reviewer_count=1,
+        )
+        base = _pr_state(
+            merge_state_status="BEHIND",
+            review_decision="REVIEW_REQUIRED",
+            ci_ok=True,
+            reviewer_count=1,
+            is_draft=False,
+        )
+        push_answer = _overlay_push_observation(
+            base, event_type=OrchestratorEventType.PR_REVIEW_RECEIVED, payload={}
+        ).attention_state
+        assert poll_answer == push_answer
 
 
 class TestParsePrUrl:
@@ -658,6 +689,39 @@ class TestHydrateEmitsEvents:
         events = read_events(event_types=[OrchestratorEventType.PR_CI_FAILED])
         assert len(events) == 1
 
+    def test_derives_new_fields_from_pr_view(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Poll path stores is_draft/reviewer_count so push can recompute
+        attention_state without re-fetching GitHub (#1196)."""
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1",
+                        client="acme",
+                        pr_url=_URL,
+                        pr_state=PrState(
+                            state="OPEN",
+                            hydrated_at=datetime(2000, 1, 1, tzinfo=UTC),
+                        ),
+                    )
+                ]
+            )
+        )
+        monkeypatch.setattr(
+            "cw.pr_hydrate.fetch_pr_view",
+            lambda *_a, **_kw: _pr_view_payload(
+                isDraft=True, reviewRequests=[{"login": "x"}]
+            ),
+        )
+        hydrate_pr_states(OrchestratorConfig())
+        store = load_dev_queue()
+        task = store.tasks[0]
+        assert task.pr_state is not None
+        assert task.pr_state.is_draft is True
+        assert task.pr_state.reviewer_count == 1
+
 
 class TestMultiTaskRouting:
     """Two candidates in the same pass route to the correct task, no cross-talk."""
@@ -915,6 +979,8 @@ class TestOverlayPushObservation:
             old, event_type=OrchestratorEventType.PR_MERGED, payload={}
         )
         assert new.state == "MERGED"
+        # Terminal state short-circuits the ladder entirely (#1196).
+        assert new.attention_state is None
 
     def test_ci_failed_sets_ci_ok_false_and_failing_checks(self) -> None:
         old = _pr_state(ci_ok=True, failing_checks=[])
@@ -925,6 +991,15 @@ class TestOverlayPushObservation:
         )
         assert new.ci_ok is False
         assert new.failing_checks == ["lint"]
+        expected = _compute_attention_state(
+            ci_ok=False,
+            pending_count=0,
+            merge_state_status="CLEAN",
+            review_decision="",
+            is_draft=False,
+            reviewer_count=0,
+        )
+        assert new.attention_state == expected == "ci_failing"
 
     def test_ci_failed_missing_failing_checks_key_leaves_field_untouched(self) -> None:
         old = _pr_state(ci_ok=True, failing_checks=["stale"])
@@ -933,6 +1008,15 @@ class TestOverlayPushObservation:
         )
         assert new.ci_ok is False
         assert new.failing_checks == ["stale"]
+        expected = _compute_attention_state(
+            ci_ok=False,
+            pending_count=0,
+            merge_state_status="CLEAN",
+            review_decision="",
+            is_draft=False,
+            reviewer_count=0,
+        )
+        assert new.attention_state == expected == "ci_failing"
 
     def test_review_received_sets_review_decision(self) -> None:
         old = _pr_state(review_decision="REVIEW_REQUIRED")
@@ -942,6 +1026,15 @@ class TestOverlayPushObservation:
             payload={"review_decision": "APPROVED"},
         )
         assert new.review_decision == "APPROVED"
+        expected = _compute_attention_state(
+            ci_ok=True,
+            pending_count=0,
+            merge_state_status="CLEAN",
+            review_decision="APPROVED",
+            is_draft=False,
+            reviewer_count=0,
+        )
+        assert new.attention_state == expected == "ready_to_approve"
 
     def test_review_received_missing_key_leaves_field_untouched(self) -> None:
         old = _pr_state(review_decision="REVIEW_REQUIRED")
@@ -949,6 +1042,15 @@ class TestOverlayPushObservation:
             old, event_type=OrchestratorEventType.PR_REVIEW_RECEIVED, payload={}
         )
         assert new.review_decision == "REVIEW_REQUIRED"
+        expected = _compute_attention_state(
+            ci_ok=True,
+            pending_count=0,
+            merge_state_status="CLEAN",
+            review_decision="REVIEW_REQUIRED",
+            is_draft=False,
+            reviewer_count=0,
+        )
+        assert new.attention_state == expected == "no_reviewer"
 
     def test_mergeable_sets_merge_state_status(self) -> None:
         old = _pr_state(merge_state_status="BLOCKED")
@@ -958,6 +1060,15 @@ class TestOverlayPushObservation:
             payload={"merge_state_status": "CLEAN"},
         )
         assert new.merge_state_status == "CLEAN"
+        expected = _compute_attention_state(
+            ci_ok=True,
+            pending_count=0,
+            merge_state_status="CLEAN",
+            review_decision="",
+            is_draft=False,
+            reviewer_count=0,
+        )
+        assert new.attention_state == expected == "ready_to_approve"
 
     def test_mergeable_missing_key_leaves_field_untouched(self) -> None:
         old = _pr_state(merge_state_status="BLOCKED")
@@ -965,6 +1076,8 @@ class TestOverlayPushObservation:
             old, event_type=OrchestratorEventType.PR_MERGEABLE, payload={}
         )
         assert new.merge_state_status == "BLOCKED"
+        expected = _blocked_attention_state(pending_count=0, review_decision="")
+        assert new.attention_state == expected is None
 
     def test_no_prior_baseline_starts_fresh(self) -> None:
         new = _overlay_push_observation(
@@ -972,6 +1085,8 @@ class TestOverlayPushObservation:
         )
         assert new.state == "MERGED"
         assert new.ci_ok is True  # PrState() default, untouched
+        # Terminal state short-circuits the ladder entirely (#1196).
+        assert new.attention_state is None
 
     def test_carries_forward_untouched_fields(self) -> None:
         old = _pr_state(
@@ -987,6 +1102,8 @@ class TestOverlayPushObservation:
         assert new.ci_ok is False
         assert new.failing_checks == ["x"]
         assert new.review_decision == "APPROVED"
+        # Terminal state wins over the ladder even with a stale ci_ok=False.
+        assert new.attention_state is None
 
     def test_hydrated_at_refreshed(self) -> None:
         old = _pr_state(hydrated_at=datetime(2000, 1, 1, tzinfo=UTC))
@@ -995,6 +1112,39 @@ class TestOverlayPushObservation:
                 old, event_type=OrchestratorEventType.PR_MERGED, payload={}
             )
         assert new.hydrated_at == datetime(2026, 7, 6, 12, 0, 0, tzinfo=UTC)
+        assert new.attention_state is None
+
+    def test_merged_sets_attention_state_none_regardless_of_prior_ladder_inputs(
+        self,
+    ) -> None:
+        old = _pr_state(
+            merge_state_status="BEHIND",
+            review_decision="REVIEW_REQUIRED",
+            ci_ok=False,
+            reviewer_count=0,
+            is_draft=False,
+        )
+        new = _overlay_push_observation(
+            old, event_type=OrchestratorEventType.PR_MERGED, payload={}
+        )
+        assert new.attention_state is None
+
+    def test_push_recomputes_merge_blocked_from_carried_inputs(self) -> None:
+        """Ticket's exact repro (#1196): no ladder field changes in the
+        payload, but attention_state must still be recomputed from the
+        carried baseline instead of going stale."""
+        old = _pr_state(
+            merge_state_status="BEHIND",
+            review_decision="REVIEW_REQUIRED",
+            ci_ok=True,
+            reviewer_count=1,
+            is_draft=False,
+            attention_state=None,
+        )
+        new = _overlay_push_observation(
+            old, event_type=OrchestratorEventType.PR_REVIEW_RECEIVED, payload={}
+        )
+        assert new.attention_state == "merge_blocked"
 
 
 class TestObservePushedEvent:
