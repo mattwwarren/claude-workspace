@@ -368,6 +368,9 @@ def _claude_agents_json() -> list[dict[str, object]]:
         capture_output=True,
         text=True,
         check=True,
+        # Why: bare literal (not a module constant) — single call site, matches
+        # the RealNativeDaemonClient.stop timeout=10 precedent (native_daemon.py:352)
+        # and keeps this fix minimal per #1230's scope fence (see .cw/plan.md).
         timeout=15,
     )
     data = json.loads(proc.stdout)
