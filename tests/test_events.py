@@ -675,6 +675,28 @@ def test_read_events_multiple_unknown_types_single_summary_warning(
     assert "another.new.type" in warning_records[0].message
 
 
+def test_read_events_repeated_unknown_type_counts_events_not_types(
+    tmp_events_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The warning's event count reflects skipped lines, not distinct type strings."""
+    ev1 = events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 1})
+
+    inbox = tmp_events_dir / "inbox.jsonl"
+    _append_raw_event(inbox, type="future.event.type")
+    _append_raw_event(inbox, type="future.event.type")
+    _append_raw_event(inbox, type="future.event.type")
+
+    ev2 = events_record_event(OrchestratorEventType.PR_MERGED, {"n": 2})
+
+    with caplog.at_level(logging.WARNING, logger="cw.events"):
+        result = read_events()
+
+    assert [e.id for e in result] == [ev1.id, ev2.id]
+    warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warning_records) == 1
+    assert "skipping 3 event(s)" in warning_records[0].message
+
+
 def test_read_events_known_type_other_validation_failure_raises(
     tmp_events_dir: Path,
 ) -> None:

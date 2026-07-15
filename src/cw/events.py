@@ -307,6 +307,7 @@ def _parse_lines(lines: list[str]) -> list[OrchestratorEvent]:
     )
     results: list[OrchestratorEvent] = []
     unknown_types: set[str] = set()
+    unknown_type_count = 0
     for i, raw_line in enumerate(lines):
         stripped = raw_line.strip()
         if not stripped:
@@ -325,12 +326,13 @@ def _parse_lines(lines: list[str]) -> list[OrchestratorEvent]:
             errors = exc.errors()
             if all(err["type"] == "enum" and err["loc"] == ("type",) for err in errors):
                 unknown_types.add(raw.get("type", "<missing>"))
+                unknown_type_count += 1
                 continue
             raise
     if unknown_types:
         logger.warning(
             "skipping %d event(s) with unknown type: %s",
-            len(unknown_types),
+            unknown_type_count,
             ", ".join(sorted(unknown_types)),
         )
     return results
