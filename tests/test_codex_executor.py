@@ -5,6 +5,7 @@ RFC 0005 F1.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
@@ -15,8 +16,10 @@ from cw.codex_runner import FakeCodexRunner
 from cw.config import load_state
 from cw.executor import (
     CODEX_ERROR,
+    CODEX_MUST_FIX_FINDINGS,
     CODEX_NOT_FOUND,
     CODEX_REVIEW_ONLY,
+    CODEX_REVIEW_UNPARSEABLE,
     CODEX_TIMEOUT,
     CodexExecutor,
     StageExecutor,
@@ -37,7 +40,6 @@ from cw.models import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
 
 def _persisted_result() -> AutoDevResult:
@@ -150,7 +152,11 @@ def test_codex_executor_stage_complete(
 ) -> None:
     """Runner exit 0 with findings → stage_complete, session COMPLETED."""
     worktree = make_git_repo("wt-codex-complete")
-    runner = FakeCodexRunner(returncode=0, stdout="## Findings\n\nLooks good.")
+    runner = FakeCodexRunner(
+        returncode=0,
+        stdout="## Findings\n\nLooks good.",
+        output_file_content='{"must_fix_initial": 0, "should_fix": 0, "deferred": 0}',
+    )
     config = StageExecutorConfig(backend=CODEX_BACKEND)
     executor = CodexExecutor(config=config, runner=runner)
     client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
@@ -169,6 +175,10 @@ def test_codex_executor_stage_complete(
     assert result.stage_reached == "stage3_review"
     assert result.health.recommendation == "PROCEED"
     assert result.health.any_incomplete_risk is False
+    assert result.review.must_fix_initial == 0
+    assert result.review.should_fix == 0
+    assert result.review.deferred == 0
+    assert result.review.fix_cycles_used == 0
     # Round-trips through the strict validator.
     AutoDevResult.model_validate(result.model_dump(mode="json"))
 
@@ -176,6 +186,130 @@ def test_codex_executor_stage_complete(
     session = next((s for s in state.sessions if s.last_result is not None), None)
     assert session is not None
     assert session.status == SessionStatus.COMPLETED
+
+
+def test_codex_executor_must_fix_findings_blocked(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """must_fix_initial > 0 → blocked/codex_must_fix_findings, never stage_complete."""
+    worktree = make_git_repo("wt-codex-must-fix")
+    runner = FakeCodexRunner(
+        returncode=0,
+        output_file_content='{"must_fix_initial": 2, "should_fix": 1, "deferred": 0}',
+    )
+    config = StageExecutorConfig(backend=CODEX_BACKEND)
+    executor = CodexExecutor(config=config, runner=runner)
+    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
+
+    with patch("cw.executor.shutil.which", return_value="/usr/bin/codex"):
+        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+
+    result = _persisted_result()
+    assert result.status == "blocked"
+    assert result.stage_reached == "stage3_review"
+    assert result.blocker is not None
+    assert result.blocker.reason == CODEX_MUST_FIX_FINDINGS
+    # #1203's own bug, reproduced in the blocked path: the parsed counts must
+    # survive onto the sentinel, not fall back to the hardcoded 0/0/0/0.
+    assert result.review.must_fix_initial == 2
+    assert result.review.should_fix == 1
+    assert result.review.deferred == 0
+    assert result.review.fix_cycles_used == 0
+
+
+def test_codex_executor_missing_output_file_blocked(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """No -o output file content → blocked/codex_review_unparseable."""
+    worktree = make_git_repo("wt-codex-missing-output")
+    runner = FakeCodexRunner(returncode=0)
+    config = StageExecutorConfig(backend=CODEX_BACKEND)
+    executor = CodexExecutor(config=config, runner=runner)
+    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
+
+    with patch("cw.executor.shutil.which", return_value="/usr/bin/codex"):
+        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+
+    result = _persisted_result()
+    assert result.status == "blocked"
+    assert result.stage_reached == "stage3_review"
+    assert result.blocker is not None
+    assert result.blocker.reason == CODEX_REVIEW_UNPARSEABLE
+
+
+def test_codex_executor_malformed_json_blocked(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Non-JSON output file content → blocked/codex_review_unparseable."""
+    worktree = make_git_repo("wt-codex-malformed-json")
+    runner = FakeCodexRunner(returncode=0, output_file_content="not json{{")
+    config = StageExecutorConfig(backend=CODEX_BACKEND)
+    executor = CodexExecutor(config=config, runner=runner)
+    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
+
+    with patch("cw.executor.shutil.which", return_value="/usr/bin/codex"):
+        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+
+    result = _persisted_result()
+    assert result.status == "blocked"
+    assert result.stage_reached == "stage3_review"
+    assert result.blocker is not None
+    assert result.blocker.reason == CODEX_REVIEW_UNPARSEABLE
+
+
+def test_codex_executor_review_validation_failure_blocked(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Non-coercible field type in output JSON → blocked/codex_review_unparseable."""
+    worktree = make_git_repo("wt-codex-review-validation-failure")
+    runner = FakeCodexRunner(
+        returncode=0,
+        output_file_content='{"must_fix_initial": "many", "should_fix": 0}',
+    )
+    config = StageExecutorConfig(backend=CODEX_BACKEND)
+    executor = CodexExecutor(config=config, runner=runner)
+    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
+
+    with patch("cw.executor.shutil.which", return_value="/usr/bin/codex"):
+        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+
+    result = _persisted_result()
+    assert result.status == "blocked"
+    assert result.stage_reached == "stage3_review"
+    assert result.blocker is not None
+    assert result.blocker.reason == CODEX_REVIEW_UNPARSEABLE
+
+
+def test_codex_executor_should_fix_only_stays_complete(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """must_fix_initial == 0 with should_fix > 0 → stays stage_complete."""
+    worktree = make_git_repo("wt-codex-should-fix-only")
+    runner = FakeCodexRunner(
+        returncode=0,
+        output_file_content='{"must_fix_initial": 0, "should_fix": 3, "deferred": 1}',
+    )
+    config = StageExecutorConfig(backend=CODEX_BACKEND)
+    executor = CodexExecutor(config=config, runner=runner)
+    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
+
+    with patch("cw.executor.shutil.which", return_value="/usr/bin/codex"):
+        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+
+    result = _persisted_result()
+    assert result.status == "stage_complete"
+    assert result.review.should_fix == 3
+    assert result.review.deferred == 1
 
 
 def test_resolve_executor_returns_codex_executor(
@@ -198,15 +332,51 @@ def test_resolve_executor_returns_codex_executor(
 
 
 def test_build_codex_argv_with_model() -> None:
-    """A model maps to a trailing -m flag."""
-    argv = _build_codex_argv("gpt-4", "main")
-    assert argv == ["codex", "exec", "review", "--base", "main", "-m", "gpt-4"]
+    """A model maps to a trailing -m flag, after --output-schema/-o."""
+    schema_path = Path("/tmp/schema.json")
+    output_path = Path("/tmp/output.json")
+    argv = _build_codex_argv(
+        model="gpt-4",
+        default_branch="main",
+        schema_path=schema_path,
+        output_path=output_path,
+    )
+    assert argv == [
+        "codex",
+        "exec",
+        "review",
+        "--base",
+        "main",
+        "--output-schema",
+        str(schema_path),
+        "-o",
+        str(output_path),
+        "-m",
+        "gpt-4",
+    ]
 
 
 def test_build_codex_argv_no_model() -> None:
     """A None model omits the -m flag."""
-    argv = _build_codex_argv(None, "main")
-    assert argv == ["codex", "exec", "review", "--base", "main"]
+    schema_path = Path("/tmp/schema.json")
+    output_path = Path("/tmp/output.json")
+    argv = _build_codex_argv(
+        model=None,
+        default_branch="main",
+        schema_path=schema_path,
+        output_path=output_path,
+    )
+    assert argv == [
+        "codex",
+        "exec",
+        "review",
+        "--base",
+        "main",
+        "--output-schema",
+        str(schema_path),
+        "-o",
+        str(output_path),
+    ]
 
 
 def test_codex_executor_stage_sentinel_schema(tmp_path: Path) -> None:

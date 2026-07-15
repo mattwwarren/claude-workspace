@@ -9,10 +9,8 @@ from __future__ import annotations
 
 import dataclasses
 import subprocess
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 
 @dataclasses.dataclass
@@ -23,6 +21,31 @@ class CodexRunResult:
     stdout: str
     stderr: str
     timed_out: bool = False
+    # Contents of the file at the argv "-o" path, read after the process
+    # exits. None when the flag was absent, the file was never written, or
+    # it could not be read (issue #1203).
+    output_file_content: str | None = None
+
+
+def _read_output_file(argv: list[str]) -> str | None:
+    """Return the contents of the file following "-o" in *argv*, or None.
+
+    Returns None when "-o" is absent from argv, has no following element, the
+    target file cannot be read (missing, permissions, etc.), or its bytes
+    aren't valid UTF-8 — the caller treats None as "no structured output
+    available". The content originates from an external process (codex), so
+    a decode failure is a real possibility, not just a missing-file case.
+    """
+    if "-o" not in argv:
+        return None
+    idx = argv.index("-o")
+    if idx + 1 >= len(argv):
+        return None
+    output_path = Path(argv[idx + 1])
+    try:
+        return output_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
 
 
 @runtime_checkable
@@ -76,6 +99,7 @@ class RealCodexRunner:
             # Cap in-memory allocation; caller applies a tighter cap before persisting.
             stderr=stderr[-4000:],
             timed_out=False,
+            output_file_content=_read_output_file(argv),
         )
 
 
@@ -93,12 +117,14 @@ class FakeCodexRunner:
         stderr: str = "",
         timed_out: bool = False,
         simulate_timeout: bool = False,
+        output_file_content: str | None = None,
     ) -> None:
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
         self.timed_out = timed_out
         self.simulate_timeout = simulate_timeout
+        self.output_file_content = output_file_content
         self.calls: list[dict[str, object]] = []
 
     def run(
@@ -121,4 +147,5 @@ class FakeCodexRunner:
             stdout=self.stdout,
             stderr=self.stderr,
             timed_out=self.timed_out,
+            output_file_content=self.output_file_content,
         )
