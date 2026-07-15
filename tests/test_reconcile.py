@@ -157,6 +157,31 @@ def test_claude_agents_json_returns_empty_on_non_list(
     assert result == []
 
 
+def test_claude_agents_json_passes_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_claude_agents_json passes a timeout= kwarg to subprocess.run (#1230).
+
+    An unbounded `claude agents --json` call under sessions_lock wedges the
+    fleet on any CLI hang — the timeout is the guard against that.
+    """
+    captured_kwargs: dict[str, object] = {}
+
+    def _fake_run(cmd: list[str], **kwargs: object) -> object:
+        captured_kwargs.update(kwargs)
+
+        class _Result:
+            stdout = "[]"
+            returncode = 0
+
+        return _Result()
+
+    monkeypatch.setattr("cw.reconcile._shared.subprocess.run", _fake_run)
+    _claude_agents_json()
+    assert "timeout" in captured_kwargs
+    assert captured_kwargs["timeout"] == 15
+
+
 def test_compute_drift_empty_state_returns_empty_report() -> None:
     state = CwState()
     report = compute_drift(state, set())
@@ -7658,6 +7683,40 @@ def test_reconcile_tolerates_file_not_found_from_claude_agents(
     # State must be unchanged — no session reaped
     reloaded = load_state()
     s = reloaded.find_by_name_or_id("s-fnf")
+    assert s is not None
+    assert s.status == SessionStatus.ACTIVE
+
+
+def test_reconcile_tolerates_timeout_from_claude_agents(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """subprocess.TimeoutExpired from _claude_agents_json → daemon_errored semantics.
+
+    A `claude agents --json` hang must not wedge sessions_lock or trigger
+    mass-reaping. reconcile() must NOT raise; with live ACTIVE sessions
+    present the outage guard fires and state is left unchanged (#1230).
+    """
+    state = CwState(
+        sessions=[
+            _mk_session("s-timeout", "ref-timeout"),
+        ]
+    )
+    save_state(state)
+
+    def _hangs() -> list[dict[str, object]]:
+        raise subprocess.TimeoutExpired(cmd=["claude", "agents", "--json"], timeout=15)
+
+    monkeypatch.setattr("cw.reconcile.core._claude_agents_json", _hangs)
+
+    # Must not raise
+    report = reconcile()
+
+    assert report.phantom_session_ids == []
+    assert report.phantom_session_names == []
+    # State must be unchanged — no session reaped, no reap/park mutation
+    reloaded = load_state()
+    s = reloaded.find_by_name_or_id("s-timeout")
     assert s is not None
     assert s.status == SessionStatus.ACTIVE
 
