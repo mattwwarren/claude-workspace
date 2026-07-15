@@ -363,7 +363,7 @@ See [config/CONFIG_REFERENCE.md](config/CONFIG_REFERENCE.md) for all options and
 - **Reconcile** — `cw status`, `cw list`, `cw start`, and each dispatch tick call `reconcile()` to detect phantom sessions (in state but absent from the daemon roster). Default `reap_policy: signal_only` emits `SESSION_REAP_PROPOSED` and routes to `BLOCKED_ON_USER` without destructive mutation. `reap_policy: auto` or `cw doctor --reap` performs actual cleanup.
 - **Sentinel parsing** — the `/auto-dev --headless` worker emits a structured `AUTO_DEV_RESULT` JSON block at session end. `reconcile()` reads this from the transcript to advance the queue task.
 - **File-based locking** — prevents concurrent state corruption from parallel session operations.
-- **Event bus** — `~/.local/share/cw/events.jsonl` provides an audit trail; MCP servers (`cw pr-channel`, `cw queue-channel`, `cw operator-channel`) push filtered events to Claude Code sessions.
+- **Event bus** — `~/.local/share/cw/events/inbox.jsonl` provides an audit trail; MCP servers (`cw pr-channel`, `cw queue-channel`, `cw operator-channel`) push filtered events to Claude Code sessions.
 - **Worktrees** — impl agents work in isolated git worktrees; `cw worktree gc` prunes merged ones.
 
 ### Key files
@@ -373,7 +373,8 @@ See [config/CONFIG_REFERENCE.md](config/CONFIG_REFERENCE.md) for all options and
 | `~/.config/cw/clients.yaml` | Client configuration |
 | `~/.local/share/cw/sessions.json` | Session state |
 | `~/.local/share/cw/dev_queue.json` | Dispatch queue |
-| `~/.local/share/cw/events.jsonl` | Event history |
+| `~/.local/share/cw/events/inbox.jsonl` | Event history |
+| `~/.claude-workspace/orchestrator.yaml` | Dispatch-loop tuning (created with defaults on first run) |
 | `~/.claude/daemon/roster.json` | Native daemon session roster |
 
 ### Architecture decisions
