@@ -311,7 +311,9 @@ If any signature is present, emit the structured `blocked` sentinel below and st
 }
 ```
 
-**Do not add `push_auth_failed` to `FINALIZE_REGRESS_BLOCKER_REASONS`** (`auto_dev_result.py:119`, currently `{"agent_block"}`). A locked SSH key is not fixed by re-running implementation — adding this reason to the regress set would auto-regress FINALIZE→IMPL and burn `FINALIZE_REGRESS_CAP` attempts against a still-locked key. Park for the operator instead via the sentinel above.
+**Do not add `push_auth_failed` to `FINALIZE_REGRESS_BLOCKER_REASONS`** (`auto_dev_result.py:126`, currently `{"agent_block"}`). A locked SSH key is not fixed by re-running implementation — adding this reason to the regress set would auto-regress FINALIZE→IMPL and burn `FINALIZE_REGRESS_CAP` attempts against a still-locked key. Park for the operator instead via the sentinel above.
+
+**cw-side classification (RFC 0011 A1, #1155):** `push_auth_failed` is now retro-classified under `OPERATOR_UNAVAILABLE_BLOCKER_REASONS` (`auto_dev_result.py`), so cw tags its park with `paused_status: "awaiting_operator_availability"` instead of the generic `"blocked"`. This is a cw-side (`dispatch.py`) routing change only — no change to this producer skill's sentinel shape or logic is required.
 
 **Producer note:** `push_auth_failed` is an open-enum addition to `blocker.reason` (per headless-contract.md §4.2 — `reason` is open by design, same precedent as `merge_conflict_post_push` below). Consumers surface it verbatim; no parser change needed.
 
