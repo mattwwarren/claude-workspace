@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from cw.auto_dev_result import INTERMEDIATE_ADVANCE_STATUSES, AutoDevResult
 from cw.config import save_state
 from cw.dev_queue import (
     _derive_disposition,
@@ -49,11 +50,14 @@ from cw.reconcile._shared import (
     ReapCandidate,
     _apply_queue_mutations,
     _apply_salvaged_completion,
+    _apply_sentinel_to_task,
     _cleanup_timed_out_worktree,
     _emit_reap_proposed,
     _is_headless,
+    _parse_any_sentinel_from_transcript,
     _queue_status_for_salvaged,
     _transcript_age_seconds,
+    classify_sentinel_stage_position,
     feature_branch_key,
     resolve_headless_budget,
     resolve_reap_policy,
@@ -67,7 +71,6 @@ if TYPE_CHECKING:
     from datetime import datetime
     from pathlib import Path
 
-    from cw.auto_dev_result import AutoDevResult
     from cw.models import ClientConfig, CwState, Session, TicketTask
 
 _log = logging.getLogger(__name__)
@@ -146,6 +149,82 @@ def _maybe_append_salvage_skip_reset(
         )
 
 
+def _stalled_advance_sentinel_candidate(
+    session: Session,
+    task: TicketTask | None,
+    ticket_id: str | None,
+    elapsed: float,
+    clients: dict[str, ClientConfig],
+) -> ReapCandidate | None:
+    """ROUTE_EMITTED_SENTINEL candidate for a wall-clock-expired stage-advance session.
+
+    Path 1 backstop (GitHub #1149, R5). ``salvage_terminal_result`` deliberately
+    excludes ``stage_complete`` (not in ``SALVAGE_TERMINAL_STATUSES``), so a
+    ``stage_complete`` sentinel on a stalled session is invisible to stalled.py's
+    own salvage check and the session is wall-clock-reverted despite having
+    finished its stage cleanly. This mirrors ``phantom._phantom_advance_sentinel_
+    candidate`` (parse any sentinel, filter to ``INTERMEDIATE_ADVANCE_STATUSES``)
+    but ALSO resolves the sentinel's stage position against ``task.stage`` (R2):
+    only a *same*- or *later*-stage sentinel is harvested here, where routing is
+    expected to succeed (or park at a signoff gate) at apply time. An *earlier*-
+    stage or unresolvable-position sentinel (a stale replay, #1019) returns
+    ``None`` so detection falls through to the existing finalize-blocked /
+    retry-cap / wall-clock-revert chain unchanged, and this backstop never
+    intercepts stalled.py's fallback reap path for a stale sentinel.
+    """
+    if task is None:
+        return None
+    parsed = _parse_any_sentinel_from_transcript(session)
+    if parsed is None:
+        return None
+    result, csid = parsed
+    if (
+        not isinstance(result, AutoDevResult)
+        or result.status not in INTERMEDIATE_ADVANCE_STATUSES
+    ):
+        return None
+    position, _stages, _target_idx = classify_sentinel_stage_position(
+        task, result.model_dump(mode="json"), clients
+    )
+    if position not in ("same", "later"):
+        return None
+    return ReapCandidate(
+        session_id=session.id,
+        proposed_action=ProposedAction.ROUTE_EMITTED_SENTINEL,
+        ticket_id=ticket_id,
+        routed_sentinel=result,
+        salvage_csid=csid,
+        elapsed_seconds=elapsed,
+        lane=task.lane,
+        client=session.client,
+    )
+
+
+def _append_routed_advance_candidate(
+    candidates: list[ReapCandidate],
+    session: Session,
+    task: TicketTask | None,
+    ticket_id: str | None,
+    elapsed: float,
+    clients: dict[str, ClientConfig],
+) -> bool:
+    """Append a Path 1 backstop candidate if one applies; return whether it did.
+
+    Mirrors the other recovery exits in ``_detect_stalled_candidates``: on a
+    hit, also appends the RESET_SALVAGE_SKIP_COUNTER reset when the latch is
+    nonzero (#974). Extracted to keep the detect loop under the statement cap;
+    the caller ``continue``s when this returns True. See GitHub #1149.
+    """
+    routed_advance = _stalled_advance_sentinel_candidate(
+        session, task, ticket_id, elapsed, clients
+    )
+    if routed_advance is None:
+        return False
+    _maybe_append_salvage_skip_reset(candidates, session, ticket_id)
+    candidates.append(routed_advance)
+    return True
+
+
 def _detect_stalled_candidates(
     state: CwState,
     *,
@@ -164,11 +243,12 @@ def _detect_stalled_candidates(
     effective_clients = _deps.load_effective_clients()
     candidates: list[ReapCandidate] = []
     for session in state.sessions:
-        if session.status not in _LIVE_STATUSES:
-            continue
-        if session.origin is not SessionOrigin.DAEMON:
-            continue
-        if not _is_headless(session):
+        # Only live, headless DAEMON sessions are eligible for the stalled sweep.
+        if (
+            session.status not in _LIVE_STATUSES
+            or session.origin is not SessionOrigin.DAEMON
+            or not _is_headless(session)
+        ):
             continue
         # Park-marker check: sessions already parked by the idle watchdog.
         # Detect returns SKIP_PARKED candidate; act emits the skip event.
@@ -226,6 +306,16 @@ def _detect_stalled_candidates(
                     client=session.client,
                 )
             )
+            continue
+        # Path 1 backstop (#1149): a stage_complete advance sentinel is excluded
+        # from SALVAGE_TERMINAL_STATUSES, so the salvage check above never sees
+        # it. Harvest a same-/later-stage advance sentinel here (routing it via
+        # the shared authority) BEFORE any finalize-blocked / cap / wall-clock
+        # revert candidate is constructed, so a cleanly-completed stage is not
+        # reverted. Earlier-stage / unresolvable sentinels fall through unchanged.
+        if _append_routed_advance_candidate(
+            candidates, session, task, ticket_id, elapsed, effective_clients
+        ):
             continue
         # Finalize-blocked check: branch pushed but finalize failed before opening
         # a PR (GitHub #812). Must run BEFORE the retry-cap check so the task
@@ -502,6 +592,53 @@ def _apply_stalled_state_mutations(
         session_by_id[candidate.session_id].consecutive_salvage_skips = 0
 
 
+def _apply_stalled_routed_mutations(
+    session_by_id: dict[str, Session],
+    routed_sentinel_candidates: list[ReapCandidate],
+    *,
+    now: datetime,
+) -> list[ReapCandidate]:
+    """Apply ROUTE_EMITTED_SENTINEL mutations for wall-clock-expired advance workers.
+
+    Path 1 backstop act phase (GitHub #1149). A direct structural mirror of
+    ``idle._apply_idle_routed_mutations``: route the emitted advance sentinel
+    through the shared staged-advance authority (``_apply_sentinel_to_task`` ->
+    ``apply_staged_decision``), then mark the session COMPLETED/NORMAL only when
+    the route was accepted. On a stage-mismatch refusal (``routed=False``) the
+    session is NOT completed -- the candidate is dropped from the accepted list
+    so the session falls through to the ordinary cap / wall-clock-revert path on
+    the next tick rather than being torn down on a refusal. (Unlike idle.py, no
+    paused_status marker is stamped: stalled.py's detect phase only builds a
+    candidate for a same-/later-stage position, which routes successfully, so
+    there is no earlier-stage refusal loop to break here.)
+
+    ``_apply_sentinel_to_task`` acquires its own ``dev_queue_lock``; session
+    state is flushed by the caller's ``save_state``. ``session_by_id`` is built
+    from ``state.sessions`` by reference, so these mutations persist in the
+    caller's existing ``save_state(state)`` call.
+    """
+    accepted: list[ReapCandidate] = []
+    for candidate in routed_sentinel_candidates:
+        if candidate.routed_sentinel is None or candidate.salvage_csid is None:
+            continue  # Invariant: ROUTE_EMITTED_SENTINEL has routed_sentinel + csid
+        routed = True
+        if candidate.ticket_id:
+            outcome = _apply_sentinel_to_task(
+                candidate.ticket_id, candidate.session_id, candidate.routed_sentinel
+            )
+            routed = outcome.routed
+        if not routed:
+            continue
+        session = session_by_id[candidate.session_id]
+        session.status = SessionStatus.COMPLETED
+        session.completed_at = now
+        session.completed_reason = CompletionReason.NORMAL
+        session.last_result = candidate.routed_sentinel.model_dump(mode="json")
+        session.claude_session_id = candidate.salvage_csid
+        accepted.append(candidate)
+    return accepted
+
+
 def _apply_stalled_queue_mutations(
     revert_candidates: list[ReapCandidate],
     merged_revert_candidates: list[ReapCandidate],
@@ -652,6 +789,35 @@ def _branch_state_for_ticket(
     return None
 
 
+def _emit_stalled_routed_events(
+    session_by_id: dict[str, Session],
+    routed_sentinel_candidates: list[ReapCandidate],
+) -> None:
+    """Emit salvaged SESSION_COMPLETED + stop surface for routed advance sentinels.
+
+    Path 1 backstop (#1149). Mirrors ``idle._emit_idle_completion_events``'
+    routed-sentinel loop and stalled.py's own salvage loop. Extracted so
+    ``_emit_stalled_events`` stays under the branch cap.
+    """
+    for candidate in routed_sentinel_candidates:
+        if candidate.routed_sentinel is None:
+            continue  # Invariant: ROUTE_EMITTED_SENTINEL has routed_sentinel
+        session = session_by_id[candidate.session_id]
+        routed_payload: dict[str, object] = {
+            "session_id": session.id,
+            "session_name": session.name,
+            "client": session.client,
+            "ticket_id": candidate.ticket_id,
+            "claude_session_id": session.claude_session_id,
+            "crashed": False,
+            "salvaged": True,
+            "status": candidate.routed_sentinel.status,
+        }
+        record_event(OrchestratorEventType.SESSION_COMPLETED, routed_payload)
+        if session.surface_ref is not None:
+            _deps.get_native_daemon_client().stop(session.surface_ref)
+
+
 def _emit_stalled_events(
     session_by_id: dict[str, Session],
     revert_candidates: list[ReapCandidate],
@@ -660,6 +826,7 @@ def _emit_stalled_events(
     park_candidates: list[ReapCandidate],
     salvage_candidates: list[ReapCandidate],
     finalize_blocked_candidates: list[ReapCandidate],
+    routed_sentinel_candidates: list[ReapCandidate],
     *,
     branch_absent_ticket_ids: frozenset[str] = frozenset(),
 ) -> None:
@@ -668,6 +835,8 @@ def _emit_stalled_events(
     Mirrors the post-queue side effects of the original act phase: SESSION_TIMED_OUT
     + worktree cleanup for reverts, SESSION_COMPLETED for merged/salvage, and
     SESSION_NEEDS_ATTENTION for gh-blocked and finalize-blocked candidates.
+    ROUTE_EMITTED_SENTINEL candidates (Path 1 backstop, #1149) emit a salvaged
+    SESSION_COMPLETED and stop the surface, mirroring the salvage loop.
     """
     for candidate in revert_candidates:
         session = session_by_id[candidate.session_id]
@@ -775,6 +944,7 @@ def _emit_stalled_events(
         if session.surface_ref is not None:
             _deps.get_native_daemon_client().stop(session.surface_ref)
 
+    _emit_stalled_routed_events(session_by_id, routed_sentinel_candidates)
     _emit_finalize_blocked_events(session_by_id, finalize_blocked_candidates)
 
 
@@ -922,6 +1092,11 @@ def _act_on_stalled_candidates(
     park_vetoed_candidates = [
         c for c in candidates if c.proposed_action == ProposedAction.PARK_VETOED
     ]
+    routed_sentinel_candidates = [
+        c
+        for c in candidates
+        if c.proposed_action == ProposedAction.ROUTE_EMITTED_SENTINEL
+    ]
 
     # Split REVERT_TASK candidates by world-state check results (GitHub #637).
     # merged_ticket_ids / gh_blocked_ticket_ids come from a pre-pass in
@@ -948,8 +1123,8 @@ def _act_on_stalled_candidates(
     # mutations on a skip/reset-only tick because it predated those two
     # candidate lists). The `if not candidates: return [], []` above already
     # guarantees non-emptiness, and skip/salvage/revert/park/finalize_blocked/
-    # reset_salvage_skip/park_vetoed exhaustively partition every ProposedAction
-    # that _detect_stalled_candidates emits — so a second enumerated guard here
+    # reset_salvage_skip/park_vetoed/routed_sentinel exhaustively partition every
+    # ProposedAction that _detect_stalled_candidates emits — so a second guard here
     # can never fire and only risks silently reintroducing the same bug class
     # the next time a new ProposedAction is added and this list isn't updated
     # to match. session_by_id must be built unconditionally: SKIP_PARKED/
@@ -991,6 +1166,13 @@ def _act_on_stalled_candidates(
         reset_salvage_skip_candidates=reset_salvage_skip_candidates,
     )
 
+    # Path 1 backstop (#1149): route emitted advance sentinels through the shared
+    # authority and complete the session — persisted by the save_state below,
+    # alongside the other session-state mutations.
+    routed_sentinel_candidates = _apply_stalled_routed_mutations(
+        session_by_id, routed_sentinel_candidates, now=now
+    )
+
     save_state(state)
 
     salvaged_result_by_ticket = {
@@ -1017,6 +1199,7 @@ def _act_on_stalled_candidates(
         park_candidates,
         salvage_candidates,
         finalize_blocked_candidates,
+        routed_sentinel_candidates,
         branch_absent_ticket_ids=branch_absent_ticket_ids,
     )
 
