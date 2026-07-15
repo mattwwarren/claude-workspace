@@ -4964,6 +4964,78 @@ def test_idle_park_session_needs_attention_fires_only_on_first_park(
     )
 
 
+def test_flag_silently_idle_daemon_sessions_external_counterparty_escalates(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: derive_counterparty="external" -> SESSION_NEEDS_ATTENTION
+    fires and the daemon session is NOT torn down. RFC 0011 B1 (#1158)."""
+    from cw.reconcile._shared import _EXTERNAL_COUNTERPARTY_IDLE_REASON
+
+    monkeypatch.setattr(
+        "cw.reconcile.idle.derive_counterparty", lambda _task, **_kw: "external"
+    )
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > IDLE_WATCHDOG_SECONDS
+
+    sess = Session(
+        id="idle-ext-e2e-1",
+        name="client-a/auto-dev/idle-ext-e2e-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ext-e2e",
+        started_at=started_at,
+        idle_observation_count=0,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="idle-ext-e2e-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="idle-ext-e2e-1",
+        attempts=0,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    mock_daemon = MagicMock()
+    with (
+        patch("cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon),
+        patch("cw.reconcile._deps.fire_push_notification") as mock_notify,
+    ):
+        blocked, _salvage = flag_silently_idle_daemon_sessions(
+            state,
+            now=now,
+            native_live={"live-ext-e2e"},
+            config=_auto_config(idle_confirm_observations=1),
+        )
+        mock_daemon.stop.assert_not_called()
+        mock_notify.assert_called_once_with(sess.name, sess.client)
+
+    assert "idle-ext-e2e-1" not in blocked
+    assert sess.status == SessionStatus.ACTIVE
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "idle-ext-e2e-1")
+    assert t.status == QueueItemStatus.RUNNING
+
+    events = read_events(
+        consumer="test-idle-ext-e2e-1",
+        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+    )
+    assert len(events) == 1
+    assert events[0].payload["paused_status"] == _EXTERNAL_COUNTERPARTY_IDLE_REASON
+
+
 def test_idle_park_push_notification_suppressed_on_re_park(
     tmp_config_dir: Path,
     tmp_path: Path,
@@ -7199,6 +7271,155 @@ def test_classify_idle_threshold_non_finalize_worktree_still_salvage_git(
 
     assert candidate is not None
     assert candidate.proposed_action == ProposedAction.SALVAGE_GIT
+
+
+def test_classify_idle_threshold_external_counterparty_escalates_instead_of_parking(
+    tmp_config_dir: Path,
+) -> None:
+    """counterparty="external" -> ESCALATE_EXTERNAL_IDLE, not PARK_BLOCKED_ON_USER.
+
+    RFC 0011 B1 (#1158): a session reviewing a teammate's PR is exempt from
+    silent idle-reap and is escalated instead.
+    """
+    from cw.reconcile import DEFAULT_IDLE_RETRY_CAP, ProposedAction
+    from cw.reconcile._shared import _EXTERNAL_COUNTERPARTY_IDLE_REASON
+    from cw.reconcile.idle import _classify_idle_threshold
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    sess = Session(
+        id="idle-ext-1",
+        name="client-a/auto-dev/idle-ext-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=Path("/tmp/ws"),
+        worktree_path=None,
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    task = TicketTask(
+        ticket_id="idle-ext-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="idle-ext-1",
+        attempts=DEFAULT_IDLE_RETRY_CAP,
+    )
+
+    candidate = _classify_idle_threshold(
+        sess,
+        task=task,
+        ticket_id="idle-ext-1",
+        config=_auto_config(),
+        elapsed=1000.0,
+        new_count=3,
+        counterparty="external",
+    )
+
+    assert candidate is not None
+    assert candidate.proposed_action == ProposedAction.ESCALATE_EXTERNAL_IDLE
+    assert candidate.paused_status == _EXTERNAL_COUNTERPARTY_IDLE_REASON
+
+
+def test_classify_idle_threshold_external_counterparty_merged_still_completes(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """counterparty="external" + merged ticket -> merged-first check still wins.
+
+    A shipped ticket has nothing left to escalate; REVERT_TASK must be
+    returned regardless of the counterparty axis. RFC 0011 B1 (#1158).
+    """
+    from cw.reconcile import ProposedAction
+    from cw.reconcile.idle import _classify_idle_threshold
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    wt_path = tmp_path / "wt-ext-merged-classify"
+    wt_path.mkdir(parents=True)
+    sess = Session(
+        id="idle-ext-merged-1",
+        name="client-a/auto-dev/idle-ext-merged-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=Path("/tmp/ws"),
+        worktree_path=wt_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    task = TicketTask(
+        ticket_id="idle-ext-merged-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="idle-ext-merged-1",
+        stage=Stage.IMPL,
+    )
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.checked_out_branch",
+        lambda _p: "auto-dev/idle-ext-merged-1",
+    )
+
+    candidate = _classify_idle_threshold(
+        sess,
+        task=task,
+        ticket_id="idle-ext-merged-1",
+        config=_auto_config(),
+        elapsed=1000.0,
+        new_count=3,
+        merged_client_ticket_ids=frozenset({("client-a", "idle-ext-merged-1")}),
+        counterparty="external",
+    )
+
+    assert candidate is not None
+    assert candidate.proposed_action == ProposedAction.REVERT_TASK
+
+
+def test_classify_idle_threshold_self_counterparty_unchanged(
+    tmp_config_dir: Path,
+) -> None:
+    """counterparty defaulted (="self") -> PARK_BLOCKED_ON_USER unchanged.
+
+    Regression guard for RFC 0011 B1 (#1158): existing callers that don't
+    yet pass counterparty must see identical behavior to before this ticket.
+    """
+    from cw.reconcile import DEFAULT_IDLE_RETRY_CAP, ProposedAction
+    from cw.reconcile.idle import _classify_idle_threshold
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    sess = Session(
+        id="idle-self-1",
+        name="client-a/auto-dev/idle-self-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=Path("/tmp/ws"),
+        worktree_path=None,
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    task = TicketTask(
+        ticket_id="idle-self-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="idle-self-1",
+        attempts=DEFAULT_IDLE_RETRY_CAP,
+    )
+
+    candidate = _classify_idle_threshold(
+        sess,
+        task=task,
+        ticket_id="idle-self-1",
+        config=_auto_config(),
+        elapsed=1000.0,
+        new_count=3,
+    )
+
+    assert candidate.proposed_action == ProposedAction.PARK_BLOCKED_ON_USER
+    assert candidate.paused_status == _SILENTLY_IDLE_REASON
 
 
 # ---------------------------------------------------------------------------
@@ -13793,6 +14014,124 @@ def test_act_on_idle_park_emits_needs_attention_and_sets_reap_reason(
     )
     assert len(events) == 1
     assert events[0].payload["paused_status"] == _SILENTLY_IDLE_REASON
+
+
+def test_act_on_idle_candidates_escalate_external_emits_needs_attention_zero_mutation(
+    tmp_config_dir: Path,
+) -> None:
+    """ESCALATE_EXTERNAL_IDLE -> SESSION_NEEDS_ATTENTION with real session_name/
+    claude_session_id (not None/empty), push notification fired once, and zero
+    Session/TicketTask mutation. RFC 0011 B1 (#1158)."""
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_idle_candidates
+    from cw.reconcile._shared import _EXTERNAL_COUNTERPARTY_IDLE_REASON
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+    sess = Session(
+        id="idle-ext-evt-1",
+        name="client-a/auto-dev/idle-ext-evt-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+        idle_observation_count=3,
+        claude_session_id="csid-ext-evt-1",
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="idle-ext-evt-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="idle-ext-evt-1",
+        attempts=1,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    session_before = sess.model_copy(deep=True)
+    task_before = task.model_copy(deep=True)
+
+    candidate = ReapCandidate(
+        session_id="idle-ext-evt-1",
+        proposed_action=ProposedAction.ESCALATE_EXTERNAL_IDLE,
+        ticket_id="idle-ext-evt-1",
+        new_observation_count=4,
+        client="client-a",
+        paused_status=_EXTERNAL_COUNTERPARTY_IDLE_REASON,
+    )
+
+    with patch("cw.reconcile._deps.fire_push_notification") as mock_notify:
+        _act_on_idle_candidates(state, [candidate], now=now)
+        mock_notify.assert_called_once_with(sess.name, sess.client)
+
+    events = read_events(
+        consumer="test-idle-ext-evt-1",
+        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+    )
+    assert len(events) == 1
+    payload = events[0].payload
+    assert payload["session_name"] == "client-a/auto-dev/idle-ext-evt-1"
+    assert payload["claude_session_id"] == "csid-ext-evt-1"
+    assert payload["paused_status"] == _EXTERNAL_COUNTERPARTY_IDLE_REASON
+
+    # Zero mutation: neither Session nor TicketTask state changed.
+    assert sess.model_dump() == session_before.model_dump()
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "idle-ext-evt-1")
+    assert t.model_dump() == task_before.model_dump()
+
+
+def test_act_on_idle_candidates_escalate_external_only_candidate_not_dropped(
+    tmp_config_dir: Path,
+) -> None:
+    """ESCALATE_EXTERNAL_IDLE as the sole candidate is not dropped by the
+    has_dispositions short-circuit ([], [], []). RFC 0011 B1 (#1158)."""
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_idle_candidates
+    from cw.reconcile._shared import _EXTERNAL_COUNTERPARTY_IDLE_REASON
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+    sess = _mk_live_idle_daemon_session(
+        "idle-ext-only-1", "live-ref", started_at, idle_observation_count=3
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="idle-ext-only-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="idle-ext-only-1",
+        attempts=1,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidate = ReapCandidate(
+        session_id="idle-ext-only-1",
+        proposed_action=ProposedAction.ESCALATE_EXTERNAL_IDLE,
+        ticket_id="idle-ext-only-1",
+        new_observation_count=4,
+        client="client-a",
+        paused_status=_EXTERNAL_COUNTERPARTY_IDLE_REASON,
+    )
+
+    with patch("cw.reconcile._deps.fire_push_notification"):
+        result = _act_on_idle_candidates(state, [candidate], now=now)
+
+    assert result == ([], [], [])
+
+    events = read_events(
+        consumer="test-idle-ext-only-1",
+        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+    )
+    assert len(events) == 1
+    assert events[0].payload["paused_status"] == _EXTERNAL_COUNTERPARTY_IDLE_REASON
 
 
 def test_act_on_idle_revert_task_routes_pending_emits_timed_out(
