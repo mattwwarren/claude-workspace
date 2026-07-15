@@ -203,3 +203,24 @@ class RfcContractError(CwError):
     """
 
     __slots__ = ()
+
+
+class SprintApplyError(CwError):
+    """Raised when :func:`cw.sprint.apply_plan` cannot complete a `gh`
+    issue-creation pass — any milestone/epic/ticket lookup or create call
+    that reports failure (``ok=False`` or a ``None`` return).
+
+    Carries the partial ``AppliedBuildout`` state accumulated before the
+    failure via ``applied``, so the operator can see exactly what was already
+    created or skipped and re-run ``cw sprint apply`` to resume rather than
+    starting over (creation is idempotent by title). Typed ``object | None``
+    rather than ``AppliedBuildout | None`` to avoid a ``cw.exceptions`` ->
+    ``cw.sprint`` import cycle: ``cw.sprint`` already imports from
+    ``cw.exceptions``, so the reverse import is not available here.
+    """
+
+    __slots__ = ("applied",)
+
+    def __init__(self, message: str, *, applied: object | None = None) -> None:
+        super().__init__(message)
+        self.applied = applied
