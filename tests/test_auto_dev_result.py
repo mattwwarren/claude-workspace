@@ -14,6 +14,8 @@ from cw.auto_dev_result import (
     _PREMISE_GLITCH_PLACEHOLDER_CLAIM,
     BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN,
     BLOCKER_REASON_VALIDATION_FAILED,
+    FINALIZE_REGRESS_BLOCKER_REASONS,
+    OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
     PAUSED_FOR_USER_INPUT_STATUSES,
     SALVAGE_TERMINAL_STATUSES,
     SCOPE_GATED_APPROVAL_STATUSES,
@@ -3550,3 +3552,37 @@ class TestReviewDeferred:
             }
         )
         assert review.deferred == 3
+
+
+class TestOperatorUnavailableBlockerReasons:
+    """RFC 0011 A1 — distinct `awaiting_operator` park class (issue #1155).
+
+    OPERATOR_UNAVAILABLE_BLOCKER_REASONS tags blocker reasons that mean "we
+    can't reach the operator/a dependency right now", not "this leg is
+    broken" -- a distinct axis from FINALIZE_REGRESS_BLOCKER_REASONS.
+    """
+
+    def test_operator_unavailable_reasons_frozenset_members(self) -> None:
+        assert (
+            frozenset({"push_auth_failed", "operator_unavailable"})
+            == OPERATOR_UNAVAILABLE_BLOCKER_REASONS
+        )
+
+    def test_operator_unavailable_reasons_excluded_from_finalize_regress(
+        self,
+    ) -> None:
+        assert "push_auth_failed" not in FINALIZE_REGRESS_BLOCKER_REASONS
+        assert "operator_unavailable" not in FINALIZE_REGRESS_BLOCKER_REASONS
+
+    def test_finalize_regress_blocker_reasons_unchanged(self) -> None:
+        assert frozenset({"agent_block"}) == FINALIZE_REGRESS_BLOCKER_REASONS
+
+    def test_blocked_operator_unavailable_round_trips_without_bump(self) -> None:
+        """A blocked+operator_unavailable blocker round-trips without a schema bump."""
+        p = _blocked_payload()
+        p["blocker"]["reason"] = "operator_unavailable"
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.blocker is not None
+        assert result.blocker.reason == "operator_unavailable"
+        assert result.schema_version == p["schema_version"]

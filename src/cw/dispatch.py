@@ -19,6 +19,7 @@ from cw.auto_dev_result import (
     _STAGE_REACHED_CANONICAL,
     FINALIZE_REGRESS_BLOCKER_REASONS,
     FINALIZE_REGRESS_CAP,
+    OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
     PAUSED_FOR_USER_INPUT_STATUSES,
     PLAN_SOURCE_NONE,
     SCOPE_GATED_APPROVAL_STATUSES,
@@ -135,6 +136,14 @@ _UNKNOWN_CLIENT_REASON = "unknown_client"
 # transient/recoverable state. Same exclusion as _UNKNOWN_CLIENT_REASON. See
 # GitHub #976.
 _INVALID_STAGE_REASON = "invalid_stage_config"
+# paused_status written to SESSION_NEEDS_ATTENTION when Rule 5's blocked
+# status carries a blocker reason in OPERATOR_UNAVAILABLE_BLOCKER_REASONS
+# (RFC 0011 A1). Deliberately distinct from QueueItemStatus.
+# AWAITING_OPERATOR_SIGNOFF -- that enum member is a REVIEW-stage signoff
+# gate; this constant is a paused_status string for an operator/dependency
+# unavailability, an unrelated concept that happens to share the "awaiting
+# operator" phrase. See GitHub #1155.
+_AWAITING_OPERATOR_REASON = "awaiting_operator_availability"
 # ``source`` field on a LANE_PAUSED event emitted by the per-lane circuit breaker
 # (as opposed to an operator-initiated ``cw lane pause``). See GitHub issue #875.
 _LANE_PAUSE_SOURCE_CIRCUIT_BREAKER = "circuit_breaker"
@@ -2067,17 +2076,17 @@ def _route_staged_decision(
         # scope_exceeded/forbidden_area/merge_gate_blocked have no blocker field
         # (validator enforces this) so they always fall through to BLOCKED_ON_USER.
         blocker = last_result.get("blocker") if isinstance(last_result, dict) else None
+        blocker_reason = blocker.get("reason") if isinstance(blocker, dict) else None
         if (
             status == "blocked"
             and task.stage == Stage.FINALIZE
-            and isinstance(blocker, dict)
-            and blocker.get("reason") in FINALIZE_REGRESS_BLOCKER_REASONS
+            and blocker_reason in FINALIZE_REGRESS_BLOCKER_REASONS
             and task.regress_attempts < FINALIZE_REGRESS_CAP
         ):
             _log.info(
                 "dispatch: finalize gate blocked (%r) — regressing %r to IMPL"
                 " (regress attempt %d/%d)",
-                blocker.get("reason"),
+                blocker_reason,
                 task.ticket_id,
                 task.regress_attempts + 1,
                 FINALIZE_REGRESS_CAP,
@@ -2091,14 +2100,12 @@ def _route_staged_decision(
                     "from_stage": Stage.FINALIZE,
                     "to_stage": Stage.IMPL,
                     "reason": "finalize_regress",
-                    "blocker_reason": blocker.get("reason"),
+                    "blocker_reason": blocker_reason,
                     "regress_attempt": task.regress_attempts,
                 },
             )
             return True
-        breadcrumbs = (
-            str(blocker.get("reason", "")) if isinstance(blocker, dict) else ""
-        )
+        breadcrumbs = str(blocker_reason) if blocker_reason is not None else ""
         record_event(
             OrchestratorEventType.SESSION_NEEDS_ATTENTION,
             {
@@ -2107,7 +2114,11 @@ def _route_staged_decision(
                 "client": task.client,
                 "ticket_id": task.ticket_id,
                 "claude_session_id": None,
-                "paused_status": status,
+                "paused_status": (
+                    _AWAITING_OPERATOR_REASON
+                    if blocker_reason in OPERATOR_UNAVAILABLE_BLOCKER_REASONS
+                    else status
+                ),
                 "breadcrumbs": breadcrumbs,
                 "crashed": False,
             },
