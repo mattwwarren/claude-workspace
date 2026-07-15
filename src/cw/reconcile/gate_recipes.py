@@ -41,6 +41,15 @@ The act phase calls the lock-free ``_approve_ticket_locked`` primitive directly
 from inside its own ``dev_queue_lock()`` acquisition — never the public
 ``approve_ticket`` wrapper, which would self-deadlock by re-acquiring the same
 flock-based lock (see #1065 and ``dev_queue._approve_ticket_locked``).
+
+**Invariant (GitHub #1199):** cw never grants a GitHub pull-request review
+approval — no ``gh pr review --approve``, GraphQL ``addPullRequestReview``
+with ``event: APPROVE``, or REST ``POST /pulls/{n}/reviews`` with
+``"event": "APPROVE"`` call path exists anywhere in ``src/``, and this
+module's own ``auto_approve_clean_review`` recipe does not touch GitHub
+review state at all — it advances only cw's internal dev-queue gate via
+``_approve_ticket_locked``. See ADR-0012 and
+``tests/test_review_approval_guard.py``.
 """
 
 from __future__ import annotations
@@ -78,6 +87,8 @@ _log = logging.getLogger(__name__)
 # Recipe name constants — the recognised gate-recipe keys. Only the review
 # recipe is wired in P1+P2 (#1065); RECIPE_AUTO_ADOPT_PLAN is defined now so
 # both keys have one home, but its detect/act land in P3 (#1066).
+# NOTE (#1199): "auto_approve" here means cw's internal dispatch gate only —
+# never a GitHub PR review approval. See the module docstring and ADR-0012.
 RECIPE_AUTO_APPROVE_REVIEW = "auto_approve_clean_review"
 RECIPE_AUTO_ADOPT_PLAN = "auto_adopt_clean_plan"
 
