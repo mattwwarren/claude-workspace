@@ -98,9 +98,9 @@ def _find_graphql_approve(text: str, path: Path) -> list[str]:
     return _find_cooccurrence(
         text,
         path,
-        _GRAPHQL_APPROVE_RE,
-        _GRAPHQL_APPROVE_EVENT_RE,
-        "addPullRequestReview co-occurs with event: APPROVE",
+        primary_re=_GRAPHQL_APPROVE_RE,
+        secondary_re=_GRAPHQL_APPROVE_EVENT_RE,
+        message="addPullRequestReview co-occurs with event: APPROVE",
     )
 
 
@@ -108,9 +108,9 @@ def _find_rest_approve(text: str, path: Path) -> list[str]:
     return _find_cooccurrence(
         text,
         path,
-        _REST_REVIEWS_ENDPOINT_RE,
-        _REST_APPROVE_EVENT_RE,
-        'POST .../reviews co-occurs with "event": "APPROVE"',
+        primary_re=_REST_REVIEWS_ENDPOINT_RE,
+        secondary_re=_REST_APPROVE_EVENT_RE,
+        message='POST .../reviews co-occurs with "event": "APPROVE"',
     )
 
 
