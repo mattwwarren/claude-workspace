@@ -1828,13 +1828,14 @@ git commit -m "feat(gh): issue and milestone creation helpers, bodies via --body
 
 **Files:**
 - Modify: `src/cw/sprint.py`
+- Modify: `src/cw/exceptions.py`
 - Modify: `tests/test_sprint.py`
 
 **Interfaces:**
 - Consumes: `cw.sprint.BuildoutPlan` (Task 2); every helper from Task 3.
 - Produces:
   - `cw.sprint.GhSurface` (Protocol) and `cw.sprint.GhClient` (its default `cw.gh`-backed impl)
-  - `cw.sprint.AppliedBuildout` (Pydantic model: `milestone_number: int`, `epic_numbers: dict[str, int]`, `ticket_numbers: dict[str, int]`, `created: list[str]`, `skipped: list[str]`)
+  - `cw.sprint.AppliedBuildout` (Pydantic model: `milestone_number: int`, `epic_numbers: dict[str, int]`, `ticket_numbers: dict[str, int]`, `created: list[str]`, `skipped: list[str]`). `created`/`skipped` are epic-or-ticket codes, partitioned by whether `_create_or_skip` created a new issue or reused one matched by title against the milestone's existing issues.
   - `cw.sprint.apply_plan(plan: BuildoutPlan, *, client: GhSurface | None = None) -> AppliedBuildout` — raises `SprintApplyError` on any unrecoverable `gh` failure
   - `cw.exceptions.SprintApplyError(CwError)` — carries the partial `AppliedBuildout` (as `applied`) so the CLI can report what was created before the failure
 
@@ -1842,6 +1843,98 @@ git commit -m "feat(gh): issue and milestone creation helpers, bodies via --body
 `(value, ok)` tuple returns exactly — `apply_plan` must refuse
 (`SprintApplyError`) rather than proceed when `ok` is `False`, since proceeding
 would read a failed lookup as "nothing exists yet" and re-file duplicates.
+
+## Touch-point Contract
+
+- Touch-point: `src/cw/sprint.py` import-block insertion point
+  File:line: `src/cw/sprint.py:10-23`
+  Read: `from __future__ import annotations` (10) / (blank) / `import re` (12) /
+  `import subprocess as _sp` (13) / `from typing import TYPE_CHECKING` (14) /
+  (blank) / `from pydantic import BaseModel, Field` (16) / (blank) /
+  `from cw.exceptions import RfcContractError` (18) /
+  `from cw.tracker import load_project_config_dict` (19) / (blank) /
+  `if TYPE_CHECKING:` (21) / `    from collections.abc import Iterator` (22) /
+  `    from pathlib import Path` (23) — this is the current, already-merged
+  header (Tasks 1-2 are on `origin/main`); the file is 545 lines total.
+  Plan asserts: Task 4's new imports (`Protocol`, `runtime_checkable`; `from cw
+  import gh`; `SprintApplyError`) must land in this existing header — `Protocol,
+  runtime_checkable` added onto the existing line-14 `from typing import
+  TYPE_CHECKING` import, `SprintApplyError` merged into the existing line-18
+  `from cw.exceptions import RfcContractError` import, `from cw import gh` added
+  as its own line — not appended near `apply_plan` at the end of the file, to
+  avoid tripping ruff's E402 (and I001 if merely moved to the top unsorted).
+  Match: CONFIRMED
+
+- Touch-point: `src/cw/gh.py`'s 5 real signatures `GhSurface` must structurally match
+  File:line: `src/cw/gh.py:510-517` (`create_issue`), `587-589`
+  (`update_issue_body`), `604` (`create_milestone`), `631-633`
+  (`find_milestone`), `686-688` (`milestone_issue_titles`)
+  Read:
+  `def create_issue(title: str, body: str, *, labels: list[str], milestone: int, timeout: int = _CREATE_TIMEOUT) -> int | None:`
+  `def update_issue_body(number: int, body: str, *, timeout: int = _CREATE_TIMEOUT) -> bool:`
+  `def create_milestone(title: str, *, timeout: int = _CREATE_TIMEOUT) -> int | None:`
+  `def find_milestone(title: str, *, timeout: int = _CREATE_TIMEOUT) -> tuple[int | None, bool]:`
+  `def milestone_issue_titles(milestone: int, *, timeout: int = _CREATE_TIMEOUT) -> tuple[dict[str, int] | None, bool]:`
+  Plan asserts: `GhSurface`'s 5 Protocol methods (and `GhClient`'s delegating
+  bodies) cover a narrower call surface than the real functions — none of them
+  declare the real `*, timeout: int = ...` keyword-only parameter, since
+  `apply_plan` never needs a non-default timeout. This is a deliberate subset,
+  not a mismatch: a class satisfies a `Protocol` by being call-compatible with
+  what the Protocol declares, and `GhClient`'s bodies (`gh.find_milestone(title)`
+  etc.) rely on the real functions' `timeout` default rather than forwarding one.
+  Every other parameter name, order, and return-type shape (including the
+  `tuple[T | None, bool]` split on the two lookup helpers) matches exactly.
+  Match: CONFIRMED
+
+- Touch-point: `src/cw/exceptions.py`'s `CwError.__slots__ = ()` convention
+  File:line: `src/cw/exceptions.py:18-21`
+  Read: `class CwError(Exception):` (18) / `"""Base exception for all cw
+  errors."""` (19) / (blank) / `    __slots__ = ()` (21) — every subclass in the
+  file (`WorktreeError`, `RfcContractError`, etc.) repeats `__slots__ = ()`
+  unchanged, since none of them carry their own attributes.
+  Plan asserts: `SprintApplyError` follows the same `__slots__` convention but
+  is the first exception in the file to override it to `("applied",)`, because
+  — unlike every existing subclass — it carries an instance attribute (the
+  partial `AppliedBuildout`) that a plain `()` slots tuple would reject.
+  Match: CONFIRMED
+
+## Pre-flight Resolution Conformance
+
+- R1: The `(value, ok)` tuple discipline on `find_milestone` and
+  `milestone_issue_titles` extends into `apply_plan`: `ok=False` is treated as
+  an unrecoverable failure, never as "nothing exists yet" (the duplicate-filing
+  guard). `_resolve_milestone` raises `SprintApplyError("could not determine
+  whether milestone exists...")` when `find_milestone`'s `ok` is `False`, and
+  `apply_plan` raises `SprintApplyError("could not list existing issues...")`
+  when `milestone_issue_titles`'s `ok` is `False`. Covered by
+  `test_apply_plan_raises_when_the_milestone_lookup_itself_fails` and
+  `test_apply_plan_raises_when_the_milestone_issue_lookup_fails`, both of which
+  also assert no `create_issue` call leaked through before the raise.
+  [SATISFIED]
+- R2: `GhSurface` is a `@runtime_checkable typing.Protocol`, not the `cw.gh`
+  module itself. `apply_plan(plan, *, client: GhSurface | None = None)` types
+  the parameter as the Protocol, and `GhSurface`'s docstring states why:
+  `mypy --strict` cannot verify a module object against a call site without a
+  suppression, which this repo does not permit. [SATISFIED]
+- R3: `SprintApplyError` carries the partial `AppliedBuildout` (as `applied`)
+  so a mid-run failure is diagnosable rather than opaque. `_create_or_skip` and
+  `_backfill_children` both raise with `applied=applied`;
+  `test_sprint_apply_error_carries_the_partial_applied_state` asserts
+  `exc_info.value.applied.milestone_number == 11` and that both tickets already
+  created survive on the partial object. [SATISFIED]
+- R4: The epic-ref rewrite (`Epic #<key>` → `Epic #<number>`) is a
+  boundary-safe regex, not a plain substring replace — Epic I's replacement
+  must not corrupt an Epic II reference (`"Epic #I"` is a literal prefix of
+  `"Epic #II"`). `_resolve_epic_refs` uses
+  `re.sub(rf"Epic #{re.escape(key)}(?!\w)", ...)`;
+  `test_apply_plan_resolves_epic_ii_refs_without_corruption_from_epic_i`
+  exercises exactly this failure mode with the two-epic fixture. [SATISFIED]
+- R5: An epic-less ticket's footer keeps no `Epic #` clause at all — this is
+  not a template substitution with an empty placeholder, it is the absence of
+  the clause. `_resolve_epic_refs`'s loop is a no-op when the body has no
+  `Epic #` substring to match, so the body passes through byte-for-byte;
+  `test_apply_plan_leaves_the_epic_less_ticket_footer_epic_free` asserts
+  `"Epic #" not in s1_body`. [SATISFIED]
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1853,12 +1946,40 @@ written once the children have numbers.
 Append to `tests/test_sprint.py`:
 
 ```python
-# Add to tests/test_sprint.py's header. `_plan()` below is annotated
-# `-> BuildoutPlan`, but BuildoutPlan was never imported by name — Task 2's
-# append only imported BuildoutConfig/build_plan/load_buildout_config.
-# Without this, the return annotation NameErrors.
-from cw.exceptions import SprintApplyError
-from cw.sprint import BuildoutPlan, apply_plan
+# Merge into tests/test_sprint.py's EXISTING top-of-file import block — do NOT
+# append these as new lines near the classes/functions below (that trips
+# ruff's E402; and even placed at top as unsorted separate lines, I001).
+# The existing header is:
+#     from cw import sprint
+#     from cw.exceptions import RfcContractError
+#     from cw.sprint import (
+#         BuildoutConfig,
+#         build_plan,
+#         load_buildout_config,
+#         load_rfc_text,
+#         parse_rfc,
+#     )
+#     from tests.conftest import _write_project_config_yaml
+# `_plan()` below is annotated `-> BuildoutPlan`, but BuildoutPlan was never
+# imported by name — Task 2's append only imported BuildoutConfig/build_plan/
+# load_buildout_config. `AppliedBuildout` and `GhSurface` are needed by the
+# new tests further down (partial-state narrowing and Protocol conformance);
+# `gh` is needed by the client=None default-path test. Without these, the
+# block NameErrors.
+from cw import gh, sprint
+from cw.exceptions import RfcContractError, SprintApplyError
+from cw.sprint import (
+    AppliedBuildout,
+    BuildoutConfig,
+    BuildoutPlan,
+    GhSurface,
+    apply_plan,
+    build_plan,
+    load_buildout_config,
+    load_rfc_text,
+    parse_rfc,
+)
+from tests.conftest import _write_project_config_yaml
 
 
 class FakeGh:
@@ -1886,7 +2007,9 @@ class FakeGh:
         self.calls.append(f"create_milestone:{title}")
         return 11
 
-    def milestone_issue_titles(self, milestone: int) -> tuple[dict[str, int] | None, bool]:
+    def milestone_issue_titles(
+        self, milestone: int
+    ) -> tuple[dict[str, int] | None, bool]:
         self.calls.append(f"list:{milestone}")
         return dict(self.existing), True
 
@@ -2062,7 +2185,9 @@ def test_apply_plan_raises_when_the_milestone_issue_lookup_fails() -> None:
     as "the milestone has no issues yet"."""
 
     class FlakyGh(FakeGh):
-        def milestone_issue_titles(self, milestone: int) -> tuple[dict[str, int] | None, bool]:
+        def milestone_issue_titles(
+            self, milestone: int
+        ) -> tuple[dict[str, int] | None, bool]:
             self.calls.append(f"list:{milestone}")
             return None, False
 
@@ -2099,9 +2224,128 @@ def test_sprint_apply_error_carries_the_partial_applied_state() -> None:
         apply_plan(_plan(), client=fake)
 
     applied = exc_info.value.applied
-    assert applied is not None
+    # `.applied` is typed `object | None` on SprintApplyError (avoids an import
+    # cycle — see the exception's docstring), so mypy cannot narrow attribute
+    # access without this isinstance check.
+    assert isinstance(applied, AppliedBuildout)
     assert applied.milestone_number == 11
     assert set(applied.ticket_numbers) == {"S1", "A1"}
+
+
+def test_apply_plan_raises_when_epic_creation_fails() -> None:
+    """`_create_or_skip`'s `create_issue returns None` branch is shared by both
+    epic and ticket creation, but no test above exercises the epic side —
+    every DeadGh/FlakyGh variant kills a different call. This kills epic
+    creation specifically: the partial `AppliedBuildout` must carry the
+    milestone number but no epic numbers yet, since the raise happens before
+    `applied.epic_numbers[epic.code]` is ever assigned for the failing epic."""
+
+    class DeadEpicGh(FakeGh):
+        def create_issue(
+            self, title: str, body: str, *, labels: list[str], milestone: int
+        ) -> int | None:
+            self.calls.append(f"create_issue:{title}")
+            return None
+
+    fake = DeadEpicGh()
+    with pytest.raises(SprintApplyError, match="could not create issue") as exc_info:
+        apply_plan(_plan(), client=fake)
+
+    applied = exc_info.value.applied
+    assert isinstance(applied, AppliedBuildout)
+    assert applied.milestone_number == 11
+    assert applied.epic_numbers == {}
+
+
+def test_apply_plan_is_idempotent_and_skips_an_epic_that_already_exists() -> None:
+    """Sibling of `test_apply_plan_is_idempotent_and_skips_issues_that_already_exist`,
+    which only exercises the skip branch for a ticket. `_create_or_skip` is the
+    same shared helper for epics — this covers the other caller."""
+    plan = _plan()
+    epic_title = plan.epics[0].title
+    existing = {epic_title: 500}  # Epic I already filed by a partial run
+    fake = FakeGh(existing=existing)
+
+    applied = apply_plan(plan, client=fake)
+
+    assert applied.epic_numbers["I"] == 500
+    assert "I" in applied.skipped
+    assert f"create_issue:{epic_title}" not in fake.calls
+
+
+def test_apply_plan_uses_ghclient_by_default_and_forwards_calls_to_cw_gh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every test above passes an explicit `client=fake`, so `GhClient`'s 5
+    delegating methods and the `else GhClient()` branch in `apply_plan` are
+    0% covered. Monkeypatch `cw.gh`'s 5 module functions directly and call
+    `apply_plan` with no `client=` at all."""
+    calls: list[str] = []
+
+    def fake_find_milestone(title: str) -> tuple[int | None, bool]:
+        calls.append(f"find_milestone:{title}")
+        return None, True
+
+    def fake_create_milestone(title: str) -> int | None:
+        calls.append(f"create_milestone:{title}")
+        return 11
+
+    def fake_milestone_issue_titles(
+        milestone: int,
+    ) -> tuple[dict[str, int] | None, bool]:
+        calls.append(f"list:{milestone}")
+        return {}, True
+
+    def fake_create_issue(
+        title: str, body: str, *, labels: list[str], milestone: int
+    ) -> int | None:
+        calls.append(f"create_issue:{title}")
+        return 200 + len(calls)
+
+    def fake_update_issue_body(number: int, body: str) -> bool:
+        calls.append(f"update_issue_body:{number}")
+        return True
+
+    monkeypatch.setattr(gh, "find_milestone", fake_find_milestone)
+    monkeypatch.setattr(gh, "create_milestone", fake_create_milestone)
+    monkeypatch.setattr(gh, "milestone_issue_titles", fake_milestone_issue_titles)
+    monkeypatch.setattr(gh, "create_issue", fake_create_issue)
+    monkeypatch.setattr(gh, "update_issue_body", fake_update_issue_body)
+
+    applied = apply_plan(_plan())
+
+    assert applied.milestone_number == 11
+    assert set(applied.ticket_numbers) == {"S1", "A1"}
+    kinds = [c.split(":")[0] for c in calls]
+    assert kinds[:3] == ["find_milestone", "create_milestone", "list"]
+    assert "update_issue_body" in kinds
+
+
+def test_fake_gh_satisfies_the_ghsurface_protocol() -> None:
+    """`@runtime_checkable` conformance check — cheap, and catches drift if
+    `GhSurface`'s method set changes without `FakeGh` keeping pace."""
+    assert isinstance(FakeGh(), GhSurface)
+
+
+def test_backfill_children_handles_an_epic_with_zero_children() -> None:
+    """A valid RFC shape: an epic exists but no ticket cites it yet (e.g. a
+    keystone epic filed ahead of its first child). `_backfill_children`'s
+    checklist generator over `plan.epic_children.get(epic.code, [])` must
+    produce an empty checklist, not raise, for that epic."""
+    rfc = MINIMAL_RFC.replace(
+        "### Epic I — Availability-aware holding (inward)\n\n"
+        "Hold work when the environment cannot carry it.\n",
+        "### Epic I — Availability-aware holding (inward)\n\n"
+        "Hold work when the environment cannot carry it.\n\n"
+        "### Epic II — Counterparty-aware collaboration (outward)\n\n"
+        "Collaborate when the counterparty can't proceed.\n",
+    )
+    plan = build_plan(parse_rfc(rfc), _config(), version="1.20.0")
+    fake = FakeGh()
+    applied = apply_plan(plan, client=fake)
+
+    epic_ii_body = fake.bodies[applied.epic_numbers["II"]]
+    assert "<!-- children -->" not in epic_ii_body
 
 
 def test_apply_plan_resolves_epic_ii_refs_without_corruption_from_epic_i() -> None:
@@ -2164,19 +2408,37 @@ class SprintApplyError(CwError):
 
 - [ ] **Step 4: Implement apply**
 
-Append to `src/cw/sprint.py`:
+Edit `src/cw/sprint.py`'s EXISTING top-of-file import block (do NOT append
+these lines near the code below — that trips ruff's E402; and even placed at
+top as unsorted separate lines, I001). This append raises `SprintApplyError`
+throughout (`_resolve_milestone`, `_create_or_skip`, `_backfill_children`) but
+Task 1/2's header only imported `RfcContractError`, and it calls `gh.*` but
+never imports the module — without both, the block NameErrors. Replace the
+current header (`from __future__ import annotations` through the
+`if TYPE_CHECKING:` block, `src/cw/sprint.py:10-23`) with:
 
 ```python
-# Add to src/cw/sprint.py's import block. This append raises SprintApplyError
-# throughout (_resolve_milestone, _create_or_skip, _backfill_children) but
-# never imports it — Task 1/2's appends only imported RfcContractError.
-# Without this, the block NameErrors.
-from typing import Protocol, runtime_checkable
+from __future__ import annotations
+
+import re
+import subprocess as _sp
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+from pydantic import BaseModel, Field
 
 from cw import gh
-from cw.exceptions import SprintApplyError
+from cw.exceptions import RfcContractError, SprintApplyError
+from cw.tracker import load_project_config_dict
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from pathlib import Path
+```
 
+Then append the following to `src/cw/sprint.py` (no import lines in this
+fence — they are all already merged into the header above):
+
+```python
 @runtime_checkable
 class GhSurface(Protocol):
     """The slice of `gh` that apply_plan needs.
@@ -2191,7 +2453,9 @@ class GhSurface(Protocol):
 
     def find_milestone(self, title: str) -> tuple[int | None, bool]: ...
     def create_milestone(self, title: str) -> int | None: ...
-    def milestone_issue_titles(self, milestone: int) -> tuple[dict[str, int] | None, bool]: ...
+    def milestone_issue_titles(
+        self, milestone: int
+    ) -> tuple[dict[str, int] | None, bool]: ...
     def create_issue(
         self, title: str, body: str, *, labels: list[str], milestone: int
     ) -> int | None: ...
@@ -2207,7 +2471,9 @@ class GhClient:
     def create_milestone(self, title: str) -> int | None:
         return gh.create_milestone(title)
 
-    def milestone_issue_titles(self, milestone: int) -> tuple[dict[str, int] | None, bool]:
+    def milestone_issue_titles(
+        self, milestone: int
+    ) -> tuple[dict[str, int] | None, bool]:
         return gh.milestone_issue_titles(milestone)
 
     def create_issue(
@@ -2300,7 +2566,9 @@ def _backfill_children(
             raise SprintApplyError(msg, applied=applied)
 
 
-def apply_plan(plan: BuildoutPlan, *, client: GhSurface | None = None) -> AppliedBuildout:
+def apply_plan(
+    plan: BuildoutPlan, *, client: GhSurface | None = None
+) -> AppliedBuildout:
     """Execute the plan against GitHub. Idempotent; safe to re-run after a failure.
 
     The pass order is forced by GitHub assigning issue numbers at creation time:
