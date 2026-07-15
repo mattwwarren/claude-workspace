@@ -3563,8 +3563,9 @@ class TestOperatorUnavailableBlockerReasons:
     """
 
     def test_operator_unavailable_reasons_frozenset_members(self) -> None:
-        assert OPERATOR_UNAVAILABLE_BLOCKER_REASONS == frozenset(
-            {"push_auth_failed", "operator_unavailable"}
+        assert (
+            frozenset({"push_auth_failed", "operator_unavailable"})
+            == OPERATOR_UNAVAILABLE_BLOCKER_REASONS
         )
 
     def test_operator_unavailable_reasons_excluded_from_finalize_regress(
@@ -3574,7 +3575,7 @@ class TestOperatorUnavailableBlockerReasons:
         assert "operator_unavailable" not in FINALIZE_REGRESS_BLOCKER_REASONS
 
     def test_finalize_regress_blocker_reasons_unchanged(self) -> None:
-        assert FINALIZE_REGRESS_BLOCKER_REASONS == frozenset({"agent_block"})
+        assert frozenset({"agent_block"}) == FINALIZE_REGRESS_BLOCKER_REASONS
 
     def test_blocked_operator_unavailable_round_trips_without_bump(self) -> None:
         """A blocked+operator_unavailable blocker round-trips without a schema bump."""

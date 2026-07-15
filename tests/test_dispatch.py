@@ -6882,7 +6882,7 @@ class TestApplyStagedDecision:
         "reason",
         ["push_auth_failed", "operator_unavailable"],
     )
-    def test_stage_failure_operator_unavailable_blocker_sets_awaiting_operator_paused_status(
+    def test_operator_unavailable_blocker_sets_awaiting_operator_paused_status(
         self,
         reason: str,
         tmp_dispatch_dirs: Path,
