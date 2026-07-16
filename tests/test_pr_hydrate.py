@@ -648,6 +648,17 @@ class TestResolveRepoSlug:
         monkeypatch.setattr("cw.pr_hydrate.subprocess.run", _raise)
         assert _resolve_repo_slug(tmp_path) is None
 
+    def test_subprocess_timeout_fails_open(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A hung `git` process (stale credential prompt, NFS stall) times out
+        # -> None, never raises (GitHub #1198 perf-review follow-up).
+        def _raise(*_a: Any, **_k: Any) -> Any:
+            raise subprocess.TimeoutExpired(cmd="git", timeout=5)
+
+        monkeypatch.setattr("cw.pr_hydrate.subprocess.run", _raise)
+        assert _resolve_repo_slug(tmp_path) is None
+
 
 class TestRepoSlugMismatch:
     """_repo_slug_mismatch fails open; only a resolvable disagreement is a hit."""

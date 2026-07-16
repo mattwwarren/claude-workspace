@@ -303,8 +303,13 @@ def _resolve_repo_slug(git_dir: Path) -> str | None:
             capture_output=True,
             text=True,
             check=False,
+            # Why: this runs under dev_queue_lock (a single, queue-wide lock —
+            # see review_recipes.py call sites); a hung `git` process (stale
+            # credential-helper prompt, NFS-mounted workspace) would otherwise
+            # freeze dispatch for every client, not just the mismatched one.
+            timeout=5,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return None
     if result.returncode != 0:
         return None

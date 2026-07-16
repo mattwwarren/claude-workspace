@@ -415,6 +415,39 @@ def _skip_with_anomaly(
     _emit_pr_action_failed(payload_base, error=error, ticket_id=ticket_id)
 
 
+def _guard_cross_repo_mismatch(
+    task: TicketTask,
+    payload_base: dict[str, object],
+    pr_repo: str,
+    client_repo: str,
+    *,
+    location: str,
+) -> bool:
+    """Shared cross-repo dispatch guard body for both recipes (GitHub #1198).
+
+    ``location`` names what ``client_repo`` was resolved from (e.g. "worktree
+    origin" or "client workspace origin") for the anomaly error message.
+    Returns ``True`` to proceed (override logged) or ``False`` to skip (anomaly
+    + ``PR_ACTION_FAILED`` already emitted — caller returns ``None``).
+    """
+    if task.cross_repo_override:
+        _log.warning(
+            "review_recipe_repo_mismatch_override ticket=%s pr_repo=%s client_repo=%s",
+            task.ticket_id,
+            pr_repo,
+            client_repo,
+        )
+        return True
+    _skip_with_anomaly(
+        payload_base,
+        error=(
+            f"repo mismatch: pr_url repo {pr_repo!r} != {location} repo {client_repo!r}"
+        ),
+        ticket_id=task.ticket_id,
+    )
+    return False
+
+
 def _review_payload_base(
     task: TicketTask,
     session_id: str | None,
@@ -517,25 +550,10 @@ def _prepare_dispatch_job(
     # under dev_queue_lock; do not add network calls here.
     pr_repo = parsed[0]
     client_repo = _repo_slug_mismatch(pr_repo, wt)
-    if client_repo is not None:
-        if task.cross_repo_override:
-            _log.warning(
-                "review_recipe_repo_mismatch_override ticket=%s pr_repo=%s"
-                " client_repo=%s",
-                task.ticket_id,
-                pr_repo,
-                client_repo,
-            )
-        else:
-            _skip_with_anomaly(
-                payload_base,
-                error=(
-                    f"repo mismatch: pr_url repo {pr_repo!r} != worktree origin"
-                    f" repo {client_repo!r}"
-                ),
-                ticket_id=task.ticket_id,
-            )
-            return None
+    if client_repo is not None and not _guard_cross_repo_mismatch(
+        task, payload_base, pr_repo, client_repo, location="worktree origin"
+    ):
+        return None
     record_event(
         OrchestratorEventType.PR_ACTION_TAKEN,
         payload_base,
@@ -774,23 +792,9 @@ def _prepare_auto_fix_ci_job(
     mismatch = _detect_auto_fix_ci_repo_mismatch(task, clients)
     if mismatch is not None:
         pr_repo, client_repo = mismatch
-        if task.cross_repo_override:
-            _log.warning(
-                "review_recipe_repo_mismatch_override ticket=%s pr_repo=%s"
-                " client_repo=%s",
-                task.ticket_id,
-                pr_repo,
-                client_repo,
-            )
-        else:
-            _skip_with_anomaly(
-                payload_base,
-                error=(
-                    f"repo mismatch: pr_url repo {pr_repo!r} != client workspace"
-                    f" origin repo {client_repo!r}"
-                ),
-                ticket_id=task.ticket_id,
-            )
+        if not _guard_cross_repo_mismatch(
+            task, payload_base, pr_repo, client_repo, location="client workspace origin"
+        ):
             return None
     record_event(
         OrchestratorEventType.PR_ACTION_TAKEN,

@@ -927,6 +927,26 @@ def test_repo_match_dispatches_normally(
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
 
 
+def test_repo_unresolvable_dispatches_normally(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+) -> None:
+    """A worktree with no origin remote fails open (R5) -> dispatches normally."""
+    _write_acme_clients_yaml(tmp_config_dir)
+    worktree = make_git_repo("repo-unresolvable")  # no origin set
+    task = _cr_task(worktree_path=worktree)
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    acted = _act_address_review(
+        [_candidate_for(task)], clients=load_effective_clients()
+    )
+
+    assert acted == [task.ticket_id]
+    assert len(stub_spawn.calls) == 1
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+
+
 def test_repo_mismatch_override_dispatches_and_logs(
     tmp_config_dir: Path,
     make_git_repo: Any,
@@ -950,8 +970,8 @@ def test_repo_mismatch_override_dispatches_and_logs(
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
     assert "review_recipe_repo_mismatch_override" in caplog.text
     assert task.ticket_id in caplog.text
-    assert "acme/widgets" in caplog.text  # pr_repo
-    assert "other/repo" in caplog.text  # client_repo
+    assert "pr_repo=acme/widgets" in caplog.text
+    assert "client_repo=other/repo" in caplog.text
 
 
 # --- RFC 0010 P4 recipes (#1099) -------------------------------------------
@@ -1297,8 +1317,8 @@ def test_auto_fix_ci_repo_mismatch_override_dispatches_and_logs(
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
     assert "review_recipe_repo_mismatch_override" in caplog.text
     assert task.ticket_id in caplog.text
-    assert "acme/widgets" in caplog.text  # pr_repo
-    assert "other/repo" in caplog.text  # client_repo
+    assert "pr_repo=acme/widgets" in caplog.text
+    assert "client_repo=other/repo" in caplog.text
 
 
 def test_auto_fix_ci_unparseable_pr_url_fails_open(
