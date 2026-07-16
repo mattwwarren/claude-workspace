@@ -768,9 +768,10 @@ def load_main_drift_latches() -> dict[str, bool]:
             for key, value in entry.items()
         ):
             return {}
-        return entry
     except (OSError, json.JSONDecodeError, ValueError, TypeError):
         return {}
+    else:
+        return entry
 
 
 def save_main_drift_latches(latches: dict[str, bool]) -> None:

@@ -23151,7 +23151,7 @@ def test_main_drift_fires_once_not_per_tick(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Edge-triggered latch: drift holding across two ticks fires once, not per-tick (#1258)."""
+    """Edge-triggered latch: drift across two ticks fires once, not per-tick (#1258)."""
     wt = tmp_path / "wt-refire"
     save_state(CwState(sessions=[_mk_live_drift_session("drift-refire", wt)]))
     _prime_drift_reconcile(monkeypatch, tmp_path, dirty=True, ff_safety="equal")
@@ -23167,7 +23167,7 @@ def test_main_drift_clears_and_refires(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Latch resets silently on clean, then re-arms on the next drift episode (#1258)."""
+    """Latch resets silently on clean, re-arms on the next drift episode (#1258)."""
     wt = tmp_path / "wt-clear-refire"
     save_state(CwState(sessions=[_mk_live_drift_session("drift-clear-refire", wt)]))
 
@@ -23227,9 +23227,7 @@ def test_main_drift_event_routes_to_client_badge(
     assert payload["ticket_id"] is None
     assert payload["client"] == "client-a"
 
-    badges = _index_client_badge_events(
-        events, datetime.now(UTC), {"client-a"}
-    )
+    badges = _index_client_badge_events(events, datetime.now(UTC), {"client-a"})
     assert "client-a" in badges
 
 
