@@ -418,9 +418,9 @@ def _skip_with_anomaly(
 def _guard_cross_repo_mismatch(
     task: TicketTask,
     payload_base: dict[str, object],
+    *,
     pr_repo: str,
     client_repo: str,
-    *,
     location: str,
 ) -> bool:
     """Shared cross-repo dispatch guard body for both recipes (GitHub #1198).
@@ -551,7 +551,11 @@ def _prepare_dispatch_job(
     pr_repo = parsed[0]
     client_repo = _repo_slug_mismatch(pr_repo, wt)
     if client_repo is not None and not _guard_cross_repo_mismatch(
-        task, payload_base, pr_repo, client_repo, location="worktree origin"
+        task,
+        payload_base,
+        pr_repo=pr_repo,
+        client_repo=client_repo,
+        location="worktree origin",
     ):
         return None
     record_event(
@@ -793,7 +797,11 @@ def _prepare_auto_fix_ci_job(
     if mismatch is not None:
         pr_repo, client_repo = mismatch
         if not _guard_cross_repo_mismatch(
-            task, payload_base, pr_repo, client_repo, location="client workspace origin"
+            task,
+            payload_base,
+            pr_repo=pr_repo,
+            client_repo=client_repo,
+            location="client workspace origin",
         ):
             return None
     record_event(
