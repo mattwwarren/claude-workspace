@@ -1,0 +1,147 @@
+"""Tests for src/cw/unavailability.py — classify_unavailability unit tests (#1156).
+
+Mirrors tests/test_review_strategy.py / tests/test_collision.py in shape: a
+parametrized fixture table covers one case per shipped signature-family
+member, plus structural tests pinning down matching semantics and guarding
+against a ``tool_denied`` (#636) regression per RFC 0011 A2 R4.
+
+The drift-guard test (``test_unavailability_signatures_mirrored_in_prose``)
+reuses the ``COMMANDS``/``_cmd()`` helper convention already used by
+``tests/test_auto_dev_model_pins.py`` and
+``tests/test_auto_dev_preflight_resolutions.py`` — a small private per-file
+copy, not a shared ``conftest.py`` fixture, following the repo's established
+convention for a third consumer of this pattern.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from cw.unavailability import (
+    FAMILY_AUTH_FAILURE,
+    FAMILY_GITHUB_5XX_OR_RATE_LIMIT,
+    FAMILY_NETWORK_UNREACHABLE,
+    UNAVAILABILITY_SIGNATURES,
+    classify_unavailability,
+)
+
+ROOT = Path(__file__).parent.parent
+COMMANDS = ROOT / ".claude" / "commands"
+
+
+def _cmd(name: str) -> str:
+    return (COMMANDS / name).read_text()
+
+
+class TestClassifyUnavailabilityFixtures:
+    """One case per shipped family member, plus a negative (non-matching) case."""
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (
+                "...git@github.com: Permission denied (publickey).",
+                FAMILY_AUTH_FAILURE,
+            ),
+            (
+                "remote: Invalid username or password.\n"
+                "fatal: Authentication failed for 'https://...'",
+                FAMILY_AUTH_FAILURE,
+            ),
+            (
+                "fatal: could not read Username for 'https://github.com': "
+                "terminal prompts disabled",
+                FAMILY_AUTH_FAILURE,
+            ),
+            (
+                "Host key verification failed.\n"
+                "fatal: Could not read from remote repository.",
+                FAMILY_AUTH_FAILURE,
+            ),
+            (
+                "ssh: connect to host github.com port 22: Network is unreachable",
+                FAMILY_NETWORK_UNREACHABLE,
+            ),
+            (
+                "fatal: unable to access '...': Failed to connect to "
+                "github.com port 443: Could not connect to server",
+                FAMILY_NETWORK_UNREACHABLE,
+            ),
+            (
+                "gh: You have exceeded a secondary rate limit. Please wait...",
+                FAMILY_GITHUB_5XX_OR_RATE_LIMIT,
+            ),
+            (
+                "gh: Something Went Wrong (HTTP 500)",
+                FAMILY_GITHUB_5XX_OR_RATE_LIMIT,
+            ),
+            (
+                "error: pathspec 'foo' did not match any file(s) known to git",
+                None,
+            ),
+        ],
+    )
+    def test_fixture(self, text: str, expected: str | None) -> None:
+        assert classify_unavailability(text) == expected
+
+
+class TestClassifyUnavailabilityStructural:
+    def test_classify_unavailability_case_sensitive_or_documented_insensitivity(
+        self,
+    ) -> None:
+        """Matching is exact substring (case-sensitive) -- mirrors #1049's
+
+        "match verbatim" prose semantics. A case change must NOT match, so a
+        future change to matching semantics fails loudly here rather than
+        silently.
+        """
+        assert classify_unavailability("permission denied (publickey)") is None
+        assert (
+            classify_unavailability("Permission denied (publickey)")
+            == FAMILY_AUTH_FAILURE
+        )
+
+    def test_classify_unavailability_empty_string_returns_none(self) -> None:
+        assert classify_unavailability("") is None
+
+    def test_family_constants_are_frozen_and_disjoint(self) -> None:
+        """Guards against a copy-paste collision when a 4th/5th family
+
+        (e.g. MCP-github-unreachable or tool_denied) is added later.
+        """
+        constants = (
+            FAMILY_NETWORK_UNREACHABLE,
+            FAMILY_GITHUB_5XX_OR_RATE_LIMIT,
+            FAMILY_AUTH_FAILURE,
+        )
+        assert len(set(constants)) == len(constants)
+        assert isinstance(UNAVAILABILITY_SIGNATURES, tuple)
+
+    def test_signature_table_excludes_tool_denied(self) -> None:
+        """RFC 0011 A2 R4: tool_denied (#636) must never be folded in here.
+
+        It carries its own retry_eligible/auto-redispatch semantics and would
+        misclassify a classifier-flaky hiccup as an overnight-locked key.
+        """
+        for signature, family in UNAVAILABILITY_SIGNATURES:
+            assert "tool_denied" not in signature
+            assert family != "tool_denied"
+
+    def test_unavailability_signatures_mirrored_in_prose(self) -> None:
+        """Drift guard: every shipped signature must appear verbatim in both
+
+        prose mirrors (auto-dev-finalize.md, auto-dev-intake.md). Adapted from
+        test_plan_spec_marker_matches_gh_marker since there's no Python
+        constant on the prose side to compare directly.
+        """
+        finalize = _cmd("auto-dev-finalize.md")
+        intake = _cmd("auto-dev-intake.md")
+        for signature, _family in UNAVAILABILITY_SIGNATURES:
+            assert signature in finalize, (
+                f"{signature!r} missing from auto-dev-finalize.md prose mirror"
+            )
+            assert signature in intake, (
+                f"{signature!r} missing from auto-dev-intake.md prose mirror"
+            )
