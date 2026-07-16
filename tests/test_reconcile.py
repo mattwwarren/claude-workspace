@@ -22,6 +22,7 @@ from cw.auto_dev_result import (
     Blocker,
     parse_stdout,
 )
+from cw.board import _index_client_badge_events
 from cw.config import (
     load_state,
     orchestrator_config_file,
@@ -23145,12 +23146,12 @@ def test_main_drift_detached_ignored(
     assert _read_drift_events("test-drift-detached") == []
 
 
-def test_main_drift_refires_each_tick(
+def test_main_drift_fires_once_not_per_tick(
     tmp_config_dir: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Per-session state check re-fires while drift holds — two ticks → two events."""
+    """Edge-triggered latch: drift across two ticks fires once, not per-tick (#1258)."""
     wt = tmp_path / "wt-refire"
     save_state(CwState(sessions=[_mk_live_drift_session("drift-refire", wt)]))
     _prime_drift_reconcile(monkeypatch, tmp_path, dirty=True, ff_safety="equal")
@@ -23158,7 +23159,76 @@ def test_main_drift_refires_each_tick(
     reconcile()
     reconcile()
 
-    assert len(_read_drift_events("test-drift-refire")) == 2
+    assert len(_read_drift_events("test-drift-refire")) == 1
+
+
+def test_main_drift_clears_and_refires(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Latch resets silently on clean, re-arms on the next drift episode (#1258)."""
+    wt = tmp_path / "wt-clear-refire"
+    save_state(CwState(sessions=[_mk_live_drift_session("drift-clear-refire", wt)]))
+
+    _prime_drift_reconcile(monkeypatch, tmp_path, dirty=True, ff_safety="equal")
+    reconcile()
+    reconcile()
+    assert len(_read_drift_events("test-drift-clear-refire")) == 1
+
+    _prime_drift_reconcile(monkeypatch, tmp_path, dirty=False, ff_safety="equal")
+    reconcile()
+    assert len(_read_drift_events("test-drift-clear-refire")) == 1
+
+    _prime_drift_reconcile(monkeypatch, tmp_path, dirty=True, ff_safety="equal")
+    reconcile()
+    assert len(_read_drift_events("test-drift-clear-refire")) == 2
+
+
+def test_main_drift_multi_session_one_event_per_client(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two live sessions on the same client, both dirty → exactly 1 event (#1258)."""
+    wt_a = tmp_path / "wt-multi-a"
+    wt_b = tmp_path / "wt-multi-b"
+    save_state(
+        CwState(
+            sessions=[
+                _mk_live_drift_session("drift-multi-a", wt_a),
+                _mk_live_drift_session("drift-multi-b", wt_b),
+            ]
+        )
+    )
+    _prime_drift_reconcile(monkeypatch, tmp_path, dirty=True, ff_safety="equal")
+
+    reconcile()
+
+    assert len(_read_drift_events("test-drift-multi")) == 1
+
+
+def test_main_drift_event_routes_to_client_badge(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Client-scoped drift event carries ticket_id=None + real client, routes
+    through _index_client_badge_events (not the ticket-row badge path, #1258)."""
+    wt = tmp_path / "wt-badge"
+    save_state(CwState(sessions=[_mk_live_drift_session("drift-badge", wt)]))
+    _prime_drift_reconcile(monkeypatch, tmp_path, dirty=True, ff_safety="equal")
+
+    reconcile()
+
+    events = _read_drift_events("test-drift-badge")
+    assert len(events) == 1
+    payload = events[0].payload
+    assert payload["ticket_id"] is None
+    assert payload["client"] == "client-a"
+
+    badges = _index_client_badge_events(events, datetime.now(UTC), {"client-a"})
+    assert "client-a" in badges
 
 
 def test_main_drift_non_daemon_session_skipped(
@@ -23217,7 +23287,13 @@ def test_detect_main_drift_skips_unknown_client() -> None:
 def test_detect_main_drift_swallows_git_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A git error during classification is treated as no-drift (fail-safe)."""
+    """A git error during classification is treated as no-drift (fail-safe).
+
+    The checked client still produces one _ClientDriftStatus entry with
+    drift_kind=None (not an empty list) — a client that errored this tick is
+    indistinguishable from a genuinely clean one, and the act phase needs
+    that clean entry to be able to reset a stale latch (#1258).
+    """
 
     def _boom(_c: object) -> bool:
         msg = "git blew up"
@@ -23230,7 +23306,9 @@ def test_detect_main_drift_swallows_git_error(
     clients = {
         "client-a": ClientConfig(name="client-a", workspace_path=Path("/tmp/ws"))
     }
-    assert _detect_main_drift_candidates(CwState(sessions=[sess]), clients) == []
+    result = _detect_main_drift_candidates(CwState(sessions=[sess]), clients)
+    assert len(result) == 1
+    assert result[0].drift_kind is None
 
 
 class TestConciergeAndEscalationWiring:

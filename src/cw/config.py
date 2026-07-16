@@ -747,6 +747,69 @@ def save_availability_probe_cache(cache: AvailabilityProbeCache) -> None:
         logger.warning("dispatch_state: failed to persist availability_probe")
 
 
+def load_main_drift_latches() -> dict[str, bool]:
+    """Load the per-client main-checkout-drift attention latches (#1258).
+
+    Returns ``{}`` when the file is absent, unreadable, malformed, missing
+    the ``"main_drift_latches"`` key, or storing a non-dict / wrong-value-type
+    entry. Mirrors :func:`load_availability_probe_cache`'s fail-safe shape;
+    tolerates other keys (e.g. ``availability_probe``) sharing the file.
+    """
+    path = DISPATCH_STATE_FILE
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+        entry = raw.get("main_drift_latches")
+        if not isinstance(entry, dict):
+            return {}
+        if not all(
+            isinstance(key, str) and isinstance(value, bool)
+            for key, value in entry.items()
+        ):
+            return {}
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        return {}
+    else:
+        return entry
+
+
+def save_main_drift_latches(latches: dict[str, bool]) -> None:
+    """Persist the per-client main-checkout-drift attention latches (#1258).
+
+    Read-merge-writes the shared sidecar so ``usage_limited_until`` and
+    ``availability_probe`` are preserved rather than clobbered.  Creates
+    STATE_DIR if needed.  Silently swallows write errors, same posture as
+    ``save_availability_probe_cache`` — acceptable degradation: a failed
+    persist on a *set* just risks one extra re-fire next tick, but a failed
+    persist on a *reset* leaves the on-disk latch stale (still ``True``),
+    which can suppress one genuine future re-arm until a later tick's write
+    succeeds. Bounded and self-healing, not silent data loss: the merge is
+    per-tick (this function is called at most once per ``reconcile()``, with
+    the full latch dict), so a lost update only ever costs one client's one
+    flip, never another client's state.
+    """
+    try:
+        refuse_real_state_write(DISPATCH_STATE_FILE)
+        DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        # Why: no file lock — reconcile() runs from independent, short-lived
+        # processes (cw status/list/start, every dispatch_tick), so two
+        # concurrent read-merge-writes for different clients can race and
+        # lose one flip. Matches the existing sibling caches' posture
+        # (save_availability_probe_cache etc.); a lost flip self-heals on
+        # the next tick, so unlike a real DB write this is an accepted
+        # tradeoff, not a bug.
+        payload = _load_dispatch_state_raw()
+        payload["main_drift_latches"] = latches
+        atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
+    except OSError:
+        logger.warning(
+            "dispatch_state: failed to persist main_drift_latches (clients=%s)",
+            sorted(latches),
+            exc_info=True,
+        )
+
+
 def load_orchestrator_config() -> OrchestratorConfig:
     """Load orchestrator.yaml, creating with defaults if missing."""
     path = orchestrator_config_file()
