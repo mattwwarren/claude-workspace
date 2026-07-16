@@ -258,12 +258,26 @@ Spawn a **general-purpose** agent (`model: "sonnet"`) scoped to run `/prep-pr`, 
   - **Recommendation**: PROCEED | EXIT_FOR_HUMAN_REVIEW
   ```
 
-**Push-auth-failure classifier (#1049):** Immediately after the subagent returns — before the verify-script gate below — inspect its returned text (friction report / BLOCK message) for a push-authentication failure. This covers the project's `ship-it.md` initial `git push -u origin "$BRANCH"` (the only push site the Step 4c subagent's returned text can reflect). Match any of these signatures verbatim:
+**Unavailability classifier (#1049, generalized #1156 — RFC 0011 A2):** Immediately after the subagent returns — before the verify-script gate below — inspect its returned text (friction report / BLOCK message) for an unavailability failure. This covers the project's `ship-it.md` initial `git push -u origin "$BRANCH"` (the only push site the Step 4c subagent's returned text can reflect). Match any of these signatures verbatim — this list is a PROSE MIRROR of `src/cw/unavailability.py`'s `UNAVAILABILITY_SIGNATURES` (mirror-comment pattern: `cw.reconcile.gate_recipes._PLAN_SPEC_MARKER` mirroring `gh._PLAN_MARKER`); keep the two copies in sync, see `test_unavailability_signatures_mirrored_in_prose` for the drift guard:
 
-- `Permission denied (publickey)`
-- `could not read Username`
-- `Host key verification failed`
-- `Authentication failed`
+- Auth-failure (#1049's original four, unchanged):
+  - `Permission denied (publickey)`
+  - `could not read Username`
+  - `Host key verification failed`
+  - `Authentication failed`
+- Network-unreachable:
+  - `Could not resolve host`
+  - `Network is unreachable`
+  - `Temporary failure in name resolution`
+  - `Failed to connect to`
+  - `Could not connect to server`
+- GitHub 5xx / secondary-rate-limit:
+  - `secondary rate limit`
+  - `HTTP 502`
+  - `HTTP 503`
+  - `HTTP 500`
+
+(`MCP-github-unreachable` is deliberately not mirrored here — no verified signature exists yet, see the module docstring in `src/cw/unavailability.py`.)
 
 (Step 4c.5's own rebase-retry push is a separate site, checked directly by the main session — see the classifier added there below, which reuses this same signature list.)
 
@@ -360,7 +374,7 @@ git rebase origin/main
 git push --force-with-lease origin HEAD:<branch-name>
 ```
 
-**Push-auth-failure check (#1049):** Before re-verifying mergeability, check this push's own output for the same four signatures listed under the Step 4c classifier above (`Permission denied (publickey)`, `could not read Username`, `Host key verification failed`, `Authentication failed`). If any signature is present, emit the `push_auth_failed` sentinel (same shape as the Step 4c template above) with `stage_reached` and `blocker.stage` set to `"stage5_post_create"` (this site runs after PR creation) and `blocker.details` naming this site, e.g. `"Step 4c.5 rebase-retry push: Permission denied (publickey)"`. Stop — do not proceed to the mergeability re-check below.
+**Push-auth-failure check (#1049):** Before re-verifying mergeability, check this push's own output for the same signature family listed under the Step 4c classifier above (`Permission denied (publickey)`, `could not read Username`, `Host key verification failed`, `Authentication failed`). If any signature is present, emit the `push_auth_failed` sentinel (same shape as the Step 4c template above) with `stage_reached` and `blocker.stage` set to `"stage5_post_create"` (this site runs after PR creation) and `blocker.details` naming this site, e.g. `"Step 4c.5 rebase-retry push: Permission denied (publickey)"`. Stop — do not proceed to the mergeability re-check below.
 
 After the push, re-verify mergeability once:
 
