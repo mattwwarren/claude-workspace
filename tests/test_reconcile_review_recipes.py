@@ -1301,6 +1301,53 @@ def test_auto_fix_ci_repo_mismatch_override_dispatches_and_logs(
     assert "other/repo" in caplog.text  # client_repo
 
 
+def test_auto_fix_ci_unparseable_pr_url_fails_open(
+    tmp_config_dir: Path, make_git_repo: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unparseable pr_url fails open (no mismatch) -> re-dispatch proceeds."""
+    _write_acme_clients_yaml_with_repo(
+        tmp_config_dir, make_git_repo, "https://github.com/other/repo.git"
+    )
+    task = _make_task(
+        pr_url="https://example.com/not-a-pr",
+        pr_state=_pr_state(attention_state="ci_failing"),
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    added: list[TicketTask] = []
+    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda t: added.append(t) or True)
+    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
+
+    acted = _act_auto_fix_ci(
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+        clients=load_effective_clients(),
+    )
+
+    assert acted == [task.ticket_id]
+    assert len(added) == 1
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+
+
+def test_auto_fix_ci_unresolvable_client_fails_open(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A client absent from the clients dict fails open -> re-dispatch proceeds."""
+    _write_acme_clients_yaml(tmp_config_dir)
+    task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="ci_failing"))
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    added: list[TicketTask] = []
+    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda t: added.append(t) or True)
+    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
+
+    # clients={} -> client_cfg is None -> guard fails open, dispatch proceeds.
+    acted = _act_auto_fix_ci(
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")], clients={}
+    )
+
+    assert acted == [task.ticket_id]
+    assert len(added) == 1
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+
+
 # --- request_reviewer ------------------------------------------------------
 
 

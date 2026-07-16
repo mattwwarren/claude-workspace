@@ -5004,6 +5004,33 @@ class TestCheckCrossRepoRows:
 
         assert _check_cross_repo_rows({"acme": _load_client("acme")}) == []
 
+    def test_unparseable_pr_url_returns_empty(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        # pr_url set but not a parseable GitHub PR url -> skipped (fail-open).
+        from cw.doctor import _check_cross_repo_rows
+
+        self._write_client_repo(
+            tmp_config_dir, tmp_path, "https://github.com/acme/other-repo.git"
+        )
+        self._save_row("https://example.com/not-a-pr")
+
+        assert _check_cross_repo_rows({"acme": _load_client("acme")}) == []
+
+    def test_queue_load_failure_returns_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A broken queue is already reported by _check_dev_queue; this check
+        # degrades to [] rather than double-reporting.
+        from cw.doctor import _check_cross_repo_rows
+
+        def _boom() -> None:
+            msg = "queue unreadable"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.doctor.load_dev_queue", _boom)
+        assert _check_cross_repo_rows({}) == []
+
     def test_run_doctor_wires_check(
         self,
         tmp_config_dir: Path,
