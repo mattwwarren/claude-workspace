@@ -23,9 +23,10 @@ from cw.config import (
     mutate_state,
     refuse_real_state_write,
     save_state,
+    sessions_lock,
     show_config,
 )
-from cw.exceptions import CwError
+from cw.exceptions import CwError, SessionsLockReentryError
 from cw.models import (
     CW_STATE_SCHEMA_VERSION,
     DEFAULT_AUTO_PURPOSES,
@@ -1470,6 +1471,48 @@ class TestMutateState:
 
         assert isinstance(result, CwState)
         assert any(sess.id == "ms-return-1" for sess in result.sessions)
+
+
+# ---------------------------------------------------------------------------
+# TestSessionsLockReentrancy
+# ---------------------------------------------------------------------------
+
+
+class TestSessionsLockReentrancy:
+    """Tests for sessions_lock()'s same-thread reentrancy guard (GitHub #1228)."""
+
+    def test_nested_sessions_lock_raises_reentry_error(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A nested acquisition raises instead of blocking in flock().
+
+        NOTE: a wrong implementation that actually calls flock() a second
+        time here would HANG the whole test run (not just fail an
+        assertion) — the guard must raise before any second flock() syscall.
+        """
+        with sessions_lock(), pytest.raises(SessionsLockReentryError), sessions_lock():
+            pytest.fail("must not reach body")
+
+    def test_sessions_lock_sequential_reacquire_still_succeeds(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Two sequential, non-nested acquisitions both succeed."""
+        with sessions_lock():
+            pass
+        with sessions_lock():
+            pass
+
+    def test_sessions_lock_releases_guard_on_exception(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """The held flag resets via finally even on exceptional exit."""
+        msg = "boom"
+        with pytest.raises(ValueError, match="boom"), sessions_lock():
+            raise ValueError(msg)
+
+        # A second call must succeed — no stuck "held" flag from the raise.
+        with sessions_lock():
+            pass
 
 
 # ---------------------------------------------------------------------------

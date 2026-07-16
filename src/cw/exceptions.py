@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from cw.sprint import AppliedBuildout
 
 # Usage-limit detection regex. Matches all documented Claude usage-limit phrasings:
 # - "You've hit your session limit · resets 3:45pm"   (verified against errors.md)
@@ -200,6 +204,48 @@ class RfcContractError(CwError):
     field is absent, or when a ticket cites a decision/ticket/epic that the RFC
     does not define. The message always names the exact defect (e.g. "missing
     section: ## Tickets") so the operator can fix the RFC rather than guess.
+    """
+
+    __slots__ = ()
+
+
+class SprintApplyError(CwError):
+    """Raised when :func:`cw.sprint.apply_plan` cannot complete a `gh`
+    issue-creation pass — any milestone/epic/ticket lookup or create call
+    that reports failure (``ok=False`` or a ``None`` return).
+
+    Carries the partial ``AppliedBuildout`` state accumulated before the
+    failure via ``applied``, so the operator can see exactly what was already
+    created or skipped and re-run ``cw sprint apply`` to resume rather than
+    starting over (creation is idempotent by title). The type is only
+    available under ``TYPE_CHECKING`` — ``cw.sprint`` imports from
+    ``cw.exceptions``, so importing ``AppliedBuildout`` at runtime here would
+    cycle; the annotation is deferred (``from __future__ import annotations``)
+    so this never executes at import time.
+    """
+
+    __slots__ = ("applied",)
+
+    def __init__(self, message: str, *, applied: AppliedBuildout | None = None) -> None:
+        super().__init__(message)
+        self.applied = applied
+
+
+class SessionsLockReentryError(CwError):
+    """Raised when ``sessions_lock()`` is re-entered on the same thread while
+    already held.
+
+    ``sessions_lock`` is a per-open-fd ``fcntl.flock``, which is not
+    reentrant: a second acquisition on the same thread blocks forever in
+    ``flock()`` against the fd already held by the outer acquisition
+    (GitHub #1228 — the review-recipe act phase transitively re-entering
+    ``reconcile()`` from inside its own locked body). Raising here, guarded
+    by a thread-local flag checked before any second ``flock()`` syscall,
+    converts that hang into a catchable error. Existing callers on the
+    reentrant paths (``_dispatch_auto_fix_ci``, ``_dispatch_address_review``,
+    ``_reconcile_usage_limited``) already catch ``CwError`` / broad
+    ``Exception`` around the call that would otherwise re-enter, so no
+    call-site changes are needed elsewhere.
     """
 
     __slots__ = ()

@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
@@ -23,7 +24,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 
 from cw.atomic import atomic_write_text
-from cw.exceptions import ConfigValidationError, CwError
+from cw.exceptions import ConfigValidationError, CwError, SessionsLockReentryError
 from cw.models import (
     CW_STATE_SCHEMA_VERSION,
     DEFAULT_AUTO_PURPOSES,
@@ -237,6 +238,9 @@ def concurrency_override_lock() -> Iterator[None]:
         fd.close()
 
 
+_sessions_lock_state = threading.local()
+
+
 @contextlib.contextmanager
 def sessions_lock() -> Iterator[None]:
     """Acquire an exclusive file lock over the sessions.json write window.
@@ -246,15 +250,33 @@ def sessions_lock() -> Iterator[None]:
     processes cannot clobber each other's mutations (last-writer-wins
     data loss). The lock is advisory (``fcntl.flock``) and per-open-fd,
     so sequential re-acquisitions in the same process (non-nested) are
-    safe. Do NOT nest: acquiring while already holding will deadlock.
+    safe.
+
+    Not reentrant: a same-thread nested acquisition raises
+    :class:`~cw.exceptions.SessionsLockReentryError` instead of opening a
+    second fd and deadlocking in ``flock()`` (GitHub #1228). The check is
+    synchronous and runs before any file I/O or ``flock`` syscall, so it
+    is hang-safe by construction. Callers that would otherwise re-enter
+    (e.g. the RFC 0010 P4 review-recipe act phase calling back into
+    ``reconcile()``) must already tolerate a ``CwError``-shaped failure on
+    this path; see the callers of ``_dispatch_auto_fix_ci`` /
+    ``_dispatch_address_review`` / ``_reconcile_usage_limited``.
     """
+    if getattr(_sessions_lock_state, "held", False):
+        msg = (
+            "sessions_lock() re-entered on the same thread while already "
+            "held; this would deadlock in flock() (GitHub #1228)"
+        )
+        raise SessionsLockReentryError(msg)
     state_dir().mkdir(parents=True, exist_ok=True)
     lock_path = sessions_lock_file()
     fd = lock_path.open("w")
+    _sessions_lock_state.held = True
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
+        _sessions_lock_state.held = False
         fcntl.flock(fd, fcntl.LOCK_UN)
         fd.close()
 
@@ -262,11 +284,12 @@ def sessions_lock() -> Iterator[None]:
 def mutate_state(fn: Callable[[CwState], None]) -> CwState:
     """Load state, apply fn in place under sessions_lock, save and return.
 
-    Not reentrant: ``sessions_lock`` is a per-open-fd ``flock``, so calling
-    this while the caller already holds ``sessions_lock`` self-deadlocks.
-    Code running inside a ``with sessions_lock():`` block (e.g. anything
-    called from ``reconcile._reconcile_locked``) must mutate the loaded
-    state and ``save_state`` directly instead.
+    Not reentrant: calling this while the caller already holds
+    ``sessions_lock`` raises :class:`~cw.exceptions.SessionsLockReentryError`
+    (GitHub #1228) instead of self-deadlocking. Code running inside a
+    ``with sessions_lock():`` block (e.g. anything called from
+    ``reconcile._reconcile_locked``) must mutate the loaded state and
+    ``save_state`` directly instead.
 
     Invariant: every ``save_state`` call outside ``config.py`` is either
     inside a ``with sessions_lock():`` block **or** in a helper whose

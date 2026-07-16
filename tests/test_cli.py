@@ -25,9 +25,10 @@ from cw.cli import (
     _display_status,
     main,
 )
+from cw.cli.sprint import _resolve_version
 from cw.config import load_clients, load_state, save_state
 from cw.events import read_events
-from cw.exceptions import CwError
+from cw.exceptions import CwError, SprintApplyError
 from cw.models import (
     ClientConfig,
     CwState,
@@ -39,7 +40,10 @@ from cw.models import (
     Stage,
     TicketTask,
 )
+from cw.sprint import AppliedBuildout, BuildoutPlan
+from tests.conftest import _write_project_config_yaml
 from tests.test_result import _valid_payload
+from tests.test_sprint import CONFIG_YAML, MINIMAL_RFC, _plan
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -9164,3 +9168,189 @@ class TestQueuePeekCli:
         mock_build.assert_called_once()
         call_client = mock_build.call_args[0][0]
         assert call_client == "myorg"
+
+
+class TestSprintPlanCli:
+    def test_writes_a_plan_file_and_prints_a_summary(self, tmp_path: Path) -> None:
+        _write_project_config_yaml(tmp_path, CONFIG_YAML)
+        (tmp_path / "rfc.md").write_text(MINIMAL_RFC, encoding="utf-8")
+        out_file = tmp_path / "plan.json"
+
+        result = CliRunner().invoke(
+            main,
+            [
+                "sprint",
+                "plan",
+                "rfc.md",
+                "--out",
+                str(out_file),
+                "--root",
+                str(tmp_path),
+                "--version",
+                "1.20.0",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert out_file.exists()
+        expected = _plan()
+        written = BuildoutPlan.model_validate_json(out_file.read_text(encoding="utf-8"))
+        assert written == expected
+        assert "Milestone:" in result.output
+        assert "Epics: 1  Tickets: 2" in result.output
+
+    def test_reports_a_contract_violation_as_a_clean_cli_error(
+        self, tmp_path: Path
+    ) -> None:
+        _write_project_config_yaml(tmp_path, CONFIG_YAML)
+        bad_rfc = MINIMAL_RFC.replace("## Tickets", "## NotTickets")
+        (tmp_path / "rfc.md").write_text(bad_rfc, encoding="utf-8")
+
+        result = CliRunner().invoke(
+            main,
+            [
+                "sprint",
+                "plan",
+                "rfc.md",
+                "--out",
+                str(tmp_path / "plan.json"),
+                "--root",
+                str(tmp_path),
+                "--version",
+                "1.20.0",
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "missing section: ## Tickets" in result.output
+        assert "Traceback" not in result.output
+
+    def test_version_override_wins_over_resolve_version(self, tmp_path: Path) -> None:
+        """An explicit --version short-circuits _resolve_version entirely — a
+        gh call here would mean --version stopped being a real override."""
+        _write_project_config_yaml(tmp_path, CONFIG_YAML)
+        (tmp_path / "rfc.md").write_text(MINIMAL_RFC, encoding="utf-8")
+        out_file = tmp_path / "plan.json"
+
+        with patch(
+            "cw.gh.latest_release_tag",
+            side_effect=AssertionError("gh should not be called"),
+        ):
+            result = CliRunner().invoke(
+                main,
+                [
+                    "sprint",
+                    "plan",
+                    "rfc.md",
+                    "--out",
+                    str(out_file),
+                    "--root",
+                    str(tmp_path),
+                    "--version",
+                    "9.9.9",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        written = BuildoutPlan.model_validate_json(out_file.read_text(encoding="utf-8"))
+        assert written.milestone_title.startswith("v9.9.9")
+
+
+class TestResolveVersion:
+    def test_minor_bumps_the_latest_release_tag(self, tmp_path: Path) -> None:
+        with patch("cw.gh.latest_release_tag", return_value=("v1.20.0", True)):
+            assert _resolve_version(tmp_path) == "1.21.0"
+
+    def test_falls_back_when_the_gh_call_fails(self, tmp_path: Path) -> None:
+        with patch("cw.gh.latest_release_tag", return_value=(None, False)):
+            assert _resolve_version(tmp_path) == "0.0.0"
+
+    def test_falls_back_on_a_malformed_tag(self, tmp_path: Path) -> None:
+        with patch("cw.gh.latest_release_tag", return_value=("not-a-version", True)):
+            assert _resolve_version(tmp_path) == "0.0.0"
+
+
+class TestSprintApplyCli:
+    def test_dry_run_makes_no_gh_calls(self, tmp_path: Path) -> None:
+        plan = _plan()
+        plan_file = tmp_path / "plan.json"
+        plan_file.write_text(plan.model_dump_json(), encoding="utf-8")
+
+        with patch(
+            "cw.cli.sprint.apply_plan",
+            side_effect=AssertionError("apply_plan should not be called"),
+        ):
+            result = CliRunner().invoke(
+                main, ["sprint", "apply", str(plan_file), "--dry-run"]
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "Would create" in result.output
+
+    def test_prints_partial_progress_on_a_mid_run_failure(self, tmp_path: Path) -> None:
+        plan = _plan()
+        plan_file = tmp_path / "plan.json"
+        plan_file.write_text(plan.model_dump_json(), encoding="utf-8")
+
+        applied = AppliedBuildout(
+            milestone_number=5,
+            epic_numbers={"I": 6},
+            ticket_numbers={"S1": 7},
+            created=["epic: Availability-aware holding (inward)"],
+            skipped=[],
+            backfilled=["I"],
+        )
+
+        with patch(
+            "cw.cli.sprint.apply_plan",
+            side_effect=SprintApplyError("boom: create failed", applied=applied),
+        ):
+            result = CliRunner().invoke(main, ["sprint", "apply", str(plan_file)])
+
+        assert result.exit_code != 0
+        assert "Partial progress before failure" in result.output
+        assert "#5" in result.output
+        assert "#6" in result.output
+        assert "#7" in result.output
+        assert "Backfilled children checklist: I" in result.output
+        assert "boom: create failed" in result.output
+        assert "Traceback" not in result.output
+
+    def test_error_without_partial_state_prints_no_partial_banner(
+        self, tmp_path: Path
+    ) -> None:
+        plan = _plan()
+        plan_file = tmp_path / "plan.json"
+        plan_file.write_text(plan.model_dump_json(), encoding="utf-8")
+
+        with patch(
+            "cw.cli.sprint.apply_plan",
+            side_effect=SprintApplyError("milestone lookup failed"),
+        ):
+            result = CliRunner().invoke(main, ["sprint", "apply", str(plan_file)])
+
+        assert result.exit_code != 0
+        assert "Partial progress before failure" not in result.output
+        assert "milestone lookup failed" in result.output
+
+    def test_prints_the_created_issue_numbers_on_success(self, tmp_path: Path) -> None:
+        plan = _plan()
+        plan_file = tmp_path / "plan.json"
+        plan_file.write_text(plan.model_dump_json(), encoding="utf-8")
+
+        applied = AppliedBuildout(
+            milestone_number=5,
+            epic_numbers={"I": 6},
+            ticket_numbers={"S1": 7, "A1": 8},
+            created=["epic: Availability-aware holding (inward)"],
+            skipped=["RFC 0011 S1 — counterparty axis + self-identity"],
+        )
+
+        with patch("cw.cli.sprint.apply_plan", return_value=applied):
+            result = CliRunner().invoke(main, ["sprint", "apply", str(plan_file)])
+
+        assert result.exit_code == 0, result.output
+        assert "#6" in result.output
+        assert "#7" in result.output
+        assert "#8" in result.output
+        assert "Skipped" in result.output

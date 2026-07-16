@@ -427,7 +427,12 @@ def _reconcile_locked(
             sid[:8]: sid for a in _agents if isinstance(sid := a.get("sessionId"), str)
         }
         daemon_errored = False
-    except (subprocess.CalledProcessError, json.JSONDecodeError, FileNotFoundError):
+    except (
+        subprocess.CalledProcessError,
+        json.JSONDecodeError,
+        FileNotFoundError,
+        subprocess.TimeoutExpired,
+    ):
         native_live = set()
         surface_to_full = {}
         daemon_errored = True

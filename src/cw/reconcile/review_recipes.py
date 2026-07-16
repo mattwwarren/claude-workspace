@@ -60,6 +60,7 @@ if TYPE_CHECKING:
         DevQueueStore,
         OrchestratorConfig,
         TicketTask,
+        WatchedPr,
     )
 
 
@@ -167,6 +168,51 @@ def resolve_review_recipe_enabled(
     # this function's documented no-exception robustness guarantee for every
     # other unresolved input.
     return _DEFAULT_REVIEW_RECIPE_ENABLED.get(recipe_name, False)
+
+
+def resolve_outbound_consent_allowed(
+    pr_url: str,
+    *,
+    config: OrchestratorConfig,
+    watched_prs: list[WatchedPr],
+) -> bool:
+    """Two-party consent gate for outbound acting toward another's PR.
+
+    RFC 0011 B2, #1159.
+
+    Party 1 (operator): ``config.review_recipes_enabled`` — the existing
+    review-recipes master switch (RFC 0010 P3), reused as a flat bool only;
+    this function does NOT thread a TicketTask/LaneConfig through
+    ``resolve_review_recipe_enabled`` (that 3-tier resolver is a distinct,
+    ticket-scoped concept — see its docstring at :135).
+
+    Party 2 (target): an active ``WatchedPr`` for *pr_url* — every persisted
+    ``WatchedPr`` already passed ``resolve_and_register_review_request``'s
+    individual-vs-team filter (RFC 0011 S2 R5/R7, ``cw.pr_hydrate:363``)
+    before being inserted, so an existing ``status == "active"`` match IS
+    the channel-opening action; no further individual-vs-team re-derivation
+    happens here.
+
+    Reads only — never creates, mutates, or dismisses a ``WatchedPr``, so
+    "no path initiates outbound" holds definitionally: this function cannot
+    be the origin of a channel, only a check against one that already
+    exists.
+
+    Own-authored PRs are out of scope for this predicate entirely — the
+    existing TicketTask-typed act phase (``_act_address_review`` et al.)
+    does not call this function, so those PRs bypass the gate by
+    non-modification (RFC 0011 B2 Acceptance; regression coverage is the
+    existing test_reconcile_review_recipes.py suite passing unmodified).
+
+    No re-review re-engagement detection (RFC 0011 B3, #1163, Wave 2) — this
+    checks ``status == "active"`` existence only.
+    """
+    if not config.review_recipes_enabled:
+        return False
+    return any(
+        watched.pr_url == pr_url and watched.status == "active"
+        for watched in watched_prs
+    )
 
 
 @dataclass(frozen=True)

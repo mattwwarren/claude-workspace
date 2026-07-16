@@ -67,7 +67,7 @@ uv tool install "claude-workspace[mcp] @ git+https://github.com/mattwwarren/clau
 Pin to a specific release:
 
 ```bash
-uv tool install "claude-workspace[mcp] @ git+https://github.com/mattwwarren/claude-workspace.git@v0.4.0"
+uv tool install "claude-workspace[mcp] @ git+https://github.com/mattwwarren/claude-workspace.git@v1.20.0"
 ```
 
 ### From Local Clone
@@ -78,7 +78,7 @@ cd claude-workspace
 ./scripts/install.sh
 ```
 
-The install script runs `uv tool install --from "$PROJECT_DIR" --force --reinstall --no-cache "claude-workspace[mcp]"`, making `cw` globally available.
+The install script runs `uv tool install --from "$PROJECT_DIR" --force --reinstall --no-cache "claude-workspace[mcp]"`, making `cw` globally available, and then syncs cw's bundled skills and commands into `~/.claude/` via `scripts/install-skills.sh`.
 
 ### For Development
 
@@ -174,15 +174,30 @@ cw start my-project
 
 This spawns background Claude daemon sessions for each session purpose (impl, idea, debt).
 
+### 5. Read the Operator Guide
+
+```bash
+cw guide
+```
+
+Prints the built-in operator guide — how to drive a sprint with cw
+(dev-queue dispatch, monitoring, and follow-up).
+
 ## File Locations
 
 | File | Location | Purpose |
 |------|----------|---------|
 | Client config | `~/.config/cw/clients.yaml` | Project definitions |
+| Orchestrator config | `~/.claude-workspace/orchestrator.yaml` | Dispatch-loop tuning (created with defaults on first run) |
 | Session state | `~/.local/share/cw/sessions.json` | Active session tracking |
+| Dev-queue state | `~/.local/share/cw/dev_queue.json` | Orchestrator ticket queue |
+| Event inbox | `~/.local/share/cw/events/inbox.jsonl` | Orchestrator event bus (prune with `cw event prune`) |
 | Event history | `~/.local/share/cw/history/` | Session event log |
+| Daemon roster | `~/.claude/daemon/roster.json` | Claude-owned registry of `claude --bg` workers |
 
-All paths respect `XDG_CONFIG_HOME` and `XDG_DATA_HOME` if set.
+The `~/.config/cw/` and `~/.local/share/cw/` paths respect `XDG_CONFIG_HOME`
+and `XDG_DATA_HOME` if set; `orchestrator.yaml` is always at
+`~/.claude-workspace/`.
 
 ## Configuration Reference
 

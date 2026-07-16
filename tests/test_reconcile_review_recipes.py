@@ -26,10 +26,10 @@ import pytest
 from pydantic import ValidationError
 
 from cw.config import dev_queue_lock as _dev_queue_lock_path
-from cw.config import load_effective_clients
+from cw.config import load_effective_clients, sessions_lock, sessions_lock_file
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
-from cw.exceptions import CwError
+from cw.exceptions import CwError, SessionsLockReentryError
 from cw.models import (
     ClientConfig,
     DevQueueStore,
@@ -38,6 +38,7 @@ from cw.models import (
     OrchestratorEventType,
     TicketTask,
 )
+from cw.reconcile import reconcile
 from cw.reconcile.review_recipes import (
     RECIPE_ADDRESS_REVIEW,
     RECIPE_AUTO_FIX_CI,
@@ -52,6 +53,7 @@ from cw.reconcile.review_recipes import (
     _detect_auto_fix_ci,
     _detect_escalate_merge_block,
     _detect_request_reviewer,
+    resolve_outbound_consent_allowed,
     resolve_review_recipe_enabled,
     run_review_recipes,
 )
@@ -62,7 +64,7 @@ from cw.review_strategy import ReviewStrategy
 # client / lane), _pr_state builds a PrState with sensible OPEN defaults.
 # _client_with_lanes builds a ClientConfig with the given lanes (reused by the
 # resolve-precedence tests below).
-from tests.test_pr_hydrate import _pr_state
+from tests.test_pr_hydrate import _pr_state, _watched
 from tests.test_reconcile_gate_recipes import _client_with_lanes, _make_task
 
 _SKILL_PATH = (
@@ -574,6 +576,71 @@ def test_no_self_deadlock_under_dev_queue_lock(
     assert _act_address_review(
         [_candidate_for(task)], clients=load_effective_clients()
     ) == [task.ticket_id]
+
+
+def test_reconcile_reentry_guard_fires_and_is_swallowed(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RFC 0010 P4's act phase re-entering reconcile() raises, not hangs.
+
+    Stands in for the real chain (GitHub #1228): reconcile() holds
+    sessions_lock() -> ... -> run_review_recipes -> _act_auto_fix_ci ->
+    _dispatch_auto_fix_ci -> run_dispatch_loop -> a nested reconcile() /
+    sessions_lock() acquisition on the same thread. The outer
+    ``with sessions_lock():`` below stands in for reconcile()'s own lock
+    hold. Before the #1228 fix this scenario hangs forever in flock(); after
+    the fix, SessionsLockReentryError propagates out of the inner
+    reconcile() call, into _dispatch_auto_fix_ci's ``except CwError``, and is
+    converted to a logged PR_ACTION_FAILED correction instead of a call-site
+    change.
+    """
+    _write_acme_clients_yaml(tmp_config_dir)
+    task = _cr_task(
+        pr_state=_pr_state(
+            state="OPEN", attention_state="ci_failing", failing_checks=["lint"]
+        )
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda _t: True)
+
+    probed = {"lock_held": False}
+    captured: list[BaseException] = []
+
+    def _fake_dispatch_loop(**_kwargs: Any) -> None:
+        # Non-blocking probe proves the outer sessions_lock() is genuinely
+        # held (not just assumed) before exercising the real reentry path.
+        fd = sessions_lock_file().open("w")
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            probed["lock_held"] = True
+        finally:
+            fd.close()
+        try:
+            reconcile()
+        except SessionsLockReentryError as exc:
+            # Record the exact exception raised (not just "some CwError")
+            # before letting it propagate into _dispatch_auto_fix_ci's
+            # `except CwError` handler, so the outer assertions below can
+            # confirm the guard — not some other failure — fired.
+            captured.append(exc)
+            raise
+
+    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", _fake_dispatch_loop)
+
+    with sessions_lock():
+        acted = _act_auto_fix_ci([_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")])
+
+    assert acted == []
+    assert probed["lock_held"] is True
+    assert len(captured) == 1
+    assert isinstance(captured[0], SessionsLockReentryError)
+    failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+    assert len(failed) == 1
+    assert failed[0].correlation_id == task.ticket_id
 
 
 def test_action_failure_emits_pr_action_failed(
@@ -1378,3 +1445,71 @@ def test_act_escalate_merge_block_stale_row_silent_skip(tmp_config_dir: Path) ->
     assert acted == []
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
     assert load_dev_queue().tasks[0].escalate_merge_block_fired_at is None
+
+
+# --- outbound consent gate (RFC 0011 B2, #1159) -----------------------------
+
+
+class TestResolveOutboundConsentAllowed:
+    """Two-party consent gate for outbound acting toward another's PR.
+
+    Party 1 (operator): ``config.review_recipes_enabled``, the existing
+    review-recipes master switch (RFC 0010 P3). Party 2 (target): an active
+    ``WatchedPr`` for the queried ``pr_url`` (RFC 0011 S2). See R1-R4.
+    """
+
+    _PR_URL = "https://github.com/acme/widgets/pull/42"
+
+    def test_switch_off_returns_false_regardless_of_watched_pr(self) -> None:
+        """The master switch off gates outbound action shut, even with an
+        active WatchedPr match present."""
+        assert (
+            resolve_outbound_consent_allowed(
+                self._PR_URL,
+                config=_config(review_recipes_enabled=False),
+                watched_prs=[_watched(pr_number=42)],
+            )
+            is False
+        )
+
+    def test_switch_on_active_match_returns_true(self) -> None:
+        """Switch on + an active WatchedPr for this pr_url -> True."""
+        assert (
+            resolve_outbound_consent_allowed(
+                self._PR_URL,
+                config=_config(),
+                watched_prs=[_watched(pr_number=42)],
+            )
+            is True
+        )
+
+    def test_switch_on_no_match_returns_false(self) -> None:
+        """Switch on but no WatchedPr for this pr_url -> False."""
+        assert (
+            resolve_outbound_consent_allowed(
+                self._PR_URL,
+                config=_config(),
+                watched_prs=[_watched(pr_number=99)],
+            )
+            is False
+        )
+        assert (
+            resolve_outbound_consent_allowed(
+                self._PR_URL,
+                config=_config(),
+                watched_prs=[],
+            )
+            is False
+        )
+
+    def test_switch_on_dismissed_watched_pr_returns_false(self) -> None:
+        """A dismissed WatchedPr matching this pr_url does not open the
+        channel -- only an active one does."""
+        assert (
+            resolve_outbound_consent_allowed(
+                self._PR_URL,
+                config=_config(),
+                watched_prs=[_watched(pr_number=42, status="dismissed")],
+            )
+            is False
+        )
