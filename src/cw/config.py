@@ -779,18 +779,35 @@ def save_main_drift_latches(latches: dict[str, bool]) -> None:
 
     Read-merge-writes the shared sidecar so ``usage_limited_until`` and
     ``availability_probe`` are preserved rather than clobbered.  Creates
-    STATE_DIR if needed.  Silently swallows write errors — a failed persist
-    just means the next tick may re-fire an attention event it shouldn't
-    (acceptable degradation, same posture as ``save_availability_probe_cache``).
+    STATE_DIR if needed.  Silently swallows write errors, same posture as
+    ``save_availability_probe_cache`` — acceptable degradation: a failed
+    persist on a *set* just risks one extra re-fire next tick, but a failed
+    persist on a *reset* leaves the on-disk latch stale (still ``True``),
+    which can suppress one genuine future re-arm until a later tick's write
+    succeeds. Bounded and self-healing, not silent data loss: the merge is
+    per-tick (this function is called at most once per ``reconcile()``, with
+    the full latch dict), so a lost update only ever costs one client's one
+    flip, never another client's state.
     """
     try:
         refuse_real_state_write(DISPATCH_STATE_FILE)
         DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        # Why: no file lock — reconcile() runs from independent, short-lived
+        # processes (cw status/list/start, every dispatch_tick), so two
+        # concurrent read-merge-writes for different clients can race and
+        # lose one flip. Matches the existing sibling caches' posture
+        # (save_availability_probe_cache etc.); a lost flip self-heals on
+        # the next tick, so unlike a real DB write this is an accepted
+        # tradeoff, not a bug.
         payload = _load_dispatch_state_raw()
         payload["main_drift_latches"] = latches
         atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
     except OSError:
-        logger.warning("dispatch_state: failed to persist main_drift_latches")
+        logger.warning(
+            "dispatch_state: failed to persist main_drift_latches (clients=%s)",
+            sorted(latches),
+            exc_info=True,
+        )
 
 
 def load_orchestrator_config() -> OrchestratorConfig:
