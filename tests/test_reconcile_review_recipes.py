@@ -1038,9 +1038,9 @@ def test_act_auto_fix_ci_calls_add_ticket_and_dispatch_once(
     monkeypatch.setattr("cw.dispatch.run_dispatch_loop", _fake_dispatch)
 
     acted = _act_auto_fix_ci(
-            [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
-            clients=load_effective_clients(),
-        )
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+        clients=load_effective_clients(),
+    )
 
     assert acted == [task.ticket_id]
     assert len(added) == 1
@@ -1077,9 +1077,9 @@ def test_act_auto_fix_ci_stale_row_silent_skip(
     monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: called.append(1))
 
     acted = _act_auto_fix_ci(
-            [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
-            clients=load_effective_clients(),
-        )
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+        clients=load_effective_clients(),
+    )
 
     assert acted == []
     assert called == []
@@ -1134,7 +1134,7 @@ def test_auto_fix_ci_fires_once_per_episode(
     monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
     candidate = _candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")
 
-    acted1 = _act_auto_fix_ci([candidate])
+    acted1 = _act_auto_fix_ci([candidate], clients=load_effective_clients())
     assert acted1 == [task.ticket_id]
     assert load_dev_queue().tasks[0].auto_fix_ci_fired_at is not None
 
@@ -1142,7 +1142,7 @@ def test_auto_fix_ci_fires_once_per_episode(
     # hydration lag, per the ticket's acceptance criterion): detect still
     # yields a candidate every tick, but the latch blocks a re-fire.
     for _ in range(5):
-        acted_n = _act_auto_fix_ci([candidate])
+        acted_n = _act_auto_fix_ci([candidate], clients=load_effective_clients())
         assert acted_n == []
     taken = [
         e
@@ -1162,7 +1162,9 @@ def test_auto_fix_ci_latch_clears_on_episode_end(
     monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
     candidate = _candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")
 
-    assert _act_auto_fix_ci([candidate]) == [task.ticket_id]
+    assert _act_auto_fix_ci(
+        [candidate], clients=load_effective_clients()
+    ) == [task.ticket_id]
 
     # Episode ends: hydration moves the PR off ci_failing.
     store = load_dev_queue()
@@ -1170,14 +1172,16 @@ def test_auto_fix_ci_latch_clears_on_episode_end(
     save_dev_queue(store)
 
     # Clear pass runs even with zero candidates.
-    assert _act_auto_fix_ci([]) == []
+    assert _act_auto_fix_ci([], clients=load_effective_clients()) == []
     assert load_dev_queue().tasks[0].auto_fix_ci_fired_at is None
 
     # Genuine re-entry into ci_failing fires again (episode semantics).
     store = load_dev_queue()
     store.tasks[0].pr_state = _pr_state(attention_state="ci_failing")
     save_dev_queue(store)
-    assert _act_auto_fix_ci([candidate]) == [task.ticket_id]
+    assert _act_auto_fix_ci(
+        [candidate], clients=load_effective_clients()
+    ) == [task.ticket_id]
 
 
 # --- cross-repo dispatch guard, auto_fix_ci (GitHub #1198) ------------------
@@ -1246,9 +1250,7 @@ def test_auto_fix_ci_repo_match_dispatches_normally(
     save_dev_queue(DevQueueStore(tasks=[task]))
     added: list[TicketTask] = []
     dispatched: list[dict[str, Any]] = []
-    monkeypatch.setattr(
-        "cw.dev_queue.add_ticket", lambda t: added.append(t) or True
-    )
+    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda t: added.append(t) or True)
     monkeypatch.setattr(
         "cw.dispatch.run_dispatch_loop", lambda **kw: dispatched.append(kw)
     )
@@ -1281,9 +1283,7 @@ def test_auto_fix_ci_repo_mismatch_override_dispatches_and_logs(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
     added: list[TicketTask] = []
-    monkeypatch.setattr(
-        "cw.dev_queue.add_ticket", lambda t: added.append(t) or True
-    )
+    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda t: added.append(t) or True)
     monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
 
     with caplog.at_level("WARNING"):

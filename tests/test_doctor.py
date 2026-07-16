@@ -4940,9 +4940,7 @@ class TestCheckCrossRepoRows:
         save_dev_queue(DevQueueStore(tasks=[task]))
         return task.ticket_id
 
-    def test_mismatch_returns_warn(
-        self, tmp_config_dir: Path, tmp_path: Path
-    ) -> None:
+    def test_mismatch_returns_warn(self, tmp_config_dir: Path, tmp_path: Path) -> None:
         from cw.doctor import _check_cross_repo_rows
 
         self._write_client_repo(
@@ -4960,9 +4958,7 @@ class TestCheckCrossRepoRows:
         assert "acme/widgets" in r.detail
         assert "acme/other-repo" in r.detail
 
-    def test_match_returns_empty(
-        self, tmp_config_dir: Path, tmp_path: Path
-    ) -> None:
+    def test_match_returns_empty(self, tmp_config_dir: Path, tmp_path: Path) -> None:
         from cw.doctor import _check_cross_repo_rows
 
         self._write_client_repo(
@@ -5023,9 +5019,7 @@ class TestCheckCrossRepoRows:
 
         report = run_doctor()
 
-        cross_checks = [
-            c for c in report.checks if c.name.startswith("cross-repo/")
-        ]
+        cross_checks = [c for c in report.checks if c.name.startswith("cross-repo/")]
         assert len(cross_checks) == 1
         assert cross_checks[0].warn is True
         assert cross_checks[0].ok is True
