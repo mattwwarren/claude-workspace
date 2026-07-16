@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, get_args
 import pytest
 from click.testing import CliRunner
 
-from cw.auto_dev_result import Status
+from cw.auto_dev_result import AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION, Status
 from cw.cli import main
 from cw.config import load_state, save_state
 from cw.exceptions import CwError
@@ -1944,7 +1944,7 @@ class TestWriteHookContextTaskFields:
         assert "stage_started_at" in context
         ref = context["expected_sentinel_schema_ref"]
         assert ref["model"] == "AutoDevResult"
-        assert ref["version"] == 4
+        assert ref["version"] == AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION
         assert "cw schema show" in ref["command"]
         qm = context["queue_metadata"]
         assert qm["scope_hint"] == "large"
