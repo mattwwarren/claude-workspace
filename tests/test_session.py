@@ -26,7 +26,7 @@ from cw.session import (
     resume_session,
     start_session,
 )
-from cw.spawn import _LINEAR_MCP_DISALLOW, _LINEAR_MCP_DISALLOW_ARG
+from tests.test_spawn import _write_orchestrator_disallow
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -1108,19 +1108,16 @@ class TestResumeSession:
         assert "Ctrl+Z" in out
         assert "Ctrl+D" in out
 
-    def test_resume_daemon_github_issues_injects_disallow_flag(
+    def test_resume_daemon_injects_disallow_when_configured(
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
         mock_native_daemon: FakeNativeDaemonClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """DAEMON resume with github-issues tracker injects --disallowed-tools."""
-        claude_dir = sample_client.workspace_path / ".claude"
-        claude_dir.mkdir(parents=True, exist_ok=True)
-        (claude_dir / "project-config.yaml").write_text(
-            "tracking:\n  primary:\n    system: github-issues\n", encoding="utf-8"
-        )
+        """DAEMON resume injects --disallowed-tools when orchestrator config
+        sets ``disallowed_mcp_tools`` — tracker no longer affects this."""
+        _write_orchestrator_disallow(["mcp__plugin_linear_linear__*"])
         self._write_clients_file(tmp_config_dir, sample_client)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
@@ -1147,23 +1144,92 @@ class TestResumeSession:
         extra = mock_native_daemon.spawn_extra_args[0] or []
         # Single `=`-joined token; the bare two-token form would let the variadic
         # flag swallow the resume's positional prompt (#733).
-        assert _LINEAR_MCP_DISALLOW_ARG in extra
+        assert "--disallowed-tools=mcp__plugin_linear_linear__*" in extra
         assert "--disallowed-tools" not in extra
-        assert _LINEAR_MCP_DISALLOW not in extra
 
-    def test_resume_user_session_does_not_inject_disallow_flag(
+    def test_resume_daemon_multiple_patterns_comma_joined(
         self,
         tmp_config_dir: Path,
         sample_client: ClientConfig,
         mock_native_daemon: FakeNativeDaemonClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """USER-origin resume never injects --disallowed-tools (#726)."""
-        claude_dir = sample_client.workspace_path / ".claude"
-        claude_dir.mkdir(parents=True, exist_ok=True)
-        (claude_dir / "project-config.yaml").write_text(
-            "tracking:\n  primary:\n    system: github-issues\n", encoding="utf-8"
+        """DAEMON resume comma-joins multiple patterns into ONE token — parity
+        with the spawn_create_impl chokepoint's multi-pattern handling."""
+        _write_orchestrator_disallow(["mcp__plugin_linear_linear__*", "mcp__foo__*"])
+        self._write_clients_file(tmp_config_dir, sample_client)
+        monkeypatch.setattr("cw.session._attach_session", _noop)
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id="rgh726b",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    origin=SessionOrigin.DAEMON,
+                    status=SessionStatus.BACKGROUNDED,
+                    workspace_path=sample_client.workspace_path,
+                    worktree_path=sample_client.workspace_path.parent / "wt-resume",
+                    surface_ref="deadbeef",
+                    claude_session_id="550e8400-e29b-41d4-a716-446655440002",
+                )
+            ]
         )
+        save_state(state)
+
+        resume_session("test-client/impl", native_daemon=mock_native_daemon)
+
+        extra = mock_native_daemon.spawn_extra_args[0] or []
+        assert "--disallowed-tools=mcp__plugin_linear_linear__*,mcp__foo__*" in extra
+        # Both patterns ride ONE token (#733); no bare two-token form.
+        assert "--disallowed-tools" not in extra
+
+    def test_resume_daemon_no_disallow_when_unconfigured(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """DAEMON resume with no orchestrator config → no --disallowed-tools."""
+        self._write_clients_file(tmp_config_dir, sample_client)
+        monkeypatch.setattr("cw.session._attach_session", _noop)
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id="rgh726c",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    origin=SessionOrigin.DAEMON,
+                    status=SessionStatus.BACKGROUNDED,
+                    workspace_path=sample_client.workspace_path,
+                    worktree_path=sample_client.workspace_path.parent / "wt-resume",
+                    surface_ref="deadbeef",
+                    claude_session_id="550e8400-e29b-41d4-a716-446655440003",
+                )
+            ]
+        )
+        save_state(state)
+
+        resume_session("test-client/impl", native_daemon=mock_native_daemon)
+
+        extra = mock_native_daemon.spawn_extra_args[0] or []
+        assert "--disallowed-tools" not in extra
+        assert not any(tok.startswith("--disallowed-tools=") for tok in extra)
+
+    def test_resume_user_session_never_injects_disallow(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """USER-origin resume never injects --disallowed-tools (#726), even
+        when orchestrator config sets ``disallowed_mcp_tools``."""
+        _write_orchestrator_disallow(["mcp__plugin_linear_linear__*"])
         self._write_clients_file(tmp_config_dir, sample_client)
         monkeypatch.setattr("cw.session._attach_session", _noop)
 
@@ -1188,7 +1254,7 @@ class TestResumeSession:
 
         extra = mock_native_daemon.spawn_extra_args[0] or []
         assert "--disallowed-tools" not in extra
-        assert _LINEAR_MCP_DISALLOW_ARG not in extra
+        assert not any(tok.startswith("--disallowed-tools=") for tok in extra)
 
     def test_resume_session_prompt_is_trailing_positional(
         self,
@@ -1200,18 +1266,15 @@ class TestResumeSession:
         """resume_session (dead surface): prompt is the trailing positional in argv.
 
         Uses the maximally-loaded extra_args set: ``--resume <uuid>``,
-        ``--model``, and ``--disallowed-tools=`` (github-issues tracker).
-        This is the exact argv shape that triggered #733 when the disallow
-        flag was in two-token form — ``--disallowed-tools <pattern>`` would
-        consume the prompt as a second value, leaving the worker promptless.
+        ``--model``, and ``--disallowed-tools=`` (configured disallow
+        patterns). This is the exact argv shape that triggered #733 when the
+        disallow flag was in two-token form — ``--disallowed-tools <pattern>``
+        would consume the prompt as a second value, leaving the worker
+        promptless.
         """
         from cw.native_daemon import _DEFAULT_PERMISSION_MODE, _build_spawn_argv
 
-        claude_dir = sample_client.workspace_path / ".claude"
-        claude_dir.mkdir(parents=True, exist_ok=True)
-        (claude_dir / "project-config.yaml").write_text(
-            "tracking:\n  primary:\n    system: github-issues\n", encoding="utf-8"
-        )
+        _write_orchestrator_disallow(["mcp__plugin_linear_linear__*"])
         self._write_clients_file(
             tmp_config_dir,
             sample_client,
@@ -1253,7 +1316,7 @@ class TestResumeSession:
         # Sanity: all three flag types are present, exercising the full #733 shape.
         assert "--resume" in (extra_args or [])
         assert "--model" in (extra_args or [])
-        assert _LINEAR_MCP_DISALLOW_ARG in (extra_args or [])
+        assert "--disallowed-tools=mcp__plugin_linear_linear__*" in (extra_args or [])
 
     def test_dead_surface_unregistered_raises_spawn_unregistered_error(
         self,

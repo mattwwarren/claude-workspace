@@ -1090,6 +1090,46 @@ class OrchestratorConfig(BaseModel):
     # construction until P2 ships). Default False, mirroring
     # gate_recipes_enabled's fail-safe default.
     review_recipes_enabled: bool = False
+    # Tool-name patterns forwarded to EVERY DAEMON worker spawn as a single
+    # `--disallowed-tools=<comma-joined>` token (cw.spawn.build_disallowed_tools_arg).
+    # Default empty: cw forces no tool restriction on workers. Replaces the
+    # former hard-coded, tracker-gated Linear-MCP block (#726) — restricting an
+    # MCP whose headless auth behaves badly is the operator's policy to set
+    # here, not cw's to impose from a tracker heuristic. Patterns use claude's
+    # `--disallowed-tools` glob syntax, e.g. "mcp__plugin_linear_linear__*".
+    # Global by design (no per-lane/per-client override): the operator sets one
+    # fleet-wide policy. The removed #726 heuristic's per-client (tracker)
+    # scoping was dropped deliberately, not overlooked — a mixed fleet that
+    # needs the block on only some clients sets the one pattern that is safe
+    # fleet-wide (headless Linear OAuth stalls the same way on every client).
+    disallowed_mcp_tools: list[str] = Field(default_factory=list)
+
+    @field_validator("disallowed_mcp_tools")
+    @classmethod
+    def _validate_disallowed_mcp_tools(cls, value: list[str]) -> list[str]:
+        """Reject blank or comma-bearing patterns (fail-loud, not silent-drop).
+
+        Two silent-corruption modes are guarded, both producing a restriction
+        that differs from what the operator wrote with no error raised: a blank
+        entry renders as an empty comma-field in the `--disallowed-tools=`
+        value, and a comma-bearing entry splits into two patterns when
+        ``build_disallowed_tools_arg`` comma-joins the list into one token.
+        Same fail-closed reasoning as default_signoff. Pydantic already
+        enforces ``list[str]``; this adds the element-shape guard.
+        """
+        for pattern in value:
+            if not pattern.strip():
+                msg = (
+                    "disallowed_mcp_tools entries must be non-empty, non-blank strings"
+                )
+                raise ValueError(msg)
+            if "," in pattern:
+                msg = (
+                    "disallowed_mcp_tools entries must not contain ',' (the "
+                    "comma-join delimiter); use one list entry per pattern"
+                )
+                raise ValueError(msg)
+        return value
 
     @field_validator("concierge_recoveries")
     @classmethod

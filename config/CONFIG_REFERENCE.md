@@ -493,6 +493,20 @@ operator_channel_forward:
     - failed
     - cancelled
   liveness_min_bucket: stale_30m
+
+# Tool-name patterns denied to EVERY DAEMON worker spawn, forwarded as a single
+# `--disallowed-tools=<comma-joined>` token (GitHub #726/#733). Default empty:
+# cw imposes no tool restriction on workers. Global by design — one fleet-wide
+# policy, no per-lane/per-client override. Patterns use claude's
+# `--disallowed-tools` glob syntax; entries must be non-blank and comma-free
+# (comma is the join delimiter). Replaces the former hard-coded, tracker-gated
+# Linear-MCP block.
+#
+# MIGRATION: a github-issues client that depended on the old automatic
+#   mcp__plugin_linear_linear__* block (added in #726 to avoid a headless
+#   Linear-OAuth stall) must now opt in explicitly:
+#   disallowed_mcp_tools: ["mcp__plugin_linear_linear__*"]
+disallowed_mcp_tools: []
 ```
 
 Override a single ticket's budget or tier at enqueue time (there is no
