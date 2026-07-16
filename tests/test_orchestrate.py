@@ -1634,6 +1634,122 @@ class TestTickSummaryLanes:
 
 
 # ---------------------------------------------------------------------------
+# TestTickSummaryLaneOccupants — lane_occupants + occupied (#1243)
+# ---------------------------------------------------------------------------
+
+
+class TestTickSummaryLaneOccupants:
+    def test_tick_summary_lane_occupants_defaults_empty(self) -> None:
+        """TickSummary without lane_occupants/occupied kwargs defaults empty."""
+        tick = TickSummary(
+            claimed=0,
+            pending=0,
+            running=0,
+            cap=1,
+            skip_reason="none",
+            tick_at=datetime(2026, 6, 12, 0, 0, 0, tzinfo=UTC),
+        )
+        assert tick.lane_occupants == {}
+        assert tick.occupied == 0
+
+    def test_tick_summary_lane_occupants_round_trip(self) -> None:
+        """TickSummary serialises lane_occupants/occupied intact."""
+        tick = TickSummary(
+            claimed=0,
+            pending=0,
+            running=0,
+            cap=1,
+            skip_reason="none",
+            tick_at=datetime(2026, 6, 12, 0, 0, 0, tzinfo=UTC),
+            lane_occupants={"impl": [{"ticket_id": "GEN-1", "status": "running"}]},
+            occupied=1,
+        )
+        parsed = json.loads(tick.model_dump_json())
+        assert parsed["lane_occupants"]["impl"] == [
+            {"ticket_id": "GEN-1", "status": "running"}
+        ]
+        assert parsed["occupied"] == 1
+
+    def test_latest_tick_by_client_extracts_lane_occupants(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """DISPATCH_TICK with lane_occupants/occupied populates TickSummary."""
+        from cw.orchestrate import _latest_tick_by_client
+
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "occ-client",
+                "claimed": 0,
+                "pending": 1,
+                "running": 0,
+                "cap": 2,
+                "skip_reason": "lane_cap_blocked",
+                "lane_occupants": {
+                    "impl": [{"ticket_id": "GEN-1", "status": "blocked_on_user"}]
+                },
+                "occupied": 1,
+            },
+        )
+        events = read_events()
+        result = _latest_tick_by_client(events)
+        assert "occ-client" in result
+        assert result["occ-client"].lane_occupants == {
+            "impl": [{"ticket_id": "GEN-1", "status": "blocked_on_user"}]
+        }
+        assert result["occ-client"].occupied == 1
+
+    def test_latest_tick_by_client_legacy_event_no_lane_occupants_key(
+        self,
+        tmp_orchestrate_dirs: Path,
+    ) -> None:
+        """DISPATCH_TICK without the key yields empty lane_occupants, occupied=0."""
+        from cw.orchestrate import _latest_tick_by_client
+
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "legacy-occ-client",
+                "claimed": 0,
+                "pending": 1,
+                "running": 0,
+                "cap": 2,
+                "skip_reason": "none",
+                # no lane_occupants/occupied keys — pre-#1243 format
+            },
+        )
+        events = read_events()
+        result = _latest_tick_by_client(events)
+        assert "legacy-occ-client" in result
+        assert result["legacy-occ-client"].lane_occupants == {}
+        assert result["legacy-occ-client"].occupied == 0
+
+    def test_extract_lane_occupants_tolerates_malformed_entries(self) -> None:
+        """_extract_lane_occupants drops malformed shapes without raising."""
+        from cw.orchestrate import _extract_lane_occupants
+
+        assert _extract_lane_occupants("not-a-dict") == {}
+        assert _extract_lane_occupants(None) == {}
+        raw = {
+            "good": [
+                {"ticket_id": "T1", "status": "running"},
+                "not-a-dict",
+                {"ticket_id": "T2"},  # missing status
+                {"status": "running"},  # missing ticket_id
+                {"ticket_id": 5, "status": "running"},  # non-str ticket_id
+                {"ticket_id": "T3", "status": 9},  # non-str status
+            ],
+            "bad-value": "not-a-list",
+            5: [{"ticket_id": "T9", "status": "running"}],  # non-str lane name
+        }
+        result = _extract_lane_occupants(raw)
+        assert result["good"] == [{"ticket_id": "T1", "status": "running"}]
+        assert "bad-value" not in result
+        assert 5 not in result
+
+
+# ---------------------------------------------------------------------------
 # TestTickSummaryFreshnessFields — freshness_detail + blocked_branch (#820)
 # ---------------------------------------------------------------------------
 
