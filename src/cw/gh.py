@@ -24,7 +24,7 @@ _PR_VIEW_TIMEOUT = 15
 # asserted by tests/test_gh.py — keep it in sync with the decision-table spec.
 _PR_VIEW_FIELDS = (
     "state,mergeable,mergeStateStatus,statusCheckRollup,"
-    "reviewDecision,isDraft,reviewRequests"
+    "reviewDecision,isDraft,reviewRequests,comments"
 )
 
 # Lookback window for timed_out-merged detection, shared by doctor.py and reconcile.py.

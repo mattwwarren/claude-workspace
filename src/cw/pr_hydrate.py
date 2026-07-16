@@ -123,6 +123,70 @@ def _summarize_status_checks(rollup: list[dict[str, Any]]) -> dict[str, Any]:
     return {"failing": failing, "pending_count": pending_count, "ok": not failing}
 
 
+# RFC 0010 W2 comment-review gap (#1195): cw's own review skills emit this
+# vocabulary (a leading "## Review:" heading, or a MUST_FIX/BLOCKING marker)
+# when a blocking review is posted as a plain issue/PR comment rather than
+# through GitHub's Request-changes review flow. Deliberately scoped to cw's
+# own emitted vocabulary — does NOT catch free-form human prose reviews
+# (ticket option (a); (b)/#1108's structured review-verdict artifact is the
+# general-case follow-up).
+_BLOCKING_COMMENT_MARKERS: frozenset[str] = frozenset({"MUST_FIX", "BLOCKING"})
+_REVIEW_HEADING_PREFIX = "## Review:"
+
+
+def _comment_body_is_blocking(body: str) -> bool:
+    """True if *body* carries cw's own blocking-review vocabulary (#1195).
+
+    Marker matching requires a boundary on both sides, where a boundary is
+    "not a word character and not a hyphen" — plain ``\\b`` alone treats a
+    hyphen as a boundary, which would false-positive on a negated,
+    hyphen-joined prefix like ``"NON-BLOCKING"`` (a common code-review
+    convention for explicitly marking a comment as *not* blocking).
+    """
+    if body.strip().startswith(_REVIEW_HEADING_PREFIX):
+        return True
+    return any(
+        re.search(rf"(?<![\w-]){re.escape(marker)}(?![\w-])", body)
+        for marker in _BLOCKING_COMMENT_MARKERS
+    )
+
+
+def _has_blocking_comment_review(
+    comments: list[dict[str, Any]], *, self_login: str | None
+) -> bool:
+    """True if any non-self-authored comment carries a blocking-review marker.
+
+    Pure classifier feeding the new row in ``_compute_attention_state``
+    (#1195). *comments* is the raw ``gh pr view --json comments`` list (same
+    ``body``/``author.login`` shape as ``fetch_approved_plan_comment``'s
+    comment reads in ``cw.gh``); malformed entries are skipped, not raised
+    on. *self_login* excludes the operator's own comments — without this, a
+    past ``/address-review`` reply quoting "MUST_FIX" would re-trigger this
+    classifier forever. *self_login* is caller-resolved (see
+    ``hydrate_pr_states``), not fetched here.
+
+    *self_login* is required to classify safely: when it is ``None`` (the
+    caller could not resolve the operator's own identity that tick), this
+    fails closed and returns ``False`` unconditionally rather than scanning
+    without the exclusion — scanning anyway would reproduce the exact
+    self-trigger loop the exclusion exists to prevent, on every tick identity
+    resolution happens to fail.
+    """
+    if self_login is None:
+        return False
+    for comment in comments:
+        if not isinstance(comment, dict):
+            continue
+        author = comment.get("author")
+        login = author.get("login") if isinstance(author, dict) else None
+        if login == self_login:
+            continue
+        body = comment.get("body")
+        if isinstance(body, str) and _comment_body_is_blocking(body):
+            return True
+    return False
+
+
 def _compute_attention_state(
     *,
     ci_ok: bool,
@@ -131,16 +195,19 @@ def _compute_attention_state(
     review_decision: str,
     is_draft: bool,
     reviewer_count: int,
+    has_blocking_comment_review: bool = False,
 ) -> str | None:
     """Derive the operator attention-state via the #929 decision table.
 
     Precedence chain + unconditional draft-gate ported from
     ``_compute_attention_state`` in ``.claude/scripts/review_monitor.py``. cw
-    drops the reference's role/status/unaddressed_count/comment-review inputs
-    (no subsystem exists for them). First matching row wins:
+    drops the reference's role/status/unaddressed_count inputs (no subsystem
+    exists for them), but does carry a narrow comment-review input (#1195,
+    row 2b) — see ``_has_blocking_comment_review``. First matching row wins:
       0. is_draft                                    -> None
       1. merge_state_status in (DIRTY, BEHIND)       -> merge_blocked
       2. not ci_ok                                   -> ci_failing
+      2b. has_blocking_comment_review                -> changes_requested
       3. review_decision == CHANGES_REQUESTED        -> changes_requested
       4. review_decision == REVIEW_REQUIRED and no reviewer -> no_reviewer
       5a. BLOCKED and pending checks                 -> None (waiting on CI)
@@ -150,7 +217,12 @@ def _compute_attention_state(
 
     Rows 5a-5c encode the #929 premise-round finding (2026-07-05): BLOCKED can
     co-occur with green CI (a required check that hasn't run yet, or missing
-    approvals), so BLOCKED alone must not read as "ready to approve".
+    approvals), so BLOCKED alone must not read as "ready to approve". Row 2b
+    (#1195) is evaluated at equal precedence to Row 3 (immediately before it)
+    so it overrides Rows 4/5/6 uniformly on both the BLOCKED and clean/
+    ready_to_approve ladders — a comment-shaped blocking review must not be
+    invisible just because it didn't arrive through GitHub's formal review
+    flow.
     """
     if is_draft:  # Row 0 — drafts never enter an escalation path.
         # Why: unconditional draft-gate ported from review-monitor lesson
@@ -166,7 +238,10 @@ def _compute_attention_state(
         return "merge_blocked"
     if not ci_ok:  # Row 2
         return "ci_failing"
-    if review_decision == "CHANGES_REQUESTED":  # Row 3
+    # Row 2b (#1195) is merged into Row 3's return (not a separate `if`/`return`)
+    # to stay within the PLR0911 return-count budget — it is equal-precedence
+    # to Row 3, not a distinct outcome.
+    if has_blocking_comment_review or review_decision == "CHANGES_REQUESTED":  # Row 3
         # Why: fires on the PR's top-level reviewDecision, ported from review-
         # monitor lesson (session:1a93541b, "changes_requested fires on top-level
         # reviewDecision"): a "Request changes" review with NO inline comments
@@ -209,8 +284,15 @@ def _parse_pr_url(pr_url: str) -> tuple[str, int] | None:
     return match.group(1), int(match.group(2))
 
 
-def _derive_pr_state(pr_url: str) -> PrState | None:
-    """Fetch and derive a fresh ``PrState`` for *pr_url*, or None on failure."""
+def _derive_pr_state(pr_url: str, *, self_login: str | None) -> PrState | None:
+    """Fetch and derive a fresh ``PrState`` for *pr_url*, or None on failure.
+
+    *self_login* is the operator's own gh login, resolved once by the caller
+    (``hydrate_pr_states``, at most once per tick — see #1195 RISK note) and
+    threaded down rather than re-resolved per PR, to avoid an unbounded
+    per-candidate ``gh api user`` subprocess retry storm on login-resolution
+    failure.
+    """
     data = fetch_pr_view(pr_url)
     if data is None:
         return None
@@ -223,6 +305,11 @@ def _derive_pr_state(pr_url: str) -> PrState | None:
     reviewer_count = len(data.get("reviewRequests") or [])
     is_draft = bool(data.get("isDraft", False))
     pending_count = summary["pending_count"]
+    comments = data.get("comments")
+    has_blocking_comment_review = _has_blocking_comment_review(
+        comments if isinstance(comments, list) else [],
+        self_login=self_login,
+    )
     # Terminal PRs (MERGED/CLOSED) need no operator attention — the decision
     # table is a candidate-selection filter that never runs for them (#929).
     attention_state = (
@@ -235,6 +322,7 @@ def _derive_pr_state(pr_url: str) -> PrState | None:
             review_decision=review_decision,
             is_draft=is_draft,
             reviewer_count=reviewer_count,
+            has_blocking_comment_review=has_blocking_comment_review,
         )
     )
     mergeable = data.get("mergeable")
@@ -407,21 +495,24 @@ def resolve_and_register_review_request(
     return (True, "registered") if inserted else (False, "already_registered")
 
 
-def _hydrate_watched_prs(watched_prs: list[WatchedPr]) -> None:
+def _hydrate_watched_prs(
+    watched_prs: list[WatchedPr], *, self_login: str | None
+) -> None:
     """Hydrate ``pr_state`` on each active watched PR, best-effort (RFC 0011 S2).
 
-    Parallel to the ``TicketTask`` hydration loop: reuses ``_derive_pr_state``
-    unmodified. A ``dismissed`` watched PR is skipped (never fetched). A
-    transient fetch failure (``_derive_pr_state`` -> None) leaves the prior
-    ``pr_state`` untouched, mirroring the task path's best-effort contract. Each
-    persist re-reads the store under ``dev_queue_lock()`` and matches by
-    ``(repo, pr_number)`` on an ``active`` record, so a concurrent writer that
-    dismissed/removed the entry can't be clobbered.
+    Parallel to the ``TicketTask`` hydration loop: reuses ``_derive_pr_state``,
+    threading through the caller-resolved ``self_login`` (#1195) rather than
+    re-resolving it here. A ``dismissed`` watched PR is skipped (never
+    fetched). A transient fetch failure (``_derive_pr_state`` -> None) leaves
+    the prior ``pr_state`` untouched, mirroring the task path's best-effort
+    contract. Each persist re-reads the store under ``dev_queue_lock()`` and
+    matches by ``(repo, pr_number)`` on an ``active`` record, so a concurrent
+    writer that dismissed/removed the entry can't be clobbered.
     """
     for watched in watched_prs:
         if watched.status != "active":
             continue
-        new_state = _derive_pr_state(watched.pr_url)
+        new_state = _derive_pr_state(watched.pr_url, self_login=self_login)
         if new_state is None:
             continue
         with dev_queue_lock():
@@ -594,6 +685,34 @@ def _overlay_push_observation(
     review_decision plus ``is_draft``/``reviewer_count``/``pending_count``,
     which are only ever carried forward from *base* — no wire payload ever
     carries them, so they are never themselves overlaid.
+
+    ``has_blocking_comment_review`` (#1195) is not a ``PrState`` field and no
+    webhook payload carries it, so this recompute can't re-fetch ``comments``
+    to re-derive it directly. It infers whether the signal was in effect
+    instead: ``changes_requested`` is produced by exactly two rows (2b or 3)
+    -- KEEP THIS IN SYNC with ``_compute_attention_state``'s row table; a new
+    row that also yields ``changes_requested`` would silently break this
+    inference -- and row 3 requires ``review_decision == CHANGES_REQUESTED``,
+    so if *base*'s ``attention_state`` was ``changes_requested`` while its
+    ``review_decision`` was NOT itself ``CHANGES_REQUESTED``, row 2b must have
+    been the cause, and that carries forward into this recompute. This
+    recovers the common case: a comment-driven ``changes_requested`` no
+    longer silently reverts on an unrelated push event mid-interval.
+
+    Narrower residual gap (accepted, same category as the original R4 cost):
+    if the comment signal was present but *masked* by a higher-precedence row
+    at the prior poll (row 1, ``merge_blocked``), *base*.attention_state reads
+    ``merge_blocked``, not ``changes_requested``, so this inference can't
+    recover it -- a later push that clears just that masking condition
+    (``PR_MERGEABLE``) still reverts to whatever the base ladder computes.
+    Only the next full poll (``_derive_pr_state``, which re-fetches
+    ``comments``) can re-derive it. Row 2 (``ci_failing``) masking is
+    unreachable via any current push event (nothing overlays ``ci_ok`` back
+    to ``True``). Fully closing this residual requires persisting
+    ``has_blocking_comment_review`` as a ``PrState`` field, which the
+    operator's R2 decision explicitly forbids. See
+    ``TestOverlayPushObservation::test_overlay_recompute_preserves_blocking_comment_signal``
+    and ``test_overlay_recompute_masked_row_gap_reverts_on_clearing_push``.
     """
     base = old if old is not None else PrState()
     updates: dict[str, Any] = {"hydrated_at": datetime.now(UTC)}
@@ -616,6 +735,10 @@ def _overlay_push_observation(
     if merged_state in _TERMINAL_PR_STATES:
         updates["attention_state"] = None
     else:
+        had_blocking_comment_review = (
+            base.attention_state == "changes_requested"
+            and base.review_decision != "CHANGES_REQUESTED"
+        )
         updates["attention_state"] = _compute_attention_state(
             ci_ok=updates.get("ci_ok", base.ci_ok),
             pending_count=base.pending_count,
@@ -625,6 +748,7 @@ def _overlay_push_observation(
             review_decision=updates.get("review_decision", base.review_decision),
             is_draft=base.is_draft,
             reviewer_count=base.reviewer_count,
+            has_blocking_comment_review=had_blocking_comment_review,
         )
     return base.model_copy(update=updates)
 
@@ -720,17 +844,26 @@ def hydrate_pr_states(config: OrchestratorConfig) -> None:
     fetch failure for a single task leaves its prior state untouched. Active
     ``watched_prs`` (RFC 0011 S2) hydrate on the same pass via
     ``_hydrate_watched_prs``, independently of whether any task is a candidate.
+
+    The operator's own gh login (``cached_gh_login()``) is resolved at most
+    once per call, outside both hydration loops (#1195), and threaded down to
+    ``_derive_pr_state``/``_hydrate_watched_prs`` — never re-resolved per
+    candidate/watched-PR.
     """
     store = load_dev_queue()
     if _throttled(store.tasks, store.watched_prs, config.pr_hydration_interval_seconds):
         return
+    from cw.operator_identity import cached_gh_login
+
     candidates = [t for t in store.tasks if _is_candidate(t)]
+    has_active_watched_prs = any(w.status == "active" for w in store.watched_prs)
+    self_login = cached_gh_login() if candidates or has_active_watched_prs else None
     derived: list[tuple[TicketTask, PrState]] = []
     for task in candidates:
         pr_url = task.pr_url
         if pr_url is None:  # pragma: no cover - _is_candidate guarantees non-null
             continue
-        new_state = _derive_pr_state(pr_url)
+        new_state = _derive_pr_state(pr_url, self_login=self_login)
         if new_state is not None:
             derived.append((task, new_state))
     if derived:
@@ -738,4 +871,4 @@ def hydrate_pr_states(config: OrchestratorConfig) -> None:
     # Watched PRs hydrate on the same throttled pass but independently of task
     # candidates (RFC 0011 S2) — the early ``if not candidates: return`` was
     # removed so a watched-PR-only store still hydrates.
-    _hydrate_watched_prs(store.watched_prs)
+    _hydrate_watched_prs(store.watched_prs, self_login=self_login)
