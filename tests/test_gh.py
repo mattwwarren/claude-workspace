@@ -12,6 +12,7 @@ from cw import gh
 from cw.gh import (
     add_pr_reviewer,
     branch_exists_on_origin,
+    check_gh_availability,
     current_gh_login,
     fetch_approved_plan_comment,
     fetch_pr_view,
@@ -827,6 +828,51 @@ class TestCurrentGhLogin:
 
         monkeypatch.setattr("cw.gh._sp.run", _raise)
         assert current_gh_login(timeout=10) is None
+
+
+class TestCheckGhAvailability:
+    """Direct tests for check_gh_availability (RFC 0011 A5).
+
+    Sibling of TestCurrentGhLogin: mocks the same subprocess seam
+    (``cw.gh._sp.run``) and asserts the fail-closed posture — any failure to
+    resolve ``gh auth status`` (non-zero exit, missing binary, timeout, or
+    OSError) reports the fleet as unavailable.
+    """
+
+    def test_success_returncode_zero_returns_true(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("cw.gh._sp.run", lambda *_a, **_kw: _make_run_result(0, ""))
+        assert check_gh_availability(timeout=10) is True
+
+    def test_failure_returncode_nonzero_returns_false(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("cw.gh._sp.run", lambda *_a, **_kw: _make_run_result(1, ""))
+        assert check_gh_availability(timeout=10) is False
+
+    def test_gh_not_found_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raise(*_a: object, **_kw: object) -> Any:
+            msg = "gh"
+            raise FileNotFoundError(msg)
+
+        monkeypatch.setattr("cw.gh._sp.run", _raise)
+        assert check_gh_availability(timeout=10) is False
+
+    def test_timeout_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raise(*_a: object, **_kw: object) -> Any:
+            raise subprocess.TimeoutExpired(cmd="gh", timeout=10)
+
+        monkeypatch.setattr("cw.gh._sp.run", _raise)
+        assert check_gh_availability(timeout=10) is False
+
+    def test_oserror_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raise(*_a: object, **_kw: object) -> Any:
+            msg = "boom"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.gh._sp.run", _raise)
+        assert check_gh_availability(timeout=10) is False
 
 
 _PR_VIEW_FIELDS = (
