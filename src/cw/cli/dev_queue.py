@@ -475,7 +475,8 @@ def _emit_dev_queue_lane_breakdown(
         )
         occupants = [t for t in lane_tasks if t.status in OCCUPIED_LANE_STATUSES]
         cap = lane_caps.get(lane_name, 1)
-        noteworthy = (blocked + signoff) > 0 or len(occupants) >= cap
+        at_cap = len(occupants) >= cap
+        noteworthy = (blocked + signoff) > 0 or at_cap
         if single_default_lane and not noteworthy:
             continue
         override = overrides.lanes.get(f"{lane_tasks[0].client}/{lane_name}")
@@ -489,7 +490,12 @@ def _emit_dev_queue_lane_breakdown(
             occupant_str = ", ".join(
                 f"{t.ticket_id} ({t.status.value})" for t in occupants
             )
-            click.echo(f"      lane full: {occupant_str}")
+            # "lane full" only when actually at/over cap -- a lane with spare
+            # capacity that merely has a blocked/signoff occupant is not full,
+            # and mislabeling it that way reintroduces the same misdiagnosis
+            # risk (#1243) on a lane that could still claim more work.
+            label = "lane full" if at_cap else "lane occupants"
+            click.echo(f"      {label}: {occupant_str}")
 
 
 @dev_queue.command(name="status")

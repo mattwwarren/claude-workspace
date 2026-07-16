@@ -337,7 +337,10 @@ def _lane_occupants_for_client(
 
 
 def _lane_stats_for_client(
-    client: ClientConfig, queue_snapshot: DevQueueStore
+    client: ClientConfig,
+    queue_snapshot: DevQueueStore,
+    *,
+    occupants: dict[str, list[dict[str, str]]] | None = None,
 ) -> dict[str, dict[str, int]]:
     """Per-lane ``{claimed, running, blocked, signoff, pending}`` counts for
     event payloads.
@@ -350,8 +353,13 @@ def _lane_stats_for_client(
     and ``signoff`` are split out so operators can see at a glance why
     claimed=0 when pending>0 (#588, #990). Derives running/blocked/signoff
     from :func:`_lane_occupants_for_client` -- see #1243.
+
+    *occupants* lets a caller that already computed the occupant lookup (e.g.
+    to also emit ``lane_occupants``/``occupied`` on the same dispatch.tick
+    payload) pass it in and avoid a second full scan of ``queue_snapshot.tasks``.
     """
-    occupants = _lane_occupants_for_client(client, queue_snapshot)
+    if occupants is None:
+        occupants = _lane_occupants_for_client(client, queue_snapshot)
     stats: dict[str, dict[str, int]] = {}
     for lane_cfg in client.effective_lanes:
         lane_occupants = occupants.get(lane_cfg.name, [])
@@ -478,8 +486,10 @@ def _emit_usage_limit_skip_events(
             if t.client == client.name and t.status == QueueItemStatus.PENDING
         )
         # Per-lane breakdown for the event payload (claimed=0 for all).
-        backoff_lane_stats = _lane_stats_for_client(client, queue_snapshot)
         backoff_lane_occupants = _lane_occupants_for_client(client, queue_snapshot)
+        backoff_lane_stats = _lane_stats_for_client(
+            client, queue_snapshot, occupants=backoff_lane_occupants
+        )
         record_event(
             OrchestratorEventType.DISPATCH_TICK,
             {
@@ -639,7 +649,9 @@ def _emit_availability_skip(
             "running": running_count,
             "cap": cap,
             "skip_reason": DispatchSkipReason.AVAILABILITY_GATE,
-            "lanes": _lane_stats_for_client(client, queue_snapshot),
+            "lanes": _lane_stats_for_client(
+                client, queue_snapshot, occupants=lane_occupants
+            ),
             "lane_occupants": lane_occupants,
             "occupied": sum(len(v) for v in lane_occupants.values()),
         },
@@ -812,7 +824,9 @@ def _emit_stale_skip(
             "skip_reason": DispatchSkipReason.FRESHNESS_GATE,
             "freshness_detail": freshness_detail,
             "blocked_branch": non_main_branch,
-            "lanes": _lane_stats_for_client(client, queue_snapshot),
+            "lanes": _lane_stats_for_client(
+                client, queue_snapshot, occupants=lane_occupants
+            ),
             "lane_occupants": lane_occupants,
             "occupied": sum(len(v) for v in lane_occupants.values()),
         },

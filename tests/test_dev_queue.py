@@ -673,6 +673,14 @@ class TestDevQueueLaneBreakdownOccupants:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A signoff-parked default-lane ticket surfaces a 'lane full' occupant line."""
+        # load_orchestrator_config() auto-creates orchestrator.yaml with
+        # default_ceiling=2 when absent -- pin it to 1 so the single
+        # signoff-parked occupant is genuinely at cap (matches the ticket's
+        # own worked example), not merely noteworthy-with-headroom.
+        _write_orchestrator_yaml(
+            tmp_orchestrator_config,
+            "default_ceiling: 1\nper_client_ceiling: {}\n",
+        )
         add_ticket(
             TicketTask(
                 ticket_id="GEN-5175",
@@ -789,13 +797,54 @@ class TestDevQueueLaneBreakdownOccupants:
         assert result.output.count("lane full") == 1
         assert "lane full: IMPL-1 (blocked_on_user)" in result.output
 
+    def test_blocked_occupant_under_cap_renders_occupants_not_full(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A blocked occupant with lane headroom is noteworthy but not "full"."""
+        ws = tmp_dev_queue / "ws"
+        clients_file().write_text(
+            "clients:\n"
+            "  genhealth:\n"
+            f"    workspace_path: {ws}\n"
+            "    lanes:\n"
+            "      - name: impl\n"
+            "        max_parallel: 3\n"
+        )
+        add_ticket(
+            TicketTask(
+                ticket_id="IMPL-1",
+                client="genhealth",
+                lane="impl",
+                status=QueueItemStatus.BLOCKED_ON_USER,
+            )
+        )
+        _patch_tick_for(monkeypatch, "genhealth")
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        # 1 occupant against cap=3 — noteworthy (blocked>0) but not at cap, so
+        # the line must not claim the lane is "full".
+        assert "lane full" not in result.output
+        assert "lane occupants: IMPL-1 (blocked_on_user)" in result.output
+
     def test_lane_breakdown_client_missing_from_config_falls_back_gracefully(
         self,
         tmp_dev_queue: Path,
         tmp_orchestrator_config: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A queued task for a client absent from clients.yaml does not raise."""
+        """A queued task for a client absent from clients.yaml falls back to the
+        default_ceiling cap and still renders a sensible occupant line."""
+        # Pin default_ceiling=1 (load_orchestrator_config() otherwise
+        # auto-creates orchestrator.yaml with default_ceiling=2) so the
+        # fallback path is deterministically at cap.
+        _write_orchestrator_yaml(
+            tmp_orchestrator_config,
+            "default_ceiling: 1\nper_client_ceiling: {}\n",
+        )
         # Inject directly — add_ticket would defer lane validation, but be explicit
         # that this client is not in clients.yaml.
         with _lock():
@@ -812,6 +861,10 @@ class TestDevQueueLaneBreakdownOccupants:
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "status"])
         assert result.exit_code == 0, result.output
+        # Fallback cap is the config default_ceiling (1); one RUNNING task
+        # fills it, so the default lane is noteworthy despite the missing
+        # client config.
+        assert "lane full: GHOST-1 (running)" in result.output
 
 
 class TestLaneCapsForClient:
