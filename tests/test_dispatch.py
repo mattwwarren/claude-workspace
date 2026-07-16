@@ -4635,6 +4635,33 @@ class TestLaneCapBlockedSkipReason:
         assert lane["blocked"] == 1
         assert lane["pending"] == 1
         assert lane["claimed"] == 0
+        p = events[0].payload
+        assert p["lane_occupants"]["impl"] == [
+            {"ticket_id": "LCAP-BLOCKED", "status": "blocked_on_user"}
+        ]
+        assert p["occupied"] == 1
+
+    def test_lane_occupants_names_the_blocking_ticket(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """lane_occupants names the BLOCKED_ON_USER ticket; PENDING is excluded."""
+        self._setup_blocked_lane(tmp_dispatch_dirs, sample_client_config.workspace_path)
+
+        daemon = FakeNativeDaemonClient()
+        config = OrchestratorConfig(default_ceiling=2)
+        dispatch_tick(config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-lcap-occupant-names",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        occupants = events[0].payload["lane_occupants"]["impl"]
+        # LCAP-BLOCKED occupies the lane; LCAP-PENDING (still PENDING) is absent.
+        assert occupants == [{"ticket_id": "LCAP-BLOCKED", "status": "blocked_on_user"}]
+        assert all(o["ticket_id"] != "LCAP-PENDING" for o in occupants)
 
     def test_no_pending_still_used_when_truly_empty(
         self,
@@ -4757,6 +4784,11 @@ class TestLaneCapCountingWithAwaitingSignoff:
         assert lane["blocked"] == 0
         assert lane["signoff"] == 1
         assert lane["pending"] == 1
+        p = events[0].payload
+        assert p["lane_occupants"]["impl"] == [
+            {"ticket_id": "SIGNOFF-BLOCKED", "status": "awaiting_operator_signoff"}
+        ]
+        assert p["occupied"] == 1
 
     def test_running_by_lane_counts_signoff_as_occupied(
         self,
@@ -4845,6 +4877,235 @@ class TestLaneCapCountingWithAwaitingSignoff:
             "signoff": 1,
             "pending": 0,
         }
+        from cw.dispatch import _lane_occupants_for_client
+
+        occupants = _lane_occupants_for_client(client, DevQueueStore(tasks=tasks))
+        assert {"ticket_id": "T1", "status": "awaiting_operator_signoff"} in occupants[
+            "impl"
+        ]
+        assert {"ticket_id": "T2", "status": "running"} in occupants["impl"]
+        assert len(occupants["impl"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# TestLaneOccupantsPayload (#1243) — lane_occupants/occupied on every skip path
+# ---------------------------------------------------------------------------
+
+
+class TestLaneOccupantsPayload:
+    """dispatch.tick carries lane_occupants/occupied across every skip path."""
+
+    def _make_running_lane(self, tmp_dispatch_dirs: Path, workspace_path: Path) -> None:
+        """One impl lane (max_parallel=1) with a single RUNNING occupant."""
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=workspace_path,
+            default_branch="main",
+            lanes=[LaneConfig(name="impl", max_parallel=1)],
+        )
+        _make_clients_yaml(tmp_dispatch_dirs, client)
+        running_task = TicketTask(
+            ticket_id="OCC-RUN", client="test-client", lane="impl"
+        )
+        running_task.status = QueueItemStatus.RUNNING
+        with dev_queue_lock():
+            store = load_dev_queue()
+            store.tasks.append(running_task)
+            save_dev_queue(store)
+
+    def _assert_occupants_consistent(self, payload: dict[str, object]) -> None:
+        """lane_occupants names the running task; occupied sums the lists."""
+        occupants = payload["lane_occupants"]
+        assert isinstance(occupants, dict)
+        assert occupants["impl"] == [{"ticket_id": "OCC-RUN", "status": "running"}]
+        assert payload["occupied"] == sum(len(v) for v in occupants.values())
+        assert payload["occupied"] == 1
+
+    def test_availability_skip_emits_lane_occupants(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """AVAILABILITY_GATE skip carries lane_occupants/occupied."""
+        self._make_running_lane(tmp_dispatch_dirs, sample_client_config.workspace_path)
+        _force_gh_unavailable(monkeypatch)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        events = read_events(
+            consumer="test-occ-availability",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        ticks = [
+            e
+            for e in events
+            if e.payload.get("skip_reason") == DispatchSkipReason.AVAILABILITY_GATE
+        ]
+        assert len(ticks) == 1
+        self._assert_occupants_consistent(ticks[0].payload)
+
+    def test_usage_limit_skip_emits_lane_occupants(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """USAGE_LIMITED skip carries lane_occupants/occupied."""
+        self._make_running_lane(tmp_dispatch_dirs, sample_client_config.workspace_path)
+        future = datetime.now(UTC) + timedelta(hours=1)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon, usage_limited_until=future)
+
+        events = read_events(
+            consumer="test-occ-usage-limit",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        ticks = [
+            e
+            for e in events
+            if e.payload.get("skip_reason") == DispatchSkipReason.USAGE_LIMITED
+        ]
+        assert len(ticks) == 1
+        self._assert_occupants_consistent(ticks[0].payload)
+
+    def test_stale_skip_emits_lane_occupants(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """FRESHNESS_GATE skip carries lane_occupants/occupied."""
+        self._make_running_lane(tmp_dispatch_dirs, sample_client_config.workspace_path)
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client, **_kw: (True, "aaa", "bbb", 2),
+        )
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-occ-stale",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        ticks = [
+            e
+            for e in events
+            if e.payload.get("skip_reason") == DispatchSkipReason.FRESHNESS_GATE
+        ]
+        assert len(ticks) == 1
+        self._assert_occupants_consistent(ticks[0].payload)
+
+    def test_occupied_count_sums_across_lanes(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """Top-level occupied sums per-lane occupant lists across two lanes."""
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=sample_client_config.workspace_path,
+            default_branch="main",
+            lanes=[
+                LaneConfig(name="lane-a", max_parallel=1),
+                LaneConfig(name="lane-b", max_parallel=1),
+            ],
+        )
+        _make_clients_yaml(tmp_dispatch_dirs, client)
+        run_task = TicketTask(ticket_id="OCC-A", client="test-client", lane="lane-a")
+        run_task.status = QueueItemStatus.RUNNING
+        blocked_task = TicketTask(
+            ticket_id="OCC-B", client="test-client", lane="lane-b"
+        )
+        blocked_task.status = QueueItemStatus.BLOCKED_ON_USER
+        with dev_queue_lock():
+            store = load_dev_queue()
+            store.tasks.append(run_task)
+            store.tasks.append(blocked_task)
+            save_dev_queue(store)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        events = read_events(
+            consumer="test-occ-sum",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        p = events[0].payload
+        assert p["occupied"] == 2
+        assert len(p["lane_occupants"]["lane-a"]) == 1
+        assert len(p["lane_occupants"]["lane-b"]) == 1
+
+
+class TestLaneOccupantsForClient:
+    """Direct unit tests for _lane_occupants_for_client (#1243)."""
+
+    def test_lane_occupants_for_client_excludes_pending_and_completed(
+        self, tmp_path: Path
+    ) -> None:
+        """Only OCCUPIED_LANE_STATUSES tasks appear; terminal/pending excluded."""
+        from cw.dispatch import _lane_occupants_for_client
+
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=tmp_path,
+            lanes=[LaneConfig(name="impl", max_parallel=4)],
+        )
+        tasks = [
+            TicketTask(
+                ticket_id="P",
+                client="test-client",
+                lane="impl",
+                status=QueueItemStatus.PENDING,
+            ),
+            TicketTask(
+                ticket_id="C",
+                client="test-client",
+                lane="impl",
+                status=QueueItemStatus.COMPLETED,
+            ),
+            TicketTask(
+                ticket_id="X",
+                client="test-client",
+                lane="impl",
+                status=QueueItemStatus.CANCELLED,
+            ),
+            TicketTask(
+                ticket_id="F",
+                client="test-client",
+                lane="impl",
+                status=QueueItemStatus.FAILED,
+            ),
+            TicketTask(
+                ticket_id="R",
+                client="test-client",
+                lane="impl",
+                status=QueueItemStatus.RUNNING,
+            ),
+        ]
+        occupants = _lane_occupants_for_client(client, DevQueueStore(tasks=tasks))
+        assert occupants["impl"] == [{"ticket_id": "R", "status": "running"}]
+
+    def test_lane_occupants_for_client_empty_lane_is_empty_list(
+        self, tmp_path: Path
+    ) -> None:
+        """A declared lane with no tasks maps to [] (present, not absent)."""
+        from cw.dispatch import _lane_occupants_for_client
+
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=tmp_path,
+            lanes=[LaneConfig(name="impl", max_parallel=1)],
+        )
+        occupants = _lane_occupants_for_client(client, DevQueueStore(tasks=[]))
+        assert occupants["impl"] == []
 
 
 # ---------------------------------------------------------------------------

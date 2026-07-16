@@ -634,6 +634,283 @@ class TestCLIDevQueueStatus:
 
 
 # ---------------------------------------------------------------------------
+# TestDevQueueLaneBreakdownOccupants — occupant line in dev-queue status (#1243)
+# ---------------------------------------------------------------------------
+
+
+def _patch_tick_for(monkeypatch: pytest.MonkeyPatch, client_name: str) -> None:
+    """Force a fresh, non-skip tick for *client_name* so lane breakdown renders."""
+    from cw.orchestrate import TickSummary
+
+    tick = TickSummary(
+        claimed=0,
+        pending=0,
+        running=0,
+        cap=2,
+        skip_reason="none",
+        tick_at=datetime.now(UTC),
+    )
+    monkeypatch.setattr(
+        "cw.cli.dev_queue.latest_tick_summary_by_client",
+        lambda: {client_name: tick},
+    )
+
+
+def _write_orchestrator_yaml(tmp_orchestrator_config: Path, body: str) -> None:
+    """Write an orchestrator.yaml under the redirected config dir."""
+    config_dir = tmp_orchestrator_config / ".claude-workspace"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "orchestrator.yaml").write_text(body)
+
+
+class TestDevQueueLaneBreakdownOccupants:
+    """dev-queue status names lane occupants when a lane is noteworthy (#1243)."""
+
+    def test_default_lane_signoff_at_cap_renders_occupant_line(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A signoff-parked default-lane ticket surfaces a 'lane full' occupant line."""
+        # load_orchestrator_config() auto-creates orchestrator.yaml with
+        # default_ceiling=2 when absent -- pin it to 1 so the single
+        # signoff-parked occupant is genuinely at cap (matches the ticket's
+        # own worked example), not merely noteworthy-with-headroom.
+        _write_orchestrator_yaml(
+            tmp_orchestrator_config,
+            "default_ceiling: 1\nper_client_ceiling: {}\n",
+        )
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-5175",
+                client="genhealth",
+                status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+            )
+        )
+        _patch_tick_for(monkeypatch, "genhealth")
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "lane full: GEN-5175 (awaiting_operator_signoff)" in result.output
+
+    def test_default_lane_running_under_cap_output_unchanged(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A single RUNNING task under cap prints no lane line at all (quiet case)."""
+        _write_orchestrator_yaml(
+            tmp_orchestrator_config,
+            "default_ceiling: 2\nper_client_ceiling: {}\n",
+        )
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-1",
+                client="genhealth",
+                status=QueueItemStatus.RUNNING,
+            )
+        )
+        _patch_tick_for(monkeypatch, "genhealth")
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "lane full" not in result.output
+        assert "    lane " not in result.output
+
+    def test_default_lane_two_running_at_cap_renders_all_occupants(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Two RUNNING tasks at cap render both occupants in the lane-full line."""
+        _write_orchestrator_yaml(
+            tmp_orchestrator_config,
+            "default_ceiling: 2\nper_client_ceiling: {}\n",
+        )
+        add_ticket(
+            TicketTask(
+                ticket_id="1195",
+                client="genhealth",
+                status=QueueItemStatus.RUNNING,
+            )
+        )
+        add_ticket(
+            TicketTask(
+                ticket_id="1198",
+                client="genhealth",
+                status=QueueItemStatus.RUNNING,
+            )
+        )
+        _patch_tick_for(monkeypatch, "genhealth")
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert (
+            "lane full: 1195 (running), 1198 (running)" in result.output
+            or "lane full: 1198 (running), 1195 (running)" in result.output
+        )
+
+    def test_named_lane_quiet_lane_still_prints_base_line_no_occupant_line(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Named-lane client: healthy lane prints base line, noteworthy gets full."""
+        ws = tmp_dev_queue / "ws"
+        clients_file().write_text(
+            "clients:\n"
+            "  genhealth:\n"
+            f"    workspace_path: {ws}\n"
+            "    lanes:\n"
+            "      - name: fast\n"
+            "        max_parallel: 2\n"
+            "      - name: impl\n"
+            "        max_parallel: 1\n"
+        )
+        add_ticket(
+            TicketTask(
+                ticket_id="FAST-1",
+                client="genhealth",
+                lane="fast",
+                status=QueueItemStatus.RUNNING,
+            )
+        )
+        add_ticket(
+            TicketTask(
+                ticket_id="IMPL-1",
+                client="genhealth",
+                lane="impl",
+                status=QueueItemStatus.BLOCKED_ON_USER,
+            )
+        )
+        _patch_tick_for(monkeypatch, "genhealth")
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "    lane fast:" in result.output
+        assert "    lane impl:" in result.output
+        # Only the impl lane is noteworthy → exactly one occupant line.
+        assert result.output.count("lane full") == 1
+        assert "lane full: IMPL-1 (blocked_on_user)" in result.output
+
+    def test_blocked_occupant_under_cap_renders_occupants_not_full(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A blocked occupant with lane headroom is noteworthy but not "full"."""
+        ws = tmp_dev_queue / "ws"
+        clients_file().write_text(
+            "clients:\n"
+            "  genhealth:\n"
+            f"    workspace_path: {ws}\n"
+            "    lanes:\n"
+            "      - name: impl\n"
+            "        max_parallel: 3\n"
+        )
+        add_ticket(
+            TicketTask(
+                ticket_id="IMPL-1",
+                client="genhealth",
+                lane="impl",
+                status=QueueItemStatus.BLOCKED_ON_USER,
+            )
+        )
+        _patch_tick_for(monkeypatch, "genhealth")
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        # 1 occupant against cap=3 — noteworthy (blocked>0) but not at cap, so
+        # the line must not claim the lane is "full".
+        assert "lane full" not in result.output
+        assert "lane occupants: IMPL-1 (blocked_on_user)" in result.output
+
+    def test_lane_breakdown_client_missing_from_config_falls_back_gracefully(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A queued task for a client absent from clients.yaml falls back to the
+        default_ceiling cap and still renders a sensible occupant line."""
+        # Pin default_ceiling=1 (load_orchestrator_config() otherwise
+        # auto-creates orchestrator.yaml with default_ceiling=2) so the
+        # fallback path is deterministically at cap.
+        _write_orchestrator_yaml(
+            tmp_orchestrator_config,
+            "default_ceiling: 1\nper_client_ceiling: {}\n",
+        )
+        # Inject directly — add_ticket would defer lane validation, but be explicit
+        # that this client is not in clients.yaml.
+        with _lock():
+            store = load_dev_queue()
+            store.tasks.append(
+                TicketTask(
+                    ticket_id="GHOST-1",
+                    client="ghost-client",
+                    status=QueueItemStatus.RUNNING,
+                )
+            )
+            save_dev_queue(store)
+        _patch_tick_for(monkeypatch, "ghost-client")
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        # Fallback cap is the config default_ceiling (1); one RUNNING task
+        # fills it, so the default lane is noteworthy despite the missing
+        # client config.
+        assert "lane full: GHOST-1 (running)" in result.output
+
+
+class TestLaneCapsForClient:
+    """Direct unit tests for _lane_caps_for_client (#1243)."""
+
+    def test_lane_caps_for_client_no_lanes_uses_ceiling_not_max_parallel_default(
+        self,
+        tmp_dev_queue: Path,
+    ) -> None:
+        """No declared lanes → single default lane capped at the client ceiling."""
+        from cw.cli.dev_queue import _lane_caps_for_client
+
+        config = OrchestratorConfig(default_ceiling=3)
+        assert _lane_caps_for_client("genhealth", config) == {DEFAULT_LANE: 3}
+
+    def test_lane_caps_for_client_named_lanes_uses_max_parallel(
+        self,
+        tmp_dev_queue: Path,
+    ) -> None:
+        """Declared lanes → each lane's max_parallel is its cap."""
+        from cw.cli.dev_queue import _lane_caps_for_client
+
+        ws = tmp_dev_queue / "ws"
+        clients_file().write_text(
+            "clients:\n"
+            "  genhealth:\n"
+            f"    workspace_path: {ws}\n"
+            "    lanes:\n"
+            "      - name: impl\n"
+            "        max_parallel: 2\n"
+        )
+        config = OrchestratorConfig(default_ceiling=1)
+        assert _lane_caps_for_client("genhealth", config) == {"impl": 2}
+
+    def test_lane_caps_for_client_unknown_client_falls_back_to_default_ceiling(
+        self,
+        tmp_dev_queue: Path,
+    ) -> None:
+        """Unknown client → single default lane at the config default ceiling."""
+        from cw.cli.dev_queue import _lane_caps_for_client
+
+        config = OrchestratorConfig(default_ceiling=5)
+        assert _lane_caps_for_client("ghost-client", config) == {DEFAULT_LANE: 5}
+
+
+# ---------------------------------------------------------------------------
 # TestStatusFreshnessSubline — freshness block surfaced in dev-queue status (#820)
 # ---------------------------------------------------------------------------
 
