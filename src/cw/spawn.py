@@ -12,7 +12,12 @@ from typing import TYPE_CHECKING
 
 from cw.atomic import atomic_write_text
 from cw.auto_dev_result import AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION
-from cw.config import load_state, save_state, sessions_lock
+from cw.config import (
+    load_orchestrator_config,
+    load_state,
+    save_state,
+    sessions_lock,
+)
 from cw.events import record_event
 from cw.exceptions import (
     CwError,
@@ -30,7 +35,6 @@ from cw.models import (
 )
 from cw.native_daemon import get_native_daemon_client, resolve_permission_mode
 from cw.reconcile import _csid_from_transcript, ticket_id_for_session
-from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -45,18 +49,27 @@ _log = logging.getLogger(__name__)
 # v2: added `workspace_path` (#766 — forbidden main-checkout path for git guard).
 CW_CONTEXT_SCHEMA_VERSION = 2
 
-# --disallowed-tools pattern that blocks all Linear MCP tools. Injected into
-# headless worker spawns when the client tracker is github-issues, preventing
-# workers from attempting Linear OAuth (which stalls in a headless context).
-# See GitHub issue #726.
-_LINEAR_MCP_DISALLOW = "mcp__plugin_linear_linear__*"
-# Pass the flag as a SINGLE `=`-joined argv token, never as the two-token form
-# ``["--disallowed-tools", pattern]``. `claude`'s ``--disallowed-tools <tools...>``
-# is variadic: as two tokens it greedily consumes the following positional —
-# the worker prompt — leaving the worker promptless (it idles, emits no
-# transcript). The `=` form binds exactly one value and cannot reach the prompt.
-# See GitHub issue #733 (regression from #726).
-_LINEAR_MCP_DISALLOW_ARG = f"--disallowed-tools={_LINEAR_MCP_DISALLOW}"
+
+def build_disallowed_tools_arg(patterns: list[str]) -> list[str]:
+    """Return the single ``--disallowed-tools=<patterns>`` argv token, or [].
+
+    Empty *patterns* → ``[]`` (cw forwards no restriction). Non-empty → one
+    ``=``-joined token whose value is the patterns comma-joined; claude accepts
+    a comma/space-separated list, so every pattern rides one token.
+
+    The ``=``-joined single-token form is mandatory. ``claude``'s
+    ``--disallowed-tools <tools...>`` is variadic: as the two-token form
+    ``["--disallowed-tools", pattern]`` it greedily consumes the following
+    positional — the worker prompt — leaving the worker promptless (it idles,
+    emits no transcript). The ``=`` form binds exactly one value and cannot
+    reach the prompt. See GitHub #733 (the regression this shape prevents) and
+    #726 (the former hard-coded, tracker-gated Linear block this replaces —
+    now ``OrchestratorConfig.disallowed_mcp_tools``).
+    """
+    if not patterns:
+        return []
+    return [f"--disallowed-tools={','.join(patterns)}"]
+
 
 # Max chars kept for blocker.details in prior_attempts_summary entries — long
 # details (tracebacks, test output) would bloat the context injected into the
@@ -483,11 +496,9 @@ def spawn_create_impl(
     final_extra: list[str] = []
     if client.worker_model:
         final_extra.extend(["--model", client.worker_model])
-    if (
-        resolve_tracker(client.repo_path or client.workspace_path)
-        == TRACKER_GITHUB_ISSUES
-    ):
-        final_extra.append(_LINEAR_MCP_DISALLOW_ARG)
+    final_extra.extend(
+        build_disallowed_tools_arg(load_orchestrator_config().disallowed_mcp_tools)
+    )
     if extra_args:
         final_extra.extend(extra_args)
 

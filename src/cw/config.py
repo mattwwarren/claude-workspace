@@ -95,6 +95,8 @@ per_client_ceiling: {}
 # max_parallel_clients: null  # uncomment to cap how many clients dispatch per tick
 linear_prefix_map: {}
 reap_policy: signal_only  # default: signal only; set to auto to restore self-healing
+# disallowed_mcp_tools: []  # patterns denied to every DAEMON worker, e.g.
+#   ["mcp__plugin_linear_linear__*"] to block Linear MCP in headless workers
 """
 
 

@@ -1085,6 +1085,33 @@ class OrchestratorConfig(BaseModel):
     # construction until P2 ships). Default False, mirroring
     # gate_recipes_enabled's fail-safe default.
     review_recipes_enabled: bool = False
+    # Tool-name patterns forwarded to EVERY DAEMON worker spawn as a single
+    # `--disallowed-tools=<comma-joined>` token (cw.spawn.build_disallowed_tools_arg).
+    # Default empty: cw forces no tool restriction on workers. Replaces the
+    # former hard-coded, tracker-gated Linear-MCP block (#726) — restricting an
+    # MCP whose headless auth behaves badly is the operator's policy to set
+    # here, not cw's to impose from a tracker heuristic. Patterns use claude's
+    # `--disallowed-tools` glob syntax, e.g. "mcp__plugin_linear_linear__*".
+    disallowed_mcp_tools: list[str] = Field(default_factory=list)
+
+    @field_validator("disallowed_mcp_tools")
+    @classmethod
+    def _validate_disallowed_mcp_tools(cls, value: list[str]) -> list[str]:
+        """Reject blank/whitespace-only patterns (fail-loud, not silent-drop).
+
+        A blank entry would render as an empty comma-field in the
+        `--disallowed-tools=` value and silently weaken the restriction the
+        operator intended — the same fail-closed reasoning as default_signoff.
+        Pydantic already enforces ``list[str]``; this adds the
+        non-empty-element guard.
+        """
+        for pattern in value:
+            if not pattern.strip():
+                msg = (
+                    "disallowed_mcp_tools entries must be non-empty, non-blank strings"
+                )
+                raise ValueError(msg)
+        return value
 
     @field_validator("concierge_recoveries")
     @classmethod

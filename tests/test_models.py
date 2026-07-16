@@ -1405,3 +1405,31 @@ class TestTicketIdValidation:
             TicketTask(ticket_id="foo/bar", client="acme")
         message = str(exc_info.value)
         assert "foo/bar" in message
+
+
+class TestOrchestratorConfigDisallowedMcpTools:
+    """Config-driven --disallowed-tools mechanism (replaces the #726
+    hard-coded, tracker-gated Linear MCP disallow) — cw.spawn.
+    build_disallowed_tools_arg reads this field."""
+
+    def test_default_is_empty_list(self) -> None:
+        assert OrchestratorConfig().disallowed_mcp_tools == []
+
+    def test_round_trips_configured_patterns(self) -> None:
+        config = OrchestratorConfig(
+            disallowed_mcp_tools=["mcp__plugin_linear_linear__*"]
+        )
+        assert config.disallowed_mcp_tools == ["mcp__plugin_linear_linear__*"]
+
+    def test_rejects_blank_entry(self) -> None:
+        with pytest.raises(ValidationError):
+            OrchestratorConfig(disallowed_mcp_tools=["  "])
+
+    def test_model_validate_from_dict(self) -> None:
+        config = OrchestratorConfig.model_validate(
+            {"disallowed_mcp_tools": ["mcp__plugin_linear_linear__*", "mcp__foo__*"]}
+        )
+        assert config.disallowed_mcp_tools == [
+            "mcp__plugin_linear_linear__*",
+            "mcp__foo__*",
+        ]
