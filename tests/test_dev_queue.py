@@ -638,9 +638,7 @@ class TestCLIDevQueueStatus:
 # ---------------------------------------------------------------------------
 
 
-def _patch_tick_for(
-    monkeypatch: pytest.MonkeyPatch, client_name: str
-) -> None:
+def _patch_tick_for(monkeypatch: pytest.MonkeyPatch, client_name: str) -> None:
     """Force a fresh, non-skip tick for *client_name* so lane breakdown renders."""
     from cw.orchestrate import TickSummary
 
@@ -701,7 +699,8 @@ class TestDevQueueLaneBreakdownOccupants:
         )
         add_ticket(
             TicketTask(
-                ticket_id="GEN-1", client="genhealth",
+                ticket_id="GEN-1",
+                client="genhealth",
                 status=QueueItemStatus.RUNNING,
             )
         )
@@ -725,13 +724,15 @@ class TestDevQueueLaneBreakdownOccupants:
         )
         add_ticket(
             TicketTask(
-                ticket_id="1195", client="genhealth",
+                ticket_id="1195",
+                client="genhealth",
                 status=QueueItemStatus.RUNNING,
             )
         )
         add_ticket(
             TicketTask(
-                ticket_id="1198", client="genhealth",
+                ticket_id="1198",
+                client="genhealth",
                 status=QueueItemStatus.RUNNING,
             )
         )
@@ -750,7 +751,7 @@ class TestDevQueueLaneBreakdownOccupants:
         tmp_orchestrator_config: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Named-lane client: healthy lane prints base line, noteworthy lane gets full."""
+        """Named-lane client: healthy lane prints base line, noteworthy gets full."""
         ws = tmp_dev_queue / "ws"
         clients_file().write_text(
             "clients:\n"
@@ -764,13 +765,17 @@ class TestDevQueueLaneBreakdownOccupants:
         )
         add_ticket(
             TicketTask(
-                ticket_id="FAST-1", client="genhealth", lane="fast",
+                ticket_id="FAST-1",
+                client="genhealth",
+                lane="fast",
                 status=QueueItemStatus.RUNNING,
             )
         )
         add_ticket(
             TicketTask(
-                ticket_id="IMPL-1", client="genhealth", lane="impl",
+                ticket_id="IMPL-1",
+                client="genhealth",
+                lane="impl",
                 status=QueueItemStatus.BLOCKED_ON_USER,
             )
         )

@@ -4660,9 +4660,7 @@ class TestLaneCapBlockedSkipReason:
         assert len(events) == 1
         occupants = events[0].payload["lane_occupants"]["impl"]
         # LCAP-BLOCKED occupies the lane; LCAP-PENDING (still PENDING) is absent.
-        assert occupants == [
-            {"ticket_id": "LCAP-BLOCKED", "status": "blocked_on_user"}
-        ]
+        assert occupants == [{"ticket_id": "LCAP-BLOCKED", "status": "blocked_on_user"}]
         assert all(o["ticket_id"] != "LCAP-PENDING" for o in occupants)
 
     def test_no_pending_still_used_when_truly_empty(
@@ -4897,9 +4895,7 @@ class TestLaneCapCountingWithAwaitingSignoff:
 class TestLaneOccupantsPayload:
     """dispatch.tick carries lane_occupants/occupied across every skip path."""
 
-    def _make_running_lane(
-        self, tmp_dispatch_dirs: Path, workspace_path: Path
-    ) -> None:
+    def _make_running_lane(self, tmp_dispatch_dirs: Path, workspace_path: Path) -> None:
         """One impl lane (max_parallel=1) with a single RUNNING occupant."""
         client = ClientConfig(
             name="test-client",
@@ -4933,9 +4929,7 @@ class TestLaneOccupantsPayload:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """AVAILABILITY_GATE skip carries lane_occupants/occupied."""
-        self._make_running_lane(
-            tmp_dispatch_dirs, sample_client_config.workspace_path
-        )
+        self._make_running_lane(tmp_dispatch_dirs, sample_client_config.workspace_path)
         _force_gh_unavailable(monkeypatch)
 
         daemon = FakeNativeDaemonClient()
@@ -4960,15 +4954,11 @@ class TestLaneOccupantsPayload:
         simple_config: OrchestratorConfig,
     ) -> None:
         """USAGE_LIMITED skip carries lane_occupants/occupied."""
-        self._make_running_lane(
-            tmp_dispatch_dirs, sample_client_config.workspace_path
-        )
+        self._make_running_lane(tmp_dispatch_dirs, sample_client_config.workspace_path)
         future = datetime.now(UTC) + timedelta(hours=1)
 
         daemon = FakeNativeDaemonClient()
-        dispatch_tick(
-            simple_config, native_daemon=daemon, usage_limited_until=future
-        )
+        dispatch_tick(simple_config, native_daemon=daemon, usage_limited_until=future)
 
         events = read_events(
             consumer="test-occ-usage-limit",
@@ -4990,9 +4980,7 @@ class TestLaneOccupantsPayload:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """FRESHNESS_GATE skip carries lane_occupants/occupied."""
-        self._make_running_lane(
-            tmp_dispatch_dirs, sample_client_config.workspace_path
-        )
+        self._make_running_lane(tmp_dispatch_dirs, sample_client_config.workspace_path)
         monkeypatch.setattr(
             "cw.dispatch.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 2),
@@ -5030,9 +5018,7 @@ class TestLaneOccupantsPayload:
             ],
         )
         _make_clients_yaml(tmp_dispatch_dirs, client)
-        run_task = TicketTask(
-            ticket_id="OCC-A", client="test-client", lane="lane-a"
-        )
+        run_task = TicketTask(ticket_id="OCC-A", client="test-client", lane="lane-a")
         run_task.status = QueueItemStatus.RUNNING
         blocked_task = TicketTask(
             ticket_id="OCC-B", client="test-client", lane="lane-b"
@@ -5074,23 +5060,33 @@ class TestLaneOccupantsForClient:
         )
         tasks = [
             TicketTask(
-                ticket_id="P", client="test-client", lane="impl",
+                ticket_id="P",
+                client="test-client",
+                lane="impl",
                 status=QueueItemStatus.PENDING,
             ),
             TicketTask(
-                ticket_id="C", client="test-client", lane="impl",
+                ticket_id="C",
+                client="test-client",
+                lane="impl",
                 status=QueueItemStatus.COMPLETED,
             ),
             TicketTask(
-                ticket_id="X", client="test-client", lane="impl",
+                ticket_id="X",
+                client="test-client",
+                lane="impl",
                 status=QueueItemStatus.CANCELLED,
             ),
             TicketTask(
-                ticket_id="F", client="test-client", lane="impl",
+                ticket_id="F",
+                client="test-client",
+                lane="impl",
                 status=QueueItemStatus.FAILED,
             ),
             TicketTask(
-                ticket_id="R", client="test-client", lane="impl",
+                ticket_id="R",
+                client="test-client",
+                lane="impl",
                 status=QueueItemStatus.RUNNING,
             ),
         ]
