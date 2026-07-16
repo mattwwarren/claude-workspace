@@ -31,14 +31,17 @@ from cw.auto_dev_result import (
 )
 from cw.collision import detect_wave_collisions
 from cw.config import (
+    AvailabilityProbeCache,
     _load_concurrency_overrides,
     _save_concurrency_overrides,
     concurrency_override_lock,
+    load_availability_probe_cache,
     load_clients,
     load_effective_clients,
     load_effective_config,
     load_state,
     load_usage_limited_until,
+    save_availability_probe_cache,
     save_state,
     save_usage_limited_until,
     sessions_lock,
@@ -65,6 +68,7 @@ from cw.exceptions import (
     WorktreeError,
 )
 from cw.executor import resolve_executor, resolve_executor_config
+from cw.gh import check_gh_availability
 from cw.models import (
     CONTEXT_JSON_RELATIVE_PATH,
     LOCAL_BACKEND,
@@ -144,6 +148,23 @@ _INVALID_STAGE_REASON = "invalid_stage_config"
 # unavailability, an unrelated concept that happens to share the "awaiting
 # operator" phrase. See GitHub #1155.
 _AWAITING_OPERATOR_REASON = "awaiting_operator_availability"
+# paused_status written to SESSION_NEEDS_ATTENTION when the fleet-wide
+# gh-availability latch trips (RFC 0011 A5). Deliberately distinct from
+# _AWAITING_OPERATOR_REASON, which is scoped (see its own comment above) to
+# Rule 5's per-task blocked status with session_id/ticket_id populated
+# (RFC 0011 A1) -- an unrelated, per-task event shape. This constant's event
+# is fleet-wide and sessionless (session_id="", client="", ticket_id=None).
+# See GitHub #1157.
+_AVAILABILITY_OUTAGE_REASON = "gh_availability_outage"
+# Timeout (seconds) for the fleet-wide `gh auth status` availability probe.
+# Value mirrors cw.operator_identity._GH_LOGIN_TIMEOUT_SECONDS (also 10); not
+# imported directly because that would invert the circular-import direction.
+_AVAILABILITY_PROBE_TIMEOUT_SECONDS = 10
+# TTL (seconds) for the fleet-wide availability probe cache. Within this
+# window a tick reuses the cached verdict instead of re-shelling `gh auth
+# status`, so a multi-client fleet pays at most one probe per TTL, not one per
+# client per tick.
+_AVAILABILITY_PROBE_TTL_SECONDS = 60
 # ``source`` field on a LANE_PAUSED event emitted by the per-lane circuit breaker
 # (as opposed to an operator-initiated ``cw lane pause``). See GitHub issue #875.
 _LANE_PAUSE_SOURCE_CIRCUIT_BREAKER = "circuit_breaker"
@@ -455,6 +476,123 @@ FRESHNESS_MAIN_BEHIND = "main_behind_origin"
 FRESHNESS_MAIN_DIRTY_CHECKOUT = "main_dirty_checkout"
 FRESHNESS_MAIN_DIVERGED = "main_diverged_from_origin"
 FRESHNESS_MAIN_DETACHED = "main_detached_head"
+
+
+def _resolve_availability() -> bool:
+    """Fleet-wide TTL-cached gh-availability probe (RFC 0011 A5).
+
+    Mirrors :func:`_resolve_freshness`'s check-and-cache shape but fleet-wide,
+    not per-client: state lives in config.py's DISPATCH_STATE_FILE sidecar
+    (:class:`~cw.config.AvailabilityProbeCache`), not a ConcurrencyOverrides
+    client entry. On a cache hit (probed within
+    ``_AVAILABILITY_PROBE_TTL_SECONDS``) returns the cached verdict without
+    calling gh or touching the latch. On a cache miss, calls
+    :func:`~cw.gh.check_gh_availability`, persists the fresh verdict, and
+    updates the fleet-wide latch: :func:`_record_availability_block` on a
+    fresh failure (fires SESSION_NEEDS_ATTENTION once per outage episode --
+    edge-triggered), :func:`_reset_availability_block` on a fresh success. On
+    any resolution error, fails open -- same posture as _resolve_freshness's
+    own ``except Exception`` fail-open.
+    """
+    try:
+        cache = load_availability_probe_cache()
+        now = datetime.now(UTC)
+        if (
+            cache is not None
+            and (now - cache.probed_at).total_seconds()
+            < _AVAILABILITY_PROBE_TTL_SECONDS
+        ):
+            return cache.available
+
+        available = check_gh_availability(timeout=_AVAILABILITY_PROBE_TIMEOUT_SECONDS)
+        was_latched = cache.latched if cache is not None else False
+        if available:
+            _reset_availability_block(now=now)
+        else:
+            _record_availability_block(now=now, was_latched=was_latched)
+    except Exception:  # noqa: BLE001
+        # Defense-in-depth: check_gh_availability already fails closed on its
+        # own subprocess errors; this catches an error resolving the cache or
+        # persisting the verdict. Fail open so a transient sidecar issue never
+        # blocks the whole loop, mirroring _resolve_freshness's fail-open.
+        _log.warning("dispatch_tick: availability probe failed to resolve; proceeding")
+        return True
+    return available
+
+
+def _record_availability_block(*, now: datetime, was_latched: bool) -> None:
+    """Persist a fresh failed probe and fire attention once per outage episode.
+
+    Writes the AvailabilityProbeCache with ``latched=True`` and, when the
+    fleet was not already latched (edge-triggered), emits a single fleet-wide
+    ``session.needs_attention``. Sibling of
+    :func:`_record_client_freshness_block`, but the latch lives in the probe
+    cache (fleet-wide) rather than a per-client override counter. The event is
+    sessionless and clientless (``session_id=""``, ``client=""``): a
+    fleet-wide outage has no single node to name. No push notification
+    (deliberate -- matches the freshness-block escalation precedent).
+    """
+    save_availability_probe_cache(
+        AvailabilityProbeCache(probed_at=now, available=False, latched=True)
+    )
+    if not was_latched:
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": "",
+                "session_name": "",
+                "client": "",
+                "ticket_id": None,
+                "claude_session_id": None,
+                "paused_status": _AVAILABILITY_OUTAGE_REASON,
+                "breadcrumbs": "availability_probe_failed",
+                "crashed": False,
+            },
+            correlation_id=None,
+        )
+
+
+def _reset_availability_block(*, now: datetime) -> None:
+    """Persist a fresh successful probe, clearing the fleet-wide outage latch.
+
+    Edge-triggered reset: writes the AvailabilityProbeCache with
+    ``latched=False`` so the next outage episode re-fires attention. Sibling
+    of :func:`_reset_client_freshness_blocks`; unlike that helper it always
+    writes, because the fresh ``probed_at`` also refreshes the TTL window.
+    """
+    save_availability_probe_cache(
+        AvailabilityProbeCache(probed_at=now, available=True, latched=False)
+    )
+
+
+def _emit_availability_skip(
+    client: ClientConfig,
+    queue_snapshot: DevQueueStore,
+    *,
+    pending_count: int,
+    running_count: int,
+    cap: int,
+) -> None:
+    """Emit a dispatch.tick skip event for an availability-gated client.
+
+    Mirrors :func:`_emit_stale_skip`'s dispatch.tick emission (same
+    ``pending``/``running``/``cap``/``lanes`` fields, ``claimed=0``) minus its
+    freshness-specific TICKET_NEEDS_SYNC + resync-WARN loop -- a fleet-wide gh
+    outage is not a per-ticket sync problem. ``skip_reason`` is
+    ``AVAILABILITY_GATE``.
+    """
+    record_event(
+        OrchestratorEventType.DISPATCH_TICK,
+        {
+            "client": client.name,
+            "claimed": 0,
+            "pending": pending_count,
+            "running": running_count,
+            "cap": cap,
+            "skip_reason": DispatchSkipReason.AVAILABILITY_GATE,
+            "lanes": _lane_stats_for_client(client, queue_snapshot),
+        },
+    )
 
 
 def _resolve_freshness(
@@ -1309,6 +1447,38 @@ def _build_plan_order(*, use_plan: bool) -> dict[str, list[str]]:
     return plan_order_by_client
 
 
+def _client_tick_snapshot(
+    client: ClientConfig,
+    state: CwState,
+    config: OrchestratorConfig,
+) -> tuple[int, int, DevQueueStore, int]:
+    """Compute a client's per-tick numeric fields for dispatch.tick skip events.
+
+    Returns ``(running_count, client_ceiling, queue_snapshot, pending_count)``.
+    Extracted from :func:`dispatch_tick`'s loop body so both preflight gates
+    (availability, freshness) can emit a dispatch.tick skip event with all four
+    numeric fields populated. Single dev-queue lock acquisition — the returned
+    ``queue_snapshot`` is reused by the caller for stale-task and per-lane
+    counts.
+    """
+    running_count = sum(
+        1
+        for s in state.sessions
+        if s.client == client.name
+        and s.origin == SessionOrigin.DAEMON
+        and s.status in (SessionStatus.ACTIVE, SessionStatus.IDLE)
+    )
+    client_ceiling = config.per_client_ceiling.get(client.name, config.default_ceiling)
+    with dev_queue_lock():
+        queue_snapshot = load_dev_queue()
+    pending_count = sum(
+        1
+        for t in queue_snapshot.tasks
+        if t.client == client.name and t.status == QueueItemStatus.PENDING
+    )
+    return running_count, client_ceiling, queue_snapshot, pending_count
+
+
 def dispatch_tick(
     config: OrchestratorConfig,
     *,
@@ -1421,7 +1591,40 @@ def dispatch_tick(
             and dispatched_client_count >= config.max_parallel_clients
         ):
             break
-        # --- Freshness gate ---
+
+        # --- Availability preflight gate (RFC 0011 A5) --- highest precedence.
+        # Fleet-wide TTL-cached `gh auth status` probe, checked BEFORE the
+        # per-client freshness gate so that during a real GitHub outage no
+        # client pays the freshness git-fetch cost for a verdict that gets
+        # discarded anyway. Fails open on any resolution error, same posture as
+        # _resolve_freshness.
+        available = _resolve_availability()
+
+        # Numeric fields (running, cap, queue snapshot, pending) hoisted above
+        # both gates so a dispatch.tick skip event for either gate carries all
+        # four. See _client_tick_snapshot.
+        running_count, client_ceiling, queue_snapshot, pending_count = (
+            _client_tick_snapshot(client, state, config)
+        )
+        # Keep legacy cap alias for skip-event and back-off event payloads.
+        cap = client_ceiling
+
+        # Fleet-wide availability outage: hold every client PENDING (no claim,
+        # no attempts consumed). Composition pin (RFC 0011 A5): on this gated
+        # path NEITHER _record_client_freshness_block NOR
+        # _reset_client_freshness_blocks runs — the freshness counter stays
+        # frozen during an outage, it must not reset.
+        if not available:
+            _emit_availability_skip(
+                client,
+                queue_snapshot,
+                pending_count=pending_count,
+                running_count=running_count,
+                cap=cap,
+            )
+            continue
+
+        # --- Freshness gate --- (only reached when the fleet is available)
         # Check whether the client's local default branch is behind origin
         # before claiming any ticket.  Stale repos cause sessions to exit
         # immediately with local_main_diverged_from_origin, burning a slot.
@@ -1430,35 +1633,6 @@ def dispatch_tick(
         # fast-forwards local main and clears the stale flag on success.
         stale, freshness_detail = _resolve_freshness(
             client, auto_ff=auto_ff, warned_fetch_fail=warned_fetch_fail
-        )
-
-        # Count running daemon sessions and cap — hoisted above freshness gate
-        # so all four numeric fields (claimed, pending, running, cap) are
-        # available when emitting dispatch.tick with skip_reason=freshness_gate.
-        running_count = sum(
-            1
-            for s in state.sessions
-            if s.client == client.name
-            and s.origin == SessionOrigin.DAEMON
-            and s.status in (SessionStatus.ACTIVE, SessionStatus.IDLE)
-        )
-
-        # Tier-2 ceiling: per-client slot budget across all lanes.
-        client_ceiling = config.per_client_ceiling.get(
-            client.name, config.default_ceiling
-        )
-        # Keep legacy cap alias for freshness-gate and back-off event payloads.
-        cap = client_ceiling
-
-        # Pre-claim pending count for dispatch.tick payload. Single lock
-        # acquisition — reused for stale_tasks when stale=True (avoids a
-        # second load on the freshness-gate path).
-        with dev_queue_lock():
-            queue_snapshot = load_dev_queue()
-        pending_count = sum(
-            1
-            for t in queue_snapshot.tasks
-            if t.client == client.name and t.status == QueueItemStatus.PENDING
         )
 
         if stale:
