@@ -374,7 +374,7 @@ git rebase origin/main
 git push --force-with-lease origin HEAD:<branch-name>
 ```
 
-**Push-auth-failure check (#1049):** Before re-verifying mergeability, check this push's own output for the same signature family listed under the Step 4c classifier above (`Permission denied (publickey)`, `could not read Username`, `Host key verification failed`, `Authentication failed`). If any signature is present, emit the `push_auth_failed` sentinel (same shape as the Step 4c template above) with `stage_reached` and `blocker.stage` set to `"stage5_post_create"` (this site runs after PR creation) and `blocker.details` naming this site, e.g. `"Step 4c.5 rebase-retry push: Permission denied (publickey)"`. Stop — do not proceed to the mergeability re-check below.
+**Push-auth-failure check (#1049):** Before re-verifying mergeability, check this push's own output against the **full signature table listed under the Step 4c classifier above** — all three families (auth-failure, network-unreachable, GitHub 5xx / secondary-rate-limit), not just the original 4 auth signatures. If any signature is present, emit the `push_auth_failed` sentinel (same shape as the Step 4c template above) with `stage_reached` and `blocker.stage` set to `"stage5_post_create"` (this site runs after PR creation) and `blocker.details` naming this site and the matched signature, e.g. `"Step 4c.5 rebase-retry push: Permission denied (publickey)"` or `"Step 4c.5 rebase-retry push: Could not resolve host"`. Stop — do not proceed to the mergeability re-check below.
 
 After the push, re-verify mergeability once:
 

@@ -88,7 +88,7 @@ class TestClassifyUnavailabilityFixtures:
 
 
 class TestClassifyUnavailabilityStructural:
-    def test_classify_unavailability_case_sensitive_or_documented_insensitivity(
+    def test_classify_unavailability_is_case_sensitive(
         self,
     ) -> None:
         """Matching is exact substring (case-sensitive) -- mirrors #1049's
