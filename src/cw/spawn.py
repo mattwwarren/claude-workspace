@@ -55,7 +55,9 @@ def build_disallowed_tools_arg(patterns: list[str]) -> list[str]:
 
     Empty *patterns* → ``[]`` (cw forwards no restriction). Non-empty → one
     ``=``-joined token whose value is the patterns comma-joined; claude accepts
-    a comma/space-separated list, so every pattern rides one token.
+    a comma/space-separated list, so every pattern rides one token. Callers pass
+    ``OrchestratorConfig.disallowed_mcp_tools``, whose validator rejects any
+    comma-bearing entry — so the comma-join here cannot split a single pattern.
 
     The ``=``-joined single-token form is mandatory. ``claude``'s
     ``--disallowed-tools <tools...>`` is variadic: as the two-token form

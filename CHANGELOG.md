@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Daemon worker MCP-tool restrictions are now operator-configurable.** The
+  hard-coded, tracker-gated block that stripped Linear MCP tools from
+  `github-issues`-client DAEMON workers (added in #726 to avoid a headless
+  Linear-OAuth stall) is replaced by a global `disallowed_mcp_tools` list on
+  `OrchestratorConfig` (`~/.claude-workspace/orchestrator.yaml`), default empty
+  and applied uniformly at both DAEMON spawn chokepoints. cw no longer decides
+  tool availability from a tracker heuristic; the operator declares the exact
+  deny patterns. **MIGRATION:** any `github-issues` client that relied on the
+  old automatic block must now set
+  `disallowed_mcp_tools: ["mcp__plugin_linear_linear__*"]` explicitly, or its
+  workers will have Linear MCP tools available (a Linear-tracked ticket
+  mis-routed to such a client previously blocked at pre-flight with zero Linear
+  tools). The single `--disallowed-tools=` token form (#733) is preserved.
+
 ## [1.20.0] — 2026-07-15
 
 RFC 0011 availability- & counterparty-aware holding — wave-0 seams plus the

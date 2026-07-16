@@ -96,7 +96,9 @@ per_client_ceiling: {}
 linear_prefix_map: {}
 reap_policy: signal_only  # default: signal only; set to auto to restore self-healing
 # disallowed_mcp_tools: []  # patterns denied to every DAEMON worker, e.g.
-#   ["mcp__plugin_linear_linear__*"] to block Linear MCP in headless workers
+#   ["mcp__plugin_linear_linear__*"] to block Linear MCP in headless workers.
+#   MIGRATION: github-issues clients that relied on the old automatic Linear
+#   block (#726) must set this explicitly now — the tracker heuristic is gone.
 """
 
 

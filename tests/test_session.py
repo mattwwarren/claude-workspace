@@ -1147,6 +1147,44 @@ class TestResumeSession:
         assert "--disallowed-tools=mcp__plugin_linear_linear__*" in extra
         assert "--disallowed-tools" not in extra
 
+    def test_resume_daemon_multiple_patterns_comma_joined(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """DAEMON resume comma-joins multiple patterns into ONE token — parity
+        with the spawn_create_impl chokepoint's multi-pattern handling."""
+        _write_orchestrator_disallow(["mcp__plugin_linear_linear__*", "mcp__foo__*"])
+        self._write_clients_file(tmp_config_dir, sample_client)
+        monkeypatch.setattr("cw.session._attach_session", _noop)
+
+        state = CwState(
+            sessions=[
+                Session(
+                    id="rgh726b",
+                    name="test-client/impl",
+                    client="test-client",
+                    purpose=SessionPurpose.IMPL,
+                    origin=SessionOrigin.DAEMON,
+                    status=SessionStatus.BACKGROUNDED,
+                    workspace_path=sample_client.workspace_path,
+                    worktree_path=sample_client.workspace_path.parent / "wt-resume",
+                    surface_ref="deadbeef",
+                    claude_session_id="550e8400-e29b-41d4-a716-446655440002",
+                )
+            ]
+        )
+        save_state(state)
+
+        resume_session("test-client/impl", native_daemon=mock_native_daemon)
+
+        extra = mock_native_daemon.spawn_extra_args[0] or []
+        assert "--disallowed-tools=mcp__plugin_linear_linear__*,mcp__foo__*" in extra
+        # Both patterns ride ONE token (#733); no bare two-token form.
+        assert "--disallowed-tools" not in extra
+
     def test_resume_daemon_no_disallow_when_unconfigured(
         self,
         tmp_config_dir: Path,

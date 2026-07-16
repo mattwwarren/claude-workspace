@@ -1425,6 +1425,12 @@ class TestOrchestratorConfigDisallowedMcpTools:
         with pytest.raises(ValidationError):
             OrchestratorConfig(disallowed_mcp_tools=["  "])
 
+    def test_rejects_comma_bearing_entry(self) -> None:
+        # A comma would split into two patterns at build_disallowed_tools_arg's
+        # comma-join — reject it fail-loud rather than silently reinterpret.
+        with pytest.raises(ValidationError):
+            OrchestratorConfig(disallowed_mcp_tools=["mcp__a__*,mcp__b__*"])
+
     def test_model_validate_from_dict(self) -> None:
         config = OrchestratorConfig.model_validate(
             {"disallowed_mcp_tools": ["mcp__plugin_linear_linear__*", "mcp__foo__*"]}
