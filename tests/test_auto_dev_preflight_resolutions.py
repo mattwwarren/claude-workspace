@@ -16,7 +16,7 @@ MARKER = "<!-- auto-dev-preflight-resolutions -->"
 BLOCKER_HEADER = "## Multi-Marker Gate Blocked"
 PENDING_HEADER = "## Pending Verification Scan"
 PREMISES_NONEMPTY_PARKED_EXIT = (
-    "Premises block present AND `parked` non-empty → EXIT "
+    "`unverified` non-empty AND `parked` non-empty → EXIT "
     "`premises_pending_verification`"
 )
 
@@ -296,12 +296,14 @@ def test_step1c_ambiguities_exit_uses_pending_header() -> None:
     """The parked-non-empty headless exit posts under the pinned pending-verify header.
 
     Anchor updated for #1032: the trigger now keys on `parked` non-empty rather
-    than raw `AMBIGUITIES` presence (see Step 4c partition rewrite).
+    than raw `AMBIGUITIES` presence (see Step 4c partition rewrite). Anchor
+    updated again for #1192: the premises half of the condition is now
+    `unverified` empty rather than raw premises-block presence.
     """
     content = _cmd("auto-dev-plan.md")
     window = _after(
         content,
-        "`parked` non-empty AND no premises block → EXIT "
+        "`parked` non-empty AND `unverified` empty → EXIT "
         "`ambiguities_pending_resolution`",
     )
     assert PENDING_HEADER in window
@@ -397,12 +399,14 @@ def test_step1c_partition_missing_recommendation_defaults_to_parked() -> None:
 
 
 def test_step1c_all_adopt_does_not_exit() -> None:
-    """An all-adopt scan (parked empty, no premises) auto-continues, not exits."""
+    """An all-adopt scan (parked empty, unverified empty) auto-continues, not exits."""
     section = _step1c_section()
-    assert "`parked` empty AND no premises block → AUTO-CONTINUE to Step 1d." in section
     assert (
-        "functionally `NO_AMBIGUITIES` even though the raw scan returned items"
-        in section
+        "`parked` empty AND `unverified` empty → AUTO-CONTINUE to Step 1d." in section
+    )
+    assert (
+        "functionally `NO_AMBIGUITIES`/`no premises pending` even though the "
+        "raw scans returned items" in section
     )
 
 
@@ -439,8 +443,8 @@ def test_step1c_all_adopt_plus_premises_exits_premises_only() -> None:
     """All-adopt plus premises exits premises-only, no parked/ambiguities pair."""
     section = _step1c_section()
     assert (
-        "Premises block present AND `parked` empty → EXIT "
-        "`premises_pending_verification`. Post ONLY the premise list"
+        "`unverified` non-empty AND `parked` empty → EXIT "
+        "`premises_pending_verification`. Post ONLY the `unverified` premises"
     ) in section
 
 
