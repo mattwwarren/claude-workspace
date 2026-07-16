@@ -782,9 +782,10 @@ def _act_auto_fix_ci(
     2. **Fire** — for each candidate, ``_prepare_auto_fix_ci_job`` re-validates,
        emits ``PR_ACTION_TAKEN``, and stamps the latch.
 
-    Stamping/clearing the latch IS a dev-queue write (one of the three
-    exceptions to this module's "no dev-queue mutation" rule — a latch field,
-    not a status transition), saved before the lock releases. The re-enqueue +
+    Stamping/clearing the latch IS a dev-queue write (GitHub #1206: all four
+    review-recipe act phases now perform this same kind of write — a latch
+    field, not a status transition; none remain read-only), saved before the
+    lock releases. The re-enqueue +
     dispatch tick runs strictly after the lock releases (``add_ticket``
     re-acquires ``dev_queue_lock``, so nesting would self-deadlock). Returns
     the ticket_ids whose re-dispatch succeeded.
@@ -971,9 +972,10 @@ def _act_request_reviewer(
     2. **Fire** — for each candidate, ``_prepare_request_reviewer_job``
        re-validates, emits ``PR_ACTION_TAKEN``, and stamps the latch.
 
-    Stamping/clearing the latch IS a dev-queue write (the one exception to the
-    "no dev-queue mutation" rule — a latch field, not a status transition),
-    saved before the lock releases. The ``add_pr_reviewer`` gh call runs
+    Stamping/clearing the latch IS a dev-queue write (GitHub #1206: all four
+    review-recipe act phases now perform this same kind of write — a latch
+    field, not a status transition; none remain read-only), saved before the
+    lock releases. The ``add_pr_reviewer`` gh call runs
     strictly after the lock releases. Returns the ticket_ids for which a
     reviewer request actually succeeded (a failed gh call is excluded and
     corrected via ``PR_ACTION_FAILED``).
@@ -1038,9 +1040,10 @@ def _act_escalate_merge_block(
        hold, emit ``PR_ACTION_TAKEN`` and stamp the latch to *now*. An already-
        stamped row is a silent skip (already fired this episode).
 
-    Stamping/clearing the latch IS a dev-queue write (the one exception to the
-    review layer's "no dev-queue mutation" rule — it is a latch field, not a
-    status transition). ``record_event`` nests the inbox lock INSIDE
+    Stamping/clearing the latch IS a dev-queue write (GitHub #1206: all four
+    review-recipe act phases now perform this same kind of write — a latch
+    field, not a status transition; none remain read-only). ``record_event``
+    nests the inbox lock INSIDE
     ``dev_queue_lock`` (never the reverse), so emitting under the lock is
     deadlock-safe (same ordering as ``cw.reconcile.escalation``).
     """
