@@ -18,24 +18,24 @@ compatibility. On first load after upgrading, cw automatically:
 2. Clears any legacy multiplexer pane reference (e.g. `ws:0.1`,
    `tmux-pane-3`) from `surface_ref`, replacing it with `null`. Valid
    8-char hex daemon session ids are preserved unchanged.
-3. Bumps the schema version to 5.
+3. Bumps the schema version to the current value (v14 as of cw 1.20.0).
 
 ### Schema version chain
 
-The state file schema has moved through three steps since the multiplexer
-deletion:
+The legacy-`surface_ref` clearing above is the **v5** step (#119/#521) — the
+only step in the chain that rewrites existing data. Every schema version since
+is purely additive: new fields default safely, so old state files load without
+user action. Highlights:
 
-- **v5** (#119/#521): cleared legacy multiplexer `surface_ref` values on first
-  load (the migration described above).
 - **v6** (#545): added `Session.idle_observation_count` — the count of
-  consecutive idle observations before a confirm-before-reap decision is made.
-  Purely additive; old state files load with a default of `0`.
+  consecutive idle observations before a confirm-before-reap decision is made
+  (defaults to `0`).
 - **v7** (#380): added `Session.reap_reason` — the `ReapReason` enum value
-  recorded when a session is reaped by the reconciler. Purely additive; old
-  state files load with `None`.
-
-v6 and v7 carry no migration steps: the new fields default safely, so old
-state files load without user action.
+  recorded when a session is reaped by the reconciler (defaults to `None`).
+- **v8–v14**: further additive fields (`reap_proposed_at`, `lane`, `stage`,
+  `local_liveness`, `consecutive_salvage_skips`, `liveness_bucket`) plus a
+  v14 normalization of stale `local_liveness` handles (#921) — all applied
+  automatically on load.
 
 ### `cw daemon`
 
@@ -66,10 +66,11 @@ Brief summaries below; the linked docs have the authoritative detail.
   long-running healthy workers whose reconcile cycle hasn't fired yet.
 - **`queue.session_reaped` bus events + `ReapReason` taxonomy** (#380) — the
   reconciler emits a structured `queue.session_reaped` event for every reap
-  decision, carrying one of eight `ReapReason` values
-  (`phantom_surface`, `idle_stall`, `usage_limit_cutoff`, `retry_cap_parked`,
-  `wall_clock_budget`, `completed_backstop`, `salvage_completed`,
-  `salvage_parked`). See [`docs/headless-contract.md`](headless-contract.md)
+  decision, carrying a `ReapReason` value (as of 1.20.0:
+  `phantom_surface`, `idle_stall`, `usage_limit_cutoff`, `retry_cap_parked`,
+  `stalled_retry_cap_parked`, `wall_clock_budget`, `completed_backstop`,
+  `salvage_completed`, `salvage_parked`, `finalize_blocked`,
+  `terminal_sibling`). See [`docs/headless-contract.md`](headless-contract.md)
   for the full event schema.
 - **Confirm-before-reap** (#545) — the idle watchdog waits for
   `idle_confirm_observations` (default: 2) consecutive idle observations before
@@ -87,5 +88,5 @@ Brief summaries below; the linked docs have the authoritative detail.
 ## What you need to do
 
 Nothing. Worktrees stay where they are. The `surface_ref` migration runs
-automatically on first `load_state()` call after upgrading to 1.0. The v6/v7
+automatically on first `load_state()` call after upgrading to 1.0. The v6–v14
 schema additions are purely additive and require no manual action.

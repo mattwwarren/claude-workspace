@@ -2083,6 +2083,12 @@ class TestSignalStop:
         task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
         assert task.status == QueueItemStatus.FAILED
 
+        # GitHub #1189: this FAILED-landing branch must also report
+        # routed=False on the session side so signal_stop does not complete a
+        # session whose task it just landed terminal-FAILED.
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status != SessionStatus.COMPLETED
+
     def test_signal_stop_blocked_retry_eligible_routes_blocked_on_user(
         self,
         tmp_config_dir: Path,
@@ -2802,6 +2808,90 @@ class TestSignalStop:
         assert events == []
         assert daemon.stop_calls == []
 
+    def test_signal_stop_race_already_failed_task_does_not_complete_session(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """GitHub #1189: a task raced to FAILED by a concurrent caller must not
+        be completed by signal_stop (R5 mandatory, the Stop-hook symmetric
+        case).
+
+        Mirrors ``test_signal_stop_stage_mismatch_does_not_orphan_task_or_
+        complete_session`` structurally, except the dev-queue task is already
+        FAILED/abandoned with a matching session_id (instead of advanced to
+        REVIEW) by the time signal_stop's own lookup runs, while the Stop-
+        hook's own transcript carries an ordinary successful sentinel. The
+        lookup-miss race (R3(a)) must report routed=False just like a stage
+        mismatch: session and task both left exactly as they were.
+        """
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        worktree, session = self._setup_headless_session(
+            tmp_path, "sess-1189-race", "worktree-1189-race"
+        )
+        _write_staged_clients_yaml_for_test(tmp_config_dir, "test-client")
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=self.SEED_TICKET_ID,
+                        client="test-client",
+                        # Already raced to terminal FAILED by a concurrent
+                        # caller before this signal_stop's own lookup runs.
+                        status=QueueItemStatus.FAILED,
+                        session_id=session.id,
+                        stage=Stage.IMPL,
+                        disposition="abandoned",
+                    )
+                ]
+            )
+        )
+        self._write_headless_context(worktree, session_id=session.id)
+
+        claude_session_id = "uuid-1189-race"
+        fake_home = tmp_path / "fake-home-1189-race"
+        self._write_transcript(
+            worktree, claude_session_id, _SENTINEL_918_STAGE_COMPLETE, fake_home
+        )
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
+
+        runner = CliRunner()
+        with freeze_time(datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)):
+            result = runner.invoke(
+                main,
+                ["signal-stop"],
+                input=json.dumps(
+                    {
+                        "session_id": claude_session_id,
+                        "cwd": str(worktree),
+                        "hook_event_name": "Stop",
+                    }
+                ),
+            )
+        assert result.exit_code == 0, result.output
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status != SessionStatus.COMPLETED
+
+        task = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == self.SEED_TICKET_ID
+        )
+        assert task.status == QueueItemStatus.FAILED
+        assert task.disposition == "abandoned"
+
+        events = read_events(
+            consumer="test-1189-race",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert events == []
+        assert daemon.stop_calls == []
+
     def test_signal_stop_schema_version_unsupported_marks_failed(
         self,
         tmp_config_dir: Path,
@@ -2865,7 +2955,10 @@ class TestSignalStop:
         assert result.exit_code == 0, result.output
 
         updated = next(s for s in load_state().sessions if s.id == session.id)
-        assert updated.status == SessionStatus.COMPLETED
+        # GitHub #1189: this same call lands the task terminal-FAILED via a
+        # BlockedResult, so `routed` must be False and signal_stop must NOT
+        # also complete the session (pre-fix this asserted COMPLETED).
+        assert updated.status != SessionStatus.COMPLETED
 
         store = load_dev_queue()
         task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
@@ -2913,8 +3006,9 @@ class TestSignalStop:
                 details="test: unrecognised reason code",
             )
         )
-        _apply_sentinel_to_task(self.SEED_TICKET_ID, session.id, sentinel)
+        outcome = _apply_sentinel_to_task(self.SEED_TICKET_ID, session.id, sentinel)
 
+        assert outcome.routed is False
         store = load_dev_queue()
         task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
         assert task.status == QueueItemStatus.FAILED
