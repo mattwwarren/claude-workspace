@@ -400,15 +400,11 @@ class TestBlockingCommentReview:
 
     def test_must_fix_marker_non_self_authored_is_blocking(self) -> None:
         comments = [{"author": {"login": "someone-else"}, "body": "MUST_FIX: bad"}]
-        assert (
-            _has_blocking_comment_review(comments, self_login="the-operator") is True
-        )
+        assert _has_blocking_comment_review(comments, self_login="the-operator") is True
 
     def test_blocking_marker_non_self_authored_is_blocking(self) -> None:
         comments = [{"author": {"login": "someone-else"}, "body": "BLOCKING issue"}]
-        assert (
-            _has_blocking_comment_review(comments, self_login="the-operator") is True
-        )
+        assert _has_blocking_comment_review(comments, self_login="the-operator") is True
 
     def test_review_heading_prefix_non_self_authored_is_blocking(self) -> None:
         comments = [
@@ -417,9 +413,7 @@ class TestBlockingCommentReview:
                 "body": "## Review: blocking\nData handling defect.",
             }
         ]
-        assert (
-            _has_blocking_comment_review(comments, self_login="the-operator") is True
-        )
+        assert _has_blocking_comment_review(comments, self_login="the-operator") is True
 
     def test_marker_present_self_authored_is_not_blocking(self) -> None:
         comments = [{"author": {"login": "the-operator"}, "body": "MUST_FIX: bad"}]
@@ -444,18 +438,14 @@ class TestBlockingCommentReview:
             "not a dict",  # type: ignore[list-item]
             {"author": {"login": "someone-else"}, "body": "MUST_FIX: bad"},
         ]
-        assert (
-            _has_blocking_comment_review(comments, self_login="the-operator") is True
-        )
+        assert _has_blocking_comment_review(comments, self_login="the-operator") is True
 
     def test_malformed_non_str_body_is_skipped_not_raised(self) -> None:
         comments = [
             {"author": {"login": "someone-else"}, "body": None},
             {"author": {"login": "someone-else"}, "body": "MUST_FIX: bad"},
         ]
-        assert (
-            _has_blocking_comment_review(comments, self_login="the-operator") is True
-        )
+        assert _has_blocking_comment_review(comments, self_login="the-operator") is True
 
     def test_comment_body_is_blocking_direct(self) -> None:
         assert _comment_body_is_blocking("## Review: nope") is True
@@ -499,6 +489,7 @@ class TestDerivePrStateCommentReview:
             "cw.pr_hydrate.fetch_pr_view",
             lambda *_a, **_kw: _pr_view_payload(
                 reviewDecision="REVIEW_REQUIRED",
+                reviewRequests=[{"slug": "a-team"}],
                 mergeStateStatus="BLOCKED",
                 comments=[
                     {"author": {"login": "the-operator"}, "body": "MUST_FIX: bad"}
@@ -1360,6 +1351,7 @@ class TestOverlayPushObservation:
         old = _pr_state(
             merge_state_status="BLOCKED",
             review_decision="REVIEW_REQUIRED",
+            reviewer_count=1,
             attention_state="changes_requested",  # set by a prior poll's comment signal
         )
         new = _overlay_push_observation(

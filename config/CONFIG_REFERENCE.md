@@ -581,8 +581,10 @@ state** (derived by `cw.pr_hydrate._compute_attention_state`) and takes a
 matching action. The routing is 1:1 — a single PR is never a candidate for more
 than one recipe. Recognized recipe keys (RFC 0010 P4, #1099):
 
-- `address_review` — PR review came back `changes_requested`; dispatch an
-  `/address-review` session to mechanically work the requested changes.
+- `address_review` — PR review came back `changes_requested` (a formal GitHub
+  review OR a plain issue/PR comment carrying cw's own blocking-review
+  vocabulary, #1195); dispatch an `/address-review` session to mechanically
+  work the requested changes.
 - `auto_fix_ci` — PR CI is failing (`ci_failing`); re-enqueue the ticket and run
   a dispatch tick to re-enter auto-dev (coarse re-dispatch, not a scoped fix).
 - `request_reviewer` — PR needs a reviewer (`no_reviewer`); request one per the
