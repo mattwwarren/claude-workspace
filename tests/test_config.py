@@ -2195,6 +2195,19 @@ class TestMainDriftLatchesPersistence:
         cw.config.DISPATCH_STATE_FILE.unlink(missing_ok=True)
         assert load_main_drift_latches() == {}
 
+    def test_load_returns_empty_when_key_absent(self, tmp_config_dir: Path) -> None:
+        """File exists (sibling sidecar key present) but no main_drift_latches key."""
+        import json
+
+        import cw.config
+        from cw.config import load_main_drift_latches
+
+        cw.config.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cw.config.DISPATCH_STATE_FILE.write_text(
+            json.dumps({"usage_limited_until": None})
+        )
+        assert load_main_drift_latches() == {}
+
     def test_load_returns_empty_on_corrupt_json(self, tmp_config_dir: Path) -> None:
         import cw.config
         from cw.config import load_main_drift_latches
