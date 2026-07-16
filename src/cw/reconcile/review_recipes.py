@@ -10,15 +10,20 @@ classification phase produces :class:`ReviewRecipeCandidate`s for every
 dev-queue row whose ``pr_state`` carries
 ``attention_state == "changes_requested"``; it performs no writes.
 
-**P2 scope (GitHub #1097, this ticket):** the act phase. ``_act_address_review``
-re-validates each candidate under ``dev_queue_lock()`` (a consistent READ only —
-NO dev-queue mutation, per Resolution 6), emits
+**P2 scope (GitHub #1097):** the act phase. ``_act_address_review``
+re-validates each candidate under ``dev_queue_lock()``, emits
 :class:`OrchestratorEventType.PR_ACTION_TAKEN` (durably, BEFORE the spawn), and
 then — strictly after the lock releases — dispatches an ``/address-review``
 session via ``spawn_create_impl``. A dispatch ``CwError`` or a precondition
 anomaly (unparseable PR url, unresolvable client, missing worktree) emits
 :class:`OrchestratorEventType.PR_ACTION_FAILED` instead. Emit-before-dispatch is
 structural: the event fires inside the lock, every spawn strictly afterward.
+GitHub #1206 adds a one-shot ``address_review_fired_at`` latch, stamped inside
+this same lock hold, so the dispatch fires exactly once per changes-requested
+episode instead of every reconcile tick. Resolution 6's "no dev-queue
+correlation" half (no ``task=`` kwarg passed to ``spawn_create_impl``) is
+untouched and stays true — only the "no dev-queue mutation" half of
+Resolution 6 is superseded by the latch write.
 
 Like the gate recipes, this module gates on its own opt-in master switch
 (``OrchestratorConfig.review_recipes_enabled``, default False). The switch is
@@ -441,6 +446,7 @@ def _prepare_dispatch_job(
     task: TicketTask,
     session_id: str | None,
     clients: dict[str, ClientConfig],
+    now: datetime,
 ) -> _DispatchJob | None:
     """Re-validate a re-loaded row under the lock; emit + build its dispatch job.
 
@@ -448,19 +454,26 @@ def _prepare_dispatch_job(
 
     * **Silent** (no event) when the row is stale — ``pr_state`` gone or no
       longer ``changes_requested`` (a concurrent re-review can have moved it on
-      between detect and act).
+      between detect and act) — OR already fired this episode
+      (``address_review_fired_at`` is not None; not an anomaly, mirrors
+      ``_prepare_auto_fix_ci_job``'s already-fired check).
     * **Anomaly** (emits ``PR_ACTION_FAILED`` + a warning) when the PR url is
       unparseable/absent, the client is unresolvable, or the worktree is
       missing — a fail-safe correction, never a silent drop.
 
     Otherwise records ``PR_ACTION_TAKEN`` (emit-before-dispatch) from the
-    RE-LOADED row and returns the deferred dispatch job. ``session_id`` is the
-    originating candidate's — the event fires before the new spawn exists, so it
-    can't carry a session id that doesn't exist yet.
+    RE-LOADED row, stamps the ``address_review_fired_at`` latch to *now*, and
+    returns the deferred dispatch job. ``session_id`` is the originating
+    candidate's — the event fires before the new spawn exists, so it can't
+    carry a session id that doesn't exist yet.
     """
     pr_state = task.pr_state
-    if pr_state is None or pr_state.attention_state != _ATTENTION_CHANGES_REQUESTED:
-        return None  # stale — silent skip (precedent: gate_recipes silent paths)
+    if (
+        pr_state is None
+        or pr_state.attention_state != _ATTENTION_CHANGES_REQUESTED
+        or task.address_review_fired_at is not None
+    ):
+        return None  # stale or already-fired — silent skip
     payload_base = _review_payload_base(
         task,
         session_id,
@@ -503,6 +516,7 @@ def _prepare_dispatch_job(
         payload_base,
         correlation_id=task.ticket_id,
     )
+    task.address_review_fired_at = now
     return _DispatchJob(
         client_cfg=client_cfg,
         worktree=wt,
@@ -550,20 +564,36 @@ def _dispatch_address_review(job: _DispatchJob) -> str | None:
     return job.ticket_id
 
 
+def _clear_address_review_fired(task: TicketTask) -> None:
+    task.address_review_fired_at = None
+
+
 def _act_address_review(
-    candidates: list[ReviewRecipeCandidate], *, clients: dict[str, ClientConfig]
+    candidates: list[ReviewRecipeCandidate],
+    *,
+    clients: dict[str, ClientConfig],
+    now: datetime | None = None,
 ) -> list[str]:
     """Act phase: re-validate under lock, emit PR_ACTION_TAKEN, then dispatch.
 
     Mirrors ``gate_recipes._act_auto_approve_review``'s shape (lock / re-load /
-    re-check / emit-before-action / deferred side-effect after lock release) but
-    performs NO dev-queue mutation (RFC 0010 P2 Resolution 6): the
-    ``dev_queue_lock()`` is held only for a consistent READ re-validation. Each
-    candidate's row is re-loaded fresh under the lock and re-checked — a
-    concurrent re-review can have moved the PR off ``changes_requested`` between
-    detect and act. Every ``spawn_create_impl`` runs strictly after the lock
-    releases, so the dispatch never nests the flock (guaranteeing no
-    self-deadlock) and ``PR_ACTION_TAKEN`` is always durable before its spawn.
+    re-check / emit-before-action / deferred side-effect after lock release).
+    Under one ``dev_queue_lock()``:
+
+    1. **Episode-end clear** — scan every freshly-loaded row and clear
+       ``address_review_fired_at`` where it is set but the current ``pr_state``
+       is None or no longer ``changes_requested`` (the episode ended; this
+       re-arms the latch for a genuine future re-entry). Runs regardless of
+       whether *candidates* is empty.
+    2. **Fire** — for each candidate, ``_prepare_dispatch_job`` re-validates,
+       emits ``PR_ACTION_TAKEN``, and stamps the latch.
+
+    Stamping/clearing the latch IS a dev-queue write (GitHub #1206 — a latch
+    field, not a status transition; all four review-recipe act phases now
+    perform this same kind of write). Every ``spawn_create_impl`` runs strictly
+    after the lock releases, so the dispatch never nests the flock
+    (guaranteeing no self-deadlock) and ``PR_ACTION_TAKEN`` is always durable
+    before its spawn.
 
     ``clients`` is the caller's snapshot (mirrors ``run_gate_recipes`` loading
     ``load_effective_clients()`` once and threading it down) rather than a
@@ -574,21 +604,34 @@ def _act_address_review(
     Returns the acted ticket_ids (those whose ``/address-review`` dispatch
     succeeded).
     """
-    if not candidates:
-        return []
+    from datetime import UTC
+    from datetime import datetime as _datetime
+
+    resolved_now = now if now is not None else _datetime.now(UTC)
     # Keyed on (ticket_id, client): ticket_id alone is a per-repo GitHub issue
     # number, not globally unique across this multi-tenant system's clients.
     by_key = {(c.ticket_id, c.client): c for c in candidates}
     dispatch_jobs: list[_DispatchJob] = []
     with dev_queue_lock():
         store = load_dev_queue()
+        changed = _clear_ended_episodes(
+            store,
+            attention_state=_ATTENTION_CHANGES_REQUESTED,
+            get_fired_at=lambda t: t.address_review_fired_at,
+            clear_fired_at=_clear_address_review_fired,
+        )
         for candidate in by_key.values():
             task = _find_review_task(store, candidate.ticket_id, candidate.client)
             if task is None:
                 continue
-            job = _prepare_dispatch_job(task, candidate.session_id, clients)
+            job = _prepare_dispatch_job(
+                task, candidate.session_id, clients, resolved_now
+            )
             if job is not None:
                 dispatch_jobs.append(job)
+                changed = True
+        if changed:
+            save_dev_queue(store)
     acted: list[str] = []
     for job in dispatch_jobs:
         ticket_id = _dispatch_address_review(job)
@@ -739,9 +782,10 @@ def _act_auto_fix_ci(
     2. **Fire** — for each candidate, ``_prepare_auto_fix_ci_job`` re-validates,
        emits ``PR_ACTION_TAKEN``, and stamps the latch.
 
-    Stamping/clearing the latch IS a dev-queue write (one of the three
-    exceptions to this module's "no dev-queue mutation" rule — a latch field,
-    not a status transition), saved before the lock releases. The re-enqueue +
+    Stamping/clearing the latch IS a dev-queue write (GitHub #1206: all four
+    review-recipe act phases now perform this same kind of write — a latch
+    field, not a status transition; none remain read-only), saved before the
+    lock releases. The re-enqueue +
     dispatch tick runs strictly after the lock releases (``add_ticket``
     re-acquires ``dev_queue_lock``, so nesting would self-deadlock). Returns
     the ticket_ids whose re-dispatch succeeded.
@@ -928,9 +972,10 @@ def _act_request_reviewer(
     2. **Fire** — for each candidate, ``_prepare_request_reviewer_job``
        re-validates, emits ``PR_ACTION_TAKEN``, and stamps the latch.
 
-    Stamping/clearing the latch IS a dev-queue write (the one exception to the
-    "no dev-queue mutation" rule — a latch field, not a status transition),
-    saved before the lock releases. The ``add_pr_reviewer`` gh call runs
+    Stamping/clearing the latch IS a dev-queue write (GitHub #1206: all four
+    review-recipe act phases now perform this same kind of write — a latch
+    field, not a status transition; none remain read-only), saved before the
+    lock releases. The ``add_pr_reviewer`` gh call runs
     strictly after the lock releases. Returns the ticket_ids for which a
     reviewer request actually succeeded (a failed gh call is excluded and
     corrected via ``PR_ACTION_FAILED``).
@@ -995,9 +1040,10 @@ def _act_escalate_merge_block(
        hold, emit ``PR_ACTION_TAKEN`` and stamp the latch to *now*. An already-
        stamped row is a silent skip (already fired this episode).
 
-    Stamping/clearing the latch IS a dev-queue write (the one exception to the
-    review layer's "no dev-queue mutation" rule — it is a latch field, not a
-    status transition). ``record_event`` nests the inbox lock INSIDE
+    Stamping/clearing the latch IS a dev-queue write (GitHub #1206: all four
+    review-recipe act phases now perform this same kind of write — a latch
+    field, not a status transition; none remain read-only). ``record_event``
+    nests the inbox lock INSIDE
     ``dev_queue_lock`` (never the reverse), so emitting under the lock is
     deadlock-safe (same ordering as ``cw.reconcile.escalation``).
     """
@@ -1079,12 +1125,12 @@ def run_review_recipes(*, config: OrchestratorConfig) -> list[str]:
     a reviewer per the repo's review_strategy on a no_reviewer PR), and
     ``escalate_merge_block`` (fires one durable escalation per merge-blocked
     episode). Each detect->act pair runs against the same fresh ``tasks``
-    snapshot; the ``request_reviewer``, ``escalate_merge_block``, and
-    ``auto_fix_ci`` act phases each perform a small latch write (the three
-    exceptions to this module's "no dev-queue mutation" rule — a one-shot
-    field, not a status transition). ``address_review`` is the only act phase
-    that remains read-only under its lock. Returns the concatenated
-    ticket_ids each recipe reports as acted.
+    snapshot; the ``request_reviewer``, ``escalate_merge_block``,
+    ``auto_fix_ci``, and (GitHub #1206) ``address_review`` act phases each
+    perform a small latch write (all four act phases now write a one-shot
+    latch field, not a status transition — none remain purely read-only under
+    their lock). Returns the concatenated ticket_ids each recipe reports as
+    acted.
     """
     if not config.review_recipes_enabled:
         return []

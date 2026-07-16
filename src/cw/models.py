@@ -169,7 +169,9 @@ CW_STATE_SCHEMA_VERSION = 14
 #      latch for the request_reviewer review recipe.
 # v17: added TicketTask.auto_fix_ci_fired_at (GitHub #1205) — one-shot
 #      latch for the auto_fix_ci review recipe.
-DEV_QUEUE_SCHEMA_VERSION = 17
+# v18: added TicketTask.address_review_fired_at (GitHub #1206) — one-shot
+#      latch for the address_review review recipe.
+DEV_QUEUE_SCHEMA_VERSION = 18
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -647,13 +649,23 @@ class TicketTask(BaseModel):
     # (cw.reconcile.review_recipes). Stamped by _prepare_auto_fix_ci_job when it
     # emits PR_ACTION_TAKEN for a ci_failing PR, so the CI-fix re-dispatch (a
     # full re-enqueue + dispatch tick, not a scoped session — the highest blast
-    # radius of the three review-recipe latches) fires exactly once per
+    # radius of the four review-recipe latches) fires exactly once per
     # ci-failing episode rather than every reconcile tick. Cleared by
     # _act_auto_fix_ci's own episode-end sweep (the shared _clear_ended_episodes
     # helper) when the row's pr_state leaves ci_failing (or goes None),
     # re-arming the latch for a genuine future re-entry — mirrors
     # request_reviewer_fired_at above.
     auto_fix_ci_fired_at: datetime | None = None
+    # GitHub #1206 — one-shot latch for the address_review review recipe
+    # (cw.reconcile.review_recipes). Stamped by _prepare_dispatch_job when it
+    # emits PR_ACTION_TAKEN for a changes_requested PR, so the
+    # /address-review dispatch fires exactly once per changes-requested
+    # episode rather than every reconcile tick. Cleared by
+    # _act_address_review's own episode-end sweep (the shared
+    # _clear_ended_episodes helper) when the row's pr_state leaves
+    # changes_requested (or goes None), re-arming the latch for a genuine
+    # future re-entry — mirrors auto_fix_ci_fired_at above.
+    address_review_fired_at: datetime | None = None
 
     @field_validator("gate_recipes")
     @classmethod
