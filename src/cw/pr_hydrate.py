@@ -138,7 +138,10 @@ def _comment_body_is_blocking(body: str) -> bool:
     """True if *body* carries cw's own blocking-review vocabulary (#1195)."""
     if body.strip().startswith(_REVIEW_HEADING_PREFIX):
         return True
-    return any(marker in body for marker in _BLOCKING_COMMENT_MARKERS)
+    return any(
+        re.search(rf"\b{re.escape(marker)}\b", body)
+        for marker in _BLOCKING_COMMENT_MARKERS
+    )
 
 
 def _has_blocking_comment_review(
@@ -154,13 +157,22 @@ def _has_blocking_comment_review(
     past ``/address-review`` reply quoting "MUST_FIX" would re-trigger this
     classifier forever. *self_login* is caller-resolved (see
     ``hydrate_pr_states``), not fetched here.
+
+    *self_login* is required to classify safely: when it is ``None`` (the
+    caller could not resolve the operator's own identity that tick), this
+    fails closed and returns ``False`` unconditionally rather than scanning
+    without the exclusion — scanning anyway would reproduce the exact
+    self-trigger loop the exclusion exists to prevent, on every tick identity
+    resolution happens to fail.
     """
+    if self_login is None:
+        return False
     for comment in comments:
         if not isinstance(comment, dict):
             continue
         author = comment.get("author")
         login = author.get("login") if isinstance(author, dict) else None
-        if self_login is not None and login == self_login:
+        if login == self_login:
             continue
         body = comment.get("body")
         if isinstance(body, str) and _comment_body_is_blocking(body):
@@ -668,16 +680,18 @@ def _overlay_push_observation(
     carries them, so they are never themselves overlaid.
 
     ``has_blocking_comment_review`` (#1195) is not a ``PrState`` field and no
-    webhook payload carries it, so this recompute always passes ``False`` — a
-    push-path recompute cannot rediscover a marker-vocabulary comment that
-    drove a prior poll's ``changes_requested``. Only the next full poll
-    (``_derive_pr_state``, which re-fetches ``comments``) can re-derive it. A
-    push event landing between polls can therefore transiently move
-    ``attention_state`` off ``changes_requested`` back to whatever the base
-    GitHub-fact ladder computes, until the next
-    ``pr_hydration_interval_seconds`` poll. This is the accepted cost of R4
-    (no new ``PrState`` field); see
-    ``TestOverlayPushObservation::test_overlay_recompute_cannot_rederive_blocking_comment_signal``.
+    webhook payload carries it, so this recompute can't re-fetch ``comments``
+    to re-derive it directly. It infers whether the signal was in effect
+    instead: ``changes_requested`` is produced by exactly two rows (2b or 3),
+    and row 3 requires ``review_decision == CHANGES_REQUESTED`` — so if
+    *base*'s ``attention_state`` was ``changes_requested`` while its
+    ``review_decision`` was NOT itself ``CHANGES_REQUESTED``, row 2b must have
+    been the cause, and that carries forward into this recompute. This keeps
+    a comment-driven ``changes_requested`` from silently reverting mid-
+    interval on an unrelated push event; only the next full poll
+    (``_derive_pr_state``, which re-fetches ``comments``) can clear it (e.g.
+    once the marker comment is superseded). See
+    ``TestOverlayPushObservation::test_overlay_recompute_preserves_blocking_comment_signal``.
     """
     base = old if old is not None else PrState()
     updates: dict[str, Any] = {"hydrated_at": datetime.now(UTC)}
@@ -700,6 +714,10 @@ def _overlay_push_observation(
     if merged_state in _TERMINAL_PR_STATES:
         updates["attention_state"] = None
     else:
+        had_blocking_comment_review = (
+            base.attention_state == "changes_requested"
+            and base.review_decision != "CHANGES_REQUESTED"
+        )
         updates["attention_state"] = _compute_attention_state(
             ci_ok=updates.get("ci_ok", base.ci_ok),
             pending_count=base.pending_count,
@@ -709,7 +727,7 @@ def _overlay_push_observation(
             review_decision=updates.get("review_decision", base.review_decision),
             is_draft=base.is_draft,
             reviewer_count=base.reviewer_count,
-            has_blocking_comment_review=False,
+            has_blocking_comment_review=had_blocking_comment_review,
         )
     return base.model_copy(update=updates)
 
@@ -817,7 +835,8 @@ def hydrate_pr_states(config: OrchestratorConfig) -> None:
     from cw.operator_identity import cached_gh_login
 
     candidates = [t for t in store.tasks if _is_candidate(t)]
-    self_login = cached_gh_login() if candidates or store.watched_prs else None
+    has_active_watched_prs = any(w.status == "active" for w in store.watched_prs)
+    self_login = cached_gh_login() if candidates or has_active_watched_prs else None
     derived: list[tuple[TicketTask, PrState]] = []
     for task in candidates:
         pr_url = task.pr_url

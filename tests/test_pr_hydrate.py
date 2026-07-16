@@ -394,6 +394,23 @@ class TestAttentionState:
             == "ready_to_approve"
         )
 
+    def test_row2b_overrides_row4_no_reviewer(self) -> None:
+        # #1195 SHOULD_FIX: the docstring claims row 2b overrides rows 4/5/6
+        # uniformly -- this proves the row-4 (no_reviewer) case specifically,
+        # not just the BLOCKED and clean/ready_to_approve ladders.
+        assert (
+            _compute_attention_state(
+                ci_ok=True,
+                pending_count=0,
+                merge_state_status="CLEAN",
+                review_decision="REVIEW_REQUIRED",
+                is_draft=False,
+                reviewer_count=0,
+                has_blocking_comment_review=True,
+            )
+            == "changes_requested"
+        )
+
 
 class TestBlockingCommentReview:
     """_comment_body_is_blocking / _has_blocking_comment_review (#1195)."""
@@ -433,6 +450,13 @@ class TestBlockingCommentReview:
     def test_empty_comments_list_with_no_self_login_is_not_blocking(self) -> None:
         assert _has_blocking_comment_review([], self_login=None) is False
 
+    def test_unresolved_self_login_fails_closed_not_open(self) -> None:
+        # #1195 MUST_FIX: an unresolved identity (self_login=None) must not
+        # scan without exclusion -- that would reproduce the exact
+        # self-authored re-trigger loop the exclusion exists to prevent.
+        comments = [{"author": {"login": "someone-else"}, "body": "MUST_FIX: bad"}]
+        assert _has_blocking_comment_review(comments, self_login=None) is False
+
     def test_malformed_non_dict_entry_is_skipped_not_raised(self) -> None:
         comments = [
             "not a dict",  # type: ignore[list-item]
@@ -452,6 +476,12 @@ class TestBlockingCommentReview:
         assert _comment_body_is_blocking("plain MUST_FIX text") is True
         assert _comment_body_is_blocking("plain BLOCKING text") is True
         assert _comment_body_is_blocking("looks great, thanks!") is False
+
+    def test_comment_body_is_blocking_requires_word_boundary(self) -> None:
+        # #1195 SHOULD_FIX: bare substring containment would false-positive
+        # on words that merely contain a marker, e.g. NONBLOCKING/UNBLOCKING.
+        assert _comment_body_is_blocking("this change is NONBLOCKING") is False
+        assert _comment_body_is_blocking("UNBLOCKING the queue now") is False
 
 
 class TestDerivePrStateCommentReview:
@@ -834,6 +864,25 @@ class TestSelfLoginResolution:
 
     def test_not_called_on_empty_store(self, monkeypatch: pytest.MonkeyPatch) -> None:
         save_dev_queue(DevQueueStore(tasks=[], watched_prs=[]))
+        calls: list[None] = []
+
+        def _counting_login() -> str | None:
+            calls.append(None)
+            return "the-operator"
+
+        monkeypatch.setattr("cw.operator_identity.cached_gh_login", _counting_login)
+        hydrate_pr_states(OrchestratorConfig())
+        assert calls == []
+
+    def test_not_called_when_only_dismissed_watched_prs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # #1195 SHOULD_FIX: a dismissed watched PR is never fetched
+        # (_hydrate_watched_prs skips it before calling _derive_pr_state), so
+        # resolving self_login for it is a wasted call every un-throttled tick.
+        save_dev_queue(
+            DevQueueStore(tasks=[], watched_prs=[_watched(status="dismissed")])
+        )
         calls: list[None] = []
 
         def _counting_login() -> str | None:
@@ -1341,12 +1390,12 @@ class TestOverlayPushObservation:
         # Terminal state short-circuits the ladder entirely (#1196).
         assert new.attention_state is None
 
-    def test_overlay_recompute_cannot_rederive_blocking_comment_signal(self) -> None:
-        """#1195 accepted gap: a comment-driven changes_requested (base GitHub
-        facts alone would compute ready_to_approve) reverts on the next push
-        overlay, because has_blocking_comment_review is not a PrState field
-        and no wire payload carries it. Only the next full poll
-        (_derive_pr_state, which re-fetches comments) can re-derive it.
+    def test_overlay_recompute_preserves_blocking_comment_signal(self) -> None:
+        """#1195 MUST_FIX: has_blocking_comment_review is not a PrState field
+        and no wire payload carries it, but the overlay can infer it was in
+        effect (changes_requested with a review_decision that doesn't itself
+        explain it) and carry it forward, rather than silently reverting to
+        ready_to_approve on an unrelated push event mid-interval.
         """
         old = _pr_state(
             merge_state_status="BLOCKED",
@@ -1357,10 +1406,28 @@ class TestOverlayPushObservation:
         new = _overlay_push_observation(
             old, event_type=OrchestratorEventType.PR_MERGEABLE, payload={}
         )
-        expected = _blocked_attention_state(
-            pending_count=0, review_decision="REVIEW_REQUIRED"
+        assert new.attention_state == "changes_requested"
+
+    def test_overlay_recompute_reverts_when_real_review_decision_explains_prior_state(
+        self,
+    ) -> None:
+        """#1195: the inference must not over-carry. When the prior
+        changes_requested was explained by a real review_decision (not the
+        comment signal), a push that moves review_decision away from
+        CHANGES_REQUESTED must revert normally.
+        """
+        old = _pr_state(
+            merge_state_status="CLEAN",
+            review_decision="CHANGES_REQUESTED",
+            reviewer_count=1,
+            attention_state="changes_requested",
         )
-        assert new.attention_state == expected == "ready_to_approve"
+        new = _overlay_push_observation(
+            old,
+            event_type=OrchestratorEventType.PR_REVIEW_RECEIVED,
+            payload={"review_decision": "APPROVED"},
+        )
+        assert new.attention_state == "ready_to_approve"
 
     def test_carries_forward_untouched_fields(self) -> None:
         old = _pr_state(
