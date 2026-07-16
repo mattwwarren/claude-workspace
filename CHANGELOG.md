@@ -11,6 +11,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`auto_fix_ci_fired_at` latch + schema v16→17** (#1205): the `auto_fix_ci`
   recipe now re-dispatches once per ci-failing episode instead of spawning a
   worker session on every reconcile tick until hydration catches up.
+- **`address_review_fired_at` latch + schema v17→v18** (#1206): the
+  `address_review` recipe now dispatches once per changes-requested episode
+  instead of re-dispatching an `/address-review` session on every reconcile
+  tick until a human re-reviews.
 
 ### Changed
 

@@ -205,8 +205,11 @@ def test_run_review_recipes_loads_from_dev_queue(
     assert stub_spawn.calls[0]["prompt"] == "/address-review 42"
     taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
     assert any(e.correlation_id == task.ticket_id for e in taken)
-    # P2 performs NO dev-queue mutation: the on-disk snapshot is untouched.
-    assert load_dev_queue().tasks == [task]
+    # GitHub #1206: the row's address_review_fired_at latch is now stamped, so
+    # the on-disk snapshot is unchanged EXCEPT for that field.
+    after_task = load_dev_queue().tasks[0]
+    assert after_task.address_review_fired_at is not None
+    assert after_task.model_copy(update={"address_review_fired_at": None}) == task
 
 
 def test_draft_pr_never_a_candidate() -> None:
@@ -707,12 +710,8 @@ def test_action_failure_emits_pr_action_failed(
     after_task2 = reloaded["GEN-2"]
     assert after_task1.address_review_fired_at is not None
     assert after_task2.address_review_fired_at is not None
-    assert (
-        after_task1.model_copy(update={"address_review_fired_at": None}) == task1
-    )
-    assert (
-        after_task2.model_copy(update={"address_review_fired_at": None}) == task2
-    )
+    assert after_task1.model_copy(update={"address_review_fired_at": None}) == task1
+    assert after_task2.model_copy(update={"address_review_fired_at": None}) == task2
 
 
 def test_unparseable_pr_url_emits_pr_action_failed(
