@@ -831,7 +831,7 @@ class TestCurrentGhLogin:
 
 _PR_VIEW_FIELDS = (
     "state,mergeable,mergeStateStatus,statusCheckRollup,"
-    "reviewDecision,isDraft,reviewRequests"
+    "reviewDecision,isDraft,reviewRequests,comments"
 )
 
 
@@ -846,6 +846,7 @@ def _make_pr_view_result(**fields: Any) -> Any:
         "reviewDecision": "",
         "isDraft": False,
         "reviewRequests": [],
+        "comments": [],
     }
     payload.update(fields)
     return _make_run_result(0, json.dumps(payload))
