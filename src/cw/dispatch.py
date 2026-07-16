@@ -309,6 +309,33 @@ def _claim_next_pending(
     return None, spawn_backoff_skipped
 
 
+def _lane_occupants_for_client(
+    client: ClientConfig, queue_snapshot: DevQueueStore
+) -> dict[str, list[dict[str, str]]]:
+    """Per-lane occupant ``{ticket_id, status}`` list for dispatch.tick payloads.
+
+    Sibling of :func:`_lane_stats_for_client` -- same OCCUPIED_LANE_STATUSES
+    join over ``client``/``lane``, but returns identifying detail instead
+    of counts, so a ``lane_cap_blocked`` reader can name the occupant
+    instead of inferring a (possibly phantom) cross-client cap. See #1243.
+
+    Deliberately a NEW top-level dispatch.tick payload key, never nested
+    inside ``lanes`` -- orchestrate.py's ``_extract_lanes`` hard-filters
+    ``lanes`` values to numerics, so a nested ticket-id string would be
+    silently stripped downstream.
+    """
+    occupants: dict[str, list[dict[str, str]]] = {}
+    for lane_cfg in client.effective_lanes:
+        occupants[lane_cfg.name] = [
+            {"ticket_id": t.ticket_id, "status": t.status.value}
+            for t in queue_snapshot.tasks
+            if t.client == client.name
+            and t.lane == lane_cfg.name
+            and t.status in OCCUPIED_LANE_STATUSES
+        ]
+    return occupants
+
+
 def _lane_stats_for_client(
     client: ClientConfig, queue_snapshot: DevQueueStore
 ) -> dict[str, dict[str, int]]:
@@ -321,30 +348,25 @@ def _lane_stats_for_client(
     scheduler). BLOCKED_ON_USER occupies its lane slot per ADR-0006, so
     ``running + blocked + signoff`` is the total occupied count. ``blocked``
     and ``signoff`` are split out so operators can see at a glance why
-    claimed=0 when pending>0 (#588, #990).
+    claimed=0 when pending>0 (#588, #990). Derives running/blocked/signoff
+    from :func:`_lane_occupants_for_client` -- see #1243.
     """
+    occupants = _lane_occupants_for_client(client, queue_snapshot)
     stats: dict[str, dict[str, int]] = {}
     for lane_cfg in client.effective_lanes:
+        lane_occupants = occupants.get(lane_cfg.name, [])
         running = sum(
-            1
-            for t in queue_snapshot.tasks
-            if t.client == client.name
-            and t.lane == lane_cfg.name
-            and t.status == QueueItemStatus.RUNNING
+            1 for o in lane_occupants if o["status"] == QueueItemStatus.RUNNING.value
         )
         blocked = sum(
             1
-            for t in queue_snapshot.tasks
-            if t.client == client.name
-            and t.lane == lane_cfg.name
-            and t.status == QueueItemStatus.BLOCKED_ON_USER
+            for o in lane_occupants
+            if o["status"] == QueueItemStatus.BLOCKED_ON_USER.value
         )
         signoff = sum(
             1
-            for t in queue_snapshot.tasks
-            if t.client == client.name
-            and t.lane == lane_cfg.name
-            and t.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+            for o in lane_occupants
+            if o["status"] == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF.value
         )
         pending = sum(
             1
@@ -457,6 +479,7 @@ def _emit_usage_limit_skip_events(
         )
         # Per-lane breakdown for the event payload (claimed=0 for all).
         backoff_lane_stats = _lane_stats_for_client(client, queue_snapshot)
+        backoff_lane_occupants = _lane_occupants_for_client(client, queue_snapshot)
         record_event(
             OrchestratorEventType.DISPATCH_TICK,
             {
@@ -467,6 +490,8 @@ def _emit_usage_limit_skip_events(
                 "cap": cap,
                 "skip_reason": DispatchSkipReason.USAGE_LIMITED,
                 "lanes": backoff_lane_stats,
+                "lane_occupants": backoff_lane_occupants,
+                "occupied": sum(len(v) for v in backoff_lane_occupants.values()),
             },
         )
 
@@ -604,6 +629,7 @@ def _emit_availability_skip(
     outage is not a per-ticket sync problem. ``skip_reason`` is
     ``AVAILABILITY_GATE``.
     """
+    lane_occupants = _lane_occupants_for_client(client, queue_snapshot)
     record_event(
         OrchestratorEventType.DISPATCH_TICK,
         {
@@ -614,6 +640,8 @@ def _emit_availability_skip(
             "cap": cap,
             "skip_reason": DispatchSkipReason.AVAILABILITY_GATE,
             "lanes": _lane_stats_for_client(client, queue_snapshot),
+            "lane_occupants": lane_occupants,
+            "occupied": sum(len(v) for v in lane_occupants.values()),
         },
     )
 
@@ -772,6 +800,7 @@ def _emit_stale_skip(
                     )
                 if warned_stale is not None:
                     warned_stale.add(ticket_key)
+    lane_occupants = _lane_occupants_for_client(client, queue_snapshot)
     record_event(
         OrchestratorEventType.DISPATCH_TICK,
         {
@@ -784,6 +813,8 @@ def _emit_stale_skip(
             "freshness_detail": freshness_detail,
             "blocked_branch": non_main_branch,
             "lanes": _lane_stats_for_client(client, queue_snapshot),
+            "lane_occupants": lane_occupants,
+            "occupied": sum(len(v) for v in lane_occupants.values()),
         },
     )
 
@@ -1229,6 +1260,11 @@ def _dispatch_client_lanes(
     # lane running_by_lane counts govern per-lane grants within this budget.
     available_client_slots = client_ceiling - running_count
     lane_stats: dict[str, dict[str, int]] = {}
+    # Per-lane occupant {ticket_id, status} lists for the dispatch.tick payload
+    # (#1243). Computed once here (all lanes), the same OCCUPIED_LANE_STATUSES
+    # join _lane_stats_for_client uses -- so blocked_in_lane/signoff_in_lane
+    # below derive from it rather than re-scanning the queue.
+    occupants_by_lane = _lane_occupants_for_client(client, queue_snapshot)
 
     for lane_cfg in effective_lanes:
         if available_client_slots <= 0:
@@ -1246,23 +1282,20 @@ def _dispatch_client_lanes(
         # running_in_lane = RUNNING + BLOCKED_ON_USER + AWAITING_OPERATOR_SIGNOFF
         # (total occupied slots, OCCUPIED_LANE_STATUSES, #990).
         running_in_lane = running_by_lane.get(lane_cfg.name, 0)
-        # blocked_in_lane = BLOCKED_ON_USER only (for per-lane breakdown).
+        # blocked_in_lane = BLOCKED_ON_USER only (for per-lane breakdown),
+        # derived from occupants_by_lane rather than re-scanning the queue.
         blocked_in_lane = sum(
             1
-            for t in queue_snapshot.tasks
-            if t.client == client.name
-            and t.lane == lane_cfg.name
-            and t.status == QueueItemStatus.BLOCKED_ON_USER
+            for o in occupants_by_lane.get(lane_cfg.name, [])
+            if o["status"] == QueueItemStatus.BLOCKED_ON_USER.value
         )
         # signoff_in_lane = AWAITING_OPERATOR_SIGNOFF only (for per-lane
         # breakdown). Must be subtracted out of running_in_lane below, else a
         # signoff-parked ticket is misreported as "running" (#990).
         signoff_in_lane = sum(
             1
-            for t in queue_snapshot.tasks
-            if t.client == client.name
-            and t.lane == lane_cfg.name
-            and t.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+            for o in occupants_by_lane.get(lane_cfg.name, [])
+            if o["status"] == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF.value
         )
         pending_in_lane = sum(
             1
@@ -1359,6 +1392,8 @@ def _dispatch_client_lanes(
             "cap": cap,
             "skip_reason": skip_reason,
             "lanes": lane_stats,
+            "lane_occupants": occupants_by_lane,
+            "occupied": sum(len(v) for v in occupants_by_lane.values()),
         },
     )
     return _ClientDispatchResult(
