@@ -747,6 +747,51 @@ def save_availability_probe_cache(cache: AvailabilityProbeCache) -> None:
         logger.warning("dispatch_state: failed to persist availability_probe")
 
 
+def load_main_drift_latches() -> dict[str, bool]:
+    """Load the per-client main-checkout-drift attention latches (#1258).
+
+    Returns ``{}`` when the file is absent, unreadable, malformed, missing
+    the ``"main_drift_latches"`` key, or storing a non-dict / wrong-value-type
+    entry. Mirrors :func:`load_availability_probe_cache`'s fail-safe shape;
+    tolerates other keys (e.g. ``availability_probe``) sharing the file.
+    """
+    path = DISPATCH_STATE_FILE
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+        entry = raw.get("main_drift_latches")
+        if not isinstance(entry, dict):
+            return {}
+        if not all(
+            isinstance(key, str) and isinstance(value, bool)
+            for key, value in entry.items()
+        ):
+            return {}
+        return entry
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        return {}
+
+
+def save_main_drift_latches(latches: dict[str, bool]) -> None:
+    """Persist the per-client main-checkout-drift attention latches (#1258).
+
+    Read-merge-writes the shared sidecar so ``usage_limited_until`` and
+    ``availability_probe`` are preserved rather than clobbered.  Creates
+    STATE_DIR if needed.  Silently swallows write errors — a failed persist
+    just means the next tick may re-fire an attention event it shouldn't
+    (acceptable degradation, same posture as ``save_availability_probe_cache``).
+    """
+    try:
+        refuse_real_state_write(DISPATCH_STATE_FILE)
+        DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        payload = _load_dispatch_state_raw()
+        payload["main_drift_latches"] = latches
+        atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
+    except OSError:
+        logger.warning("dispatch_state: failed to persist main_drift_latches")
+
+
 def load_orchestrator_config() -> OrchestratorConfig:
     """Load orchestrator.yaml, creating with defaults if missing."""
     path = orchestrator_config_file()
