@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import subprocess
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -29,6 +31,8 @@ from cw.pr_hydrate import (
     _hydrate_watched_prs,
     _overlay_push_observation,
     _parse_pr_url,
+    _repo_slug_mismatch,
+    _resolve_repo_slug,
     _resolve_task_by_pr_ref,
     _reviewer_node_login,
     _summarize_status_checks,
@@ -577,6 +581,82 @@ class TestParsePrUrl:
 
     def test_returns_none_for_non_pull_url(self) -> None:
         assert _parse_pr_url("https://github.com/acme/widgets/issues/42") is None
+
+
+def _init_repo_with_remote(path: Path, remote_url: str | None) -> Path:
+    """Build a minimal git repo at *path*, optionally with an ``origin`` remote.
+
+    Raw subprocess (not the shared ``make_git_repo`` fixture): no existing
+    fixture sets a remote, and extending the widely-shared factory to add one
+    would be a broader-blast-radius change than GitHub #1198 calls for.
+    """
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "-C", str(path), "init"], capture_output=True, check=True)
+    if remote_url is not None:
+        subprocess.run(
+            ["git", "-C", str(path), "remote", "add", "origin", remote_url],
+            capture_output=True,
+            check=True,
+        )
+    return path
+
+
+class TestResolveRepoSlug:
+    """_resolve_repo_slug parses an ``owner/repo`` slug from origin's URL."""
+
+    def test_ssh_remote(self, tmp_path: Path) -> None:
+        repo = _init_repo_with_remote(
+            tmp_path / "ssh", "git@github.com:acme/widgets.git"
+        )
+        assert _resolve_repo_slug(repo) == "acme/widgets"
+
+    def test_https_remote_with_git_suffix(self, tmp_path: Path) -> None:
+        repo = _init_repo_with_remote(
+            tmp_path / "https-git", "https://github.com/acme/widgets.git"
+        )
+        assert _resolve_repo_slug(repo) == "acme/widgets"
+
+    def test_https_remote_without_git_suffix(self, tmp_path: Path) -> None:
+        repo = _init_repo_with_remote(
+            tmp_path / "https", "https://github.com/acme/widgets"
+        )
+        assert _resolve_repo_slug(repo) == "acme/widgets"
+
+    def test_non_github_remote_returns_none(self, tmp_path: Path) -> None:
+        repo = _init_repo_with_remote(
+            tmp_path / "gitlab", "https://gitlab.com/acme/widgets.git"
+        )
+        assert _resolve_repo_slug(repo) is None
+
+    def test_no_origin_remote_returns_none(self, tmp_path: Path) -> None:
+        repo = _init_repo_with_remote(tmp_path / "no-remote", None)
+        assert _resolve_repo_slug(repo) is None
+
+    def test_non_git_directory_returns_none(self, tmp_path: Path) -> None:
+        bare = tmp_path / "not-a-repo"
+        bare.mkdir()
+        assert _resolve_repo_slug(bare) is None
+
+
+class TestRepoSlugMismatch:
+    """_repo_slug_mismatch fails open; only a resolvable disagreement is a hit."""
+
+    def test_case_insensitive_match_returns_none(self, tmp_path: Path) -> None:
+        repo = _init_repo_with_remote(
+            tmp_path / "case", "https://github.com/ACME/Widgets.git"
+        )
+        assert _repo_slug_mismatch("acme/widgets", repo) is None
+
+    def test_real_mismatch_returns_resolved_slug(self, tmp_path: Path) -> None:
+        repo = _init_repo_with_remote(
+            tmp_path / "mismatch", "https://github.com/acme/other-repo.git"
+        )
+        assert _repo_slug_mismatch("acme/widgets", repo) == "acme/other-repo"
+
+    def test_unresolvable_remote_fails_open(self, tmp_path: Path) -> None:
+        # No origin remote -> unresolvable -> None (fail-open), never the pr_repo.
+        repo = _init_repo_with_remote(tmp_path / "unresolvable", None)
+        assert _repo_slug_mismatch("acme/widgets", repo) is None
 
 
 def _pr_state(**fields: Any) -> PrState:
