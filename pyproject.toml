@@ -190,6 +190,13 @@ ignore = [
 # cw.reconcile at module top). Inline import at function level is the
 # sanctioned mechanism, not a workaround.
 "src/cw/reconcile/review_recipes.py" = ["PLC0415"]
+# pr_hydrate defers the operator_identity import inside hydrate_pr_states so a
+# test-time monkeypatch of cw.operator_identity.cached_gh_login takes effect —
+# a module-level import would bind a stale reference at import time. Mirrors
+# cw_pr_events_server.py's _handle_review_requested_sync pattern for the same
+# function (#1195). Inline import at function level is the sanctioned
+# mechanism, not a workaround.
+"src/cw/pr_hydrate.py" = ["PLC0415"]
 # Channel test files guard imports behind pytest.importorskip("starlette"/"mcp"),
 # so module-level imports legitimately follow executable code (E402).
 "tests/test_cw_pr_events_channel.py" = ["E402"]

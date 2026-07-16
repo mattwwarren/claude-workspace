@@ -21,8 +21,11 @@ from cw.models import (
 from cw.pr_hydrate import (
     WATCHED_PR_COUNTERPARTY,
     _blocked_attention_state,
+    _comment_body_is_blocking,
     _compute_attention_state,
+    _derive_pr_state,
     _diff_transitions,
+    _has_blocking_comment_review,
     _hydrate_watched_prs,
     _overlay_push_observation,
     _parse_pr_url,
@@ -59,9 +62,26 @@ def _pr_view_payload(**fields: Any) -> dict[str, Any]:
         "reviewDecision": "",
         "isDraft": False,
         "reviewRequests": [],
+        "comments": [],
     }
     payload.update(fields)
     return payload
+
+
+@pytest.fixture(autouse=True)
+def _mock_cached_gh_login(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default ``cached_gh_login()`` to unresolved for every test in this file.
+
+    Without this, the first of this file's 24 ``hydrate_pr_states(...)``-
+    driving tests would shell out to a real ``gh api user`` subprocess (up to
+    a 10s timeout, #1195) and leak the process-lifetime cache into every
+    later test in the same pytest process. Individual tests override via
+    their own ``monkeypatch.setattr("cw.operator_identity.cached_gh_login", ...)``
+    — pytest patches stack, so a test-level patch wins (mirrors
+    ``conftest.py``'s ``_mock_push_notification`` autouse-with-override
+    precedent).
+    """
+    monkeypatch.setattr("cw.operator_identity.cached_gh_login", lambda: None)
 
 
 class TestSummarizeStatusChecks:
@@ -298,6 +318,224 @@ class TestAttentionState:
             )
             == "ready_to_approve"
         )
+
+    def test_row2b_blocking_comment_overrides_blocked_ladder(self) -> None:
+        # #1195: a blocking-comment-shaped review on a BLOCKED PR (row5b would
+        # otherwise read ready_to_approve) still reads changes_requested.
+        assert (
+            _compute_attention_state(
+                ci_ok=True,
+                pending_count=0,
+                merge_state_status="BLOCKED",
+                review_decision="REVIEW_REQUIRED",
+                is_draft=False,
+                reviewer_count=1,
+                has_blocking_comment_review=True,
+            )
+            == "changes_requested"
+        )
+
+    def test_row2b_blocking_comment_overrides_row6_clean_ladder(self) -> None:
+        # #1195: the ticket's non-literal case — a clean, fully-approved PR
+        # (row6 would otherwise read ready_to_approve) still reads
+        # changes_requested when a blocking comment marker is present.
+        assert (
+            _compute_attention_state(
+                ci_ok=True,
+                pending_count=0,
+                merge_state_status="CLEAN",
+                review_decision="APPROVED",
+                is_draft=False,
+                reviewer_count=1,
+                has_blocking_comment_review=True,
+            )
+            == "changes_requested"
+        )
+
+    def test_row2b_does_not_override_row0_draft(self) -> None:
+        assert (
+            _compute_attention_state(
+                ci_ok=True,
+                pending_count=0,
+                merge_state_status="CLEAN",
+                review_decision="APPROVED",
+                is_draft=True,
+                reviewer_count=1,
+                has_blocking_comment_review=True,
+            )
+            is None
+        )
+
+    def test_row2b_does_not_override_row1_merge_blocked(self) -> None:
+        assert (
+            _compute_attention_state(
+                ci_ok=True,
+                pending_count=0,
+                merge_state_status="DIRTY",
+                review_decision="APPROVED",
+                is_draft=False,
+                reviewer_count=1,
+                has_blocking_comment_review=True,
+            )
+            == "merge_blocked"
+        )
+
+    def test_row2b_default_false_preserves_existing_behavior(self) -> None:
+        # Defaulted kwarg — every pre-#1195 call site is unaffected.
+        assert (
+            _compute_attention_state(
+                ci_ok=True,
+                pending_count=0,
+                merge_state_status="CLEAN",
+                review_decision="APPROVED",
+                is_draft=False,
+                reviewer_count=1,
+            )
+            == "ready_to_approve"
+        )
+
+    def test_row2b_overrides_row4_no_reviewer(self) -> None:
+        # #1195 SHOULD_FIX: the docstring claims row 2b overrides rows 4/5/6
+        # uniformly -- this proves the row-4 (no_reviewer) case specifically,
+        # not just the BLOCKED and clean/ready_to_approve ladders.
+        assert (
+            _compute_attention_state(
+                ci_ok=True,
+                pending_count=0,
+                merge_state_status="CLEAN",
+                review_decision="REVIEW_REQUIRED",
+                is_draft=False,
+                reviewer_count=0,
+                has_blocking_comment_review=True,
+            )
+            == "changes_requested"
+        )
+
+
+class TestBlockingCommentReview:
+    """_comment_body_is_blocking / _has_blocking_comment_review (#1195)."""
+
+    def test_must_fix_marker_non_self_authored_is_blocking(self) -> None:
+        comments = [{"author": {"login": "someone-else"}, "body": "MUST_FIX: bad"}]
+        assert _has_blocking_comment_review(comments, self_login="the-operator") is True
+
+    def test_blocking_marker_non_self_authored_is_blocking(self) -> None:
+        comments = [{"author": {"login": "someone-else"}, "body": "BLOCKING issue"}]
+        assert _has_blocking_comment_review(comments, self_login="the-operator") is True
+
+    def test_review_heading_prefix_non_self_authored_is_blocking(self) -> None:
+        comments = [
+            {
+                "author": {"login": "someone-else"},
+                "body": "## Review: blocking\nData handling defect.",
+            }
+        ]
+        assert _has_blocking_comment_review(comments, self_login="the-operator") is True
+
+    def test_marker_present_self_authored_is_not_blocking(self) -> None:
+        comments = [{"author": {"login": "the-operator"}, "body": "MUST_FIX: bad"}]
+        assert (
+            _has_blocking_comment_review(comments, self_login="the-operator") is False
+        )
+
+    def test_no_marker_ordinary_comment_is_not_blocking(self) -> None:
+        comments = [{"author": {"login": "someone-else"}, "body": "looks good!"}]
+        assert (
+            _has_blocking_comment_review(comments, self_login="the-operator") is False
+        )
+
+    def test_empty_comments_list_is_not_blocking(self) -> None:
+        assert _has_blocking_comment_review([], self_login="the-operator") is False
+
+    def test_empty_comments_list_with_no_self_login_is_not_blocking(self) -> None:
+        assert _has_blocking_comment_review([], self_login=None) is False
+
+    def test_unresolved_self_login_fails_closed_not_open(self) -> None:
+        # #1195 MUST_FIX: an unresolved identity (self_login=None) must not
+        # scan without exclusion -- that would reproduce the exact
+        # self-authored re-trigger loop the exclusion exists to prevent.
+        comments = [{"author": {"login": "someone-else"}, "body": "MUST_FIX: bad"}]
+        assert _has_blocking_comment_review(comments, self_login=None) is False
+
+    def test_malformed_non_dict_entry_is_skipped_not_raised(self) -> None:
+        comments = [
+            "not a dict",  # type: ignore[list-item]
+            {"author": {"login": "someone-else"}, "body": "MUST_FIX: bad"},
+        ]
+        assert _has_blocking_comment_review(comments, self_login="the-operator") is True
+
+    def test_malformed_non_str_body_is_skipped_not_raised(self) -> None:
+        comments = [
+            {"author": {"login": "someone-else"}, "body": None},
+            {"author": {"login": "someone-else"}, "body": "MUST_FIX: bad"},
+        ]
+        assert _has_blocking_comment_review(comments, self_login="the-operator") is True
+
+    def test_comment_body_is_blocking_direct(self) -> None:
+        assert _comment_body_is_blocking("## Review: nope") is True
+        assert _comment_body_is_blocking("plain MUST_FIX text") is True
+        assert _comment_body_is_blocking("plain BLOCKING text") is True
+        assert _comment_body_is_blocking("looks great, thanks!") is False
+
+    def test_comment_body_is_blocking_requires_word_boundary(self) -> None:
+        # #1195 SHOULD_FIX: bare substring containment would false-positive
+        # on words that merely contain a marker, e.g. NONBLOCKING/UNBLOCKING.
+        assert _comment_body_is_blocking("this change is NONBLOCKING") is False
+        assert _comment_body_is_blocking("UNBLOCKING the queue now") is False
+
+    def test_comment_body_is_blocking_boundary_excludes_hyphen(self) -> None:
+        # #1195 MUST_FIX (re-review cycle 2): a bare \b boundary treats a
+        # hyphen as a boundary too, so "NON-BLOCKING" (a common code-review
+        # convention for explicitly marking a comment non-blocking) would
+        # still false-positive under a naive \b-only fix.
+        assert _comment_body_is_blocking("NON-BLOCKING: consider renaming") is False
+
+
+class TestDerivePrStateCommentReview:
+    """_derive_pr_state (#1195): comments wired end-to-end into attention_state."""
+
+    def test_ticket_repro_fixture_reads_changes_requested(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reproduces the ticket's exact BLOCKED + REVIEW_REQUIRED fixture: a
+        blocking comment must override what row5b would otherwise read as
+        ready_to_approve."""
+        monkeypatch.setattr(
+            "cw.pr_hydrate.fetch_pr_view",
+            lambda *_a, **_kw: _pr_view_payload(
+                reviewDecision="REVIEW_REQUIRED",
+                reviewRequests=[{"slug": "a-team"}],
+                mergeStateStatus="BLOCKED",
+                isDraft=False,
+                comments=[
+                    {
+                        "author": {"login": "someone-else"},
+                        "body": "## Review: blocking\nData handling defect.",
+                    }
+                ],
+            ),
+        )
+        pr_state = _derive_pr_state(_URL, self_login="the-operator")
+        assert pr_state is not None
+        assert pr_state.attention_state == "changes_requested"
+
+    def test_self_authored_blocking_comment_does_not_trigger(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.pr_hydrate.fetch_pr_view",
+            lambda *_a, **_kw: _pr_view_payload(
+                reviewDecision="REVIEW_REQUIRED",
+                reviewRequests=[{"slug": "a-team"}],
+                mergeStateStatus="BLOCKED",
+                comments=[
+                    {"author": {"login": "the-operator"}, "body": "MUST_FIX: bad"}
+                ],
+            ),
+        )
+        pr_state = _derive_pr_state(_URL, self_login="the-operator")
+        assert pr_state is not None
+        assert pr_state.attention_state == "ready_to_approve"
 
 
 class TestPushPollParity:
@@ -590,6 +828,77 @@ class TestThrottle:
         task = load_dev_queue().tasks[0]
         assert task.pr_state is not None
         assert task.pr_state.hydrated_at == datetime(2026, 7, 4, 12, 0, 0, tzinfo=UTC)
+
+
+class TestSelfLoginResolution:
+    """RISK fix (#1195): cached_gh_login() resolved at most once per
+    hydrate_pr_states() call, never once per candidate/watched-PR."""
+
+    def test_resolved_once_per_hydrate_pass(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(ticket_id="GEN-1", client="acme", pr_url=_URL),
+                    TicketTask(
+                        ticket_id="GEN-2",
+                        client="acme",
+                        pr_url="https://github.com/acme/widgets/pull/43",
+                    ),
+                    TicketTask(
+                        ticket_id="GEN-3",
+                        client="acme",
+                        pr_url="https://github.com/acme/widgets/pull/44",
+                    ),
+                ],
+                watched_prs=[_watched()],
+            )
+        )
+        monkeypatch.setattr(
+            "cw.pr_hydrate.fetch_pr_view",
+            lambda *_a, **_kw: _pr_view_payload(state="OPEN"),
+        )
+        calls: list[None] = []
+
+        def _counting_login() -> str | None:
+            calls.append(None)
+            return "the-operator"
+
+        monkeypatch.setattr("cw.operator_identity.cached_gh_login", _counting_login)
+        hydrate_pr_states(OrchestratorConfig())
+        assert len(calls) == 1
+
+    def test_not_called_on_empty_store(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        save_dev_queue(DevQueueStore(tasks=[], watched_prs=[]))
+        calls: list[None] = []
+
+        def _counting_login() -> str | None:
+            calls.append(None)
+            return "the-operator"
+
+        monkeypatch.setattr("cw.operator_identity.cached_gh_login", _counting_login)
+        hydrate_pr_states(OrchestratorConfig())
+        assert calls == []
+
+    def test_not_called_when_only_dismissed_watched_prs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # #1195 SHOULD_FIX: a dismissed watched PR is never fetched
+        # (_hydrate_watched_prs skips it before calling _derive_pr_state), so
+        # resolving self_login for it is a wasted call every un-throttled tick.
+        save_dev_queue(
+            DevQueueStore(tasks=[], watched_prs=[_watched(status="dismissed")])
+        )
+        calls: list[None] = []
+
+        def _counting_login() -> str | None:
+            calls.append(None)
+            return "the-operator"
+
+        monkeypatch.setattr("cw.operator_identity.cached_gh_login", _counting_login)
+        hydrate_pr_states(OrchestratorConfig())
+        assert calls == []
 
 
 class TestTransientFailure:
@@ -1088,6 +1397,81 @@ class TestOverlayPushObservation:
         # Terminal state short-circuits the ladder entirely (#1196).
         assert new.attention_state is None
 
+    def test_overlay_recompute_preserves_blocking_comment_signal(self) -> None:
+        """#1195 MUST_FIX: has_blocking_comment_review is not a PrState field
+        and no wire payload carries it, but the overlay can infer it was in
+        effect (changes_requested with a review_decision that doesn't itself
+        explain it) and carry it forward, rather than silently reverting to
+        ready_to_approve on an unrelated push event mid-interval.
+        """
+        old = _pr_state(
+            merge_state_status="BLOCKED",
+            review_decision="REVIEW_REQUIRED",
+            reviewer_count=1,
+            attention_state="changes_requested",  # set by a prior poll's comment signal
+        )
+        new = _overlay_push_observation(
+            old, event_type=OrchestratorEventType.PR_MERGEABLE, payload={}
+        )
+        assert new.attention_state == "changes_requested"
+
+    def test_overlay_recompute_reverts_when_real_review_decision_explains_prior_state(
+        self,
+    ) -> None:
+        """#1195: the inference must not over-carry. When the prior
+        changes_requested was explained by a real review_decision (not the
+        comment signal), a push that moves review_decision away from
+        CHANGES_REQUESTED must revert normally.
+        """
+        old = _pr_state(
+            merge_state_status="CLEAN",
+            review_decision="CHANGES_REQUESTED",
+            reviewer_count=1,
+            attention_state="changes_requested",
+        )
+        new = _overlay_push_observation(
+            old,
+            event_type=OrchestratorEventType.PR_REVIEW_RECEIVED,
+            payload={"review_decision": "APPROVED"},
+        )
+        assert new.attention_state == "ready_to_approve"
+
+    def test_overlay_recompute_masked_row_gap_reverts_on_clearing_push(self) -> None:
+        """#1195 accepted residual gap (re-review cycle 2): when the comment
+        signal was present at the prior poll but masked by a higher-
+        precedence row (row 1, merge_blocked), the inference can't recover
+        it -- base.attention_state reads merge_blocked, not
+        changes_requested. A push that clears just that masking condition
+        still reverts to whatever the base ladder computes, until the next
+        full poll re-fetches comments. Fully closing this would require a
+        new PrState field, which R2 forbids -- documented, not silently
+        incorrect.
+        """
+        # Prior poll: has_blocking_comment_review was True, but row 1 (DIRTY)
+        # masked it, so only "merge_blocked" was persisted.
+        masked_ladder_result = _compute_attention_state(
+            ci_ok=True,
+            pending_count=0,
+            merge_state_status="DIRTY",
+            review_decision="REVIEW_REQUIRED",
+            is_draft=False,
+            reviewer_count=1,
+            has_blocking_comment_review=True,
+        )
+        assert masked_ladder_result == "merge_blocked"
+        old = _pr_state(
+            merge_state_status="DIRTY",
+            review_decision="REVIEW_REQUIRED",
+            reviewer_count=1,
+            attention_state=masked_ladder_result,
+        )
+        new = _overlay_push_observation(
+            old,
+            event_type=OrchestratorEventType.PR_MERGEABLE,
+            payload={"merge_state_status": "CLEAN"},
+        )
+        assert new.attention_state == "ready_to_approve"
+
     def test_carries_forward_untouched_fields(self) -> None:
         old = _pr_state(
             state="OPEN",
@@ -1489,7 +1873,7 @@ class TestHydrateWatchedPrs:
             "cw.pr_hydrate.fetch_pr_view",
             lambda *a, **_k: calls.append(a) or _pr_view_payload(),
         )
-        _hydrate_watched_prs([])
+        _hydrate_watched_prs([], self_login=None)
         assert calls == []
 
     def test_watched_pr_only_store_second_pass_within_interval_is_throttled(
