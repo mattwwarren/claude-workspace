@@ -646,7 +646,7 @@ class _RedispatchJob(NamedTuple):
 
 
 def _prepare_auto_fix_ci_job(
-    task: TicketTask, session_id: str | None, now: datetime | None = None
+    task: TicketTask, session_id: str | None, now: datetime
 ) -> _RedispatchJob | None:
     """Re-validate a re-loaded row under the lock; emit + build its re-dispatch.
 
@@ -720,6 +720,10 @@ def _dispatch_auto_fix_ci(job: _RedispatchJob) -> str | None:
     return job.ticket_id
 
 
+def _clear_auto_fix_ci_fired(task: TicketTask) -> None:
+    task.auto_fix_ci_fired_at = None
+
+
 def _act_auto_fix_ci(
     candidates: list[ReviewRecipeCandidate], *, now: datetime | None = None
 ) -> list[str]:
@@ -754,7 +758,7 @@ def _act_auto_fix_ci(
             store,
             attention_state=_ATTENTION_CI_FAILING,
             get_fired_at=lambda t: t.auto_fix_ci_fired_at,
-            clear_fired_at=lambda t: setattr(t, "auto_fix_ci_fired_at", None),
+            clear_fired_at=_clear_auto_fix_ci_fired,
         )
         for candidate in by_key.values():
             task = _find_review_task(store, candidate.ticket_id, candidate.client)
@@ -901,6 +905,10 @@ def _dispatch_request_reviewer(job: _ReviewerJob) -> str | None:
     return job.ticket_id
 
 
+def _clear_request_reviewer_fired(task: TicketTask) -> None:
+    task.request_reviewer_fired_at = None
+
+
 def _act_request_reviewer(
     candidates: list[ReviewRecipeCandidate],
     *,
@@ -939,7 +947,7 @@ def _act_request_reviewer(
             store,
             attention_state=_ATTENTION_NO_REVIEWER,
             get_fired_at=lambda t: t.request_reviewer_fired_at,
-            clear_fired_at=lambda t: setattr(t, "request_reviewer_fired_at", None),
+            clear_fired_at=_clear_request_reviewer_fired,
         )
         for candidate in by_key.values():
             task = _find_review_task(store, candidate.ticket_id, candidate.client)
@@ -962,6 +970,10 @@ def _act_request_reviewer(
 
 
 # --- escalate_merge_block act phase (RFC 0010 P4, #1099) -------------------
+
+
+def _clear_escalate_merge_block_fired(task: TicketTask) -> None:
+    task.escalate_merge_block_fired_at = None
 
 
 def _act_escalate_merge_block(
@@ -1001,7 +1013,7 @@ def _act_escalate_merge_block(
             store,
             attention_state=_ATTENTION_MERGE_BLOCKED,
             get_fired_at=lambda t: t.escalate_merge_block_fired_at,
-            clear_fired_at=lambda t: setattr(t, "escalate_merge_block_fired_at", None),
+            clear_fired_at=_clear_escalate_merge_block_fired,
         )
         for candidate in by_key.values():
             task = _find_review_task(store, candidate.ticket_id, candidate.client)
