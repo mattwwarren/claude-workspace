@@ -488,8 +488,11 @@ def test_pr_action_taken_emitted_before_mutation(
     assert payload["evidence_snapshot"] == {"review_decision": "CHANGES_REQUESTED"}
     # No PR_ACTION_FAILED on the happy path.
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
-    # Resolution 6 (no dev-queue mutation): the on-disk snapshot is untouched.
-    assert load_dev_queue().tasks == [task]
+    # GitHub #1206: the row's address_review_fired_at latch is now stamped, so
+    # the on-disk snapshot is unchanged EXCEPT for that field.
+    after_task = load_dev_queue().tasks[0]
+    assert after_task.address_review_fired_at is not None
+    assert after_task.model_copy(update={"address_review_fired_at": None}) == task
 
 
 @pytest.mark.parametrize("stale_state", ["ready_to_approve", None])
@@ -694,9 +697,22 @@ def test_action_failure_emits_pr_action_failed(
     assert failed[0].payload["ticket_id"] == "GEN-1"
     assert boom_msg in failed[0].payload["error"]
     assert any("dispatch_failed" in r.message for r in caplog.records)
-    # Resolution 6 (no dev-queue mutation): the on-disk snapshot is untouched,
-    # including for the candidate whose dispatch failed.
-    assert load_dev_queue().tasks == [task1, task2]
+    # GitHub #1206: both rows get address_review_fired_at stamped during the
+    # prepare phase (which runs for both before either dispatch is attempted)
+    # — including task1, whose dispatch subsequently failed. Narrowed
+    # store-unchanged assertion: the on-disk snapshot is unchanged except for
+    # that field, for both tasks.
+    reloaded = {t.ticket_id: t for t in load_dev_queue().tasks}
+    after_task1 = reloaded["GEN-1"]
+    after_task2 = reloaded["GEN-2"]
+    assert after_task1.address_review_fired_at is not None
+    assert after_task2.address_review_fired_at is not None
+    assert (
+        after_task1.model_copy(update={"address_review_fired_at": None}) == task1
+    )
+    assert (
+        after_task2.model_copy(update={"address_review_fired_at": None}) == task2
+    )
 
 
 def test_unparseable_pr_url_emits_pr_action_failed(
@@ -781,6 +797,75 @@ def test_missing_worktree_emits_pr_action_failed(
     failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
     assert len(failed) == 1
     assert failed[0].correlation_id == task.ticket_id
+
+
+def test_address_review_fires_once_per_episode(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+) -> None:
+    """The address_review latch blocks a re-dispatch within the same episode
+    (GitHub #1206) — mirrors test_auto_fix_ci_fires_once_per_episode."""
+    _write_acme_clients_yaml(tmp_config_dir)
+    worktree = make_git_repo("address-review-fires-once")
+    task = _cr_task(worktree_path=worktree)
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    candidate = _candidate_for(task)
+
+    acted1 = _act_address_review([candidate], clients=load_effective_clients())
+    assert acted1 == [task.ticket_id]
+    assert load_dev_queue().tasks[0].address_review_fired_at is not None
+
+    # Hold the hydrated row at changes_requested across N further ticks
+    # (simulating hydration lag): detect still yields a candidate every tick,
+    # but the latch blocks a re-fire.
+    for _ in range(5):
+        acted_n = _act_address_review([candidate], clients=load_effective_clients())
+        assert acted_n == []
+    taken = [
+        e
+        for e in read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+        if e.correlation_id == task.ticket_id
+    ]
+    assert len(taken) == 1
+    assert len(stub_spawn.calls) == 1
+
+
+def test_address_review_latch_clears_on_episode_end(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+) -> None:
+    """The latch re-arms once pr_state leaves changes_requested (GitHub #1206)
+    — mirrors test_auto_fix_ci_latch_clears_on_episode_end."""
+    _write_acme_clients_yaml(tmp_config_dir)
+    worktree = make_git_repo("address-review-clears-on-end")
+    task = _cr_task(worktree_path=worktree)
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    candidate = _candidate_for(task)
+
+    assert _act_address_review([candidate], clients=load_effective_clients()) == [
+        task.ticket_id
+    ]
+
+    # Episode ends: hydration moves the PR off changes_requested.
+    store = load_dev_queue()
+    store.tasks[0].pr_state = _pr_state(attention_state="ready_to_approve")
+    save_dev_queue(store)
+
+    # Clear pass runs even with zero candidates.
+    assert _act_address_review([], clients=load_effective_clients()) == []
+    assert load_dev_queue().tasks[0].address_review_fired_at is None
+
+    # Genuine re-entry into changes_requested fires again (episode semantics).
+    store = load_dev_queue()
+    store.tasks[0].pr_state = _pr_state(
+        state="OPEN", attention_state="changes_requested"
+    )
+    save_dev_queue(store)
+    assert _act_address_review([candidate], clients=load_effective_clients()) == [
+        task.ticket_id
+    ]
 
 
 # --- RFC 0010 P4 recipes (#1099) -------------------------------------------
