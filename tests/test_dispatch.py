@@ -8907,6 +8907,39 @@ class TestAvailabilityPreflightGate:
         assert record_calls == []
         assert reset_calls == []
 
+    def test_probe_not_called_when_fleet_dispatch_paused(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """max_parallel_clients=0 (fleet-wide dispatch pause) never probes.
+
+        The availability check is memoized inside the per-client loop (only
+        resolved once the loop body actually runs for a client), not hoisted
+        unconditionally above it — a fully-paused fleet, which breaks out of
+        the loop on its very first iteration before reaching the gate, must
+        not shell out to `gh auth status` or touch the outage latch.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-A5O", client="test-client"))
+
+        calls: list[int] = []
+
+        def _counting_probe(**_kw: object) -> bool:
+            calls.append(1)
+            return True
+
+        monkeypatch.setattr("cw.dispatch.check_gh_availability", _counting_probe)
+
+        paused_config = simple_config.model_copy(update={"max_parallel_clients": 0})
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(paused_config, native_daemon=daemon, auto_ff=False)
+
+        assert result.spawned == 0
+        assert calls == []
+
 
 # ---------------------------------------------------------------------------
 # TestSpawnInvalidatesStaleContextJson (#1046)

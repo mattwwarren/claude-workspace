@@ -520,6 +520,19 @@ def _resolve_availability() -> bool:
     return available
 
 
+def _resolve_availability_once(available: bool | None) -> bool:
+    """Return *available* unchanged, or resolve it via :func:`_resolve_availability`.
+
+    Per-tick memoization helper for :func:`dispatch_tick`'s client loop:
+    ``available`` starts ``None`` each tick and is only ever resolved once,
+    the first time the loop body runs for a client (not hoisted above the
+    loop, so an empty ``clients`` dict or a fully-paused fleet never probes).
+    Extracted to keep the branch this adds out of ``dispatch_tick`` itself
+    (PLR0912).
+    """
+    return _resolve_availability() if available is None else available
+
+
 def _record_availability_block(*, now: datetime, was_latched: bool) -> None:
     """Persist a fresh failed probe and fire attention once per outage episode.
 
@@ -1475,6 +1488,7 @@ class _ClientTickSnapshot(NamedTuple):
 
 def _client_tick_snapshot(
     client: ClientConfig,
+    *,
     state: CwState,
     config: OrchestratorConfig,
 ) -> _ClientTickSnapshot:
@@ -1615,15 +1629,9 @@ def dispatch_tick(
     # Tier-1: optionally cap how many clients are eligible per tick.
     # max_parallel_clients=None preserves the original behaviour (all clients).
     dispatched_client_count = 0
-    # --- Availability preflight gate (RFC 0011 A5) --- highest precedence.
-    # Fleet-wide TTL-cached `gh auth status` probe: resolved ONCE per tick,
-    # not once per client — the cached verdict is identical for every client
-    # in this loop, so a per-client call would re-read the shared sidecar
-    # file N times for the same answer. Checked before the per-client
-    # freshness gate so that during a real GitHub outage no client pays the
-    # freshness git-fetch cost for a verdict that gets discarded anyway.
-    # Fails open on any resolution error, same posture as _resolve_freshness.
-    available = _resolve_availability()
+    # Fleet-wide availability verdict, memoized across loop iterations (see
+    # gate below). ``None`` means "not yet resolved this tick".
+    available: bool | None = None
     for client in clients.values():
         if (
             config.max_parallel_clients is not None
@@ -1631,11 +1639,29 @@ def dispatch_tick(
         ):
             break
 
+        # --- Availability preflight gate (RFC 0011 A5) --- highest
+        # precedence. Fleet-wide TTL-cached `gh auth status` probe: resolved
+        # at most ONCE per tick, not once per client — the cached verdict is
+        # identical for every client in this loop, so a per-client call
+        # would re-read the shared sidecar file N times for the same
+        # answer. Memoized (not hoisted above the loop) via
+        # _resolve_availability_once so it's only called once the loop body
+        # actually runs for at least one client — an empty ``clients`` dict
+        # or a fully-paused fleet (``max_parallel_clients=0``, which breaks
+        # on the first iteration above) never probes or pages, matching the
+        # pre-#1157 invariant that this check only fires when there's
+        # dispatch work it could gate. Checked before the per-client
+        # freshness gate so that during a real GitHub outage no client pays
+        # the freshness git-fetch cost for a verdict that gets discarded
+        # anyway. Fails open on any resolution error, same posture as
+        # _resolve_freshness.
+        available = _resolve_availability_once(available)
+
         # Numeric fields (running, cap, queue snapshot, pending) hoisted above
         # both gates so a dispatch.tick skip event for either gate carries all
         # four. See _client_tick_snapshot.
         running_count, client_ceiling, queue_snapshot, pending_count = (
-            _client_tick_snapshot(client, state, config)
+            _client_tick_snapshot(client, state=state, config=config)
         )
         # Keep legacy cap alias for skip-event and back-off event payloads.
         cap = client_ceiling
