@@ -34,7 +34,7 @@ from cw.models import CONTEXT_JSON_RELATIVE_PATH
 if TYPE_CHECKING:
     from cw.models import TicketTask
 
-_SCHEMA_VERSION: Literal[5] = 5
+_SCHEMA_VERSION: Literal[4] = 4
 
 # --- Reason-string constants (exported for tests and callers) ---
 _NUMSTAT_MIN_COLS = 3  # git diff --numstat lines: <added> \t <removed> \t <file>

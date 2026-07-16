@@ -410,8 +410,17 @@ def derive_review_counts(
 
     A ``deferred`` finding is counted in ``deferred`` and excluded from
     ``must_fix_initial``/``should_fix`` (both severities behave the same way).
+    ``NIT``/``PRINCIPLE`` findings never contribute to any of the three
+    gate-feeding aggregates, regardless of disposition — ``deferred`` is
+    filtered to ``severity in {MUST_FIX, SHOULD_FIX}`` first, same as the
+    other two.
     """
-    deferred = sum(1 for af in findings if af.disposition == "deferred")
+    deferred = sum(
+        1
+        for af in findings
+        if af.disposition == "deferred"
+        and af.finding.severity in ("MUST_FIX", "SHOULD_FIX")
+    )
     must_fix_initial = sum(
         1
         for af in findings

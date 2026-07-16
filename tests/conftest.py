@@ -161,9 +161,12 @@ def _make_escalation(**overrides: object) -> EscalationMetadata:
     return EscalationMetadata(**kwargs)  # type: ignore[arg-type]
 
 
-def _make_finding(**overrides: object) -> Finding:
-    """Minimal-but-valid Finding with keyword overrides (#1237).
+def _finding_kwargs(**overrides: object) -> dict[str, object]:
+    """Full kwargs for a valid Finding (#1237).
 
+    Shared by :func:`_make_finding` and by tests that need the raw dict
+    (e.g. ``Finding.model_construct(**_finding_kwargs(...))`` to bypass
+    Pydantic validation) — a single source of truth so the two never drift.
     Defaults line up with ``_make_diff``: ``evidence`` appears in the diff
     text, ``file`` is a changed file, and the line range is a changed line.
     """
@@ -180,7 +183,12 @@ def _make_finding(**overrides: object) -> Finding:
         "escalation": None,
     }
     kwargs.update(overrides)
-    return Finding(**kwargs)  # type: ignore[arg-type]
+    return kwargs
+
+
+def _make_finding(**overrides: object) -> Finding:
+    """Minimal-but-valid Finding with keyword overrides (#1237)."""
+    return Finding(**_finding_kwargs(**overrides))  # type: ignore[arg-type]
 
 
 def _make_reviewer_doc(
@@ -205,7 +213,7 @@ def _make_diff(*added_lines: str, **overrides: object) -> CapturedDiff:
     appended verbatim so context/removed lines can be exercised.
     """
     lines = added_lines or ("def broken():",)
-    files = overrides.get("files") or {"src/cw/foo.py": [10]}
+    files = overrides.get("files", {"src/cw/foo.py": [10]})
     extra_text = str(overrides.get("extra_text", ""))
     assert isinstance(files, dict)
     header = "\n".join(f"+++ b/{path}" for path in files)

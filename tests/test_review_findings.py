@@ -29,6 +29,7 @@ from cw.review_findings import (
     write_review_verdict,
 )
 from tests.conftest import (
+    _finding_kwargs,
     _make_diff,
     _make_escalation,
     _make_finding,
@@ -85,24 +86,6 @@ class TestRejectionReasonLiteral:
         )
         assert rejected
         assert all(r.reason != "escalation_evidence_not_in_diff" for r in rejected)
-
-
-def _finding_kwargs(**overrides: object) -> dict[str, object]:
-    """Full kwargs for a valid Finding, for model_construct bypass tests."""
-    kwargs: dict[str, object] = {
-        "severity": "MUST_FIX",
-        "file": "src/cw/foo.py",
-        "line_start": 10,
-        "line_end": 10,
-        "summary": "Bug here",
-        "consequence": "It breaks",
-        "suggested_fix": "Fix it",
-        "evidence": "def broken():",
-        "confidence": "HIGH",
-        "escalation": None,
-    }
-    kwargs.update(overrides)
-    return kwargs
 
 
 class TestFindingValidation:
@@ -237,6 +220,15 @@ class TestValidateReviewerDocument:
         _, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), _make_diff())
         assert rejected[0].raw["summary"] == "raw kept"
         assert rejected[0].reviewer_role == "Test Reviewer"
+
+    def test_evidence_matches_full_diff_not_only_added_lines(self) -> None:
+        # A3: Finding.evidence matching is against the full diff text
+        # (context/removed lines included), same rule as escalation quotes.
+        diff = _make_diff(extra_text="-removed_context_line = 1")
+        f = _make_finding(evidence="removed_context_line = 1")
+        accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
+        assert len(accepted) == 1
+        assert not rejected
 
 
 class TestEscalationStripOnInvalidEvidence:
@@ -407,6 +399,34 @@ class TestDeriveReviewCounts:
         review = derive_review_counts(findings)
         assert review.should_fix == 0
         assert review.deferred == 1
+
+    def test_nit_deferred_excluded_from_deferred_count(self) -> None:
+        # NIT/PRINCIPLE never touch any of the 3 gate-feeding aggregates,
+        # regardless of disposition — deferred is severity-filtered too.
+        findings = [
+            AcceptedFinding(
+                finding=_make_finding(severity="NIT"),
+                reviewers=["a"],
+                disposition="deferred",
+            ),
+        ]
+        review = derive_review_counts(findings)
+        assert review.deferred == 0
+        assert review.must_fix_initial == 0
+        assert review.should_fix == 0
+
+    def test_principle_deferred_excluded_from_deferred_count(self) -> None:
+        findings = [
+            AcceptedFinding(
+                finding=_make_finding(severity="PRINCIPLE"),
+                reviewers=["a"],
+                disposition="deferred",
+            ),
+        ]
+        review = derive_review_counts(findings)
+        assert review.deferred == 0
+        assert review.must_fix_initial == 0
+        assert review.should_fix == 0
 
 
 class TestConsolidateVerdict:
