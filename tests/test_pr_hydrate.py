@@ -483,6 +483,13 @@ class TestBlockingCommentReview:
         assert _comment_body_is_blocking("this change is NONBLOCKING") is False
         assert _comment_body_is_blocking("UNBLOCKING the queue now") is False
 
+    def test_comment_body_is_blocking_boundary_excludes_hyphen(self) -> None:
+        # #1195 MUST_FIX (re-review cycle 2): a bare \b boundary treats a
+        # hyphen as a boundary too, so "NON-BLOCKING" (a common code-review
+        # convention for explicitly marking a comment non-blocking) would
+        # still false-positive under a naive \b-only fix.
+        assert _comment_body_is_blocking("NON-BLOCKING: consider renaming") is False
+
 
 class TestDerivePrStateCommentReview:
     """_derive_pr_state (#1195): comments wired end-to-end into attention_state."""
@@ -1426,6 +1433,42 @@ class TestOverlayPushObservation:
             old,
             event_type=OrchestratorEventType.PR_REVIEW_RECEIVED,
             payload={"review_decision": "APPROVED"},
+        )
+        assert new.attention_state == "ready_to_approve"
+
+    def test_overlay_recompute_masked_row_gap_reverts_on_clearing_push(self) -> None:
+        """#1195 accepted residual gap (re-review cycle 2): when the comment
+        signal was present at the prior poll but masked by a higher-
+        precedence row (row 1, merge_blocked), the inference can't recover
+        it -- base.attention_state reads merge_blocked, not
+        changes_requested. A push that clears just that masking condition
+        still reverts to whatever the base ladder computes, until the next
+        full poll re-fetches comments. Fully closing this would require a
+        new PrState field, which R2 forbids -- documented, not silently
+        incorrect.
+        """
+        # Prior poll: has_blocking_comment_review was True, but row 1 (DIRTY)
+        # masked it, so only "merge_blocked" was persisted.
+        masked_ladder_result = _compute_attention_state(
+            ci_ok=True,
+            pending_count=0,
+            merge_state_status="DIRTY",
+            review_decision="REVIEW_REQUIRED",
+            is_draft=False,
+            reviewer_count=1,
+            has_blocking_comment_review=True,
+        )
+        assert masked_ladder_result == "merge_blocked"
+        old = _pr_state(
+            merge_state_status="DIRTY",
+            review_decision="REVIEW_REQUIRED",
+            reviewer_count=1,
+            attention_state=masked_ladder_result,
+        )
+        new = _overlay_push_observation(
+            old,
+            event_type=OrchestratorEventType.PR_MERGEABLE,
+            payload={"merge_state_status": "CLEAN"},
         )
         assert new.attention_state == "ready_to_approve"
 

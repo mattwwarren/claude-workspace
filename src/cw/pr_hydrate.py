@@ -135,11 +135,18 @@ _REVIEW_HEADING_PREFIX = "## Review:"
 
 
 def _comment_body_is_blocking(body: str) -> bool:
-    """True if *body* carries cw's own blocking-review vocabulary (#1195)."""
+    """True if *body* carries cw's own blocking-review vocabulary (#1195).
+
+    Marker matching requires a boundary on both sides, where a boundary is
+    "not a word character and not a hyphen" — plain ``\\b`` alone treats a
+    hyphen as a boundary, which would false-positive on a negated,
+    hyphen-joined prefix like ``"NON-BLOCKING"`` (a common code-review
+    convention for explicitly marking a comment as *not* blocking).
+    """
     if body.strip().startswith(_REVIEW_HEADING_PREFIX):
         return True
     return any(
-        re.search(rf"\b{re.escape(marker)}\b", body)
+        re.search(rf"(?<![\w-]){re.escape(marker)}(?![\w-])", body)
         for marker in _BLOCKING_COMMENT_MARKERS
     )
 
@@ -682,16 +689,30 @@ def _overlay_push_observation(
     ``has_blocking_comment_review`` (#1195) is not a ``PrState`` field and no
     webhook payload carries it, so this recompute can't re-fetch ``comments``
     to re-derive it directly. It infers whether the signal was in effect
-    instead: ``changes_requested`` is produced by exactly two rows (2b or 3),
-    and row 3 requires ``review_decision == CHANGES_REQUESTED`` — so if
-    *base*'s ``attention_state`` was ``changes_requested`` while its
+    instead: ``changes_requested`` is produced by exactly two rows (2b or 3)
+    -- KEEP THIS IN SYNC with ``_compute_attention_state``'s row table; a new
+    row that also yields ``changes_requested`` would silently break this
+    inference -- and row 3 requires ``review_decision == CHANGES_REQUESTED``,
+    so if *base*'s ``attention_state`` was ``changes_requested`` while its
     ``review_decision`` was NOT itself ``CHANGES_REQUESTED``, row 2b must have
-    been the cause, and that carries forward into this recompute. This keeps
-    a comment-driven ``changes_requested`` from silently reverting mid-
-    interval on an unrelated push event; only the next full poll
-    (``_derive_pr_state``, which re-fetches ``comments``) can clear it (e.g.
-    once the marker comment is superseded). See
-    ``TestOverlayPushObservation::test_overlay_recompute_preserves_blocking_comment_signal``.
+    been the cause, and that carries forward into this recompute. This
+    recovers the common case: a comment-driven ``changes_requested`` no
+    longer silently reverts on an unrelated push event mid-interval.
+
+    Narrower residual gap (accepted, same category as the original R4 cost):
+    if the comment signal was present but *masked* by a higher-precedence row
+    at the prior poll (row 1, ``merge_blocked``), *base*.attention_state reads
+    ``merge_blocked``, not ``changes_requested``, so this inference can't
+    recover it -- a later push that clears just that masking condition
+    (``PR_MERGEABLE``) still reverts to whatever the base ladder computes.
+    Only the next full poll (``_derive_pr_state``, which re-fetches
+    ``comments``) can re-derive it. Row 2 (``ci_failing``) masking is
+    unreachable via any current push event (nothing overlays ``ci_ok`` back
+    to ``True``). Fully closing this residual requires persisting
+    ``has_blocking_comment_review`` as a ``PrState`` field, which the
+    operator's R2 decision explicitly forbids. See
+    ``TestOverlayPushObservation::test_overlay_recompute_preserves_blocking_comment_signal``
+    and ``test_overlay_recompute_masked_row_gap_reverts_on_clearing_push``.
     """
     base = old if old is not None else PrState()
     updates: dict[str, Any] = {"hydrated_at": datetime.now(UTC)}
