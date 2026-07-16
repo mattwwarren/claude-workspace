@@ -322,6 +322,29 @@ def current_gh_login(*, timeout: int) -> str | None:
     return login or None
 
 
+def check_gh_availability(*, timeout: int) -> bool:
+    """Return True iff ``gh auth status`` succeeds (RFC 0011 A5).
+
+    The fleet-wide availability preflight probe for ``dispatch_tick``. Fails
+    closed (returns False) on any failure to resolve — gh binary absent, a
+    non-zero exit, a timeout, or an OSError — so a probe that cannot confirm
+    availability never reports the fleet as available.
+    """
+    try:
+        result = _sp.run(
+            ["gh", "auth", "status"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        return False
+    except (OSError, _sp.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
 def _fetch_issue_comments(ticket_id: str, timeout: int) -> list[dict[str, Any]] | None:
     """Return the issue's comments list, or None on any fetch/parse error."""
     try:

@@ -11,7 +11,14 @@ import click
 if TYPE_CHECKING:
     from pathlib import Path
 
-from cw.config import get_client, load_state, mutate_state, save_state, sessions_lock
+from cw.config import (
+    get_client,
+    load_orchestrator_config,
+    load_state,
+    mutate_state,
+    save_state,
+    sessions_lock,
+)
 from cw.exceptions import CwError
 from cw.history import EventType, HistoryEvent, record_event
 from cw.models import (
@@ -31,13 +38,12 @@ from cw.native_daemon import (
 from cw.prompts import build_session_context, get_purpose_prompt
 from cw.reconcile import reconcile
 from cw.spawn import (
-    _LINEAR_MCP_DISALLOW_ARG,
     _ROSTER_POLL_INTERVAL_SECS,
     _ROSTER_POLL_TIMEOUT_SECS,
     _verify_roster_registration,
     _write_hook_context,
+    build_disallowed_tools_arg,
 )
-from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import (
     _git_dir,
     check_not_main_checkout,
@@ -407,9 +413,11 @@ def _resume_spawn_args(
     Mirrors the ``spawn_create_impl`` chokepoint. ``--resume <uuid>`` re-enters
     the Claude transcript when available. For DAEMON-origin sessions only
     (USER-origin inherits the operator's interactive defaults): forward
-    ``--model`` from ``client.worker_model`` (#248), block Linear MCP under
-    github-issues (#726), and fall back to ``bypassPermissions`` when the
-    pinned model lacks ``--permission-mode auto`` (#1111).
+    ``--model`` from ``client.worker_model`` (#248), forward any
+    ``OrchestratorConfig.disallowed_mcp_tools`` restriction (replaces the
+    former tracker-gated Linear block, #726), and fall back to
+    ``bypassPermissions`` when the pinned model lacks ``--permission-mode
+    auto`` (#1111).
     """
     extra_args: list[str] = []
     if session.claude_session_id:
@@ -420,11 +428,10 @@ def _resume_spawn_args(
 
     if client.worker_model:
         extra_args = [*extra_args, "--model", client.worker_model]
-    if (
-        resolve_tracker(client.repo_path or client.workspace_path)
-        == TRACKER_GITHUB_ISSUES
-    ):
-        extra_args = [*extra_args, _LINEAR_MCP_DISALLOW_ARG]
+    extra_args = [
+        *extra_args,
+        *build_disallowed_tools_arg(load_orchestrator_config().disallowed_mcp_tools),
+    ]
 
     permission_mode = resolve_permission_mode(client.worker_model)
     return extra_args, permission_mode

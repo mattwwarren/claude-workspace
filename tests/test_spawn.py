@@ -12,7 +12,7 @@ from click.testing import CliRunner
 
 from cw.auto_dev_result import AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION, Status
 from cw.cli import main
-from cw.config import load_state, save_state
+from cw.config import load_state, orchestrator_config_file, save_state
 from cw.exceptions import CwError
 from cw.models import (
     ClientConfig,
@@ -25,7 +25,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
-from cw.spawn import _LINEAR_MCP_DISALLOW, _LINEAR_MCP_DISALLOW_ARG
+from cw.spawn import build_disallowed_tools_arg
 from tests.conftest import _seed_daemon_session
 
 if TYPE_CHECKING:
@@ -2374,130 +2374,62 @@ class TestSpawnCreateImplCsidBackfill:
 
 
 # ---------------------------------------------------------------------------
-# Tests for #726: Linear MCP disallow-tools when tracker is github-issues
+# Tests for config-driven --disallowed-tools injection (replaces the #726
+# hard-coded, tracker-gated Linear MCP disallow). Tracker no longer affects
+# the disallow at all; the source of truth is
+# ``OrchestratorConfig.disallowed_mcp_tools``, plumbed through
+# ``build_disallowed_tools_arg``. The single `=`-joined token shape (#733 —
+# NOT the two-token ``["--disallowed-tools", pattern]`` form, whose variadic
+# flag would swallow the positional prompt) is preserved.
 # ---------------------------------------------------------------------------
 
 
-def _write_project_config(workspace: Path, system: str) -> None:
-    """Write a minimal .claude/project-config.yaml with the given tracker system."""
-    claude_dir = workspace / ".claude"
-    claude_dir.mkdir(parents=True, exist_ok=True)
-    config = f"tracking:\n  primary:\n    system: {system}\n"
-    (claude_dir / "project-config.yaml").write_text(config, encoding="utf-8")
+def _write_orchestrator_disallow(patterns: list[str]) -> None:
+    """Write ``disallowed_mcp_tools: [...]`` to the orchestrator config file."""
+    path = orchestrator_config_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = "".join(f"  - {json.dumps(p)}\n" for p in patterns)
+    path.write_text(f"disallowed_mcp_tools:\n{lines}", encoding="utf-8")
 
 
-class TestLinearMcpDisallow:
-    """Tests for #726: --disallowed-tools is injected when tracker=github-issues.
+class TestBuildDisallowedToolsArg:
+    """Pure-function unit tests for ``build_disallowed_tools_arg``."""
 
-    When a client's project-config.yaml declares github-issues as the tracker,
-    spawn_create_impl must add --disallowed-tools mcp__plugin_linear_linear__*
-    to the claude --bg extra_args so the Linear MCP is unreachable in the
-    headless worker (where OAuth cannot complete).
+    def test_empty_patterns_returns_empty_list(self) -> None:
+        assert build_disallowed_tools_arg([]) == []
+
+    def test_single_pattern_returns_single_equals_joined_token(self) -> None:
+        result = build_disallowed_tools_arg(["mcp__plugin_linear_linear__*"])
+        assert result == ["--disallowed-tools=mcp__plugin_linear_linear__*"]
+
+    def test_multiple_patterns_are_comma_joined_into_one_token(self) -> None:
+        result = build_disallowed_tools_arg(["a", "Bash(git *)"])
+        assert result == ["--disallowed-tools=a,Bash(git *)"]
+
+    def test_non_empty_result_is_always_a_single_token(self) -> None:
+        # Never the two-token variadic-swallowing form (#733).
+        result = build_disallowed_tools_arg(["mcp__plugin_linear_linear__*"])
+        assert len(result) == 1
+        assert result[0].startswith("--disallowed-tools=")
+
+
+class TestDisallowedMcpTools:
+    """Spawn-integration tests: ``OrchestratorConfig.disallowed_mcp_tools`` is
+    injected into ``claude --bg`` extra_args via ``build_disallowed_tools_arg``.
     """
 
-    def test_github_issues_tracker_injects_disallow_flag(
+    def test_no_config_injects_no_disallow(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
     ) -> None:
-        """github-issues tracker → --disallowed-tools mcp__plugin_linear_linear__*."""
+        """No orchestrator config written → defaults to [] → no disallow flag."""
         from cw.spawn import spawn_create_impl
 
-        workspace = tmp_path / "workspace" / "gh-client"
-        workspace.mkdir(parents=True)
-        _write_project_config(workspace, "github-issues")
-        client = ClientConfig(name="gh-client", workspace_path=workspace)
+        client = _make_client(tmp_path)
         daemon = FakeNativeDaemonClient()
-        worktree = make_git_repo("wt-726-github-issues")
-
-        spawn_create_impl(
-            client=client,
-            worktree=worktree,
-            prompt="/auto-dev 726 --headless",
-            label="auto-dev-726",
-            native_daemon=daemon,
-        )
-
-        # Single `=`-joined token — NOT ["--disallowed-tools", pattern], whose
-        # variadic flag would swallow the positional prompt (#733).
-        assert daemon.spawn_extra_args[0] == [_LINEAR_MCP_DISALLOW_ARG]
-
-    def test_disallow_flag_is_single_token_not_prompt_eating(
-        self,
-        tmp_config_dir: Path,
-        tmp_path: Path,
-        make_git_repo: Callable[[str], Path],
-    ) -> None:
-        """#733 regression: flag is ONE `=`-joined token, not the variadic two-token
-        form that swallows the positional prompt.
-
-        ``claude --disallowed-tools <tools...>`` is variadic; the two-token form
-        ``["--disallowed-tools", pattern]`` immediately before the prompt makes
-        the flag consume the prompt, leaving the worker promptless (it idles and
-        emits no transcript — the live #722 stall).
-        """
-        from cw.spawn import spawn_create_impl
-
-        workspace = tmp_path / "workspace" / "gh-733-client"
-        workspace.mkdir(parents=True)
-        _write_project_config(workspace, "github-issues")
-        client = ClientConfig(name="gh-733-client", workspace_path=workspace)
-        daemon = FakeNativeDaemonClient()
-        worktree = make_git_repo("wt-733")
-
-        spawn_create_impl(
-            client=client,
-            worktree=worktree,
-            prompt="/auto-dev-plan 722 --headless",
-            label="auto-dev-722",
-            native_daemon=daemon,
-        )
-
-        extra = daemon.spawn_extra_args[0] or []
-        assert _LINEAR_MCP_DISALLOW_ARG in extra
-        # The prompt-eating forms must NOT appear as standalone tokens.
-        assert "--disallowed-tools" not in extra
-        assert _LINEAR_MCP_DISALLOW not in extra
-
-    def test_linear_tracker_does_not_inject_disallow_flag(
-        self,
-        tmp_config_dir: Path,
-        tmp_path: Path,
-        make_git_repo: Callable[[str], Path],
-    ) -> None:
-        """linear tracker → no --disallowed-tools flag."""
-        from cw.spawn import spawn_create_impl
-
-        workspace = tmp_path / "workspace" / "lin-client"
-        workspace.mkdir(parents=True)
-        _write_project_config(workspace, "linear")
-        client = ClientConfig(name="lin-client", workspace_path=workspace)
-        daemon = FakeNativeDaemonClient()
-        worktree = make_git_repo("wt-726-linear")
-
-        spawn_create_impl(
-            client=client,
-            worktree=worktree,
-            prompt="/auto-dev LIN-99 --headless",
-            label="auto-dev-LIN-99",
-            native_daemon=daemon,
-        )
-
-        assert daemon.spawn_extra_args[0] is None
-
-    def test_absent_project_config_does_not_inject_disallow_flag(
-        self,
-        tmp_config_dir: Path,
-        tmp_path: Path,
-        make_git_repo: Callable[[str], Path],
-    ) -> None:
-        """No project-config.yaml → no --disallowed-tools flag (fail-open)."""
-        from cw.spawn import spawn_create_impl
-
-        client = _make_client(tmp_path)  # no project-config.yaml
-        daemon = FakeNativeDaemonClient()
-        worktree = make_git_repo("wt-726-no-config")
+        worktree = make_git_repo("wt-disallow-no-config")
 
         spawn_create_impl(
             client=client,
@@ -2509,25 +2441,79 @@ class TestLinearMcpDisallow:
 
         assert daemon.spawn_extra_args[0] is None
 
-    def test_github_issues_with_worker_model_orders_model_before_disallow(
+    def test_single_pattern_injects_single_token(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
     ) -> None:
-        """github-issues + worker_model: --model first, then --disallowed-tools."""
+        """One configured pattern → one `=`-joined --disallowed-tools token."""
         from cw.spawn import spawn_create_impl
 
-        workspace = tmp_path / "workspace" / "gh-model-client"
+        _write_orchestrator_disallow(["mcp__plugin_linear_linear__*"])
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-disallow-single")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev 726 --headless",
+            label="auto-dev-726",
+            native_daemon=daemon,
+        )
+
+        assert daemon.spawn_extra_args[0] == [
+            "--disallowed-tools=mcp__plugin_linear_linear__*"
+        ]
+
+    def test_multiple_patterns_comma_joined_single_token(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """Multiple configured patterns → one comma-joined token, not several."""
+        from cw.spawn import spawn_create_impl
+
+        _write_orchestrator_disallow(["mcp__plugin_linear_linear__*", "mcp__foo__*"])
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-disallow-multiple")
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev 726 --headless",
+            label="auto-dev-726",
+            native_daemon=daemon,
+        )
+
+        assert daemon.spawn_extra_args[0] == [
+            "--disallowed-tools=mcp__plugin_linear_linear__*,mcp__foo__*"
+        ]
+        # #733 guard: always one token, never split across multiple flags.
+        assert len(daemon.spawn_extra_args[0]) == 1
+
+    def test_worker_model_ordered_before_disallow(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """worker_model + configured disallow: --model first, then disallow."""
+        from cw.spawn import spawn_create_impl
+
+        _write_orchestrator_disallow(["mcp__plugin_linear_linear__*"])
+        workspace = tmp_path / "workspace" / "model-client"
         workspace.mkdir(parents=True)
-        _write_project_config(workspace, "github-issues")
         client = ClientConfig(
-            name="gh-model-client",
+            name="model-client",
             workspace_path=workspace,
             worker_model="claude-sonnet-4-6-20251015",
         )
         daemon = FakeNativeDaemonClient()
-        worktree = make_git_repo("wt-726-model-disallow")
+        worktree = make_git_repo("wt-disallow-model")
 
         spawn_create_impl(
             client=client,
@@ -2540,10 +2526,10 @@ class TestLinearMcpDisallow:
         assert daemon.spawn_extra_args[0] == [
             "--model",
             "claude-sonnet-4-6-20251015",
-            _LINEAR_MCP_DISALLOW_ARG,
+            "--disallowed-tools=mcp__plugin_linear_linear__*",
         ]
 
-    def test_github_issues_with_extra_args_appended_after_disallow(
+    def test_extra_args_appended_after_disallow(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
@@ -2552,12 +2538,10 @@ class TestLinearMcpDisallow:
         """Caller extra_args append after --disallowed-tools."""
         from cw.spawn import spawn_create_impl
 
-        workspace = tmp_path / "workspace" / "gh-extra-client"
-        workspace.mkdir(parents=True)
-        _write_project_config(workspace, "github-issues")
-        client = ClientConfig(name="gh-extra-client", workspace_path=workspace)
+        _write_orchestrator_disallow(["mcp__plugin_linear_linear__*"])
+        client = _make_client(tmp_path)
         daemon = FakeNativeDaemonClient()
-        worktree = make_git_repo("wt-726-extra-args")
+        worktree = make_git_repo("wt-disallow-extra-args")
 
         spawn_create_impl(
             client=client,
@@ -2569,40 +2553,10 @@ class TestLinearMcpDisallow:
         )
 
         assert daemon.spawn_extra_args[0] == [
-            _LINEAR_MCP_DISALLOW_ARG,
+            "--disallowed-tools=mcp__plugin_linear_linear__*",
             "--resume",
             "abc12345",
         ]
-
-    def test_corrupt_project_config_does_not_inject_disallow_flag(
-        self,
-        tmp_config_dir: Path,
-        tmp_path: Path,
-        make_git_repo: Callable[[str], Path],
-    ) -> None:
-        """Corrupt project-config.yaml → no --disallowed-tools (fail-open)."""
-        from cw.spawn import spawn_create_impl
-
-        workspace = tmp_path / "workspace" / "corrupt-client"
-        workspace.mkdir(parents=True)
-        claude_dir = workspace / ".claude"
-        claude_dir.mkdir(parents=True)
-        (claude_dir / "project-config.yaml").write_text(
-            ": invalid yaml {{{", encoding="utf-8"
-        )
-        client = ClientConfig(name="corrupt-client", workspace_path=workspace)
-        daemon = FakeNativeDaemonClient()
-        worktree = make_git_repo("wt-726-corrupt-config")
-
-        spawn_create_impl(
-            client=client,
-            worktree=worktree,
-            prompt="/auto-dev 726 --headless",
-            label="auto-dev-726",
-            native_daemon=daemon,
-        )
-
-        assert daemon.spawn_extra_args[0] is None
 
 
 # ---------------------------------------------------------------------------
@@ -2632,8 +2586,8 @@ class TestSpawnArgvPromptPositional:
         """spawn_create_impl: prompt is the final token of the assembled argv.
 
         Uses the maximally-loaded extra_args set: ``--model`` (worker_model)
-        then ``--disallowed-tools=`` (github-issues tracker).  This is the
-        exact argv shape that triggered #733 when the disallow flag was in
+        then ``--disallowed-tools=`` (configured disallow patterns).  This is
+        the exact argv shape that triggered #733 when the disallow flag was in
         two-token form.
         """
         from cw.native_daemon import _DEFAULT_PERMISSION_MODE, _build_spawn_argv
@@ -2641,7 +2595,7 @@ class TestSpawnArgvPromptPositional:
 
         workspace = tmp_path / "workspace" / "gh-argv-create"
         workspace.mkdir(parents=True)
-        _write_project_config(workspace, "github-issues")
+        _write_orchestrator_disallow(["mcp__plugin_linear_linear__*"])
         client = ClientConfig(
             name="gh-argv-create",
             workspace_path=workspace,

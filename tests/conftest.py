@@ -318,6 +318,24 @@ def _mock_push_notification(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def _mock_gh_availability(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default the fleet-wide gh-availability probe to 'available' (RFC 0011 A5).
+
+    Sibling of ``_mock_push_notification``: ``dispatch_tick``'s per-client
+    availability gate calls ``check_gh_availability``, which shells out to a
+    real ``gh auth status`` subprocess. Without a default, every existing
+    dispatch test would depend on the host machine's live gh auth state (and
+    pay a real subprocess per tick). Patching the ``cw.dispatch`` binding
+    autouse guarantees no dispatch test probes for real; the fleet reads as
+    available unless a test overrides this seam. ``TestAvailabilityPreflightGate``
+    re-patches the same name via ``_force_gh_unavailable`` and pytest's patch
+    stacking lets the test-level patch win. ``test_gh.py`` exercises the real
+    helper via ``cw.gh`` directly and is unaffected.
+    """
+    monkeypatch.setattr("cw.dispatch.check_gh_availability", lambda **_kw: True)
+
+
 @pytest.fixture
 def tmp_state_dir(tmp_config_dir: Path) -> Path:
     """Return the state directory within tmp_config_dir."""
