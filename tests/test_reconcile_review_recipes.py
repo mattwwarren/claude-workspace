@@ -950,7 +950,7 @@ def test_auto_fix_ci_fires_once_per_episode(
     _write_acme_clients_yaml(tmp_config_dir)
     task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="ci_failing"))
     save_dev_queue(DevQueueStore(tasks=[task]))
-    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda t: True)
+    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda _t: True)
     monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
     candidate = _candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")
 
@@ -978,7 +978,7 @@ def test_auto_fix_ci_latch_clears_on_episode_end(
     _write_acme_clients_yaml(tmp_config_dir)
     task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="ci_failing"))
     save_dev_queue(DevQueueStore(tasks=[task]))
-    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda t: True)
+    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda _t: True)
     monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
     candidate = _candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")
 
