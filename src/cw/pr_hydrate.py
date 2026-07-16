@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import re
+import subprocess
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -32,6 +33,7 @@ from cw.models import OrchestratorEventType, PrState, WatchedPr
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
     from cw.models import DevQueueStore, OrchestratorConfig, TicketTask
 
@@ -64,6 +66,10 @@ _MERGEABLE_STATES: frozenset[str] = frozenset({"CLEAN", "UNSTABLE", "HAS_HOOKS"}
 _TERMINAL_PR_STATES: frozenset[str] = frozenset({_GH_PR_STATE_MERGED, "CLOSED"})
 
 _PR_URL_RE = re.compile(r"github\.com/([^/]+/[^/]+)/pull/(\d+)")
+# GitHub #1198 — parse an ``owner/repo`` slug out of a git remote URL, covering
+# both SSH (git@github.com:owner/repo.git) and HTTPS
+# (https://github.com/owner/repo[.git]) forms. Non-github remotes don't match.
+_REMOTE_SLUG_RE = re.compile(r"github\.com[:/]([^/]+/[^/]+?)(?:\.git)?/?$")
 
 # RFC 0011 S1 D-S1 — the counterparty axis for a hold's PR: "self" (the
 # operator's own work) or "external" (someone else's). Mirrors
@@ -282,6 +288,45 @@ def _parse_pr_url(pr_url: str) -> tuple[str, int] | None:
     if match is None:
         return None
     return match.group(1), int(match.group(2))
+
+
+def _resolve_repo_slug(git_dir: Path) -> str | None:
+    """Resolve *git_dir*'s ``origin`` remote to a github ``owner/repo`` slug.
+
+    Fail-open (GitHub #1198): returns ``None`` — never raises — on any
+    unresolvable case (not a git dir, no origin remote, non-github URL). The
+    subprocess shape mirrors ``doctor.py``'s ``_check_wedge_repo_ahead``.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(git_dir), "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    match = _REMOTE_SLUG_RE.search(result.stdout.strip())
+    if match is None:
+        return None
+    return match.group(1)
+
+
+def _repo_slug_mismatch(pr_repo: str, git_dir: Path) -> str | None:
+    """Return *git_dir*'s resolved slug when it disagrees with *pr_repo*, else None.
+
+    Fail-open (GitHub #1198): an unresolvable remote yields ``None`` (no
+    mismatch, proceed), never *pr_repo*. The compare is case-insensitive so a
+    remote's casing never spuriously trips the guard.
+    """
+    resolved = _resolve_repo_slug(git_dir)
+    if resolved is None:
+        return None
+    if resolved.lower() == pr_repo.lower():
+        return None
+    return resolved
 
 
 def _derive_pr_state(pr_url: str, *, self_login: str | None) -> PrState | None:
