@@ -2037,7 +2037,9 @@ class TestAvailabilityProbeCachePersistence:
         self,
         tmp_config_dir: Path,
         monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
+        import logging
         from datetime import UTC, datetime
         from unittest.mock import patch
 
@@ -2049,8 +2051,13 @@ class TestAvailabilityProbeCachePersistence:
         cache = AvailabilityProbeCache(
             probed_at=datetime.now(UTC), available=True, latched=False
         )
-        with patch("cw.config.atomic_write_text", side_effect=OSError("disk full")):
+        with (
+            patch("cw.config.atomic_write_text", side_effect=OSError("disk full")),
+            caplog.at_level(logging.WARNING, logger="cw.config"),
+        ):
             save_availability_probe_cache(cache)
+
+        assert "availability_probe" in caplog.text
 
     def test_save_refuses_real_path_and_does_not_swallow(
         self,

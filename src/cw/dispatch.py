@@ -10,7 +10,7 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 import yaml
 
@@ -531,6 +531,16 @@ def _record_availability_block(*, now: datetime, was_latched: bool) -> None:
     sessionless and clientless (``session_id=""``, ``client=""``): a
     fleet-wide outage has no single node to name. No push notification
     (deliberate -- matches the freshness-block escalation precedent).
+
+    Why edge-triggered, not debounce-N: this fleet latch fires on the FIRST
+    bad probe, diverging from its three sibling latches
+    (``freshness_block_attention_threshold``, ``salvage_skip_attention_threshold``,
+    ``lane_circuit_breaker_threshold``), which all debounce N>=2 observations
+    before paging. Those three exist to filter single-node/single-lane
+    transient noise; a fleet-wide `gh auth status` failure has no analogous
+    per-node noise source (every client observes the identical outage
+    simultaneously), so debouncing would only delay the operator's first
+    signal of an already-fleet-wide condition. See RFC 0011 A5 / #1157.
     """
     save_availability_probe_cache(
         AvailabilityProbeCache(probed_at=now, available=False, latched=True)
@@ -1447,14 +1457,29 @@ def _build_plan_order(*, use_plan: bool) -> dict[str, list[str]]:
     return plan_order_by_client
 
 
+class _ClientTickSnapshot(NamedTuple):
+    """A client's per-tick numeric fields for dispatch.tick skip events.
+
+    ``running_count`` / ``client_ceiling`` / ``pending_count`` are plain
+    ``int``s naming distinct concepts (running sessions, per-client cap,
+    queued tasks) — named fields (vs. a bare positional tuple) prevent a
+    transposition mypy can't catch (e.g. swapping running/pending) while
+    still unpacking positionally at the call site like a plain tuple.
+    """
+
+    running_count: int
+    client_ceiling: int
+    queue_snapshot: DevQueueStore
+    pending_count: int
+
+
 def _client_tick_snapshot(
     client: ClientConfig,
     state: CwState,
     config: OrchestratorConfig,
-) -> tuple[int, int, DevQueueStore, int]:
+) -> _ClientTickSnapshot:
     """Compute a client's per-tick numeric fields for dispatch.tick skip events.
 
-    Returns ``(running_count, client_ceiling, queue_snapshot, pending_count)``.
     Extracted from :func:`dispatch_tick`'s loop body so both preflight gates
     (availability, freshness) can emit a dispatch.tick skip event with all four
     numeric fields populated. Single dev-queue lock acquisition — the returned
@@ -1476,7 +1501,12 @@ def _client_tick_snapshot(
         for t in queue_snapshot.tasks
         if t.client == client.name and t.status == QueueItemStatus.PENDING
     )
-    return running_count, client_ceiling, queue_snapshot, pending_count
+    return _ClientTickSnapshot(
+        running_count=running_count,
+        client_ceiling=client_ceiling,
+        queue_snapshot=queue_snapshot,
+        pending_count=pending_count,
+    )
 
 
 def dispatch_tick(
@@ -1585,20 +1615,21 @@ def dispatch_tick(
     # Tier-1: optionally cap how many clients are eligible per tick.
     # max_parallel_clients=None preserves the original behaviour (all clients).
     dispatched_client_count = 0
+    # --- Availability preflight gate (RFC 0011 A5) --- highest precedence.
+    # Fleet-wide TTL-cached `gh auth status` probe: resolved ONCE per tick,
+    # not once per client — the cached verdict is identical for every client
+    # in this loop, so a per-client call would re-read the shared sidecar
+    # file N times for the same answer. Checked before the per-client
+    # freshness gate so that during a real GitHub outage no client pays the
+    # freshness git-fetch cost for a verdict that gets discarded anyway.
+    # Fails open on any resolution error, same posture as _resolve_freshness.
+    available = _resolve_availability()
     for client in clients.values():
         if (
             config.max_parallel_clients is not None
             and dispatched_client_count >= config.max_parallel_clients
         ):
             break
-
-        # --- Availability preflight gate (RFC 0011 A5) --- highest precedence.
-        # Fleet-wide TTL-cached `gh auth status` probe, checked BEFORE the
-        # per-client freshness gate so that during a real GitHub outage no
-        # client pays the freshness git-fetch cost for a verdict that gets
-        # discarded anyway. Fails open on any resolution error, same posture as
-        # _resolve_freshness.
-        available = _resolve_availability()
 
         # Numeric fields (running, cap, queue snapshot, pending) hoisted above
         # both gates so a dispatch.tick skip event for either gate carries all

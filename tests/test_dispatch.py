@@ -8651,19 +8651,33 @@ class TestAvailabilityPreflightGate:
 
         Distinct from the within-TTL test: here the TTL expires so a fresh
         ``check_gh_availability`` call actually runs on the second tick, yet the
-        outage-episode latch suppresses a second attention event.
+        outage-episode latch suppresses a second attention event. Uses a
+        call-counting stub (not the constant ``_force_gh_unavailable`` lambda)
+        so the "a fresh probe call occurs" half of MF2 is independently
+        asserted, not just inferred from the freeze_time advance.
         """
         from freezegun import freeze_time
 
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-A5F", client="test-client"))
-        _force_gh_unavailable(monkeypatch)
+
+        calls: list[int] = []
+
+        def _counting_unavailable_probe(**_kw: object) -> bool:
+            calls.append(1)
+            return False
+
+        monkeypatch.setattr(
+            "cw.dispatch.check_gh_availability", _counting_unavailable_probe
+        )
 
         daemon = FakeNativeDaemonClient()
         with freeze_time("2026-07-16 12:00:00") as frozen:
             dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
             frozen.tick(delta=timedelta(seconds=_AVAILABILITY_PROBE_TTL_SECONDS + 10))
             dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        assert len(calls) == 2, "TTL expiry must trigger a second real probe call"
 
         events = read_events(
             consumer="test-a5-ttl-reemit",
