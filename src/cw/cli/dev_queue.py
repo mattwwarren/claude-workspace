@@ -44,6 +44,7 @@ from cw.events import record_event
 from cw.exceptions import CwError, MissingWorkspaceError, WorktreeError
 from cw.models import (
     DEFAULT_LANE,
+    OCCUPIED_LANE_STATUSES,
     DispatchSkipReason,
     OrchestratorConfig,
     OrchestratorEventType,
@@ -417,16 +418,45 @@ def dev_queue_clear(client: str, status_filter: str | None) -> None:
     click.echo(f"Cleared {count} dev-queue task(s) for {client}.")
 
 
-def _emit_dev_queue_lane_breakdown(tasks: list[TicketTask]) -> None:
-    """Print indented lane lines for tasks when multi-lane or non-default lanes used.
+def _lane_caps_for_client(
+    client_name: str, config: OrchestratorConfig
+) -> dict[str, int]:
+    """Resolve each lane's effective cap for *client_name* (dev-queue status rendering).
 
-    Groups tasks by lane and emits one line per lane showing pending, running,
-    and blocked counts.  Skipped when all tasks share the single default lane.
+    Mirrors dispatch_tick's no-lanes override (dispatch.py's client loop): a
+    client with no declared lanes is capped at the client ceiling, not
+    LaneConfig's max_parallel=1 default. Falls back to a single default-lane
+    entry at the ceiling when the client isn't found in clients.yaml -- dev-queue
+    status must render even for a client dropped from config while tickets remain
+    queued. See #1243.
     """
-    # Collect lanes that are either non-default OR appear alongside other lanes
+    ceiling = config.per_client_ceiling.get(client_name, config.default_ceiling)
+    try:
+        client = get_client(client_name)
+    except CwError:
+        return {DEFAULT_LANE: ceiling}
+    if not client.lanes:
+        return {DEFAULT_LANE: ceiling}
+    return {lane.name: lane.max_parallel for lane in client.lanes}
+
+
+def _emit_dev_queue_lane_breakdown(
+    tasks: list[TicketTask], client_name: str, config: OrchestratorConfig
+) -> None:
+    """Print indented lane lines; occupant line(s) when a lane is noteworthy.
+
+    A lane is noteworthy when it has non-RUNNING occupied status count > 0
+    (blocked/signoff) OR is at/over its effective cap -- i.e. exactly when a
+    reader could misdiagnose why nothing is claiming (#1243). For a
+    single-default-lane client, the base + occupant lines are suppressed
+    entirely unless the lane is noteworthy (unchanged quiet-case behaviour);
+    for multi-/named-lane clients the base line still prints unconditionally per
+    lane as before, with the occupant line added only when that lane is
+    noteworthy.
+    """
     lanes_seen: set[str] = {t.lane for t in tasks}
-    if len(lanes_seen) <= 1 and lanes_seen == {DEFAULT_LANE}:
-        return
+    single_default_lane = len(lanes_seen) <= 1 and lanes_seen <= {DEFAULT_LANE}
+    lane_caps = _lane_caps_for_client(client_name, config)
     overrides = _load_concurrency_overrides()
     by_lane: dict[str, list[TicketTask]] = {}
     for task in tasks:
@@ -443,6 +473,11 @@ def _emit_dev_queue_lane_breakdown(tasks: list[TicketTask]) -> None:
             for t in lane_tasks
             if t.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
         )
+        occupants = [t for t in lane_tasks if t.status in OCCUPIED_LANE_STATUSES]
+        cap = lane_caps.get(lane_name, 1)
+        noteworthy = (blocked + signoff) > 0 or len(occupants) >= cap
+        if single_default_lane and not noteworthy:
+            continue
         override = overrides.lanes.get(f"{lane_tasks[0].client}/{lane_name}")
         marker = _PAUSED_LANE_MARKER if override is not None and override.paused else ""
         click.echo(
@@ -450,6 +485,11 @@ def _emit_dev_queue_lane_breakdown(tasks: list[TicketTask]) -> None:
             f" pending={pending} running={running} blocked={blocked}"
             f" signoff={signoff}{marker}"
         )
+        if noteworthy:
+            occupant_str = ", ".join(
+                f"{t.ticket_id} ({t.status.value})" for t in occupants
+            )
+            click.echo(f"      lane full: {occupant_str}")
 
 
 @dev_queue.command(name="status")
@@ -533,6 +573,7 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
 
     tick_data = latest_tick_summary_by_client()
     if tick_data:
+        config = load_orchestrator_config()
         click.echo("")
         click.echo("Last dispatch tick per client:")
         click.echo(
@@ -545,7 +586,7 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
                 tick = tick_data[client_name]
                 tick_line = (
                     f"  {client_name}: claimed={tick.claimed}  pending={tick.pending}"
-                    f"  running={tick.running}/{tick.cap}"
+                    f"  running={tick.running}/{tick.cap}  occupied={tick.occupied}"
                     f"  skip={tick.skip_reason}"
                 )
                 age_secs = (now - tick.tick_at).total_seconds()
@@ -565,7 +606,9 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
                         tick.blocked_branch,
                         n_pending,
                     )
-                _emit_dev_queue_lane_breakdown(by_client[client_name])
+                _emit_dev_queue_lane_breakdown(
+                    by_client[client_name], client_name, config
+                )
 
 
 @dev_queue.command(name="run")
