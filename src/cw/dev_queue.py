@@ -393,6 +393,13 @@ def _fill_last_blocked_result_default(task_raw: dict[str, Any]) -> None:
         task_raw["last_blocked_result"] = None
 
 
+def _fill_cross_repo_override_default(task_raw: dict[str, Any]) -> None:
+    """Fill cross_repo_override introduced in dev-queue schema v20
+    (GitHub #1198). Idempotent."""
+    if "cross_repo_override" not in task_raw:
+        task_raw["cross_repo_override"] = False
+
+
 def _fill_watched_prs_default(raw: dict[str, Any]) -> None:
     """Fill the top-level watched_prs list introduced in schema v15 (#1154).
 
@@ -428,6 +435,7 @@ def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
                 _fill_auto_fix_ci_fired_default(task_raw)
                 _fill_address_review_fired_default(task_raw)
                 _fill_last_blocked_result_default(task_raw)
+                _fill_cross_repo_override_default(task_raw)
     _fill_watched_prs_default(raw)
     raw["schema_version"] = DEV_QUEUE_SCHEMA_VERSION
     return raw
