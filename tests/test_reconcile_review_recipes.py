@@ -849,6 +849,7 @@ def test_act_auto_fix_ci_calls_add_ticket_and_dispatch_once(
         ),
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
+    store_before = load_dev_queue()
     added: list[TicketTask] = []
     dispatched: list[dict[str, Any]] = []
 
@@ -880,6 +881,12 @@ def test_act_auto_fix_ci_calls_add_ticket_and_dispatch_once(
         "failing_checks": ["lint", "mypy"]
     }
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+    # The latch is the ONLY mutation this act phase makes to the row.
+    after_task = load_dev_queue().tasks[0]
+    assert (
+        after_task.model_copy(update={"auto_fix_ci_fired_at": None})
+        == store_before.tasks[0]
+    )
 
 
 def test_act_auto_fix_ci_stale_row_silent_skip(
@@ -935,6 +942,62 @@ def test_act_auto_fix_ci_add_ticket_raises_emits_pr_action_failed(
     assert len(failed) == 1
     assert failed[0].correlation_id == task.ticket_id
     assert "lane gone" in failed[0].payload["error"]
+
+
+def test_auto_fix_ci_fires_once_per_episode(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_acme_clients_yaml(tmp_config_dir)
+    task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="ci_failing"))
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda _t: True)
+    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
+    candidate = _candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")
+
+    acted1 = _act_auto_fix_ci([candidate])
+    assert acted1 == [task.ticket_id]
+    assert load_dev_queue().tasks[0].auto_fix_ci_fired_at is not None
+
+    # Hold the hydrated row at ci_failing across N further ticks (simulating
+    # hydration lag, per the ticket's acceptance criterion): detect still
+    # yields a candidate every tick, but the latch blocks a re-fire.
+    for _ in range(5):
+        acted_n = _act_auto_fix_ci([candidate])
+        assert acted_n == []
+    taken = [
+        e
+        for e in read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+        if e.correlation_id == task.ticket_id
+    ]
+    assert len(taken) == 1
+
+
+def test_auto_fix_ci_latch_clears_on_episode_end(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_acme_clients_yaml(tmp_config_dir)
+    task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="ci_failing"))
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda _t: True)
+    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
+    candidate = _candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")
+
+    assert _act_auto_fix_ci([candidate]) == [task.ticket_id]
+
+    # Episode ends: hydration moves the PR off ci_failing.
+    store = load_dev_queue()
+    store.tasks[0].pr_state = _pr_state(attention_state="ready_to_approve")
+    save_dev_queue(store)
+
+    # Clear pass runs even with zero candidates.
+    assert _act_auto_fix_ci([]) == []
+    assert load_dev_queue().tasks[0].auto_fix_ci_fired_at is None
+
+    # Genuine re-entry into ci_failing fires again (episode semantics).
+    store = load_dev_queue()
+    store.tasks[0].pr_state = _pr_state(attention_state="ci_failing")
+    save_dev_queue(store)
+    assert _act_auto_fix_ci([candidate]) == [task.ticket_id]
 
 
 # --- request_reviewer ------------------------------------------------------

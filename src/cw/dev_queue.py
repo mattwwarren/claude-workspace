@@ -372,6 +372,13 @@ def _fill_request_reviewer_fired_default(task_raw: dict[str, Any]) -> None:
         task_raw["request_reviewer_fired_at"] = None
 
 
+def _fill_auto_fix_ci_fired_default(task_raw: dict[str, Any]) -> None:
+    """Fill auto_fix_ci_fired_at introduced in dev-queue schema v17
+    (GitHub #1205). Idempotent."""
+    if "auto_fix_ci_fired_at" not in task_raw:
+        task_raw["auto_fix_ci_fired_at"] = None
+
+
 def _fill_watched_prs_default(raw: dict[str, Any]) -> None:
     """Fill the top-level watched_prs list introduced in schema v15 (#1154).
 
@@ -404,6 +411,7 @@ def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
                 _fill_gate_recipe_failed_default(task_raw)
                 _fill_escalate_merge_block_default(task_raw)
                 _fill_request_reviewer_fired_default(task_raw)
+                _fill_auto_fix_ci_fired_default(task_raw)
     _fill_watched_prs_default(raw)
     raw["schema_version"] = DEV_QUEUE_SCHEMA_VERSION
     return raw

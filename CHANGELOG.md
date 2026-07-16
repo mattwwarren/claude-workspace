@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`auto_fix_ci_fired_at` latch + schema v16→17** (#1205): the `auto_fix_ci`
+  recipe now re-dispatches once per ci-failing episode instead of spawning a
+  worker session on every reconcile tick until hydration catches up.
+
 ### Changed
 
 - **Daemon worker MCP-tool restrictions are now operator-configurable.** The
