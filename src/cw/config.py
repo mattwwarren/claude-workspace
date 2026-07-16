@@ -15,7 +15,7 @@ import threading
 from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import click
 import yaml
@@ -612,6 +612,41 @@ def save_state(state: CwState) -> None:
     atomic_write_text(state_file(), state.model_dump_json(indent=2))
 
 
+class AvailabilityProbeCache(NamedTuple):
+    """Fleet-wide TTL-cached gh-availability probe result + outage latch.
+
+    Persisted in DISPATCH_STATE_FILE under the ``"availability_probe"`` key
+    (RFC 0011 A5). A NamedTuple, not a pydantic BaseModel: transient,
+    TTL-bounded runtime state with no durability/migration contract — the
+    dispatch loop re-probes on every TTL expiry, so a shape drift self-heals
+    within one TTL window rather than needing a schema version.
+    """
+
+    probed_at: datetime
+    available: bool
+    latched: bool  # True once SESSION_NEEDS_ATTENTION has fired for the
+    # current unbroken run of failures; False once a subsequent fresh probe
+    # succeeds (edge-triggered reset).
+
+
+def _load_dispatch_state_raw() -> dict[str, Any]:
+    """Read DISPATCH_STATE_FILE as a dict, or ``{}`` if absent/corrupt/unreadable.
+
+    Shared read-side of the read-merge-write save helpers
+    (``save_usage_limited_until`` / ``save_availability_probe_cache``) so that
+    neither clobbers the other's key in the shared sidecar (#1157). A corrupt
+    or non-object existing file is treated as empty rather than raising.
+    """
+    path = DISPATCH_STATE_FILE
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
 def load_usage_limited_until() -> datetime | None:
     """Load the persisted usage-limit backoff expiry from DISPATCH_STATE_FILE.
 
@@ -637,17 +672,75 @@ def save_usage_limited_until(dt: datetime | None) -> None:
     """Persist (or clear) the usage-limit backoff expiry to DISPATCH_STATE_FILE.
 
     Writes ``{"usage_limited_until": "<iso>"}`` when *dt* is set; writes
-    ``{"usage_limited_until": null}`` to clear it.  Creates STATE_DIR if
-    needed.  Silently swallows write errors — a failed persist just means
-    the next loop start won't honour the backoff (acceptable degradation).
+    ``{"usage_limited_until": null}`` to clear it.  Read-merge-writes the
+    shared sidecar so the ``availability_probe`` key (RFC 0011 A5) is
+    preserved rather than clobbered (#1157).  Creates STATE_DIR if needed.
+    Silently swallows write errors — a failed persist just means the next loop
+    start won't honour the backoff (acceptable degradation).
     """
     try:
         refuse_real_state_write(DISPATCH_STATE_FILE)
         DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"usage_limited_until": dt.isoformat() if dt is not None else None}
+        payload = _load_dispatch_state_raw()
+        payload["usage_limited_until"] = dt.isoformat() if dt is not None else None
         atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
     except OSError:
         logger.warning("dispatch_state: failed to persist usage_limited_until")
+
+
+def load_availability_probe_cache() -> AvailabilityProbeCache | None:
+    """Load the fleet-wide gh-availability probe cache from DISPATCH_STATE_FILE.
+
+    Returns None when the file is absent, unreadable, malformed, missing the
+    ``"availability_probe"`` key, or storing a malformed entry shape (RFC 0011
+    A5). Tolerates other keys (e.g. ``usage_limited_until``) sharing the file.
+    """
+    path = DISPATCH_STATE_FILE
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text())
+        entry = raw.get("availability_probe")
+        if not isinstance(entry, dict):
+            return None
+        probed_at = entry.get("probed_at")
+        available = entry.get("available")
+        latched = entry.get("latched")
+        if (
+            not isinstance(probed_at, str)
+            or not isinstance(available, bool)
+            or not isinstance(latched, bool)
+        ):
+            return None
+        return AvailabilityProbeCache(
+            probed_at=datetime.fromisoformat(probed_at),
+            available=available,
+            latched=latched,
+        )
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        return None
+
+
+def save_availability_probe_cache(cache: AvailabilityProbeCache) -> None:
+    """Persist the fleet-wide gh-availability probe cache to DISPATCH_STATE_FILE.
+
+    Read-merge-writes the shared sidecar so the ``usage_limited_until`` key is
+    preserved rather than clobbered (#1157).  Creates STATE_DIR if needed.
+    Silently swallows write errors — a failed persist just means the next tick
+    re-probes rather than reading the cache (acceptable degradation).
+    """
+    try:
+        refuse_real_state_write(DISPATCH_STATE_FILE)
+        DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        payload = _load_dispatch_state_raw()
+        payload["availability_probe"] = {
+            "probed_at": cache.probed_at.isoformat(),
+            "available": cache.available,
+            "latched": cache.latched,
+        }
+        atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
+    except OSError:
+        logger.warning("dispatch_state: failed to persist availability_probe")
 
 
 def load_orchestrator_config() -> OrchestratorConfig:

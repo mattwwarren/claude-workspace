@@ -321,13 +321,18 @@ class DispatchSkipReason(StrEnum):
     """First-match skip_reason values emitted in dispatch.tick events.
 
     Precedence (highest first):
-    FRESHNESS_GATE > USAGE_LIMITED > CAP_FULL > LANE_CAP_BLOCKED
-    > SPAWN_ERROR > LANE_CIRCUIT_PAUSED > SPAWN_ERROR_BACKOFF > NO_PENDING
-    > NONE.
+    AVAILABILITY_GATE > FRESHNESS_GATE > USAGE_LIMITED > CAP_FULL
+    > LANE_CAP_BLOCKED > SPAWN_ERROR > LANE_CIRCUIT_PAUSED > SPAWN_ERROR_BACKOFF
+    > NO_PENDING > NONE.
+    AVAILABILITY_GATE ranks first: it is the fleet-wide gh-availability
+    preflight probe (RFC 0011 A5), checked before the per-client freshness
+    gate so a real GitHub outage short-circuits every client before any pays
+    the freshness git-fetch cost.
     ATTEMPT_CAP_BLOCKED is emitted per-task when the global attempt ceiling
     parks a task; it is not part of the per-client-tick precedence chain.
     """
 
+    AVAILABILITY_GATE = "availability_gate"
     FRESHNESS_GATE = "freshness_gate"
     USAGE_LIMITED = "usage_limited"
     CAP_FULL = "cap_full"
