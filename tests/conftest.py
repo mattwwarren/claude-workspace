@@ -264,6 +264,9 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "cw.config.DISPATCH_STATE_FILE", state_dir / "dispatch_state.json"
     )
     monkeypatch.setattr(
+        "cw.config.DISPATCH_STATE_LOCK", state_dir / ".dispatch_state.lock"
+    )
+    monkeypatch.setattr(
         "cw.config.CONCURRENCY_OVERRIDE_FILE",
         state_dir / "concurrency_overrides.json",
     )
