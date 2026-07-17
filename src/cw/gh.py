@@ -33,7 +33,9 @@ _PR_VIEW_FIELDS = (
 TIMED_OUT_MERGED_LOOKBACK_DAYS = 7
 
 
-def _fetch_issue_pr_refs(ticket_id: str, timeout: int) -> list[dict[str, Any]] | None:
+def _fetch_issue_pr_refs(
+    ticket_id: str, timeout: int, *, cwd: Path | None = None
+) -> list[dict[str, Any]] | None:
     """Return the list of PR refs linked to ticket_id, or None on any error."""
     try:
         result = _sp.run(
@@ -49,6 +51,7 @@ def _fetch_issue_pr_refs(ticket_id: str, timeout: int) -> list[dict[str, Any]] |
             text=True,
             check=False,
             timeout=timeout,
+            cwd=cwd,
         )
     except FileNotFoundError:
         raise
@@ -65,7 +68,9 @@ def _fetch_issue_pr_refs(ticket_id: str, timeout: int) -> list[dict[str, Any]] |
         return None
 
 
-def _fetch_pr_state(pr_number: int, timeout: int) -> str | None:
+def _fetch_pr_state(
+    pr_number: int, timeout: int, *, cwd: Path | None = None
+) -> str | None:
     """Return the state string for the given PR number, or None on any error."""
     try:
         result = _sp.run(
@@ -74,6 +79,7 @@ def _fetch_pr_state(pr_number: int, timeout: int) -> str | None:
             text=True,
             check=False,
             timeout=timeout,
+            cwd=cwd,
         )
     except FileNotFoundError:
         raise
@@ -124,7 +130,9 @@ def fetch_pr_view(
     return data
 
 
-def _fetch_branch_merged_pr(branch: str, timeout: int) -> tuple[bool | None, bool]:
+def _fetch_branch_merged_pr(
+    branch: str, timeout: int, *, cwd: Path | None = None
+) -> tuple[bool | None, bool]:
     """Return (merged, gh_available) for the head branch via gh pr list.
 
     Checks whether any MERGED PR exists for *branch* using
@@ -155,6 +163,7 @@ def _fetch_branch_merged_pr(branch: str, timeout: int) -> tuple[bool | None, boo
             text=True,
             check=False,
             timeout=timeout,
+            cwd=cwd,
         )
     except FileNotFoundError:
         return None, False
@@ -172,7 +181,11 @@ def _fetch_branch_merged_pr(branch: str, timeout: int) -> tuple[bool | None, boo
 
 
 def pr_is_merged_for_ticket(
-    ticket_id: str, *, branch: str | None = None, timeout: int = 10
+    ticket_id: str,
+    *,
+    branch: str | None = None,
+    timeout: int = 10,
+    cwd: Path | None = None,
 ) -> tuple[bool | None, bool]:
     """Return (merged, gh_available).
 
@@ -195,6 +208,14 @@ def pr_is_merged_for_ticket(
               building this value; gh.py does not import from cw.reconcile
               to avoid a circular import.
       timeout: Subprocess timeout in seconds (applies to each gh call).
+      cwd: Directory to scope every ``gh`` subprocess call to (``gh``
+           autodetects the target repo from its cwd's git remote). Defaults
+           to None, which preserves today's ambient-CWD behaviour — the
+           calling process's own directory decides which repo ``gh`` talks
+           to. Callers that operate on multiple clients' repos MUST pass the
+           client's repo directory here; leaving it None risks scoping a gh
+           call to the wrong repo when the ambient CWD belongs to a
+           different client (GitHub #1269).
 
     merged:
       True   -- at least one PR linked to ticket_id is MERGED
@@ -206,21 +227,21 @@ def pr_is_merged_for_ticket(
       True   -- binary present (even if the call failed transiently)
     """
     try:
-        refs = _fetch_issue_pr_refs(ticket_id, timeout)
+        refs = _fetch_issue_pr_refs(ticket_id, timeout, cwd=cwd)
     except FileNotFoundError:
         return None, False
 
     if refs is None:
         if branch is None:
             return None, True
-        return _fetch_branch_merged_pr(branch, timeout)
+        return _fetch_branch_merged_pr(branch, timeout, cwd=cwd)
 
     for ref in refs:
         pr_number = ref.get("number")
         if pr_number is None:
             continue
         try:
-            state = _fetch_pr_state(int(pr_number), timeout)
+            state = _fetch_pr_state(int(pr_number), timeout, cwd=cwd)
         except FileNotFoundError:
             return None, False
         if state == _GH_PR_STATE_MERGED:
