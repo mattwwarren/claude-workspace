@@ -32,6 +32,7 @@ from cw.auto_dev_result import (
     SALVAGE_TERMINAL_STATUSES,
     AutoDevResult,
     BlockedResult,
+    _is_placeholder_sentinel_text,
     extract_block,
     is_documented_example,
     parse_stdout,
@@ -634,7 +635,10 @@ def _parse_sentinel_from_blocks(path: Path) -> AutoDevResult | BlockedResult | N
     """
     last_result: AutoDevResult | BlockedResult | None = None
     for text in _iter_sentinel_text_blocks(path):
-        if extract_block(text) is not None:
+        block = extract_block(text)
+        if block is not None:
+            if _is_placeholder_sentinel_text(block):
+                continue
             result = parse_stdout(text)
             if isinstance(result, AutoDevResult) and is_documented_example(result):
                 continue
@@ -889,6 +893,11 @@ def _route_blocked_result_to_task(target: TicketTask, sentinel: BlockedResult) -
     caller must not also complete the owning session on that outcome), True
     when it re-queued to PENDING instead (#1189).
     """
+    # #1266: the two branches below (deterministic parse failures and
+    # validation_failed at the attempt cap) are deliberately out of scope for
+    # the last_result diagnostic write added below -- only the unrecognized-
+    # reason catch-all gets it. Follow-up: neither of these landings records
+    # *why* either, but widening scope here wasn't part of this fix.
     if sentinel.blocker.reason in _DETERMINISTIC_PARSE_FAILURES:
         transition_task_status(target, QueueItemStatus.FAILED, disposition="abandoned")
         return False
@@ -910,6 +919,10 @@ def _route_blocked_result_to_task(target: TicketTask, sentinel: BlockedResult) -
     # signal. Never mark it COMPLETED — that silently retires unshipped work
     # as "shipped" (#750, the #728 loss). Surface as FAILED so the operator
     # sees it instead of a phantom completion.
+    # #1266: persist the rejected sentinel so an operator can tell an absent
+    # sentinel (last_result stays None) from a rejected one, instead of a
+    # bare `abandoned` disposition with no diagnostic.
+    target.last_result = sentinel.model_dump(mode="json")
     transition_task_status(target, QueueItemStatus.FAILED, disposition="abandoned")
     return False
 
