@@ -167,12 +167,28 @@ def _collect_timed_out_merged_candidates(
 def _client_cwd(client_name: str, clients: dict[str, ClientConfig]) -> Path | None:
     """Resolve the gh cwd for *client_name*, or None if no config is found.
 
-    None preserves today's ambient-CWD gh behavior for that one session
-    (accepted tradeoff for a dangling/misconfigured client -- see #1269 plan
-    Adopted Assumptions); every configured client gets a scoped cwd.
+    None preserves today's ambient-CWD gh behavior for single-tenant
+    deployments with no clients.yaml at all (see #1269 plan Adopted
+    Assumptions and TestCompleteTimedOutMergedTasks's no-clients.yaml
+    coverage). Callers must check :func:`_is_dangling_client` first and
+    skip rather than call this when *clients* is populated but missing an
+    entry for *client_name* -- that is config drift, not single-tenant mode,
+    and an unscoped gh call there risks misattributing a same-numbered
+    ticket from a different repo as merged (GitHub #1269).
     """
     client_cfg = clients.get(client_name)
     return _git_dir(client_cfg) if client_cfg is not None else None
+
+
+def _is_dangling_client(client_name: str, clients: dict[str, ClientConfig]) -> bool:
+    """True when *clients* is populated but has no entry for *client_name*.
+
+    Distinguishes "no clients.yaml at all" (single-tenant, safe ambient-cwd
+    fallback via :func:`_client_cwd`) from "client removed/renamed from an
+    otherwise-populated clients.yaml" (drift), which must not fall back to
+    an unscoped gh call (GitHub #1269).
+    """
+    return bool(clients) and client_name not in clients
 
 
 def _filter_merged_candidates(
@@ -182,7 +198,9 @@ def _filter_merged_candidates(
     """One gh call per candidate to keep only merged-PR tickets (Phase 2).
 
     Runs outside any lock. Stops scanning if the gh binary is absent; skips
-    candidates with transient gh errors or unmerged PRs.
+    candidates with transient gh errors, unmerged PRs, or a dangling client
+    (present in the candidate but absent from a populated *clients*, GitHub
+    #1269 -- see :func:`_is_dangling_client`).
 
     *clients* is used to resolve each session's
     :attr:`ClientConfig.feature_branch_prefix` so the branch key matches what
@@ -190,6 +208,8 @@ def _filter_merged_candidates(
     """
     to_complete: list[tuple[Session, str]] = []
     for session, ticket_id in candidates:
+        if _is_dangling_client(session.client, clients):
+            continue
         branch = feature_branch_key(session.client, ticket_id, clients)
         cwd = _client_cwd(session.client, clients)
         merged, gh_available = _deps.pr_is_merged_for_ticket(

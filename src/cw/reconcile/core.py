@@ -65,6 +65,7 @@ from cw.reconcile.stalled import (
 )
 from cw.reconcile.tasks import (
     _client_cwd,
+    _is_dangling_client,
     complete_timed_out_merged_tasks,
     park_terminal_sibling_tasks,
     revert_completed_silent_tasks,
@@ -243,6 +244,12 @@ def reconcile() -> ReconcileReport:
             _gh_blocked_tids.append(_ticket_id)
             continue
         _branch = feature_branch_key(_session.client, _ticket_id, _clients)
+        if _is_dangling_client(_session.client, _clients):
+            # Client was configured but has since been removed/renamed --
+            # route to gh_blocked (SESSION_NEEDS_ATTENTION downstream)
+            # rather than risk an unscoped gh call (GitHub #1269).
+            _gh_blocked_tids.append(_ticket_id)
+            continue
         _cwd = _client_cwd(_session.client, _clients)
         _merged, _gh_avail = _deps.pr_is_merged_for_ticket(
             _ticket_id, branch=_branch, cwd=_cwd
