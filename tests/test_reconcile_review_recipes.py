@@ -1743,11 +1743,10 @@ class TestDetectRepeatFireCounts:
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         def _boom(**_kwargs: Any) -> list[Any]:
-            raise OSError("inbox unreadable")
+            msg = "inbox unreadable"
+            raise OSError(msg)
 
-        monkeypatch.setattr(
-            "cw.reconcile.review_recipes.read_events", _boom
-        )
+        monkeypatch.setattr("cw.reconcile.review_recipes.read_events", _boom)
         assert _detect_repeat_fire_counts(config=_config()) == {}
 
 
@@ -1778,9 +1777,7 @@ class TestRecordPrActionTaken:
             config=cfg,
             repeat_fire_counts=counts,
         )
-        attn = read_events(
-            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION]
-        )
+        attn = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
         assert len(attn) == 1
         assert attn[0].payload["paused_status"] == _REPEAT_FIRE_REASON
         assert attn[0].payload["ticket_id"] == "GEN-1"
@@ -1827,9 +1824,7 @@ class TestRecordPrActionTaken:
             config=cfg,
             repeat_fire_counts={},
         )
-        attn = read_events(
-            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION]
-        )
+        attn = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
         assert len(attn) == 1
 
     def test_none_config_records_without_burst_check(
@@ -1910,9 +1905,7 @@ class TestRunReviewRecipesRepeatFire:
                 run_review_recipes(config=_config())
         taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
         assert len(taken) == 5
-        attn = read_events(
-            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION]
-        )
+        attn = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
         assert len(attn) == 1
         assert attn[0].payload["recipe"] == RECIPE_ADDRESS_REVIEW
         assert attn[0].payload["repeat_fire_count"] == 5
@@ -1929,9 +1922,7 @@ class TestRunReviewRecipesRepeatFire:
                 run_review_recipes(
                     config=_config(review_recipe_repeat_fire_threshold=2)
                 )
-        attn = read_events(
-            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION]
-        )
+        attn = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
         assert len(attn) == 1
         assert attn[0].payload["repeat_fire_count"] == 2
 
@@ -1971,9 +1962,7 @@ class TestRunReviewRecipesRepeatFire:
                 _record_taken(task.ticket_id, RECIPE_AUTO_FIX_CI)
         with freeze_time(base + timedelta(minutes=1)):
             run_review_recipes(config=_config())
-        attn = read_events(
-            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION]
-        )
+        attn = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
         # Only address_review crossed its threshold; auto_fix_ci counts don't
         # leak into the address_review key.
         assert len(attn) == 1
