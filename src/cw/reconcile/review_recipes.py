@@ -58,6 +58,7 @@ from cw.events import read_events, record_event
 from cw.exceptions import CwError
 from cw.models import OrchestratorEventType
 from cw.pr_hydrate import _is_candidate, _parse_pr_url
+from cw.reconcile._shared import _PAUSED_STATUS_KEY
 from cw.review_strategy import MODE_CI, resolve_review_strategy
 
 if TYPE_CHECKING:
@@ -127,9 +128,11 @@ _PAYLOAD_KEY_REVIEWER_HANDLE = "reviewer_handle"
 _PAYLOAD_KEY_MERGE_STATE_STATUS = "merge_state_status"
 _PAYLOAD_KEY_FAILING_CHECKS = "failing_checks"
 # RFC 0010 anomaly layer (#1201) — repeat-fire burst SESSION_NEEDS_ATTENTION
-# payload keys + its paused_status marker (sibling to the _shared.py reasons).
-_PAYLOAD_KEY_PAUSED_STATUS = "paused_status"
+# payload keys; the "paused_status" key itself reuses cw.reconcile._shared's
+# _PAUSED_STATUS_KEY (the producer/consumer-shared constant every other
+# recipe in this package already imports) rather than redeclaring it here.
 _PAYLOAD_KEY_REPEAT_FIRE_COUNT = "repeat_fire_count"
+_PAYLOAD_KEY_REPEAT_FIRE_WINDOW_MINUTES = "window_minutes"
 _REPEAT_FIRE_ATTENTION_REASON = "review_recipe_repeat_fire"
 
 # RFC 0010 P3 (#1098) — tier-3 hardcoded fallback for the per-lane resolver.
@@ -476,17 +479,23 @@ def _review_payload_base(
 
 def _detect_repeat_fire_counts(
     *, config: OrchestratorConfig, now: datetime | None = None
-) -> dict[tuple[str, str], int]:
-    """Count PR_ACTION_TAKEN events per ``(ticket_id, recipe)`` in the window.
+) -> dict[tuple[str, str, str], int]:
+    """Count PR_ACTION_TAKEN events per ``(client, ticket_id, recipe)`` in the window.
 
     Stateless burst detector (#1201): replays PR_ACTION_TAKEN events from the
-    inbox and buckets them by ``(ticket_id, recipe)``, counting only those
-    recorded within ``config.review_recipe_repeat_fire_window_minutes`` of *now*
-    (default ``datetime.now(UTC)``). The act phase compares its own about-to-fire
-    event against these counts (``_record_pr_action_taken``) to decide whether a
-    repeat-fire burst has crossed the attention threshold. Read-only and
-    resilient: a failed inbox read degrades to an empty dict so a corrupt inbox
-    never blocks the act phase. Called ONCE per reconcile tick (in
+    inbox and buckets them by ``(client, ticket_id, recipe)`` — ``client`` is
+    load-bearing here: ``ticket_id`` alone is a per-repo GitHub issue number, not
+    globally unique across this multi-tenant system's clients (same rationale as
+    the ``by_key`` dicts in ``_act_address_review`` et al.), so two different
+    clients whose numeric issue IDs collide must not share a count. Counts only
+    events recorded within ``config.review_recipe_repeat_fire_window_minutes`` of
+    *now* (default ``datetime.now(UTC)``) — the window itself is applied via
+    ``read_events(since_ts=...)`` rather than a manual post-filter, so events
+    outside the window are never even materialized. The act phase compares its
+    own about-to-fire event against these counts (``_record_pr_action_taken``) to
+    decide whether a repeat-fire burst has crossed the attention threshold.
+    Read-only and resilient: a failed inbox read degrades to an empty dict so a
+    corrupt inbox never blocks the act phase. Called ONCE per reconcile tick (in
     ``run_review_recipes``), outside every ``dev_queue_lock()``.
     """
     resolved_now = now if now is not None else datetime.now(UTC)
@@ -494,38 +503,44 @@ def _detect_repeat_fire_counts(
         minutes=config.review_recipe_repeat_fire_window_minutes
     )
     try:
-        events = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+        events = read_events(
+            event_types=[OrchestratorEventType.PR_ACTION_TAKEN], since_ts=cutoff
+        )
     except (OSError, json.JSONDecodeError, ValidationError):
         return {}
-    counts: dict[tuple[str, str], int] = {}
+    counts: dict[tuple[str, str, str], int] = {}
     for event in events:
-        if event.created_at < cutoff:
-            continue
+        client = event.payload.get(_PAYLOAD_KEY_CLIENT)
         ticket_id = event.payload.get(_PAYLOAD_KEY_TICKET_ID)
         recipe = event.payload.get(_PAYLOAD_KEY_RECIPE)
-        if not isinstance(ticket_id, str) or not isinstance(recipe, str):
+        if (
+            not isinstance(client, str)
+            or not isinstance(ticket_id, str)
+            or not isinstance(recipe, str)
+        ):
             continue
-        key = (ticket_id, recipe)
+        key = (client, ticket_id, recipe)
         counts[key] = counts.get(key, 0) + 1
     return counts
 
 
 def _record_pr_action_taken(
     payload_base: dict[str, object],
+    client: str,
     ticket_id: str,
     recipe: str,
     *,
     config: OrchestratorConfig | None,
-    repeat_fire_counts: dict[tuple[str, str], int] | None,
+    repeat_fire_counts: dict[tuple[str, str, str], int] | None,
 ) -> None:
     """Record PR_ACTION_TAKEN, escalating once on the exact repeat-fire crossing.
 
     The PR_ACTION_TAKEN event is ALWAYS recorded (unchanged behaviour). When both
     *config* and *repeat_fire_counts* are supplied (the ``run_review_recipes``
-    path), the prior in-window count for this ``(ticket_id, recipe)`` plus this
-    fire is compared to ``config.review_recipe_repeat_fire_threshold``: a single
-    ``SESSION_NEEDS_ATTENTION`` (``paused_status=review_recipe_repeat_fire``) is
-    emitted exactly when the post-increment count EQUALS the threshold — no
+    path), the prior in-window count for this ``(client, ticket_id, recipe)``
+    plus this fire is compared to ``config.review_recipe_repeat_fire_threshold``:
+    a single ``SESSION_NEEDS_ATTENTION`` (``paused_status=review_recipe_repeat_fire``)
+    is emitted exactly when the post-increment count EQUALS the threshold — no
     re-fire once past it (each burst crosses the boundary once). A direct
     ``_act_*`` unit-test call passing ``config=None``/``repeat_fire_counts=None``
     records the action with no burst check.
@@ -537,18 +552,21 @@ def _record_pr_action_taken(
     )
     if config is None or repeat_fire_counts is None:
         return
-    new_count = repeat_fire_counts.get((ticket_id, recipe), 0) + 1
+    new_count = repeat_fire_counts.get((client, ticket_id, recipe), 0) + 1
     if new_count != config.review_recipe_repeat_fire_threshold:
         return
     record_event(
         OrchestratorEventType.SESSION_NEEDS_ATTENTION,
         {
-            _PAYLOAD_KEY_CLIENT: payload_base.get(_PAYLOAD_KEY_CLIENT),
+            _PAYLOAD_KEY_CLIENT: client,
             _PAYLOAD_KEY_TICKET_ID: ticket_id,
             _PAYLOAD_KEY_RECIPE: recipe,
             _PAYLOAD_KEY_SESSION_ID: payload_base.get(_PAYLOAD_KEY_SESSION_ID),
-            _PAYLOAD_KEY_PAUSED_STATUS: _REPEAT_FIRE_ATTENTION_REASON,
+            _PAUSED_STATUS_KEY: _REPEAT_FIRE_ATTENTION_REASON,
             _PAYLOAD_KEY_REPEAT_FIRE_COUNT: new_count,
+            _PAYLOAD_KEY_REPEAT_FIRE_WINDOW_MINUTES: (
+                config.review_recipe_repeat_fire_window_minutes
+            ),
         },
         correlation_id=ticket_id,
     )
@@ -561,7 +579,7 @@ def _prepare_dispatch_job(
     now: datetime,
     *,
     config: OrchestratorConfig | None = None,
-    repeat_fire_counts: dict[tuple[str, str], int] | None = None,
+    repeat_fire_counts: dict[tuple[str, str, str], int] | None = None,
 ) -> _DispatchJob | None:
     """Re-validate a re-loaded row under the lock; emit + build its dispatch job.
 
@@ -628,6 +646,7 @@ def _prepare_dispatch_job(
         return None
     _record_pr_action_taken(
         payload_base,
+        task.client,
         task.ticket_id,
         RECIPE_ADDRESS_REVIEW,
         config=config,
@@ -691,7 +710,7 @@ def _act_address_review(
     clients: dict[str, ClientConfig],
     now: datetime | None = None,
     config: OrchestratorConfig | None = None,
-    repeat_fire_counts: dict[tuple[str, str], int] | None = None,
+    repeat_fire_counts: dict[tuple[str, str, str], int] | None = None,
 ) -> list[str]:
     """Act phase: re-validate under lock, emit PR_ACTION_TAKEN, then dispatch.
 
@@ -815,7 +834,7 @@ def _prepare_auto_fix_ci_job(
     now: datetime,
     *,
     config: OrchestratorConfig | None = None,
-    repeat_fire_counts: dict[tuple[str, str], int] | None = None,
+    repeat_fire_counts: dict[tuple[str, str, str], int] | None = None,
 ) -> _RedispatchJob | None:
     """Re-validate a re-loaded row under the lock; emit + build its re-dispatch.
 
@@ -842,6 +861,7 @@ def _prepare_auto_fix_ci_job(
     )
     _record_pr_action_taken(
         payload_base,
+        task.client,
         task.ticket_id,
         RECIPE_AUTO_FIX_CI,
         config=config,
@@ -900,7 +920,7 @@ def _act_auto_fix_ci(
     *,
     now: datetime | None = None,
     config: OrchestratorConfig | None = None,
-    repeat_fire_counts: dict[tuple[str, str], int] | None = None,
+    repeat_fire_counts: dict[tuple[str, str, str], int] | None = None,
 ) -> list[str]:
     """Act phase for auto_fix_ci: re-validate under lock, emit, then re-dispatch.
 
@@ -976,7 +996,7 @@ def _prepare_request_reviewer_job(
     now: datetime,
     *,
     config: OrchestratorConfig | None = None,
-    repeat_fire_counts: dict[tuple[str, str], int] | None = None,
+    repeat_fire_counts: dict[tuple[str, str, str], int] | None = None,
 ) -> _ReviewerJob | None:
     """Re-validate under the lock, resolve the review strategy, emit + build job.
 
@@ -1040,6 +1060,7 @@ def _prepare_request_reviewer_job(
     payload_base[_PAYLOAD_KEY_REVIEWER_HANDLE] = strategy.handle
     _record_pr_action_taken(
         payload_base,
+        task.client,
         task.ticket_id,
         RECIPE_REQUEST_REVIEWER,
         config=config,
@@ -1099,7 +1120,7 @@ def _act_request_reviewer(
     clients: dict[str, ClientConfig],
     now: datetime | None = None,
     config: OrchestratorConfig | None = None,
-    repeat_fire_counts: dict[tuple[str, str], int] | None = None,
+    repeat_fire_counts: dict[tuple[str, str, str], int] | None = None,
 ) -> list[str]:
     """Act phase for request_reviewer: re-validate + resolve strategy, then gh.
 
@@ -1170,7 +1191,7 @@ def _act_escalate_merge_block(
     *,
     now: datetime | None = None,
     config: OrchestratorConfig | None = None,
-    repeat_fire_counts: dict[tuple[str, str], int] | None = None,
+    repeat_fire_counts: dict[tuple[str, str, str], int] | None = None,
 ) -> list[str]:
     """Act phase for escalate_merge_block: fire once per merge-blocked episode.
 
@@ -1230,7 +1251,7 @@ def _fire_escalate_merge_block(
     now: datetime,
     *,
     config: OrchestratorConfig | None = None,
-    repeat_fire_counts: dict[tuple[str, str], int] | None = None,
+    repeat_fire_counts: dict[tuple[str, str, str], int] | None = None,
 ) -> bool:
     """Emit + stamp the latch for one still-merge-blocked, un-fired row.
 
@@ -1250,6 +1271,7 @@ def _fire_escalate_merge_block(
     )
     _record_pr_action_taken(
         payload_base,
+        task.client,
         task.ticket_id,
         RECIPE_ESCALATE_MERGE_BLOCK,
         config=config,

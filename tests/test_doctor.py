@@ -5734,6 +5734,41 @@ class TestCheckReviewRecipeLiveness:
         results = _check_review_recipe_liveness(_liveness_clients())
         assert all(not r.warn for r in results)
 
+    def test_orchestrator_config_validation_error_degrades_to_default(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The realistic bad-YAML failure mode is ConfigValidationError (a
+        CwError), not OSError — load_orchestrator_config raises it directly."""
+        from cw.dev_queue import save_dev_queue
+        from cw.exceptions import ConfigValidationError
+        from cw.models import DevQueueStore
+
+        def _boom() -> object:
+            msg = "orchestrator.yaml: bad field"
+            raise ConfigValidationError(msg)
+
+        monkeypatch.setattr("cw.doctor.load_orchestrator_config", _boom)
+        save_dev_queue(DevQueueStore(tasks=[_cr_liveness_task()]))
+        results = _check_review_recipe_liveness(_liveness_clients())
+        assert all(not r.warn for r in results)
+
+    def test_dev_queue_validation_error_degrades_gracefully(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The realistic corrupt-dev_queue failure mode is a pydantic
+        ValidationError from model_validate, not OSError."""
+        from cw.models import DevQueueStore
+
+        _patch_config_enabled(monkeypatch)
+
+        def _boom() -> object:
+            # A malformed task dict raises a genuine pydantic ValidationError.
+            return DevQueueStore.model_validate({"tasks": ["not-a-task-dict"]})
+
+        monkeypatch.setattr("cw.doctor.load_dev_queue", _boom)
+        results = _check_review_recipe_liveness(_liveness_clients())
+        assert all(not r.warn for r in results)
+
 
 class TestCheckAttentionStateCensus:
     """_check_attention_state_census warns on non-draft PRs missing a state."""
@@ -5814,6 +5849,19 @@ class TestCheckAttentionStateCensus:
         def _boom() -> object:
             msg = "unreadable"
             raise OSError(msg)
+
+        monkeypatch.setattr("cw.doctor.load_dev_queue", _boom)
+        assert not _check_attention_state_census().warn
+
+    def test_dev_queue_validation_error_degrades_gracefully(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The realistic corrupt-dev_queue failure mode is a pydantic
+        ValidationError from model_validate, not OSError."""
+        from cw.models import DevQueueStore
+
+        def _boom() -> object:
+            return DevQueueStore.model_validate({"tasks": ["not-a-task-dict"]})
 
         monkeypatch.setattr("cw.doctor.load_dev_queue", _boom)
         assert not _check_attention_state_census().warn

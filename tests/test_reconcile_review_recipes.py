@@ -42,6 +42,9 @@ from cw.models import (
 )
 from cw.reconcile import reconcile
 from cw.reconcile.review_recipes import (
+    _REPEAT_FIRE_ATTENTION_REASON as _REPEAT_FIRE_REASON,
+)
+from cw.reconcile.review_recipes import (
     RECIPE_ADDRESS_REVIEW,
     RECIPE_ATTENTION_STATES,
     RECIPE_AUTO_FIX_CI,
@@ -1675,8 +1678,6 @@ class TestResolveOutboundConsentAllowed:
 # #1201 — repeat-fire burst detector + fired-at getters (anomaly layer)
 # ---------------------------------------------------------------------------
 
-_REPEAT_FIRE_REASON = "review_recipe_repeat_fire"
-
 
 def _record_taken(ticket_id: str, recipe: str, *, client: str = "acme") -> None:
     """Seed one PR_ACTION_TAKEN event for (ticket_id, recipe) at the frozen now."""
@@ -1692,10 +1693,13 @@ def _record_taken(ticket_id: str, recipe: str, *, client: str = "acme") -> None:
 
 
 def _repeat_fire_payload_base(
-    ticket_id: str = "GEN-1", recipe: str = RECIPE_ADDRESS_REVIEW
+    ticket_id: str = "GEN-1",
+    recipe: str = RECIPE_ADDRESS_REVIEW,
+    *,
+    client: str = "acme",
 ) -> dict[str, object]:
     return {
-        "client": "acme",
+        "client": client,
         "lane": "default",
         "recipe": recipe,
         "ticket_id": ticket_id,
@@ -1707,12 +1711,12 @@ def _repeat_fire_payload_base(
 
 
 class TestDetectRepeatFireCounts:
-    """_detect_repeat_fire_counts: stateless per-(ticket, recipe) window count."""
+    """_detect_repeat_fire_counts: stateless per-(client, ticket, recipe) count."""
 
     def test_empty_inbox_returns_empty_dict(self, tmp_config_dir: Path) -> None:
         assert _detect_repeat_fire_counts(config=_config()) == {}
 
-    def test_counts_within_window_grouped_by_ticket_and_recipe(
+    def test_counts_within_window_grouped_by_client_ticket_and_recipe(
         self, tmp_config_dir: Path
     ) -> None:
         base = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
@@ -1724,9 +1728,9 @@ class TestDetectRepeatFireCounts:
         counts = _detect_repeat_fire_counts(
             config=_config(), now=base + timedelta(minutes=1)
         )
-        assert counts[("GEN-1", RECIPE_ADDRESS_REVIEW)] == 2
-        assert counts[("GEN-1", RECIPE_AUTO_FIX_CI)] == 1
-        assert counts[("GEN-2", RECIPE_ADDRESS_REVIEW)] == 1
+        assert counts[("acme", "GEN-1", RECIPE_ADDRESS_REVIEW)] == 2
+        assert counts[("acme", "GEN-1", RECIPE_AUTO_FIX_CI)] == 1
+        assert counts[("acme", "GEN-2", RECIPE_ADDRESS_REVIEW)] == 1
 
     def test_events_outside_window_excluded(self, tmp_config_dir: Path) -> None:
         base = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
@@ -1737,7 +1741,16 @@ class TestDetectRepeatFireCounts:
         counts = _detect_repeat_fire_counts(
             config=_config(), now=base + timedelta(minutes=1)
         )
-        assert counts[("GEN-1", RECIPE_ADDRESS_REVIEW)] == 1
+        assert counts[("acme", "GEN-1", RECIPE_ADDRESS_REVIEW)] == 1
+
+    def test_event_exactly_at_cutoff_included(self, tmp_config_dir: Path) -> None:
+        """The cutoff boundary is inclusive: an event at exactly now-window counts."""
+        base = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+        window = _config().review_recipe_repeat_fire_window_minutes
+        with freeze_time(base - timedelta(minutes=window)):
+            _record_taken("GEN-1", RECIPE_ADDRESS_REVIEW)  # exactly at cutoff
+        counts = _detect_repeat_fire_counts(config=_config(), now=base)
+        assert counts[("acme", "GEN-1", RECIPE_ADDRESS_REVIEW)] == 1
 
     def test_read_events_failure_returns_empty_dict(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
@@ -1750,16 +1763,33 @@ class TestDetectRepeatFireCounts:
         assert _detect_repeat_fire_counts(config=_config()) == {}
 
     def test_malformed_payload_missing_keys_skipped(self, tmp_config_dir: Path) -> None:
-        """A PR_ACTION_TAKEN with no/non-str ticket_id+recipe is not counted."""
+        """A PR_ACTION_TAKEN with no/non-str client+ticket_id+recipe is not counted."""
         record_event(
             OrchestratorEventType.PR_ACTION_TAKEN,
             {"client": "acme"},  # no ticket_id / recipe
         )
         record_event(
             OrchestratorEventType.PR_ACTION_TAKEN,
-            {"ticket_id": 123, "recipe": None},  # non-str values
+            {"client": "acme", "ticket_id": 123, "recipe": None},  # non-str values
+        )
+        record_event(
+            OrchestratorEventType.PR_ACTION_TAKEN,
+            {"ticket_id": "GEN-1", "recipe": RECIPE_ADDRESS_REVIEW},  # no client
         )
         assert _detect_repeat_fire_counts(config=_config()) == {}
+
+    def test_isolates_by_client_same_ticket_id(self, tmp_config_dir: Path) -> None:
+        """Two clients whose numeric ticket_id collides don't share a count."""
+        base = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+        with freeze_time(base):
+            for _ in range(4):
+                _record_taken("42", RECIPE_ADDRESS_REVIEW, client="acme")
+            _record_taken("42", RECIPE_ADDRESS_REVIEW, client="widgetco")
+        counts = _detect_repeat_fire_counts(
+            config=_config(), now=base + timedelta(minutes=1)
+        )
+        assert counts[("acme", "42", RECIPE_ADDRESS_REVIEW)] == 4
+        assert counts[("widgetco", "42", RECIPE_ADDRESS_REVIEW)] == 1
 
 
 class TestRecordPrActionTaken:
@@ -1768,6 +1798,7 @@ class TestRecordPrActionTaken:
     def test_records_event_regardless_of_count(self, tmp_config_dir: Path) -> None:
         _record_pr_action_taken(
             _repeat_fire_payload_base(),
+            "acme",
             "GEN-1",
             RECIPE_ADDRESS_REVIEW,
             config=_config(),
@@ -1780,10 +1811,14 @@ class TestRecordPrActionTaken:
     def test_exact_crossing_emits_session_needs_attention(
         self, tmp_config_dir: Path
     ) -> None:
-        cfg = _config(review_recipe_repeat_fire_threshold=5)
-        counts = {("GEN-1", RECIPE_ADDRESS_REVIEW): 4}  # prior 4 + this = 5
+        cfg = _config(
+            review_recipe_repeat_fire_threshold=5,
+            review_recipe_repeat_fire_window_minutes=20,
+        )
+        counts = {("acme", "GEN-1", RECIPE_ADDRESS_REVIEW): 4}  # prior 4 + this = 5
         _record_pr_action_taken(
             _repeat_fire_payload_base(),
+            "acme",
             "GEN-1",
             RECIPE_ADDRESS_REVIEW,
             config=cfg,
@@ -1796,12 +1831,14 @@ class TestRecordPrActionTaken:
         assert attn[0].payload["recipe"] == RECIPE_ADDRESS_REVIEW
         assert attn[0].payload["client"] == "acme"
         assert attn[0].payload["repeat_fire_count"] == 5
+        assert attn[0].payload["window_minutes"] == 20
 
     def test_below_threshold_no_attention_event(self, tmp_config_dir: Path) -> None:
         cfg = _config(review_recipe_repeat_fire_threshold=5)
-        counts = {("GEN-1", RECIPE_ADDRESS_REVIEW): 2}  # prior 2 + this = 3
+        counts = {("acme", "GEN-1", RECIPE_ADDRESS_REVIEW): 2}  # prior 2 + this = 3
         _record_pr_action_taken(
             _repeat_fire_payload_base(),
+            "acme",
             "GEN-1",
             RECIPE_ADDRESS_REVIEW,
             config=cfg,
@@ -1814,9 +1851,10 @@ class TestRecordPrActionTaken:
 
     def test_past_threshold_no_re_fire(self, tmp_config_dir: Path) -> None:
         cfg = _config(review_recipe_repeat_fire_threshold=5)
-        counts = {("GEN-1", RECIPE_ADDRESS_REVIEW): 5}  # prior 5 + this = 6 > 5
+        counts = {("acme", "GEN-1", RECIPE_ADDRESS_REVIEW): 5}  # prior 5 + this = 6 > 5
         _record_pr_action_taken(
             _repeat_fire_payload_base(),
+            "acme",
             "GEN-1",
             RECIPE_ADDRESS_REVIEW,
             config=cfg,
@@ -1831,6 +1869,7 @@ class TestRecordPrActionTaken:
         cfg = _config(review_recipe_repeat_fire_threshold=1)  # 0 + this = 1 == 1
         _record_pr_action_taken(
             _repeat_fire_payload_base(),
+            "acme",
             "GEN-1",
             RECIPE_ADDRESS_REVIEW,
             config=cfg,
@@ -1845,6 +1884,7 @@ class TestRecordPrActionTaken:
         """A direct _act_* call (no burst wiring) still records PR_ACTION_TAKEN."""
         _record_pr_action_taken(
             _repeat_fire_payload_base(),
+            "acme",
             "GEN-1",
             RECIPE_ADDRESS_REVIEW,
             config=None,
@@ -1853,6 +1893,29 @@ class TestRecordPrActionTaken:
         assert (
             len(read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])) == 1
         )
+        assert (
+            read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+            == []
+        )
+
+    def test_different_client_same_ticket_id_isolated_count(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Tenant A's fire count is unaffected by tenant B's fires on the same id."""
+        cfg = _config(review_recipe_repeat_fire_threshold=5)
+        counts = {
+            ("widgetco", "42", RECIPE_ADDRESS_REVIEW): 4,  # tenant B: 1 short
+        }
+        _record_pr_action_taken(
+            _repeat_fire_payload_base("42", RECIPE_ADDRESS_REVIEW, client="acme"),
+            "acme",
+            "42",
+            RECIPE_ADDRESS_REVIEW,
+            config=cfg,
+            repeat_fire_counts=counts,
+        )
+        # Tenant A's own count (absent from `counts`) starts at 0 + this = 1,
+        # nowhere near the threshold — tenant B's count must not leak in.
         assert (
             read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
             == []
@@ -1949,7 +2012,7 @@ class TestRunReviewRecipesRepeatFire:
         self._enqueue_cr_task(make_git_repo("once-per-tick"))
         calls: list[dict[str, Any]] = []
 
-        def _spy(**kwargs: Any) -> dict[tuple[str, str], int]:
+        def _spy(**kwargs: Any) -> dict[tuple[str, str, str], int]:
             calls.append(kwargs)
             return _real_detect_repeat_fire_counts(**kwargs)
 
