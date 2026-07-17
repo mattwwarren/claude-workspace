@@ -1277,6 +1277,7 @@ def _task_to_dict(task: TicketTask) -> dict[str, object]:
             task.pr_state.model_dump(mode="json") if task.pr_state is not None else None
         ),
         "signoff": task.signoff,
+        "last_blocked_result": task.last_blocked_result,
     }
 
 

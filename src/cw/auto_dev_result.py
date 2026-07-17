@@ -878,6 +878,32 @@ def is_documented_example(result: AutoDevResult) -> bool:
     )
 
 
+_PLACEHOLDER_TICKET_ID_RE = re.compile(r'"ticket_id"\s*:\s*"<')
+_PLACEHOLDER_STATUS_RE = re.compile(r'"status"\s*:\s*"<')
+
+
+def _is_placeholder_sentinel_text(raw: str) -> bool:
+    """Return True iff *raw* sentinel block text is an unresolved doc-example.
+
+    Detects the .claude/commands/auto-dev-*.md worked-example blocks whose
+    ticket_id/status values are angle-bracket placeholders (e.g.
+    "<ticket-id>", "<stage_complete | blocked>") BEFORE the JSON is parsed.
+    A placeholder payload fails schema validation (status not in
+    _KNOWN_STATUSES) and returns a BlockedResult -- a type
+    is_documented_example() cannot inspect, since it operates on parsed
+    AutoDevResult fields that a failed parse never produces (#1266).
+
+    Deliberately narrow (both keys, leading '<' right after the opening
+    quote): no real producer ever emits ticket_id/status beginning with
+    '<', so this cannot misfire on genuine output. Do not broaden to
+    "looks templated" -- silently dropping a genuine result is a strictly
+    worse bug than the one this fixes.
+    """
+    return bool(
+        _PLACEHOLDER_TICKET_ID_RE.search(raw) and _PLACEHOLDER_STATUS_RE.search(raw)
+    )
+
+
 def _tail(text: str, lines: int = _TAIL_LINES) -> str:
     return "\n".join(text.splitlines()[-lines:])
 
