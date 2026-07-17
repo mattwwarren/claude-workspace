@@ -35,6 +35,21 @@ if TYPE_CHECKING:
 # A captured record_event invocation: (event_type, payload, correlation_id).
 CapturedEvent = tuple[OrchestratorEventType, dict[str, Any], str | None]
 
+# Repo-root-relative path constants + src/ discovery, hoisted from
+# test_review_approval_guard.py's pre-existing private copy (#1240).
+# Shared by test_review_approval_guard.py (which keeps its own private
+# copy, unmodified, deliberately left as-is) and test_ticket_boundary_guard.py
+# (which imports these). Pure, generic path/discovery helpers with no
+# scan-semantics coupling, so they are the ones hoisted; each test file's
+# scan-specific `_run_scan` driver stays file-local.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_SRC_ROOT = _REPO_ROOT / "src"
+
+
+def _iter_src_files() -> list[Path]:
+    """Return every ``*.py`` file under ``src/``, sorted for determinism."""
+    return sorted(_SRC_ROOT.rglob("*.py"))
+
 
 def _seed_daemon_session(
     tmp_path: Path,
