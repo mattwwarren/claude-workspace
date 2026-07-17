@@ -6,7 +6,7 @@ import json
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from click.testing import CliRunner
 
@@ -5499,16 +5499,16 @@ class TestCheckInboxSize:
 # ---------------------------------------------------------------------------
 
 
-def _patch_config_enabled(monkeypatch: pytest.MonkeyPatch, **kwargs: object) -> None:
+def _patch_config_enabled(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> None:
     """Point cw.doctor.load_orchestrator_config at an enabled config."""
     from cw.models import OrchestratorConfig
 
     kwargs.setdefault("review_recipes_enabled", True)
-    cfg = OrchestratorConfig(**kwargs)  # type: ignore[arg-type]
+    cfg = OrchestratorConfig(**kwargs)
     monkeypatch.setattr("cw.doctor.load_orchestrator_config", lambda: cfg)
 
 
-def _cr_liveness_task(**kwargs: object) -> TicketTask:
+def _cr_liveness_task(**kwargs: Any) -> TicketTask:
     """A changes_requested candidate row for the liveness check."""
     from tests.test_pr_hydrate import _pr_state
     from tests.test_reconcile_gate_recipes import _make_task
@@ -5517,7 +5517,7 @@ def _cr_liveness_task(**kwargs: object) -> TicketTask:
     kwargs.setdefault(
         "pr_state", _pr_state(state="OPEN", attention_state="changes_requested")
     )
-    return _make_task(**kwargs)  # type: ignore[arg-type]
+    return _make_task(**kwargs)
 
 
 def _liveness_clients() -> dict[str, ClientConfig]:
@@ -5572,9 +5572,7 @@ class TestCheckReviewRecipeLiveness:
         # 2 hours ago — deliberately outside any old fixed window; still "fired".
         stamp = datetime(2026, 7, 17, 10, 0, tzinfo=UTC)
         save_dev_queue(
-            DevQueueStore(
-                tasks=[_cr_liveness_task(address_review_fired_at=stamp)]
-            )
+            DevQueueStore(tasks=[_cr_liveness_task(address_review_fired_at=stamp)])
         )
         results = _check_review_recipe_liveness(_liveness_clients())
         assert all(not r.warn for r in results)
@@ -5696,7 +5694,8 @@ class TestCheckReviewRecipeLiveness:
         _patch_config_enabled(monkeypatch)
 
         def _boom() -> object:
-            raise OSError("dev queue unreadable")
+            msg = "dev queue unreadable"
+            raise OSError(msg)
 
         monkeypatch.setattr("cw.doctor.load_dev_queue", _boom)
         results = _check_review_recipe_liveness(_liveness_clients())
@@ -5709,7 +5708,8 @@ class TestCheckReviewRecipeLiveness:
         from cw.models import DevQueueStore
 
         def _boom() -> object:
-            raise OSError("config unreadable")
+            msg = "config unreadable"
+            raise OSError(msg)
 
         monkeypatch.setattr("cw.doctor.load_orchestrator_config", _boom)
         save_dev_queue(DevQueueStore(tasks=[_cr_liveness_task()]))
@@ -5754,14 +5754,10 @@ class TestCheckAttentionStateCensus:
         from cw.dev_queue import save_dev_queue
         from cw.models import DevQueueStore
 
-        save_dev_queue(
-            DevQueueStore(tasks=[self._candidate("changes_requested")])
-        )
+        save_dev_queue(DevQueueStore(tasks=[self._candidate("changes_requested")]))
         assert not _check_attention_state_census().warn
 
-    def test_non_draft_none_attention_state_warns(
-        self, tmp_config_dir: Path
-    ) -> None:
+    def test_non_draft_none_attention_state_warns(self, tmp_config_dir: Path) -> None:
         from cw.dev_queue import save_dev_queue
         from cw.models import DevQueueStore
 
@@ -5770,20 +5766,14 @@ class TestCheckAttentionStateCensus:
         assert result.warn
         assert "GEN-1" in result.detail
 
-    def test_draft_none_attention_state_no_warn(
-        self, tmp_config_dir: Path
-    ) -> None:
+    def test_draft_none_attention_state_no_warn(self, tmp_config_dir: Path) -> None:
         from cw.dev_queue import save_dev_queue
         from cw.models import DevQueueStore
 
-        save_dev_queue(
-            DevQueueStore(tasks=[self._candidate(None, is_draft=True)])
-        )
+        save_dev_queue(DevQueueStore(tasks=[self._candidate(None, is_draft=True)]))
         assert not _check_attention_state_census().warn
 
-    def test_un_hydrated_row_excluded_from_census(
-        self, tmp_config_dir: Path
-    ) -> None:
+    def test_un_hydrated_row_excluded_from_census(self, tmp_config_dir: Path) -> None:
         from cw.dev_queue import save_dev_queue
         from cw.models import DevQueueStore
         from tests.test_reconcile_gate_recipes import _make_task
@@ -5794,22 +5784,19 @@ class TestCheckAttentionStateCensus:
         save_dev_queue(DevQueueStore(tasks=[task]))
         assert not _check_attention_state_census().warn
 
-    def test_terminal_pr_excluded_by_is_candidate(
-        self, tmp_config_dir: Path
-    ) -> None:
+    def test_terminal_pr_excluded_by_is_candidate(self, tmp_config_dir: Path) -> None:
         from cw.dev_queue import save_dev_queue
         from cw.models import DevQueueStore
 
-        save_dev_queue(
-            DevQueueStore(tasks=[self._candidate(None, state="MERGED")])
-        )
+        save_dev_queue(DevQueueStore(tasks=[self._candidate(None, state="MERGED")]))
         assert not _check_attention_state_census().warn
 
     def test_dev_queue_load_failure_degrades_gracefully(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         def _boom() -> object:
-            raise OSError("unreadable")
+            msg = "unreadable"
+            raise OSError(msg)
 
         monkeypatch.setattr("cw.doctor.load_dev_queue", _boom)
         assert not _check_attention_state_census().warn
