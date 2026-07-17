@@ -206,11 +206,20 @@ def _make_reviewer_doc(
 
 
 def _make_diff(*added_lines: str, **overrides: object) -> CapturedDiff:
-    """Minimal-but-valid CapturedDiff (#1237).
+    """Minimal-but-valid CapturedDiff (#1237, restructured #1236).
 
     Positional args are added ("+"-prefixed) content lines. ``files`` maps a
     changed file path to its list of changed line numbers; ``extra_text`` is
     appended verbatim so context/removed lines can be exercised.
+
+    Populates ``file_diffs`` (per-file hunk text, for prompt inlining and the
+    file-level evidence fallback) and ``file_line_text`` (per-file
+    ``{line_number: content}`` for the added lines) alongside the flat ``text``,
+    so every call site keeps passing under the per-file/per-line
+    ``_classify_finding``. Each file's line numbers are paired positionally with
+    the shared ``added_lines`` (the last content repeats if a file claims more
+    lines than there are added lines), keeping ``files[f] ==
+    sorted(file_line_text[f])`` an invariant.
     """
     lines = added_lines or ("def broken():",)
     files = overrides.get("files", {"src/cw/foo.py": [10]})
@@ -219,7 +228,22 @@ def _make_diff(*added_lines: str, **overrides: object) -> CapturedDiff:
     header = "\n".join(f"+++ b/{path}" for path in files)
     body = "\n".join(f"+{line}" for line in lines)
     text = f"{header}\n{body}\n{extra_text}"
-    return CapturedDiff(text=text, files=files)
+    file_diffs: dict[str, str] = {}
+    file_line_text: dict[str, dict[int, str]] = {}
+    for path, line_nums in files.items():
+        per_file: dict[int, str] = {
+            ln: (lines[idx] if idx < len(lines) else lines[-1])
+            for idx, ln in enumerate(line_nums)
+        }
+        file_line_text[path] = per_file
+        file_body = "\n".join(f"+{per_file[ln]}" for ln in line_nums)
+        file_diffs[path] = f"+++ b/{path}\n{file_body}\n{extra_text}"
+    return CapturedDiff(
+        text=text,
+        files=files,
+        file_diffs=file_diffs,
+        file_line_text=file_line_text,
+    )
 
 
 @pytest.fixture(autouse=True)

@@ -16,7 +16,9 @@ from pydantic import ValidationError
 
 from cw.review_findings import (
     AcceptedFinding,
+    CapturedDiff,
     Finding,
+    RejectedFinding,
     ReviewerFindingsDocument,
     ReviewerRunFailure,
     ReviewerRunRecord,
@@ -86,6 +88,27 @@ class TestRejectionReasonLiteral:
         )
         assert rejected
         assert all(r.reason != "escalation_evidence_not_in_diff" for r in rejected)
+
+    def test_rejected_finding_reason_rejects_escalation_value(self) -> None:
+        # R6 (#1236): RejectedFinding.reason uses the split RejectedFindingReason
+        # Literal, which excludes the escalation-only value.
+        with pytest.raises(ValidationError):
+            RejectedFinding(
+                raw={},
+                reviewer_role="R",
+                reason="escalation_evidence_not_in_diff",
+            )
+
+    def test_stripped_escalation_reason_rejects_core_value(self) -> None:
+        # R6 (#1236): StrippedEscalation.reason uses EscalationStripReason, which
+        # excludes every core rejection reason.
+        with pytest.raises(ValidationError):
+            StrippedEscalation(
+                reviewer_role="R",
+                finding_index=0,
+                target_reviewer="Perf Reviewer",
+                reason="evidence_not_in_diff",
+            )
 
 
 class TestFindingValidation:
@@ -221,11 +244,78 @@ class TestValidateReviewerDocument:
         assert rejected[0].raw["summary"] == "raw kept"
         assert rejected[0].reviewer_role == "Test Reviewer"
 
-    def test_evidence_matches_full_diff_not_only_added_lines(self) -> None:
-        # A3: Finding.evidence matching is against the full diff text
-        # (context/removed lines included), same rule as escalation quotes.
+    def test_evidence_from_removed_line_rejected_by_default_claimed_line(self) -> None:
+        # R6 (#1236): supersedes A3's file-full-diff matching claim for
+        # Finding.evidence. The default finding claims line_start=line_end=10
+        # ("def broken():"); evidence quoting a removed/context line elsewhere in
+        # the diff is NOT the content of the claimed line, so true line-position
+        # validation now rejects it (evidence_not_in_diff), where the old
+        # whole-diff substring check accepted it. Escalation quotes are
+        # unaffected — see test_quote_matches_full_diff_not_only_added_lines.
         diff = _make_diff(extra_text="-removed_context_line = 1")
         f = _make_finding(evidence="removed_context_line = 1")
+        accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
+        assert not accepted
+        assert rejected[0].reason == "evidence_not_in_diff"
+
+    def test_evidence_from_other_line_same_file_rejected(self) -> None:
+        # R6 (#1236), one level more precise than the cross-file gap: a quote
+        # that IS the verbatim content of a *different added line in the same
+        # file* — outside the finding's claimed line window — is rejected
+        # (evidence_not_in_diff), even though it's real, in-file, in that file's
+        # hunk. The claimed window (line 10) must contain the evidence.
+        diff = _make_diff(
+            "def broken():",
+            "sneaky = elsewhere()",
+            files={"src/cw/foo.py": [10, 11]},
+        )
+        f = _make_finding(evidence="sneaky = elsewhere()", line_start=10, line_end=10)
+        accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
+        assert not accepted
+        assert rejected[0].reason == "evidence_not_in_diff"
+
+    def test_evidence_cross_file_rejected(self) -> None:
+        # R6 (#1236): a quote copied verbatim from a *different changed file's*
+        # hunk is rejected even though it appears in the full diff text — the
+        # claimed file/line window governs, not whole-diff substring presence.
+        diff = _make_diff(
+            "def broken():",
+            "other_file_line = 2",
+            files={"src/cw/foo.py": [10], "src/cw/bar.py": [10]},
+        )
+        f = _make_finding(
+            file="src/cw/foo.py",
+            evidence="other_file_line = 2",
+            line_start=10,
+            line_end=10,
+        )
+        accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
+        assert not accepted
+        assert rejected[0].reason == "evidence_not_in_diff"
+
+    def test_single_endpoint_finding_checks_that_line(self) -> None:
+        # A finding with only line_start set (line_end None) checks evidence
+        # against exactly that one line.
+        diff = _make_diff("def broken():", files={"src/cw/foo.py": [10]})
+        f = _make_finding(evidence="def broken():", line_start=10, line_end=None)
+        accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
+        assert len(accepted) == 1
+        assert not rejected
+
+    def test_single_endpoint_line_end_only_checks_that_line(self) -> None:
+        # Symmetric: only line_end set (line_start None).
+        diff = _make_diff("def broken():", files={"src/cw/foo.py": [10]})
+        f = _make_finding(evidence="def broken():", line_start=None, line_end=10)
+        accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
+        assert len(accepted) == 1
+        assert not rejected
+
+    def test_file_level_evidence_matches_file_hunk(self) -> None:
+        # A file-level finding (both endpoints None) has no line anchor and
+        # falls back to matching against that file's full hunk text
+        # (file_diffs), the same fallback _line_reference_valid grants today.
+        diff = _make_diff(extra_text="-context_only = 3")
+        f = _make_finding(evidence="context_only = 3", line_start=None, line_end=None)
         accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
         assert len(accepted) == 1
         assert not rejected
@@ -582,3 +672,52 @@ class TestReviewerRunRecord:
     def test_construct(self) -> None:
         r = ReviewerRunRecord(reviewer_role="R", status="ok", finding_count=3)
         assert r.finding_count == 3
+
+
+class TestCapturedDiffStructure:
+    def test_file_diffs_and_line_text_round_trip(self) -> None:
+        # R6 (#1236): the restructured CapturedDiff carries per-file hunk text
+        # and per-file {line: content}, and both survive a JSON round-trip
+        # (int line-number keys coerce back from their JSON string form).
+        diff = _make_diff("def broken():", files={"src/cw/foo.py": [10]})
+        assert diff.file_line_text["src/cw/foo.py"][10] == "def broken():"
+        assert "def broken():" in diff.file_diffs["src/cw/foo.py"]
+        reloaded = CapturedDiff.model_validate_json(diff.model_dump_json())
+        assert reloaded.file_line_text == diff.file_line_text
+        assert reloaded.file_diffs == diff.file_diffs
+
+    def test_files_matches_file_line_text_keys(self) -> None:
+        # The _make_diff invariant the production _capture_diff also upholds:
+        # files[f] == sorted(file_line_text[f]).
+        diff = _make_diff("a = 1", "b = 2", files={"src/cw/foo.py": [10, 11]})
+        for path, line_nums in diff.files.items():
+            assert line_nums == sorted(diff.file_line_text[path])
+
+
+class TestReviewVerdictSchemaVersion:
+    def test_schema_version_defaults_to_one(self) -> None:
+        diff = _make_diff()
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_make_finding())], diff, reviewed_sha="sha"
+        )
+        assert verdict.schema_version == 1
+
+    def test_schema_version_round_trips(self) -> None:
+        diff = _make_diff()
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_make_finding())], diff, reviewed_sha="sha"
+        )
+        reloaded = ReviewVerdict.model_validate_json(verdict.model_dump_json())
+        assert reloaded.schema_version == 1
+
+    def test_schema_version_rejects_other_value(self) -> None:
+        with pytest.raises(ValidationError):
+            ReviewVerdict.model_validate(
+                {
+                    "schema_version": 2,
+                    "blocking": False,
+                    "must_fix": [],
+                    "reviewed_sha": "sha",
+                    "review": derive_review_counts([]).model_dump(),
+                }
+            )

@@ -45,18 +45,22 @@ Severity = Literal["MUST_FIX", "SHOULD_FIX", "NIT", "PRINCIPLE"]
 Disposition = Literal["fixed", "rejected", "deferred"]
 ReviewerHealthStatus = Literal["ok", "degraded", "failed"]
 Confidence = Literal["HIGH", "MEDIUM", "LOW"]
-# The last value is populated only on :attr:`StrippedEscalation.reason`, never
-# on :attr:`RejectedFinding.reason` — a stripped escalation is a survived
-# finding whose escalation evidence failed the diff check, not a rejected
-# finding (see :func:`validate_reviewer_document`).
-RejectionReason = Literal[
+# The five reasons a finding can be rejected outright (used by
+# :attr:`RejectedFinding.reason` and :func:`_classify_finding`'s return type).
+# Split from the escalation-strip reason (R6): a stripped escalation is a
+# survived finding whose escalation evidence failed the diff check, not a
+# rejected finding, so the two never share a Literal.
+RejectedFindingReason = Literal[
     "invalid_severity",
     "missing_evidence",
     "evidence_not_in_diff",
     "unknown_file",
     "invalid_line_reference",
-    "escalation_evidence_not_in_diff",
 ]
+# The sole reason an escalation is stripped, kept as its own single-value
+# Literal so :attr:`StrippedEscalation.reason` cannot accidentally carry a
+# core rejection reason.
+EscalationStripReason = Literal["escalation_evidence_not_in_diff"]
 
 # Valid severity strings, derived from the Literal so the two never drift.
 # Used by the defensive severity check in validate_reviewer_document — findings
@@ -64,9 +68,12 @@ RejectionReason = Literal[
 # bypasses Pydantic's Literal enforcement, so validate re-checks it.
 _VALID_SEVERITIES: frozenset[str] = frozenset(get_args(Severity))
 
-_ESCALATION_STRIP_REASON: Literal["escalation_evidence_not_in_diff"] = (
-    "escalation_evidence_not_in_diff"
-)
+_ESCALATION_STRIP_REASON: EscalationStripReason = "escalation_evidence_not_in_diff"
+
+# Schema version for the ReviewVerdict artifact (#1108/R6), following the
+# AutoDevResult.schema_version convention (auto_dev_result.py). Bump when the
+# verdict's on-disk shape changes in a way a reader must branch on.
+_REVIEW_VERDICT_SCHEMA_VERSION: Literal[1] = 1
 
 
 def _is_blank(s: str) -> bool:
@@ -163,7 +170,7 @@ class RejectedFinding(BaseModel):
 
     raw: dict[str, Any]
     reviewer_role: str
-    reason: RejectionReason
+    reason: RejectedFindingReason
     detail: str = ""
 
 
@@ -214,7 +221,7 @@ class StrippedEscalation(BaseModel):
     reviewer_role: str
     finding_index: int
     target_reviewer: str
-    reason: RejectionReason = _ESCALATION_STRIP_REASON
+    reason: EscalationStripReason = _ESCALATION_STRIP_REASON
 
 
 class ReviewVerdict(BaseModel):
@@ -224,6 +231,7 @@ class ReviewVerdict(BaseModel):
     requires; the rest is the executor-neutral superset.
     """
 
+    schema_version: Literal[1] = _REVIEW_VERDICT_SCHEMA_VERSION
     blocking: bool
     must_fix: list[Finding]
     reviewed_sha: str
@@ -235,15 +243,23 @@ class ReviewVerdict(BaseModel):
 
 
 class CapturedDiff(BaseModel):
-    """A captured diff: full text plus per-file changed line numbers.
+    """A captured diff: full text plus per-file line-level detail.
 
     ``text`` is the full unified diff (context, removed, and added lines) used
-    for verbatim evidence-quote matching. ``files`` maps each changed file path
-    to the list of changed line numbers used for line-reference validation.
+    for verbatim escalation-quote matching. ``files`` maps each changed file
+    path to the list of changed (added) line numbers used for line-reference
+    validation. ``file_diffs`` maps each file to its raw per-file hunk text
+    (``+``/``-``/context lines intact), used only for prompt inlining, never for
+    evidence validation. ``file_line_text`` maps each file to a
+    ``{line_number: content}`` map for exactly the added lines (same line-number
+    domain as ``files[file]``) — the substrate for true line-position evidence
+    validation of finding evidence.
     """
 
     text: str
     files: dict[str, list[int]] = Field(default_factory=dict)
+    file_diffs: dict[str, str] = Field(default_factory=dict)
+    file_line_text: dict[str, dict[int, str]] = Field(default_factory=dict)
 
 
 def _changed_files(diff: CapturedDiff) -> frozenset[str]:
@@ -278,25 +294,64 @@ def _line_reference_valid(diff: CapturedDiff, finding: Finding) -> bool:
     return True
 
 
+def _evidence_in_claimed_lines(
+    diff: CapturedDiff,
+    file: str,
+    text: str,
+    line_start: int | None,
+    line_end: int | None,
+) -> bool:
+    """True iff *text* appears within the finding's claimed line window for *file*.
+
+    A file-level finding (both endpoints ``None``) has no line anchor — falls
+    back to file-level matching against that file's full hunk text
+    (``file_diffs``), the same fallback ``_line_reference_valid`` already grants
+    file-level findings today.
+
+    When a line window is claimed, *text* must appear within the joined content
+    of exactly those added lines (``file_line_text``). A quote whose true origin
+    is a removed/context line — which has no new-file line number — is correctly
+    rejected here rather than accepted via a whole-file or whole-diff fallback.
+    """
+    if line_start is not None and line_end is not None:
+        start, end = line_start, line_end
+    elif line_start is not None:
+        start = end = line_start
+    elif line_end is not None:
+        start = end = line_end
+    else:
+        return text in diff.file_diffs.get(file, "")
+    line_text = diff.file_line_text.get(file, {})
+    window = "\n".join(line_text[n] for n in range(start, end + 1) if n in line_text)
+    return text in window
+
+
 def _classify_finding(
     finding: Finding, diff: CapturedDiff, changed: frozenset[str]
-) -> RejectionReason | None:
+) -> RejectedFindingReason | None:
     """Return the rejection reason for *finding*, or ``None`` if it passes.
 
     Check order (first failure wins): severity → evidence-present →
-    evidence-in-diff → file-known → line-in-range. The escalation-quote check
-    is NOT here — it runs only after a finding passes all five of these.
+    file-known → line-in-range → evidence-in-claimed-lines. The
+    ``invalid_line_reference`` check MUST run before the evidence check so that
+    ``_evidence_in_claimed_lines`` only builds a window from confirmed-real
+    changed lines — a bogus line reference (e.g. ``line_start=999``) is reported
+    as ``invalid_line_reference``, not misclassified as ``evidence_not_in_diff``
+    via an empty window. The escalation-quote check is NOT here — it runs only
+    after a finding passes all of these.
     """
     if finding.severity not in _VALID_SEVERITIES:
         return "invalid_severity"
     if _is_blank(finding.evidence):
         return "missing_evidence"
-    if not _substring_in_diff(diff, finding.evidence):
-        return "evidence_not_in_diff"
     if finding.file not in changed:
         return "unknown_file"
     if not _line_reference_valid(diff, finding):
         return "invalid_line_reference"
+    if not _evidence_in_claimed_lines(
+        diff, finding.file, finding.evidence, finding.line_start, finding.line_end
+    ):
+        return "evidence_not_in_diff"
     return None
 
 
