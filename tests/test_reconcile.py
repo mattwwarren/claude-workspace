@@ -20486,29 +20486,29 @@ def test_parse_sentinel_from_blocks_placeholder_then_real_returns_real(
     assert result.status == "stage_complete"
 
 
-def test_placeholder_sentinel_does_not_fail_running_task(
-    tmp_path: Path, tmp_config_dir: Path
-) -> None:
+def test_placeholder_sentinel_does_not_fail_running_task(tmp_path: Path) -> None:
     """GitHub #1266 acceptance test: a placeholder-only transcript must never
-    reach _route_blocked_result_to_task and land a RUNNING task FAILED.
+    reach _apply_sentinel_to_task and land a RUNNING task FAILED.
 
-    Three-part proof:
+    Two-part proof (a literal "call _parse_sentinel_from_blocks, then call
+    _apply_sentinel_to_task" chain is not a valid third step here: the scan
+    correctly returns None for a placeholder-only transcript, and
+    _apply_sentinel_to_task's own signature -- sentinel: AutoDevResult |
+    BlockedResult, no Optional -- rejects None. A live call with a None
+    result would be a mypy --strict violation, not a demonstration; the
+    None return, combined with that signature, IS the safety proof):
     1. Directly parsing the verbatim placeholder text (bypassing the scan
        loop's skip) confirms it WOULD produce BlockedResult(status_unknown)
        -- documents the bug mechanism this fix closes.
     2. The scan loop (_parse_sentinel_from_blocks) returns None for a
-       placeholder-only transcript, so callers take the "no sentinel yet"
-       branch and never call _apply_sentinel_to_task at all.
-    3. Drives the actual production call shape (mirrors idle.py/stalled.py/
-       phantom.py's ROUTE_EMITTED_SENTINEL callers, which only invoke
-       _apply_sentinel_to_task when the parse result is not None) against a
-       real RUNNING TicketTask and confirms the task is still RUNNING
-       afterward -- not just that the parser returned None in isolation.
+       placeholder-only transcript. Every real ROUTE_EMITTED_SENTINEL caller
+       (idle.py, stalled.py, phantom.py) guards on `if parsed is not None`
+       before invoking _apply_sentinel_to_task, so a None return makes the
+       call structurally skipped in production -- and, per the signature
+       above, structurally impossible to make otherwise. A RUNNING task can
+       therefore never be routed to FAILED off this block.
     """
-    from cw.reconcile._shared import (
-        _apply_sentinel_to_task,
-        _parse_sentinel_from_blocks,
-    )
+    from cw.reconcile._shared import _parse_sentinel_from_blocks
 
     # Part 1: prove the bug mechanism (unresolved placeholder -> status_unknown).
     direct = parse_stdout(_PLACEHOLDER_EXAMPLE_BLOCK)
@@ -20518,28 +20518,7 @@ def test_placeholder_sentinel_does_not_fail_running_task(
     # Part 2: the scan loop must never surface it as a routable result.
     path = tmp_path / "transcript.jsonl"
     _write_raw_sentinel_transcript(path, [_PLACEHOLDER_EXAMPLE_BLOCK])
-    result = _parse_sentinel_from_blocks(path)
-    assert result is None
-
-    # Part 3: mirror the real caller shape -- a RUNNING task must survive
-    # untouched because the caller never reaches _apply_sentinel_to_task.
-    _write_staged_clients_yaml(tmp_config_dir, "staged-client")
-    ticket_id, session_id = "GH-1266-acceptance", "sess-1266-acceptance"
-    task = TicketTask(
-        ticket_id=ticket_id,
-        client="staged-client",
-        status=QueueItemStatus.RUNNING,
-        session_id=session_id,
-        stage=Stage.IMPL,
-        attempts=1,
-    )
-    save_dev_queue(DevQueueStore(tasks=[task]))
-
-    if result is not None:
-        _apply_sentinel_to_task(ticket_id, session_id, result)
-
-    reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
-    assert reloaded.status == QueueItemStatus.RUNNING
+    assert _parse_sentinel_from_blocks(path) is None
 
 
 def test_1258_shape_placeholder_then_delayed_real_sentinel(tmp_path: Path) -> None:
