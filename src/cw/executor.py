@@ -3,28 +3,20 @@
 from __future__ import annotations
 
 import contextlib
-import json
 import shutil
-import subprocess
-import tempfile
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 
-from pydantic import ValidationError
-
-from cw.auto_dev_result import (
-    AutoDevResult,
-    Health,
-    Review,
-    Scope,
-    StageReached,
+from cw.auto_dev_result import AutoDevResult
+from cw.codex_review import (
+    STAGE3_REVIEW,
+    render_verdict_comment,
+    run_review,
 )
-from cw.codex_runner import CodexRunner, CodexRunResult, RealCodexRunner
+from cw.codex_runner import CodexRunner, RealCodexRunner
 from cw.config import load_state, save_state, sessions_lock
 from cw.events import record_event as _record_orchestrator_event
 from cw.gh import post_issue_comment
 from cw.local_runner import (
-    _SCHEMA_VERSION,
     AIDER_NOT_FOUND,
     ENDPOINT_NOT_CONFIGURED,
     LIVENESS_UNAVAILABLE,
@@ -40,7 +32,6 @@ from cw.local_runner import (
     build_task_message,
     make_blocked,
     read_process_start_time_ns,
-    resolve_tier,
 )
 from cw.models import (
     CLAUDE_NATIVE_BACKEND,
@@ -62,37 +53,16 @@ from cw.spawn import spawn_create_impl
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 
 if TYPE_CHECKING:
-    from cw.native_daemon import NativeDaemonClient
+    from pathlib import Path
 
-# CodexExecutor blocker reason codes (RFC 0005 F1).
+    from cw.native_daemon import NativeDaemonClient
+    from cw.review_findings import ReviewVerdict
+
+# Session-level CodexExecutor pre-flight blocker reason codes (RFC 0005 F1).
+# Per-role failure reason codes (CODEX_TIMEOUT/CODEX_ERROR/
+# CODEX_REVIEW_UNPARSEABLE/CODEX_MUST_FIX_FINDINGS) live in cw.codex_review.
 CODEX_NOT_FOUND = "codex_not_found"
 CODEX_REVIEW_ONLY = "codex_review_only"
-CODEX_TIMEOUT = "codex_timeout"
-CODEX_ERROR = "codex_error"
-# Issue #1203: codex's -o output file was missing/unreadable, not valid JSON,
-# or did not validate as a Review payload.
-CODEX_REVIEW_UNPARSEABLE = "codex_review_unparseable"
-# Issue #1203: codex reported one or more must-fix findings (R3) — never
-# reaches stage_complete regardless of should_fix/deferred counts.
-CODEX_MUST_FIX_FINDINGS = "codex_must_fix_findings"
-
-STAGE3_REVIEW: StageReached = "stage3_review"
-
-# JSON Schema handed to `codex exec review --output-schema` so codex's final
-# message reports structured finding counts instead of raw markdown (#1203).
-# `deferred` is marked required here for a maximally explicit contract with
-# codex, but _parse_codex_findings treats it as optional (defaults to 0) —
-# intentional defensive permissiveness, not a bug: behavior is identical
-# either way since Review.deferred already defaults to 0.
-_CODEX_FINDINGS_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "must_fix_initial": {"type": "integer"},
-        "should_fix": {"type": "integer"},
-        "deferred": {"type": "integer"},
-    },
-    "required": ["must_fix_initial", "should_fix", "deferred"],
-}
 
 
 def resolve_executor_config(
@@ -423,12 +393,15 @@ class LocalExecutor:
 
 
 class CodexExecutor:
-    """StageExecutor backed by ``codex exec review`` subprocess (RFC 0005 F1).
+    """StageExecutor backed by prompt-driven ``codex exec`` reviewers (#1236).
 
     REVIEW-only: spawn() returns make_blocked(reason=CODEX_REVIEW_ONLY) if
-    called on any stage other than REVIEW. Synthesizes an AutoDevResult directly
-    from the codex exit code — codex stdout is raw markdown, not a sentinel, so
-    on a clean exit the raw findings are posted as a GitHub issue comment.
+    called on any stage other than REVIEW. Step 3 delegates to
+    ``codex_review.run_review``, which runs a per-reviewer-role loop of generic
+    ``codex exec`` calls (each fed a materialized prompt over stdin), validates
+    every reviewer's structured output through the ``review_findings`` library,
+    and synthesizes a typed AutoDevResult from the consolidated verdict. The
+    consolidated verdict is posted as a GitHub issue comment on a clean run.
 
     Like LocalExecutor, spawn() is synchronous and bypasses persist_last_result:
     the SESSION_COMPLETED event carries no 'stdout' key, so dispatch consumes the
@@ -475,7 +448,7 @@ class CodexExecutor:
 
         # Step 2: Pre-flight checks (first match assigns result).
         result: AutoDevResult | None = None
-        run_result: CodexRunResult | None = None
+        verdict: ReviewVerdict | None = None
         if stage != Stage.REVIEW:
             result = make_blocked(
                 ticket_id=task.ticket_id,
@@ -493,18 +466,14 @@ class CodexExecutor:
 
         try:
             if result is None:
-                # Step 3: Run codex (only reached when pre-flight checks pass).
-                run_result = _run_codex_review(
+                # Step 3: Run the per-role review pass (delegated to codex_review).
+                result, verdict = run_review(
                     runner=self._runner,
-                    worktree=worktree,
-                    model=self._config.model,
-                    default_branch=client.default_branch,
-                    wall_clock_budget_seconds=wall_clock_budget_seconds,
-                )
-                result = _synthesize_codex_result(
                     task=task,
                     worktree=worktree,
-                    run_result=run_result,
+                    default_branch=client.default_branch,
+                    model=self._config.model,
+                    wall_clock_budget_seconds=wall_clock_budget_seconds,
                 )
 
             # Step 4: Persist result under sessions_lock.
@@ -516,16 +485,12 @@ class CodexExecutor:
                     target.status = SessionStatus.COMPLETED
                     save_state(state)
 
-            # Step 4b: Post raw review findings as an issue comment (best-effort).
-            # Runs after save_state so a retry on save_state failure does not
-            # post a duplicate comment.
-            if (
-                run_result is not None
-                and not run_result.timed_out
-                and run_result.returncode == 0
-                and run_result.stdout
-            ):
-                _post_review_comment(task.ticket_id, run_result.stdout)
+            # Step 4b: Post the consolidated verdict as an issue comment
+            # (best-effort). Runs after save_state so a retry on save_state
+            # failure does not post a duplicate comment. verdict is None only
+            # when every reviewer failed (no documents to render).
+            if verdict is not None:
+                _post_review_comment(task.ticket_id, render_verdict_comment(verdict))
 
             # Step 5: Emit SESSION_COMPLETED — no "stdout" key so dispatch skips
             # persist_last_result and uses the last_result written in Step 4.
@@ -539,7 +504,7 @@ class CodexExecutor:
             )
         except Exception:
             # Ensure the session is never left ACTIVE on unexpected errors (e.g.
-            # git CalledProcessError in _synthesize_codex_result). Mark it
+            # git CalledProcessError from run_review's diff capture). Mark it
             # COMPLETED with a blocked result so reconcile can clean it up.
             # SESSION_COMPLETED is NOT emitted; dispatch's exception handler
             # reverts the task to PENDING, which is the correct recovery path.
@@ -561,176 +526,6 @@ class CodexExecutor:
 
     def stage_sentinel_schema(self, _stage: Stage) -> dict[str, Any]:
         return AutoDevResult.model_json_schema()
-
-
-def _build_codex_argv(
-    *,
-    model: str | None,
-    default_branch: str,
-    schema_path: Path,
-    output_path: Path,
-) -> list[str]:
-    """Return the ``codex exec review`` argv for the given model/base branch.
-
-    ``--output-schema``/``-o`` steer codex's structured final message into
-    *output_path* (validated against *schema_path*) so the caller can parse
-    finding counts instead of raw markdown (#1203).
-    """
-    argv = [
-        "codex",
-        "exec",
-        "review",
-        "--base",
-        default_branch,
-        "--output-schema",
-        str(schema_path),
-        "-o",
-        str(output_path),
-    ]
-    if model:
-        argv += ["-m", model]
-    return argv
-
-
-def _run_codex_review(
-    *,
-    runner: CodexRunner,
-    worktree: Path,
-    model: str | None,
-    default_branch: str,
-    wall_clock_budget_seconds: int | None,
-) -> CodexRunResult:
-    """Write the findings schema, build argv, and invoke the codex runner.
-
-    Both the schema file (written here) and the output file (written by
-    codex, read by ``RealCodexRunner.run`` before it returns) live in a
-    ``TemporaryDirectory`` scoped to this call — the directory outlives the
-    ``runner.run`` invocation and is cleaned up once this function returns.
-    """
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        schema_path = Path(tmp_dir) / "findings-schema.json"
-        output_path = Path(tmp_dir) / "findings-output.json"
-        schema_path.write_text(json.dumps(_CODEX_FINDINGS_SCHEMA), encoding="utf-8")
-        argv = _build_codex_argv(
-            model=model,
-            default_branch=default_branch,
-            schema_path=schema_path,
-            output_path=output_path,
-        )
-        return runner.run(worktree, argv, wall_clock_budget_seconds)
-
-
-def _parse_codex_findings(output_file_content: str | None) -> Review | None:
-    """Parse codex's ``-o`` output file content into a :class:`Review`.
-
-    Fails closed (returns ``None``) on any of: no output file content, invalid
-    JSON, a non-dict payload, missing/wrong-typed required keys, or a
-    ``Review`` that fails Pydantic validation. codex's ``CodexExecutor`` is
-    single-shot (no fix loop), so ``fix_cycles_used`` is always hardcoded to
-    0 — codex is never asked to report it.
-    """
-    if output_file_content is None:
-        return None
-    try:
-        data = json.loads(output_file_content)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(data, dict):
-        return None
-    try:
-        return Review(
-            must_fix_initial=data["must_fix_initial"],
-            should_fix=data["should_fix"],
-            fix_cycles_used=0,
-            deferred=data.get("deferred", 0),
-        )
-    except (KeyError, TypeError, ValidationError):
-        return None
-
-
-def _synthesize_codex_result(
-    *,
-    task: TicketTask,
-    worktree: Path,
-    run_result: CodexRunResult,
-) -> AutoDevResult:
-    """Map a CodexRunResult to a typed AutoDevResult at stage3_review.
-
-    Disposition table:
-    - timed_out                     → CODEX_TIMEOUT (blocked, retry_eligible)
-    - returncode != 0                → CODEX_ERROR (blocked, stderr tail in details)
-    - -o output missing/unparseable  → CODEX_REVIEW_UNPARSEABLE (blocked)
-    - must_fix_initial > 0           → CODEX_MUST_FIX_FINDINGS (blocked)
-    - exit 0, no must-fix findings   → stage_complete (raw findings posted by caller)
-    """
-    if run_result.timed_out:
-        return make_blocked(
-            ticket_id=task.ticket_id,
-            worktree=worktree,
-            reason=CODEX_TIMEOUT,
-            retry_eligible=True,
-            stage_reached=STAGE3_REVIEW,
-        )
-    if run_result.returncode != 0:
-        return make_blocked(
-            ticket_id=task.ticket_id,
-            worktree=worktree,
-            reason=CODEX_ERROR,
-            details=run_result.stderr[-2000:],
-            stage_reached=STAGE3_REVIEW,
-        )
-    review = _parse_codex_findings(run_result.output_file_content)
-    if review is None:
-        return make_blocked(
-            ticket_id=task.ticket_id,
-            worktree=worktree,
-            reason=CODEX_REVIEW_UNPARSEABLE,
-            stage_reached=STAGE3_REVIEW,
-        )
-    if review.must_fix_initial > 0:
-        # make_blocked() has no review override (out of scope for #1203: its
-        # _FIXED_REVIEW default serves the LocalExecutor/aider path, which has
-        # no codex findings to report). Override the field on its result
-        # instead of threading a new param through local_runner.py, so the
-        # already-parsed counts survive onto the blocked sentinel rather than
-        # reverting to 0/0/0/0 — the same bug #1203 exists to fix, just on
-        # the blocked disposition instead of stage_complete.
-        blocked = make_blocked(
-            ticket_id=task.ticket_id,
-            worktree=worktree,
-            reason=CODEX_MUST_FIX_FINDINGS,
-            stage_reached=STAGE3_REVIEW,
-        )
-        return blocked.model_copy(update={"review": review})
-    branch = subprocess.check_output(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-        cwd=worktree,
-        text=True,
-    ).strip()
-    return AutoDevResult(
-        schema_version=_SCHEMA_VERSION,
-        ticket_id=task.ticket_id,
-        status="stage_complete",
-        stage_reached=STAGE3_REVIEW,
-        scope=Scope(
-            tier=resolve_tier(task.scope_hint),
-            files=0,
-            lines_estimate=0,
-            lines_actual=0,
-            forbidden_touched=False,
-        ),
-        plan_source="none",
-        branch=branch,
-        fork_point_sha=None,
-        commits=[],
-        review=review,
-        health=Health(
-            lowest_agent_confidence="HIGH",
-            any_incomplete_risk=False,
-            recommendation="PROCEED",
-        ),
-        worktree_path=str(worktree),
-    )
 
 
 def _post_review_comment(ticket_id: str, review_text: str) -> None:
