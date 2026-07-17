@@ -1912,7 +1912,7 @@ class TestRecordPrActionTaken:
         *runtime* isolation a type annotation alone can't verify.
         """
         cfg = _config(review_recipe_repeat_fire_threshold=5)
-        counts = {
+        counts: dict[tuple[str, ...], int] = {
             ("42", RECIPE_ADDRESS_REVIEW): 4,  # legacy 2-tuple shape (regression a)
             ("widgetco", "42", RECIPE_ADDRESS_REVIEW): 4,  # tenant B, 1 short
         }
