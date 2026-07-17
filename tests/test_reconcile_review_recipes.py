@@ -1182,9 +1182,9 @@ def test_auto_fix_ci_latch_clears_on_episode_end(
     monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
     candidate = _candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")
 
-    assert _act_auto_fix_ci(
-        [candidate], clients=load_effective_clients()
-    ) == [task.ticket_id]
+    assert _act_auto_fix_ci([candidate], clients=load_effective_clients()) == [
+        task.ticket_id
+    ]
 
     # Episode ends: hydration moves the PR off ci_failing.
     store = load_dev_queue()
@@ -1199,9 +1199,9 @@ def test_auto_fix_ci_latch_clears_on_episode_end(
     store = load_dev_queue()
     store.tasks[0].pr_state = _pr_state(attention_state="ci_failing")
     save_dev_queue(store)
-    assert _act_auto_fix_ci(
-        [candidate], clients=load_effective_clients()
-    ) == [task.ticket_id]
+    assert _act_auto_fix_ci([candidate], clients=load_effective_clients()) == [
+        task.ticket_id
+    ]
 
 
 # --- cross-repo dispatch guard, auto_fix_ci (GitHub #1198) ------------------
