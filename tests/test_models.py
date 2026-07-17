@@ -675,6 +675,27 @@ class TestCostFields:
         restored = TicketTask.model_validate(dumped)
         assert restored.total_cost_usd == pytest.approx(3.14)
 
+    def test_ticket_task_last_blocked_result_defaults_to_none(self) -> None:
+        """GitHub #1266: new diagnostic field defaults to None (schema v19)."""
+        task = TicketTask(ticket_id="T-1", client="c")
+        assert task.last_blocked_result is None
+
+    def test_ticket_task_last_blocked_result_round_trip(self) -> None:
+        task = TicketTask(
+            ticket_id="T-1",
+            client="c",
+            last_blocked_result={
+                "status": "blocked",
+                "blocker": {"reason": "status_unknown"},
+            },
+        )
+        dumped = task.model_dump(mode="json")
+        restored = TicketTask.model_validate(dumped)
+        assert restored.last_blocked_result == {
+            "status": "blocked",
+            "blocker": {"reason": "status_unknown"},
+        }
+
 
 class TestFalseParkRecoveryBackoffFields:
     """GitHub #1030: new TicketTask backoff-state fields for concierge recipe 1."""
@@ -882,8 +903,8 @@ def test_session_lane_round_trips() -> None:
 class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
-    def test_dev_queue_schema_version_is_18(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 18
+    def test_dev_queue_schema_version_is_19(self) -> None:
+        assert DEV_QUEUE_SCHEMA_VERSION == 19
 
     def test_pr_state_defaults(self) -> None:
         state = PrState()

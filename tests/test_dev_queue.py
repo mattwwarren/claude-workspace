@@ -2363,7 +2363,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["pr_state"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 18
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 19
 
     def test_v8_pr_state_preserved_idempotently(self) -> None:
         """Existing pr_state survives a second migration pass (idempotent)."""
@@ -2407,7 +2407,7 @@ class TestMigrateDevQueue:
         """migrate_dev_queue bumps schema_version to current regardless of input."""
         raw: dict[str, object] = {"schema_version": 1, "tasks": []}
         migrated = migrate_dev_queue(raw)
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 18
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 19
 
     def test_v9_signoff_preserved_idempotently(self) -> None:
         """Existing signoff value survives a second migration pass."""
@@ -2442,7 +2442,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["escalation_parked_at"] is None
         assert migrated["tasks"][0]["escalation_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 18
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 19
 
     def test_v10_escalation_fields_preserved_idempotently(self) -> None:
         """Existing escalation timestamps survive a second migration pass."""
@@ -2485,7 +2485,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["false_park_recovery_count"] == 0
         assert migrated["tasks"][0]["false_park_recovery_next_eligible_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 18
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 19
 
     def test_v11_false_park_recovery_backoff_preserved_idempotently(self) -> None:
         """Existing false-park-recovery backoff state survives a second
@@ -2527,7 +2527,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["gate_recipe_failed_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 18
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 19
 
     def test_v12_gate_recipe_failed_at_preserved_idempotently(self) -> None:
         """Existing gate_recipe_failed_at timestamp survives a second
@@ -2565,7 +2565,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["escalate_merge_block_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 18
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 19
 
     def test_v14_escalate_merge_block_fired_at_preserved_idempotently(self) -> None:
         """Existing escalate_merge_block_fired_at survives a second migration."""
@@ -2602,7 +2602,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["request_reviewer_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 18
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 19
 
     def test_v16_request_reviewer_fired_at_preserved_idempotently(self) -> None:
         """Existing request_reviewer_fired_at survives a second migration."""
@@ -2639,7 +2639,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["auto_fix_ci_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 18
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 19
 
     def test_v17_auto_fix_ci_fired_at_preserved_idempotently(self) -> None:
         """Existing auto_fix_ci_fired_at survives a second migration."""
@@ -2676,7 +2676,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["address_review_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 18
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 19
 
     def test_v18_address_review_fired_at_preserved_idempotently(self) -> None:
         """Existing address_review_fired_at survives a second migration."""
@@ -2697,12 +2697,53 @@ class TestMigrateDevQueue:
             "2026-07-16T00:00:00+00:00"
         )
 
+    def test_migrate_dev_queue_fills_last_blocked_result_default(self) -> None:
+        """migrate_dev_queue fills last_blocked_result=None on tasks missing
+        the key (v19, GitHub #1266)."""
+        raw: dict[str, object] = {
+            "schema_version": 18,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-107",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["last_blocked_result"] is None
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 19
+
+    def test_v19_last_blocked_result_preserved_idempotently(self) -> None:
+        """Existing last_blocked_result survives a second migration."""
+        raw: dict[str, object] = {
+            "schema_version": 19,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-108",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "failed",
+                    "last_blocked_result": {
+                        "status": "blocked",
+                        "blocker": {"reason": "status_unknown"},
+                    },
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["last_blocked_result"] == {
+            "status": "blocked",
+            "blocker": {"reason": "status_unknown"},
+        }
+
     def test_migrate_dev_queue_fills_watched_prs_default(self) -> None:
         """migrate_dev_queue fills watched_prs=[] on a store missing the key (v15)."""
         raw: dict[str, object] = {"schema_version": 14, "tasks": []}
         migrated = migrate_dev_queue(raw)
         assert migrated["watched_prs"] == []
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 18
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 19
 
     def test_migrate_dev_queue_preserves_existing_watched_prs(self) -> None:
         """An existing watched_prs list survives migration untouched (idempotent)."""
@@ -3413,6 +3454,7 @@ class TestDevQueueTasks:
             "pr_url",
             "pr_state",
             "signoff",
+            "last_blocked_result",
         }
         assert set(tasks[0].keys()) == expected_fields
 

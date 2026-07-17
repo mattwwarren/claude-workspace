@@ -228,6 +228,68 @@ class TestParseSentinelFromTranscriptToolResult:
         "AUTO_DEV_RESULT>>>"
     )
 
+    # Verbatim auto-dev-impl.md "Stage 2 Completion" worked example (GitHub
+    # #1266): a doc-example block whose ticket_id/status are angle-bracket
+    # placeholders. Fails schema validation (status not a known enum value)
+    # and, absent the fix, would parse to BlockedResult(status_unknown).
+    _PLACEHOLDER_TOOL_RESULT = (
+        "<<<AUTO_DEV_RESULT\n"
+        "{\n"
+        '  "schema_version": 4,\n'
+        '  "ticket_id": "<ticket-id>",\n'
+        '  "status": "<stage_complete | blocked>",\n'
+        '  "stage_reached": "stage2_impl",\n'
+        '  "scope": {"tier": "<small|large>", "files": 0, "lines_estimate": 0,'
+        ' "lines_actual": 0, "forbidden_touched": false},\n'
+        '  "plan_source": "<github_issue_existing | generated | free_text | none>",\n'
+        '  "branch": "<branch-name>",\n'
+        '  "worktree_path": "<session worktree path>",\n'
+        '  "fork_point_sha": "<fork point sha>",\n'
+        '  "commits": ["<sha1>", "<sha2>"],\n'
+        '  "pr": null,\n'
+        '  "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},\n'
+        '  "health": {\n'
+        '    "lowest_agent_confidence": "<HIGH|MEDIUM|LOW>",\n'
+        '    "any_incomplete_risk": false,\n'
+        '    "shortcuts": [],\n'
+        '    "recommendation": "PROCEED",\n'
+        '    "downgrade_applied": false,\n'
+        '    "fix_loop_escalated": false\n'
+        "  },\n"
+        '  "friction_highlights": [],\n'
+        '  "ambiguities": [],\n'
+        '  "blocker": null,\n'
+        '  "prior_pr_warnings": [],\n'
+        '  "next_actions": []\n'
+        "}\n"
+        "AUTO_DEV_RESULT>>>"
+    )
+
+    def _write_transcript_tool_results(
+        self,
+        worktree: Path,
+        claude_session_id: str,
+        sentinel_texts: list[str],
+        home: Path,
+    ) -> None:
+        """Write a transcript with one tool_result block per entry, in order."""
+        encoded = str(worktree).replace("/", "-").replace(".", "-")
+        project_dir = home / ".claude" / "projects" / encoded
+        project_dir.mkdir(parents=True, exist_ok=True)
+        lines = [
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "tool_result", "content": text}],
+                    },
+                }
+            )
+            for text in sentinel_texts
+        ]
+        (project_dir / f"{claude_session_id}.jsonl").write_text("\n".join(lines) + "\n")
+
     def _write_transcript_tool_result(
         self,
         worktree: Path,
@@ -309,6 +371,54 @@ class TestParseSentinelFromTranscriptToolResult:
         (project_dir / "uuid-774b.jsonl").write_text(json.dumps(record) + "\n")
 
         assert _parse_sentinel_from_transcript(str(worktree), "uuid-774b") is None
+
+    def test_parse_sentinel_from_transcript_skips_placeholder_example_returns_none(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """GitHub #1266: a placeholder-only transcript -> None, not BlockedResult."""
+        from cw.cli._sentinels import _parse_sentinel_from_transcript
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw._util.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "auto-dev-1266"
+        worktree.mkdir(parents=True)
+        self._write_transcript_tool_results(
+            worktree, "uuid-1266", [self._PLACEHOLDER_TOOL_RESULT], fake_home
+        )
+
+        assert _parse_sentinel_from_transcript(str(worktree), "uuid-1266") is None
+
+    def test_parse_sentinel_from_transcript_placeholder_then_real_returns_real(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """GitHub #1266: placeholder then real sentinel -> the real result.
+
+        Confirms last-match semantics survive the new placeholder skip.
+        """
+        from cw.auto_dev_result import AutoDevResult
+        from cw.cli._sentinels import _parse_sentinel_from_transcript
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw._util.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "auto-dev-1266b"
+        worktree.mkdir(parents=True)
+        self._write_transcript_tool_results(
+            worktree,
+            "uuid-1266b",
+            [self._PLACEHOLDER_TOOL_RESULT, self._SENTINEL_TOOL_RESULT],
+            fake_home,
+        )
+
+        parsed = _parse_sentinel_from_transcript(str(worktree), "uuid-1266b")
+        assert isinstance(parsed, AutoDevResult)
+        assert parsed.ticket_id == "774"
+        assert parsed.status == "stage_complete"
 
 
 class TestLastContentEntryTimestamp:
