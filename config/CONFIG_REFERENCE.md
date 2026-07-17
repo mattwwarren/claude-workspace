@@ -377,6 +377,16 @@ liveness_first_bucket_by_stage:
 freshness_block_attention_threshold: 5
 salvage_skip_attention_threshold: 5
 
+# Review-recipe repeat-fire burst detector (RFC 0010 anomaly layer, #1201).
+# When a single (ticket, recipe) records this many PR_ACTION_TAKEN events
+# within review_recipe_repeat_fire_window_minutes, one
+# session.needs_attention (paused_status="review_recipe_repeat_fire") fires on
+# the exact crossing (no re-fire once past it) — surfacing a recipe thrashing
+# on a PR that never clears its attention_state. The sibling `cw doctor`
+# liveness check needs no config.
+review_recipe_repeat_fire_threshold: 5
+review_recipe_repeat_fire_window_minutes: 20
+
 # Reap policy: controls whether the reconciler destroys a stalled session
 # or only signals for human intervention (ADR-0006 invariant 4).
 #

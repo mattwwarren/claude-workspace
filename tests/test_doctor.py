@@ -6,12 +6,19 @@ import json
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from click.testing import CliRunner
 
 from cw.cli import main
-from cw.doctor import CheckResult, DoctorReport, format_report, run_doctor
+from cw.doctor import (
+    CheckResult,
+    DoctorReport,
+    _check_attention_state_census,
+    _check_review_recipe_liveness,
+    format_report,
+    run_doctor,
+)
 
 if TYPE_CHECKING:
     import pytest
@@ -5638,3 +5645,389 @@ class TestCheckInboxSize:
         result = _check_inbox_size()
         assert isinstance(result, CheckResult)
         assert result.ok is True
+
+
+# ---------------------------------------------------------------------------
+# #1201 — review-recipe liveness + attention-state census doctor checks
+# ---------------------------------------------------------------------------
+
+
+def _patch_config_enabled(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> None:
+    """Point cw.doctor.load_orchestrator_config at an enabled config."""
+    from cw.models import OrchestratorConfig
+
+    kwargs.setdefault("review_recipes_enabled", True)
+    cfg = OrchestratorConfig(**kwargs)
+    monkeypatch.setattr("cw.doctor.load_orchestrator_config", lambda: cfg)
+
+
+def _cr_liveness_task(**kwargs: Any) -> TicketTask:
+    """A changes_requested candidate row for the liveness check."""
+    from tests.test_pr_hydrate import _pr_state
+    from tests.test_reconcile_gate_recipes import _make_task
+
+    kwargs.setdefault("pr_url", "https://github.com/acme/widgets/pull/1")
+    kwargs.setdefault(
+        "pr_state", _pr_state(state="OPEN", attention_state="changes_requested")
+    )
+    return _make_task(**kwargs)
+
+
+def _liveness_clients() -> dict[str, ClientConfig]:
+    from cw.models import LaneConfig
+    from cw.reconcile.review_recipes import RECIPE_ADDRESS_REVIEW
+    from tests.test_reconcile_gate_recipes import _client_with_lanes
+
+    return {
+        "acme": _client_with_lanes(
+            LaneConfig(name="default", review_recipes={RECIPE_ADDRESS_REVIEW: True})
+        )
+    }
+
+
+class TestCheckReviewRecipeLiveness:
+    """_check_review_recipe_liveness warns on enabled recipes that never fired."""
+
+    def test_master_switch_off_no_warn(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, OrchestratorConfig
+
+        monkeypatch.setattr(
+            "cw.doctor.load_orchestrator_config",
+            lambda: OrchestratorConfig(review_recipes_enabled=False),
+        )
+        save_dev_queue(DevQueueStore(tasks=[_cr_liveness_task()]))
+        results = _check_review_recipe_liveness(_liveness_clients())
+        assert all(not r.warn for r in results)
+
+    def test_candidates_unfired_warns(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore
+
+        _patch_config_enabled(monkeypatch)
+        save_dev_queue(
+            DevQueueStore(tasks=[_cr_liveness_task(address_review_fired_at=None)])
+        )
+        results = _check_review_recipe_liveness(_liveness_clients())
+        assert any(r.warn for r in results)
+
+    def test_candidates_fired_no_warn(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore
+
+        _patch_config_enabled(monkeypatch)
+        # 2 hours ago — deliberately outside any old fixed window; still "fired".
+        stamp = datetime(2026, 7, 17, 10, 0, tzinfo=UTC)
+        save_dev_queue(
+            DevQueueStore(tasks=[_cr_liveness_task(address_review_fired_at=stamp)])
+        )
+        results = _check_review_recipe_liveness(_liveness_clients())
+        assert all(not r.warn for r in results)
+
+    def test_mixed_fired_and_unfired_in_same_group_no_warn(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore
+
+        _patch_config_enabled(monkeypatch)
+        stamp = datetime(2026, 7, 17, 10, 0, tzinfo=UTC)
+        fired = _cr_liveness_task(
+            ticket_id="GEN-1",
+            pr_url="https://github.com/acme/widgets/pull/1",
+            address_review_fired_at=stamp,
+        )
+        unfired = _cr_liveness_task(
+            ticket_id="GEN-2",
+            pr_url="https://github.com/acme/widgets/pull/2",
+            address_review_fired_at=None,
+        )
+        save_dev_queue(DevQueueStore(tasks=[fired, unfired]))
+        results = _check_review_recipe_liveness(_liveness_clients())
+        # 1-of-2 fired in the same (client, lane, recipe) group is healthy.
+        assert all(not r.warn for r in results)
+
+    def test_un_hydrated_row_excluded_from_liveness(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore
+        from tests.test_reconcile_gate_recipes import _make_task
+
+        _patch_config_enabled(monkeypatch)
+        # pr_url set (a hydration candidate) but pr_state not yet hydrated → the
+        # row is skipped before any recipe grouping (no warn).
+        task = _make_task(
+            pr_url="https://github.com/acme/widgets/pull/9", pr_state=None
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        results = _check_review_recipe_liveness(_liveness_clients())
+        assert all(not r.warn for r in results)
+
+    def test_zero_candidates_no_warn(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore
+
+        _patch_config_enabled(monkeypatch)
+        save_dev_queue(DevQueueStore(tasks=[]))
+        results = _check_review_recipe_liveness(_liveness_clients())
+        assert all(not r.warn for r in results)
+
+    def test_disabled_recipe_not_checked(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, LaneConfig
+        from tests.test_reconcile_gate_recipes import _client_with_lanes
+
+        _patch_config_enabled(monkeypatch)
+        # Lane does not enable the recipe → default-off floor → no candidate.
+        clients = {"acme": _client_with_lanes(LaneConfig(name="default"))}
+        save_dev_queue(
+            DevQueueStore(tasks=[_cr_liveness_task(address_review_fired_at=None)])
+        )
+        results = _check_review_recipe_liveness(clients)
+        assert all(not r.warn for r in results)
+
+    def test_ticket_level_override_excludes_candidate(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore
+        from cw.reconcile.review_recipes import RECIPE_ADDRESS_REVIEW
+
+        _patch_config_enabled(monkeypatch)
+        # Lane enables, tier-1 ticket override disables → not a candidate.
+        task = _cr_liveness_task(
+            address_review_fired_at=None,
+            review_recipes={RECIPE_ADDRESS_REVIEW: False},
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        results = _check_review_recipe_liveness(_liveness_clients())
+        assert all(not r.warn for r in results)
+
+    def test_per_recipe_isolation(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, LaneConfig
+        from cw.reconcile.review_recipes import (
+            RECIPE_ADDRESS_REVIEW,
+            RECIPE_AUTO_FIX_CI,
+        )
+        from tests.test_pr_hydrate import _pr_state
+        from tests.test_reconcile_gate_recipes import _client_with_lanes, _make_task
+
+        _patch_config_enabled(monkeypatch)
+        clients = {
+            "acme": _client_with_lanes(
+                LaneConfig(
+                    name="default",
+                    review_recipes={
+                        RECIPE_ADDRESS_REVIEW: True,
+                        RECIPE_AUTO_FIX_CI: True,
+                    },
+                )
+            )
+        }
+        stamp = datetime(2026, 7, 17, 10, 0, tzinfo=UTC)
+        address = _cr_liveness_task(
+            ticket_id="GEN-AR",
+            pr_url="https://github.com/acme/widgets/pull/1",
+            address_review_fired_at=None,
+        )
+        ci = _make_task(
+            ticket_id="GEN-CI",
+            pr_url="https://github.com/acme/widgets/pull/2",
+            pr_state=_pr_state(state="OPEN", attention_state="ci_failing"),
+            auto_fix_ci_fired_at=stamp,
+        )
+        save_dev_queue(DevQueueStore(tasks=[address, ci]))
+        results = _check_review_recipe_liveness(clients)
+        warned = [r for r in results if r.warn]
+        # Only the unfired address_review group warns; the fired auto_fix_ci
+        # group does not.
+        assert len(warned) == 1
+        assert "address_review" in warned[0].name
+
+    def test_dev_queue_load_failure_degrades_gracefully(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_config_enabled(monkeypatch)
+
+        def _boom() -> object:
+            msg = "dev queue unreadable"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.doctor.load_dev_queue", _boom)
+        results = _check_review_recipe_liveness(_liveness_clients())
+        assert all(not r.warn for r in results)
+
+    def test_orchestrator_config_load_failure_degrades_to_default(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore
+
+        def _boom() -> object:
+            msg = "config unreadable"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.doctor.load_orchestrator_config", _boom)
+        save_dev_queue(DevQueueStore(tasks=[_cr_liveness_task()]))
+        # Default OrchestratorConfig has review_recipes_enabled=False → no warn.
+        results = _check_review_recipe_liveness(_liveness_clients())
+        assert all(not r.warn for r in results)
+
+    def test_orchestrator_config_validation_error_degrades_to_default(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The realistic bad-YAML failure mode is ConfigValidationError (a
+        CwError), not OSError — load_orchestrator_config raises it directly."""
+        from cw.dev_queue import save_dev_queue
+        from cw.exceptions import ConfigValidationError
+        from cw.models import DevQueueStore
+
+        def _boom() -> object:
+            msg = "orchestrator.yaml: bad field"
+            raise ConfigValidationError(msg)
+
+        monkeypatch.setattr("cw.doctor.load_orchestrator_config", _boom)
+        save_dev_queue(DevQueueStore(tasks=[_cr_liveness_task()]))
+        results = _check_review_recipe_liveness(_liveness_clients())
+        assert all(not r.warn for r in results)
+
+    def test_dev_queue_validation_error_degrades_gracefully(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The realistic corrupt-dev_queue failure mode is a pydantic
+        ValidationError from model_validate, not OSError."""
+        from cw.models import DevQueueStore
+
+        _patch_config_enabled(monkeypatch)
+
+        def _boom() -> object:
+            # A malformed task dict raises a genuine pydantic ValidationError.
+            return DevQueueStore.model_validate({"tasks": ["not-a-task-dict"]})
+
+        monkeypatch.setattr("cw.doctor.load_dev_queue", _boom)
+        results = _check_review_recipe_liveness(_liveness_clients())
+        assert all(not r.warn for r in results)
+
+
+class TestCheckAttentionStateCensus:
+    """_check_attention_state_census warns on non-draft PRs missing a state."""
+
+    def _candidate(
+        self,
+        attention_state: str | None,
+        *,
+        is_draft: bool = False,
+        state: str = "OPEN",
+        ticket_id: str = "GEN-1",
+        pr_num: int = 1,
+    ) -> TicketTask:
+        from tests.test_pr_hydrate import _pr_state
+        from tests.test_reconcile_gate_recipes import _make_task
+
+        return _make_task(
+            ticket_id=ticket_id,
+            pr_url=f"https://github.com/acme/widgets/pull/{pr_num}",
+            pr_state=_pr_state(
+                state=state, attention_state=attention_state, is_draft=is_draft
+            ),
+        )
+
+    def test_no_candidates_no_warn(self, tmp_config_dir: Path) -> None:
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore
+
+        save_dev_queue(DevQueueStore(tasks=[]))
+        assert not _check_attention_state_census().warn
+
+    def test_all_hydrated_non_draft_have_state_no_warn(
+        self, tmp_config_dir: Path
+    ) -> None:
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore
+
+        save_dev_queue(DevQueueStore(tasks=[self._candidate("changes_requested")]))
+        assert not _check_attention_state_census().warn
+
+    def test_non_draft_none_attention_state_warns(self, tmp_config_dir: Path) -> None:
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore
+
+        save_dev_queue(DevQueueStore(tasks=[self._candidate(None)]))
+        result = _check_attention_state_census()
+        assert result.warn
+        assert "GEN-1" in result.detail
+
+    def test_draft_none_attention_state_no_warn(self, tmp_config_dir: Path) -> None:
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore
+
+        save_dev_queue(DevQueueStore(tasks=[self._candidate(None, is_draft=True)]))
+        assert not _check_attention_state_census().warn
+
+    def test_un_hydrated_row_excluded_from_census(self, tmp_config_dir: Path) -> None:
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore
+        from tests.test_reconcile_gate_recipes import _make_task
+
+        task = _make_task(
+            pr_url="https://github.com/acme/widgets/pull/1", pr_state=None
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        assert not _check_attention_state_census().warn
+
+    def test_terminal_pr_excluded_by_is_candidate(self, tmp_config_dir: Path) -> None:
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore
+
+        save_dev_queue(DevQueueStore(tasks=[self._candidate(None, state="MERGED")]))
+        assert not _check_attention_state_census().warn
+
+    def test_dev_queue_load_failure_degrades_gracefully(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom() -> object:
+            msg = "unreadable"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.doctor.load_dev_queue", _boom)
+        assert not _check_attention_state_census().warn
+
+    def test_dev_queue_validation_error_degrades_gracefully(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The realistic corrupt-dev_queue failure mode is a pydantic
+        ValidationError from model_validate, not OSError."""
+        from cw.models import DevQueueStore
+
+        def _boom() -> object:
+            return DevQueueStore.model_validate({"tasks": ["not-a-task-dict"]})
+
+        monkeypatch.setattr("cw.doctor.load_dev_queue", _boom)
+        assert not _check_attention_state_census().warn
+
+
+class TestRunDoctorReviewRecipeWiring:
+    """run_doctor registers both #1201 checks."""
+
+    def test_run_doctor_includes_review_recipe_liveness_and_census_checks(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        _stub_claude_version_ok(monkeypatch)
+        report = run_doctor()
+        names = [c.name for c in report.checks]
+        assert any(n.startswith("review-recipe-liveness") for n in names)
+        assert any(n == "attention-state-census" for n in names)
