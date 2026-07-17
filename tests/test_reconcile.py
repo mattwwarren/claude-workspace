@@ -10365,7 +10365,8 @@ class TestCompleteTimedOutMergedTasks:
         def _capture(
             tid: str, *, branch: str, cwd: Path | None = None, **_kw: object
         ) -> tuple[bool, bool]:
-            assert cwd is not None and cwd == Path("/tmp/ws-feat")
+            assert cwd is not None
+            assert cwd == Path("/tmp/ws-feat")
             return True, True
 
         monkeypatch.setattr("cw.reconcile._deps.pr_is_merged_for_ticket", _capture)
@@ -19052,7 +19053,7 @@ class TestWorldStateCheckBeforeRevert:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """reconcile() pre-pass resolves cwd from the client's workspace_path (#1269)."""
+        """reconcile() pre-pass resolves cwd from client's workspace_path (#1269)."""
         ticket_id = "reconcile-cwd-1"
         worktree = tmp_path / "wt-reconcile-cwd"
         started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -19081,7 +19082,8 @@ class TestWorldStateCheckBeforeRevert:
         def _capture(
             tid: str, *, branch: str, cwd: Path | None = None, **_kw: object
         ) -> tuple[bool, bool]:
-            assert cwd is not None and cwd == Path("/tmp/ws-feat")
+            assert cwd is not None
+            assert cwd == Path("/tmp/ws-feat")
             return False, True
 
         monkeypatch.setattr("cw.reconcile._deps.pr_is_merged_for_ticket", _capture)
@@ -19239,9 +19241,7 @@ class TestWorldStateCheckBeforeRevert:
             consumer=f"test-{ticket_id}-phantom-reap-guard",
             event_types=[OrchestratorEventType.SESSION_COMPLETED],
         )
-        assert not any(
-            e.payload.get("reason") == "phantom_reap_merged" for e in events
-        )
+        assert not any(e.payload.get("reason") == "phantom_reap_merged" for e in events)
 
 
 # ---------------------------------------------------------------------------
@@ -23096,10 +23096,7 @@ def test_local_harvest_fires_when_daemon_query_errors(
     def _boom() -> list[dict[str, object]]:
         raise subprocess.CalledProcessError(1, ["claude", "agents", "--json"])
 
-    def _fake_pr_merged(
-        _tid: str, branch: str | None = None
-    ) -> tuple[bool | None, bool]:
-        del branch
+    def _fake_pr_merged(_tid: str, **_kw: object) -> tuple[bool | None, bool]:
         return (None, True)
 
     monkeypatch.setattr("cw.reconcile.core._claude_agents_json", _boom)
