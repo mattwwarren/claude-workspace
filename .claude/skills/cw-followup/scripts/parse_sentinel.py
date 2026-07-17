@@ -53,6 +53,7 @@ from cw._util import _iter_sentinel_text_blocks
 from cw.auto_dev_result import (
     AutoDevResult,
     BlockedResult,
+    _is_placeholder_sentinel_text,
     extract_block,
     is_documented_example,
     parse_stdout,
@@ -178,7 +179,10 @@ def main() -> int:
     last_result: AutoDevResult | BlockedResult | None = None
     for text in _iter_sentinel_text_blocks(transcript_path):
         blocks_scanned += 1
-        if extract_block(text) is not None:
+        block = extract_block(text)
+        if block is not None:
+            if _is_placeholder_sentinel_text(block):
+                continue
             candidate = parse_stdout(text)
             if isinstance(candidate, AutoDevResult) and is_documented_example(
                 candidate
