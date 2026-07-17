@@ -19,16 +19,18 @@ from __future__ import annotations
 
 import fcntl
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
+from freezegun import freeze_time
 from pydantic import ValidationError
 
 from cw.config import dev_queue_lock as _dev_queue_lock_path
 from cw.config import load_effective_clients, sessions_lock, sessions_lock_file
 from cw.dev_queue import load_dev_queue, save_dev_queue
-from cw.events import read_events
+from cw.events import read_events, record_event
 from cw.exceptions import CwError, SessionsLockReentryError
 from cw.models import (
     ClientConfig,
@@ -41,8 +43,10 @@ from cw.models import (
 from cw.reconcile import reconcile
 from cw.reconcile.review_recipes import (
     RECIPE_ADDRESS_REVIEW,
+    RECIPE_ATTENTION_STATES,
     RECIPE_AUTO_FIX_CI,
     RECIPE_ESCALATE_MERGE_BLOCK,
+    RECIPE_FIRED_AT_GETTERS,
     RECIPE_REQUEST_REVIEWER,
     ReviewRecipeCandidate,
     _act_address_review,
@@ -52,10 +56,15 @@ from cw.reconcile.review_recipes import (
     _detect_address_review,
     _detect_auto_fix_ci,
     _detect_escalate_merge_block,
+    _detect_repeat_fire_counts,
     _detect_request_reviewer,
+    _record_pr_action_taken,
     resolve_outbound_consent_allowed,
     resolve_review_recipe_enabled,
     run_review_recipes,
+)
+from cw.reconcile.review_recipes import (
+    _detect_repeat_fire_counts as _real_detect_repeat_fire_counts,
 )
 from cw.review_strategy import ReviewStrategy
 
@@ -1660,3 +1669,312 @@ class TestResolveOutboundConsentAllowed:
             )
             is False
         )
+
+
+# ---------------------------------------------------------------------------
+# #1201 — repeat-fire burst detector + fired-at getters (anomaly layer)
+# ---------------------------------------------------------------------------
+
+_REPEAT_FIRE_REASON = "review_recipe_repeat_fire"
+
+
+def _record_taken(ticket_id: str, recipe: str, *, client: str = "acme") -> None:
+    """Seed one PR_ACTION_TAKEN event for (ticket_id, recipe) at the frozen now."""
+    record_event(
+        OrchestratorEventType.PR_ACTION_TAKEN,
+        {
+            "ticket_id": ticket_id,
+            "recipe": recipe,
+            "client": client,
+        },
+        correlation_id=ticket_id,
+    )
+
+
+def _repeat_fire_payload_base(
+    ticket_id: str = "GEN-1", recipe: str = RECIPE_ADDRESS_REVIEW
+) -> dict[str, object]:
+    return {
+        "client": "acme",
+        "lane": "default",
+        "recipe": recipe,
+        "ticket_id": ticket_id,
+        "pr_url": "https://github.com/acme/widgets/pull/42",
+        "attention_state": "changes_requested",
+        "session_id": "sess-1",
+        "evidence_snapshot": {},
+    }
+
+
+class TestDetectRepeatFireCounts:
+    """_detect_repeat_fire_counts: stateless per-(ticket, recipe) window count."""
+
+    def test_empty_inbox_returns_empty_dict(self, tmp_config_dir: Path) -> None:
+        assert _detect_repeat_fire_counts(config=_config()) == {}
+
+    def test_counts_within_window_grouped_by_ticket_and_recipe(
+        self, tmp_config_dir: Path
+    ) -> None:
+        base = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+        with freeze_time(base):
+            _record_taken("GEN-1", RECIPE_ADDRESS_REVIEW)
+            _record_taken("GEN-1", RECIPE_ADDRESS_REVIEW)
+            _record_taken("GEN-1", RECIPE_AUTO_FIX_CI)
+            _record_taken("GEN-2", RECIPE_ADDRESS_REVIEW)
+        counts = _detect_repeat_fire_counts(
+            config=_config(), now=base + timedelta(minutes=1)
+        )
+        assert counts[("GEN-1", RECIPE_ADDRESS_REVIEW)] == 2
+        assert counts[("GEN-1", RECIPE_AUTO_FIX_CI)] == 1
+        assert counts[("GEN-2", RECIPE_ADDRESS_REVIEW)] == 1
+
+    def test_events_outside_window_excluded(self, tmp_config_dir: Path) -> None:
+        base = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+        with freeze_time(base - timedelta(minutes=30)):
+            _record_taken("GEN-1", RECIPE_ADDRESS_REVIEW)  # 30 min ago — excluded
+        with freeze_time(base):
+            _record_taken("GEN-1", RECIPE_ADDRESS_REVIEW)  # inside — counted
+        counts = _detect_repeat_fire_counts(
+            config=_config(), now=base + timedelta(minutes=1)
+        )
+        assert counts[("GEN-1", RECIPE_ADDRESS_REVIEW)] == 1
+
+    def test_read_events_failure_returns_empty_dict(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom(**_kwargs: Any) -> list[Any]:
+            raise OSError("inbox unreadable")
+
+        monkeypatch.setattr(
+            "cw.reconcile.review_recipes.read_events", _boom
+        )
+        assert _detect_repeat_fire_counts(config=_config()) == {}
+
+
+class TestRecordPrActionTaken:
+    """_record_pr_action_taken: always records, escalates on exact crossing."""
+
+    def test_records_event_regardless_of_count(self, tmp_config_dir: Path) -> None:
+        _record_pr_action_taken(
+            _repeat_fire_payload_base(),
+            "GEN-1",
+            RECIPE_ADDRESS_REVIEW,
+            config=_config(),
+            repeat_fire_counts={},
+        )
+        taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+        assert len(taken) == 1
+        assert taken[0].correlation_id == "GEN-1"
+
+    def test_exact_crossing_emits_session_needs_attention(
+        self, tmp_config_dir: Path
+    ) -> None:
+        cfg = _config(review_recipe_repeat_fire_threshold=5)
+        counts = {("GEN-1", RECIPE_ADDRESS_REVIEW): 4}  # prior 4 + this = 5
+        _record_pr_action_taken(
+            _repeat_fire_payload_base(),
+            "GEN-1",
+            RECIPE_ADDRESS_REVIEW,
+            config=cfg,
+            repeat_fire_counts=counts,
+        )
+        attn = read_events(
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION]
+        )
+        assert len(attn) == 1
+        assert attn[0].payload["paused_status"] == _REPEAT_FIRE_REASON
+        assert attn[0].payload["ticket_id"] == "GEN-1"
+        assert attn[0].payload["recipe"] == RECIPE_ADDRESS_REVIEW
+        assert attn[0].payload["client"] == "acme"
+        assert attn[0].payload["repeat_fire_count"] == 5
+
+    def test_below_threshold_no_attention_event(self, tmp_config_dir: Path) -> None:
+        cfg = _config(review_recipe_repeat_fire_threshold=5)
+        counts = {("GEN-1", RECIPE_ADDRESS_REVIEW): 2}  # prior 2 + this = 3
+        _record_pr_action_taken(
+            _repeat_fire_payload_base(),
+            "GEN-1",
+            RECIPE_ADDRESS_REVIEW,
+            config=cfg,
+            repeat_fire_counts=counts,
+        )
+        assert (
+            read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+            == []
+        )
+
+    def test_past_threshold_no_re_fire(self, tmp_config_dir: Path) -> None:
+        cfg = _config(review_recipe_repeat_fire_threshold=5)
+        counts = {("GEN-1", RECIPE_ADDRESS_REVIEW): 5}  # prior 5 + this = 6 > 5
+        _record_pr_action_taken(
+            _repeat_fire_payload_base(),
+            "GEN-1",
+            RECIPE_ADDRESS_REVIEW,
+            config=cfg,
+            repeat_fire_counts=counts,
+        )
+        assert (
+            read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+            == []
+        )
+
+    def test_missing_key_defaults_to_zero(self, tmp_config_dir: Path) -> None:
+        cfg = _config(review_recipe_repeat_fire_threshold=1)  # 0 + this = 1 == 1
+        _record_pr_action_taken(
+            _repeat_fire_payload_base(),
+            "GEN-1",
+            RECIPE_ADDRESS_REVIEW,
+            config=cfg,
+            repeat_fire_counts={},
+        )
+        attn = read_events(
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION]
+        )
+        assert len(attn) == 1
+
+    def test_none_config_records_without_burst_check(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A direct _act_* call (no burst wiring) still records PR_ACTION_TAKEN."""
+        _record_pr_action_taken(
+            _repeat_fire_payload_base(),
+            "GEN-1",
+            RECIPE_ADDRESS_REVIEW,
+            config=None,
+            repeat_fire_counts=None,
+        )
+        assert (
+            len(read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])) == 1
+        )
+        assert (
+            read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+            == []
+        )
+
+
+class TestRecipeFiredAtGetters:
+    """RECIPE_FIRED_AT_GETTERS reads the correct per-recipe latch field."""
+
+    def test_getters_cover_all_four_recipes(self) -> None:
+        assert set(RECIPE_FIRED_AT_GETTERS) == {
+            RECIPE_ADDRESS_REVIEW,
+            RECIPE_AUTO_FIX_CI,
+            RECIPE_REQUEST_REVIEWER,
+            RECIPE_ESCALATE_MERGE_BLOCK,
+        }
+        # 1:1 with the attention-state routing map.
+        assert set(RECIPE_FIRED_AT_GETTERS) == set(RECIPE_ATTENTION_STATES)
+
+    @pytest.mark.parametrize(
+        ("recipe", "field"),
+        [
+            (RECIPE_ADDRESS_REVIEW, "address_review_fired_at"),
+            (RECIPE_AUTO_FIX_CI, "auto_fix_ci_fired_at"),
+            (RECIPE_REQUEST_REVIEWER, "request_reviewer_fired_at"),
+            (RECIPE_ESCALATE_MERGE_BLOCK, "escalate_merge_block_fired_at"),
+        ],
+    )
+    def test_getters_read_the_correct_field(self, recipe: str, field: str) -> None:
+        stamp = datetime(2026, 7, 17, tzinfo=UTC)
+        task = _make_task(**{field: stamp})
+        assert RECIPE_FIRED_AT_GETTERS[recipe](task) == stamp
+        # A row with no latch set reads None (catches a copy-paste field mixup).
+        assert RECIPE_FIRED_AT_GETTERS[recipe](_make_task()) is None
+
+
+class TestRunReviewRecipesRepeatFire:
+    """Integration: run_review_recipes wires the burst detector once per tick."""
+
+    def _enqueue_cr_task(self, worktree: Path) -> TicketTask:
+        task = _cr_task(
+            review_recipes={RECIPE_ADDRESS_REVIEW: True}, worktree_path=worktree
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        return task
+
+    def _rearm_latch(self) -> None:
+        """Simulate a fresh changes_requested episode by clearing the latch."""
+        store = load_dev_queue()
+        store.tasks[0].address_review_fired_at = None
+        save_dev_queue(store)
+
+    def test_run_review_recipes_repeat_fire_triggers_attention_on_fifth_tick(
+        self, tmp_config_dir: Path, make_git_repo: Any, stub_spawn: _SpawnRecorder
+    ) -> None:
+        _write_acme_clients_yaml(tmp_config_dir)
+        self._enqueue_cr_task(make_git_repo("repeat-fire"))
+        base = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+        for i in range(5):
+            with freeze_time(base + timedelta(minutes=i)):
+                self._rearm_latch()
+                run_review_recipes(config=_config())
+        taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+        assert len(taken) == 5
+        attn = read_events(
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION]
+        )
+        assert len(attn) == 1
+        assert attn[0].payload["recipe"] == RECIPE_ADDRESS_REVIEW
+        assert attn[0].payload["repeat_fire_count"] == 5
+
+    def test_run_review_recipes_threshold_configurable(
+        self, tmp_config_dir: Path, make_git_repo: Any, stub_spawn: _SpawnRecorder
+    ) -> None:
+        _write_acme_clients_yaml(tmp_config_dir)
+        self._enqueue_cr_task(make_git_repo("threshold"))
+        base = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+        for i in range(2):
+            with freeze_time(base + timedelta(minutes=i)):
+                self._rearm_latch()
+                run_review_recipes(
+                    config=_config(review_recipe_repeat_fire_threshold=2)
+                )
+        attn = read_events(
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION]
+        )
+        assert len(attn) == 1
+        assert attn[0].payload["repeat_fire_count"] == 2
+
+    def test_run_review_recipes_repeat_fire_counts_computed_once_per_tick(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Any,
+        stub_spawn: _SpawnRecorder,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _write_acme_clients_yaml(tmp_config_dir)
+        self._enqueue_cr_task(make_git_repo("once-per-tick"))
+        calls: list[dict[str, Any]] = []
+
+        def _spy(**kwargs: Any) -> dict[tuple[str, str], int]:
+            calls.append(kwargs)
+            return _real_detect_repeat_fire_counts(**kwargs)
+
+        monkeypatch.setattr(
+            "cw.reconcile.review_recipes._detect_repeat_fire_counts", _spy
+        )
+        run_review_recipes(config=_config())
+        # One detector call per tick — NOT once per recipe (four recipes run).
+        assert len(calls) == 1
+
+    def test_run_review_recipes_repeat_fire_isolated_per_recipe(
+        self, tmp_config_dir: Path, make_git_repo: Any, stub_spawn: _SpawnRecorder
+    ) -> None:
+        _write_acme_clients_yaml(tmp_config_dir)
+        task = self._enqueue_cr_task(make_git_repo("isolated"))
+        base = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+        with freeze_time(base):
+            # 4 prior address_review fires + 4 unrelated auto_fix_ci fires.
+            for _ in range(4):
+                _record_taken(task.ticket_id, RECIPE_ADDRESS_REVIEW)
+            for _ in range(4):
+                _record_taken(task.ticket_id, RECIPE_AUTO_FIX_CI)
+        with freeze_time(base + timedelta(minutes=1)):
+            run_review_recipes(config=_config())
+        attn = read_events(
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION]
+        )
+        # Only address_review crossed its threshold; auto_fix_ci counts don't
+        # leak into the address_review key.
+        assert len(attn) == 1
+        assert attn[0].payload["recipe"] == RECIPE_ADDRESS_REVIEW
