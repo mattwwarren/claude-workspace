@@ -379,6 +379,16 @@ class TestDetect:
         assert snapshot is not None
         assert _predicate_holds(snapshot) is False
 
+    def test_bool_agents_run_fails_closed(self) -> None:
+        """``bool`` is a subclass of ``int`` in Python, so a malformed
+        ``agents_run: true`` payload must not slip past the isinstance
+        guard via truthy coercion."""
+        result = _clean_result()
+        result["review"]["agents_run"] = True
+        snapshot = _clean_review_snapshot(result)
+        assert snapshot is not None
+        assert _predicate_holds(snapshot) is False
+
     def test_1091_shaped_corrected_snapshot_predicate_holds(self) -> None:
         """#1104 regression: once Stage 1 correctly classifies a CI/CD content
         change as non-pipeline-logic (forbidden_touched=False), the existing

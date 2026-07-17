@@ -283,7 +283,9 @@ def _predicate_holds(snapshot: dict[str, object]) -> bool:
     explicit ``isinstance`` check (rather than a bare ``> 0`` comparison)
     since *snapshot* is typed ``dict[str, object]`` — a malformed
     non-int producer value must fail closed, not raise or pass via truthy
-    coercion.
+    coercion. ``bool`` is excluded explicitly: it is a subclass of ``int``
+    in Python, so a malformed ``agents_run: true`` payload would otherwise
+    satisfy both ``isinstance(agents_run, int)`` and ``agents_run > 0``.
     """
     agents_run = snapshot["agents_run"]
     return (
@@ -292,6 +294,7 @@ def _predicate_holds(snapshot: dict[str, object]) -> bool:
         and snapshot["recommendation"] == _RECOMMENDATION_PROCEED
         and snapshot["forbidden_touched"] is False
         and isinstance(agents_run, int)
+        and not isinstance(agents_run, bool)
         and agents_run > 0
     )
 
