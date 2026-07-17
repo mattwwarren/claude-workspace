@@ -19760,6 +19760,10 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
         assert t.status == QueueItemStatus.FAILED
         assert t.disposition == "abandoned"
+        # GitHub #1266: the last_result diagnostic write is scoped to the
+        # :913 unrecognized-reason catch-all only -- this deterministic
+        # branch (:892-894) is untouched and must leave it unset.
+        assert t.last_result is None
 
     def test_running_task_blocked_result_validation_failed_at_cap_returns_routed_false(
         self, tmp_config_dir: Path
@@ -19790,6 +19794,10 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
         assert t.status == QueueItemStatus.FAILED
         assert t.disposition == "abandoned"
+        # GitHub #1266: the last_result diagnostic write is scoped to the
+        # :913 unrecognized-reason catch-all only -- this validation_failed
+        # branch (:895-903) is untouched and must leave it unset.
+        assert t.last_result is None
 
     def test_running_task_blocked_result_unknown_reason_returns_routed_false(
         self, tmp_config_dir: Path
@@ -19825,6 +19833,45 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
         assert t.status == QueueItemStatus.FAILED
         assert t.disposition == "abandoned"
+        # GitHub #1266: the :913 catch-all now persists the rejected sentinel.
+        assert t.last_result == sentinel.model_dump(mode="json")
+
+    def test_route_blocked_result_catch_all_writes_last_result(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """GitHub #1266: the :913 catch-all persists the rejected sentinel.
+
+        Calls _route_blocked_result_to_task directly with an
+        unrecognized-reason BlockedResult. Confirms the existing FAILED/
+        abandoned landing is unchanged AND the new diagnostic write lands
+        so an operator can distinguish "no sentinel yet" (last_result=None)
+        from "a rejected sentinel landed this FAILED."
+        """
+        from cw.reconcile._shared import _route_blocked_result_to_task
+
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        target = TicketTask(
+            ticket_id="GH-1266-catchall",
+            client="staged-client",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-1266-catchall",
+            stage=Stage.IMPL,
+            attempts=1,
+        )
+        sentinel = BlockedResult(
+            blocker=Blocker(
+                stage="unknown",
+                reason="status_unknown",
+                details="test: unresolved placeholder sentinel",
+            )
+        )
+
+        routed = _route_blocked_result_to_task(target, sentinel)
+
+        assert routed is False
+        assert target.status == QueueItemStatus.FAILED
+        assert target.disposition == "abandoned"
+        assert target.last_result == sentinel.model_dump(mode="json")
 
     def test_apply_sentinel_to_task_race_already_failed_task_returns_routed_false(
         self, tmp_config_dir: Path
@@ -20335,6 +20382,151 @@ def test_parse_sentinel_from_blocks_example_only_returns_none(
 
     result = _parse_sentinel_from_blocks(path)
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# _parse_sentinel_from_blocks — placeholder doc-example skip (GitHub #1266)
+# ---------------------------------------------------------------------------
+
+# Verbatim auto-dev-impl.md "Stage 2 Completion" worked example: ticket_id
+# and status are angle-bracket placeholders. Fails schema validation (status
+# not a known enum value) and, absent the fix, would parse to
+# BlockedResult(status_unknown) -- landing a RUNNING task terminal-FAILED.
+_PLACEHOLDER_EXAMPLE_BLOCK = (
+    "<<<AUTO_DEV_RESULT\n"
+    "{\n"
+    '  "schema_version": 4,\n'
+    '  "ticket_id": "<ticket-id>",\n'
+    '  "status": "<stage_complete | blocked>",\n'
+    '  "stage_reached": "stage2_impl",\n'
+    '  "scope": {"tier": "<small|large>", "files": 0, "lines_estimate": 0,'
+    ' "lines_actual": 0, "forbidden_touched": false},\n'
+    '  "plan_source": "<github_issue_existing | generated | free_text | none>",\n'
+    '  "branch": "<branch-name>",\n'
+    '  "worktree_path": "<session worktree path>",\n'
+    '  "fork_point_sha": "<fork point sha>",\n'
+    '  "commits": ["<sha1>", "<sha2>"],\n'
+    '  "pr": null,\n'
+    '  "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},\n'
+    '  "health": {\n'
+    '    "lowest_agent_confidence": "<HIGH|MEDIUM|LOW>",\n'
+    '    "any_incomplete_risk": false,\n'
+    '    "shortcuts": [],\n'
+    '    "recommendation": "PROCEED",\n'
+    '    "downgrade_applied": false,\n'
+    '    "fix_loop_escalated": false\n'
+    "  },\n"
+    '  "friction_highlights": [],\n'
+    '  "ambiguities": [],\n'
+    '  "blocker": null,\n'
+    '  "prior_pr_warnings": [],\n'
+    '  "next_actions": []\n'
+    "}\n"
+    "AUTO_DEV_RESULT>>>"
+)
+
+
+def _write_raw_sentinel_transcript(path: Path, texts: list[str]) -> None:
+    """Write a transcript at *path*, one assistant-text record per entry.
+
+    Takes pre-built raw sentinel-block text directly rather than a payload
+    dict -- GitHub #1266's placeholder tests need exact fidelity to the
+    verbatim doc-example text, which is not valid against any AutoDevResult
+    payload shape (its values are unresolved template placeholders).
+    """
+    records = [
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": f"narrative\n{text}"}],
+            },
+        }
+        for text in texts
+    ]
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+
+def test_parse_sentinel_from_blocks_placeholder_example_only_returns_none(
+    tmp_path: Path,
+) -> None:
+    """GitHub #1266: only the doc-example placeholder block present -> None.
+
+    Absent the raw-text pre-parse skip, this would parse to
+    BlockedResult(status_unknown) since is_documented_example() cannot
+    inspect a BlockedResult's fields (it has none matching the check).
+    """
+    from cw.reconcile._shared import _parse_sentinel_from_blocks
+
+    path = tmp_path / "transcript.jsonl"
+    _write_raw_sentinel_transcript(path, [_PLACEHOLDER_EXAMPLE_BLOCK])
+
+    assert _parse_sentinel_from_blocks(path) is None
+
+
+def test_parse_sentinel_from_blocks_placeholder_then_real_returns_real(
+    tmp_path: Path,
+) -> None:
+    """GitHub #1266: placeholder block then a real sentinel -> the real result.
+
+    Confirms last-match semantics survive the new placeholder skip.
+    """
+    from cw.reconcile._shared import _parse_sentinel_from_blocks
+
+    path = tmp_path / "transcript.jsonl"
+    real_payload = _stage_complete_payload()
+    real_frame = f"<<<AUTO_DEV_RESULT\n{json.dumps(real_payload)}\nAUTO_DEV_RESULT>>>"
+    _write_raw_sentinel_transcript(path, [_PLACEHOLDER_EXAMPLE_BLOCK, real_frame])
+
+    result = _parse_sentinel_from_blocks(path)
+    assert isinstance(result, AutoDevResult)
+    assert result.status == "stage_complete"
+
+
+def test_placeholder_sentinel_does_not_fail_running_task(tmp_path: Path) -> None:
+    """GitHub #1266 acceptance test: a placeholder-only transcript must never
+    reach _route_blocked_result_to_task and land a RUNNING task FAILED.
+
+    Two-part proof:
+    1. Directly parsing the verbatim placeholder text (bypassing the scan
+       loop's skip) confirms it WOULD produce BlockedResult(status_unknown)
+       -- documents the bug mechanism this fix closes.
+    2. The scan loop (_parse_sentinel_from_blocks) returns None for a
+       placeholder-only transcript, so callers take the "no sentinel yet"
+       branch and never call _route_blocked_result_to_task at all -- the
+       task cannot be routed to FAILED off this block.
+    """
+    from cw.reconcile._shared import _parse_sentinel_from_blocks
+
+    # Part 1: prove the bug mechanism (unresolved placeholder -> status_unknown).
+    direct = parse_stdout(_PLACEHOLDER_EXAMPLE_BLOCK)
+    assert isinstance(direct, BlockedResult)
+    assert direct.blocker.reason == "status_unknown"
+
+    # Part 2: the scan loop must never surface it as a routable result.
+    path = tmp_path / "transcript.jsonl"
+    _write_raw_sentinel_transcript(path, [_PLACEHOLDER_EXAMPLE_BLOCK])
+    assert _parse_sentinel_from_blocks(path) is None
+
+
+def test_1258_shape_placeholder_then_delayed_real_sentinel(tmp_path: Path) -> None:
+    """GitHub #1266 / #1258 timeline: placeholder at T, real sentinel at T+1.
+
+    A worker quotes the doc example while narrating, then emits the real
+    stage_complete sentinel later in the same transcript -- the scan must
+    return the real result, not None and not the placeholder's BlockedResult.
+    """
+    from cw.reconcile._shared import _parse_sentinel_from_blocks
+
+    path = tmp_path / "transcript.jsonl"
+    real_payload = _stage_complete_payload()
+    real_frame = f"<<<AUTO_DEV_RESULT\n{json.dumps(real_payload)}\nAUTO_DEV_RESULT>>>"
+    _write_raw_sentinel_transcript(path, [_PLACEHOLDER_EXAMPLE_BLOCK, real_frame])
+
+    result = _parse_sentinel_from_blocks(path)
+    assert isinstance(result, AutoDevResult)
+    assert result.status == "stage_complete"
+    assert result.ticket_id == real_payload["ticket_id"]
 
 
 class TestFinalizeBlocked:

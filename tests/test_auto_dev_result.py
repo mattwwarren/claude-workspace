@@ -28,6 +28,7 @@ from cw.auto_dev_result import (
     BlockedResult,
     Health,
     Review,
+    _is_placeholder_sentinel_text,
     extract_block,
     is_documented_example,
     parse_stdout,
@@ -3531,6 +3532,75 @@ def test_is_documented_example_returns_false_for_non_example() -> None:
     }
     result = AutoDevResult.model_validate(p)
     assert not is_documented_example(result)
+
+
+# ---------------------------------------------------------------------------
+# _is_placeholder_sentinel_text — raw-text placeholder detection (GitHub #1266)
+# ---------------------------------------------------------------------------
+
+_VERBATIM_IMPL_EXAMPLE_BLOCK = (
+    "<<<AUTO_DEV_RESULT\n"
+    "{\n"
+    '  "schema_version": 4,\n'
+    '  "ticket_id": "<ticket-id>",\n'
+    '  "status": "<stage_complete | blocked>",\n'
+    '  "stage_reached": "stage2_impl",\n'
+    '  "scope": {"tier": "<small|large>", "files": 0, "lines_estimate": 0,'
+    ' "lines_actual": 0, "forbidden_touched": false},\n'
+    '  "plan_source": "<github_issue_existing | generated | free_text | none>",\n'
+    '  "branch": "<branch-name>",\n'
+    '  "worktree_path": "<session worktree path>",\n'
+    '  "fork_point_sha": "<fork point sha>",\n'
+    '  "commits": ["<sha1>", "<sha2>"],\n'
+    '  "pr": null,\n'
+    '  "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},\n'
+    '  "health": {\n'
+    '    "lowest_agent_confidence": "<HIGH|MEDIUM|LOW>",\n'
+    '    "any_incomplete_risk": false,\n'
+    '    "shortcuts": [],\n'
+    '    "recommendation": "PROCEED",\n'
+    '    "downgrade_applied": false,\n'
+    '    "fix_loop_escalated": false\n'
+    "  },\n"
+    '  "friction_highlights": [],\n'
+    '  "ambiguities": [],\n'
+    '  "blocker": null,\n'
+    '  "prior_pr_warnings": [],\n'
+    '  "next_actions": []\n'
+    "}\n"
+    "AUTO_DEV_RESULT>>>"
+)
+
+
+def test_is_placeholder_sentinel_text_true_for_both_placeholders() -> None:
+    """Raw block text with placeholder ticket_id and status -> True."""
+    raw = '{"ticket_id": "<ticket-id>", "status": "<stage_complete | blocked>"}'
+    assert _is_placeholder_sentinel_text(raw)
+
+
+def test_is_placeholder_sentinel_text_false_for_real_status_only() -> None:
+    """Placeholder ticket_id but a real (non-placeholder) status -> False.
+
+    Guards the AND combinator: both keys must be placeholders, not just one.
+    """
+    raw = '{"ticket_id": "<ticket-id>", "status": "stage_complete"}'
+    assert not _is_placeholder_sentinel_text(raw)
+
+
+def test_is_placeholder_sentinel_text_false_for_real_sentinel() -> None:
+    """A genuine stage_complete payload -> False."""
+    raw = _wrap_sentinel(_stage_complete_payload())
+    assert not _is_placeholder_sentinel_text(raw)
+
+
+def test_is_placeholder_sentinel_text_true_for_verbatim_impl_example() -> None:
+    """The verbatim auto-dev-impl.md Stage 2 Completion block -> True.
+
+    Pins the acceptance criterion's literal text (GitHub #1266); also
+    exercises the doc file's actual whitespace ("ticket_id": "<..." with a
+    space after the colon).
+    """
+    assert _is_placeholder_sentinel_text(_VERBATIM_IMPL_EXAMPLE_BLOCK)
 
 
 class TestReviewDeferred:
