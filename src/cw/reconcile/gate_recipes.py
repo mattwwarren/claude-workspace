@@ -12,7 +12,8 @@ loop is attention-worthy.
 **P1+P2 scope (GitHub #1065):** the ``auto_approve_clean_review`` recipe. It
 auto-approves a ``review_pending_approval`` gate when the review came back
 completely clean — no MUST_FIX findings, nothing deferred, health
-recommendation PROCEED, and no forbidden-area touch.
+recommendation PROCEED, no forbidden-area touch, and at least one reviewer
+agent actually ran (``agents_run > 0``).
 
 **P3 scope (GitHub #1066):** the ``auto_adopt_clean_plan`` recipe. It
 auto-adopts a ``plan_pending_approval`` gate when the plan-of-record carries
@@ -176,6 +177,7 @@ The review met the clean-review predicate and was approved automatically
 - deferred: {deferred}
 - recommendation: {recommendation}
 - forbidden_touched: {forbidden_touched}
+- agents_run: {agents_run}
 
 See event `GATE_AUTO_APPROVED` for the full audit trail.
 """
@@ -218,9 +220,9 @@ class GateRecipeCandidate:
     Same shape as :class:`cw.reconcile.concierge.ConciergeCandidate` plus a
     ``lane`` field: the ``GATE_AUTO_APPROVED`` event payload carries the row's
     lane, so the candidate captures it at detect time. ``evidence`` carries the
-    ``predicate_snapshot`` — the exact four field values that licensed the fire
+    ``predicate_snapshot`` — the exact five field values that licensed the fire
     (``must_fix_initial``, ``deferred``, ``recommendation``,
-    ``forbidden_touched``), read off ``session.last_result``.
+    ``forbidden_touched``, ``agents_run``), read off ``session.last_result``.
 
     Why ``evidence`` is unlike :class:`ConciergeCandidate`'s: the concierge act
     phase reads ``candidate.evidence`` straight into its event payload, but
@@ -245,7 +247,7 @@ def _clean_review_snapshot(last_result: object) -> dict[str, object] | None:
 
     Returns None (fail-closed) unless *last_result* is a dict at the
     ``review_pending_approval`` gate whose ``review``/``health``/``scope``
-    sections are all present dicts. The returned snapshot holds the four
+    sections are all present dicts. The returned snapshot holds the five
     predicate field values verbatim; whether the predicate *holds* is a
     separate check (:func:`_predicate_holds`) so detect and act share both the
     extraction and the decision.
@@ -268,21 +270,29 @@ def _clean_review_snapshot(last_result: object) -> dict[str, object] | None:
         "deferred": review.get("deferred", 0),
         "recommendation": health.get("recommendation"),
         "forbidden_touched": scope.get("forbidden_touched"),
+        "agents_run": review.get("agents_run", 0),
     }
 
 
 def _predicate_holds(snapshot: dict[str, object]) -> bool:
-    """True iff the four-field clean-review predicate is satisfied.
+    """True iff the five-field clean-review predicate is satisfied.
 
     Every field is compared against its clean value; a missing/None field
     (e.g. a malformed producer payload) fails the comparison and blocks the
-    fire — the predicate is fail-closed.
+    fire — the predicate is fail-closed. ``agents_run`` is guarded with an
+    explicit ``isinstance`` check (rather than a bare ``> 0`` comparison)
+    since *snapshot* is typed ``dict[str, object]`` — a malformed
+    non-int producer value must fail closed, not raise or pass via truthy
+    coercion.
     """
+    agents_run = snapshot["agents_run"]
     return (
         snapshot["must_fix_initial"] == 0
         and snapshot["deferred"] == 0
         and snapshot["recommendation"] == _RECOMMENDATION_PROCEED
         and snapshot["forbidden_touched"] is False
+        and isinstance(agents_run, int)
+        and agents_run > 0
     )
 
 
@@ -487,6 +497,7 @@ def _post_auto_approve_comment(ticket_id: str, snapshot: dict[str, object]) -> N
         deferred=snapshot["deferred"],
         recommendation=snapshot["recommendation"],
         forbidden_touched=snapshot["forbidden_touched"],
+        agents_run=snapshot["agents_run"],
     )
     result = post_issue_comment(ticket_id, body)
     if result is None:
@@ -595,7 +606,7 @@ def _act_auto_approve_review(
     """Act phase: re-validate under lock, emit, then approve via the primitive.
 
     For each candidate the row + session are re-loaded fresh under
-    ``dev_queue_lock()`` and the four-field predicate re-checked — a concurrent
+    ``dev_queue_lock()`` and the five-field predicate re-checked — a concurrent
     human approve, re-dispatch, or new sentinel between detect and act can have
     invalidated it (the re-check race). Only a still-valid candidate fires:
     :class:`OrchestratorEventType.GATE_AUTO_APPROVED` is emitted BEFORE the
