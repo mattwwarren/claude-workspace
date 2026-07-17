@@ -26,10 +26,10 @@ import pytest
 from pydantic import ValidationError
 
 from cw.config import dev_queue_lock as _dev_queue_lock_path
-from cw.config import load_effective_clients
+from cw.config import load_effective_clients, sessions_lock, sessions_lock_file
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events
-from cw.exceptions import CwError
+from cw.exceptions import CwError, SessionsLockReentryError
 from cw.models import (
     ClientConfig,
     DevQueueStore,
@@ -38,6 +38,7 @@ from cw.models import (
     OrchestratorEventType,
     TicketTask,
 )
+from cw.reconcile import reconcile
 from cw.reconcile.review_recipes import (
     RECIPE_ADDRESS_REVIEW,
     RECIPE_AUTO_FIX_CI,
@@ -52,6 +53,7 @@ from cw.reconcile.review_recipes import (
     _detect_auto_fix_ci,
     _detect_escalate_merge_block,
     _detect_request_reviewer,
+    resolve_outbound_consent_allowed,
     resolve_review_recipe_enabled,
     run_review_recipes,
 )
@@ -62,7 +64,7 @@ from cw.review_strategy import ReviewStrategy
 # client / lane), _pr_state builds a PrState with sensible OPEN defaults.
 # _client_with_lanes builds a ClientConfig with the given lanes (reused by the
 # resolve-precedence tests below).
-from tests.test_pr_hydrate import _pr_state
+from tests.test_pr_hydrate import _pr_state, _watched
 from tests.test_reconcile_gate_recipes import _client_with_lanes, _make_task
 
 _SKILL_PATH = (
@@ -203,8 +205,11 @@ def test_run_review_recipes_loads_from_dev_queue(
     assert stub_spawn.calls[0]["prompt"] == "/address-review 42"
     taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
     assert any(e.correlation_id == task.ticket_id for e in taken)
-    # P2 performs NO dev-queue mutation: the on-disk snapshot is untouched.
-    assert load_dev_queue().tasks == [task]
+    # GitHub #1206: the row's address_review_fired_at latch is now stamped, so
+    # the on-disk snapshot is unchanged EXCEPT for that field.
+    after_task = load_dev_queue().tasks[0]
+    assert after_task.address_review_fired_at is not None
+    assert after_task.model_copy(update={"address_review_fired_at": None}) == task
 
 
 def test_draft_pr_never_a_candidate() -> None:
@@ -486,8 +491,11 @@ def test_pr_action_taken_emitted_before_mutation(
     assert payload["evidence_snapshot"] == {"review_decision": "CHANGES_REQUESTED"}
     # No PR_ACTION_FAILED on the happy path.
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
-    # Resolution 6 (no dev-queue mutation): the on-disk snapshot is untouched.
-    assert load_dev_queue().tasks == [task]
+    # GitHub #1206: the row's address_review_fired_at latch is now stamped, so
+    # the on-disk snapshot is unchanged EXCEPT for that field.
+    after_task = load_dev_queue().tasks[0]
+    assert after_task.address_review_fired_at is not None
+    assert after_task.model_copy(update={"address_review_fired_at": None}) == task
 
 
 @pytest.mark.parametrize("stale_state", ["ready_to_approve", None])
@@ -576,6 +584,71 @@ def test_no_self_deadlock_under_dev_queue_lock(
     ) == [task.ticket_id]
 
 
+def test_reconcile_reentry_guard_fires_and_is_swallowed(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RFC 0010 P4's act phase re-entering reconcile() raises, not hangs.
+
+    Stands in for the real chain (GitHub #1228): reconcile() holds
+    sessions_lock() -> ... -> run_review_recipes -> _act_auto_fix_ci ->
+    _dispatch_auto_fix_ci -> run_dispatch_loop -> a nested reconcile() /
+    sessions_lock() acquisition on the same thread. The outer
+    ``with sessions_lock():`` below stands in for reconcile()'s own lock
+    hold. Before the #1228 fix this scenario hangs forever in flock(); after
+    the fix, SessionsLockReentryError propagates out of the inner
+    reconcile() call, into _dispatch_auto_fix_ci's ``except CwError``, and is
+    converted to a logged PR_ACTION_FAILED correction instead of a call-site
+    change.
+    """
+    _write_acme_clients_yaml(tmp_config_dir)
+    task = _cr_task(
+        pr_state=_pr_state(
+            state="OPEN", attention_state="ci_failing", failing_checks=["lint"]
+        )
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda _t: True)
+
+    probed = {"lock_held": False}
+    captured: list[BaseException] = []
+
+    def _fake_dispatch_loop(**_kwargs: Any) -> None:
+        # Non-blocking probe proves the outer sessions_lock() is genuinely
+        # held (not just assumed) before exercising the real reentry path.
+        fd = sessions_lock_file().open("w")
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            probed["lock_held"] = True
+        finally:
+            fd.close()
+        try:
+            reconcile()
+        except SessionsLockReentryError as exc:
+            # Record the exact exception raised (not just "some CwError")
+            # before letting it propagate into _dispatch_auto_fix_ci's
+            # `except CwError` handler, so the outer assertions below can
+            # confirm the guard — not some other failure — fired.
+            captured.append(exc)
+            raise
+
+    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", _fake_dispatch_loop)
+
+    with sessions_lock():
+        acted = _act_auto_fix_ci([_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")])
+
+    assert acted == []
+    assert probed["lock_held"] is True
+    assert len(captured) == 1
+    assert isinstance(captured[0], SessionsLockReentryError)
+    failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+    assert len(failed) == 1
+    assert failed[0].correlation_id == task.ticket_id
+
+
 def test_action_failure_emits_pr_action_failed(
     tmp_config_dir: Path,
     make_git_repo: Any,
@@ -627,9 +700,18 @@ def test_action_failure_emits_pr_action_failed(
     assert failed[0].payload["ticket_id"] == "GEN-1"
     assert boom_msg in failed[0].payload["error"]
     assert any("dispatch_failed" in r.message for r in caplog.records)
-    # Resolution 6 (no dev-queue mutation): the on-disk snapshot is untouched,
-    # including for the candidate whose dispatch failed.
-    assert load_dev_queue().tasks == [task1, task2]
+    # GitHub #1206: both rows get address_review_fired_at stamped during the
+    # prepare phase (which runs for both before either dispatch is attempted)
+    # — including task1, whose dispatch subsequently failed. Narrowed
+    # store-unchanged assertion: the on-disk snapshot is unchanged except for
+    # that field, for both tasks.
+    reloaded = {t.ticket_id: t for t in load_dev_queue().tasks}
+    after_task1 = reloaded["GEN-1"]
+    after_task2 = reloaded["GEN-2"]
+    assert after_task1.address_review_fired_at is not None
+    assert after_task2.address_review_fired_at is not None
+    assert after_task1.model_copy(update={"address_review_fired_at": None}) == task1
+    assert after_task2.model_copy(update={"address_review_fired_at": None}) == task2
 
 
 def test_unparseable_pr_url_emits_pr_action_failed(
@@ -716,6 +798,75 @@ def test_missing_worktree_emits_pr_action_failed(
     assert failed[0].correlation_id == task.ticket_id
 
 
+def test_address_review_fires_once_per_episode(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+) -> None:
+    """The address_review latch blocks a re-dispatch within the same episode
+    (GitHub #1206) — mirrors test_auto_fix_ci_fires_once_per_episode."""
+    _write_acme_clients_yaml(tmp_config_dir)
+    worktree = make_git_repo("address-review-fires-once")
+    task = _cr_task(worktree_path=worktree)
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    candidate = _candidate_for(task)
+
+    acted1 = _act_address_review([candidate], clients=load_effective_clients())
+    assert acted1 == [task.ticket_id]
+    assert load_dev_queue().tasks[0].address_review_fired_at is not None
+
+    # Hold the hydrated row at changes_requested across N further ticks
+    # (simulating hydration lag): detect still yields a candidate every tick,
+    # but the latch blocks a re-fire.
+    for _ in range(5):
+        acted_n = _act_address_review([candidate], clients=load_effective_clients())
+        assert acted_n == []
+    taken = [
+        e
+        for e in read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+        if e.correlation_id == task.ticket_id
+    ]
+    assert len(taken) == 1
+    assert len(stub_spawn.calls) == 1
+
+
+def test_address_review_latch_clears_on_episode_end(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+) -> None:
+    """The latch re-arms once pr_state leaves changes_requested (GitHub #1206)
+    — mirrors test_auto_fix_ci_latch_clears_on_episode_end."""
+    _write_acme_clients_yaml(tmp_config_dir)
+    worktree = make_git_repo("address-review-clears-on-end")
+    task = _cr_task(worktree_path=worktree)
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    candidate = _candidate_for(task)
+
+    assert _act_address_review([candidate], clients=load_effective_clients()) == [
+        task.ticket_id
+    ]
+
+    # Episode ends: hydration moves the PR off changes_requested.
+    store = load_dev_queue()
+    store.tasks[0].pr_state = _pr_state(attention_state="ready_to_approve")
+    save_dev_queue(store)
+
+    # Clear pass runs even with zero candidates.
+    assert _act_address_review([], clients=load_effective_clients()) == []
+    assert load_dev_queue().tasks[0].address_review_fired_at is None
+
+    # Genuine re-entry into changes_requested fires again (episode semantics).
+    store = load_dev_queue()
+    store.tasks[0].pr_state = _pr_state(
+        state="OPEN", attention_state="changes_requested"
+    )
+    save_dev_queue(store)
+    assert _act_address_review([candidate], clients=load_effective_clients()) == [
+        task.ticket_id
+    ]
+
+
 # --- RFC 0010 P4 recipes (#1099) -------------------------------------------
 
 
@@ -782,6 +933,7 @@ def test_act_auto_fix_ci_calls_add_ticket_and_dispatch_once(
         ),
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
+    store_before = load_dev_queue()
     added: list[TicketTask] = []
     dispatched: list[dict[str, Any]] = []
 
@@ -813,6 +965,12 @@ def test_act_auto_fix_ci_calls_add_ticket_and_dispatch_once(
         "failing_checks": ["lint", "mypy"]
     }
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+    # The latch is the ONLY mutation this act phase makes to the row.
+    after_task = load_dev_queue().tasks[0]
+    assert (
+        after_task.model_copy(update={"auto_fix_ci_fired_at": None})
+        == store_before.tasks[0]
+    )
 
 
 def test_act_auto_fix_ci_stale_row_silent_skip(
@@ -868,6 +1026,62 @@ def test_act_auto_fix_ci_add_ticket_raises_emits_pr_action_failed(
     assert len(failed) == 1
     assert failed[0].correlation_id == task.ticket_id
     assert "lane gone" in failed[0].payload["error"]
+
+
+def test_auto_fix_ci_fires_once_per_episode(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_acme_clients_yaml(tmp_config_dir)
+    task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="ci_failing"))
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda _t: True)
+    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
+    candidate = _candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")
+
+    acted1 = _act_auto_fix_ci([candidate])
+    assert acted1 == [task.ticket_id]
+    assert load_dev_queue().tasks[0].auto_fix_ci_fired_at is not None
+
+    # Hold the hydrated row at ci_failing across N further ticks (simulating
+    # hydration lag, per the ticket's acceptance criterion): detect still
+    # yields a candidate every tick, but the latch blocks a re-fire.
+    for _ in range(5):
+        acted_n = _act_auto_fix_ci([candidate])
+        assert acted_n == []
+    taken = [
+        e
+        for e in read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+        if e.correlation_id == task.ticket_id
+    ]
+    assert len(taken) == 1
+
+
+def test_auto_fix_ci_latch_clears_on_episode_end(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_acme_clients_yaml(tmp_config_dir)
+    task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="ci_failing"))
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda _t: True)
+    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
+    candidate = _candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")
+
+    assert _act_auto_fix_ci([candidate]) == [task.ticket_id]
+
+    # Episode ends: hydration moves the PR off ci_failing.
+    store = load_dev_queue()
+    store.tasks[0].pr_state = _pr_state(attention_state="ready_to_approve")
+    save_dev_queue(store)
+
+    # Clear pass runs even with zero candidates.
+    assert _act_auto_fix_ci([]) == []
+    assert load_dev_queue().tasks[0].auto_fix_ci_fired_at is None
+
+    # Genuine re-entry into ci_failing fires again (episode semantics).
+    store = load_dev_queue()
+    store.tasks[0].pr_state = _pr_state(attention_state="ci_failing")
+    save_dev_queue(store)
+    assert _act_auto_fix_ci([candidate]) == [task.ticket_id]
 
 
 # --- request_reviewer ------------------------------------------------------
@@ -1378,3 +1592,71 @@ def test_act_escalate_merge_block_stale_row_silent_skip(tmp_config_dir: Path) ->
     assert acted == []
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
     assert load_dev_queue().tasks[0].escalate_merge_block_fired_at is None
+
+
+# --- outbound consent gate (RFC 0011 B2, #1159) -----------------------------
+
+
+class TestResolveOutboundConsentAllowed:
+    """Two-party consent gate for outbound acting toward another's PR.
+
+    Party 1 (operator): ``config.review_recipes_enabled``, the existing
+    review-recipes master switch (RFC 0010 P3). Party 2 (target): an active
+    ``WatchedPr`` for the queried ``pr_url`` (RFC 0011 S2). See R1-R4.
+    """
+
+    _PR_URL = "https://github.com/acme/widgets/pull/42"
+
+    def test_switch_off_returns_false_regardless_of_watched_pr(self) -> None:
+        """The master switch off gates outbound action shut, even with an
+        active WatchedPr match present."""
+        assert (
+            resolve_outbound_consent_allowed(
+                self._PR_URL,
+                config=_config(review_recipes_enabled=False),
+                watched_prs=[_watched(pr_number=42)],
+            )
+            is False
+        )
+
+    def test_switch_on_active_match_returns_true(self) -> None:
+        """Switch on + an active WatchedPr for this pr_url -> True."""
+        assert (
+            resolve_outbound_consent_allowed(
+                self._PR_URL,
+                config=_config(),
+                watched_prs=[_watched(pr_number=42)],
+            )
+            is True
+        )
+
+    def test_switch_on_no_match_returns_false(self) -> None:
+        """Switch on but no WatchedPr for this pr_url -> False."""
+        assert (
+            resolve_outbound_consent_allowed(
+                self._PR_URL,
+                config=_config(),
+                watched_prs=[_watched(pr_number=99)],
+            )
+            is False
+        )
+        assert (
+            resolve_outbound_consent_allowed(
+                self._PR_URL,
+                config=_config(),
+                watched_prs=[],
+            )
+            is False
+        )
+
+    def test_switch_on_dismissed_watched_pr_returns_false(self) -> None:
+        """A dismissed WatchedPr matching this pr_url does not open the
+        channel -- only an active one does."""
+        assert (
+            resolve_outbound_consent_allowed(
+                self._PR_URL,
+                config=_config(),
+                watched_prs=[_watched(pr_number=42, status="dismissed")],
+            )
+            is False
+        )

@@ -11,10 +11,11 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import click
 import yaml
@@ -23,7 +24,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 
 from cw.atomic import atomic_write_text
-from cw.exceptions import ConfigValidationError, CwError
+from cw.exceptions import ConfigValidationError, CwError, SessionsLockReentryError
 from cw.models import (
     CW_STATE_SCHEMA_VERSION,
     DEFAULT_AUTO_PURPOSES,
@@ -94,6 +95,10 @@ per_client_ceiling: {}
 # max_parallel_clients: null  # uncomment to cap how many clients dispatch per tick
 linear_prefix_map: {}
 reap_policy: signal_only  # default: signal only; set to auto to restore self-healing
+# disallowed_mcp_tools: []  # patterns denied to every DAEMON worker, e.g.
+#   ["mcp__plugin_linear_linear__*"] to block Linear MCP in headless workers.
+#   MIGRATION: github-issues clients that relied on the old automatic Linear
+#   block (#726) must set this explicitly now — the tracker heuristic is gone.
 """
 
 
@@ -237,6 +242,9 @@ def concurrency_override_lock() -> Iterator[None]:
         fd.close()
 
 
+_sessions_lock_state = threading.local()
+
+
 @contextlib.contextmanager
 def sessions_lock() -> Iterator[None]:
     """Acquire an exclusive file lock over the sessions.json write window.
@@ -246,15 +254,33 @@ def sessions_lock() -> Iterator[None]:
     processes cannot clobber each other's mutations (last-writer-wins
     data loss). The lock is advisory (``fcntl.flock``) and per-open-fd,
     so sequential re-acquisitions in the same process (non-nested) are
-    safe. Do NOT nest: acquiring while already holding will deadlock.
+    safe.
+
+    Not reentrant: a same-thread nested acquisition raises
+    :class:`~cw.exceptions.SessionsLockReentryError` instead of opening a
+    second fd and deadlocking in ``flock()`` (GitHub #1228). The check is
+    synchronous and runs before any file I/O or ``flock`` syscall, so it
+    is hang-safe by construction. Callers that would otherwise re-enter
+    (e.g. the RFC 0010 P4 review-recipe act phase calling back into
+    ``reconcile()``) must already tolerate a ``CwError``-shaped failure on
+    this path; see the callers of ``_dispatch_auto_fix_ci`` /
+    ``_dispatch_address_review`` / ``_reconcile_usage_limited``.
     """
+    if getattr(_sessions_lock_state, "held", False):
+        msg = (
+            "sessions_lock() re-entered on the same thread while already "
+            "held; this would deadlock in flock() (GitHub #1228)"
+        )
+        raise SessionsLockReentryError(msg)
     state_dir().mkdir(parents=True, exist_ok=True)
     lock_path = sessions_lock_file()
     fd = lock_path.open("w")
+    _sessions_lock_state.held = True
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
+        _sessions_lock_state.held = False
         fcntl.flock(fd, fcntl.LOCK_UN)
         fd.close()
 
@@ -262,11 +288,12 @@ def sessions_lock() -> Iterator[None]:
 def mutate_state(fn: Callable[[CwState], None]) -> CwState:
     """Load state, apply fn in place under sessions_lock, save and return.
 
-    Not reentrant: ``sessions_lock`` is a per-open-fd ``flock``, so calling
-    this while the caller already holds ``sessions_lock`` self-deadlocks.
-    Code running inside a ``with sessions_lock():`` block (e.g. anything
-    called from ``reconcile._reconcile_locked``) must mutate the loaded
-    state and ``save_state`` directly instead.
+    Not reentrant: calling this while the caller already holds
+    ``sessions_lock`` raises :class:`~cw.exceptions.SessionsLockReentryError`
+    (GitHub #1228) instead of self-deadlocking. Code running inside a
+    ``with sessions_lock():`` block (e.g. anything called from
+    ``reconcile._reconcile_locked``) must mutate the loaded state and
+    ``save_state`` directly instead.
 
     Invariant: every ``save_state`` call outside ``config.py`` is either
     inside a ``with sessions_lock():`` block **or** in a helper whose
@@ -589,6 +616,41 @@ def save_state(state: CwState) -> None:
     atomic_write_text(state_file(), state.model_dump_json(indent=2))
 
 
+class AvailabilityProbeCache(NamedTuple):
+    """Fleet-wide TTL-cached gh-availability probe result + outage latch.
+
+    Persisted in DISPATCH_STATE_FILE under the ``"availability_probe"`` key
+    (RFC 0011 A5). A NamedTuple, not a pydantic BaseModel: transient,
+    TTL-bounded runtime state with no durability/migration contract — the
+    dispatch loop re-probes on every TTL expiry, so a shape drift self-heals
+    within one TTL window rather than needing a schema version.
+    """
+
+    probed_at: datetime
+    available: bool
+    latched: bool  # True once SESSION_NEEDS_ATTENTION has fired for the
+    # current unbroken run of failures; False once a subsequent fresh probe
+    # succeeds (edge-triggered reset).
+
+
+def _load_dispatch_state_raw() -> dict[str, Any]:
+    """Read DISPATCH_STATE_FILE as a dict, or ``{}`` if absent/corrupt/unreadable.
+
+    Shared read-side of the read-merge-write save helpers
+    (``save_usage_limited_until`` / ``save_availability_probe_cache``) so that
+    neither clobbers the other's key in the shared sidecar (#1157). A corrupt
+    or non-object existing file is treated as empty rather than raising.
+    """
+    path = DISPATCH_STATE_FILE
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
 def load_usage_limited_until() -> datetime | None:
     """Load the persisted usage-limit backoff expiry from DISPATCH_STATE_FILE.
 
@@ -614,17 +676,138 @@ def save_usage_limited_until(dt: datetime | None) -> None:
     """Persist (or clear) the usage-limit backoff expiry to DISPATCH_STATE_FILE.
 
     Writes ``{"usage_limited_until": "<iso>"}`` when *dt* is set; writes
-    ``{"usage_limited_until": null}`` to clear it.  Creates STATE_DIR if
-    needed.  Silently swallows write errors — a failed persist just means
-    the next loop start won't honour the backoff (acceptable degradation).
+    ``{"usage_limited_until": null}`` to clear it.  Read-merge-writes the
+    shared sidecar so the ``availability_probe`` key (RFC 0011 A5) is
+    preserved rather than clobbered (#1157).  Creates STATE_DIR if needed.
+    Silently swallows write errors — a failed persist just means the next loop
+    start won't honour the backoff (acceptable degradation).
     """
     try:
         refuse_real_state_write(DISPATCH_STATE_FILE)
         DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"usage_limited_until": dt.isoformat() if dt is not None else None}
+        payload = _load_dispatch_state_raw()
+        payload["usage_limited_until"] = dt.isoformat() if dt is not None else None
         atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
     except OSError:
         logger.warning("dispatch_state: failed to persist usage_limited_until")
+
+
+def load_availability_probe_cache() -> AvailabilityProbeCache | None:
+    """Load the fleet-wide gh-availability probe cache from DISPATCH_STATE_FILE.
+
+    Returns None when the file is absent, unreadable, malformed, missing the
+    ``"availability_probe"`` key, or storing a malformed entry shape (RFC 0011
+    A5). Tolerates other keys (e.g. ``usage_limited_until``) sharing the file.
+    """
+    path = DISPATCH_STATE_FILE
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text())
+        entry = raw.get("availability_probe")
+        if not isinstance(entry, dict):
+            return None
+        probed_at = entry.get("probed_at")
+        available = entry.get("available")
+        latched = entry.get("latched")
+        if (
+            not isinstance(probed_at, str)
+            or not isinstance(available, bool)
+            or not isinstance(latched, bool)
+        ):
+            return None
+        return AvailabilityProbeCache(
+            probed_at=datetime.fromisoformat(probed_at),
+            available=available,
+            latched=latched,
+        )
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        return None
+
+
+def save_availability_probe_cache(cache: AvailabilityProbeCache) -> None:
+    """Persist the fleet-wide gh-availability probe cache to DISPATCH_STATE_FILE.
+
+    Read-merge-writes the shared sidecar so the ``usage_limited_until`` key is
+    preserved rather than clobbered (#1157).  Creates STATE_DIR if needed.
+    Silently swallows write errors — a failed persist just means the next tick
+    re-probes rather than reading the cache (acceptable degradation).
+    """
+    try:
+        refuse_real_state_write(DISPATCH_STATE_FILE)
+        DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        payload = _load_dispatch_state_raw()
+        payload["availability_probe"] = {
+            "probed_at": cache.probed_at.isoformat(),
+            "available": cache.available,
+            "latched": cache.latched,
+        }
+        atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
+    except OSError:
+        logger.warning("dispatch_state: failed to persist availability_probe")
+
+
+def load_main_drift_latches() -> dict[str, bool]:
+    """Load the per-client main-checkout-drift attention latches (#1258).
+
+    Returns ``{}`` when the file is absent, unreadable, malformed, missing
+    the ``"main_drift_latches"`` key, or storing a non-dict / wrong-value-type
+    entry. Mirrors :func:`load_availability_probe_cache`'s fail-safe shape;
+    tolerates other keys (e.g. ``availability_probe``) sharing the file.
+    """
+    path = DISPATCH_STATE_FILE
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+        entry = raw.get("main_drift_latches")
+        if not isinstance(entry, dict):
+            return {}
+        if not all(
+            isinstance(key, str) and isinstance(value, bool)
+            for key, value in entry.items()
+        ):
+            return {}
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        return {}
+    else:
+        return entry
+
+
+def save_main_drift_latches(latches: dict[str, bool]) -> None:
+    """Persist the per-client main-checkout-drift attention latches (#1258).
+
+    Read-merge-writes the shared sidecar so ``usage_limited_until`` and
+    ``availability_probe`` are preserved rather than clobbered.  Creates
+    STATE_DIR if needed.  Silently swallows write errors, same posture as
+    ``save_availability_probe_cache`` — acceptable degradation: a failed
+    persist on a *set* just risks one extra re-fire next tick, but a failed
+    persist on a *reset* leaves the on-disk latch stale (still ``True``),
+    which can suppress one genuine future re-arm until a later tick's write
+    succeeds. Bounded and self-healing, not silent data loss: the merge is
+    per-tick (this function is called at most once per ``reconcile()``, with
+    the full latch dict), so a lost update only ever costs one client's one
+    flip, never another client's state.
+    """
+    try:
+        refuse_real_state_write(DISPATCH_STATE_FILE)
+        DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        # Why: no file lock — reconcile() runs from independent, short-lived
+        # processes (cw status/list/start, every dispatch_tick), so two
+        # concurrent read-merge-writes for different clients can race and
+        # lose one flip. Matches the existing sibling caches' posture
+        # (save_availability_probe_cache etc.); a lost flip self-heals on
+        # the next tick, so unlike a real DB write this is an accepted
+        # tradeoff, not a bug.
+        payload = _load_dispatch_state_raw()
+        payload["main_drift_latches"] = latches
+        atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
+    except OSError:
+        logger.warning(
+            "dispatch_state: failed to persist main_drift_latches (clients=%s)",
+            sorted(latches),
+            exc_info=True,
+        )
 
 
 def load_orchestrator_config() -> OrchestratorConfig:

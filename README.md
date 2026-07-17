@@ -15,8 +15,8 @@ The core loop: **harden a ticket → dispatch it → workers implement, review, 
 # Install from GitHub
 uv tool install "claude-workspace[mcp] @ git+https://github.com/mattwwarren/claude-workspace.git"
 
-# Pin to a specific release
-uv tool install "claude-workspace[mcp] @ git+https://github.com/mattwwarren/claude-workspace.git@v1.3.0"
+# Pin to a specific release (see github.com/mattwwarren/claude-workspace/tags for the latest)
+uv tool install "claude-workspace[mcp] @ git+https://github.com/mattwwarren/claude-workspace.git@v1.20.0"
 
 # Install from local clone (development)
 git clone https://github.com/mattwwarren/claude-workspace.git
@@ -101,12 +101,18 @@ You (coordinator)
 |---|---|
 | `shipped` | Done. PR is live with auto-merge. |
 | `no_op` | Ticket already satisfied. Close as completed. |
+| `stage_complete` | Staged pipeline: one stage (HARDEN/PLAN/IMPL/REVIEW) finished cleanly — not terminal. `cw` auto-advances the ticket to the next stage. |
+| `merge_pending` | PR created but CI/merge gate hasn't cleared yet. Not a failure — don't re-dispatch, just monitor the PR. |
 | `ambiguities_pending_resolution` | Answer questions on the issue, re-dispatch. |
 | `premises_pending_verification` | Verify flagged premises on the issue, re-dispatch. |
 | `plan_pending_approval` | Read the plan comment, post `<!-- auto-dev-plan-approved -->`, re-dispatch. |
 | `review_pending_approval` | Review the diff yourself, ship (`gh pr create` + `gh pr merge --squash --auto`). |
 | `merge_gate_blocked` | A prior pipeline PR is still open. Merge or close it, re-dispatch. |
+| `scope_exceeded` | Diff grew past the declared scope tier. Re-scope the ticket or approve manually. |
+| `forbidden_area` | Change touches a forbidden path (see client config). Route to a human. |
 | `blocked` | Triage `blocker.reason` and `blocker.retry_eligible`. Re-dispatch if eligible. |
+
+Use the `/cw-session-watch` skill to read a session's exit status without hand-grepping events and transcripts, and `/cw-followup` to act on the sentinel automatically (close `no_op`, rebase+PR for `merge_gate_blocked`, draft a Decisions section for ambiguities/premises, escalate real blockers).
 
 ## CLI Reference
 
@@ -127,17 +133,28 @@ You (coordinator)
 
 | Command | Description |
 |---------|-------------|
-| `cw dev-queue add <ticket> -c <client>` | Enqueue a ticket for dispatch |
+| `cw dev-queue add <ticket> -c <client>` | Enqueue one or more tickets for dispatch |
 | `cw dev-queue run [--once]` | Dispatch pending tasks (up to concurrency cap) |
+| `cw dev-queue serve` | Run the dispatch loop with automatic restart on crash |
 | `cw dev-queue status` | Show queue state and last tick summary |
+| `cw dev-queue tasks` | List dev-queue tasks with typed field output |
 | `cw dev-queue wait <ticket>` | Block until terminal; structured JSON exit codes |
-| `cw dev-queue move <ticket> --to-lane <lane>` | Re-lane a ticket |
-| `cw dev-queue cancel <ticket>` | Cancel a pending ticket |
+| `cw dev-queue approve <ticket>` | Approve a plan/review gate, or clear an operator-signoff hold |
+| `cw dev-queue requeue <ticket>` | Requeue a `BLOCKED_ON_USER` ticket back to pending |
+| `cw dev-queue unblock <ticket>` | Clear salvage/park markers and requeue a `SALVAGE_PARKED` ticket |
+| `cw dev-queue move <ticket> --to <lane>` | Re-lane a ticket |
+| `cw dev-queue cancel <ticket>` | Cancel a pending ticket and stop any running session |
 | `cw dev-queue remove <ticket> --all` | Remove a ticket from the queue |
-| `cw dev-queue clear -c <client>` | Clear completed/cancelled tickets |
+| `cw dev-queue clear -c <client> [-s <status>]` | Clear tasks for a client, optionally filtered to one status (e.g. `completed`) |
+| `cw dev-queue plan` | Spawn `/orchestrate-plan` to produce a DispatchPlan |
 | `cw dev-queue refresh-all` | Fast-forward all client repos to origin/main |
+| `cw queue peek` | In-flight inspection of RUNNING dev-queue sessions (age, idle gap, sentinel, PR state) |
 
-`cw dev-queue wait` exit codes: `0`=shipped/no_op · `1`=failed/cancelled · `2`=blocked/pending-human · `3`=attention (stale transcript) · `124`=timeout
+`cw dev-queue wait` exit codes: `0`=shipped/no_op · `1`=failed/cancelled · `2`=blocked/pending-human · `3`=attention (stale transcript) · `4`=parked awaiting operator signoff · `124`=timeout
+
+For a wave of tickets, the `/cw-fanout` skill wraps this whole table — pre-flight, enqueue, dispatch, and monitor — into one orchestrated motion, using the `/cw-queue-peek` skill's WAIT/PEEK/STOP ladder to decide whether to keep a long-running session alive.
+
+**Operator signoff gate** (RFC 0007 Phase 3): configure `--signoff operator` on `cw dev-queue add`, a lane, or the global default to force a ship checkpoint a ticket can't clear on its own. A gated ticket parks as `AWAITING_OPERATOR_SIGNOFF` at the REVIEW→FINALIZE boundary; `cw dev-queue approve` clears it forward (large-tier tickets need it twice — once for the ordinary review gate, once for signoff), and `cw dev-queue requeue --stage <earlier> --regress` sends it backward instead.
 
 ### Orchestrator
 
@@ -161,8 +178,20 @@ You (coordinator)
 
 | Command | Description |
 |---------|-------------|
-| `cw lane list` | List configured lanes |
-| `cw lane declare <name>` | Declare a named dispatch lane |
+| `cw lane ls -c <client>` | List lanes for a client |
+| `cw lane add <name> -c <client>` | Add a dispatch lane to a client |
+| `cw lane pause <name> -c <client>` | Pause a lane (stop new dispatch into it) |
+| `cw lane resume <name> -c <client>` | Resume a paused lane |
+| `cw lane rm <name> -c <client>` | Remove a lane from a client |
+
+### Sprint buildout
+
+| Command | Description |
+|---------|-------------|
+| `cw sprint plan <rfc-path> --out <file>` | Parse an RFC into a reviewable buildout plan |
+| `cw sprint apply <plan-file>` | Idempotently apply the plan: milestone, epics, tickets |
+
+The `/sprint-buildout` skill wraps this pair end-to-end — presenting the one approval gate, running an adjacent-bug pull-in scan, and (config-gated) mirroring pages to Notion.
 
 ### Maintenance
 
@@ -170,25 +199,28 @@ You (coordinator)
 |---------|-------------|
 | `cw init <name> --path <path>` | Register a new project |
 | `cw doctor [--reap]` | Health check; `--reap` repairs common wedge conditions |
-| `cw upgrade-workers` | Upgrade all daemon workers to the latest model |
-| `cw board` | Open the orchestrator board |
-| `cw schema` | Print JSON schema for internal models |
+| `cw upgrade-workers` | Restart all daemon-managed background sessions on the latest model |
+| `cw board` | Lane × stage pipeline cockpit (`--once` for a static/CI-friendly snapshot) |
+| `cw schema` | Inspect Pydantic model schemas (`AutoDevResult`, etc.) |
+| `cw session show/list/result/wait` | Inspect session state without going through `cw list`/`cw status` |
+| `cw peek <session>` | Emit the last N lines of a worker's transcript output |
 
 ### Worktree management
 
 | Command | Description |
 |---------|-------------|
-| `cw worktree list` | List managed worktrees |
-| `cw worktree gc` | Prune squash-merged worktrees (checks PR state) |
+| `cw worktree gc` | Prune worktrees for squash-merged or closed branches (checks PR state) |
 
 ### Other
 
 | Command | Description |
 |---------|-------------|
-| `cw config` | Show or manage configuration |
+| `cw config show` / `cw config concurrency` | Show configuration / manage concurrency overrides |
 | `cw completion <shell>` | Print shell completion snippet |
-| `cw result validate -` | Validate an AUTO_DEV_RESULT sentinel JSON payload |
-| `cw event record <type>` | Record an event on the orchestrator bus |
+| `cw result validate -` / `cw result emit` | Validate, or record onto a session, an AUTO_DEV_RESULT sentinel |
+| `cw event record/tail/wait/prune` | Record, read, block-until, or prune events on the orchestrator bus |
+| `cw review register <pr-url>` | Register a PR you were asked to review as a watched PR |
+| `cw pr-channel` / `cw queue-channel` / `cw operator-channel` | MCP notification servers — wired into a session's `.mcp.json` to push PR/queue/operator events into Claude Code |
 
 ## Slash Commands (Claude Code Skills)
 
@@ -207,8 +239,22 @@ These are invoked inside a Claude Code session and form the daily operational to
 | Command | When to use |
 |---------|-------------|
 | `/auto-dev-plan` | Stage 1 only: draft plan, run spec + soundness reviewers, post to issue tracker. |
-| `/queue-issues` | Queue multiple issues for dispatch. |
+| `/queue-issues` | Select open tickets from the tracker and enqueue them for parallel dispatch via `cw dev-queue`. |
 | `/auto-debt <ticket-id>` | Constrained auto-dev for small-scope tech debt tickets. |
+| `/sprint-buildout` | Turn a hardened RFC into a filed GitHub sprint block — milestone, epics, tickets, an adjacent-bug pull-in scan, and (config-gated) Notion mirror pages. Wraps `cw sprint plan`/`apply`. |
+
+### Dispatch monitoring and follow-up (skills)
+
+Once tickets are enqueued, this is the toolkit for watching a wave and closing it out without hand-rolling queue inspection every time:
+
+| Skill | When to use |
+|-------|-------------|
+| `/cw-fanout` | Enqueue a batch of tickets and drive the whole wave to terminal in one motion — pre-flight, dispatch, monitor via the queue-peek ladder, close gate tickets inline. |
+| `/cw-queue-peek` | In-flight check on RUNNING sessions — age, idle gap, sentinel status, PR state — recommends WAIT / PEEK / STOP. |
+| `/cw-session-watch` | Reliably determine whether a dispatched session has ended and what its exit status was, without grepping events/transcripts by hand. |
+| `/cw-followup` | React to a finished session's sentinel: close `no_op`, rebase + open PR for `merge_gate_blocked`, draft a Decisions section for ambiguities/premises, or escalate a real blocker. |
+| `/cw-validate-result` | Forensic read on a completed run: extract the `AUTO_DEV_RESULT` sentinel and validate it against the headless contract. |
+| `/cw-smoke-test` | End-to-end dogfood of the `/auto-dev --headless` pipeline against one ticket — pre-flight through sentinel validation, PASS/FAIL. |
 
 ### Review and shipping
 
@@ -217,6 +263,7 @@ These are invoked inside a Claude Code session and form the daily operational to
 | `/review` | Run the review suite on the current branch. |
 | `/review-sweep` | Sweep all open PRs for feedback and CI status. |
 | `/review-monitor` | Watch a PR and respond to review events. |
+| `/address-review` | Address review comments on a GitHub PR and post replies. |
 | `/prep-pr` | Prepare a PR: format title/body, wire auto-merge, post to tracker. |
 | `/ship-it` | Final gate check + merge. **Project-scoped** — each repo supplies its own `.claude/commands/ship-it.md`; `/prep-pr` resolves it from the current project and blocks if absent. Never installed globally. |
 | `/post-review` | Post-merge cleanup and debt filing. |
@@ -235,7 +282,7 @@ These are invoked inside a Claude Code session and form the daily operational to
 | Command | When to use |
 |---------|-------------|
 | `/orchestrate-phase` | Run a single pipeline phase in an orchestrated multi-session setup. |
-| `/graduate-plan` | Promote a plan from draft to approved state. |
+| `/graduate-plan` | Route an approved plan to the right implementation track. |
 
 ## The `/auto-dev` Pipeline
 
@@ -263,15 +310,19 @@ Stage 5: CI Wait         ← skipped headless (orchestrator concern)
   "ticket_id": "PROJ-123",
   "status": "shipped",
   "stage_reached": "stage5_post_create",
-  "scope": {"tier": "small", "files": 3, "lines_actual": 47},
+  "scope": {"tier": "small", "files": 3, "lines_estimate": 40, "lines_actual": 47, "forbidden_touched": false},
+  "plan_source": "github_issue_existing",
   "branch": "dev/proj-123-fix-login",
-  "pr": {"number": 42, "url": "...", "auto_merge": true},
+  "pr": {"number": 42, "url": "https://github.com/org/repo/pull/42", "base": "main", "auto_merge": true},
   "review": {"must_fix_initial": 0, "should_fix": 1, "fix_cycles_used": 0},
+  "health": {"lowest_agent_confidence": "HIGH", "any_incomplete_risk": false, "recommendation": "PROCEED"},
   "blocker": null,
-  "next_actions": []
+  "next_actions": ["wait_for_ci"]
 }
 AUTO_DEV_RESULT>>>
 ```
+
+This is the minimum payload that actually passes `cw result validate -` — `scope.lines_estimate`, `scope.forbidden_touched`, `plan_source`, `pr.base`, and `health` are all required once `stage_reached` is past `stage1_plan`/`stage1_pre_flight`, and a `shipped` status requires `"wait_for_ci"` in `next_actions`.
 
 `cw` parses this sentinel via `reconcile()` to route tasks to terminal queue states. See [`docs/headless-contract.md`](docs/headless-contract.md) for the full schema.
 
@@ -302,7 +353,7 @@ Key fields:
 | `workspace_path` | Absolute path to the project repo (or use `repo_path` + `branch` for worktree mode) |
 | `worker_model` | Model for DAEMON-origin workers (`claude --bg`). USER-origin sessions inherit the operator's default. |
 | `lanes` | Named dispatch lanes with `max_parallel`, `reap_policy`, and `priority` |
-| `auto_purposes` | Session purposes to start with `cw start`: `impl`, `idea`, `debt`, `explore` |
+| `auto_purposes` | Session purposes to start with `cw start`: `impl`, `idea`, `debt` (a fourth purpose, `orchestrate`, exists only for `cw orchestrate start` and is never selected via `auto_purposes`) |
 
 See [config/CONFIG_REFERENCE.md](config/CONFIG_REFERENCE.md) for all options and worktree-mode configuration.
 
@@ -312,7 +363,7 @@ See [config/CONFIG_REFERENCE.md](config/CONFIG_REFERENCE.md) for all options and
 - **Reconcile** — `cw status`, `cw list`, `cw start`, and each dispatch tick call `reconcile()` to detect phantom sessions (in state but absent from the daemon roster). Default `reap_policy: signal_only` emits `SESSION_REAP_PROPOSED` and routes to `BLOCKED_ON_USER` without destructive mutation. `reap_policy: auto` or `cw doctor --reap` performs actual cleanup.
 - **Sentinel parsing** — the `/auto-dev --headless` worker emits a structured `AUTO_DEV_RESULT` JSON block at session end. `reconcile()` reads this from the transcript to advance the queue task.
 - **File-based locking** — prevents concurrent state corruption from parallel session operations.
-- **Event bus** — `~/.local/share/cw/events.jsonl` provides an audit trail; MCP servers (`cw pr-channel`, `cw queue-channel`) expose events to Claude Code sessions.
+- **Event bus** — `~/.local/share/cw/events/inbox.jsonl` provides an audit trail; MCP servers (`cw pr-channel`, `cw queue-channel`, `cw operator-channel`) push filtered events to Claude Code sessions.
 - **Worktrees** — impl agents work in isolated git worktrees; `cw worktree gc` prunes merged ones.
 
 ### Key files
@@ -322,7 +373,8 @@ See [config/CONFIG_REFERENCE.md](config/CONFIG_REFERENCE.md) for all options and
 | `~/.config/cw/clients.yaml` | Client configuration |
 | `~/.local/share/cw/sessions.json` | Session state |
 | `~/.local/share/cw/dev_queue.json` | Dispatch queue |
-| `~/.local/share/cw/events.jsonl` | Event history |
+| `~/.local/share/cw/events/inbox.jsonl` | Event history |
+| `~/.claude-workspace/orchestrator.yaml` | Dispatch-loop tuning (created with defaults on first run) |
 | `~/.claude/daemon/roster.json` | Native daemon session roster |
 
 ### Architecture decisions
@@ -350,10 +402,12 @@ _CW_COMPLETE=fish_source cw | source
 ## Further Reading
 
 - [`cw guide`](src/cw/data/GUIDE.md) — operator how-to, always matches your installed version
+- [`docs/INSTALL.md`](docs/INSTALL.md) — detailed install and upgrade instructions
 - [`docs/dispatch-runbook.md`](docs/dispatch-runbook.md) — end-to-end `cw dev-queue` dispatch procedure
 - [`docs/session-disposition.md`](docs/session-disposition.md) — reading a session's outcome from transcript sentinels
 - [`docs/headless-contract.md`](docs/headless-contract.md) — `AUTO_DEV_RESULT` schema and event taxonomy
 - [`docs/events.md`](docs/events.md) — event bus reference
+- [`docs/operator-channel.md`](docs/operator-channel.md) — operator MCP notification channel reference
 - [`config/CONFIG_REFERENCE.md`](config/CONFIG_REFERENCE.md) — full configuration reference
 
 ## License

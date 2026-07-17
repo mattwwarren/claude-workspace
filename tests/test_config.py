@@ -23,9 +23,10 @@ from cw.config import (
     mutate_state,
     refuse_real_state_write,
     save_state,
+    sessions_lock,
     show_config,
 )
-from cw.exceptions import CwError
+from cw.exceptions import CwError, SessionsLockReentryError
 from cw.models import (
     CW_STATE_SCHEMA_VERSION,
     DEFAULT_AUTO_PURPOSES,
@@ -1473,6 +1474,48 @@ class TestMutateState:
 
 
 # ---------------------------------------------------------------------------
+# TestSessionsLockReentrancy
+# ---------------------------------------------------------------------------
+
+
+class TestSessionsLockReentrancy:
+    """Tests for sessions_lock()'s same-thread reentrancy guard (GitHub #1228)."""
+
+    def test_nested_sessions_lock_raises_reentry_error(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A nested acquisition raises instead of blocking in flock().
+
+        NOTE: a wrong implementation that actually calls flock() a second
+        time here would HANG the whole test run (not just fail an
+        assertion) — the guard must raise before any second flock() syscall.
+        """
+        with sessions_lock(), pytest.raises(SessionsLockReentryError), sessions_lock():
+            pytest.fail("must not reach body")
+
+    def test_sessions_lock_sequential_reacquire_still_succeeds(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Two sequential, non-nested acquisitions both succeed."""
+        with sessions_lock():
+            pass
+        with sessions_lock():
+            pass
+
+    def test_sessions_lock_releases_guard_on_exception(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """The held flag resets via finally even on exceptional exit."""
+        msg = "boom"
+        with pytest.raises(ValueError, match="boom"), sessions_lock():
+            raise ValueError(msg)
+
+        # A second call must succeed — no stuck "held" flag from the raise.
+        with sessions_lock():
+            pass
+
+
+# ---------------------------------------------------------------------------
 # TestLoadEffectiveConfig
 # ---------------------------------------------------------------------------
 
@@ -1897,3 +1940,353 @@ class TestUsageLimitedUntilPersistence:
             save_usage_limited_until(future)
 
         mock_write.assert_not_called()
+
+
+class TestAvailabilityProbeCachePersistence:
+    """Unit tests for the fleet-wide gh-availability probe cache (RFC 0011 A5).
+
+    Sibling of TestUsageLimitedUntilPersistence: the cache is persisted in the
+    same DISPATCH_STATE_FILE sidecar under the ``"availability_probe"`` key.
+    The two clobber-regression tests pin the read-merge-write contract that
+    keeps save_usage_limited_until and save_availability_probe_cache from
+    overwriting each other's key (#1157).
+    """
+
+    def test_save_then_load_round_trip_available_true(
+        self, tmp_config_dir: Path
+    ) -> None:
+        from datetime import UTC, datetime
+
+        from cw.config import (
+            AvailabilityProbeCache,
+            load_availability_probe_cache,
+            save_availability_probe_cache,
+        )
+
+        probed_at = datetime.now(UTC)
+        save_availability_probe_cache(
+            AvailabilityProbeCache(probed_at=probed_at, available=True, latched=False)
+        )
+        loaded = load_availability_probe_cache()
+        assert loaded is not None
+        assert loaded.available is True
+        assert loaded.latched is False
+        assert abs((loaded.probed_at - probed_at).total_seconds()) < 1
+
+    def test_save_then_load_round_trip_available_false(
+        self, tmp_config_dir: Path
+    ) -> None:
+        from datetime import UTC, datetime
+
+        from cw.config import (
+            AvailabilityProbeCache,
+            load_availability_probe_cache,
+            save_availability_probe_cache,
+        )
+
+        probed_at = datetime.now(UTC)
+        save_availability_probe_cache(
+            AvailabilityProbeCache(probed_at=probed_at, available=False, latched=True)
+        )
+        loaded = load_availability_probe_cache()
+        assert loaded is not None
+        assert loaded.available is False
+        assert loaded.latched is True
+
+    def test_load_returns_none_when_file_absent(self, tmp_config_dir: Path) -> None:
+        import cw.config
+        from cw.config import load_availability_probe_cache
+
+        cw.config.DISPATCH_STATE_FILE.unlink(missing_ok=True)
+        assert load_availability_probe_cache() is None
+
+    def test_load_returns_none_on_corrupt_json(self, tmp_config_dir: Path) -> None:
+        import cw.config
+        from cw.config import load_availability_probe_cache
+
+        cw.config.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cw.config.DISPATCH_STATE_FILE.write_text("not-json")
+        assert load_availability_probe_cache() is None
+
+    def test_load_returns_none_when_key_absent(self, tmp_config_dir: Path) -> None:
+        import json
+
+        import cw.config
+        from cw.config import load_availability_probe_cache
+
+        cw.config.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cw.config.DISPATCH_STATE_FILE.write_text(
+            json.dumps({"usage_limited_until": None})
+        )
+        assert load_availability_probe_cache() is None
+
+    def test_load_returns_none_on_malformed_shape(self, tmp_config_dir: Path) -> None:
+        import json
+
+        import cw.config
+        from cw.config import load_availability_probe_cache
+
+        cw.config.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        # available is an int, not a bool; latched/probed_at missing → None.
+        cw.config.DISPATCH_STATE_FILE.write_text(
+            json.dumps({"availability_probe": {"available": 1}})
+        )
+        assert load_availability_probe_cache() is None
+
+    def test_save_warns_and_does_not_raise_on_oserror(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import logging
+        from datetime import UTC, datetime
+        from unittest.mock import patch
+
+        from cw.config import (
+            AvailabilityProbeCache,
+            save_availability_probe_cache,
+        )
+
+        cache = AvailabilityProbeCache(
+            probed_at=datetime.now(UTC), available=True, latched=False
+        )
+        with (
+            patch("cw.config.atomic_write_text", side_effect=OSError("disk full")),
+            caplog.at_level(logging.WARNING, logger="cw.config"),
+        ):
+            save_availability_probe_cache(cache)
+
+        assert "availability_probe" in caplog.text
+
+    def test_save_refuses_real_path_and_does_not_swallow(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The #1017 CwError guard must propagate, unlike the OSError above."""
+        from datetime import UTC, datetime
+
+        from cw.config import (
+            AvailabilityProbeCache,
+            save_availability_probe_cache,
+        )
+
+        real_dispatch_state_file = _REAL_STATE_DIR / "dispatch_state.json"
+        monkeypatch.setattr("cw.config.DISPATCH_STATE_FILE", real_dispatch_state_file)
+        mock_write = MagicMock()
+        monkeypatch.setattr("cw.config.atomic_write_text", mock_write)
+
+        cache = AvailabilityProbeCache(
+            probed_at=datetime.now(UTC), available=True, latched=False
+        )
+        with pytest.raises(CwError, match="refusing real-state write"):
+            save_availability_probe_cache(cache)
+
+        mock_write.assert_not_called()
+
+    def test_save_availability_probe_cache_preserves_usage_limited_until(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Writing the probe cache must not clobber the usage-limit key."""
+        from datetime import UTC, datetime, timedelta
+
+        from cw.config import (
+            AvailabilityProbeCache,
+            load_usage_limited_until,
+            save_availability_probe_cache,
+            save_usage_limited_until,
+        )
+
+        future = datetime.now(UTC) + timedelta(hours=1)
+        save_usage_limited_until(future)
+        save_availability_probe_cache(
+            AvailabilityProbeCache(
+                probed_at=datetime.now(UTC), available=False, latched=True
+            )
+        )
+        loaded = load_usage_limited_until()
+        assert loaded is not None
+        assert abs((loaded - future).total_seconds()) < 1
+
+    def test_save_usage_limited_until_preserves_availability_probe_cache(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Writing the usage-limit key must not clobber the probe cache."""
+        from datetime import UTC, datetime, timedelta
+
+        from cw.config import (
+            AvailabilityProbeCache,
+            load_availability_probe_cache,
+            save_availability_probe_cache,
+            save_usage_limited_until,
+        )
+
+        save_availability_probe_cache(
+            AvailabilityProbeCache(
+                probed_at=datetime.now(UTC), available=False, latched=True
+            )
+        )
+        save_usage_limited_until(datetime.now(UTC) + timedelta(hours=1))
+        loaded = load_availability_probe_cache()
+        assert loaded is not None
+        assert loaded.available is False
+        assert loaded.latched is True
+
+    def test_save_availability_probe_cache_swallows_corrupt_existing_sidecar(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A corrupt existing sidecar is replaced, not raised on (#1157)."""
+        from datetime import UTC, datetime
+
+        import cw.config
+        from cw.config import (
+            AvailabilityProbeCache,
+            load_availability_probe_cache,
+            save_availability_probe_cache,
+        )
+
+        cw.config.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cw.config.DISPATCH_STATE_FILE.write_text("not-json")
+        save_availability_probe_cache(
+            AvailabilityProbeCache(
+                probed_at=datetime.now(UTC), available=True, latched=False
+            )
+        )
+        loaded = load_availability_probe_cache()
+        assert loaded is not None
+        assert loaded.available is True
+
+    def test_save_usage_limited_until_swallows_corrupt_existing_sidecar(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """save_usage_limited_until also tolerates a corrupt existing sidecar."""
+        from datetime import UTC, datetime, timedelta
+
+        import cw.config
+        from cw.config import load_usage_limited_until, save_usage_limited_until
+
+        cw.config.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cw.config.DISPATCH_STATE_FILE.write_text("not-json")
+        future = datetime.now(UTC) + timedelta(hours=1)
+        save_usage_limited_until(future)
+        loaded = load_usage_limited_until()
+        assert loaded is not None
+        assert abs((loaded - future).total_seconds()) < 1
+
+
+class TestMainDriftLatchesPersistence:
+    """Unit tests for the per-client main-checkout-drift latch (#1258).
+
+    Sibling of TestAvailabilityProbeCachePersistence: persisted in the same
+    DISPATCH_STATE_FILE sidecar under the ``"main_drift_latches"`` key.
+    """
+
+    def test_save_then_load_round_trip(self, tmp_config_dir: Path) -> None:
+        from cw.config import load_main_drift_latches, save_main_drift_latches
+
+        save_main_drift_latches({"client-a": True, "client-b": False})
+        assert load_main_drift_latches() == {"client-a": True, "client-b": False}
+
+    def test_load_returns_empty_when_file_absent(self, tmp_config_dir: Path) -> None:
+        import cw.config
+        from cw.config import load_main_drift_latches
+
+        cw.config.DISPATCH_STATE_FILE.unlink(missing_ok=True)
+        assert load_main_drift_latches() == {}
+
+    def test_load_returns_empty_when_key_absent(self, tmp_config_dir: Path) -> None:
+        """File exists (sibling sidecar key present) but no main_drift_latches key."""
+        import json
+
+        import cw.config
+        from cw.config import load_main_drift_latches
+
+        cw.config.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cw.config.DISPATCH_STATE_FILE.write_text(
+            json.dumps({"usage_limited_until": None})
+        )
+        assert load_main_drift_latches() == {}
+
+    def test_load_returns_empty_on_corrupt_json(self, tmp_config_dir: Path) -> None:
+        import cw.config
+        from cw.config import load_main_drift_latches
+
+        cw.config.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cw.config.DISPATCH_STATE_FILE.write_text("not-json")
+        assert load_main_drift_latches() == {}
+
+    def test_load_returns_empty_on_malformed_value_type(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A non-bool latch value is treated as malformed, not coerced."""
+        import json
+
+        import cw.config
+        from cw.config import load_main_drift_latches
+
+        cw.config.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cw.config.DISPATCH_STATE_FILE.write_text(
+            json.dumps({"main_drift_latches": {"client-a": "yes"}})
+        )
+        assert load_main_drift_latches() == {}
+
+    def test_save_warns_and_does_not_raise_on_oserror(
+        self,
+        tmp_config_dir: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import logging
+        from unittest.mock import patch
+
+        from cw.config import save_main_drift_latches
+
+        with (
+            patch("cw.config.atomic_write_text", side_effect=OSError("disk full")),
+            caplog.at_level(logging.WARNING, logger="cw.config"),
+        ):
+            save_main_drift_latches({"client-a": True})
+
+        assert "main_drift_latches" in caplog.text
+
+    def test_save_refuses_real_path_and_does_not_swallow(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The #1017 CwError guard must propagate, unlike the OSError above."""
+        from cw.config import save_main_drift_latches
+
+        real_dispatch_state_file = _REAL_STATE_DIR / "dispatch_state.json"
+        monkeypatch.setattr("cw.config.DISPATCH_STATE_FILE", real_dispatch_state_file)
+        mock_write = MagicMock()
+        monkeypatch.setattr("cw.config.atomic_write_text", mock_write)
+
+        with pytest.raises(CwError, match="refusing real-state write"):
+            save_main_drift_latches({"client-a": True})
+
+        mock_write.assert_not_called()
+
+    def test_save_preserves_availability_probe_cache(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Writing the latch map must not clobber the availability probe key."""
+        from datetime import UTC, datetime
+
+        from cw.config import (
+            AvailabilityProbeCache,
+            load_availability_probe_cache,
+            save_availability_probe_cache,
+            save_main_drift_latches,
+        )
+
+        save_availability_probe_cache(
+            AvailabilityProbeCache(
+                probed_at=datetime.now(UTC), available=False, latched=True
+            )
+        )
+        save_main_drift_latches({"client-a": True})
+        loaded = load_availability_probe_cache()
+        assert loaded is not None
+        assert loaded.available is False
+        assert loaded.latched is True

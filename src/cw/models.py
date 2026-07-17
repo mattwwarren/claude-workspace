@@ -167,7 +167,11 @@ CW_STATE_SCHEMA_VERSION = 14
 #      distinct from the per-task queue.
 # v16: added TicketTask.request_reviewer_fired_at (GitHub #1197) — one-shot
 #      latch for the request_reviewer review recipe.
-DEV_QUEUE_SCHEMA_VERSION = 16
+# v17: added TicketTask.auto_fix_ci_fired_at (GitHub #1205) — one-shot
+#      latch for the auto_fix_ci review recipe.
+# v18: added TicketTask.address_review_fired_at (GitHub #1206) — one-shot
+#      latch for the address_review review recipe.
+DEV_QUEUE_SCHEMA_VERSION = 18
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -321,13 +325,18 @@ class DispatchSkipReason(StrEnum):
     """First-match skip_reason values emitted in dispatch.tick events.
 
     Precedence (highest first):
-    FRESHNESS_GATE > USAGE_LIMITED > CAP_FULL > LANE_CAP_BLOCKED
-    > SPAWN_ERROR > LANE_CIRCUIT_PAUSED > SPAWN_ERROR_BACKOFF > NO_PENDING
-    > NONE.
+    AVAILABILITY_GATE > FRESHNESS_GATE > USAGE_LIMITED > CAP_FULL
+    > LANE_CAP_BLOCKED > SPAWN_ERROR > LANE_CIRCUIT_PAUSED > SPAWN_ERROR_BACKOFF
+    > NO_PENDING > NONE.
+    AVAILABILITY_GATE ranks first: it is the fleet-wide gh-availability
+    preflight probe (RFC 0011 A5), checked before the per-client freshness
+    gate so a real GitHub outage short-circuits every client before any pays
+    the freshness git-fetch cost.
     ATTEMPT_CAP_BLOCKED is emitted per-task when the global attempt ceiling
     parks a task; it is not part of the per-client-tick precedence chain.
     """
 
+    AVAILABILITY_GATE = "availability_gate"
     FRESHNESS_GATE = "freshness_gate"
     USAGE_LIMITED = "usage_limited"
     CAP_FULL = "cap_full"
@@ -636,6 +645,27 @@ class TicketTask(BaseModel):
     # latch for a genuine future re-entry — mirrors
     # escalate_merge_block_fired_at above.
     request_reviewer_fired_at: datetime | None = None
+    # GitHub #1205 — one-shot latch for the auto_fix_ci review recipe
+    # (cw.reconcile.review_recipes). Stamped by _prepare_auto_fix_ci_job when it
+    # emits PR_ACTION_TAKEN for a ci_failing PR, so the CI-fix re-dispatch (a
+    # full re-enqueue + dispatch tick, not a scoped session — the highest blast
+    # radius of the four review-recipe latches) fires exactly once per
+    # ci-failing episode rather than every reconcile tick. Cleared by
+    # _act_auto_fix_ci's own episode-end sweep (the shared _clear_ended_episodes
+    # helper) when the row's pr_state leaves ci_failing (or goes None),
+    # re-arming the latch for a genuine future re-entry — mirrors
+    # request_reviewer_fired_at above.
+    auto_fix_ci_fired_at: datetime | None = None
+    # GitHub #1206 — one-shot latch for the address_review review recipe
+    # (cw.reconcile.review_recipes). Stamped by _prepare_dispatch_job when it
+    # emits PR_ACTION_TAKEN for a changes_requested PR, so the
+    # /address-review dispatch fires exactly once per changes-requested
+    # episode rather than every reconcile tick. Cleared by
+    # _act_address_review's own episode-end sweep (the shared
+    # _clear_ended_episodes helper) when the row's pr_state leaves
+    # changes_requested (or goes None), re-arming the latch for a genuine
+    # future re-entry — mirrors auto_fix_ci_fired_at above.
+    address_review_fired_at: datetime | None = None
 
     @field_validator("gate_recipes")
     @classmethod
@@ -1085,6 +1115,46 @@ class OrchestratorConfig(BaseModel):
     # construction until P2 ships). Default False, mirroring
     # gate_recipes_enabled's fail-safe default.
     review_recipes_enabled: bool = False
+    # Tool-name patterns forwarded to EVERY DAEMON worker spawn as a single
+    # `--disallowed-tools=<comma-joined>` token (cw.spawn.build_disallowed_tools_arg).
+    # Default empty: cw forces no tool restriction on workers. Replaces the
+    # former hard-coded, tracker-gated Linear-MCP block (#726) — restricting an
+    # MCP whose headless auth behaves badly is the operator's policy to set
+    # here, not cw's to impose from a tracker heuristic. Patterns use claude's
+    # `--disallowed-tools` glob syntax, e.g. "mcp__plugin_linear_linear__*".
+    # Global by design (no per-lane/per-client override): the operator sets one
+    # fleet-wide policy. The removed #726 heuristic's per-client (tracker)
+    # scoping was dropped deliberately, not overlooked — a mixed fleet that
+    # needs the block on only some clients sets the one pattern that is safe
+    # fleet-wide (headless Linear OAuth stalls the same way on every client).
+    disallowed_mcp_tools: list[str] = Field(default_factory=list)
+
+    @field_validator("disallowed_mcp_tools")
+    @classmethod
+    def _validate_disallowed_mcp_tools(cls, value: list[str]) -> list[str]:
+        """Reject blank or comma-bearing patterns (fail-loud, not silent-drop).
+
+        Two silent-corruption modes are guarded, both producing a restriction
+        that differs from what the operator wrote with no error raised: a blank
+        entry renders as an empty comma-field in the `--disallowed-tools=`
+        value, and a comma-bearing entry splits into two patterns when
+        ``build_disallowed_tools_arg`` comma-joins the list into one token.
+        Same fail-closed reasoning as default_signoff. Pydantic already
+        enforces ``list[str]``; this adds the element-shape guard.
+        """
+        for pattern in value:
+            if not pattern.strip():
+                msg = (
+                    "disallowed_mcp_tools entries must be non-empty, non-blank strings"
+                )
+                raise ValueError(msg)
+            if "," in pattern:
+                msg = (
+                    "disallowed_mcp_tools entries must not contain ',' (the "
+                    "comma-join delimiter); use one list entry per pattern"
+                )
+                raise ValueError(msg)
+        return value
 
     @field_validator("concierge_recoveries")
     @classmethod

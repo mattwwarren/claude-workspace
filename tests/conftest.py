@@ -22,6 +22,12 @@ from cw.models import (
     SessionStatus,
 )
 from cw.native_daemon import FakeNativeDaemonClient
+from cw.review_findings import (
+    CapturedDiff,
+    EscalationMetadata,
+    Finding,
+    ReviewerFindingsDocument,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -145,6 +151,77 @@ def stub_fetch_plan(
     monkeypatch.setattr(target, lambda _ticket_id, **_k: body)
 
 
+def _make_escalation(**overrides: object) -> EscalationMetadata:
+    """Minimal-but-valid EscalationMetadata with keyword overrides (#1237)."""
+    kwargs: dict[str, object] = {
+        "target_reviewer": "Perf Reviewer",
+        "evidence_quote": "def broken():",
+    }
+    kwargs.update(overrides)
+    return EscalationMetadata(**kwargs)  # type: ignore[arg-type]
+
+
+def _finding_kwargs(**overrides: object) -> dict[str, object]:
+    """Full kwargs for a valid Finding (#1237).
+
+    Shared by :func:`_make_finding` and by tests that need the raw dict
+    (e.g. ``Finding.model_construct(**_finding_kwargs(...))`` to bypass
+    Pydantic validation) — a single source of truth so the two never drift.
+    Defaults line up with ``_make_diff``: ``evidence`` appears in the diff
+    text, ``file`` is a changed file, and the line range is a changed line.
+    """
+    kwargs: dict[str, object] = {
+        "severity": "MUST_FIX",
+        "file": "src/cw/foo.py",
+        "line_start": 10,
+        "line_end": 10,
+        "summary": "Bug here",
+        "consequence": "It breaks",
+        "suggested_fix": "Fix it",
+        "evidence": "def broken():",
+        "confidence": "HIGH",
+        "escalation": None,
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def _make_finding(**overrides: object) -> Finding:
+    """Minimal-but-valid Finding with keyword overrides (#1237)."""
+    return Finding(**_finding_kwargs(**overrides))  # type: ignore[arg-type]
+
+
+def _make_reviewer_doc(
+    *findings: Finding, **overrides: object
+) -> ReviewerFindingsDocument:
+    """Minimal-but-valid ReviewerFindingsDocument wrapping *findings* (#1237)."""
+    kwargs: dict[str, object] = {
+        "reviewer_role": "Test Reviewer",
+        "status": "ok",
+        "detail": "",
+        "findings": list(findings),
+    }
+    kwargs.update(overrides)
+    return ReviewerFindingsDocument(**kwargs)  # type: ignore[arg-type]
+
+
+def _make_diff(*added_lines: str, **overrides: object) -> CapturedDiff:
+    """Minimal-but-valid CapturedDiff (#1237).
+
+    Positional args are added ("+"-prefixed) content lines. ``files`` maps a
+    changed file path to its list of changed line numbers; ``extra_text`` is
+    appended verbatim so context/removed lines can be exercised.
+    """
+    lines = added_lines or ("def broken():",)
+    files = overrides.get("files", {"src/cw/foo.py": [10]})
+    extra_text = str(overrides.get("extra_text", ""))
+    assert isinstance(files, dict)
+    header = "\n".join(f"+++ b/{path}" for path in files)
+    body = "\n".join(f"+{line}" for line in lines)
+    text = f"{header}\n{body}\n{extra_text}"
+    return CapturedDiff(text=text, files=files)
+
+
 @pytest.fixture(autouse=True)
 def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect every cw state/config path to ``tmp_path``.
@@ -239,6 +316,24 @@ def _mock_push_notification(monkeypatch: pytest.MonkeyPatch) -> None:
         "cw.reconcile._deps.fire_push_notification",
         MagicMock(name="fire_push_notification"),
     )
+
+
+@pytest.fixture(autouse=True)
+def _mock_gh_availability(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default the fleet-wide gh-availability probe to 'available' (RFC 0011 A5).
+
+    Sibling of ``_mock_push_notification``: ``dispatch_tick``'s per-client
+    availability gate calls ``check_gh_availability``, which shells out to a
+    real ``gh auth status`` subprocess. Without a default, every existing
+    dispatch test would depend on the host machine's live gh auth state (and
+    pay a real subprocess per tick). Patching the ``cw.dispatch`` binding
+    autouse guarantees no dispatch test probes for real; the fleet reads as
+    available unless a test overrides this seam. ``TestAvailabilityPreflightGate``
+    re-patches the same name via ``_force_gh_unavailable`` and pytest's patch
+    stacking lets the test-level patch win. ``test_gh.py`` exercises the real
+    helper via ``cw.gh`` directly and is unaffected.
+    """
+    monkeypatch.setattr("cw.dispatch.check_gh_availability", lambda **_kw: True)
 
 
 @pytest.fixture

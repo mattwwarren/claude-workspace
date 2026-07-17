@@ -17,6 +17,7 @@ class TestSchemaList:
         assert "auto-dev-result" in result.output
         assert "ticket-task" in result.output
         assert "session" in result.output
+        assert "review-verdict" in result.output
 
     def test_list_json_is_valid_array(self) -> None:
         runner = CliRunner()
@@ -27,7 +28,8 @@ class TestSchemaList:
         assert "auto-dev-result" in parsed
         assert "ticket-task" in parsed
         assert "session" in parsed
-        assert len(parsed) == 3
+        assert "review-verdict" in parsed
+        assert len(parsed) == 4
 
 
 class TestSchemaShow:
@@ -85,6 +87,30 @@ class TestSchemaShow:
         result = runner.invoke(main, ["schema", "show", "unknown-schema"])
         assert result.exit_code != 0
         assert "unknown-schema" in result.output.lower()
+
+
+class TestSchemaShowReviewVerdict:
+    def test_json_format_parses(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["schema", "show", "review-verdict", "--format=json"]
+        )
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert "blocking" in parsed["properties"]
+        assert "must_fix" in parsed["properties"]
+        assert "reviewed_sha" in parsed["properties"]
+        assert "stripped_escalations" in parsed["properties"]
+        assert "EscalationMetadata" in parsed["$defs"]
+        assert "StrippedEscalation" in parsed["$defs"]
+
+    def test_tldr_renders(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["schema", "show", "review-verdict", "--format=tldr"]
+        )
+        assert result.exit_code == 0
+        assert "blocking" in result.output
 
 
 class TestSchemaStageOutput:

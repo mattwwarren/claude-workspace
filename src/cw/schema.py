@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from cw.auto_dev_result import AutoDevResult
 from cw.models import Session, TicketTask
+from cw.review_findings import ReviewVerdict
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -22,6 +23,10 @@ REGISTRY: dict[str, type[BaseModel]] = {
     "auto-dev-result": AutoDevResult,
     "ticket-task": TicketTask,
     "session": Session,
+    # Executor-neutral review-verdict contract (#1237). Nested models
+    # (EscalationMetadata, StrippedEscalation, ...) surface automatically in
+    # model_json_schema()'s $defs — no separate registration.
+    "review-verdict": ReviewVerdict,
 }
 
 # Fields absent from model_json_schema() `required` arrays but enforced at

@@ -48,7 +48,16 @@ trivial one-liner — especially when it:
 - asserts against or renders data from **freshly-merged** code (the ticket may
   reference fields/functions that don't exist, or were renamed),
 - is a test ticket that replays incidents (mock seams + time-window determinism
-  are easy to get silently wrong).
+  are easy to get silently wrong),
+- is **one task of a multi-task plan whose literal code the worker transcribes
+  verbatim** (a `/sprint-buildout`- or `/writing-plans`-style plan doc). Here the
+  sweep target is the plan's own code blocks, and the recurring defect classes
+  are specific — `E402`/`I001`/`E501`, untested exception branches that fail the
+  patch-coverage gate, fabricated test helpers, dropped registration entries,
+  gitignored source refs the worker's worktree can't reach, missing Touch-point
+  Contract / `Files:` entries. Sweep **every** task's code before dispatch and
+  verify with a real `ruff`/`mypy` run on a reconstruction, not by eyeballing:
+  see [`references/multi-task-plan-hardening.md`](references/multi-task-plan-hardening.md).
 
 Also run it reactively the moment a ticket comes back
 `ambiguities_pending_resolution` or `plan_unreviewable` — don't just

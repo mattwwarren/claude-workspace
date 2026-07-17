@@ -6,8 +6,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`auto_fix_ci_fired_at` latch + schema v16→17** (#1205): the `auto_fix_ci`
+  recipe now re-dispatches once per ci-failing episode instead of spawning a
+  worker session on every reconcile tick until hydration catches up.
+- **`address_review_fired_at` latch + schema v17→v18** (#1206): the
+  `address_review` recipe now dispatches once per changes-requested episode
+  instead of re-dispatching an `/address-review` session on every reconcile
+  tick until a human re-reviews.
+
 ### Changed
 
+- **Daemon worker MCP-tool restrictions are now operator-configurable.** The
+  hard-coded, tracker-gated block that stripped Linear MCP tools from
+  `github-issues`-client DAEMON workers (added in #726 to avoid a headless
+  Linear-OAuth stall) is replaced by a global `disallowed_mcp_tools` list on
+  `OrchestratorConfig` (`~/.claude-workspace/orchestrator.yaml`), default empty
+  and applied uniformly at both DAEMON spawn chokepoints. cw no longer decides
+  tool availability from a tracker heuristic; the operator declares the exact
+  deny patterns. **MIGRATION:** any `github-issues` client that relied on the
+  old automatic block must now set
+  `disallowed_mcp_tools: ["mcp__plugin_linear_linear__*"]` explicitly, or its
+  workers will have Linear MCP tools available (a Linear-tracked ticket
+  mis-routed to such a client previously blocked at pre-flight with zero Linear
+  tools). The single `--disallowed-tools=` token form (#733) is preserved.
 - **Premise gate gains a self-verified-→-proceed path** (#1192): the auto-dev
   plan stage's premise contract now distinguishes evidence quality instead of
   treating every unverified factual claim identically. A premise the
@@ -19,6 +42,120 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   intent still parks with `premises_pending_verification` exactly as before.
   Headless-only, mirrors the existing ambiguity `Recommendation: ADOPT | PARK`
   fast path. Skill-markdown only — no `src/cw` or schema changes.
+
+## [1.20.0] — 2026-07-15
+
+RFC 0011 availability- & counterparty-aware holding — wave-0 seams plus the
+first two epic tickets, all shipped dark or naturally inert (the counterparty
+axis has no live "external" producer yet, so the new park class and idle-reap
+exemption only fire once a later ticket wires real PR-author comparison).
+Alongside it: groundwork for a native `/sprint-buildout` RFC→ticket pipeline
+(`cw.sprint` parser, config/plan builder, gh creation helpers — no `cw sprint`
+command yet, that lands with the remaining tasks), two webhook/config security
+hardenings, and a batch of dispatch/reconcile correctness fixes surfaced while
+dogfooding the sprint's own dispatch.
+
+### Added
+
+- **RFC 0011 S1 — counterparty axis + operator self-identity** (#1153):
+  `derive_counterparty` (self|external), `ClientConfig.operator_github_login`
+  override, and `cw.gh.current_gh_login` promoted to a public contract. Always
+  resolves "self" today — no candidate-selection path can reach a PR authored
+  by anyone but the operator yet.
+- **RFC 0011 S2 — native review-requested register** (#1154): a `WatchedPr`
+  model (schema v14→15) for externally-requested PRs, `register_watched_pr`,
+  watched-PR hydration wired into `hydrate_pr_states`, a `review_requested`
+  webhook event, and a new `cw review register` CLI command.
+- **RFC 0011 A1 — `awaiting_operator` park class** (#1155):
+  `OPERATOR_UNAVAILABLE_BLOCKER_REASONS`, a distinct axis from
+  `FINALIZE_REGRESS_BLOCKER_REASONS` meaning "operator/dependency unreachable"
+  rather than "leg is broken." `push_auth_failed` (#1049) is retro-classified
+  as the first instance.
+- **RFC 0011 B1 — external-counterparty idle-reap exemption** (#1158): a
+  DAEMON session idling while reviewing a teammate's PR now escalates to the
+  operator via `SESSION_NEEDS_ATTENTION` instead of being silently
+  parked/reaped.
+- **`request_reviewer_fired_at` latch + schema v15→16** (#1197): the
+  `request_reviewer` recipe now fires once per no-reviewer episode instead of
+  re-requesting on every reconcile tick.
+- **`cw-deps` dependency drift check** (#1077): `cw doctor` now warns when the
+  running `cw` interpreter is missing a distribution declared in the source
+  `pyproject.toml` — the drift class that crash-looped `cw dev-queue serve`
+  after #1075 added `psutil` without a venv resync.
+- **`cw dev-queue requeue --from-failed`** (#1190): a FAILED row whose
+  underlying session actually completed clean now has a CLI path back to
+  PENDING, mirroring the existing `--from-cancelled` escape hatch.
+- **Sprint-buildout groundwork** (#1174, #1193, #1209): `cw.sprint`'s
+  RFC→ticket parser (`docs/rfcs/TEMPLATE.md` as the strict input contract),
+  `BuildoutConfig`/`build_plan`, and gh issue/milestone creation helpers —
+  foundation tasks for an upcoming `cw sprint plan|apply` command; the CLI,
+  idempotent apply, and acceptance fixture are not in this release.
+- **`ConfigValidationError` + `extra="forbid"` on config-facing models**
+  (#1200): a typo'd `clients.yaml`/`orchestrator.yaml` key (e.g.
+  `review_recipies`) now surfaces as an actionable error at load time instead
+  of silently resolving to a hardcoded default.
+- **`CodexExecutor` parses real findings** (#1203): codex review counts now
+  come from structured `--output-schema` JSON output instead of a hardcoded
+  clean review on every exit.
+- **ADR-0012 — cw never grants a GitHub review approval** (#1199): documents
+  the invariant and adds a guard test scanning for the GraphQL/REST call
+  shapes that would violate it.
+
+### Fixed
+
+- **`/pr-event` default-denies when the HMAC secret is unset** (#1127):
+  previously fell through unauthenticated; now returns 401 unless
+  `--allow-unsigned` is explicitly passed to `cw pr-channel serve`.
+- **Plan-review marker comments now require an authorship match** (#1128):
+  `fetch_approved_plan_comment` no longer trusts a "plan reviewed" marker
+  comment posted by anyone other than the authenticated `gh` identity.
+- **`ticket_id` charset widened to permit `#`** (#1184): the #1129 validator
+  rejected `repo#N`-shaped ids already live in production (e.g.
+  `redact-api#1`), which would have taken down the dev queue for every client
+  on the next upgrade since one bad row fails the whole store's validation.
+  `#` is now percent-encoded only at the one sink where it's actually
+  dangerous (a `gh` API URL path segment).
+- **Later-stage sentinel self-escalation walks the stage pointer forward**
+  (#1149): a sentinel mapped to a later pipeline stage now advances
+  `task.stage` one rung at a time instead of silently no-op-ing — the fix for
+  the 76-event Stop-hook storm on session `cbfdc122`. Refusal loops now latch
+  instead of re-proposing the same doomed candidate every tick.
+- **`SESSION_NEEDS_ATTENTION` now emits on every `blocked_on_user` park**
+  (#1117): previously only Rule 2 emitted attention; Rule 3b
+  (`merge_pending`), the Rule 5 fallthrough, and Rule 6 (unparseable
+  sentinel) parked silently.
+- **Transcript liveness derives from the last content-bearing record, not
+  mtime** (#1076): Claude Code's metadata-only transcript writes (ai-title,
+  permission-mode, etc.) no longer reset a stalled session's idle counter and
+  mask a real stranding.
+- **Salvage LOW path merges into `last_result` instead of replacing it**
+  (#1105): a wholesale replace was destroying pre-existing keys (`status`,
+  `review`) that `cw dev-queue approve` depends on to detect an approval gate.
+- **`events._parse_lines` tolerates an unknown event type** (#1210): a line
+  written by a newer producer no longer crashes `read_events`/`prune_events`;
+  only skipped and summarized in one warning per call.
+- **`approve` on an unreviewed plan re-parks at PLAN, not IMPL** (#968): a
+  Large-scope plan approved before its quality review ran previously advanced
+  straight to Stage 2 against an empty `.cw/plan.md`.
+- **Forbidden-area classification inspects diff content, not just path**
+  (#1104): a `.github/workflows/**` change with no actual pipeline-logic diff
+  no longer permanently sticks a ticket at large-tier; Stage 3 can one-time
+  downgrade a Stage-1 false positive.
+- **Push-path PR hydration recomputes `attention_state`** (#1196): a
+  webhook-driven update previously carried the prior `attention_state`
+  forward unchanged instead of re-deriving it from the overlaid facts.
+- **`aider` stdout/stderr captured to a per-run log file** (#958): a
+  died-without-committing failure previously surfaced with no diagnostic
+  text at all.
+- **`ship-it` PR title no longer wins from TDD scaffolding commits** (#1208):
+  title derivation now prefers a substantive `feat`/`fix`/`refactor` commit
+  over a `test`/`docs`-only one.
+- **Real state-write guard + dev-queue backup rotation** (#1017): writes to
+  the real (pre-monkeypatch) state/config dirs are refused under pytest, and
+  `save_dev_queue()` now rotates a timestamped backup before every write.
+- **`AutoDevResult` empty-item filtering extended** (#1130): the existing
+  blank-item guard now also covers `commits`, `friction_highlights`,
+  `next_actions`, `Health.shortcuts`, and `AgentHealthEntry.agent_id`.
 
 ## [1.19.0] — 2026-07-12
 

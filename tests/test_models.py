@@ -882,8 +882,8 @@ def test_session_lane_round_trips() -> None:
 class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
-    def test_dev_queue_schema_version_is_16(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 16
+    def test_dev_queue_schema_version_is_18(self) -> None:
+        assert DEV_QUEUE_SCHEMA_VERSION == 18
 
     def test_pr_state_defaults(self) -> None:
         state = PrState()
@@ -1405,3 +1405,37 @@ class TestTicketIdValidation:
             TicketTask(ticket_id="foo/bar", client="acme")
         message = str(exc_info.value)
         assert "foo/bar" in message
+
+
+class TestOrchestratorConfigDisallowedMcpTools:
+    """Config-driven --disallowed-tools mechanism (replaces the #726
+    hard-coded, tracker-gated Linear MCP disallow) — cw.spawn.
+    build_disallowed_tools_arg reads this field."""
+
+    def test_default_is_empty_list(self) -> None:
+        assert OrchestratorConfig().disallowed_mcp_tools == []
+
+    def test_round_trips_configured_patterns(self) -> None:
+        config = OrchestratorConfig(
+            disallowed_mcp_tools=["mcp__plugin_linear_linear__*"]
+        )
+        assert config.disallowed_mcp_tools == ["mcp__plugin_linear_linear__*"]
+
+    def test_rejects_blank_entry(self) -> None:
+        with pytest.raises(ValidationError):
+            OrchestratorConfig(disallowed_mcp_tools=["  "])
+
+    def test_rejects_comma_bearing_entry(self) -> None:
+        # A comma would split into two patterns at build_disallowed_tools_arg's
+        # comma-join — reject it fail-loud rather than silently reinterpret.
+        with pytest.raises(ValidationError):
+            OrchestratorConfig(disallowed_mcp_tools=["mcp__a__*,mcp__b__*"])
+
+    def test_model_validate_from_dict(self) -> None:
+        config = OrchestratorConfig.model_validate(
+            {"disallowed_mcp_tools": ["mcp__plugin_linear_linear__*", "mcp__foo__*"]}
+        )
+        assert config.disallowed_mcp_tools == [
+            "mcp__plugin_linear_linear__*",
+            "mcp__foo__*",
+        ]

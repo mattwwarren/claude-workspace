@@ -13,11 +13,14 @@ import pytest
 import yaml
 
 from cw.config import (
+    AvailabilityProbeCache,
     _load_concurrency_overrides,
     _save_concurrency_overrides,
+    load_availability_probe_cache,
     load_effective_config,
     load_state,
     orchestrator_config_file,
+    save_availability_probe_cache,
     save_state,
     save_usage_limited_until,
 )
@@ -29,6 +32,8 @@ from cw.dev_queue import (
     save_plan,
 )
 from cw.dispatch import (
+    _AVAILABILITY_OUTAGE_REASON,
+    _AVAILABILITY_PROBE_TTL_SECONDS,
     FRESHNESS_MAIN_DETACHED,
     FRESHNESS_MAIN_DIRTY_CHECKOUT,
     FRESHNESS_MAIN_DIVERGED,
@@ -4630,6 +4635,33 @@ class TestLaneCapBlockedSkipReason:
         assert lane["blocked"] == 1
         assert lane["pending"] == 1
         assert lane["claimed"] == 0
+        p = events[0].payload
+        assert p["lane_occupants"]["impl"] == [
+            {"ticket_id": "LCAP-BLOCKED", "status": "blocked_on_user"}
+        ]
+        assert p["occupied"] == 1
+
+    def test_lane_occupants_names_the_blocking_ticket(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """lane_occupants names the BLOCKED_ON_USER ticket; PENDING is excluded."""
+        self._setup_blocked_lane(tmp_dispatch_dirs, sample_client_config.workspace_path)
+
+        daemon = FakeNativeDaemonClient()
+        config = OrchestratorConfig(default_ceiling=2)
+        dispatch_tick(config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-lcap-occupant-names",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        occupants = events[0].payload["lane_occupants"]["impl"]
+        # LCAP-BLOCKED occupies the lane; LCAP-PENDING (still PENDING) is absent.
+        assert occupants == [{"ticket_id": "LCAP-BLOCKED", "status": "blocked_on_user"}]
+        assert all(o["ticket_id"] != "LCAP-PENDING" for o in occupants)
 
     def test_no_pending_still_used_when_truly_empty(
         self,
@@ -4752,6 +4784,11 @@ class TestLaneCapCountingWithAwaitingSignoff:
         assert lane["blocked"] == 0
         assert lane["signoff"] == 1
         assert lane["pending"] == 1
+        p = events[0].payload
+        assert p["lane_occupants"]["impl"] == [
+            {"ticket_id": "SIGNOFF-BLOCKED", "status": "awaiting_operator_signoff"}
+        ]
+        assert p["occupied"] == 1
 
     def test_running_by_lane_counts_signoff_as_occupied(
         self,
@@ -4840,6 +4877,235 @@ class TestLaneCapCountingWithAwaitingSignoff:
             "signoff": 1,
             "pending": 0,
         }
+        from cw.dispatch import _lane_occupants_for_client
+
+        occupants = _lane_occupants_for_client(client, DevQueueStore(tasks=tasks))
+        assert {"ticket_id": "T1", "status": "awaiting_operator_signoff"} in occupants[
+            "impl"
+        ]
+        assert {"ticket_id": "T2", "status": "running"} in occupants["impl"]
+        assert len(occupants["impl"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# TestLaneOccupantsPayload (#1243) — lane_occupants/occupied on every skip path
+# ---------------------------------------------------------------------------
+
+
+class TestLaneOccupantsPayload:
+    """dispatch.tick carries lane_occupants/occupied across every skip path."""
+
+    def _make_running_lane(self, tmp_dispatch_dirs: Path, workspace_path: Path) -> None:
+        """One impl lane (max_parallel=1) with a single RUNNING occupant."""
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=workspace_path,
+            default_branch="main",
+            lanes=[LaneConfig(name="impl", max_parallel=1)],
+        )
+        _make_clients_yaml(tmp_dispatch_dirs, client)
+        running_task = TicketTask(
+            ticket_id="OCC-RUN", client="test-client", lane="impl"
+        )
+        running_task.status = QueueItemStatus.RUNNING
+        with dev_queue_lock():
+            store = load_dev_queue()
+            store.tasks.append(running_task)
+            save_dev_queue(store)
+
+    def _assert_occupants_consistent(self, payload: dict[str, object]) -> None:
+        """lane_occupants names the running task; occupied sums the lists."""
+        occupants = payload["lane_occupants"]
+        assert isinstance(occupants, dict)
+        assert occupants["impl"] == [{"ticket_id": "OCC-RUN", "status": "running"}]
+        assert payload["occupied"] == sum(len(v) for v in occupants.values())
+        assert payload["occupied"] == 1
+
+    def test_availability_skip_emits_lane_occupants(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """AVAILABILITY_GATE skip carries lane_occupants/occupied."""
+        self._make_running_lane(tmp_dispatch_dirs, sample_client_config.workspace_path)
+        _force_gh_unavailable(monkeypatch)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        events = read_events(
+            consumer="test-occ-availability",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        ticks = [
+            e
+            for e in events
+            if e.payload.get("skip_reason") == DispatchSkipReason.AVAILABILITY_GATE
+        ]
+        assert len(ticks) == 1
+        self._assert_occupants_consistent(ticks[0].payload)
+
+    def test_usage_limit_skip_emits_lane_occupants(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """USAGE_LIMITED skip carries lane_occupants/occupied."""
+        self._make_running_lane(tmp_dispatch_dirs, sample_client_config.workspace_path)
+        future = datetime.now(UTC) + timedelta(hours=1)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon, usage_limited_until=future)
+
+        events = read_events(
+            consumer="test-occ-usage-limit",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        ticks = [
+            e
+            for e in events
+            if e.payload.get("skip_reason") == DispatchSkipReason.USAGE_LIMITED
+        ]
+        assert len(ticks) == 1
+        self._assert_occupants_consistent(ticks[0].payload)
+
+    def test_stale_skip_emits_lane_occupants(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """FRESHNESS_GATE skip carries lane_occupants/occupied."""
+        self._make_running_lane(tmp_dispatch_dirs, sample_client_config.workspace_path)
+        monkeypatch.setattr(
+            "cw.dispatch.is_main_behind_origin",
+            lambda _client, **_kw: (True, "aaa", "bbb", 2),
+        )
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-occ-stale",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        ticks = [
+            e
+            for e in events
+            if e.payload.get("skip_reason") == DispatchSkipReason.FRESHNESS_GATE
+        ]
+        assert len(ticks) == 1
+        self._assert_occupants_consistent(ticks[0].payload)
+
+    def test_occupied_count_sums_across_lanes(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """Top-level occupied sums per-lane occupant lists across two lanes."""
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=sample_client_config.workspace_path,
+            default_branch="main",
+            lanes=[
+                LaneConfig(name="lane-a", max_parallel=1),
+                LaneConfig(name="lane-b", max_parallel=1),
+            ],
+        )
+        _make_clients_yaml(tmp_dispatch_dirs, client)
+        run_task = TicketTask(ticket_id="OCC-A", client="test-client", lane="lane-a")
+        run_task.status = QueueItemStatus.RUNNING
+        blocked_task = TicketTask(
+            ticket_id="OCC-B", client="test-client", lane="lane-b"
+        )
+        blocked_task.status = QueueItemStatus.BLOCKED_ON_USER
+        with dev_queue_lock():
+            store = load_dev_queue()
+            store.tasks.append(run_task)
+            store.tasks.append(blocked_task)
+            save_dev_queue(store)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        events = read_events(
+            consumer="test-occ-sum",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        p = events[0].payload
+        assert p["occupied"] == 2
+        assert len(p["lane_occupants"]["lane-a"]) == 1
+        assert len(p["lane_occupants"]["lane-b"]) == 1
+
+
+class TestLaneOccupantsForClient:
+    """Direct unit tests for _lane_occupants_for_client (#1243)."""
+
+    def test_lane_occupants_for_client_excludes_pending_and_completed(
+        self, tmp_path: Path
+    ) -> None:
+        """Only OCCUPIED_LANE_STATUSES tasks appear; terminal/pending excluded."""
+        from cw.dispatch import _lane_occupants_for_client
+
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=tmp_path,
+            lanes=[LaneConfig(name="impl", max_parallel=4)],
+        )
+        tasks = [
+            TicketTask(
+                ticket_id="P",
+                client="test-client",
+                lane="impl",
+                status=QueueItemStatus.PENDING,
+            ),
+            TicketTask(
+                ticket_id="C",
+                client="test-client",
+                lane="impl",
+                status=QueueItemStatus.COMPLETED,
+            ),
+            TicketTask(
+                ticket_id="X",
+                client="test-client",
+                lane="impl",
+                status=QueueItemStatus.CANCELLED,
+            ),
+            TicketTask(
+                ticket_id="F",
+                client="test-client",
+                lane="impl",
+                status=QueueItemStatus.FAILED,
+            ),
+            TicketTask(
+                ticket_id="R",
+                client="test-client",
+                lane="impl",
+                status=QueueItemStatus.RUNNING,
+            ),
+        ]
+        occupants = _lane_occupants_for_client(client, DevQueueStore(tasks=tasks))
+        assert occupants["impl"] == [{"ticket_id": "R", "status": "running"}]
+
+    def test_lane_occupants_for_client_empty_lane_is_empty_list(
+        self, tmp_path: Path
+    ) -> None:
+        """A declared lane with no tasks maps to [] (present, not absent)."""
+        from cw.dispatch import _lane_occupants_for_client
+
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=tmp_path,
+            lanes=[LaneConfig(name="impl", max_parallel=1)],
+        )
+        occupants = _lane_occupants_for_client(client, DevQueueStore(tasks=[]))
+        assert occupants["impl"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -8469,6 +8735,471 @@ class TestFreshnessBlockAttentionLatch:
 
         assert _client_freshness_override().consecutive_freshness_blocks == 2
         assert push_calls == []
+
+
+# ---------------------------------------------------------------------------
+# TestAvailabilityPreflightGate (RFC 0011 A5, #1157)
+# ---------------------------------------------------------------------------
+
+
+def _force_gh_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force the fleet-wide gh-availability probe to report unavailable.
+
+    Overrides the autouse ``_mock_gh_availability`` default (which returns
+    True) on the same ``cw.dispatch.check_gh_availability`` seam.
+    """
+    monkeypatch.setattr("cw.dispatch.check_gh_availability", lambda **_kw: False)
+
+
+def _seed_availability_cache(
+    *, probed_at: datetime, available: bool, latched: bool
+) -> None:
+    """Persist a fleet-wide AvailabilityProbeCache to the shared sidecar."""
+    save_availability_probe_cache(
+        AvailabilityProbeCache(
+            probed_at=probed_at, available=available, latched=latched
+        )
+    )
+
+
+def _availability_cache() -> AvailabilityProbeCache:
+    """Read back the persisted fleet-wide availability probe cache."""
+    cache = load_availability_probe_cache()
+    assert cache is not None
+    return cache
+
+
+class TestAvailabilityPreflightGate:
+    """Fleet-wide gh-availability preflight gate (RFC 0011 A5).
+
+    A TTL-cached ``gh auth status`` probe runs as the highest-precedence
+    per-client pre-claim gate in ``dispatch_tick``'s client loop. On probe
+    failure every client stays PENDING (no claim, no ``attempts`` consumed),
+    the fleet-wide outage latch fires ``session.needs_attention`` exactly once
+    per outage episode (edge-triggered), and a fresh success silently resets
+    the latch.
+    """
+
+    def test_available_spawns_normally(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """When the probe reports available, dispatch proceeds as usual."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-A5A", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        assert result.spawned == 1
+
+    def test_unavailable_holds_task_pending_no_attempt_consumed(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The core binding requirement: a gated PENDING task keeps attempts=0."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-A5B", client="test-client", attempts=0))
+        _force_gh_unavailable(monkeypatch)
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        assert result.spawned == 0
+        assert daemon.spawn_calls == []
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == "GEN-A5B")
+        assert task.status == QueueItemStatus.PENDING
+        assert task.attempts == 0
+
+    def test_unavailable_emits_dispatch_tick_availability_gate(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A gated client emits dispatch.tick with skip_reason=availability_gate."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-A5C", client="test-client"))
+        _force_gh_unavailable(monkeypatch)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        events = read_events(
+            consumer="test-a5-tick",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        ticks = [
+            e
+            for e in events
+            if e.payload.get("skip_reason") == DispatchSkipReason.AVAILABILITY_GATE
+        ]
+        assert len(ticks) == 1
+        payload = ticks[0].payload
+        assert payload["client"] == "test-client"
+        assert payload["claimed"] == 0
+        assert payload["pending"] == 1
+
+    def test_first_failure_emits_session_needs_attention_once(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The first bad probe fires the full fleet-wide attention payload."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-A5D", client="test-client"))
+        _force_gh_unavailable(monkeypatch)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        events = read_events(
+            consumer="test-a5-attn",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert len(events) == 1
+        assert events[0].payload == {
+            "session_id": "",
+            "session_name": "",
+            "client": "",
+            "ticket_id": None,
+            "claude_session_id": None,
+            "paused_status": _AVAILABILITY_OUTAGE_REASON,
+            "breadcrumbs": "availability_probe_failed",
+            "crashed": False,
+        }
+        assert events[0].correlation_id is None
+
+    def test_second_consecutive_failure_within_ttl_does_not_re_emit(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A cache-hit second tick within the TTL fires no second attention."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-A5E", client="test-client"))
+        _force_gh_unavailable(monkeypatch)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        events = read_events(
+            consumer="test-a5-reemit",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert len(events) == 1
+
+    def test_persistent_failure_across_ttl_expiry_does_not_re_emit(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A still-failing fresh probe after TTL expiry does NOT re-emit (MF2).
+
+        Distinct from the within-TTL test: here the TTL expires so a fresh
+        ``check_gh_availability`` call actually runs on the second tick, yet the
+        outage-episode latch suppresses a second attention event. Uses a
+        call-counting stub (not the constant ``_force_gh_unavailable`` lambda)
+        so the "a fresh probe call occurs" half of MF2 is independently
+        asserted, not just inferred from the freeze_time advance.
+        """
+        from freezegun import freeze_time
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-A5F", client="test-client"))
+
+        calls: list[int] = []
+
+        def _counting_unavailable_probe(**_kw: object) -> bool:
+            calls.append(1)
+            return False
+
+        monkeypatch.setattr(
+            "cw.dispatch.check_gh_availability", _counting_unavailable_probe
+        )
+
+        daemon = FakeNativeDaemonClient()
+        with freeze_time("2026-07-16 12:00:00") as frozen:
+            dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+            frozen.tick(delta=timedelta(seconds=_AVAILABILITY_PROBE_TTL_SECONDS + 10))
+            dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        assert len(calls) == 2, "TTL expiry must trigger a second real probe call"
+
+        events = read_events(
+            consumer="test-a5-ttl-reemit",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert len(events) == 1
+        assert _availability_cache().latched is True
+
+    def test_recovery_resets_latch_silently(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A fresh success after an outage resets the latch and fires no event."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-A5G", client="test-client"))
+        # Seed a latched outage state whose TTL is already expired so the next
+        # tick re-probes (autouse default → available → recovery).
+        _seed_availability_cache(
+            probed_at=datetime.now(UTC)
+            - timedelta(seconds=_AVAILABILITY_PROBE_TTL_SECONDS + 10),
+            available=False,
+            latched=True,
+        )
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        assert result.spawned == 1
+        assert _availability_cache().latched is False
+        events = read_events(
+            consumer="test-a5-recover",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert events == []
+
+    def test_ttl_cache_suppresses_repeat_probe_within_window(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Two ticks within the TTL trigger only one real probe call."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-A5H", client="test-client"))
+
+        calls: list[int] = []
+
+        def _counting_probe(**_kw: object) -> bool:
+            calls.append(1)
+            return True
+
+        monkeypatch.setattr("cw.dispatch.check_gh_availability", _counting_probe)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        assert len(calls) == 1
+
+    def test_reprobes_after_ttl_expiry(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A tick after the TTL window runs a fresh probe."""
+        from freezegun import freeze_time
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-A5I", client="test-client"))
+
+        calls: list[int] = []
+
+        def _counting_probe(**_kw: object) -> bool:
+            calls.append(1)
+            return True
+
+        monkeypatch.setattr("cw.dispatch.check_gh_availability", _counting_probe)
+
+        daemon = FakeNativeDaemonClient()
+        with freeze_time("2026-07-16 12:00:00") as frozen:
+            dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+            frozen.tick(delta=timedelta(seconds=_AVAILABILITY_PROBE_TTL_SECONDS + 10))
+            dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        assert len(calls) == 2
+
+    def test_resolution_error_fails_open(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Any resolution error fails open — dispatch proceeds (no gate)."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-A5J", client="test-client"))
+
+        def _boom(**_kw: object) -> bool:
+            msg = "probe blew up"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr("cw.dispatch.check_gh_availability", _boom)
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        assert result.spawned == 1
+
+    def test_no_push_notification_on_first_failure_emit(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The outage escalation never calls fire_push_notification."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-A5K", client="test-client"))
+        _force_gh_unavailable(monkeypatch)
+
+        push_calls: list[object] = []
+        monkeypatch.setattr(
+            "cw.reconcile._deps.fire_push_notification",
+            lambda *a, **kw: push_calls.append((a, kw)),
+        )
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        assert push_calls == []
+
+    def test_availability_outage_reason_constant_value(self) -> None:
+        """Pin the paused_status constant value (distinct from awaiting-op)."""
+        assert _AVAILABILITY_OUTAGE_REASON == "gh_availability_outage"
+
+    def test_availability_gate_precedes_freshness_gate(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When the availability gate is closed, _resolve_freshness is not called.
+
+        Event-ordering alone doesn't prove short-circuit (MF1) — spy the
+        freshness resolver and assert it is never invoked on the gated path.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-A5L", client="test-client"))
+        _force_gh_unavailable(monkeypatch)
+
+        freshness_calls: list[object] = []
+        monkeypatch.setattr(
+            "cw.dispatch._resolve_freshness",
+            lambda *a, **kw: freshness_calls.append((a, kw)) or (False, None),
+        )
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        assert freshness_calls == []
+
+    def test_finalize_stage_task_also_held_pending(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A FINALIZE-stage PENDING task is also held by the single gate (S2)."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-A5M",
+                client="test-client",
+                stage=Stage.FINALIZE,
+                attempts=0,
+            )
+        )
+        _force_gh_unavailable(monkeypatch)
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        assert result.spawned == 0
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == "GEN-A5M")
+        assert task.status == QueueItemStatus.PENDING
+        assert task.attempts == 0
+
+    def test_freshness_helpers_not_called_on_gated_path(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """On the gated path neither freshness latch helper runs (S3).
+
+        The freshness counter must stay frozen during an outage, not reset —
+        prevents a future reorder from silently clearing real freshness latches.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-A5N", client="test-client"))
+        _force_gh_unavailable(monkeypatch)
+
+        record_calls: list[object] = []
+        reset_calls: list[object] = []
+        monkeypatch.setattr(
+            "cw.dispatch._record_client_freshness_block",
+            lambda *a, **kw: record_calls.append((a, kw)),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch._reset_client_freshness_blocks",
+            lambda *a, **kw: reset_calls.append((a, kw)),
+        )
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        assert record_calls == []
+        assert reset_calls == []
+
+    def test_probe_not_called_when_fleet_dispatch_paused(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """max_parallel_clients=0 (fleet-wide dispatch pause) never probes.
+
+        The availability check is memoized inside the per-client loop (only
+        resolved once the loop body actually runs for a client), not hoisted
+        unconditionally above it — a fully-paused fleet, which breaks out of
+        the loop on its very first iteration before reaching the gate, must
+        not shell out to `gh auth status` or touch the outage latch.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-A5O", client="test-client"))
+
+        calls: list[int] = []
+
+        def _counting_probe(**_kw: object) -> bool:
+            calls.append(1)
+            return True
+
+        monkeypatch.setattr("cw.dispatch.check_gh_availability", _counting_probe)
+
+        paused_config = simple_config.model_copy(update={"max_parallel_clients": 0})
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(paused_config, native_daemon=daemon, auto_ff=False)
+
+        assert result.spawned == 0
+        assert calls == []
 
 
 # ---------------------------------------------------------------------------

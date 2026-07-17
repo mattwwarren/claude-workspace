@@ -142,6 +142,70 @@ rules below are tracker-aware.
    Step 0d) so the comments are in hand before context is materialized. Proceed to
    Stage 1.
 
+   **Step 3 fetch-failure handling (fatal, #1156 — RFC 0011 A2):** if the primary
+   fetch above (whichever op the active tracker resolved to) exits non-zero or
+   returns error text instead of issue data, match that error text against the
+   signature table below before doing anything else. This list is a PROSE MIRROR
+   of `src/cw/unavailability.py`'s `UNAVAILABILITY_SIGNATURES` (mirror-comment
+   pattern: `cw.reconcile.gate_recipes._PLAN_SPEC_MARKER` mirroring
+   `gh._PLAN_MARKER`); keep the two copies in sync, see
+   `test_unavailability_signatures_mirrored_in_prose` for the drift guard:
+
+   - Auth-failure:
+     - `Permission denied (publickey)`
+     - `could not read Username`
+     - `Host key verification failed`
+     - `Authentication failed`
+   - Network-unreachable:
+     - `Could not resolve host`
+     - `Network is unreachable`
+     - `Temporary failure in name resolution`
+     - `Failed to connect to`
+     - `Could not connect to server`
+   - GitHub 5xx / secondary-rate-limit:
+     - `secondary rate limit`
+     - `HTTP 502`
+     - `HTTP 503`
+     - `HTTP 500`
+
+   (`MCP-github-unreachable` is deliberately not mirrored here — no verified
+   signature exists yet, see the module docstring in `src/cw/unavailability.py`.)
+
+   On a family match, EXIT before spawning any agent and **before** the
+   `stage.entered` (`s0_intake`) emission below — a fetch that never succeeded
+   has no meaningful stage-entry to correlate a `s0_intake` event against
+   (same precedent as the Step P3 Origin Sync block above) — with the
+   structured `blocked` sentinel:
+
+   ```json
+   {
+     "status": "blocked",
+     "stage_reached": "stage1_pre_flight",
+     "blocker": {
+       "stage": "pre_flight",
+       "reason": "operator_unavailable",
+       "details": "<matched signature + fetch op, e.g. 'gh issue view: Could not resolve host'>",
+       "message": "Ticket fetch failed: operator/dependency currently unreachable",
+       "recovery_hint": "Resolve the underlying network/auth/GitHub-availability issue, then re-dispatch",
+       "retry_eligible": true,
+       "retry_delay_seconds": null
+     },
+     "next_actions": ["manual_intervention"]
+   }
+   ```
+
+   `next_actions` **must** be `["manual_intervention"]` — `sync_local_main` is
+   the only other legal member of `_PRE_FLIGHT_BLOCKED_NEXT_ACTIONS`
+   (`auto_dev_result.py`) and is semantically wrong here (that's the Origin
+   Sync surface). `reason: "operator_unavailable"` is already a member of
+   `OPERATOR_UNAVAILABLE_BLOCKER_REASONS` (`auto_dev_result.py`) — no schema
+   change required.
+
+   A fetch failure that matches no signature (unrecognized error text) is not
+   handled by this block — it falls through to whatever undefined behavior
+   already existed for an unmatched fetch failure; this ticket only closes the
+   classified-failure gap, per R5 (no interactive branch is added here).
+
    **Headless only — initialize correlation context and emit `stage.entered` (`s0_intake`):**
    ```bash
    CW_CTX=".claude/cw-context.json"

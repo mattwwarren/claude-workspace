@@ -25,9 +25,10 @@ from cw.cli import (
     _display_status,
     main,
 )
+from cw.cli.sprint import _resolve_version
 from cw.config import load_clients, load_state, save_state
 from cw.events import read_events
-from cw.exceptions import CwError
+from cw.exceptions import CwError, SprintApplyError
 from cw.models import (
     ClientConfig,
     CwState,
@@ -39,7 +40,10 @@ from cw.models import (
     Stage,
     TicketTask,
 )
+from cw.sprint import AppliedBuildout, BuildoutPlan
+from tests.conftest import _write_project_config_yaml
 from tests.test_result import _valid_payload
+from tests.test_sprint import CONFIG_YAML, MINIMAL_RFC, _plan
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -2079,6 +2083,12 @@ class TestSignalStop:
         task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
         assert task.status == QueueItemStatus.FAILED
 
+        # GitHub #1189: this FAILED-landing branch must also report
+        # routed=False on the session side so signal_stop does not complete a
+        # session whose task it just landed terminal-FAILED.
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status != SessionStatus.COMPLETED
+
     def test_signal_stop_blocked_retry_eligible_routes_blocked_on_user(
         self,
         tmp_config_dir: Path,
@@ -2798,6 +2808,90 @@ class TestSignalStop:
         assert events == []
         assert daemon.stop_calls == []
 
+    def test_signal_stop_race_already_failed_task_does_not_complete_session(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """GitHub #1189: a task raced to FAILED by a concurrent caller must not
+        be completed by signal_stop (R5 mandatory, the Stop-hook symmetric
+        case).
+
+        Mirrors ``test_signal_stop_stage_mismatch_does_not_orphan_task_or_
+        complete_session`` structurally, except the dev-queue task is already
+        FAILED/abandoned with a matching session_id (instead of advanced to
+        REVIEW) by the time signal_stop's own lookup runs, while the Stop-
+        hook's own transcript carries an ordinary successful sentinel. The
+        lookup-miss race (R3(a)) must report routed=False just like a stage
+        mismatch: session and task both left exactly as they were.
+        """
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        worktree, session = self._setup_headless_session(
+            tmp_path, "sess-1189-race", "worktree-1189-race"
+        )
+        _write_staged_clients_yaml_for_test(tmp_config_dir, "test-client")
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=self.SEED_TICKET_ID,
+                        client="test-client",
+                        # Already raced to terminal FAILED by a concurrent
+                        # caller before this signal_stop's own lookup runs.
+                        status=QueueItemStatus.FAILED,
+                        session_id=session.id,
+                        stage=Stage.IMPL,
+                        disposition="abandoned",
+                    )
+                ]
+            )
+        )
+        self._write_headless_context(worktree, session_id=session.id)
+
+        claude_session_id = "uuid-1189-race"
+        fake_home = tmp_path / "fake-home-1189-race"
+        self._write_transcript(
+            worktree, claude_session_id, _SENTINEL_918_STAGE_COMPLETE, fake_home
+        )
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
+
+        runner = CliRunner()
+        with freeze_time(datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)):
+            result = runner.invoke(
+                main,
+                ["signal-stop"],
+                input=json.dumps(
+                    {
+                        "session_id": claude_session_id,
+                        "cwd": str(worktree),
+                        "hook_event_name": "Stop",
+                    }
+                ),
+            )
+        assert result.exit_code == 0, result.output
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status != SessionStatus.COMPLETED
+
+        task = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == self.SEED_TICKET_ID
+        )
+        assert task.status == QueueItemStatus.FAILED
+        assert task.disposition == "abandoned"
+
+        events = read_events(
+            consumer="test-1189-race",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert events == []
+        assert daemon.stop_calls == []
+
     def test_signal_stop_schema_version_unsupported_marks_failed(
         self,
         tmp_config_dir: Path,
@@ -2861,7 +2955,10 @@ class TestSignalStop:
         assert result.exit_code == 0, result.output
 
         updated = next(s for s in load_state().sessions if s.id == session.id)
-        assert updated.status == SessionStatus.COMPLETED
+        # GitHub #1189: this same call lands the task terminal-FAILED via a
+        # BlockedResult, so `routed` must be False and signal_stop must NOT
+        # also complete the session (pre-fix this asserted COMPLETED).
+        assert updated.status != SessionStatus.COMPLETED
 
         store = load_dev_queue()
         task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
@@ -2909,8 +3006,9 @@ class TestSignalStop:
                 details="test: unrecognised reason code",
             )
         )
-        _apply_sentinel_to_task(self.SEED_TICKET_ID, session.id, sentinel)
+        outcome = _apply_sentinel_to_task(self.SEED_TICKET_ID, session.id, sentinel)
 
+        assert outcome.routed is False
         store = load_dev_queue()
         task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
         assert task.status == QueueItemStatus.FAILED
@@ -9070,3 +9168,189 @@ class TestQueuePeekCli:
         mock_build.assert_called_once()
         call_client = mock_build.call_args[0][0]
         assert call_client == "myorg"
+
+
+class TestSprintPlanCli:
+    def test_writes_a_plan_file_and_prints_a_summary(self, tmp_path: Path) -> None:
+        _write_project_config_yaml(tmp_path, CONFIG_YAML)
+        (tmp_path / "rfc.md").write_text(MINIMAL_RFC, encoding="utf-8")
+        out_file = tmp_path / "plan.json"
+
+        result = CliRunner().invoke(
+            main,
+            [
+                "sprint",
+                "plan",
+                "rfc.md",
+                "--out",
+                str(out_file),
+                "--root",
+                str(tmp_path),
+                "--version",
+                "1.20.0",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert out_file.exists()
+        expected = _plan()
+        written = BuildoutPlan.model_validate_json(out_file.read_text(encoding="utf-8"))
+        assert written == expected
+        assert "Milestone:" in result.output
+        assert "Epics: 1  Tickets: 2" in result.output
+
+    def test_reports_a_contract_violation_as_a_clean_cli_error(
+        self, tmp_path: Path
+    ) -> None:
+        _write_project_config_yaml(tmp_path, CONFIG_YAML)
+        bad_rfc = MINIMAL_RFC.replace("## Tickets", "## NotTickets")
+        (tmp_path / "rfc.md").write_text(bad_rfc, encoding="utf-8")
+
+        result = CliRunner().invoke(
+            main,
+            [
+                "sprint",
+                "plan",
+                "rfc.md",
+                "--out",
+                str(tmp_path / "plan.json"),
+                "--root",
+                str(tmp_path),
+                "--version",
+                "1.20.0",
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "missing section: ## Tickets" in result.output
+        assert "Traceback" not in result.output
+
+    def test_version_override_wins_over_resolve_version(self, tmp_path: Path) -> None:
+        """An explicit --version short-circuits _resolve_version entirely — a
+        gh call here would mean --version stopped being a real override."""
+        _write_project_config_yaml(tmp_path, CONFIG_YAML)
+        (tmp_path / "rfc.md").write_text(MINIMAL_RFC, encoding="utf-8")
+        out_file = tmp_path / "plan.json"
+
+        with patch(
+            "cw.gh.latest_release_tag",
+            side_effect=AssertionError("gh should not be called"),
+        ):
+            result = CliRunner().invoke(
+                main,
+                [
+                    "sprint",
+                    "plan",
+                    "rfc.md",
+                    "--out",
+                    str(out_file),
+                    "--root",
+                    str(tmp_path),
+                    "--version",
+                    "9.9.9",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        written = BuildoutPlan.model_validate_json(out_file.read_text(encoding="utf-8"))
+        assert written.milestone_title.startswith("v9.9.9")
+
+
+class TestResolveVersion:
+    def test_minor_bumps_the_latest_release_tag(self, tmp_path: Path) -> None:
+        with patch("cw.gh.latest_release_tag", return_value=("v1.20.0", True)):
+            assert _resolve_version(tmp_path) == "1.21.0"
+
+    def test_falls_back_when_the_gh_call_fails(self, tmp_path: Path) -> None:
+        with patch("cw.gh.latest_release_tag", return_value=(None, False)):
+            assert _resolve_version(tmp_path) == "0.0.0"
+
+    def test_falls_back_on_a_malformed_tag(self, tmp_path: Path) -> None:
+        with patch("cw.gh.latest_release_tag", return_value=("not-a-version", True)):
+            assert _resolve_version(tmp_path) == "0.0.0"
+
+
+class TestSprintApplyCli:
+    def test_dry_run_makes_no_gh_calls(self, tmp_path: Path) -> None:
+        plan = _plan()
+        plan_file = tmp_path / "plan.json"
+        plan_file.write_text(plan.model_dump_json(), encoding="utf-8")
+
+        with patch(
+            "cw.cli.sprint.apply_plan",
+            side_effect=AssertionError("apply_plan should not be called"),
+        ):
+            result = CliRunner().invoke(
+                main, ["sprint", "apply", str(plan_file), "--dry-run"]
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "Would create" in result.output
+
+    def test_prints_partial_progress_on_a_mid_run_failure(self, tmp_path: Path) -> None:
+        plan = _plan()
+        plan_file = tmp_path / "plan.json"
+        plan_file.write_text(plan.model_dump_json(), encoding="utf-8")
+
+        applied = AppliedBuildout(
+            milestone_number=5,
+            epic_numbers={"I": 6},
+            ticket_numbers={"S1": 7},
+            created=["epic: Availability-aware holding (inward)"],
+            skipped=[],
+            backfilled=["I"],
+        )
+
+        with patch(
+            "cw.cli.sprint.apply_plan",
+            side_effect=SprintApplyError("boom: create failed", applied=applied),
+        ):
+            result = CliRunner().invoke(main, ["sprint", "apply", str(plan_file)])
+
+        assert result.exit_code != 0
+        assert "Partial progress before failure" in result.output
+        assert "#5" in result.output
+        assert "#6" in result.output
+        assert "#7" in result.output
+        assert "Backfilled children checklist: I" in result.output
+        assert "boom: create failed" in result.output
+        assert "Traceback" not in result.output
+
+    def test_error_without_partial_state_prints_no_partial_banner(
+        self, tmp_path: Path
+    ) -> None:
+        plan = _plan()
+        plan_file = tmp_path / "plan.json"
+        plan_file.write_text(plan.model_dump_json(), encoding="utf-8")
+
+        with patch(
+            "cw.cli.sprint.apply_plan",
+            side_effect=SprintApplyError("milestone lookup failed"),
+        ):
+            result = CliRunner().invoke(main, ["sprint", "apply", str(plan_file)])
+
+        assert result.exit_code != 0
+        assert "Partial progress before failure" not in result.output
+        assert "milestone lookup failed" in result.output
+
+    def test_prints_the_created_issue_numbers_on_success(self, tmp_path: Path) -> None:
+        plan = _plan()
+        plan_file = tmp_path / "plan.json"
+        plan_file.write_text(plan.model_dump_json(), encoding="utf-8")
+
+        applied = AppliedBuildout(
+            milestone_number=5,
+            epic_numbers={"I": 6},
+            ticket_numbers={"S1": 7, "A1": 8},
+            created=["epic: Availability-aware holding (inward)"],
+            skipped=["RFC 0011 S1 — counterparty axis + self-identity"],
+        )
+
+        with patch("cw.cli.sprint.apply_plan", return_value=applied):
+            result = CliRunner().invoke(main, ["sprint", "apply", str(plan_file)])
+
+        assert result.exit_code == 0, result.output
+        assert "#6" in result.output
+        assert "#7" in result.output
+        assert "#8" in result.output
+        assert "Skipped" in result.output

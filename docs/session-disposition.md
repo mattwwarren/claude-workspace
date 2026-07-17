@@ -14,12 +14,13 @@ authoritative outcome. Do not rely on:
 - Queue task status — lags reconcile.
 - Daemon roster presence — cannot distinguish finished from stalled.
 
-Read the sentinel via `_parse_sentinel_from_transcript` (`src/cw/cli.py`),
-which uses `extract_block` + `parse_stdout` from `cw.auto_dev_result`. Never
-apply a raw-text regex to the transcript file.
+Read the sentinel via `_parse_sentinel_from_transcript`
+(`src/cw/cli/_sentinels.py`), which uses `extract_block` + `parse_stdout`
+from `cw.auto_dev_result`. Never apply a raw-text regex to the transcript
+file.
 
 Transcript location is resolved by `_locate_session_transcript(session)` in
-`src/cw/reconcile.py` (surface_ref-prefix glob, #541):
+`src/cw/reconcile/_shared.py` (surface_ref-prefix glob, #541):
 
 1. If `session.claude_session_id` is set: `<project_dir>/<csid>.jsonl` directly.
 2. Else if `session.surface_ref` is set: newest `<project_dir>/<surface_ref>*.jsonl`
@@ -42,14 +43,12 @@ A naive "first match" false-terminates.
 **Rule:** take the **last** block that parses to a real terminal `AutoDevResult`,
 and only trust it after the worker has left the daemon roster.
 
-Note: `_parse_sentinel_from_transcript` itself scans forward and returns the
-**first** block with sentinel framing. That is safe on its `signal_stop` call
-path (it fires at process exit, when the real emit is normally the only
-sentinel present) — but it is NOT safe for manual disposition of
-sentinel-related tickets whose transcripts contain fixture blocks. When
-dispositioning manually, reuse its JSON-decoding walk
-(`_iter_assistant_text_blocks` + `extract_block`/`parse_stdout`) but take the
-final parseable block, not the first.
+`_parse_sentinel_from_transcript` now implements exactly this: it walks every
+sentinel-bearing block in transcript order, keeps the **last** one that
+parses, and skips the illustrative example sentinel from the skill prompt
+(`is_documented_example`, #591) so a worker quoting the docs never
+false-terminates. Other fixture blocks a worker writes can still parse — the
+last-wins rule plus the roster check is what protects against those.
 
 ### Gotcha 2 — Sentinels are JSON-escaped in the transcript
 
@@ -61,7 +60,10 @@ after decoding.
 
 **Rule:** `json.loads` each transcript line, extract the `text` field, then
 run `extract_block` against the decoded text. `_parse_sentinel_from_transcript`
-does this via `_iter_assistant_text_blocks`. Never regex the raw JSONL.
+does this via `_iter_sentinel_text_blocks` (`cw._util`), which scans both
+assistant text blocks AND `tool_result` blocks — a worker may emit the
+sentinel via `cat <<EOF`, landing it in Bash stdout rather than assistant
+text (#731). Never regex the raw JSONL.
 
 ### Gotcha 3 — `claude_session_id` is often None on first lookup
 
@@ -70,7 +72,7 @@ which fires only after the first reconcile tick. Before that tick, the field
 is None.
 
 **Rule:** locate the transcript via `_locate_session_transcript(session)`
-(`src/cw/reconcile.py`) — it handles `claude_session_id=None` via the
+(`src/cw/reconcile/_shared.py`) — it handles `claude_session_id=None` via the
 surface_ref-prefix glob (§1). Note that `_parse_sentinel_from_transcript`
 takes `(cwd, claude_session_id)` and returns None when the csid is None — so
 for a csid-less session, resolve the path first (or derive the csid from the
@@ -83,16 +85,27 @@ transcript filename via `_csid_from_transcript`), then parse.
 | Status | Action |
 |---|---|
 | `shipped` | Done. PR live with auto-merge enabled. |
+| `stage_complete` | No action — one pipeline stage (HARDEN/PLAN/IMPL/REVIEW) finished cleanly; dispatch auto-advances to the next stage. Not a terminal outcome. |
 | `no_op` | Done. Ticket already satisfied; close as completed. |
 | `ambiguities_pending_resolution` | Resolve ambiguities posted on the issue; re-dispatch. |
 | `premises_pending_verification` | Verify flagged premises, record on issue; re-dispatch. |
-| `plan_pending_approval` | Read the plan comment, post `<!-- auto-dev-plan-approved -->`; re-dispatch. Advances to impl only once quality-reviewed, else re-queues at plan stage (#968). |
-| `review_pending_approval` | Review the pushed branch diff, run gates, ship (PR + auto-merge). |
+| `plan_pending_approval` | Parks only for **large** (or unresolved) scope tier — small-tier plans advance unattended. Read the plan comment, post `<!-- auto-dev-plan-approved -->`, then `cw dev-queue approve`. Advances to impl only once quality-reviewed, else re-queues at plan stage (#968). |
+| `review_pending_approval` | Parks only for large (or unresolved) tier. Review the pushed branch diff, run gates, then `cw dev-queue approve` (advances to FINALIZE, which ships) — or ship manually (PR + auto-merge). With signoff configured, `approve` re-routes to `AWAITING_OPERATOR_SIGNOFF`; approve again to clear. |
+| `merge_pending` | PR created, CI/merge gate not yet cleared (#899). Not a failure — monitor/merge the PR (`pr_url` is preserved on the task); do not re-dispatch. |
 | `merge_gate_blocked` | Prior pipeline PR still open; merge or close it; re-dispatch. |
 | `scope_exceeded` | Scope rejection; close or relax constraint. |
 | `forbidden_area` | Forbidden-area rejection; update constraints or reroute. |
-| `validation_failed` | Transient (malformed sentinel); re-dispatch. Use `cw result validate <json>` to inspect the raw payload if it recurs. |
-| `blocked` | Triage `blocker.reason`, `blocker.retry_eligible`, `blocker.recovery_hint`. |
+| `blocked` | Triage `blocker.reason`, `blocker.retry_eligible`, `blocker.recovery_hint`. At FINALIZE, `blocker.reason: "agent_block"` auto-regresses the ticket to IMPL for self-heal (up to 2 times, #770). |
+
+`validation_failed` is not a sentinel status but appears in the same
+disposition field when the emitted sentinel is malformed: the queue
+auto-requeues the ticket to PENDING until the attempt cap. Use
+`cw result validate` to inspect the raw payload if it recurs.
+
+A ticket parked in queue status `AWAITING_OPERATOR_SIGNOFF` (RFC 0007
+Phase 3) is not a sentinel outcome either — it is the operator ship gate at
+REVIEW→FINALIZE; clear it with `cw dev-queue approve` (`cw dev-queue wait`
+exits 4 for it).
 
 For the full status-enum semantics and `blocker` shape, see
 [`docs/headless-contract.md §4`](headless-contract.md).
@@ -152,9 +165,19 @@ parseable `AUTO_DEV_RESULT` (progress).
 ## 5. The orphan condition
 
 A session that emits a terminal sentinel (`shipped` / `no_op`) but is reaped
-as idle *before* `reconcile()` consumes the sentinel leaves its dev-queue task
-reverted to **PENDING** — a phantom task for finished work. A subsequent
+as idle *before* `reconcile()` consumes the sentinel can leave its dev-queue
+task reverted to **PENDING** — a phantom task for finished work. A subsequent
 dispatch tick will re-spawn it.
+
+This is now a residual case, not the common path: reconcile's salvage logic
+reads the transcript sentinel before dispositioning a phantom/stalled
+session — an emitted terminal status is honored (`SALVAGE_TERMINAL_STATUSES`,
+#372/#431) and an emitted `stage_complete` is routed through the
+stage-advance path (#716) rather than reverted as a crash. And under the
+default `reap_policy: signal_only` (ADR-0006), detection parks the task
+`BLOCKED_ON_USER` with a reap proposal instead of destructively reverting —
+the PENDING revert requires `reap_policy: auto` (or `cw doctor --reap`) plus
+an unlocatable/unparseable transcript.
 
 **Verify true state:**
 
@@ -265,6 +288,6 @@ the sweep re-evaluates it again next tick.
 - [`docs/dispatch-runbook.md`](dispatch-runbook.md) — full end-to-end dispatch procedure.
 - [`docs/headless-contract.md`](headless-contract.md) — `AUTO_DEV_RESULT` schema, status enum, `ReapReason` taxonomy, `queue.session_reaped` event.
 - [`docs/events.md`](events.md) — `session.park_vetoed` and the full orchestrator event-bus reference.
-- `src/cw/cli.py:_parse_sentinel_from_transcript` — transcript sentinel reader.
-- `src/cw/reconcile.py:_locate_session_transcript` — transcript path resolver.
-- `src/cw/reconcile.py:_csid_from_transcript` — claude_session_id derivation.
+- `src/cw/cli/_sentinels.py:_parse_sentinel_from_transcript` — transcript sentinel reader.
+- `src/cw/reconcile/_shared.py:_locate_session_transcript` — transcript path resolver.
+- `src/cw/reconcile/_shared.py:_csid_from_transcript` — claude_session_id derivation.

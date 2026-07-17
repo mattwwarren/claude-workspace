@@ -21,34 +21,70 @@ The freshness gate in `dispatch_tick` skips a ticket with:
 WARN: main behind origin, ticket skipped
 ```
 
-This fires when the local `main` is behind `origin/main`. Fix it before
-dispatching:
+A **pure-behind** local `main` is auto-fast-forwarded by the gate itself
+(`--auto-ff`, on by default on both `run` and `serve`; pass `--no-auto-ff`
+to restore the legacy block-only behavior). The gate blocks indefinitely —
+until reconciled by hand — on the other freshness states: dirty checkout,
+`ahead`/`diverged`, detached or non-main HEAD (see §9). To fix by hand:
 
 ```bash
 git -C <client-repo> pull --ff-only
 ```
 
-`cw dev-queue refresh-all` also fast-forwards every configured client repo,
-but it refuses when the working tree has untracked files. The `git pull
---ff-only` form bypasses that refusal.
+`cw dev-queue refresh-all` fast-forwards every configured client repo in one
+shot (untracked files are ignored — `ff-only` never rewrites the working
+tree). It still refuses a repo whose checkout has uncommitted **tracked**
+changes or is not on the default branch.
+
+A persistently gated client is no longer fully silent: after
+`freshness_block_attention_threshold` (default 5) consecutive blocked ticks,
+a `session.needs_attention` event fires with `paused_status:
+freshness_block_escalated` (#974) — visible on `cw event tail` and the
+operator channel.
 
 ---
 
 ## 2. Enqueue
 
 ```bash
-cw dev-queue add <TICKET-ID> --client <client> [--scope small|large]
+cw dev-queue add <TICKET-ID> [<TICKET-ID> ...] --client <client> \
+  [--scope small|large] [--priority <n>] [--timeout <seconds>] \
+  [--lane <lane>] [--signoff operator]
 ```
 
-`--scope` sets `TicketTask.scope_hint`, the operator tier override that
-bypasses auto-tiering from line counts. Use it when:
+- `-s/--scope` sets `TicketTask.scope_hint` (default `None`). Two effects:
+  - **Headless budget fallback**: pre-Stage-1 (before any sentinel has
+    reported a tier), the hint selects the per-tier wall-clock and
+    idle-watchdog budgets.
+  - **Escalate-only approval gating**: at a `plan_pending_approval` /
+    `review_pending_approval` sentinel, a `large` hint forces the operator
+    approval gate, and a `small` hint is used only when the sentinel omits
+    its own tier — a hint can ADD the gate, never remove it (`large` from
+    the sentinel always wins).
+- `-p/--priority` — higher dispatches sooner.
+- `-t/--timeout` — per-ticket wall-clock budget override (seconds), taking
+  precedence over the per-tier defaults.
+- `--lane` — target lane (must be declared for the client; default
+  `default`). Move a pending ticket later with `cw dev-queue move <T> -c
+  <client> --to <lane>`.
+- `--signoff operator` — require an explicit operator signoff before this
+  ticket ships (see below).
 
-- The ticket is deletion-heavy (high line count but small real scope).
-- You know the tier and want to avoid a misclassification penalty.
-- A prior run was mis-tiered and you are re-dispatching.
+### The operator-signoff gate (RFC 0007 Phase 3, #990)
 
-Scope hint on first dispatch is always `None` until Stage 1 sets it from the
-sentinel; subsequent retries inherit the prior sentinel's `scope.tier`.
+A ticket with signoff configured parks at the ship checkpoint — the
+REVIEW→FINALIZE transition — in queue status `AWAITING_OPERATOR_SIGNOFF`
+instead of advancing unattended. Resolution precedence: per-ticket
+(`add --signoff operator`) > per-lane (`LaneConfig.signoff`) > global
+(`default_signoff` in `orchestrator.yaml`, default `"none"` = no gate).
+
+- Clear the gate with `cw dev-queue approve <T> -c <client>`. Approving a
+  REVIEW-stage plan/review gate on a signoff-configured ticket re-routes it
+  to `AWAITING_OPERATOR_SIGNOFF` instead of advancing — run `approve` a
+  second time to clear it.
+- `cw dev-queue wait` exits **4** for a signoff-parked ticket (§4).
+- A signoff-parked row is escalation-eligible (§11.2) but is NOT eligible
+  for re-dispatch until approved.
 
 ### After you enqueue — monitor with the skills, not raw status
 
@@ -113,9 +149,17 @@ cw dev-queue run --once
 cw dev-queue run --max-parallel <n>
 ```
 
-The default concurrency cap is `OrchestratorConfig.default_max_parallel`
-(default: `1`). Per-client overrides live in `per_client_max_parallel` in
-`orchestrator.yaml`.
+The default concurrency cap is `OrchestratorConfig.default_ceiling`
+(default: `1`). Per-client overrides live in `per_client_ceiling` in
+`orchestrator.yaml`; `max_parallel_clients` additionally limits how many
+clients are eligible per tick (default: no limit). The legacy
+`default_max_parallel` / `per_client_max_parallel` keys are deprecated
+aliases that still load with a one-time warning.
+
+To dispatch in a planned order rather than raw priority, produce a
+DispatchPlan first: `cw dev-queue plan -c <client>` spawns a one-shot
+planner session and persists the plan; `run --use-plan` (also on `serve`)
+then respects its ordering when claiming tasks.
 
 ### Self-healing dispatch (`cw dev-queue serve`)
 
@@ -213,9 +257,16 @@ cw dev-queue wait <TICKET-ID> --client <client> --timeout <seconds> --json
 Exit codes:
 
 - `0` — `shipped` / `no_op` (or `COMPLETED` queue status)
-- `1` — `scope_exceeded` / `forbidden_area` / `FAILED` / `CANCELLED`
-- `2` — `blocked` / any `*_pending_*` status / `BLOCKED_ON_USER`
-- `3` — ATTENTION: transcript stale past idle budget, worker not in daemon roster
+- `1` — `scope_exceeded` / `forbidden_area` / `validation_failed` / `failed`
+  dispositions, or `FAILED` / `CANCELLED` queue status
+- `2` — `blocked` / any `*_pending_*` status / `BLOCKED_ON_USER` **not**
+  caused by a reap proposal
+- `3` — ATTENTION: transcript stale past idle budget, worker not in daemon
+  roster; a mid-wait reap (`session_id` observed then cleared, #542); or a
+  `BLOCKED_ON_USER` park that originated from a reap proposal
+  (`reap_proposed_at` set on the owning session)
+- `4` — `AWAITING_OPERATOR_SIGNOFF`: ticket parked for an explicit operator
+  signoff before it ships (§2; clear with `cw dev-queue approve`)
 - `124` — hard timeout ceiling reached with no terminal or attention signal
 
 With `--json`, the output is:
@@ -237,14 +288,14 @@ the transcript (i.e., the sentinel fired before reconcile updated queue
 status). `state=terminal` from a queue-status fast-path leaves
 `sentinel_status: null`.
 
-**Known gap (#542):** when a session is reaped mid-wait, reconcile reverts
-the task to PENDING and clears `session_id`. The wait's spawn-window grace
-(re-poll when `session_id` is None) cannot distinguish a fresh spawn from a
-just-reaped task, so ATTENTION never fires and wait rides to the `--timeout`
-ceiling (exit 124) instead. Workaround: if wait returns 124 on a run that
-should have surfaced ATTENTION, inspect `cw dev-queue status` (or `cw board`
-for a live view) and the transcript directly (see §6 in
-[`session-disposition.md`](session-disposition.md)).
+**Mid-wait reap handling (#542, fixed):** the wait loop tracks the first
+non-None `session_id` it observes; if a later poll sees `session_id` cleared
+(reconcile reaped the session and reverted the task), it surfaces ATTENTION
+(exit `3`) immediately instead of riding to the `--timeout` ceiling. The
+spawn-window grace (re-poll while `session_id` has *never* been set) still
+applies to fresh spawns. If wait does return `124`, inspect `cw dev-queue
+status` (or `cw board` for a live view) and the transcript directly (see §6
+in [`session-disposition.md`](session-disposition.md)).
 
 ---
 
@@ -253,15 +304,23 @@ for a live view) and the transcript directly (see §6 in
 | Sentinel status | Action |
 |---|---|
 | `shipped` | Done. PR is live with auto-merge enabled; CI wait is orchestrator concern. |
+| `stage_complete` | No action — ordinary staged advance (one of HARDEN/PLAN/IMPL/REVIEW finished cleanly); dispatch auto-advances the ticket to the next stage. Seeing it parked is abnormal — see §6/§7 recovery. |
 | `no_op` | Done. Ticket already satisfied; close as completed. |
-| `ambiguities_pending_resolution` | Resolve the ambiguities (post a `Pre-flight Resolutions` comment on the issue), then re-dispatch. |
+| `ambiguities_pending_resolution` | Resolve the ambiguities (post a `Pre-flight Resolutions` comment on the issue), then re-dispatch (`cw dev-queue requeue`). |
 | `premises_pending_verification` | Verify the flagged premises, record results on the issue, re-dispatch. |
-| `plan_pending_approval` | Read the plan comment, verify it is faithful to the ticket, post `<!-- auto-dev-plan-approved -->` on the issue, re-dispatch. Advances to impl only once the plan is quality-reviewed (both signoff markers present); otherwise `approve` re-queues at plan stage to run Plan Quality Review first (#968). |
-| `review_pending_approval` | Locate the branch, verify the diff and run gates yourself, then ship (PR + auto-merge). |
-| `plan_unreviewable` / `plan_unsound` | Resolve remaining plan issues. If the pipeline bounces repeatedly on an intricate ticket, use the **spec-driven subagent escape hatch** (§7) rather than retrying. |
-| `validation_failed` | Transient (malformed sentinel); re-dispatch. Use `cw result validate` to inspect the raw JSON before re-dispatch if the failure recurs. |
-| `blocked` | Triage `blocker.reason`. Check `blocker.retry_eligible` and `blocker.recovery_hint`. |
+| `plan_pending_approval` | Only parks for **large** (or unresolved) scope tier — a small-tier plan advances unattended. Read the plan comment, verify it is faithful to the ticket, post `<!-- auto-dev-plan-approved -->` on the issue, then `cw dev-queue approve <T> -c <client>`. Advances to impl only once the plan is quality-reviewed (both signoff markers present); otherwise `approve` re-queues at plan stage to run Plan Quality Review first (#968). |
+| `review_pending_approval` | Only parks for large (or unresolved) tier. Verify the pushed branch diff and gates, then `cw dev-queue approve` to advance to FINALIZE (which creates the PR) — or ship manually (PR + auto-merge) and cancel the task. With signoff configured, `approve` re-routes to `AWAITING_OPERATOR_SIGNOFF`; approve again (§2). |
+| `merge_pending` | PR created but CI/merge gate not yet cleared (#899). Not a failure — the task parks with `pr_url` preserved; monitor/merge the PR. Do **not** re-dispatch. |
+| `scope_exceeded` | Scope rejection; close the ticket or relax the constraint, then re-dispatch. |
+| `forbidden_area` | Forbidden-area rejection; update constraints or reroute. |
+| `blocked` | Triage `blocker.reason`. Check `blocker.retry_eligible` and `blocker.recovery_hint`. `blocker.reason: "plan_unreviewable"` / `"plan_unsound"` mean plan review needs human judgment — if the pipeline bounces repeatedly on an intricate ticket, use the **spec-driven subagent escape hatch** (§7) rather than retrying. A `blocked` at FINALIZE with `blocker.reason: "agent_block"` self-heals: dispatch auto-regresses the ticket to IMPL (up to 2 regressions, #770) — no operator action. |
 | `merge_gate_blocked` | A prior pipeline PR is still open. Merge or close it, then re-dispatch. |
+
+Not a sentinel status but seen in the same `disposition` field:
+`validation_failed` — the sentinel was emitted but malformed. The queue
+auto-requeues the ticket to PENDING (clearing `session_id`) until the
+attempt cap, then fails it. If it recurs, inspect the raw JSON with
+`cw result validate` before re-dispatching.
 
 ---
 
@@ -270,16 +329,20 @@ for a live view) and the transcript directly (see §6 in
 Wrong ordering leaves phantom PENDING orphans. Follow this sequence:
 
 ```bash
-# 1. Mark the cw session completed
-cw done <session-name>
-
-# 2. Stop the live daemon worker (if still running)
-#    cw spawn close refuses an already-completed session — step 1 first.
+# 1. Close the live daemon worker. This stops the daemon surface, marks the
+#    session COMPLETED, and atomically CANCELs the owning RUNNING queue task
+#    so reconcile cannot revert it to PENDING and re-spawn it (#317).
 cw spawn close <session-id>
 
-# 3. Remove the dev-queue task
+# 2. Remove the dev-queue task
 cw dev-queue remove <TICKET-ID> --client <client> --all
 ```
+
+`cw spawn close` **refuses a session that is already COMPLETED** — do not
+`cw done` it first. If the session is already completed (e.g. the worker
+exited cleanly), skip straight to `cw dev-queue remove`; use `cw done
+<session-name>` only for a session that never had a live daemon surface to
+close.
 
 If the task is already in a terminal queue status but wedged (e.g.,
 `RUNNING` with no live session), `cw doctor --reap` detects and repairs
@@ -353,8 +416,8 @@ Attempt-cap reset (below) — a different terminal condition
 it was cancelled — the row carries no record of provenance by the time it
 reaches this flag. If the ticket may have been deliberately cancelled (e.g.
 via `cw dev-queue cancel` as a duplicate or superseded ticket) rather than
-stranded by `spawn close`, check `cw dev-queue show <T>` / the event history
-before requeuing it.
+stranded by `spawn close`, check `cw dev-queue tasks -t <T> -c <CLIENT>` /
+the event history before requeuing it.
 
 ### FAILED row recovery (`--from-failed`)
 
@@ -373,8 +436,16 @@ cw dev-queue requeue <T> -c <CLIENT> --from-failed
 
 **Caveat:** `--from-failed` accepts *any* FAILED row, regardless of why it
 failed — the row carries no record of provenance by the time it reaches this
-flag. Check `cw dev-queue show <T>` / the event history before requeuing it
-to confirm the failure isn't a genuine, still-unresolved defect.
+flag. Check `cw dev-queue tasks -t <T> -c <CLIENT>` / the event history
+before requeuing it to confirm the failure isn't a genuine, still-unresolved
+defect.
+
+### Requeue at a different stage (`--stage` / `--regress`)
+
+`cw dev-queue requeue` defaults to re-running the ticket's **current** stage.
+`--stage plan|impl|review|finalize` requeues at a forward stage instead; add
+`--regress` to allow a **backward** target on a blocked ticket (e.g. a
+plan-deviation review exit back to `impl`).
 
 ### Attempt-cap reset (environmental burn)
 
@@ -407,8 +478,9 @@ read-modify-write (observed twice, 2026-07-04).
 
 - `cw dev-queue status` lane line shows `[PAUSED]` → the #875 per-lane
   breaker tripped on consecutive spawn errors. `cw lane resume <CLIENT>
-  <lane>` resumes AND resets the counter. The pause is silent today — check
-  for it whenever pending tickets sit unclaimed.
+  <lane>` resumes AND resets the counter. The trip emits a `lane.paused` bus
+  event (`cw event tail`) but no push notification — check for it whenever
+  pending tickets sit unclaimed.
 - `BLOCKED_ON_USER` rows hold lane slots by design; a parked ticket can
   starve its lane. Requeue or remove to free the slot.
 - A session wedged in `needs_salvage` with a park marker poisons every
@@ -447,9 +519,11 @@ answers, the wall is gone. During a genuine wall, STOP the dispatch loop
 > per-client tick snapshot (not `[STALE …]`) but claims nothing is almost
 > always gated, not hung. The freshness WARN is emitted **once per ticket**
 > to the `serve` stdout (invisible under `--quiet` + background redirect) and
-> then de-duplicated to silence — so a persistent block leaves no live trace
-> except the `skip_reason` in `cw dev-queue status`. Do not "restart the
-> monitor" reflexively; read the skip_reason first. (See #908.)
+> then de-duplicated to silence — so short of the escalation latch (a
+> `session.needs_attention` with `paused_status: freshness_block_escalated`
+> after 5 consecutive blocked ticks, #974), a persistent block leaves no live
+> trace except the `skip_reason` in `cw dev-queue status`. Do not "restart
+> the monitor" reflexively; read the skip_reason first. (See #908.)
 
 `cw dev-queue status` shows `pending > 0` but `claimed = 0` across multiple
 ticks. The per-client footer reads something like:
@@ -600,8 +674,9 @@ git -C <client-repo> rev-list --left-right --count HEAD...origin/main   # → 0 
 (Python won't hot-reload), and verify a representative merged symbol imports.
 Re-running PRs that auto-merge re-introduce a pure-*behind* state, which the
 gate auto-fast-forwards — keep local `main` ff-pulled between waves so it never
-re-accumulates an `ahead`/`diverged` state. (Recurs every release cycle; see
-#908 for surfacing the block proactively instead of relying on this runbook.)
+re-accumulates an `ahead`/`diverged` state. (Recurs every release cycle; the
+#974 escalation latch — `freshness_block_escalated` after 5 consecutive
+blocked ticks — now surfaces a persistent block proactively.)
 
 ---
 
@@ -661,8 +736,9 @@ network blip) and the rescue loop will not retry.
 **Diagnose.**
 
 ```bash
-cw dev-queue status          # task shows BLOCKED_ON_USER
-cw session show <ticket-id>  # last_result contains rescue_attempted: true
+cw dev-queue status           # task shows BLOCKED_ON_USER
+cw session show <session-id>  # last_result contains rescue_attempted: true
+                              # (session id from cw dev-queue tasks -t <T>)
 ```
 
 Verify the branch exists on origin:

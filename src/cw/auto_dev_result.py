@@ -42,9 +42,11 @@ _log = logging.getLogger(__name__)
 # `stage1_pre_flight` stage_reached value and `none` plan_source (used
 # together for pre-flight no_op exits); v4 promotes
 # `ambiguities_pending_resolution` and `premises_pending_verification` to
-# canonical closed-enum statuses (issue #191). All are accepted during the
-# rollout window — see docs/headless-contract.md §8.
-SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2, 3, 4})
+# canonical closed-enum statuses (issue #191). v5 adds the advisory
+# `review.agents_run` count (reviewer agents that ran) alongside the
+# executor-neutral review-verdict contract (issue #1237). All are accepted
+# during the rollout window — see docs/headless-contract.md §8.
+SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2, 3, 4, 5})
 AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION: int = max(SUPPORTED_SCHEMA_VERSIONS)
 
 _OPEN_SENTINEL = "<<<AUTO_DEV_RESULT"
@@ -306,6 +308,11 @@ class Review(BaseModel):
     should_fix: int
     fix_cycles_used: int
     deferred: int = 0
+    # v5 (#1237): count of reviewer agents that ran, reconciled against the
+    # executor-neutral review-verdict's `agents_run` list
+    # (`len(verdict.agents_run)`, including failed entries). Advisory optional
+    # field; defaults to 0 on payloads from producers that predate v5.
+    agents_run: int = 0
 
 
 class AgentHealthEntry(BaseModel):
@@ -506,7 +513,7 @@ def _has_usable_agent_id(item: dict[str, Any]) -> bool:
 class AutoDevResult(BaseModel):
     """Parsed sentinel block. All cross-field invariants from §3-§5 enforced."""
 
-    schema_version: Literal[1, 2, 3, 4]
+    schema_version: Literal[1, 2, 3, 4, 5]
     ticket_id: str
     status: Status
     stage_reached: StageReached

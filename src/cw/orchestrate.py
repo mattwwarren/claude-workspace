@@ -470,6 +470,8 @@ class TickSummary(BaseModel):
     skip_reason: str
     tick_at: datetime
     lanes: dict[str, dict[str, int]] = Field(default_factory=dict)
+    lane_occupants: dict[str, list[dict[str, str]]] = Field(default_factory=dict)
+    occupied: int = 0
     freshness_detail: str | None = None
     blocked_branch: str | None = None
 
@@ -580,6 +582,32 @@ def _extract_lanes(raw: object) -> dict[str, dict[str, int]]:
     return result
 
 
+def _extract_lane_occupants(raw: object) -> dict[str, list[dict[str, str]]]:
+    """Safely extract lane_occupants dict from a DISPATCH_TICK payload.
+
+    Sibling of :func:`_extract_lanes` -- deliberately NOT reused, since the
+    value shape differs (list[{"ticket_id","status"}] vs dict[str,int]).
+    Tolerates events emitted before this field existed (#1243) or
+    malformed entries.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, list[dict[str, str]]] = {}
+    for lane_name, occupant_list in raw.items():
+        if not isinstance(lane_name, str) or not isinstance(occupant_list, list):
+            continue
+        occupants: list[dict[str, str]] = []
+        for item in occupant_list:
+            if not isinstance(item, dict):
+                continue
+            ticket_id = item.get("ticket_id")
+            status = item.get("status")
+            if isinstance(ticket_id, str) and isinstance(status, str):
+                occupants.append({"ticket_id": ticket_id, "status": status})
+        result[lane_name] = occupants
+    return result
+
+
 def _latest_tick_by_client(
     events: list[OrchestratorEvent],
 ) -> dict[str, TickSummary]:
@@ -604,6 +632,10 @@ def _latest_tick_by_client(
                     skip_reason=str(ev.payload.get("skip_reason", "none")),
                     tick_at=ev.created_at,
                     lanes=_extract_lanes(ev.payload.get("lanes")),
+                    lane_occupants=_extract_lane_occupants(
+                        ev.payload.get("lane_occupants")
+                    ),
+                    occupied=int(ev.payload.get("occupied", 0)),
                     freshness_detail=fd if isinstance(fd, str) else None,
                     blocked_branch=bb if isinstance(bb, str) else None,
                 )

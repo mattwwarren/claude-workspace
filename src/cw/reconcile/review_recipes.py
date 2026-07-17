@@ -10,15 +10,20 @@ classification phase produces :class:`ReviewRecipeCandidate`s for every
 dev-queue row whose ``pr_state`` carries
 ``attention_state == "changes_requested"``; it performs no writes.
 
-**P2 scope (GitHub #1097, this ticket):** the act phase. ``_act_address_review``
-re-validates each candidate under ``dev_queue_lock()`` (a consistent READ only —
-NO dev-queue mutation, per Resolution 6), emits
+**P2 scope (GitHub #1097):** the act phase. ``_act_address_review``
+re-validates each candidate under ``dev_queue_lock()``, emits
 :class:`OrchestratorEventType.PR_ACTION_TAKEN` (durably, BEFORE the spawn), and
 then — strictly after the lock releases — dispatches an ``/address-review``
 session via ``spawn_create_impl``. A dispatch ``CwError`` or a precondition
 anomaly (unparseable PR url, unresolvable client, missing worktree) emits
 :class:`OrchestratorEventType.PR_ACTION_FAILED` instead. Emit-before-dispatch is
 structural: the event fires inside the lock, every spawn strictly afterward.
+GitHub #1206 adds a one-shot ``address_review_fired_at`` latch, stamped inside
+this same lock hold, so the dispatch fires exactly once per changes-requested
+episode instead of every reconcile tick. Resolution 6's "no dev-queue
+correlation" half (no ``task=`` kwarg passed to ``spawn_create_impl``) is
+untouched and stays true — only the "no dev-queue mutation" half of
+Resolution 6 is superseded by the latch write.
 
 Like the gate recipes, this module gates on its own opt-in master switch
 (``OrchestratorConfig.review_recipes_enabled``, default False). The switch is
@@ -52,6 +57,7 @@ from cw.pr_hydrate import _is_candidate, _parse_pr_url
 from cw.review_strategy import MODE_CI, resolve_review_strategy
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from datetime import datetime
     from pathlib import Path
 
@@ -60,6 +66,7 @@ if TYPE_CHECKING:
         DevQueueStore,
         OrchestratorConfig,
         TicketTask,
+        WatchedPr,
     )
 
 
@@ -167,6 +174,51 @@ def resolve_review_recipe_enabled(
     # this function's documented no-exception robustness guarantee for every
     # other unresolved input.
     return _DEFAULT_REVIEW_RECIPE_ENABLED.get(recipe_name, False)
+
+
+def resolve_outbound_consent_allowed(
+    pr_url: str,
+    *,
+    config: OrchestratorConfig,
+    watched_prs: list[WatchedPr],
+) -> bool:
+    """Two-party consent gate for outbound acting toward another's PR.
+
+    RFC 0011 B2, #1159.
+
+    Party 1 (operator): ``config.review_recipes_enabled`` — the existing
+    review-recipes master switch (RFC 0010 P3), reused as a flat bool only;
+    this function does NOT thread a TicketTask/LaneConfig through
+    ``resolve_review_recipe_enabled`` (that 3-tier resolver is a distinct,
+    ticket-scoped concept — see its docstring at :135).
+
+    Party 2 (target): an active ``WatchedPr`` for *pr_url* — every persisted
+    ``WatchedPr`` already passed ``resolve_and_register_review_request``'s
+    individual-vs-team filter (RFC 0011 S2 R5/R7, ``cw.pr_hydrate:363``)
+    before being inserted, so an existing ``status == "active"`` match IS
+    the channel-opening action; no further individual-vs-team re-derivation
+    happens here.
+
+    Reads only — never creates, mutates, or dismisses a ``WatchedPr``, so
+    "no path initiates outbound" holds definitionally: this function cannot
+    be the origin of a channel, only a check against one that already
+    exists.
+
+    Own-authored PRs are out of scope for this predicate entirely — the
+    existing TicketTask-typed act phase (``_act_address_review`` et al.)
+    does not call this function, so those PRs bypass the gate by
+    non-modification (RFC 0011 B2 Acceptance; regression coverage is the
+    existing test_reconcile_review_recipes.py suite passing unmodified).
+
+    No re-review re-engagement detection (RFC 0011 B3, #1163, Wave 2) — this
+    checks ``status == "active"`` existence only.
+    """
+    if not config.review_recipes_enabled:
+        return False
+    return any(
+        watched.pr_url == pr_url and watched.status == "active"
+        for watched in watched_prs
+    )
 
 
 @dataclass(frozen=True)
@@ -394,6 +446,7 @@ def _prepare_dispatch_job(
     task: TicketTask,
     session_id: str | None,
     clients: dict[str, ClientConfig],
+    now: datetime,
 ) -> _DispatchJob | None:
     """Re-validate a re-loaded row under the lock; emit + build its dispatch job.
 
@@ -401,19 +454,26 @@ def _prepare_dispatch_job(
 
     * **Silent** (no event) when the row is stale — ``pr_state`` gone or no
       longer ``changes_requested`` (a concurrent re-review can have moved it on
-      between detect and act).
+      between detect and act) — OR already fired this episode
+      (``address_review_fired_at`` is not None; not an anomaly, mirrors
+      ``_prepare_auto_fix_ci_job``'s already-fired check).
     * **Anomaly** (emits ``PR_ACTION_FAILED`` + a warning) when the PR url is
       unparseable/absent, the client is unresolvable, or the worktree is
       missing — a fail-safe correction, never a silent drop.
 
     Otherwise records ``PR_ACTION_TAKEN`` (emit-before-dispatch) from the
-    RE-LOADED row and returns the deferred dispatch job. ``session_id`` is the
-    originating candidate's — the event fires before the new spawn exists, so it
-    can't carry a session id that doesn't exist yet.
+    RE-LOADED row, stamps the ``address_review_fired_at`` latch to *now*, and
+    returns the deferred dispatch job. ``session_id`` is the originating
+    candidate's — the event fires before the new spawn exists, so it can't
+    carry a session id that doesn't exist yet.
     """
     pr_state = task.pr_state
-    if pr_state is None or pr_state.attention_state != _ATTENTION_CHANGES_REQUESTED:
-        return None  # stale — silent skip (precedent: gate_recipes silent paths)
+    if (
+        pr_state is None
+        or pr_state.attention_state != _ATTENTION_CHANGES_REQUESTED
+        or task.address_review_fired_at is not None
+    ):
+        return None  # stale or already-fired — silent skip
     payload_base = _review_payload_base(
         task,
         session_id,
@@ -456,6 +516,7 @@ def _prepare_dispatch_job(
         payload_base,
         correlation_id=task.ticket_id,
     )
+    task.address_review_fired_at = now
     return _DispatchJob(
         client_cfg=client_cfg,
         worktree=wt,
@@ -503,20 +564,36 @@ def _dispatch_address_review(job: _DispatchJob) -> str | None:
     return job.ticket_id
 
 
+def _clear_address_review_fired(task: TicketTask) -> None:
+    task.address_review_fired_at = None
+
+
 def _act_address_review(
-    candidates: list[ReviewRecipeCandidate], *, clients: dict[str, ClientConfig]
+    candidates: list[ReviewRecipeCandidate],
+    *,
+    clients: dict[str, ClientConfig],
+    now: datetime | None = None,
 ) -> list[str]:
     """Act phase: re-validate under lock, emit PR_ACTION_TAKEN, then dispatch.
 
     Mirrors ``gate_recipes._act_auto_approve_review``'s shape (lock / re-load /
-    re-check / emit-before-action / deferred side-effect after lock release) but
-    performs NO dev-queue mutation (RFC 0010 P2 Resolution 6): the
-    ``dev_queue_lock()`` is held only for a consistent READ re-validation. Each
-    candidate's row is re-loaded fresh under the lock and re-checked — a
-    concurrent re-review can have moved the PR off ``changes_requested`` between
-    detect and act. Every ``spawn_create_impl`` runs strictly after the lock
-    releases, so the dispatch never nests the flock (guaranteeing no
-    self-deadlock) and ``PR_ACTION_TAKEN`` is always durable before its spawn.
+    re-check / emit-before-action / deferred side-effect after lock release).
+    Under one ``dev_queue_lock()``:
+
+    1. **Episode-end clear** — scan every freshly-loaded row and clear
+       ``address_review_fired_at`` where it is set but the current ``pr_state``
+       is None or no longer ``changes_requested`` (the episode ended; this
+       re-arms the latch for a genuine future re-entry). Runs regardless of
+       whether *candidates* is empty.
+    2. **Fire** — for each candidate, ``_prepare_dispatch_job`` re-validates,
+       emits ``PR_ACTION_TAKEN``, and stamps the latch.
+
+    Stamping/clearing the latch IS a dev-queue write (GitHub #1206 — a latch
+    field, not a status transition; all four review-recipe act phases now
+    perform this same kind of write). Every ``spawn_create_impl`` runs strictly
+    after the lock releases, so the dispatch never nests the flock
+    (guaranteeing no self-deadlock) and ``PR_ACTION_TAKEN`` is always durable
+    before its spawn.
 
     ``clients`` is the caller's snapshot (mirrors ``run_gate_recipes`` loading
     ``load_effective_clients()`` once and threading it down) rather than a
@@ -527,27 +604,71 @@ def _act_address_review(
     Returns the acted ticket_ids (those whose ``/address-review`` dispatch
     succeeded).
     """
-    if not candidates:
-        return []
+    from datetime import UTC
+    from datetime import datetime as _datetime
+
+    resolved_now = now if now is not None else _datetime.now(UTC)
     # Keyed on (ticket_id, client): ticket_id alone is a per-repo GitHub issue
     # number, not globally unique across this multi-tenant system's clients.
     by_key = {(c.ticket_id, c.client): c for c in candidates}
     dispatch_jobs: list[_DispatchJob] = []
     with dev_queue_lock():
         store = load_dev_queue()
+        changed = _clear_ended_episodes(
+            store,
+            attention_state=_ATTENTION_CHANGES_REQUESTED,
+            get_fired_at=lambda t: t.address_review_fired_at,
+            clear_fired_at=_clear_address_review_fired,
+        )
         for candidate in by_key.values():
             task = _find_review_task(store, candidate.ticket_id, candidate.client)
             if task is None:
                 continue
-            job = _prepare_dispatch_job(task, candidate.session_id, clients)
+            job = _prepare_dispatch_job(
+                task, candidate.session_id, clients, resolved_now
+            )
             if job is not None:
                 dispatch_jobs.append(job)
+                changed = True
+        if changed:
+            save_dev_queue(store)
     acted: list[str] = []
     for job in dispatch_jobs:
         ticket_id = _dispatch_address_review(job)
         if ticket_id is not None:
             acted.append(ticket_id)
     return acted
+
+
+def _clear_ended_episodes(
+    store: DevQueueStore,
+    *,
+    attention_state: str,
+    get_fired_at: Callable[[TicketTask], datetime | None],
+    clear_fired_at: Callable[[TicketTask], None],
+) -> bool:
+    """Clear a one-shot latch on rows whose *attention_state* episode ended.
+
+    Shared by every review-recipe latch sweep (auto_fix_ci, request_reviewer,
+    escalate_merge_block — the third instance triggered this extraction, GitHub
+    #1205). A latch is cleared when it is set (not None) but the row's current
+    pr_state is None or no longer at *attention_state* — the episode that
+    licensed the fire has ended, re-arming the latch for a genuine future
+    re-entry. Typed accessor callables (not a string field name) keep every
+    read/clear access mypy-checked — TicketTask has no
+    extra=forbid/validate_assignment to catch a wrong-but-existing field name
+    at runtime. Returns whether any row changed (dirty flag for the caller's
+    conditional save_dev_queue).
+    """
+    changed = False
+    for task in store.tasks:
+        if get_fired_at(task) is None:
+            continue
+        pr_state = task.pr_state
+        if pr_state is None or pr_state.attention_state != attention_state:
+            clear_fired_at(task)
+            changed = True
+    return changed
 
 
 # --- auto_fix_ci act phase (RFC 0010 P4, #1099) ----------------------------
@@ -568,17 +689,24 @@ class _RedispatchJob(NamedTuple):
 
 
 def _prepare_auto_fix_ci_job(
-    task: TicketTask, session_id: str | None
+    task: TicketTask, session_id: str | None, now: datetime
 ) -> _RedispatchJob | None:
     """Re-validate a re-loaded row under the lock; emit + build its re-dispatch.
 
     Silent skip (no event) when the row is stale — ``pr_state`` gone or no
     longer ``ci_failing`` (a concurrent re-run can have moved it on between
-    detect and act). Otherwise records ``PR_ACTION_TAKEN`` (emit-before-dispatch)
+    detect and act) — OR already fired this episode (``auto_fix_ci_fired_at``
+    is not None; not an anomaly, mirrors ``_prepare_request_reviewer_job``'s
+    already-fired check). Otherwise records ``PR_ACTION_TAKEN``
+    (emit-before-dispatch), stamps the ``auto_fix_ci_fired_at`` latch to *now*,
     and returns the deferred re-dispatch job.
     """
     pr_state = task.pr_state
-    if pr_state is None or pr_state.attention_state != _ATTENTION_CI_FAILING:
+    if (
+        pr_state is None
+        or pr_state.attention_state != _ATTENTION_CI_FAILING
+        or task.auto_fix_ci_fired_at is not None
+    ):
         return None
     payload_base = _review_payload_base(
         task,
@@ -591,6 +719,7 @@ def _prepare_auto_fix_ci_job(
         payload_base,
         correlation_id=task.ticket_id,
     )
+    task.auto_fix_ci_fired_at = now
     return _RedispatchJob(
         client=task.client,
         ticket_id=task.ticket_id,
@@ -608,6 +737,9 @@ def _dispatch_auto_fix_ci(job: _RedispatchJob) -> str | None:
     ``review_recipes`` -> ``dev_queue``/``dispatch`` import cycle. ``add_ticket``
     raising (``LaneNotFoundError``, a ``CwError``) after ``PR_ACTION_TAKEN`` was
     already emitted -> catch, emit ``PR_ACTION_FAILED`` correction, return None.
+    The ``auto_fix_ci_fired_at`` latch stays stamped even when this dispatch
+    fails — same posture as ``request_reviewer``: ``PR_ACTION_FAILED`` is the
+    visible signal, the latch is NOT rolled back on dispatch failure.
     """
     from cw.dev_queue import add_ticket
     from cw.dispatch import run_dispatch_loop
@@ -631,27 +763,57 @@ def _dispatch_auto_fix_ci(job: _RedispatchJob) -> str | None:
     return job.ticket_id
 
 
-def _act_auto_fix_ci(candidates: list[ReviewRecipeCandidate]) -> list[str]:
+def _clear_auto_fix_ci_fired(task: TicketTask) -> None:
+    task.auto_fix_ci_fired_at = None
+
+
+def _act_auto_fix_ci(
+    candidates: list[ReviewRecipeCandidate], *, now: datetime | None = None
+) -> list[str]:
     """Act phase for auto_fix_ci: re-validate under lock, emit, then re-dispatch.
 
-    Mirrors ``_act_address_review``'s lock/re-load/emit-before-action/deferred-
-    side-effect shape. The re-enqueue + dispatch tick runs strictly after the
-    lock releases (``add_ticket`` re-acquires ``dev_queue_lock``, so nesting
-    would self-deadlock). Returns the ticket_ids whose re-dispatch succeeded.
+    Mirrors ``_act_request_reviewer``'s shape. Under one ``dev_queue_lock()``:
+
+    1. **Episode-end clear** — scan every freshly-loaded row and clear
+       ``auto_fix_ci_fired_at`` where it is set but the current ``pr_state`` is
+       None or no longer ``ci_failing`` (the episode ended; this re-arms the
+       latch for a genuine future re-entry). Runs regardless of whether
+       *candidates* is empty.
+    2. **Fire** — for each candidate, ``_prepare_auto_fix_ci_job`` re-validates,
+       emits ``PR_ACTION_TAKEN``, and stamps the latch.
+
+    Stamping/clearing the latch IS a dev-queue write (GitHub #1206: all four
+    review-recipe act phases now perform this same kind of write — a latch
+    field, not a status transition; none remain read-only), saved before the
+    lock releases. The re-enqueue +
+    dispatch tick runs strictly after the lock releases (``add_ticket``
+    re-acquires ``dev_queue_lock``, so nesting would self-deadlock). Returns
+    the ticket_ids whose re-dispatch succeeded.
     """
-    if not candidates:
-        return []
+    from datetime import UTC
+    from datetime import datetime as _datetime
+
+    resolved_now = now if now is not None else _datetime.now(UTC)
     by_key = {(c.ticket_id, c.client): c for c in candidates}
     jobs: list[_RedispatchJob] = []
     with dev_queue_lock():
         store = load_dev_queue()
+        changed = _clear_ended_episodes(
+            store,
+            attention_state=_ATTENTION_CI_FAILING,
+            get_fired_at=lambda t: t.auto_fix_ci_fired_at,
+            clear_fired_at=_clear_auto_fix_ci_fired,
+        )
         for candidate in by_key.values():
             task = _find_review_task(store, candidate.ticket_id, candidate.client)
             if task is None:
                 continue
-            job = _prepare_auto_fix_ci_job(task, candidate.session_id)
+            job = _prepare_auto_fix_ci_job(task, candidate.session_id, resolved_now)
             if job is not None:
                 jobs.append(job)
+                changed = True
+        if changed:
+            save_dev_queue(store)
     acted: list[str] = []
     for job in jobs:
         ticket_id = _dispatch_auto_fix_ci(job)
@@ -787,6 +949,10 @@ def _dispatch_request_reviewer(job: _ReviewerJob) -> str | None:
     return job.ticket_id
 
 
+def _clear_request_reviewer_fired(task: TicketTask) -> None:
+    task.request_reviewer_fired_at = None
+
+
 def _act_request_reviewer(
     candidates: list[ReviewRecipeCandidate],
     *,
@@ -806,9 +972,10 @@ def _act_request_reviewer(
     2. **Fire** — for each candidate, ``_prepare_request_reviewer_job``
        re-validates, emits ``PR_ACTION_TAKEN``, and stamps the latch.
 
-    Stamping/clearing the latch IS a dev-queue write (the one exception to the
-    "no dev-queue mutation" rule — a latch field, not a status transition),
-    saved before the lock releases. The ``add_pr_reviewer`` gh call runs
+    Stamping/clearing the latch IS a dev-queue write (GitHub #1206: all four
+    review-recipe act phases now perform this same kind of write — a latch
+    field, not a status transition; none remain read-only), saved before the
+    lock releases. The ``add_pr_reviewer`` gh call runs
     strictly after the lock releases. Returns the ticket_ids for which a
     reviewer request actually succeeded (a failed gh call is excluded and
     corrected via ``PR_ACTION_FAILED``).
@@ -821,7 +988,12 @@ def _act_request_reviewer(
     jobs: list[_ReviewerJob] = []
     with dev_queue_lock():
         store = load_dev_queue()
-        changed = _clear_ended_request_reviewer_episodes(store)
+        changed = _clear_ended_episodes(
+            store,
+            attention_state=_ATTENTION_NO_REVIEWER,
+            get_fired_at=lambda t: t.request_reviewer_fired_at,
+            clear_fired_at=_clear_request_reviewer_fired,
+        )
         for candidate in by_key.values():
             task = _find_review_task(store, candidate.ticket_id, candidate.client)
             if task is None:
@@ -842,20 +1014,11 @@ def _act_request_reviewer(
     return acted
 
 
-def _clear_ended_request_reviewer_episodes(store: DevQueueStore) -> bool:
-    """Clear the latch on rows whose no-reviewer episode has ended. Returns dirty."""
-    changed = False
-    for task in store.tasks:
-        if task.request_reviewer_fired_at is None:
-            continue
-        pr_state = task.pr_state
-        if pr_state is None or pr_state.attention_state != _ATTENTION_NO_REVIEWER:
-            task.request_reviewer_fired_at = None
-            changed = True
-    return changed
-
-
 # --- escalate_merge_block act phase (RFC 0010 P4, #1099) -------------------
+
+
+def _clear_escalate_merge_block_fired(task: TicketTask) -> None:
+    task.escalate_merge_block_fired_at = None
 
 
 def _act_escalate_merge_block(
@@ -877,9 +1040,10 @@ def _act_escalate_merge_block(
        hold, emit ``PR_ACTION_TAKEN`` and stamp the latch to *now*. An already-
        stamped row is a silent skip (already fired this episode).
 
-    Stamping/clearing the latch IS a dev-queue write (the one exception to the
-    review layer's "no dev-queue mutation" rule — it is a latch field, not a
-    status transition). ``record_event`` nests the inbox lock INSIDE
+    Stamping/clearing the latch IS a dev-queue write (GitHub #1206: all four
+    review-recipe act phases now perform this same kind of write — a latch
+    field, not a status transition; none remain read-only). ``record_event``
+    nests the inbox lock INSIDE
     ``dev_queue_lock`` (never the reverse), so emitting under the lock is
     deadlock-safe (same ordering as ``cw.reconcile.escalation``).
     """
@@ -891,7 +1055,12 @@ def _act_escalate_merge_block(
     acted: list[str] = []
     with dev_queue_lock():
         store = load_dev_queue()
-        changed = _clear_ended_merge_block_episodes(store)
+        changed = _clear_ended_episodes(
+            store,
+            attention_state=_ATTENTION_MERGE_BLOCKED,
+            get_fired_at=lambda t: t.escalate_merge_block_fired_at,
+            clear_fired_at=_clear_escalate_merge_block_fired,
+        )
         for candidate in by_key.values():
             task = _find_review_task(store, candidate.ticket_id, candidate.client)
             if task is None:
@@ -902,19 +1071,6 @@ def _act_escalate_merge_block(
         if changed:
             save_dev_queue(store)
     return acted
-
-
-def _clear_ended_merge_block_episodes(store: DevQueueStore) -> bool:
-    """Clear the latch on rows whose merge-block episode has ended. Returns dirty."""
-    changed = False
-    for task in store.tasks:
-        if task.escalate_merge_block_fired_at is None:
-            continue
-        pr_state = task.pr_state
-        if pr_state is None or pr_state.attention_state != _ATTENTION_MERGE_BLOCKED:
-            task.escalate_merge_block_fired_at = None
-            changed = True
-    return changed
 
 
 def _fire_escalate_merge_block(
@@ -969,11 +1125,12 @@ def run_review_recipes(*, config: OrchestratorConfig) -> list[str]:
     a reviewer per the repo's review_strategy on a no_reviewer PR), and
     ``escalate_merge_block`` (fires one durable escalation per merge-blocked
     episode). Each detect->act pair runs against the same fresh ``tasks``
-    snapshot; the ``request_reviewer`` and ``escalate_merge_block`` act phases
-    each perform a small latch write (the two exceptions to this module's "no
-    dev-queue mutation" rule — a one-shot field, not a status transition),
-    every other act phase is read-only under its lock. Returns the
-    concatenated ticket_ids each recipe reports as acted.
+    snapshot; the ``request_reviewer``, ``escalate_merge_block``,
+    ``auto_fix_ci``, and (GitHub #1206) ``address_review`` act phases each
+    perform a small latch write (all four act phases now write a one-shot
+    latch field, not a status transition — none remain purely read-only under
+    their lock). Returns the concatenated ticket_ids each recipe reports as
+    acted.
     """
     if not config.review_recipes_enabled:
         return []

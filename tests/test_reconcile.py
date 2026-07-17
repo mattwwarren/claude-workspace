@@ -15,7 +15,14 @@ import freezegun
 import pytest
 
 from cw._util import claude_project_dir
-from cw.auto_dev_result import AutoDevResult, BlockedResult, parse_stdout
+from cw.auto_dev_result import (
+    BLOCKER_REASON_VALIDATION_FAILED,
+    AutoDevResult,
+    BlockedResult,
+    Blocker,
+    parse_stdout,
+)
+from cw.board import _index_client_badge_events
 from cw.config import (
     load_state,
     orchestrator_config_file,
@@ -53,6 +60,7 @@ from cw.reconcile import (
     _SALVAGE_SKIP_REASON,
     _SILENTLY_IDLE_REASON,
     _STAGE_REVIEW_COMPLETE,
+    _VALIDATION_FAILED_MAX_ATTEMPTS,
     HEADLESS_TIMEOUT_SECONDS,
     IDLE_WATCHDOG_SECONDS,
     SPAWN_GRACE_SECONDS,
@@ -155,6 +163,31 @@ def test_claude_agents_json_returns_empty_on_non_list(
     monkeypatch.setattr("cw.reconcile._shared.subprocess.run", _fake_run)
     result = _claude_agents_json()
     assert result == []
+
+
+def test_claude_agents_json_passes_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_claude_agents_json passes a timeout= kwarg to subprocess.run (#1230).
+
+    An unbounded `claude agents --json` call under sessions_lock wedges the
+    fleet on any CLI hang — the timeout is the guard against that.
+    """
+    captured_kwargs: dict[str, object] = {}
+
+    def _fake_run(cmd: list[str], **kwargs: object) -> object:
+        captured_kwargs.update(kwargs)
+
+        class _Result:
+            stdout = "[]"
+            returncode = 0
+
+        return _Result()
+
+    monkeypatch.setattr("cw.reconcile._shared.subprocess.run", _fake_run)
+    _claude_agents_json()
+    assert "timeout" in captured_kwargs
+    assert captured_kwargs["timeout"] == 15
 
 
 def test_compute_drift_empty_state_returns_empty_report() -> None:
@@ -3507,6 +3540,83 @@ def test_reconcile_phantom_stage_mismatch_does_not_orphan_task_or_complete_sessi
     assert any(e.payload.get("ticket_id") == "salv-mismatch" for e in mismatch_events)
 
 
+def test_reconcile_phantom_race_already_failed_task_does_not_complete_session(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GitHub #1189: a task raced to FAILED by a concurrent caller must not be
+    completed by the phantom sweep's ROUTE_EMITTED_SENTINEL path.
+
+    Same shape as ``test_reconcile_phantom_stage_mismatch_does_not_orphan_
+    task_or_complete_session`` (a phantom worker's transcript carries a
+    stage_complete/stage2_impl advance sentinel), except the dev-queue task
+    has already been landed FAILED/abandoned for this same ticket/session by
+    the time the phantom sweep's own lookup runs (the R3(a) lookup-miss
+    race) -- not a literal stage mismatch. Unlike the stage-mismatch sibling,
+    no SENTINEL_STAGE_MISMATCH event fires: the race-miss return happens
+    inside _apply_sentinel_to_task's lookup loop, before any delegation to
+    dispatch.py's apply_staged_decision/_route_staged_decision, which is the
+    only emitter of that event type.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-race"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(seconds=SPAWN_GRACE_SECONDS + 60)
+
+    sess = _mk_headless_daemon_session(
+        "salv-race", worktree, started_at, surface_ref="gone-ref"
+    )
+    payload = _stage_complete_payload()
+    payload["ticket_id"] = "salv-race"
+    _write_salvage_transcript(
+        home, worktree, "claude-uuid-race", payload, surface_ref="gone-ref"
+    )
+    alive = _mk_session("alive", surface_ref="live-ref")
+    save_state(CwState(sessions=[sess, alive]))
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="salv-race",
+                    client="client-a",
+                    # Already raced to terminal FAILED by a concurrent caller
+                    # before this sweep's own lookup runs.
+                    status=QueueItemStatus.FAILED,
+                    session_id="salv-race",
+                    stage=Stage.IMPL,
+                    disposition="abandoned",
+                )
+            ]
+        )
+    )
+
+    monkeypatch.setattr(
+        "cw.reconcile.core._claude_agents_json",
+        lambda: [{"sessionId": "live-ref"}],
+    )
+    with freezegun.freeze_time(now):
+        reconcile()
+
+    # Task untouched: still FAILED/abandoned, nothing routed.
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "salv-race")
+    assert task.status == QueueItemStatus.FAILED
+    assert task.disposition == "abandoned"
+
+    # Session NOT completed/torn down -- the race-miss must not orphan it.
+    reloaded = next(s for s in load_state().sessions if s.id == "salv-race")
+    assert reloaded.status != SessionStatus.COMPLETED
+
+    mismatch_events = read_events(
+        consumer="test-salv-race-sentinel-stage-mismatch",
+        event_types=[OrchestratorEventType.SENTINEL_STAGE_MISMATCH],
+    )
+    assert mismatch_events == []
+
+
 def test_idle_routes_stage_complete_advance_sentinel(
     tmp_config_dir: Path,
     tmp_path: Path,
@@ -3628,6 +3738,132 @@ def test_idle_stage_mismatch_does_not_orphan_task_or_complete_session(
     assert task.disposition is None
 
     mock_daemon.stop.assert_not_called()
+
+
+def test_idle_race_already_failed_task_does_not_complete_session(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GitHub #1189: a task raced to FAILED by a concurrent caller must not be
+    completed by the alive-idle ROUTE_EMITTED_SENTINEL path.
+
+    Same shape as ``test_idle_routes_stage_complete_advance_sentinel``, except
+    the dev-queue task has already been landed FAILED/abandoned for this same
+    ticket/session by the time the idle sweep's own routed-sentinel lookup
+    runs (the R3(a) lookup-miss race). The lookup must report routed=False;
+    the session must NOT be completed and the task must stay untouched.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-idle-race"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(seconds=400)
+
+    sess = _mk_headless_daemon_session("idle-race", worktree, started_at)
+    sess.last_result = None  # sentinel NOT yet consumed → ROUTE_EMITTED eligible
+    payload = _stage_complete_payload()
+    payload["ticket_id"] = "idle-race"
+    _write_salvage_transcript(home, worktree, "claude-idle-race", payload)
+    save_state(CwState(sessions=[sess]))
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="idle-race",
+                    client="client-a",
+                    # Already raced to terminal FAILED by a concurrent caller
+                    # before this sweep's own lookup runs.
+                    status=QueueItemStatus.FAILED,
+                    session_id="idle-race",
+                    stage=Stage.IMPL,
+                    disposition="abandoned",
+                )
+            ]
+        )
+    )
+
+    mock_daemon = MagicMock()
+    with patch("cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon):
+        state = load_state()
+        blocked, _salvage = flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"fake-short-id"}, config=_auto_config()
+        )
+
+    assert blocked == []
+    reloaded = next(s for s in load_state().sessions if s.id == "idle-race")
+    assert reloaded.status != SessionStatus.COMPLETED
+
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "idle-race")
+    assert task.status == QueueItemStatus.FAILED
+    assert task.disposition == "abandoned"
+
+
+def test_idle_own_call_blocked_result_failed_landing_does_not_complete_session(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GitHub #1189 bonus: idle.py's own routed-sentinel call can land the
+    task terminal-FAILED directly via ``_route_blocked_result_to_task``.
+
+    Unlike phantom.py/stalled.py, idle.py's ROUTE_EMITTED_SENTINEL candidate
+    build has no ``isinstance(result, AutoDevResult)`` filter, so a malformed/
+    BlockedResult sentinel in the transcript is routed here too. Before the
+    fix, ``_route_blocked_result_to_task``'s ``None`` return meant `routed`
+    stayed True even though this same call just landed the task FAILED --
+    completing a session whose task independently failed. Assert the session
+    is NOT completed.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-idle-blockedresult"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(seconds=400)
+
+    sess = _mk_headless_daemon_session("idle-blockedres", worktree, started_at)
+    sess.last_result = None  # sentinel NOT yet consumed → ROUTE_EMITTED eligible
+    # A malformed sentinel (unrecognised status) parses as a BlockedResult,
+    # not an AutoDevResult -- idle.py has no isinstance filter to exclude it.
+    _write_salvage_transcript(
+        home,
+        worktree,
+        "claude-idle-blockedres",
+        {"schema_version": 4, "ticket_id": "idle-blockedres", "status": "proceed"},
+    )
+    save_state(CwState(sessions=[sess]))
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="idle-blockedres",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="idle-blockedres",
+                    stage=Stage.IMPL,
+                )
+            ]
+        )
+    )
+
+    mock_daemon = MagicMock()
+    with patch("cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon):
+        state = load_state()
+        blocked, _salvage = flag_silently_idle_daemon_sessions(
+            state, now=now, native_live={"fake-short-id"}, config=_auto_config()
+        )
+
+    assert blocked == []
+    reloaded = next(s for s in load_state().sessions if s.id == "idle-blockedres")
+    assert reloaded.status != SessionStatus.COMPLETED
+
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == "idle-blockedres")
+    assert task.status == QueueItemStatus.FAILED
+    assert task.disposition == "abandoned"
 
 
 def test_reconcile_includes_stalled_reverts_in_report(
@@ -7658,6 +7894,40 @@ def test_reconcile_tolerates_file_not_found_from_claude_agents(
     # State must be unchanged — no session reaped
     reloaded = load_state()
     s = reloaded.find_by_name_or_id("s-fnf")
+    assert s is not None
+    assert s.status == SessionStatus.ACTIVE
+
+
+def test_reconcile_tolerates_timeout_from_claude_agents(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """subprocess.TimeoutExpired from _claude_agents_json → daemon_errored semantics.
+
+    A `claude agents --json` hang must not wedge sessions_lock or trigger
+    mass-reaping. reconcile() must NOT raise; with live ACTIVE sessions
+    present the outage guard fires and state is left unchanged (#1230).
+    """
+    state = CwState(
+        sessions=[
+            _mk_session("s-timeout", "ref-timeout"),
+        ]
+    )
+    save_state(state)
+
+    def _hangs() -> list[dict[str, object]]:
+        raise subprocess.TimeoutExpired(cmd=["claude", "agents", "--json"], timeout=15)
+
+    monkeypatch.setattr("cw.reconcile.core._claude_agents_json", _hangs)
+
+    # Must not raise
+    report = reconcile()
+
+    assert report.phantom_session_ids == []
+    assert report.phantom_session_names == []
+    # State must be unchanged — no session reaped, no reap/park mutation
+    reloaded = load_state()
+    s = reloaded.find_by_name_or_id("s-timeout")
     assert s is not None
     assert s.status == SessionStatus.ACTIVE
 
@@ -15014,6 +15284,68 @@ def test_stalled_backstop_candidate_routed_at_act_phase(
     assert "status" in reloaded.last_result
 
 
+def test_stalled_race_already_failed_task_does_not_complete_session(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GitHub #1189: a task raced to FAILED by a concurrent caller must not be
+    completed by the Path 1 backstop's ROUTE_EMITTED_SENTINEL act phase.
+
+    Same shape as ``test_stalled_backstop_candidate_routed_at_act_phase``,
+    except the dev-queue task has already been landed FAILED/abandoned for
+    this same ticket/session by the time the act phase's own lookup runs
+    (the R3(a) lookup-miss race). The candidate is still built at detect time
+    (detection does not check task.status), but the act phase's routed=False
+    must drop it from the accepted list rather than completing the session.
+    """
+    from cw.reconcile import _act_on_stalled_candidates
+    from cw.reconcile.stalled import _detect_stalled_candidates
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-1189-stalled-race"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(seconds=7300)  # past every per-stage
+
+    sess = _mk_headless_daemon_session("1189-stalled-race", worktree, started_at)
+    payload = _stage_complete_payload()
+    payload["ticket_id"] = "1189-stalled-race"
+    _write_salvage_transcript(home, worktree, "claude-1189-stalled-race", payload)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    task = TicketTask(
+        ticket_id="1189-stalled-race",
+        client="client-a",
+        # Already raced to terminal FAILED by a concurrent caller before the
+        # act phase's own lookup runs.
+        status=QueueItemStatus.FAILED,
+        session_id="1189-stalled-race",
+        stage=Stage.IMPL,
+        disposition="abandoned",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidates = _detect_stalled_candidates(
+        state,
+        now=now,
+        config=_auto_config(),
+        task_by_ticket={"1189-stalled-race": task},
+    )
+    _act_on_stalled_candidates(state, candidates, now=now, config=_auto_config())
+
+    reloaded = next(s for s in load_state().sessions if s.id == "1189-stalled-race")
+    assert reloaded.status != SessionStatus.COMPLETED
+
+    task_after = next(
+        t for t in load_dev_queue().tasks if t.ticket_id == "1189-stalled-race"
+    )
+    assert task_after.status == QueueItemStatus.FAILED
+    assert task_after.disposition == "abandoned"
+
+
 def test_stalled_backstop_earlier_stage_sentinel_falls_through_to_revert(
     tmp_config_dir: Path,
     tmp_path: Path,
@@ -19200,9 +19532,10 @@ class TestApplySentinelToTaskLateRescue:
         assert isinstance(sentinel, BlockedResult)
         assert sentinel.blocker.reason == "validation_failed"
 
-        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel).rescued
+        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
 
-        assert rescued is False
+        assert outcome.rescued is False
+        assert outcome.routed is True
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
         assert t.status == QueueItemStatus.PENDING
         assert t.session_id is None
@@ -19228,9 +19561,10 @@ class TestApplySentinelToTaskLateRescue:
         assert isinstance(sentinel, BlockedResult)
         assert sentinel.blocker.reason == "no_result_emitted"
 
-        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel).rescued
+        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
 
-        assert rescued is False
+        assert outcome.rescued is False
+        assert outcome.routed is True
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
         assert t.status == QueueItemStatus.PENDING
         assert t.session_id is None
@@ -19378,6 +19712,288 @@ class TestApplySentinelToTaskLateRescue:
         outcome = _apply_sentinel_to_task(
             "GH-1019-no-target", "sess-no-target", sentinel
         )
+
+        assert outcome == SentinelRouteOutcome(rescued=False, routed=True)
+
+
+class TestApplySentinelToTaskRoutedFalseFailedRace:
+    """GitHub #1189: `routed` must reflect a FAILED-landing BlockedResult write,
+    and a lookup miss must distinguish "raced to terminal" from "no such task".
+
+    Pre-#1189, ``_route_blocked_result_to_task`` returned ``None`` and its sole
+    call site discarded the value, so ``routed`` stayed at its default ``True``
+    even when the call just landed the task terminal-FAILED. Separately, the
+    lookup-miss branch conflated "no matching task at all" with "a matching
+    task exists but is outside OCCUPIED_LANE_STATUSES" (raced to terminal by a
+    concurrent caller) -- both returned ``routed=True``. Both must now report
+    ``routed=False`` so callers do not complete/rescue a session whose task
+    independently landed FAILED.
+    """
+
+    def test_running_task_blocked_result_deterministic_failure_returns_routed_false(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """RUNNING + deterministic parse-failure BlockedResult → routed=False."""
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-1189-schema", "sess-1189-schema"
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            attempts=1,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        sentinel = BlockedResult(
+            blocker=Blocker(
+                stage="unknown",
+                reason="schema_version_unsupported",
+                details="test: unsupported schema_version",
+            )
+        )
+
+        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert outcome.routed is False
+        assert outcome.rescued is False
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.FAILED
+        assert t.disposition == "abandoned"
+
+    def test_running_task_blocked_result_validation_failed_at_cap_returns_routed_false(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """RUNNING + validation_failed at the attempt cap → routed=False, FAILED."""
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-1189-vfcap", "sess-1189-vfcap"
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            attempts=_VALIDATION_FAILED_MAX_ATTEMPTS,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        sentinel = BlockedResult(
+            blocker=Blocker(
+                stage="unknown",
+                reason=BLOCKER_REASON_VALIDATION_FAILED,
+                details="test: validation failed at cap",
+            )
+        )
+
+        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert outcome.routed is False
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.FAILED
+        assert t.disposition == "abandoned"
+
+    def test_running_task_blocked_result_unknown_reason_returns_routed_false(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """RUNNING + unrecognised blocker reason → routed=False, FAILED.
+
+        Companion/superset of ``test_signal_stop_unknown_blocker_reason_marks_
+        failed`` (tests/test_cli.py), which pins the same call through the real
+        CLI-adjacent path and now also asserts ``outcome.routed is False``.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-1189-unknown", "sess-1189-unknown"
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            attempts=1,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        sentinel = BlockedResult(
+            blocker=Blocker(
+                stage="unknown",
+                reason="unknown_reason_xyz",
+                details="test: unrecognised reason code",
+            )
+        )
+
+        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert outcome.routed is False
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.FAILED
+        assert t.disposition == "abandoned"
+
+    def test_apply_sentinel_to_task_race_already_failed_task_returns_routed_false(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A same-ticket/session task already raced to FAILED → routed=False.
+
+        Simulates a concurrent winner's ``_route_blocked_result_to_task`` write
+        landing FAILED just before this caller's own lookup runs. The task row
+        must be left byte-for-byte unchanged -- this call has nothing to route.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-1189-race", "sess-1189-race"
+        completed_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.FAILED,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            disposition="abandoned",
+            completed_at=completed_at,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        # An arbitrary valid sentinel -- must never reach the dispatch branch,
+        # since the lookup misses (task is outside OCCUPIED_LANE_STATUSES).
+        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+
+        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert outcome == SentinelRouteOutcome(rescued=False, routed=False)
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.FAILED
+        assert t.disposition == "abandoned"
+        assert t.completed_at == completed_at
+
+    def test_apply_sentinel_to_task_race_miss_logs_warning(
+        self, tmp_config_dir: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A race-miss (matched-but-excluded lookup) logs a WARNING.
+
+        Companion to ``test_apply_sentinel_to_task_race_already_failed_task_
+        returns_routed_false``: this pins the operator-visibility signal
+        added alongside that fix -- before it, this branch resolved with no
+        signal at all distinguishing it from "no such task ever existed."
+        """
+        import logging
+
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-1189-race-log", "sess-1189-race-log"
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.FAILED,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            disposition="abandoned",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+
+        with caplog.at_level(logging.WARNING):
+            outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert outcome.routed is False
+        assert any(
+            "sentinel_race_miss_detected" in rec.message for rec in caplog.records
+        )
+        assert any(ticket_id in rec.message for rec in caplog.records)
+
+    def test_apply_sentinel_to_task_unrelated_task_present_still_returns_routed_true(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A non-empty store with no matching row still reports routed=True.
+
+        Companion to ``test_apply_sentinel_to_task_target_none_returns_routed_
+        true`` (which pins the fully-empty-store case): this pins the
+        non-empty-store, no-match variant, proving the loop doesn't
+        false-positive the race flag on an unrelated row.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        other_task = TicketTask(
+            ticket_id="GH-1189-other",
+            client="staged-client",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-1189-other",
+            stage=Stage.IMPL,
+        )
+        save_dev_queue(DevQueueStore(tasks=[other_task]))
+        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+
+        outcome = _apply_sentinel_to_task(
+            "GH-1189-no-match", "sess-1189-no-match", sentinel
+        )
+
+        assert outcome == SentinelRouteOutcome(rescued=False, routed=True)
+
+    def test_lookup_excluded_row_before_occupied_row_still_routes(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """An excluded-status row preceding the occupied match must not short-
+        circuit the loop to a false race-miss (post-review amendment A2).
+
+        Seeds TWO tasks sharing the same ticket_id+session_id shape -- an
+        excluded-status (FAILED) row ordered before the occupied (RUNNING)
+        row -- and asserts the loop keeps scanning and routes to the occupied
+        match rather than reporting routed=False on the first (excluded) hit.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-1189-order", "sess-1189-order"
+        excluded_row = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.FAILED,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            disposition="abandoned",
+        )
+        occupied_row = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.IMPL,
+        )
+        save_dev_queue(DevQueueStore(tasks=[excluded_row, occupied_row]))
+        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+
+        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert outcome.routed is True
+        t = next(
+            t
+            for t in load_dev_queue().tasks
+            if t.ticket_id == ticket_id and t.status != QueueItemStatus.FAILED
+        )
+        assert t.status == QueueItemStatus.PENDING
+        assert t.stage == Stage.REVIEW
+
+    def test_lookup_terminal_row_with_cleared_session_id_falls_to_true_miss(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A terminal row whose session_id was cleared must not match the
+        excluded-status branch (post-review amendment A3, soundness pin).
+
+        The R3 lookup split's safety rests on an assumed precondition: every
+        write that lands a task terminal with a cleared session_id
+        (``cancel_ticket``/``cancel_task_for_session``/the PENDING branches of
+        ``_route_blocked_result_to_task``) clears ``session_id`` in the SAME
+        write as the status transition, so a terminal row should never carry a
+        session_id that still matches an in-flight caller's lookup. This test
+        exercises that assumed precondition directly (not a system-wide
+        guarantee across every write site): given a CANCELLED task with
+        session_id=None, the lookup must fall through to the truly-absent
+        (routed=True) case, not the excluded-status-match (routed=False) case.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-1189-cleared", "sess-1189-cleared"
+        stale_row = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.CANCELLED,
+            session_id=None,
+            stage=Stage.IMPL,
+            disposition="cancelled",
+        )
+        save_dev_queue(DevQueueStore(tasks=[stale_row]))
+        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+
+        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
 
         assert outcome == SentinelRouteOutcome(rescued=False, routed=True)
 
@@ -22530,12 +23146,12 @@ def test_main_drift_detached_ignored(
     assert _read_drift_events("test-drift-detached") == []
 
 
-def test_main_drift_refires_each_tick(
+def test_main_drift_fires_once_not_per_tick(
     tmp_config_dir: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Per-session state check re-fires while drift holds — two ticks → two events."""
+    """Edge-triggered latch: drift across two ticks fires once, not per-tick (#1258)."""
     wt = tmp_path / "wt-refire"
     save_state(CwState(sessions=[_mk_live_drift_session("drift-refire", wt)]))
     _prime_drift_reconcile(monkeypatch, tmp_path, dirty=True, ff_safety="equal")
@@ -22543,7 +23159,76 @@ def test_main_drift_refires_each_tick(
     reconcile()
     reconcile()
 
-    assert len(_read_drift_events("test-drift-refire")) == 2
+    assert len(_read_drift_events("test-drift-refire")) == 1
+
+
+def test_main_drift_clears_and_refires(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Latch resets silently on clean, re-arms on the next drift episode (#1258)."""
+    wt = tmp_path / "wt-clear-refire"
+    save_state(CwState(sessions=[_mk_live_drift_session("drift-clear-refire", wt)]))
+
+    _prime_drift_reconcile(monkeypatch, tmp_path, dirty=True, ff_safety="equal")
+    reconcile()
+    reconcile()
+    assert len(_read_drift_events("test-drift-clear-refire")) == 1
+
+    _prime_drift_reconcile(monkeypatch, tmp_path, dirty=False, ff_safety="equal")
+    reconcile()
+    assert len(_read_drift_events("test-drift-clear-refire")) == 1
+
+    _prime_drift_reconcile(monkeypatch, tmp_path, dirty=True, ff_safety="equal")
+    reconcile()
+    assert len(_read_drift_events("test-drift-clear-refire")) == 2
+
+
+def test_main_drift_multi_session_one_event_per_client(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two live sessions on the same client, both dirty → exactly 1 event (#1258)."""
+    wt_a = tmp_path / "wt-multi-a"
+    wt_b = tmp_path / "wt-multi-b"
+    save_state(
+        CwState(
+            sessions=[
+                _mk_live_drift_session("drift-multi-a", wt_a),
+                _mk_live_drift_session("drift-multi-b", wt_b),
+            ]
+        )
+    )
+    _prime_drift_reconcile(monkeypatch, tmp_path, dirty=True, ff_safety="equal")
+
+    reconcile()
+
+    assert len(_read_drift_events("test-drift-multi")) == 1
+
+
+def test_main_drift_event_routes_to_client_badge(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Client-scoped drift event carries ticket_id=None + real client, routes
+    through _index_client_badge_events (not the ticket-row badge path, #1258)."""
+    wt = tmp_path / "wt-badge"
+    save_state(CwState(sessions=[_mk_live_drift_session("drift-badge", wt)]))
+    _prime_drift_reconcile(monkeypatch, tmp_path, dirty=True, ff_safety="equal")
+
+    reconcile()
+
+    events = _read_drift_events("test-drift-badge")
+    assert len(events) == 1
+    payload = events[0].payload
+    assert payload["ticket_id"] is None
+    assert payload["client"] == "client-a"
+
+    badges = _index_client_badge_events(events, datetime.now(UTC), {"client-a"})
+    assert "client-a" in badges
 
 
 def test_main_drift_non_daemon_session_skipped(
@@ -22602,7 +23287,13 @@ def test_detect_main_drift_skips_unknown_client() -> None:
 def test_detect_main_drift_swallows_git_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A git error during classification is treated as no-drift (fail-safe)."""
+    """A git error during classification is treated as no-drift (fail-safe).
+
+    The checked client still produces one _ClientDriftStatus entry with
+    drift_kind=None (not an empty list) — a client that errored this tick is
+    indistinguishable from a genuinely clean one, and the act phase needs
+    that clean entry to be able to reset a stale latch (#1258).
+    """
 
     def _boom(_c: object) -> bool:
         msg = "git blew up"
@@ -22615,7 +23306,9 @@ def test_detect_main_drift_swallows_git_error(
     clients = {
         "client-a": ClientConfig(name="client-a", workspace_path=Path("/tmp/ws"))
     }
-    assert _detect_main_drift_candidates(CwState(sessions=[sess]), clients) == []
+    result = _detect_main_drift_candidates(CwState(sessions=[sess]), clients)
+    assert len(result) == 1
+    assert result[0].drift_kind is None
 
 
 class TestConciergeAndEscalationWiring:
