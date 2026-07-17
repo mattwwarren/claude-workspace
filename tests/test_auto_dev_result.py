@@ -3587,6 +3587,18 @@ def test_is_placeholder_sentinel_text_false_for_real_status_only() -> None:
     assert not _is_placeholder_sentinel_text(raw)
 
 
+def test_is_placeholder_sentinel_text_false_for_real_ticket_id_only() -> None:
+    """Real ticket_id but a placeholder status -> False.
+
+    Mirror of the real-status-only case above: guards the AND combinator in
+    the other direction. Without this, a mutant that applied the status
+    regex to both operands (silently dropping the ticket_id check) would
+    still pass every other test in this section.
+    """
+    raw = '{"ticket_id": "774", "status": "<stage_complete | blocked>"}'
+    assert not _is_placeholder_sentinel_text(raw)
+
+
 def test_is_placeholder_sentinel_text_false_for_real_sentinel() -> None:
     """A genuine stage_complete payload -> False."""
     raw = _wrap_sentinel(_stage_complete_payload())
