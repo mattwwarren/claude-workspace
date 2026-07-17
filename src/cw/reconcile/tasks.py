@@ -40,6 +40,8 @@ from cw.reconcile._shared import (
 from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from cw.models import ClientConfig, Session
 
 
@@ -162,6 +164,17 @@ def _collect_timed_out_merged_candidates(
     return candidates
 
 
+def _client_cwd(client_name: str, clients: dict[str, ClientConfig]) -> Path | None:
+    """Resolve the gh cwd for *client_name*, or None if no config is found.
+
+    None preserves today's ambient-CWD gh behavior for that one session
+    (accepted tradeoff for a dangling/misconfigured client -- see #1269 plan
+    Adopted Assumptions); every configured client gets a scoped cwd.
+    """
+    client_cfg = clients.get(client_name)
+    return _git_dir(client_cfg) if client_cfg is not None else None
+
+
 def _filter_merged_candidates(
     candidates: list[tuple[Session, str]],
     clients: dict[str, ClientConfig],
@@ -178,8 +191,7 @@ def _filter_merged_candidates(
     to_complete: list[tuple[Session, str]] = []
     for session, ticket_id in candidates:
         branch = feature_branch_key(session.client, ticket_id, clients)
-        client_cfg = clients.get(session.client)
-        cwd = _git_dir(client_cfg) if client_cfg is not None else None
+        cwd = _client_cwd(session.client, clients)
         merged, gh_available = _deps.pr_is_merged_for_ticket(
             ticket_id, branch=branch, cwd=cwd
         )

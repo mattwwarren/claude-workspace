@@ -235,9 +235,9 @@ class TestPrIsMergedForTicket:
         want_cwd = Path("/some/client/repo")
         captured: list[Path | None] = []
 
-        def _fake_run(args: list[str], **kwargs: object) -> Any:
+        def _fake_run(args: list[str], **kwargs: Any) -> Any:
             if "issue" in args:
-                captured.append(kwargs.get("cwd"))  # type: ignore[arg-type]
+                captured.append(kwargs.get("cwd"))
                 return _make_issue_result([42])
             return _make_pr_result("MERGED")
 
@@ -254,10 +254,10 @@ class TestPrIsMergedForTicket:
         want_cwd = Path("/some/client/repo")
         captured: list[Path | None] = []
 
-        def _fake_run(args: list[str], **kwargs: object) -> Any:
+        def _fake_run(args: list[str], **kwargs: Any) -> Any:
             if "issue" in args:
                 return _make_run_result(1, "")  # not a GitHub issue
-            captured.append(kwargs.get("cwd"))  # type: ignore[arg-type]
+            captured.append(kwargs.get("cwd"))
             return _make_run_result(0, json.dumps([{"number": 1}]))
 
         monkeypatch.setattr("cw.gh._sp.run", _fake_run)

@@ -10362,16 +10362,19 @@ class TestCompleteTimedOutMergedTasks:
             "    feature_branch_prefix: feat\n"
         )
 
+        captured_cwd: list[Path | None] = []
+
         def _capture(
             tid: str, *, branch: str, cwd: Path | None = None, **_kw: object
         ) -> tuple[bool, bool]:
-            assert cwd is not None
-            assert cwd == Path("/tmp/ws-feat")
+            captured_cwd.append(cwd)
             return True, True
 
         monkeypatch.setattr("cw.reconcile._deps.pr_is_merged_for_ticket", _capture)
 
         complete_timed_out_merged_tasks()
+
+        assert captured_cwd == [Path("/tmp/ws-feat")]
 
     def test_default_feature_branch_prefix_fallback(
         self,
@@ -19079,11 +19082,12 @@ class TestWorldStateCheckBeforeRevert:
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
 
+        captured_cwd: list[Path | None] = []
+
         def _capture(
             tid: str, *, branch: str, cwd: Path | None = None, **_kw: object
         ) -> tuple[bool, bool]:
-            assert cwd is not None
-            assert cwd == Path("/tmp/ws-feat")
+            captured_cwd.append(cwd)
             return False, True
 
         monkeypatch.setattr("cw.reconcile._deps.pr_is_merged_for_ticket", _capture)
@@ -19098,6 +19102,8 @@ class TestWorldStateCheckBeforeRevert:
 
         with freezegun.freeze_time(now):
             reconcile()
+
+        assert captured_cwd == [Path("/tmp/ws-feat")]
 
     def test_reconcile_prepass_default_prefix_fallback(
         self,
