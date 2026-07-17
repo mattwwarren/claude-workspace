@@ -1749,6 +1749,18 @@ class TestDetectRepeatFireCounts:
         monkeypatch.setattr("cw.reconcile.review_recipes.read_events", _boom)
         assert _detect_repeat_fire_counts(config=_config()) == {}
 
+    def test_malformed_payload_missing_keys_skipped(self, tmp_config_dir: Path) -> None:
+        """A PR_ACTION_TAKEN with no/non-str ticket_id+recipe is not counted."""
+        record_event(
+            OrchestratorEventType.PR_ACTION_TAKEN,
+            {"client": "acme"},  # no ticket_id / recipe
+        )
+        record_event(
+            OrchestratorEventType.PR_ACTION_TAKEN,
+            {"ticket_id": 123, "recipe": None},  # non-str values
+        )
+        assert _detect_repeat_fire_counts(config=_config()) == {}
+
 
 class TestRecordPrActionTaken:
     """_record_pr_action_taken: always records, escalates on exact crossing."""

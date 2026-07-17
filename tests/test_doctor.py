@@ -5600,6 +5600,23 @@ class TestCheckReviewRecipeLiveness:
         # 1-of-2 fired in the same (client, lane, recipe) group is healthy.
         assert all(not r.warn for r in results)
 
+    def test_un_hydrated_row_excluded_from_liveness(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore
+        from tests.test_reconcile_gate_recipes import _make_task
+
+        _patch_config_enabled(monkeypatch)
+        # pr_url set (a hydration candidate) but pr_state not yet hydrated → the
+        # row is skipped before any recipe grouping (no warn).
+        task = _make_task(
+            pr_url="https://github.com/acme/widgets/pull/9", pr_state=None
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        results = _check_review_recipe_liveness(_liveness_clients())
+        assert all(not r.warn for r in results)
+
     def test_zero_candidates_no_warn(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
