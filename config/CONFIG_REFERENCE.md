@@ -290,6 +290,13 @@ per_client_ceiling: {}
 max_parallel_clients: null
 
 linear_prefix_map: {}
+# ^ routes a ticket-id prefix to the client/repo that owns it in a
+# multi-client cw deployment — it is not provider selection. cw does not
+# choose between tracker implementations in Python; the daemon's only
+# programmatic tracker client is gh.py (GitHub-only), and all
+# provider-portable ticket I/O is delegated to agent-native tools. See
+# ADR-0013 (../docs/adr/0013-agent-delegated-ticket-work.md) for the full
+# boundary.
 
 # Per-tier headless timeout budgets (seconds). Sessions whose scope.tier is
 # known (from the auto-dev sentinel scope field) are budgeted by this map.
