@@ -24,7 +24,10 @@ from cw.codex_review import (
     _load_optional_text,
     _load_review_policy,
     _load_sensitive_hits,
+    _load_ticket_context,
+    _parse_reviewer_document,
     _parse_unified_diff,
+    _read_sensitive_manifest,
     _select_reviewer_roles,
     render_verdict_comment,
     run_codex_roles,
@@ -372,6 +375,92 @@ class TestLoadSensitiveHitsLarge:
         assert len(hits) == 1
         assert hits[0].category == "auth"
 
+    def test_large_no_registry(self, tmp_path: Path) -> None:
+        assert _load_sensitive_hits(tmp_path, ["src/cw/auth.py"], "large") == []
+
+
+class TestReadSensitiveManifest:
+    def test_missing_file(self, tmp_path: Path) -> None:
+        assert _read_sensitive_manifest(tmp_path / "nope.yml") == []
+
+    def test_malformed_yaml(self, tmp_path: Path) -> None:
+        p = tmp_path / "m.yml"
+        p.write_text("key: [unclosed\n", encoding="utf-8")
+        assert _read_sensitive_manifest(p) == []
+
+    def test_non_dict_root(self, tmp_path: Path) -> None:
+        p = tmp_path / "m.yml"
+        p.write_text("- just\n- a\n- list\n", encoding="utf-8")
+        assert _read_sensitive_manifest(p) == []
+
+    def test_entries_not_a_list(self, tmp_path: Path) -> None:
+        p = tmp_path / "m.yml"
+        p.write_text("sensitive_files: nope\n", encoding="utf-8")
+        assert _read_sensitive_manifest(p) == []
+
+    def test_drops_entries_without_path(self, tmp_path: Path) -> None:
+        p = tmp_path / "m.yml"
+        p.write_text(
+            "sensitive_files:\n  - category: x\n  - path: keep.py\n", encoding="utf-8"
+        )
+        entries = _read_sensitive_manifest(p)
+        assert entries == [{"path": "keep.py"}]
+
+
+class TestLoadTicketContext:
+    def test_plan_and_context_present(self, tmp_path: Path) -> None:
+        _write(tmp_path / ".cw" / "plan.md", "THE PLAN")
+        _write(
+            tmp_path / ".cw" / "context.json",
+            json.dumps({"title": "Ticket Title", "body": "Ticket Body"}),
+        )
+        plan_text, ticket_text = _load_ticket_context(tmp_path)
+        assert plan_text == "THE PLAN"
+        assert ticket_text is not None
+        assert "Ticket Title" in ticket_text
+        assert "Ticket Body" in ticket_text
+
+    def test_both_absent(self, tmp_path: Path) -> None:
+        plan_text, ticket_text = _load_ticket_context(tmp_path)
+        assert plan_text is None
+        assert ticket_text is None
+
+    def test_malformed_context_json(self, tmp_path: Path) -> None:
+        _write(tmp_path / ".cw" / "context.json", "not json{{")
+        _plan, ticket_text = _load_ticket_context(tmp_path)
+        assert ticket_text is None
+
+    def test_empty_title_body(self, tmp_path: Path) -> None:
+        _write(tmp_path / ".cw" / "context.json", json.dumps({"title": "", "body": ""}))
+        _plan, ticket_text = _load_ticket_context(tmp_path)
+        assert ticket_text is None
+
+
+class TestParseReviewerDocument:
+    def test_none_content(self) -> None:
+        assert _parse_reviewer_document(None) is None
+
+    def test_invalid_json(self) -> None:
+        assert _parse_reviewer_document("not json{{") is None
+
+    def test_schema_invalid_dict(self) -> None:
+        # Valid JSON but a failed status carrying findings is a schema violation.
+        payload = json.dumps(
+            {
+                "reviewer_role": "R",
+                "status": "failed",
+                "detail": "",
+                "findings": [{"severity": "MUST_FIX"}],
+            }
+        )
+        assert _parse_reviewer_document(payload) is None
+
+    def test_valid_document(self) -> None:
+        payload = _doc_json()
+        doc = _parse_reviewer_document(payload)
+        assert doc is not None
+        assert doc.status == "ok"
+
 
 # ---------------------------------------------------------------------------
 # _load_review_policy — scope-tier divergence
@@ -557,9 +646,7 @@ class TestRunCodexRoles:
     ) -> None:
         # deadline=100 (call0); role1 remaining=100 (call1); role2 remaining=100
         # (call2); role3 remaining=20<=30 -> skip budget_exhausted (call3).
-        monkeypatch.setattr(
-            "cw.codex_review.time.monotonic", _Clock([0, 0, 0, 80])
-        )
+        monkeypatch.setattr("cw.codex_review.time.monotonic", _Clock([0, 0, 0, 80]))
         runner = _SequencedRunner([_ok_result(), _ok_result()])
         with caplog.at_level(logging.WARNING):
             docs, failures = run_codex_roles(
