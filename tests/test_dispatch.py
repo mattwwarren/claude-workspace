@@ -9031,6 +9031,66 @@ class TestAvailabilityPreflightGate:
 
         assert len(calls) == 2
 
+    def test_ttl_dedup_across_multiple_clients_in_one_tick(
+        self,
+        tmp_dispatch_dirs: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        make_git_repo: Callable[[str], Path],
+        tmp_path: Path,
+    ) -> None:
+        """A single dispatch_tick with two eligible clients probes only once.
+
+        Distinct from test_ttl_cache_suppresses_repeat_probe_within_window
+        (which proves dedup *across ticks*): this proves dedup *within* one
+        tick's client loop, via the in-process ``_resolve_availability_once``
+        memoization already hoisted outside the per-client loop.
+        """
+        ws_a = make_git_repo("workspace/ttl-client-a")
+        ws_b = make_git_repo("workspace/ttl-client-b")
+        client_a = ClientConfig(
+            name="ttl-client-a",
+            workspace_path=ws_a,
+            default_branch="main",
+            worktree_base=tmp_path / "worktrees-ttl-a",
+        )
+        client_b = ClientConfig(
+            name="ttl-client-b",
+            workspace_path=ws_b,
+            default_branch="main",
+            worktree_base=tmp_path / "worktrees-ttl-b",
+        )
+
+        config_dir = tmp_dispatch_dirs / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            "clients:\n"
+            f"  {client_a.name}:\n"
+            f"    workspace_path: {client_a.workspace_path}\n"
+            f"    default_branch: main\n"
+            f"    worktree_base: {client_a.worktree_base}\n"
+            f"  {client_b.name}:\n"
+            f"    workspace_path: {client_b.workspace_path}\n"
+            f"    default_branch: main\n"
+            f"    worktree_base: {client_b.worktree_base}\n"
+        )
+
+        add_ticket(TicketTask(ticket_id="GEN-A5K1", client=client_a.name))
+        add_ticket(TicketTask(ticket_id="GEN-A5K2", client=client_b.name))
+
+        calls: list[int] = []
+
+        def _counting_probe(**_kw: object) -> bool:
+            calls.append(1)
+            return True
+
+        monkeypatch.setattr("cw.dispatch.check_gh_availability", _counting_probe)
+
+        config = OrchestratorConfig(default_max_parallel=1)
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(config, native_daemon=daemon, auto_ff=False)
+
+        assert len(calls) == 1
+
     def test_resolution_error_fails_open(
         self,
         tmp_dispatch_dirs: Path,

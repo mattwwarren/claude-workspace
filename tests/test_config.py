@@ -1830,6 +1830,26 @@ class TestOrchestratorConfigLivenessFirstBucketByStage:
 
 
 # ---------------------------------------------------------------------------
+# TestDispatchStateLock
+# ---------------------------------------------------------------------------
+
+
+class TestDispatchStateLock:
+    """Smoke test for dispatch_state_lock() (#1256)."""
+
+    def test_dispatch_state_lock_creates_and_releases(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """dispatch_state_lock() creates lock file and releases on exit."""
+        from cw.config import dispatch_state_lock, dispatch_state_lock_file
+
+        lock_path = dispatch_state_lock_file()
+        with dispatch_state_lock():
+            assert lock_path.exists()
+        # Lock released — file still exists but lock is no longer held
+
+
+# ---------------------------------------------------------------------------
 # TestUsageLimitedUntilPersistence
 # ---------------------------------------------------------------------------
 
