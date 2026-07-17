@@ -85,6 +85,7 @@ DEV_PLAN_OUTPUT_DIR = STATE_DIR / "plan_output"
 SESSIONS_LOCK = STATE_DIR / ".sessions.lock"
 CLIENTS_LOCK = CONFIG_DIR / ".clients.yaml.lock"
 DISPATCH_STATE_FILE = STATE_DIR / "dispatch_state.json"
+DISPATCH_STATE_LOCK = STATE_DIR / ".dispatch_state.lock"
 CONCURRENCY_OVERRIDE_FILE = STATE_DIR / "concurrency_overrides.json"
 CONCURRENCY_OVERRIDE_LOCK = STATE_DIR / ".concurrency_overrides.lock"
 
@@ -178,6 +179,10 @@ def concurrency_override_file() -> Path:
 
 def concurrency_override_lock_file() -> Path:
     return CONCURRENCY_OVERRIDE_LOCK
+
+
+def dispatch_state_lock_file() -> Path:
+    return DISPATCH_STATE_LOCK
 
 
 def _under_pytest() -> bool:
@@ -633,6 +638,40 @@ class AvailabilityProbeCache(NamedTuple):
     # succeeds (edge-triggered reset).
 
 
+@contextlib.contextmanager
+def dispatch_state_lock() -> Iterator[None]:
+    """Acquire an exclusive file lock over the DISPATCH_STATE_FILE write window.
+
+    Mirror of ``concurrency_override_lock()``/``clients_lock()``. Hold this
+    across every load→mutate→write sequence in ``save_usage_limited_until``,
+    ``save_availability_probe_cache``, and ``save_main_drift_latches`` so
+    concurrent ``cw`` processes cannot clobber each other's edits (lost
+    update, #1256). The lock is advisory (``fcntl.flock``) and per-open-fd,
+    so sequential re-acquisitions in the same process are safe.
+    Do NOT nest: acquiring while already holding will deadlock.
+
+    Lock ordering: ``sessions_lock()`` → ``dispatch_state_lock()`` is
+    permitted and occurs today, via ``save_main_drift_latches`` called from
+    inside ``reconcile/core.py``'s ``with sessions_lock():`` block through
+    ``_act_on_main_drift_candidates`` (``main_drift.py:162``). The reverse
+    ordering is forbidden and never occurs in the current call graph. The one
+    pathological cross-lock path (#1228, the RFC 0010 P4 review-recipe act
+    phase re-entering ``reconcile()`` from inside ``sessions_lock()``) fails
+    first at its own ``reconcile()`` call (``dispatch.py:1491``) with
+    ``SessionsLockReentryError``, before it can reach any
+    ``dispatch_state_lock()`` acquisition.
+    """
+    state_dir().mkdir(parents=True, exist_ok=True)
+    lock_path = dispatch_state_lock_file()
+    fd = lock_path.open("w")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()
+
+
 def _load_dispatch_state_raw() -> dict[str, Any]:
     """Read DISPATCH_STATE_FILE as a dict, or ``{}`` if absent/corrupt/unreadable.
 
@@ -685,9 +724,10 @@ def save_usage_limited_until(dt: datetime | None) -> None:
     try:
         refuse_real_state_write(DISPATCH_STATE_FILE)
         DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        payload = _load_dispatch_state_raw()
-        payload["usage_limited_until"] = dt.isoformat() if dt is not None else None
-        atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
+        with dispatch_state_lock():
+            payload = _load_dispatch_state_raw()
+            payload["usage_limited_until"] = dt.isoformat() if dt is not None else None
+            atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
     except OSError:
         logger.warning("dispatch_state: failed to persist usage_limited_until")
 
@@ -736,13 +776,14 @@ def save_availability_probe_cache(cache: AvailabilityProbeCache) -> None:
     try:
         refuse_real_state_write(DISPATCH_STATE_FILE)
         DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        payload = _load_dispatch_state_raw()
-        payload["availability_probe"] = {
-            "probed_at": cache.probed_at.isoformat(),
-            "available": cache.available,
-            "latched": cache.latched,
-        }
-        atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
+        with dispatch_state_lock():
+            payload = _load_dispatch_state_raw()
+            payload["availability_probe"] = {
+                "probed_at": cache.probed_at.isoformat(),
+                "available": cache.available,
+                "latched": cache.latched,
+            }
+            atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
     except OSError:
         logger.warning("dispatch_state: failed to persist availability_probe")
 
@@ -792,16 +833,16 @@ def save_main_drift_latches(latches: dict[str, bool]) -> None:
     try:
         refuse_real_state_write(DISPATCH_STATE_FILE)
         DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        # Why: no file lock — reconcile() runs from independent, short-lived
-        # processes (cw status/list/start, every dispatch_tick), so two
-        # concurrent read-merge-writes for different clients can race and
-        # lose one flip. Matches the existing sibling caches' posture
-        # (save_availability_probe_cache etc.); a lost flip self-heals on
-        # the next tick, so unlike a real DB write this is an accepted
-        # tradeoff, not a bug.
-        payload = _load_dispatch_state_raw()
-        payload["main_drift_latches"] = latches
-        atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
+        # Why: file-locked (dispatch_state_lock, #1256) — reconcile() runs
+        # from independent, short-lived processes (cw status/list/start,
+        # every dispatch_tick), so concurrent read-merge-writes for
+        # different clients previously could race and lose one flip. The
+        # lock serializes this critical section against the other two
+        # DISPATCH_STATE_FILE writers, closing that race.
+        with dispatch_state_lock():
+            payload = _load_dispatch_state_raw()
+            payload["main_drift_latches"] = latches
+            atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
     except OSError:
         logger.warning(
             "dispatch_state: failed to persist main_drift_latches (clients=%s)",
