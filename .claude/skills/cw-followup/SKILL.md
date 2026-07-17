@@ -209,7 +209,7 @@ Recipe (validated 4× in the 1.1 waves — #387, #552, #554, #558):
 3. **Disposition the sentinel** as if it had routed normally:
    `review_pending_approval` with SHOULD_FIX-only → assess the items; ship as-is
    (note them in the PR body as deferred follow-ups) or apply 1–4 surgical fixes
-   inline in the worker's worktree (`/home/matthew/.cw/wt/<hash>/auto-dev-<n>`),
+   inline in the worker's worktree (`~/.cw/wt/<hash>/auto-dev-<n>`),
    re-run the full gate suite, commit, push to the same branch.
 4. **Open the PR yourself** from the sentinel's branch with auto-merge; the body
    carries the sentinel's review summary + the salvage note. Never re-dispatch a
