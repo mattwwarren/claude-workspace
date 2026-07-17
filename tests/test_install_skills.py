@@ -90,6 +90,20 @@ def script(fake_repo: Path) -> Path:
     return _scaffold_fake_install(fake_repo.parent, fake_repo)
 
 
+@pytest.fixture
+def fake_repo_with_agents(fake_repo: Path) -> Path:
+    """fake_repo plus an agents dir: 1 installable agent + 1 excluded spike.
+
+    spike-isolated.md is present in source but is experiment-scoped (#107),
+    so it must never be installed globally.
+    """
+    agents = fake_repo / ".claude" / "agents"
+    agents.mkdir(parents=True)
+    (agents / "code-quality-reviewer.md").write_text("# code quality reviewer\n")
+    (agents / "spike-isolated.md").write_text("# spike (excluded)\n")
+    return fake_repo
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -205,6 +219,74 @@ class TestInstallSkillsPruneSafety:
         assert "orphans pruned  : 0" in r2.stdout
         assert (fake_home / ".claude" / "commands" / "auto-dev.md").exists()
         assert (fake_home / ".claude" / "skills" / "cw-fanout" / "SKILL.md").exists()
+
+
+class TestInstallSkillsAgents:
+    """Agents install alongside commands/skills; spike-isolated.md stays excluded."""
+
+    def test_agents_copied(
+        self, script: Path, fake_repo_with_agents: Path, fake_home: Path
+    ) -> None:
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+        agents_dst = fake_home / ".claude" / "agents"
+        assert (agents_dst / "code-quality-reviewer.md").exists()
+        assert "agents synced   : 1" in result.stdout
+
+    def test_spike_isolated_excluded(
+        self, script: Path, fake_repo_with_agents: Path, fake_home: Path
+    ) -> None:
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+        installed = fake_home / ".claude" / "agents" / "spike-isolated.md"
+        assert not installed.exists(), (
+            "spike-isolated.md is a throwaway spike probe (#107) and must "
+            "never be installed globally"
+        )
+        assert "agents skipped  : 1 (experiment-scoped)" in result.stdout
+
+    def test_spike_isolated_not_in_manifest(
+        self, script: Path, fake_repo_with_agents: Path, fake_home: Path
+    ) -> None:
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+        manifest = fake_home / ".claude" / ".cw-skills-manifest"
+        entries = manifest.read_text().splitlines()
+        assert "agents/spike-isolated.md" not in entries
+        assert "agents/code-quality-reviewer.md" in entries
+
+    def test_foreign_agent_survives_prune(
+        self, script: Path, fake_repo_with_agents: Path, fake_home: Path
+    ) -> None:
+        """Manifest-scoped prune must never remove an agent that exists only
+        in global-claude (i.e. was never installed by cw from this repo).
+        """
+        r1 = _run(script, fake_home)
+        assert r1.returncode == 0, r1.stderr
+
+        # Plant a foreign agent NOT from cw (not in the manifest) -- mirrors
+        # an agent that lives only in global-claude.
+        foreign_agent = fake_home / ".claude" / "agents" / "foreign-reviewer.md"
+        foreign_agent.write_text("# foreign, global-claude-only\n")
+
+        # Drop code-quality-reviewer.md from repo source to trigger a prune.
+        (fake_repo_with_agents / ".claude" / "agents" / "code-quality-reviewer.md").unlink()
+
+        r2 = _run(script, fake_home)
+        assert r2.returncode == 0, r2.stderr
+
+        assert foreign_agent.exists(), (
+            "An agent that exists only in global-claude (never installed by "
+            "cw) was deleted by the manifest-scoped prune"
+        )
+        pruned = fake_home / ".claude" / "agents" / "code-quality-reviewer.md"
+        assert not pruned.exists()
+
+    def test_no_agents_dir_is_a_noop(self, script: Path, fake_home: Path) -> None:
+        """Repos without .claude/agents/ still install cleanly (guarded loop)."""
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+        assert "agents synced   : 0" in result.stdout
 
 
 class TestProjectScopedCommandsExcluded:

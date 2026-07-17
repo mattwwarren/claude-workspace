@@ -17,6 +17,13 @@
 #   above still holds — an agent that exists only in global-claude never enters
 #   this manifest, so it is never removed by cw.
 #
+#   Overwrite hazard: `cp` here is unconditional, with no diff/staleness check
+#   against the destination.  If an agent is hand-edited directly in
+#   global-claude (the canonical source) after this repo's .claude/agents/
+#   copy was last refreshed, the next install run silently clobbers that edit
+#   back to the stale cw copy.  Re-import from global-claude into this repo's
+#   .claude/agents/ before running install if you've been editing there.
+#
 # PORTABILITY:
 #   Targets bash 3.2 (macOS /bin/bash) as well as modern bash on Linux.  Do not
 #   introduce namerefs (`local -n`, bash 4.3+), associative arrays, or `readarray`.
