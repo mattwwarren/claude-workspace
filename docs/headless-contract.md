@@ -288,6 +288,8 @@ Both `ambiguities_pending_resolution` and `premises_pending_verification` (§4.1
 | `ambiguities` | `ambiguities_pending_resolution` | Non-empty list of ambiguity entries. Each entry typically carries `question`, `plan_assumption`, `alternatives`, `why_it_matters`, `ticket_evidence`; **treat all keys as best-effort** (§4.4 / A3 decision, issue #191). |
 | `premises` | `premises_pending_verification` | Non-empty list of premise entries. Each entry carries at minimum a description (key may be `premise` or `claim`) and producer-supplied verification context (any of `verify_by` / `plan_depends_on_it_for` / `evidence_in_ticket` / `how_to_verify` / `verified` / `resolution`); **treat all keys as best-effort**. |
 
+**Producer note (#1192, no schema change):** as of this ticket, a headless plan-stage run's `premises` array on a `premises_pending_verification` sentinel contains only premises the plan-stage agent could **not** self-verify with authoritative evidence in the same session (official docs, `--help` output, source, or a quoted command invocation + output). Premises the agent settled itself are excluded from this array; they are instead recorded in the persisted plan body under a `## Self-Verified Premises` section and cited in `friction_highlights`. This is a producer-side inclusion-criteria change only — the array's shape, the `claim`/`premise` key union, and the parser's shape-only validation (§4.4 A7, `_reject_empty_claim_premises`) are unchanged.
+
 **Cross-field invariants (enforced by parser):**
 - `status='ambiguities_pending_resolution'` requires `ambiguities` non-empty (A5).
 - `status='premises_pending_verification'` requires `premises` non-empty (A5).
