@@ -6,8 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.21.0] — 2026-07-17
+
+Dispatch-latch hardening plus installer ownership of subagents. The two
+`*_fired_at` latches stop recipe re-dispatch storms, `disallowed_mcp_tools`
+moves worker tool policy from a tracker heuristic to explicit operator config
+(**see MIGRATION below**), and cw's installer now owns agent definitions
+outright.
+
 ### Added
 
+- **Subagents install globally alongside commands and skills** (#1278):
+  `scripts/install-skills.sh` now installs `.claude/agents/*.md` into
+  `~/.claude/agents/`, tracked in the same manifest and covered by the same
+  manifest-scoped prune invariant (an agent present only in the destination is
+  never pruned). `EXCLUDED_AGENTS` withholds experiment-scoped agents from the
+  global install, mirroring the existing `EXCLUDED_COMMANDS` precedent. cw is
+  now the single source of truth for agent definitions, which previously lived
+  as a drifting duplicate set in the `global-claude` checkout.
 - **`auto_fix_ci_fired_at` latch + schema v16→17** (#1205): the `auto_fix_ci`
   recipe now re-dispatches once per ci-failing episode instead of spawning a
   worker session on every reconcile tick until hydration catches up.
