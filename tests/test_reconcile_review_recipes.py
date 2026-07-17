@@ -1901,10 +1901,20 @@ class TestRecordPrActionTaken:
     def test_different_client_same_ticket_id_isolated_count(
         self, tmp_config_dir: Path
     ) -> None:
-        """Tenant A's fire count is unaffected by tenant B's fires on the same id."""
+        """Tenant A's fire count is unaffected by tenant B's fires on the same id.
+
+        Guards two distinct regression classes: (a) ``client`` dropped from the
+        key entirely — a legacy ``(ticket_id, recipe)`` 2-tuple lookup would hit
+        tenant B's count — and (b) ``client`` swapped/hardcoded to another
+        tenant's value. A dict-typed regression on (a) is caught at the *type*
+        level by mypy --strict on ``src/`` (the parameter is
+        ``dict[tuple[str, str, str], int]``); this test additionally proves the
+        *runtime* isolation a type annotation alone can't verify.
+        """
         cfg = _config(review_recipe_repeat_fire_threshold=5)
         counts = {
-            ("widgetco", "42", RECIPE_ADDRESS_REVIEW): 4,  # tenant B: 1 short
+            ("42", RECIPE_ADDRESS_REVIEW): 4,  # legacy 2-tuple shape (regression a)
+            ("widgetco", "42", RECIPE_ADDRESS_REVIEW): 4,  # tenant B, 1 short
         }
         _record_pr_action_taken(
             _repeat_fire_payload_base("42", RECIPE_ADDRESS_REVIEW, client="acme"),
@@ -1914,8 +1924,9 @@ class TestRecordPrActionTaken:
             config=cfg,
             repeat_fire_counts=counts,
         )
-        # Tenant A's own count (absent from `counts`) starts at 0 + this = 1,
-        # nowhere near the threshold — tenant B's count must not leak in.
+        # Tenant A's own count (absent from the ("acme", "42", recipe) key)
+        # starts at 0 + this = 1, nowhere near the threshold — neither the
+        # legacy 2-tuple shape nor tenant B's 3-tuple entry must leak in.
         assert (
             read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
             == []
