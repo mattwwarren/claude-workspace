@@ -99,6 +99,7 @@ def _clean_result(
     recommendation: str = "PROCEED",
     forbidden_touched: bool = False,
     status: str = "review_pending_approval",
+    agents_run: int = 1,
 ) -> dict[str, Any]:
     """Build a last_result dict matching a clean-review sentinel snapshot."""
     return {
@@ -108,6 +109,7 @@ def _clean_result(
             "should_fix": 0,
             "fix_cycles_used": 0,
             "deferred": deferred,
+            "agents_run": agents_run,
         },
         "health": {
             "recommendation": recommendation,
@@ -229,6 +231,7 @@ class TestDetect:
             "deferred": 0,
             "recommendation": "PROCEED",
             "forbidden_touched": False,
+            "agents_run": 1,
         }
 
     def test_non_blocked_status_yields_none(self) -> None:
@@ -331,6 +334,7 @@ class TestDetect:
             {"deferred": 1},
             {"recommendation": "EXIT_FOR_HUMAN_REVIEW"},
             {"forbidden_touched": True},
+            {"agents_run": 0},
         ],
     )
     def test_predicate_boundary_each_field_blocks(self, kwargs: dict[str, Any]) -> None:
@@ -344,6 +348,36 @@ class TestDetect:
             )
             == []
         )
+
+    def test_clean_review_with_zero_agents_run_does_not_satisfy_predicate(
+        self,
+    ) -> None:
+        """Issue #1194: a 0/0/0 review that never actually ran a reviewer
+        must not satisfy the clean-review predicate, even though the other
+        four fields all look clean."""
+        task = _make_task()
+        result = _clean_result(agents_run=0)
+        session = _make_session(last_result=result)
+        state = CwState(sessions=[session])
+
+        snapshot = _clean_review_snapshot(result)
+        assert snapshot is not None
+        assert _predicate_holds(snapshot) is False
+        assert (
+            _detect_auto_approve_review(
+                state, [task], clients=_SEAM1_CLIENTS, config=_config()
+            )
+            == []
+        )
+
+    def test_non_int_agents_run_fails_closed(self) -> None:
+        """A malformed (non-int) agents_run fails the predicate rather than
+        raising or accidentally passing via truthy coercion."""
+        result = _clean_result()
+        result["review"]["agents_run"] = "3"
+        snapshot = _clean_review_snapshot(result)
+        assert snapshot is not None
+        assert _predicate_holds(snapshot) is False
 
     def test_1091_shaped_corrected_snapshot_predicate_holds(self) -> None:
         """#1104 regression: once Stage 1 correctly classifies a CI/CD content
@@ -586,6 +620,7 @@ class TestRunApprove:
             "deferred": 0,
             "recommendation": "PROCEED",
             "forbidden_touched": False,
+            "agents_run": 1,
         }
         assert events[0].correlation_id == "GEN-1"
 
@@ -610,6 +645,7 @@ class TestRunApprove:
         assert "must_fix_initial: 0" in body
         assert "recommendation: PROCEED" in body
         assert "forbidden_touched: False" in body
+        assert "agents_run: 1" in body
 
     def test_comment_failure_swallowed_and_logged(
         self,
