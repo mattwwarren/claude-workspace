@@ -270,7 +270,8 @@ class TestInstallSkillsAgents:
         foreign_agent.write_text("# foreign, global-claude-only\n")
 
         # Drop code-quality-reviewer.md from repo source to trigger a prune.
-        (fake_repo_with_agents / ".claude" / "agents" / "code-quality-reviewer.md").unlink()
+        agents_src = fake_repo_with_agents / ".claude" / "agents"
+        (agents_src / "code-quality-reviewer.md").unlink()
 
         r2 = _run(script, fake_home)
         assert r2.returncode == 0, r2.stderr
