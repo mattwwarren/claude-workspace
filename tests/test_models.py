@@ -675,20 +675,23 @@ class TestCostFields:
         restored = TicketTask.model_validate(dumped)
         assert restored.total_cost_usd == pytest.approx(3.14)
 
-    def test_ticket_task_last_result_defaults_to_none(self) -> None:
+    def test_ticket_task_last_blocked_result_defaults_to_none(self) -> None:
         """GitHub #1266: new diagnostic field defaults to None (schema v19)."""
         task = TicketTask(ticket_id="T-1", client="c")
-        assert task.last_result is None
+        assert task.last_blocked_result is None
 
-    def test_ticket_task_last_result_round_trip(self) -> None:
+    def test_ticket_task_last_blocked_result_round_trip(self) -> None:
         task = TicketTask(
             ticket_id="T-1",
             client="c",
-            last_result={"status": "blocked", "blocker": {"reason": "status_unknown"}},
+            last_blocked_result={
+                "status": "blocked",
+                "blocker": {"reason": "status_unknown"},
+            },
         )
         dumped = task.model_dump(mode="json")
         restored = TicketTask.model_validate(dumped)
-        assert restored.last_result == {
+        assert restored.last_blocked_result == {
             "status": "blocked",
             "blocker": {"reason": "status_unknown"},
         }

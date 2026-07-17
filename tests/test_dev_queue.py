@@ -2697,9 +2697,9 @@ class TestMigrateDevQueue:
             "2026-07-16T00:00:00+00:00"
         )
 
-    def test_migrate_dev_queue_fills_last_result_default(self) -> None:
-        """migrate_dev_queue fills last_result=None on tasks missing the key
-        (v19, GitHub #1266)."""
+    def test_migrate_dev_queue_fills_last_blocked_result_default(self) -> None:
+        """migrate_dev_queue fills last_blocked_result=None on tasks missing
+        the key (v19, GitHub #1266)."""
         raw: dict[str, object] = {
             "schema_version": 18,
             "tasks": [
@@ -2712,11 +2712,11 @@ class TestMigrateDevQueue:
             ],
         }
         migrated = migrate_dev_queue(raw)
-        assert migrated["tasks"][0]["last_result"] is None
+        assert migrated["tasks"][0]["last_blocked_result"] is None
         assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 19
 
-    def test_v19_last_result_preserved_idempotently(self) -> None:
-        """Existing last_result survives a second migration."""
+    def test_v19_last_blocked_result_preserved_idempotently(self) -> None:
+        """Existing last_blocked_result survives a second migration."""
         raw: dict[str, object] = {
             "schema_version": 19,
             "tasks": [
@@ -2725,7 +2725,7 @@ class TestMigrateDevQueue:
                     "client": "test-client",
                     "priority": 0,
                     "status": "failed",
-                    "last_result": {
+                    "last_blocked_result": {
                         "status": "blocked",
                         "blocker": {"reason": "status_unknown"},
                     },
@@ -2733,7 +2733,7 @@ class TestMigrateDevQueue:
             ],
         }
         migrated = migrate_dev_queue(raw)
-        assert migrated["tasks"][0]["last_result"] == {
+        assert migrated["tasks"][0]["last_blocked_result"] == {
             "status": "blocked",
             "blocker": {"reason": "status_unknown"},
         }
@@ -3454,7 +3454,7 @@ class TestDevQueueTasks:
             "pr_url",
             "pr_state",
             "signoff",
-            "last_result",
+            "last_blocked_result",
         }
         assert set(tasks[0].keys()) == expected_fields
 

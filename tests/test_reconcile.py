@@ -19760,10 +19760,10 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
         assert t.status == QueueItemStatus.FAILED
         assert t.disposition == "abandoned"
-        # GitHub #1266: the last_result diagnostic write is scoped to the
-        # :913 unrecognized-reason catch-all only -- this deterministic
-        # branch (:892-894) is untouched and must leave it unset.
-        assert t.last_result is None
+        # GitHub #1266: the last_blocked_result diagnostic write is scoped to
+        # the unrecognized-reason catch-all only -- this deterministic-parse-
+        # failure branch is untouched and must leave it unset.
+        assert t.last_blocked_result is None
 
     def test_running_task_blocked_result_validation_failed_at_cap_returns_routed_false(
         self, tmp_config_dir: Path
@@ -19794,10 +19794,10 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
         assert t.status == QueueItemStatus.FAILED
         assert t.disposition == "abandoned"
-        # GitHub #1266: the last_result diagnostic write is scoped to the
-        # :913 unrecognized-reason catch-all only -- this validation_failed
-        # branch (:895-903) is untouched and must leave it unset.
-        assert t.last_result is None
+        # GitHub #1266: the last_blocked_result diagnostic write is scoped to
+        # the unrecognized-reason catch-all only -- this validation_failed-
+        # at-cap branch is untouched and must leave it unset.
+        assert t.last_blocked_result is None
 
     def test_running_task_blocked_result_unknown_reason_returns_routed_false(
         self, tmp_config_dir: Path
@@ -19833,19 +19833,22 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
         assert t.status == QueueItemStatus.FAILED
         assert t.disposition == "abandoned"
-        # GitHub #1266: the :913 catch-all now persists the rejected sentinel.
-        assert t.last_result == sentinel.model_dump(mode="json")
+        # GitHub #1266: the unrecognized-reason catch-all now persists the
+        # rejected sentinel.
+        assert t.last_blocked_result == sentinel.model_dump(mode="json")
 
-    def test_route_blocked_result_catch_all_writes_last_result(
+    def test_route_blocked_result_catch_all_writes_last_blocked_result(
         self, tmp_config_dir: Path
     ) -> None:
-        """GitHub #1266: the :913 catch-all persists the rejected sentinel.
+        """GitHub #1266: the unrecognized-reason catch-all persists the
+        rejected sentinel.
 
         Calls _route_blocked_result_to_task directly with an
         unrecognized-reason BlockedResult. Confirms the existing FAILED/
         abandoned landing is unchanged AND the new diagnostic write lands
-        so an operator can distinguish "no sentinel yet" (last_result=None)
-        from "a rejected sentinel landed this FAILED."
+        so an operator can distinguish "no sentinel yet"
+        (last_blocked_result=None) from "a rejected sentinel landed this
+        FAILED."
         """
         from cw.reconcile._shared import _route_blocked_result_to_task
 
@@ -19871,7 +19874,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         assert routed is False
         assert target.status == QueueItemStatus.FAILED
         assert target.disposition == "abandoned"
-        assert target.last_result == sentinel.model_dump(mode="json")
+        assert target.last_blocked_result == sentinel.model_dump(mode="json")
 
     def test_apply_sentinel_to_task_race_already_failed_task_returns_routed_false(
         self, tmp_config_dir: Path
@@ -20483,20 +20486,29 @@ def test_parse_sentinel_from_blocks_placeholder_then_real_returns_real(
     assert result.status == "stage_complete"
 
 
-def test_placeholder_sentinel_does_not_fail_running_task(tmp_path: Path) -> None:
+def test_placeholder_sentinel_does_not_fail_running_task(
+    tmp_path: Path, tmp_config_dir: Path
+) -> None:
     """GitHub #1266 acceptance test: a placeholder-only transcript must never
     reach _route_blocked_result_to_task and land a RUNNING task FAILED.
 
-    Two-part proof:
+    Three-part proof:
     1. Directly parsing the verbatim placeholder text (bypassing the scan
        loop's skip) confirms it WOULD produce BlockedResult(status_unknown)
        -- documents the bug mechanism this fix closes.
     2. The scan loop (_parse_sentinel_from_blocks) returns None for a
        placeholder-only transcript, so callers take the "no sentinel yet"
-       branch and never call _route_blocked_result_to_task at all -- the
-       task cannot be routed to FAILED off this block.
+       branch and never call _apply_sentinel_to_task at all.
+    3. Drives the actual production call shape (mirrors idle.py/stalled.py/
+       phantom.py's ROUTE_EMITTED_SENTINEL callers, which only invoke
+       _apply_sentinel_to_task when the parse result is not None) against a
+       real RUNNING TicketTask and confirms the task is still RUNNING
+       afterward -- not just that the parser returned None in isolation.
     """
-    from cw.reconcile._shared import _parse_sentinel_from_blocks
+    from cw.reconcile._shared import (
+        _apply_sentinel_to_task,
+        _parse_sentinel_from_blocks,
+    )
 
     # Part 1: prove the bug mechanism (unresolved placeholder -> status_unknown).
     direct = parse_stdout(_PLACEHOLDER_EXAMPLE_BLOCK)
@@ -20506,7 +20518,28 @@ def test_placeholder_sentinel_does_not_fail_running_task(tmp_path: Path) -> None
     # Part 2: the scan loop must never surface it as a routable result.
     path = tmp_path / "transcript.jsonl"
     _write_raw_sentinel_transcript(path, [_PLACEHOLDER_EXAMPLE_BLOCK])
-    assert _parse_sentinel_from_blocks(path) is None
+    result = _parse_sentinel_from_blocks(path)
+    assert result is None
+
+    # Part 3: mirror the real caller shape -- a RUNNING task must survive
+    # untouched because the caller never reaches _apply_sentinel_to_task.
+    _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+    ticket_id, session_id = "GH-1266-acceptance", "sess-1266-acceptance"
+    task = TicketTask(
+        ticket_id=ticket_id,
+        client="staged-client",
+        status=QueueItemStatus.RUNNING,
+        session_id=session_id,
+        stage=Stage.IMPL,
+        attempts=1,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    if result is not None:
+        _apply_sentinel_to_task(ticket_id, session_id, result)
+
+    reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+    assert reloaded.status == QueueItemStatus.RUNNING
 
 
 def test_1258_shape_placeholder_then_delayed_real_sentinel(tmp_path: Path) -> None:

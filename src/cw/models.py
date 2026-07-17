@@ -171,7 +171,7 @@ CW_STATE_SCHEMA_VERSION = 14
 #      latch for the auto_fix_ci review recipe.
 # v18: added TicketTask.address_review_fired_at (GitHub #1206) — one-shot
 #      latch for the address_review review recipe.
-# v19: added TicketTask.last_result (GitHub #1266) — diagnostic-only
+# v19: added TicketTask.last_blocked_result (GitHub #1266) — diagnostic-only
 #      field populated by the _route_blocked_result_to_task
 #      unrecognized-reason catch-all; lets an operator distinguish "no
 #      sentinel yet" from "a rejected sentinel landed this FAILED."
@@ -672,12 +672,14 @@ class TicketTask(BaseModel):
     address_review_fired_at: datetime | None = None
     # GitHub #1266 -- diagnostic-only field for the _route_blocked_result_to_task
     # unrecognized-reason catch-all: the only FAILED landing that transitioned
-    # a task without recording *why*. Mirrors Session.last_result's shape
-    # (dict[str, Any] | None) but is a distinct field on a distinct model --
+    # a task without recording *why*. Deliberately NOT named last_result --
+    # that name is Session.last_result's, a distinct, business-critical field
+    # (gates cw dev-queue approve) with a different shape/update cadence.
     # TicketTask has none today. Populated exclusively by that one catch-all;
-    # every other task keeps last_result=None. Lets an operator distinguish
-    # "sentinel never arrived" from "a rejected sentinel landed this FAILED."
-    last_result: dict[str, Any] | None = None
+    # every other task keeps last_blocked_result=None. Lets an operator
+    # distinguish "sentinel never arrived" from "a rejected sentinel landed
+    # this FAILED."
+    last_blocked_result: dict[str, Any] | None = None
 
     @field_validator("gate_recipes")
     @classmethod
