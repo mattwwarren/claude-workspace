@@ -627,7 +627,8 @@ def _parse_codex_findings(output_file_content: str | None) -> Review | None:
     JSON, a non-dict payload, missing/wrong-typed required keys, or a
     ``Review`` that fails Pydantic validation. codex's ``CodexExecutor`` is
     single-shot (no fix loop), so ``fix_cycles_used`` is always hardcoded to
-    0 — codex is never asked to report it.
+    0 — codex is never asked to report it. ``agents_run`` is likewise
+    hardcoded to 1: codex is exactly one reviewing entity per invocation.
     """
     if output_file_content is None:
         return None
@@ -643,6 +644,7 @@ def _parse_codex_findings(output_file_content: str | None) -> Review | None:
             should_fix=data["should_fix"],
             fix_cycles_used=0,
             deferred=data.get("deferred", 0),
+            agents_run=1,
         )
     except (KeyError, TypeError, ValidationError):
         return None
