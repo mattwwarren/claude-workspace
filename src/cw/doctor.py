@@ -58,7 +58,7 @@ from cw.models import (
 )
 from cw.native_daemon import _ROSTER_PATH, get_native_daemon_client
 from cw.orchestrate import TickSummary, latest_tick_summary_by_client
-from cw.pr_hydrate import _is_candidate
+from cw.pr_hydrate import _is_candidate, _parse_pr_url, _repo_slug_mismatch
 from cw.reconcile import (
     SPAWN_GRACE_SECONDS,
     compute_drift,
@@ -743,6 +743,50 @@ def _check_dispatch_repo_head(
                     ),
                 )
             )
+    return results
+
+
+def _check_cross_repo_rows(
+    clients: dict[str, ClientConfig],
+) -> list[CheckResult]:
+    """Advisory warn-only check: dev-queue rows whose client resolves to a
+    different github repo than the row's ``pr_url`` (GitHub #1198).
+
+    Every result is ``ok=True, warn=True`` so it never flips
+    ``DoctorReport.ok`` (mirrors ``_check_dispatch_repo_head``). A broken queue
+    is already surfaced by ``_check_dev_queue``, so a load failure here degrades
+    to ``[]`` rather than double-reporting.
+    """
+    try:
+        store = load_dev_queue()
+    except (OSError, json.JSONDecodeError, ValidationError):
+        return []
+    results: list[CheckResult] = []
+    for task in store.tasks:
+        if task.pr_url is None:
+            continue
+        client = clients.get(task.client)
+        if client is None:
+            continue
+        parsed = _parse_pr_url(task.pr_url)
+        if parsed is None:
+            continue
+        pr_repo = parsed[0]
+        client_repo = _repo_slug_mismatch(pr_repo, client.workspace_path)
+        if client_repo is None:
+            continue
+        results.append(
+            CheckResult(
+                f"cross-repo/{task.ticket_id}",
+                ok=True,
+                warn=True,
+                detail=(
+                    f"row {task.ticket_id} client {task.client!r} workspace repo"
+                    f" {client_repo!r} != pr_url repo {pr_repo!r} — a"
+                    " worker-dispatching recipe would run in the wrong workspace"
+                ),
+            )
+        )
     return results
 
 
@@ -1527,6 +1571,7 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     report.checks.append(_check_inbox_size())
     report.checks.extend(_check_workspace_paths())
     report.checks.extend(_check_dispatch_repo_head(_clients))
+    report.checks.extend(_check_cross_repo_rows(_clients))
     report.checks.extend(_check_worktree_paths_sessions(link_state))
 
     if link_state is not None:

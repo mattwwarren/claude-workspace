@@ -175,7 +175,9 @@ CW_STATE_SCHEMA_VERSION = 14
 #      field populated by the _route_blocked_result_to_task
 #      unrecognized-reason catch-all; lets an operator distinguish "no
 #      sentinel yet" from "a rejected sentinel landed this FAILED."
-DEV_QUEUE_SCHEMA_VERSION = 19
+# v20: added TicketTask.cross_repo_override (GitHub #1198) — operator escape
+#      hatch that bypasses the cross-repo dispatch guard for one row.
+DEV_QUEUE_SCHEMA_VERSION = 20
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -680,6 +682,13 @@ class TicketTask(BaseModel):
     # distinguish "sentinel never arrived" from "a rejected sentinel landed
     # this FAILED."
     last_blocked_result: dict[str, Any] | None = None
+    # GitHub #1198 — operator escape hatch for the cross-repo dispatch guard.
+    # When True, the address_review / auto_fix_ci recipes log a WARNING and
+    # dispatch anyway even though the row's client resolves to a different repo
+    # than its pr_url points at (the guard would otherwise skip + emit
+    # PR_ACTION_FAILED). A plain always-on bool, distinct from the Optional
+    # tiered-policy overrides above — an explicit, logged, incident-response flag.
+    cross_repo_override: bool = False
 
     @field_validator("gate_recipes")
     @classmethod

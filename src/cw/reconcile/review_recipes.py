@@ -57,7 +57,7 @@ from cw.dev_queue import (
 from cw.events import read_events, record_event
 from cw.exceptions import CwError
 from cw.models import OrchestratorEventType
-from cw.pr_hydrate import _is_candidate, _parse_pr_url
+from cw.pr_hydrate import _is_candidate, _parse_pr_url, _repo_slug_mismatch
 from cw.reconcile._shared import _PAUSED_STATUS_KEY
 from cw.review_strategy import MODE_CI, resolve_review_strategy
 
@@ -450,6 +450,39 @@ def _skip_with_anomaly(
     _emit_pr_action_failed(payload_base, error=error, ticket_id=ticket_id)
 
 
+def _guard_cross_repo_mismatch(
+    task: TicketTask,
+    payload_base: dict[str, object],
+    *,
+    pr_repo: str,
+    client_repo: str,
+    location: str,
+) -> bool:
+    """Shared cross-repo dispatch guard body for both recipes (GitHub #1198).
+
+    ``location`` names what ``client_repo`` was resolved from (e.g. "worktree
+    origin" or "client workspace origin") for the anomaly error message.
+    Returns ``True`` to proceed (override logged) or ``False`` to skip (anomaly
+    + ``PR_ACTION_FAILED`` already emitted — caller returns ``None``).
+    """
+    if task.cross_repo_override:
+        _log.warning(
+            "review_recipe_repo_mismatch_override ticket=%s pr_repo=%s client_repo=%s",
+            task.ticket_id,
+            pr_repo,
+            client_repo,
+        )
+        return True
+    _skip_with_anomaly(
+        payload_base,
+        error=(
+            f"repo mismatch: pr_url repo {pr_repo!r} != {location} repo {client_repo!r}"
+        ),
+        ticket_id=task.ticket_id,
+    )
+    return False
+
+
 def _review_payload_base(
     task: TicketTask,
     session_id: str | None,
@@ -644,6 +677,20 @@ def _prepare_dispatch_job(
             ticket_id=task.ticket_id,
         )
         return None
+    # GitHub #1198 — cross-repo dispatch guard. The worktree's origin remote can
+    # resolve to a different repo than the PR's, so dispatching /address-review
+    # here would run in the wrong workspace. local-only read, no network — safe
+    # under dev_queue_lock; do not add network calls here.
+    pr_repo = parsed[0]
+    client_repo = _repo_slug_mismatch(pr_repo, wt)
+    if client_repo is not None and not _guard_cross_repo_mismatch(
+        task,
+        payload_base,
+        pr_repo=pr_repo,
+        client_repo=client_repo,
+        location="worktree origin",
+    ):
+        return None
     _record_pr_action_taken(
         payload_base,
         task.client,
@@ -828,9 +875,32 @@ class _RedispatchJob(NamedTuple):
     payload_base: dict[str, object]
 
 
+def _detect_auto_fix_ci_repo_mismatch(
+    task: TicketTask, clients: dict[str, ClientConfig]
+) -> tuple[str, str] | None:
+    """Return ``(pr_repo, client_repo)`` when the row's client workspace resolves
+    to a different github repo than its ``pr_url``, else None (GitHub #1198).
+
+    Fails open: an unparseable ``pr_url``, an unresolvable client, or an
+    unresolvable workspace remote all yield None (proceed, no anomaly), so the
+    guard introduces no new hard-failure branches beyond the mismatch itself.
+    """
+    parsed = _parse_pr_url(task.pr_url) if task.pr_url is not None else None
+    if parsed is None:
+        return None
+    client_cfg = clients.get(task.client)
+    if client_cfg is None:
+        return None
+    client_repo = _repo_slug_mismatch(parsed[0], client_cfg.workspace_path)
+    if client_repo is None:
+        return None
+    return parsed[0], client_repo
+
+
 def _prepare_auto_fix_ci_job(
     task: TicketTask,
     session_id: str | None,
+    clients: dict[str, ClientConfig],
     now: datetime,
     *,
     config: OrchestratorConfig | None = None,
@@ -842,7 +912,10 @@ def _prepare_auto_fix_ci_job(
     longer ``ci_failing`` (a concurrent re-run can have moved it on between
     detect and act) — OR already fired this episode (``auto_fix_ci_fired_at``
     is not None; not an anomaly, mirrors ``_prepare_request_reviewer_job``'s
-    already-fired check). Otherwise records ``PR_ACTION_TAKEN``
+    already-fired check). An anomaly skip (emits ``PR_ACTION_FAILED``) when the
+    row's client resolves to a different repo than its ``pr_url`` (GitHub
+    #1198) — both this check and the already-fired check above must pass for
+    the row to fire. Otherwise records ``PR_ACTION_TAKEN``
     (emit-before-dispatch), stamps the ``auto_fix_ci_fired_at`` latch to *now*,
     and returns the deferred re-dispatch job.
     """
@@ -859,6 +932,21 @@ def _prepare_auto_fix_ci_job(
         RECIPE_AUTO_FIX_CI,
         {_PAYLOAD_KEY_FAILING_CHECKS: pr_state.failing_checks},
     )
+    # GitHub #1198 — cross-repo dispatch guard. The client's workspace origin
+    # remote can resolve to a different repo than the PR's, so re-dispatching
+    # auto-dev here would run in the wrong repo. local-only read, no network —
+    # safe under dev_queue_lock; do not add network calls here.
+    mismatch = _detect_auto_fix_ci_repo_mismatch(task, clients)
+    if mismatch is not None:
+        pr_repo, client_repo = mismatch
+        if not _guard_cross_repo_mismatch(
+            task,
+            payload_base,
+            pr_repo=pr_repo,
+            client_repo=client_repo,
+            location="client workspace origin",
+        ):
+            return None
     _record_pr_action_taken(
         payload_base,
         task.client,
@@ -918,6 +1006,7 @@ def _clear_auto_fix_ci_fired(task: TicketTask) -> None:
 def _act_auto_fix_ci(
     candidates: list[ReviewRecipeCandidate],
     *,
+    clients: dict[str, ClientConfig],
     now: datetime | None = None,
     config: OrchestratorConfig | None = None,
     repeat_fire_counts: dict[tuple[str, str, str], int] | None = None,
@@ -931,8 +1020,10 @@ def _act_auto_fix_ci(
        None or no longer ``ci_failing`` (the episode ended; this re-arms the
        latch for a genuine future re-entry). Runs regardless of whether
        *candidates* is empty.
-    2. **Fire** — for each candidate, ``_prepare_auto_fix_ci_job`` re-validates,
-       emits ``PR_ACTION_TAKEN``, and stamps the latch.
+    2. **Fire** — for each candidate, ``_prepare_auto_fix_ci_job`` re-validates
+       both the latch and the cross-repo dispatch guard (GitHub #1198;
+       ``clients`` is threaded through for the guard), emits
+       ``PR_ACTION_TAKEN``, and stamps the latch.
 
     Stamping/clearing the latch IS a dev-queue write (GitHub #1206: all four
     review-recipe act phases now perform this same kind of write — a latch
@@ -960,6 +1051,7 @@ def _act_auto_fix_ci(
             job = _prepare_auto_fix_ci_job(
                 task,
                 candidate.session_id,
+                clients,
                 resolved_now,
                 config=config,
                 repeat_fire_counts=repeat_fire_counts,
@@ -1329,6 +1421,7 @@ def run_review_recipes(*, config: OrchestratorConfig) -> list[str]:
     )
     acted += _act_auto_fix_ci(
         _detect_auto_fix_ci(tasks, clients=clients, config=config),
+        clients=clients,
         config=config,
         repeat_fire_counts=repeat_fire_counts,
     )

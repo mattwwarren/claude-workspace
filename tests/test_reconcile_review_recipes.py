@@ -650,7 +650,10 @@ def test_reconcile_reentry_guard_fires_and_is_swallowed(
     monkeypatch.setattr("cw.dispatch.run_dispatch_loop", _fake_dispatch_loop)
 
     with sessions_lock():
-        acted = _act_auto_fix_ci([_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")])
+        acted = _act_auto_fix_ci(
+            [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+            clients=load_effective_clients(),
+        )
 
     assert acted == []
     assert probed["lock_held"] is True
@@ -879,6 +882,110 @@ def test_address_review_latch_clears_on_episode_end(
     ]
 
 
+# --- cross-repo dispatch guard, address_review (GitHub #1198) ---------------
+
+
+def _set_origin(repo: Path, url: str) -> None:
+    """Point *repo*'s ``origin`` remote at *url* (raw subprocess, no fixture)."""
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin", url],
+        capture_output=True,
+        check=True,
+    )
+
+
+def test_repo_mismatch_emits_pr_action_failed(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+) -> None:
+    """A worktree whose origin repo differs from the PR's repo skips + fails."""
+    _write_acme_clients_yaml(tmp_config_dir)
+    worktree = make_git_repo("repo-mismatch")
+    _set_origin(worktree, "https://github.com/other/repo.git")
+    task = _cr_task(worktree_path=worktree)  # pr_url -> acme/widgets
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    acted = _act_address_review(
+        [_candidate_for(task)], clients=load_effective_clients()
+    )
+
+    assert acted == []
+    assert stub_spawn.calls == []
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
+    failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+    assert len(failed) == 1
+    assert failed[0].correlation_id == task.ticket_id
+
+
+def test_repo_match_dispatches_normally(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+) -> None:
+    """A worktree whose origin repo matches the PR's repo dispatches normally."""
+    _write_acme_clients_yaml(tmp_config_dir)
+    worktree = make_git_repo("repo-match")
+    _set_origin(worktree, "https://github.com/acme/widgets.git")
+    task = _cr_task(worktree_path=worktree)
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    acted = _act_address_review(
+        [_candidate_for(task)], clients=load_effective_clients()
+    )
+
+    assert acted == [task.ticket_id]
+    assert len(stub_spawn.calls) == 1
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+
+
+def test_repo_unresolvable_dispatches_normally(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+) -> None:
+    """A worktree with no origin remote fails open (R5) -> dispatches normally."""
+    _write_acme_clients_yaml(tmp_config_dir)
+    worktree = make_git_repo("repo-unresolvable")  # no origin set
+    task = _cr_task(worktree_path=worktree)
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    acted = _act_address_review(
+        [_candidate_for(task)], clients=load_effective_clients()
+    )
+
+    assert acted == [task.ticket_id]
+    assert len(stub_spawn.calls) == 1
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+
+
+def test_repo_mismatch_override_dispatches_and_logs(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """cross_repo_override=True dispatches despite the mismatch and logs a WARN."""
+    _write_acme_clients_yaml(tmp_config_dir)
+    worktree = make_git_repo("repo-override")
+    _set_origin(worktree, "https://github.com/other/repo.git")
+    task = _cr_task(worktree_path=worktree, cross_repo_override=True)
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    with caplog.at_level("WARNING"):
+        acted = _act_address_review(
+            [_candidate_for(task)], clients=load_effective_clients()
+        )
+
+    assert acted == [task.ticket_id]
+    assert len(stub_spawn.calls) == 1
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+    assert "review_recipe_repo_mismatch_override" in caplog.text
+    assert task.ticket_id in caplog.text
+    assert "pr_repo=acme/widgets" in caplog.text
+    assert "client_repo=other/repo" in caplog.text
+
+
 # --- RFC 0010 P4 recipes (#1099) -------------------------------------------
 
 
@@ -962,7 +1069,10 @@ def test_act_auto_fix_ci_calls_add_ticket_and_dispatch_once(
     monkeypatch.setattr("cw.dev_queue.add_ticket", _fake_add_ticket)
     monkeypatch.setattr("cw.dispatch.run_dispatch_loop", _fake_dispatch)
 
-    acted = _act_auto_fix_ci([_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")])
+    acted = _act_auto_fix_ci(
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+        clients=load_effective_clients(),
+    )
 
     assert acted == [task.ticket_id]
     assert len(added) == 1
@@ -998,7 +1108,10 @@ def test_act_auto_fix_ci_stale_row_silent_skip(
     monkeypatch.setattr("cw.dev_queue.add_ticket", lambda t: called.append(t) or True)
     monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: called.append(1))
 
-    acted = _act_auto_fix_ci([_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")])
+    acted = _act_auto_fix_ci(
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+        clients=load_effective_clients(),
+    )
 
     assert acted == []
     assert called == []
@@ -1029,7 +1142,10 @@ def test_act_auto_fix_ci_add_ticket_raises_emits_pr_action_failed(
     )
 
     with caplog.at_level("WARNING"):
-        acted = _act_auto_fix_ci([_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")])
+        acted = _act_auto_fix_ci(
+            [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+            clients=load_effective_clients(),
+        )
 
     assert acted == []
     taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
@@ -1050,7 +1166,7 @@ def test_auto_fix_ci_fires_once_per_episode(
     monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
     candidate = _candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")
 
-    acted1 = _act_auto_fix_ci([candidate])
+    acted1 = _act_auto_fix_ci([candidate], clients=load_effective_clients())
     assert acted1 == [task.ticket_id]
     assert load_dev_queue().tasks[0].auto_fix_ci_fired_at is not None
 
@@ -1058,7 +1174,7 @@ def test_auto_fix_ci_fires_once_per_episode(
     # hydration lag, per the ticket's acceptance criterion): detect still
     # yields a candidate every tick, but the latch blocks a re-fire.
     for _ in range(5):
-        acted_n = _act_auto_fix_ci([candidate])
+        acted_n = _act_auto_fix_ci([candidate], clients=load_effective_clients())
         assert acted_n == []
     taken = [
         e
@@ -1078,7 +1194,9 @@ def test_auto_fix_ci_latch_clears_on_episode_end(
     monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
     candidate = _candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")
 
-    assert _act_auto_fix_ci([candidate]) == [task.ticket_id]
+    assert _act_auto_fix_ci([candidate], clients=load_effective_clients()) == [
+        task.ticket_id
+    ]
 
     # Episode ends: hydration moves the PR off ci_failing.
     store = load_dev_queue()
@@ -1086,14 +1204,180 @@ def test_auto_fix_ci_latch_clears_on_episode_end(
     save_dev_queue(store)
 
     # Clear pass runs even with zero candidates.
-    assert _act_auto_fix_ci([]) == []
+    assert _act_auto_fix_ci([], clients=load_effective_clients()) == []
     assert load_dev_queue().tasks[0].auto_fix_ci_fired_at is None
 
     # Genuine re-entry into ci_failing fires again (episode semantics).
     store = load_dev_queue()
     store.tasks[0].pr_state = _pr_state(attention_state="ci_failing")
     save_dev_queue(store)
-    assert _act_auto_fix_ci([candidate]) == [task.ticket_id]
+    assert _act_auto_fix_ci([candidate], clients=load_effective_clients()) == [
+        task.ticket_id
+    ]
+
+
+# --- cross-repo dispatch guard, auto_fix_ci (GitHub #1198) ------------------
+
+
+def _write_acme_clients_yaml_with_repo(
+    tmp_config_dir: Path, make_git_repo: Any, remote_url: str
+) -> Path:
+    """clients.yaml whose acme workspace_path is a git repo with *remote_url*.
+
+    Unlike ``_write_acme_clients_yaml`` (which points acme at a non-git dir),
+    the auto_fix_ci guard resolves the client's ``workspace_path`` origin remote,
+    so it needs a real repo with a settable origin.
+    """
+    repo = make_git_repo("acme-ws")
+    _set_origin(repo, remote_url)
+    config_dir = tmp_config_dir / ".config" / "cw"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "clients.yaml").write_text(
+        f"clients:\n  acme:\n    workspace_path: {repo}\n    default_branch: main\n"
+    )
+    return repo
+
+
+def test_auto_fix_ci_repo_mismatch_emits_pr_action_failed(
+    tmp_config_dir: Path, make_git_repo: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Client workspace repo != PR repo -> skip + PR_ACTION_FAILED, no dispatch."""
+    _write_acme_clients_yaml_with_repo(
+        tmp_config_dir, make_git_repo, "https://github.com/other/repo.git"
+    )
+    task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="ci_failing"))
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    monkeypatch.setattr(
+        "cw.dev_queue.add_ticket",
+        lambda _t: pytest.fail("no re-dispatch on repo mismatch"),
+    )
+    monkeypatch.setattr(
+        "cw.dispatch.run_dispatch_loop",
+        lambda **_kw: pytest.fail("no dispatch on repo mismatch"),
+    )
+
+    acted = _act_auto_fix_ci(
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+        clients=load_effective_clients(),
+    )
+
+    assert acted == []
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
+    failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+    assert len(failed) == 1
+    assert failed[0].correlation_id == task.ticket_id
+
+
+def test_auto_fix_ci_repo_match_dispatches_normally(
+    tmp_config_dir: Path, make_git_repo: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Client workspace repo == PR repo -> re-dispatch proceeds as today."""
+    _write_acme_clients_yaml_with_repo(
+        tmp_config_dir, make_git_repo, "https://github.com/acme/widgets.git"
+    )
+    task = _make_task(
+        pr_url=_PR_URL,
+        pr_state=_pr_state(attention_state="ci_failing", failing_checks=["lint"]),
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    added: list[TicketTask] = []
+    dispatched: list[dict[str, Any]] = []
+    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda t: added.append(t) or True)
+    monkeypatch.setattr(
+        "cw.dispatch.run_dispatch_loop", lambda **kw: dispatched.append(kw)
+    )
+
+    acted = _act_auto_fix_ci(
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+        clients=load_effective_clients(),
+    )
+
+    assert acted == [task.ticket_id]
+    assert len(added) == 1
+    assert len(dispatched) == 1
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+
+
+def test_auto_fix_ci_repo_mismatch_override_dispatches_and_logs(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """cross_repo_override=True re-dispatches despite the mismatch and logs WARN."""
+    _write_acme_clients_yaml_with_repo(
+        tmp_config_dir, make_git_repo, "https://github.com/other/repo.git"
+    )
+    task = _make_task(
+        pr_url=_PR_URL,
+        pr_state=_pr_state(attention_state="ci_failing"),
+        cross_repo_override=True,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    added: list[TicketTask] = []
+    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda t: added.append(t) or True)
+    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
+
+    with caplog.at_level("WARNING"):
+        acted = _act_auto_fix_ci(
+            [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+            clients=load_effective_clients(),
+        )
+
+    assert acted == [task.ticket_id]
+    assert len(added) == 1
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+    assert "review_recipe_repo_mismatch_override" in caplog.text
+    assert task.ticket_id in caplog.text
+    assert "pr_repo=acme/widgets" in caplog.text
+    assert "client_repo=other/repo" in caplog.text
+
+
+def test_auto_fix_ci_unparseable_pr_url_fails_open(
+    tmp_config_dir: Path, make_git_repo: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unparseable pr_url fails open (no mismatch) -> re-dispatch proceeds."""
+    _write_acme_clients_yaml_with_repo(
+        tmp_config_dir, make_git_repo, "https://github.com/other/repo.git"
+    )
+    task = _make_task(
+        pr_url="https://example.com/not-a-pr",
+        pr_state=_pr_state(attention_state="ci_failing"),
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    added: list[TicketTask] = []
+    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda t: added.append(t) or True)
+    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
+
+    acted = _act_auto_fix_ci(
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+        clients=load_effective_clients(),
+    )
+
+    assert acted == [task.ticket_id]
+    assert len(added) == 1
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+
+
+def test_auto_fix_ci_unresolvable_client_fails_open(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A client absent from the clients dict fails open -> re-dispatch proceeds."""
+    _write_acme_clients_yaml(tmp_config_dir)
+    task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="ci_failing"))
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    added: list[TicketTask] = []
+    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda t: added.append(t) or True)
+    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
+
+    # clients={} -> client_cfg is None -> guard fails open, dispatch proceeds.
+    acted = _act_auto_fix_ci(
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")], clients={}
+    )
+
+    assert acted == [task.ticket_id]
+    assert len(added) == 1
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
 
 
 # --- request_reviewer ------------------------------------------------------
@@ -1516,7 +1800,12 @@ def test_act_auto_fix_ci_vanished_row_silent_skip(
     monkeypatch.setattr(
         "cw.dev_queue.add_ticket", lambda _t: pytest.fail("no dispatch for a gone row")
     )
-    assert _act_auto_fix_ci([_orphan_candidate(RECIPE_AUTO_FIX_CI, "ci_failing")]) == []
+    assert (
+        _act_auto_fix_ci(
+            [_orphan_candidate(RECIPE_AUTO_FIX_CI, "ci_failing")], clients={}
+        )
+        == []
+    )
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
 
 
