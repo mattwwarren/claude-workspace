@@ -4901,6 +4901,159 @@ class TestCheckDispatchRepoHead:
         assert "hotfix" in head_checks[0].detail
 
 
+class TestCheckCrossRepoRows:
+    """Tests for _check_cross_repo_rows advisory doctor check (GitHub #1198)."""
+
+    def _write_client_repo(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        remote_url: str | None,
+        name: str = "acme",
+    ) -> Path:
+        """clients.yaml with *name*'s workspace at a git repo whose origin is
+        *remote_url* (or no remote when None). Returns the workspace path."""
+        workspace = tmp_path / name
+        workspace.mkdir()
+        subprocess.run(
+            ["git", "-C", str(workspace), "init"], capture_output=True, check=True
+        )
+        if remote_url is not None:
+            subprocess.run(
+                ["git", "-C", str(workspace), "remote", "add", "origin", remote_url],
+                capture_output=True,
+                check=True,
+            )
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            f"clients:\n  {name}:\n    workspace_path: {workspace}\n"
+            f"    default_branch: main\n"
+        )
+        return workspace
+
+    def _save_row(self, pr_url: str | None, client: str = "acme") -> str:
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, TicketTask
+
+        task = TicketTask(ticket_id="GEN-1", client=client, pr_url=pr_url)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        return task.ticket_id
+
+    def test_mismatch_returns_warn(self, tmp_config_dir: Path, tmp_path: Path) -> None:
+        from cw.doctor import _check_cross_repo_rows
+
+        self._write_client_repo(
+            tmp_config_dir, tmp_path, "https://github.com/acme/other-repo.git"
+        )
+        ticket_id = self._save_row("https://github.com/acme/widgets/pull/42")
+
+        results = _check_cross_repo_rows({"acme": _load_client("acme")})
+
+        assert len(results) == 1
+        r = results[0]
+        assert r.name == f"cross-repo/{ticket_id}"
+        assert r.ok is True
+        assert r.warn is True
+        assert "acme/widgets" in r.detail
+        assert "acme/other-repo" in r.detail
+
+    def test_match_returns_empty(self, tmp_config_dir: Path, tmp_path: Path) -> None:
+        from cw.doctor import _check_cross_repo_rows
+
+        self._write_client_repo(
+            tmp_config_dir, tmp_path, "https://github.com/acme/widgets.git"
+        )
+        self._save_row("https://github.com/acme/widgets/pull/42")
+
+        assert _check_cross_repo_rows({"acme": _load_client("acme")}) == []
+
+    def test_unresolvable_remote_returns_empty(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        # No origin remote -> unresolvable -> fail-open (no warn).
+        from cw.doctor import _check_cross_repo_rows
+
+        self._write_client_repo(tmp_config_dir, tmp_path, None)
+        self._save_row("https://github.com/acme/widgets/pull/42")
+
+        assert _check_cross_repo_rows({"acme": _load_client("acme")}) == []
+
+    def test_no_pr_url_returns_empty(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.doctor import _check_cross_repo_rows
+
+        self._write_client_repo(
+            tmp_config_dir, tmp_path, "https://github.com/acme/other-repo.git"
+        )
+        self._save_row(None)
+
+        assert _check_cross_repo_rows({"acme": _load_client("acme")}) == []
+
+    def test_unknown_client_returns_empty(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.doctor import _check_cross_repo_rows
+
+        self._write_client_repo(
+            tmp_config_dir, tmp_path, "https://github.com/acme/other-repo.git"
+        )
+        # Row's client is not in the passed clients dict -> skipped.
+        self._save_row("https://github.com/acme/widgets/pull/42", client="ghost")
+
+        assert _check_cross_repo_rows({"acme": _load_client("acme")}) == []
+
+    def test_unparseable_pr_url_returns_empty(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        # pr_url set but not a parseable GitHub PR url -> skipped (fail-open).
+        from cw.doctor import _check_cross_repo_rows
+
+        self._write_client_repo(
+            tmp_config_dir, tmp_path, "https://github.com/acme/other-repo.git"
+        )
+        self._save_row("https://example.com/not-a-pr")
+
+        assert _check_cross_repo_rows({"acme": _load_client("acme")}) == []
+
+    def test_queue_load_failure_returns_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A broken queue is already reported by _check_dev_queue; this check
+        # degrades to [] rather than double-reporting.
+        from cw.doctor import _check_cross_repo_rows
+
+        def _boom() -> None:
+            msg = "queue unreadable"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.doctor.load_dev_queue", _boom)
+        assert _check_cross_repo_rows({}) == []
+
+    def test_run_doctor_wires_check(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """run_doctor surfaces the cross-repo warn without flipping report.ok."""
+        _stub_claude_version_ok(monkeypatch)
+        self._write_client_repo(
+            tmp_config_dir, tmp_path, "https://github.com/acme/other-repo.git"
+        )
+        self._save_row("https://github.com/acme/widgets/pull/42")
+
+        report = run_doctor()
+
+        cross_checks = [c for c in report.checks if c.name.startswith("cross-repo/")]
+        assert len(cross_checks) == 1
+        assert cross_checks[0].warn is True
+        assert cross_checks[0].ok is True
+        # Advisory-only: a warn never flips report.ok (only c.ok ANDs in).
+        assert all(c.ok for c in cross_checks)
+
+
 def _load_client(name: str) -> ClientConfig:
     """Load a single ClientConfig by name from the current config."""
     from cw.config import load_clients

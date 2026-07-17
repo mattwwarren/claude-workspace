@@ -179,6 +179,7 @@ def test_codex_executor_stage_complete(
     assert result.review.should_fix == 0
     assert result.review.deferred == 0
     assert result.review.fix_cycles_used == 0
+    assert result.review.agents_run == 1
     # Round-trips through the strict validator.
     AutoDevResult.model_validate(result.model_dump(mode="json"))
 
@@ -217,6 +218,7 @@ def test_codex_executor_must_fix_findings_blocked(
     assert result.review.should_fix == 1
     assert result.review.deferred == 0
     assert result.review.fix_cycles_used == 0
+    assert result.review.agents_run == 1
 
 
 def test_codex_executor_missing_output_file_blocked(
@@ -310,6 +312,7 @@ def test_codex_executor_should_fix_only_stays_complete(
     assert result.status == "stage_complete"
     assert result.review.should_fix == 3
     assert result.review.deferred == 1
+    assert result.review.agents_run == 1
 
 
 def test_resolve_executor_returns_codex_executor(
