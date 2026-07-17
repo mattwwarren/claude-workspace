@@ -69,6 +69,7 @@ from cw.reconcile.tasks import (
     revert_completed_silent_tasks,
     revert_timed_out_tasks,
 )
+from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig, CwState, OrchestratorConfig
@@ -242,7 +243,11 @@ def reconcile() -> ReconcileReport:
             _gh_blocked_tids.append(_ticket_id)
             continue
         _branch = feature_branch_key(_session.client, _ticket_id, _clients)
-        _merged, _gh_avail = _deps.pr_is_merged_for_ticket(_ticket_id, branch=_branch)
+        _client_cfg = _clients.get(_session.client)
+        _cwd = _git_dir(_client_cfg) if _client_cfg is not None else None
+        _merged, _gh_avail = _deps.pr_is_merged_for_ticket(
+            _ticket_id, branch=_branch, cwd=_cwd
+        )
         if not _gh_avail:
             _gh_available = False
             _gh_blocked_tids.append(_ticket_id)

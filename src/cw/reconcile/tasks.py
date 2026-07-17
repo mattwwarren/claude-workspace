@@ -37,6 +37,7 @@ from cw.reconcile._shared import (
     feature_branch_key,
     ticket_id_for_session,
 )
+from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
     from cw.models import ClientConfig, Session
@@ -177,7 +178,11 @@ def _filter_merged_candidates(
     to_complete: list[tuple[Session, str]] = []
     for session, ticket_id in candidates:
         branch = feature_branch_key(session.client, ticket_id, clients)
-        merged, gh_available = _deps.pr_is_merged_for_ticket(ticket_id, branch=branch)
+        client_cfg = clients.get(session.client)
+        cwd = _git_dir(client_cfg) if client_cfg is not None else None
+        merged, gh_available = _deps.pr_is_merged_for_ticket(
+            ticket_id, branch=branch, cwd=cwd
+        )
         if not gh_available:
             # gh binary absent — skip all remaining candidates.
             break
