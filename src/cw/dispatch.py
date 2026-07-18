@@ -130,6 +130,13 @@ _CW_PACKAGE_NAME: str = "claude-workspace"
 # paused_status written to SESSION_NEEDS_ATTENTION when a session parks at plan
 # stage (ambiguities_pending_resolution / premises_pending_verification).
 _PLAN_PARKED_REASON = "plan_parked"
+# paused_status written to SESSION_NEEDS_ATTENTION when Rule 1 parks a
+# non-small-tier scope-gated approval status (plan_pending_approval /
+# review_pending_approval) to BLOCKED_ON_USER. Deliberately distinct from
+# _PLAN_PARKED_REASON -- that constant is scoped to the v4
+# ambiguities/premises statuses, an unrelated park reason -- per the
+# operator's R1 resolution. See GitHub #1302.
+_APPROVAL_GATE_REASON = "approval_gate"
 # Disposition stamped by _stage_advance_unchecked when the task's client is
 # absent from the effective clients dict — a config error, not a
 # transient/recoverable state. Deliberately excluded from both
@@ -2211,6 +2218,20 @@ def _route_scope_gated_approval(
     """
     tier = _resolve_scope_tier(last_result, task)
     if tier != SCOPE_TIER_SMALL:
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": task.session_id or "",
+                "session_name": "",
+                "client": task.client,
+                "ticket_id": task.ticket_id,
+                "claude_session_id": None,
+                "paused_status": _APPROVAL_GATE_REASON,
+                "breadcrumbs": "",
+                "crashed": False,
+            },
+            correlation_id=task.ticket_id,
+        )
         transition_task_status(
             task, QueueItemStatus.BLOCKED_ON_USER, disposition=disposition
         )
