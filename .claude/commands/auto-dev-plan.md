@@ -56,7 +56,7 @@ Spawn a **Plan** agent (`subagent_type: "Plan", model: "sonnet"`) synchronously 
 **Prompt must include:**
 - Ticket description / user description **and ALL ticket comments in chronological order** (via the active tracker's fetch ops — same as Step 1c: `get_issue` + `list_comments` for `linear`, `gh issue view <n> --json title,body,comments` for `github-issues`)
 - Any partial plan context from Step 1a (if applicable)
-- Instruction to read CLAUDE.md and ARCHITECTURE.md
+- Instruction to read CLAUDE.md and ARCHITECTURE.md if present
 - Instruction to read actual model/schema definitions — never guess field names
 - **Pattern discovery (required before proposing any new abstraction).** Before the plan adds a new endpoint, route, cache table, model, repository method, UI component, settings surface, strategy hook, or service class, the agent MUST grep the repo for sibling patterns that already solve a similar shape. The plan must include a `## Patterns Found` section with one entry per new abstraction proposed, in this format:
   ```

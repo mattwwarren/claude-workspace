@@ -305,6 +305,22 @@ class TestGetClient:
             get_client("nope")
 
 
+class TestDiagnosticsDir:
+    def test_diagnostics_dir_accessor_matches_state_dir_convention(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """diagnostics_dir(sid) resolves under state_dir(), monkeypatchable the
+        same way state_dir() is (via the autouse tmp_config_dir fixture)."""
+        from cw.config import diagnostics_dir, state_dir
+
+        sid = "abc123"
+        expected = state_dir() / "sessions" / sid / "diagnostics"
+        assert diagnostics_dir(sid) == expected
+        # Reflects the fixture-monkeypatched STATE_DIR, not the real one.
+        assert diagnostics_dir(sid).is_relative_to(state_dir())
+        assert not diagnostics_dir(sid).is_relative_to(_REAL_STATE_DIR)
+
+
 class TestLoadSaveState:
     def test_missing_file_returns_empty_state(self, tmp_config_dir: Path) -> None:
         state = load_state()

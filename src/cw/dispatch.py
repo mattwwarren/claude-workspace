@@ -68,6 +68,7 @@ from cw.exceptions import (
     WorktreeError,
 )
 from cw.executor import resolve_executor, resolve_executor_config
+from cw.executor_diagnostics import cleanup_expired_diagnostics
 from cw.gh import check_gh_availability
 from cw.models import (
     CONTEXT_JSON_RELATIVE_PATH,
@@ -129,6 +130,13 @@ _CW_PACKAGE_NAME: str = "claude-workspace"
 # paused_status written to SESSION_NEEDS_ATTENTION when a session parks at plan
 # stage (ambiguities_pending_resolution / premises_pending_verification).
 _PLAN_PARKED_REASON = "plan_parked"
+# paused_status written to SESSION_NEEDS_ATTENTION when Rule 1 parks a
+# non-small-tier scope-gated approval status (plan_pending_approval /
+# review_pending_approval) to BLOCKED_ON_USER. Deliberately distinct from
+# _PLAN_PARKED_REASON -- that constant is scoped to the v4
+# ambiguities/premises statuses, an unrelated park reason -- per the
+# operator's R1 resolution. See GitHub #1302.
+_APPROVAL_GATE_REASON = "approval_gate"
 # Disposition stamped by _stage_advance_unchecked when the task's client is
 # absent from the effective clients dict — a config error, not a
 # transient/recoverable state. Deliberately excluded from both
@@ -1502,6 +1510,23 @@ def _reconcile_usage_limited() -> bool:
     return reconcile_report is not None and reconcile_report.usage_limited
 
 
+def _sweep_expired_diagnostics(config: OrchestratorConfig) -> None:
+    """Best-effort retention sweep of per-session diagnostics bundles (#1239).
+
+    Runs OUTSIDE ``sessions_lock`` (pure filesystem rmtree, no state mutation)
+    and swallows every error, mirroring :func:`_reconcile_usage_limited`'s
+    broad-catch posture: a cleanup failure (permission, race with a concurrent
+    tick) must never abort the tick — the sweep just retries next tick.
+    Extracted from ``dispatch_tick`` to keep it under the PLR branch/statement
+    caps. Paired test: tests/test_dispatch.py
+    test_dispatch_tick_cleanup_failure_does_not_abort_tick.
+    """
+    try:
+        cleanup_expired_diagnostics(retention_hours=config.diagnostics_retention_hours)
+    except Exception:  # noqa: BLE001
+        _log.exception("diagnostics cleanup failed during dispatch_tick; continuing")
+
+
 def _build_plan_order(*, use_plan: bool) -> dict[str, list[str]]:
     """Build the per-client ticket priority ordering from the persisted plan.
 
@@ -1640,6 +1665,7 @@ def dispatch_tick(
     """
     resolved_native_daemon = native_daemon or get_native_daemon_client()
     any_usage_limit_detected = _reconcile_usage_limited()
+    _sweep_expired_diagnostics(config)
     clients = load_effective_clients()
     if client_filter is not None:
         clients = {client_filter: clients[client_filter]}
@@ -2192,6 +2218,20 @@ def _route_scope_gated_approval(
     """
     tier = _resolve_scope_tier(last_result, task)
     if tier != SCOPE_TIER_SMALL:
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": task.session_id or "",
+                "session_name": "",
+                "client": task.client,
+                "ticket_id": task.ticket_id,
+                "claude_session_id": None,
+                "paused_status": _APPROVAL_GATE_REASON,
+                "breadcrumbs": "",
+                "crashed": False,
+            },
+            correlation_id=task.ticket_id,
+        )
         transition_task_status(
             task, QueueItemStatus.BLOCKED_ON_USER, disposition=disposition
         )

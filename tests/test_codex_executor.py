@@ -393,6 +393,42 @@ def test_codex_executor_exception_handler_marks_session_completed(
     assert result.blocker.stage == "stage3_review"
 
 
+def test_spawn_threads_real_session_id_into_run_review(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """CodexExecutor.spawn passes the real cw session id (its own sid, not a
+    fresh uuid) into run_review so diagnostics land under the right dir."""
+    worktree = make_git_repo("wt-codex-sid-thread")
+    runner = FakeCodexRunner(returncode=0)
+    config = StageExecutorConfig(backend=CODEX_BACKEND)
+    executor = CodexExecutor(config=config, runner=runner)
+    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+    task = TicketTask(ticket_id="T-sid", client="test", stage=Stage.REVIEW)
+
+    captured: dict[str, object] = {}
+
+    def _spy_run_review(**kwargs: object) -> tuple[AutoDevResult, None]:
+        captured["session_id"] = kwargs["session_id"]
+        blocked = make_blocked(
+            ticket_id="T-sid",
+            worktree=worktree,
+            reason=CODEX_REVIEW_UNPARSEABLE,
+            stage_reached="stage3_review",
+        )
+        return blocked, None
+
+    with (
+        patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+        patch("cw.executor.run_review", _spy_run_review),
+    ):
+        sid = executor.spawn(
+            stage=Stage.REVIEW, task=task, worktree=worktree, client=client
+        )
+
+    assert captured["session_id"] == sid
+
+
 def test_post_review_comment_suppresses_oserror() -> None:
     """_post_review_comment swallows OSError from a missing gh binary."""
     with patch("cw.gh._sp.run", side_effect=FileNotFoundError("no gh")):

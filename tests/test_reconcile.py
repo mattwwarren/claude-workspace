@@ -23544,6 +23544,55 @@ def test_local_harvest_no_commits_synthesizes_aider_no_output(
     assert reloaded.last_result["blocker"]["reason"] == "aider_no_output"
 
 
+def test_act_on_local_harvest_candidates_passes_session_id_to_synthesize_git_result(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1239: the production harvest path threads candidate.session_id into
+    synthesize_git_result so diagnostics land under the right session dir."""
+    from cw.local_runner import synthesize_git_result as _real_synth
+
+    worktree = _local_git_worktree(make_git_repo, "wt-harvest-sidspy", with_commit=True)
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    liveness = LocalLivenessHandle(pid=2_000_000_000, start_time_ns=7)
+    sess = _mk_local_session("harv-sidspy", worktree, liveness)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="harv-sidspy",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="harv-sidspy",
+                    stage=Stage.IMPL,
+                )
+            ]
+        )
+    )
+    task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
+    candidates = _detect_local_harvest_candidates(state, task_by_ticket)
+    assert len(candidates) == 1
+
+    captured: dict[str, object] = {}
+
+    def _spy(**kwargs: object) -> object:
+        captured["session_id"] = kwargs.get("session_id")
+        return _real_synth(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("cw.reconcile.local.synthesize_git_result", _spy)
+    _act_on_local_harvest_candidates(
+        state,
+        candidates,
+        now=datetime(2026, 1, 2, tzinfo=UTC),
+        task_by_ticket=task_by_ticket,
+    )
+
+    assert captured["session_id"] == "harv-sidspy"
+
+
 def test_local_harvest_skips_session_with_surface_ref(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],

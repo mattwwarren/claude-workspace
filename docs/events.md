@@ -539,6 +539,11 @@ open enum; consumers MUST tolerate unknown values. Known values:
 - `"merge_pending"` — Rule 3b: PR is open, awaiting CI/merge gate; not a
   failure. `breadcrumbs` empty; `pr_url` is preserved on the task
   separately. See #1117.
+- `"approval_gate"` — Rule 1: a non-small-tier scope-gated approval status
+  (`plan_pending_approval` or `review_pending_approval`) parked the task to
+  BLOCKED_ON_USER. Deliberately distinct from `"plan_parked"`, which covers
+  the unrelated v4 ambiguities/premises park. `breadcrumbs` empty. Operator
+  should review the session's scope/plan and approve or redirect. See #1302.
 
 `correlation_id` is the `ticket_id` when resolvable, `null` otherwise.
 A push notification is fired for most emissions (via `fire_push_notification`)
