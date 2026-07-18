@@ -14,7 +14,12 @@ from cw.codex_review import _parse_unified_diff
 from cw.dev_queue import load_dev_queue
 from cw.review_findings import ReviewerRunFailure
 
-from .conftest import _finding_kwargs, _make_escalation, _make_finding, _make_reviewer_doc
+from .conftest import (
+    _finding_kwargs,
+    _make_escalation,
+    _make_finding,
+    _make_reviewer_doc,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -145,7 +150,9 @@ class TestReviewConsolidateCommand:
     def test_happy_path_single_clean_reviewer(self, runner: CliRunner) -> None:
         doc = _make_reviewer_doc(status="ok")
         payload = _consolidate_payload(documents=[doc.model_dump(mode="json")])
-        result = runner.invoke(main, ["review", "consolidate", "-"], input=json.dumps(payload))
+        result = runner.invoke(
+            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+        )
         assert result.exit_code == 0, result.output
         verdict = json.loads(result.output)
         assert verdict["blocking"] is False
@@ -159,7 +166,9 @@ class TestReviewConsolidateCommand:
         )
         doc = _make_reviewer_doc(finding, status="ok")
         payload = _consolidate_payload(documents=[doc.model_dump(mode="json")])
-        result = runner.invoke(main, ["review", "consolidate", "-"], input=json.dumps(payload))
+        result = runner.invoke(
+            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+        )
         assert result.exit_code == 0, result.output
         verdict = json.loads(result.output)
         assert verdict["blocking"] is True
@@ -177,7 +186,9 @@ class TestReviewConsolidateCommand:
         )
         doc = _make_reviewer_doc(finding, status="ok")
         payload = _consolidate_payload(documents=[doc.model_dump(mode="json")])
-        result = runner.invoke(main, ["review", "consolidate", "-"], input=json.dumps(payload))
+        result = runner.invoke(
+            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+        )
         assert result.exit_code == 0, result.output
         verdict = json.loads(result.output)
         assert len(verdict["rejected"]) == 1
@@ -195,7 +206,9 @@ class TestReviewConsolidateCommand:
             "evidence": "def broken():",
         }
         doc_a = _make_reviewer_doc(
-            _make_finding(**finding_kwargs), reviewer_role="SysAdmin Reviewer", status="ok"
+            _make_finding(**finding_kwargs),
+            reviewer_role="SysAdmin Reviewer",
+            status="ok",
         )
         doc_b = _make_reviewer_doc(
             _make_finding(**finding_kwargs),
@@ -205,7 +218,9 @@ class TestReviewConsolidateCommand:
         payload = _consolidate_payload(
             documents=[doc_a.model_dump(mode="json"), doc_b.model_dump(mode="json")]
         )
-        result = runner.invoke(main, ["review", "consolidate", "-"], input=json.dumps(payload))
+        result = runner.invoke(
+            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+        )
         assert result.exit_code == 0, result.output
         verdict = json.loads(result.output)
         assert len(verdict["accepted"]) == 1
@@ -218,12 +233,16 @@ class TestReviewConsolidateCommand:
         self, runner: CliRunner
     ) -> None:
         doc = _make_reviewer_doc(status="ok")
-        failure = ReviewerRunFailure(role="Test Reviewer", reason="unparseable_response")
+        failure = ReviewerRunFailure(
+            role="Test Reviewer", reason="unparseable_response"
+        )
         payload = _consolidate_payload(
             documents=[doc.model_dump(mode="json")],
             failed_reviewers=[failure.model_dump(mode="json")],
         )
-        result = runner.invoke(main, ["review", "consolidate", "-"], input=json.dumps(payload))
+        result = runner.invoke(
+            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+        )
         assert result.exit_code == 0, result.output
         verdict = json.loads(result.output)
         assert verdict["review"]["agents_run"] == 1
@@ -239,7 +258,9 @@ class TestReviewConsolidateCommand:
         )
         doc = _make_reviewer_doc(finding, status="ok")
         payload = _consolidate_payload(documents=[doc.model_dump(mode="json")])
-        result = runner.invoke(main, ["review", "consolidate", "-"], input=json.dumps(payload))
+        result = runner.invoke(
+            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+        )
         assert result.exit_code == 0, result.output
         verdict = json.loads(result.output)
         assert len(verdict["accepted"]) == 1
@@ -249,7 +270,9 @@ class TestReviewConsolidateCommand:
     def test_escalation_with_evidence_not_in_diff_is_stripped_not_rejected(
         self, runner: CliRunner
     ) -> None:
-        escalation = _make_escalation(evidence_quote="this quote is nowhere in the diff")
+        escalation = _make_escalation(
+            evidence_quote="this quote is nowhere in the diff"
+        )
         finding = _make_finding(
             severity="MUST_FIX",
             line_start=2,
@@ -259,7 +282,9 @@ class TestReviewConsolidateCommand:
         )
         doc = _make_reviewer_doc(finding, status="ok")
         payload = _consolidate_payload(documents=[doc.model_dump(mode="json")])
-        result = runner.invoke(main, ["review", "consolidate", "-"], input=json.dumps(payload))
+        result = runner.invoke(
+            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+        )
         assert result.exit_code == 0, result.output
         verdict = json.loads(result.output)
         assert len(verdict["stripped_escalations"]) == 1
@@ -280,14 +305,20 @@ class TestReviewConsolidateCommand:
     ) -> None:
         payload = _consolidate_payload()
         del payload["reviewed_sha"]
-        result = runner.invoke(main, ["review", "consolidate", "-"], input=json.dumps(payload))
+        result = runner.invoke(
+            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+        )
         assert result.exit_code == 1
-        assert any(line.startswith("reviewed_sha:") for line in result.output.splitlines())
+        assert any(
+            line.startswith("reviewed_sha:") for line in result.output.splitlines()
+        )
 
     def test_invalid_severity_prints_nested_field_path(self, runner: CliRunner) -> None:
         raw_finding = _finding_kwargs(severity="BOGUS")
         payload = _consolidate_payload(documents=[_doc_payload(raw_finding)])
-        result = runner.invoke(main, ["review", "consolidate", "-"], input=json.dumps(payload))
+        result = runner.invoke(
+            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+        )
         assert result.exit_code == 1
         assert any(
             line.startswith("documents.0.findings.0.severity:")
@@ -309,7 +340,9 @@ class TestReviewConsolidateCommand:
     def test_output_json_has_review_verdict_shape(self, runner: CliRunner) -> None:
         doc = _make_reviewer_doc(status="ok")
         payload = _consolidate_payload(documents=[doc.model_dump(mode="json")])
-        result = runner.invoke(main, ["review", "consolidate", "-"], input=json.dumps(payload))
+        result = runner.invoke(
+            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+        )
         assert result.exit_code == 0, result.output
         verdict = json.loads(result.output)
         assert set(verdict) == {
@@ -342,7 +375,9 @@ class TestReviewConsolidateCommand:
             documents=[],
             failed_reviewers=[f.model_dump(mode="json") for f in failures],
         )
-        result = runner.invoke(main, ["review", "consolidate", "-"], input=json.dumps(payload))
+        result = runner.invoke(
+            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+        )
         assert result.exit_code == 0, result.output
         verdict = json.loads(result.output)
         assert verdict["review"]["agents_run"] == 0
