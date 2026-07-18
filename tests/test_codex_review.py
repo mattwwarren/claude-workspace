@@ -1259,10 +1259,11 @@ def test_format_failures_detail_includes_diagnostics_path() -> None:
     failures = [ReviewerRunFailure(role="Code Quality Reviewer", reason=CODEX_TIMEOUT)]
     detail = _format_failures_detail(failures, session_id="sess-fmt")
     assert "Code Quality Reviewer (codex_timeout)" in detail
-    assert "diagnostics:" in detail
-    # The rendered path points at this session's bundle dir.
+    # tmp_config_dir relocates state_dir() away from the real home, so
+    # _render_bundle_path takes its absolute-fallback branch: the rendered
+    # pointer is exactly "[diagnostics: <absolute bundle dir>]".
     bundle = diagnostics_bundle_dir("sess-fmt")
-    assert str(bundle) in detail or "sess-fmt" in detail
+    assert detail == f"Code Quality Reviewer (codex_timeout) [diagnostics: {bundle}]"
 
 
 def test_run_review_threads_session_id_to_run_codex_role(

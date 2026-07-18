@@ -422,11 +422,13 @@ class TestSessionResult:
         cli_result = runner.invoke(main, ["session", "result", "abcd1234"])
         assert cli_result.exit_code == 0
         data = json.loads(cli_result.output)
-        assert "diagnostics:" in data["blocker"]["details"]
+        # tmp_config_dir relocates state_dir() away from the real home, so
+        # _render_bundle_path takes its absolute-fallback branch: the
+        # rendered pointer is exactly "[diagnostics: <absolute bundle dir>]".
         bundle = diagnostics_bundle_dir("abcd1234")
         assert (
-            str(bundle) in data["blocker"]["details"]
-            or "abcd1234" in (data["blocker"]["details"])
+            data["blocker"]["details"]
+            == f"Code Quality Reviewer (crash) [diagnostics: {bundle}]"
         )
 
     def test_result_none_exits_1_with_stderr(
