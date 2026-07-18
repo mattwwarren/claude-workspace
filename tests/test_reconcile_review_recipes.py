@@ -19,16 +19,18 @@ from __future__ import annotations
 
 import fcntl
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
+from freezegun import freeze_time
 from pydantic import ValidationError
 
 from cw.config import dev_queue_lock as _dev_queue_lock_path
 from cw.config import load_effective_clients, sessions_lock, sessions_lock_file
 from cw.dev_queue import load_dev_queue, save_dev_queue
-from cw.events import read_events
+from cw.events import read_events, record_event
 from cw.exceptions import CwError, SessionsLockReentryError
 from cw.models import (
     ClientConfig,
@@ -40,9 +42,14 @@ from cw.models import (
 )
 from cw.reconcile import reconcile
 from cw.reconcile.review_recipes import (
+    _REPEAT_FIRE_ATTENTION_REASON as _REPEAT_FIRE_REASON,
+)
+from cw.reconcile.review_recipes import (
     RECIPE_ADDRESS_REVIEW,
+    RECIPE_ATTENTION_STATES,
     RECIPE_AUTO_FIX_CI,
     RECIPE_ESCALATE_MERGE_BLOCK,
+    RECIPE_FIRED_AT_GETTERS,
     RECIPE_REQUEST_REVIEWER,
     ReviewRecipeCandidate,
     _act_address_review,
@@ -52,10 +59,15 @@ from cw.reconcile.review_recipes import (
     _detect_address_review,
     _detect_auto_fix_ci,
     _detect_escalate_merge_block,
+    _detect_repeat_fire_counts,
     _detect_request_reviewer,
+    _record_pr_action_taken,
     resolve_outbound_consent_allowed,
     resolve_review_recipe_enabled,
     run_review_recipes,
+)
+from cw.reconcile.review_recipes import (
+    _detect_repeat_fire_counts as _real_detect_repeat_fire_counts,
 )
 from cw.review_strategy import ReviewStrategy
 
@@ -638,7 +650,10 @@ def test_reconcile_reentry_guard_fires_and_is_swallowed(
     monkeypatch.setattr("cw.dispatch.run_dispatch_loop", _fake_dispatch_loop)
 
     with sessions_lock():
-        acted = _act_auto_fix_ci([_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")])
+        acted = _act_auto_fix_ci(
+            [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+            clients=load_effective_clients(),
+        )
 
     assert acted == []
     assert probed["lock_held"] is True
@@ -867,6 +882,110 @@ def test_address_review_latch_clears_on_episode_end(
     ]
 
 
+# --- cross-repo dispatch guard, address_review (GitHub #1198) ---------------
+
+
+def _set_origin(repo: Path, url: str) -> None:
+    """Point *repo*'s ``origin`` remote at *url* (raw subprocess, no fixture)."""
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin", url],
+        capture_output=True,
+        check=True,
+    )
+
+
+def test_repo_mismatch_emits_pr_action_failed(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+) -> None:
+    """A worktree whose origin repo differs from the PR's repo skips + fails."""
+    _write_acme_clients_yaml(tmp_config_dir)
+    worktree = make_git_repo("repo-mismatch")
+    _set_origin(worktree, "https://github.com/other/repo.git")
+    task = _cr_task(worktree_path=worktree)  # pr_url -> acme/widgets
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    acted = _act_address_review(
+        [_candidate_for(task)], clients=load_effective_clients()
+    )
+
+    assert acted == []
+    assert stub_spawn.calls == []
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
+    failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+    assert len(failed) == 1
+    assert failed[0].correlation_id == task.ticket_id
+
+
+def test_repo_match_dispatches_normally(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+) -> None:
+    """A worktree whose origin repo matches the PR's repo dispatches normally."""
+    _write_acme_clients_yaml(tmp_config_dir)
+    worktree = make_git_repo("repo-match")
+    _set_origin(worktree, "https://github.com/acme/widgets.git")
+    task = _cr_task(worktree_path=worktree)
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    acted = _act_address_review(
+        [_candidate_for(task)], clients=load_effective_clients()
+    )
+
+    assert acted == [task.ticket_id]
+    assert len(stub_spawn.calls) == 1
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+
+
+def test_repo_unresolvable_dispatches_normally(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+) -> None:
+    """A worktree with no origin remote fails open (R5) -> dispatches normally."""
+    _write_acme_clients_yaml(tmp_config_dir)
+    worktree = make_git_repo("repo-unresolvable")  # no origin set
+    task = _cr_task(worktree_path=worktree)
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    acted = _act_address_review(
+        [_candidate_for(task)], clients=load_effective_clients()
+    )
+
+    assert acted == [task.ticket_id]
+    assert len(stub_spawn.calls) == 1
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+
+
+def test_repo_mismatch_override_dispatches_and_logs(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """cross_repo_override=True dispatches despite the mismatch and logs a WARN."""
+    _write_acme_clients_yaml(tmp_config_dir)
+    worktree = make_git_repo("repo-override")
+    _set_origin(worktree, "https://github.com/other/repo.git")
+    task = _cr_task(worktree_path=worktree, cross_repo_override=True)
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    with caplog.at_level("WARNING"):
+        acted = _act_address_review(
+            [_candidate_for(task)], clients=load_effective_clients()
+        )
+
+    assert acted == [task.ticket_id]
+    assert len(stub_spawn.calls) == 1
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+    assert "review_recipe_repo_mismatch_override" in caplog.text
+    assert task.ticket_id in caplog.text
+    assert "pr_repo=acme/widgets" in caplog.text
+    assert "client_repo=other/repo" in caplog.text
+
+
 # --- RFC 0010 P4 recipes (#1099) -------------------------------------------
 
 
@@ -950,7 +1069,10 @@ def test_act_auto_fix_ci_calls_add_ticket_and_dispatch_once(
     monkeypatch.setattr("cw.dev_queue.add_ticket", _fake_add_ticket)
     monkeypatch.setattr("cw.dispatch.run_dispatch_loop", _fake_dispatch)
 
-    acted = _act_auto_fix_ci([_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")])
+    acted = _act_auto_fix_ci(
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+        clients=load_effective_clients(),
+    )
 
     assert acted == [task.ticket_id]
     assert len(added) == 1
@@ -986,7 +1108,10 @@ def test_act_auto_fix_ci_stale_row_silent_skip(
     monkeypatch.setattr("cw.dev_queue.add_ticket", lambda t: called.append(t) or True)
     monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: called.append(1))
 
-    acted = _act_auto_fix_ci([_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")])
+    acted = _act_auto_fix_ci(
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+        clients=load_effective_clients(),
+    )
 
     assert acted == []
     assert called == []
@@ -1017,7 +1142,10 @@ def test_act_auto_fix_ci_add_ticket_raises_emits_pr_action_failed(
     )
 
     with caplog.at_level("WARNING"):
-        acted = _act_auto_fix_ci([_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")])
+        acted = _act_auto_fix_ci(
+            [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+            clients=load_effective_clients(),
+        )
 
     assert acted == []
     taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
@@ -1038,7 +1166,7 @@ def test_auto_fix_ci_fires_once_per_episode(
     monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
     candidate = _candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")
 
-    acted1 = _act_auto_fix_ci([candidate])
+    acted1 = _act_auto_fix_ci([candidate], clients=load_effective_clients())
     assert acted1 == [task.ticket_id]
     assert load_dev_queue().tasks[0].auto_fix_ci_fired_at is not None
 
@@ -1046,7 +1174,7 @@ def test_auto_fix_ci_fires_once_per_episode(
     # hydration lag, per the ticket's acceptance criterion): detect still
     # yields a candidate every tick, but the latch blocks a re-fire.
     for _ in range(5):
-        acted_n = _act_auto_fix_ci([candidate])
+        acted_n = _act_auto_fix_ci([candidate], clients=load_effective_clients())
         assert acted_n == []
     taken = [
         e
@@ -1066,7 +1194,9 @@ def test_auto_fix_ci_latch_clears_on_episode_end(
     monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
     candidate = _candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")
 
-    assert _act_auto_fix_ci([candidate]) == [task.ticket_id]
+    assert _act_auto_fix_ci([candidate], clients=load_effective_clients()) == [
+        task.ticket_id
+    ]
 
     # Episode ends: hydration moves the PR off ci_failing.
     store = load_dev_queue()
@@ -1074,14 +1204,180 @@ def test_auto_fix_ci_latch_clears_on_episode_end(
     save_dev_queue(store)
 
     # Clear pass runs even with zero candidates.
-    assert _act_auto_fix_ci([]) == []
+    assert _act_auto_fix_ci([], clients=load_effective_clients()) == []
     assert load_dev_queue().tasks[0].auto_fix_ci_fired_at is None
 
     # Genuine re-entry into ci_failing fires again (episode semantics).
     store = load_dev_queue()
     store.tasks[0].pr_state = _pr_state(attention_state="ci_failing")
     save_dev_queue(store)
-    assert _act_auto_fix_ci([candidate]) == [task.ticket_id]
+    assert _act_auto_fix_ci([candidate], clients=load_effective_clients()) == [
+        task.ticket_id
+    ]
+
+
+# --- cross-repo dispatch guard, auto_fix_ci (GitHub #1198) ------------------
+
+
+def _write_acme_clients_yaml_with_repo(
+    tmp_config_dir: Path, make_git_repo: Any, remote_url: str
+) -> Path:
+    """clients.yaml whose acme workspace_path is a git repo with *remote_url*.
+
+    Unlike ``_write_acme_clients_yaml`` (which points acme at a non-git dir),
+    the auto_fix_ci guard resolves the client's ``workspace_path`` origin remote,
+    so it needs a real repo with a settable origin.
+    """
+    repo = make_git_repo("acme-ws")
+    _set_origin(repo, remote_url)
+    config_dir = tmp_config_dir / ".config" / "cw"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "clients.yaml").write_text(
+        f"clients:\n  acme:\n    workspace_path: {repo}\n    default_branch: main\n"
+    )
+    return repo
+
+
+def test_auto_fix_ci_repo_mismatch_emits_pr_action_failed(
+    tmp_config_dir: Path, make_git_repo: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Client workspace repo != PR repo -> skip + PR_ACTION_FAILED, no dispatch."""
+    _write_acme_clients_yaml_with_repo(
+        tmp_config_dir, make_git_repo, "https://github.com/other/repo.git"
+    )
+    task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="ci_failing"))
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    monkeypatch.setattr(
+        "cw.dev_queue.add_ticket",
+        lambda _t: pytest.fail("no re-dispatch on repo mismatch"),
+    )
+    monkeypatch.setattr(
+        "cw.dispatch.run_dispatch_loop",
+        lambda **_kw: pytest.fail("no dispatch on repo mismatch"),
+    )
+
+    acted = _act_auto_fix_ci(
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+        clients=load_effective_clients(),
+    )
+
+    assert acted == []
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
+    failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+    assert len(failed) == 1
+    assert failed[0].correlation_id == task.ticket_id
+
+
+def test_auto_fix_ci_repo_match_dispatches_normally(
+    tmp_config_dir: Path, make_git_repo: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Client workspace repo == PR repo -> re-dispatch proceeds as today."""
+    _write_acme_clients_yaml_with_repo(
+        tmp_config_dir, make_git_repo, "https://github.com/acme/widgets.git"
+    )
+    task = _make_task(
+        pr_url=_PR_URL,
+        pr_state=_pr_state(attention_state="ci_failing", failing_checks=["lint"]),
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    added: list[TicketTask] = []
+    dispatched: list[dict[str, Any]] = []
+    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda t: added.append(t) or True)
+    monkeypatch.setattr(
+        "cw.dispatch.run_dispatch_loop", lambda **kw: dispatched.append(kw)
+    )
+
+    acted = _act_auto_fix_ci(
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+        clients=load_effective_clients(),
+    )
+
+    assert acted == [task.ticket_id]
+    assert len(added) == 1
+    assert len(dispatched) == 1
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+
+
+def test_auto_fix_ci_repo_mismatch_override_dispatches_and_logs(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """cross_repo_override=True re-dispatches despite the mismatch and logs WARN."""
+    _write_acme_clients_yaml_with_repo(
+        tmp_config_dir, make_git_repo, "https://github.com/other/repo.git"
+    )
+    task = _make_task(
+        pr_url=_PR_URL,
+        pr_state=_pr_state(attention_state="ci_failing"),
+        cross_repo_override=True,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    added: list[TicketTask] = []
+    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda t: added.append(t) or True)
+    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
+
+    with caplog.at_level("WARNING"):
+        acted = _act_auto_fix_ci(
+            [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+            clients=load_effective_clients(),
+        )
+
+    assert acted == [task.ticket_id]
+    assert len(added) == 1
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+    assert "review_recipe_repo_mismatch_override" in caplog.text
+    assert task.ticket_id in caplog.text
+    assert "pr_repo=acme/widgets" in caplog.text
+    assert "client_repo=other/repo" in caplog.text
+
+
+def test_auto_fix_ci_unparseable_pr_url_fails_open(
+    tmp_config_dir: Path, make_git_repo: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unparseable pr_url fails open (no mismatch) -> re-dispatch proceeds."""
+    _write_acme_clients_yaml_with_repo(
+        tmp_config_dir, make_git_repo, "https://github.com/other/repo.git"
+    )
+    task = _make_task(
+        pr_url="https://example.com/not-a-pr",
+        pr_state=_pr_state(attention_state="ci_failing"),
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    added: list[TicketTask] = []
+    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda t: added.append(t) or True)
+    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
+
+    acted = _act_auto_fix_ci(
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+        clients=load_effective_clients(),
+    )
+
+    assert acted == [task.ticket_id]
+    assert len(added) == 1
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
+
+
+def test_auto_fix_ci_unresolvable_client_fails_open(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A client absent from the clients dict fails open -> re-dispatch proceeds."""
+    _write_acme_clients_yaml(tmp_config_dir)
+    task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="ci_failing"))
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    added: list[TicketTask] = []
+    monkeypatch.setattr("cw.dev_queue.add_ticket", lambda t: added.append(t) or True)
+    monkeypatch.setattr("cw.dispatch.run_dispatch_loop", lambda **_kw: None)
+
+    # clients={} -> client_cfg is None -> guard fails open, dispatch proceeds.
+    acted = _act_auto_fix_ci(
+        [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")], clients={}
+    )
+
+    assert acted == [task.ticket_id]
+    assert len(added) == 1
+    assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
 
 
 # --- request_reviewer ------------------------------------------------------
@@ -1504,7 +1800,12 @@ def test_act_auto_fix_ci_vanished_row_silent_skip(
     monkeypatch.setattr(
         "cw.dev_queue.add_ticket", lambda _t: pytest.fail("no dispatch for a gone row")
     )
-    assert _act_auto_fix_ci([_orphan_candidate(RECIPE_AUTO_FIX_CI, "ci_failing")]) == []
+    assert (
+        _act_auto_fix_ci(
+            [_orphan_candidate(RECIPE_AUTO_FIX_CI, "ci_failing")], clients={}
+        )
+        == []
+    )
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN]) == []
 
 
@@ -1660,3 +1961,384 @@ class TestResolveOutboundConsentAllowed:
             )
             is False
         )
+
+
+# ---------------------------------------------------------------------------
+# #1201 — repeat-fire burst detector + fired-at getters (anomaly layer)
+# ---------------------------------------------------------------------------
+
+
+def _record_taken(ticket_id: str, recipe: str, *, client: str = "acme") -> None:
+    """Seed one PR_ACTION_TAKEN event for (ticket_id, recipe) at the frozen now."""
+    record_event(
+        OrchestratorEventType.PR_ACTION_TAKEN,
+        {
+            "ticket_id": ticket_id,
+            "recipe": recipe,
+            "client": client,
+        },
+        correlation_id=ticket_id,
+    )
+
+
+def _repeat_fire_payload_base(
+    ticket_id: str = "GEN-1",
+    recipe: str = RECIPE_ADDRESS_REVIEW,
+    *,
+    client: str = "acme",
+) -> dict[str, object]:
+    return {
+        "client": client,
+        "lane": "default",
+        "recipe": recipe,
+        "ticket_id": ticket_id,
+        "pr_url": "https://github.com/acme/widgets/pull/42",
+        "attention_state": "changes_requested",
+        "session_id": "sess-1",
+        "evidence_snapshot": {},
+    }
+
+
+class TestDetectRepeatFireCounts:
+    """_detect_repeat_fire_counts: stateless per-(client, ticket, recipe) count."""
+
+    def test_empty_inbox_returns_empty_dict(self, tmp_config_dir: Path) -> None:
+        assert _detect_repeat_fire_counts(config=_config()) == {}
+
+    def test_counts_within_window_grouped_by_client_ticket_and_recipe(
+        self, tmp_config_dir: Path
+    ) -> None:
+        base = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+        with freeze_time(base):
+            _record_taken("GEN-1", RECIPE_ADDRESS_REVIEW)
+            _record_taken("GEN-1", RECIPE_ADDRESS_REVIEW)
+            _record_taken("GEN-1", RECIPE_AUTO_FIX_CI)
+            _record_taken("GEN-2", RECIPE_ADDRESS_REVIEW)
+        counts = _detect_repeat_fire_counts(
+            config=_config(), now=base + timedelta(minutes=1)
+        )
+        assert counts[("acme", "GEN-1", RECIPE_ADDRESS_REVIEW)] == 2
+        assert counts[("acme", "GEN-1", RECIPE_AUTO_FIX_CI)] == 1
+        assert counts[("acme", "GEN-2", RECIPE_ADDRESS_REVIEW)] == 1
+
+    def test_events_outside_window_excluded(self, tmp_config_dir: Path) -> None:
+        base = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+        with freeze_time(base - timedelta(minutes=30)):
+            _record_taken("GEN-1", RECIPE_ADDRESS_REVIEW)  # 30 min ago — excluded
+        with freeze_time(base):
+            _record_taken("GEN-1", RECIPE_ADDRESS_REVIEW)  # inside — counted
+        counts = _detect_repeat_fire_counts(
+            config=_config(), now=base + timedelta(minutes=1)
+        )
+        assert counts[("acme", "GEN-1", RECIPE_ADDRESS_REVIEW)] == 1
+
+    def test_event_exactly_at_cutoff_included(self, tmp_config_dir: Path) -> None:
+        """The cutoff boundary is inclusive: an event at exactly now-window counts."""
+        base = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+        window = _config().review_recipe_repeat_fire_window_minutes
+        with freeze_time(base - timedelta(minutes=window)):
+            _record_taken("GEN-1", RECIPE_ADDRESS_REVIEW)  # exactly at cutoff
+        counts = _detect_repeat_fire_counts(config=_config(), now=base)
+        assert counts[("acme", "GEN-1", RECIPE_ADDRESS_REVIEW)] == 1
+
+    def test_read_events_failure_returns_empty_dict(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom(**_kwargs: Any) -> list[Any]:
+            msg = "inbox unreadable"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.reconcile.review_recipes.read_events", _boom)
+        assert _detect_repeat_fire_counts(config=_config()) == {}
+
+    def test_malformed_payload_missing_keys_skipped(self, tmp_config_dir: Path) -> None:
+        """A PR_ACTION_TAKEN with no/non-str client+ticket_id+recipe is not counted."""
+        record_event(
+            OrchestratorEventType.PR_ACTION_TAKEN,
+            {"client": "acme"},  # no ticket_id / recipe
+        )
+        record_event(
+            OrchestratorEventType.PR_ACTION_TAKEN,
+            {"client": "acme", "ticket_id": 123, "recipe": None},  # non-str values
+        )
+        record_event(
+            OrchestratorEventType.PR_ACTION_TAKEN,
+            {"ticket_id": "GEN-1", "recipe": RECIPE_ADDRESS_REVIEW},  # no client
+        )
+        assert _detect_repeat_fire_counts(config=_config()) == {}
+
+    def test_isolates_by_client_same_ticket_id(self, tmp_config_dir: Path) -> None:
+        """Two clients whose numeric ticket_id collides don't share a count."""
+        base = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+        with freeze_time(base):
+            for _ in range(4):
+                _record_taken("42", RECIPE_ADDRESS_REVIEW, client="acme")
+            _record_taken("42", RECIPE_ADDRESS_REVIEW, client="widgetco")
+        counts = _detect_repeat_fire_counts(
+            config=_config(), now=base + timedelta(minutes=1)
+        )
+        assert counts[("acme", "42", RECIPE_ADDRESS_REVIEW)] == 4
+        assert counts[("widgetco", "42", RECIPE_ADDRESS_REVIEW)] == 1
+
+
+class TestRecordPrActionTaken:
+    """_record_pr_action_taken: always records, escalates on exact crossing."""
+
+    def test_records_event_regardless_of_count(self, tmp_config_dir: Path) -> None:
+        _record_pr_action_taken(
+            _repeat_fire_payload_base(),
+            "acme",
+            "GEN-1",
+            RECIPE_ADDRESS_REVIEW,
+            config=_config(),
+            repeat_fire_counts={},
+        )
+        taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+        assert len(taken) == 1
+        assert taken[0].correlation_id == "GEN-1"
+
+    def test_exact_crossing_emits_session_needs_attention(
+        self, tmp_config_dir: Path
+    ) -> None:
+        cfg = _config(
+            review_recipe_repeat_fire_threshold=5,
+            review_recipe_repeat_fire_window_minutes=20,
+        )
+        counts = {("acme", "GEN-1", RECIPE_ADDRESS_REVIEW): 4}  # prior 4 + this = 5
+        _record_pr_action_taken(
+            _repeat_fire_payload_base(),
+            "acme",
+            "GEN-1",
+            RECIPE_ADDRESS_REVIEW,
+            config=cfg,
+            repeat_fire_counts=counts,
+        )
+        attn = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+        assert len(attn) == 1
+        assert attn[0].payload["paused_status"] == _REPEAT_FIRE_REASON
+        assert attn[0].payload["ticket_id"] == "GEN-1"
+        assert attn[0].payload["recipe"] == RECIPE_ADDRESS_REVIEW
+        assert attn[0].payload["client"] == "acme"
+        assert attn[0].payload["repeat_fire_count"] == 5
+        assert attn[0].payload["window_minutes"] == 20
+
+    def test_below_threshold_no_attention_event(self, tmp_config_dir: Path) -> None:
+        cfg = _config(review_recipe_repeat_fire_threshold=5)
+        counts = {("acme", "GEN-1", RECIPE_ADDRESS_REVIEW): 2}  # prior 2 + this = 3
+        _record_pr_action_taken(
+            _repeat_fire_payload_base(),
+            "acme",
+            "GEN-1",
+            RECIPE_ADDRESS_REVIEW,
+            config=cfg,
+            repeat_fire_counts=counts,
+        )
+        assert (
+            read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+            == []
+        )
+
+    def test_past_threshold_no_re_fire(self, tmp_config_dir: Path) -> None:
+        cfg = _config(review_recipe_repeat_fire_threshold=5)
+        counts = {("acme", "GEN-1", RECIPE_ADDRESS_REVIEW): 5}  # prior 5 + this = 6 > 5
+        _record_pr_action_taken(
+            _repeat_fire_payload_base(),
+            "acme",
+            "GEN-1",
+            RECIPE_ADDRESS_REVIEW,
+            config=cfg,
+            repeat_fire_counts=counts,
+        )
+        assert (
+            read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+            == []
+        )
+
+    def test_missing_key_defaults_to_zero(self, tmp_config_dir: Path) -> None:
+        cfg = _config(review_recipe_repeat_fire_threshold=1)  # 0 + this = 1 == 1
+        _record_pr_action_taken(
+            _repeat_fire_payload_base(),
+            "acme",
+            "GEN-1",
+            RECIPE_ADDRESS_REVIEW,
+            config=cfg,
+            repeat_fire_counts={},
+        )
+        attn = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+        assert len(attn) == 1
+
+    def test_none_config_records_without_burst_check(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A direct _act_* call (no burst wiring) still records PR_ACTION_TAKEN."""
+        _record_pr_action_taken(
+            _repeat_fire_payload_base(),
+            "acme",
+            "GEN-1",
+            RECIPE_ADDRESS_REVIEW,
+            config=None,
+            repeat_fire_counts=None,
+        )
+        assert (
+            len(read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])) == 1
+        )
+        assert (
+            read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+            == []
+        )
+
+    def test_different_client_same_ticket_id_isolated_count(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Tenant A's fire count is unaffected by tenant B's fires on the same id.
+
+        Guards two distinct regression classes: (a) ``client`` dropped from the
+        key entirely — a legacy ``(ticket_id, recipe)`` 2-tuple lookup would hit
+        tenant B's count — and (b) ``client`` swapped/hardcoded to another
+        tenant's value. A dict-typed regression on (a) is caught at the *type*
+        level by mypy --strict on ``src/`` (the parameter is
+        ``dict[tuple[str, str, str], int]``); this test additionally proves the
+        *runtime* isolation a type annotation alone can't verify.
+        """
+        cfg = _config(review_recipe_repeat_fire_threshold=5)
+        counts: dict[tuple[str, ...], int] = {
+            ("42", RECIPE_ADDRESS_REVIEW): 4,  # legacy 2-tuple shape (regression a)
+            ("widgetco", "42", RECIPE_ADDRESS_REVIEW): 4,  # tenant B, 1 short
+        }
+        _record_pr_action_taken(
+            _repeat_fire_payload_base("42", RECIPE_ADDRESS_REVIEW, client="acme"),
+            "acme",
+            "42",
+            RECIPE_ADDRESS_REVIEW,
+            config=cfg,
+            repeat_fire_counts=counts,
+        )
+        # Tenant A's own count (absent from the ("acme", "42", recipe) key)
+        # starts at 0 + this = 1, nowhere near the threshold — neither the
+        # legacy 2-tuple shape nor tenant B's 3-tuple entry must leak in.
+        assert (
+            read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+            == []
+        )
+
+
+class TestRecipeFiredAtGetters:
+    """RECIPE_FIRED_AT_GETTERS reads the correct per-recipe latch field."""
+
+    def test_getters_cover_all_four_recipes(self) -> None:
+        assert set(RECIPE_FIRED_AT_GETTERS) == {
+            RECIPE_ADDRESS_REVIEW,
+            RECIPE_AUTO_FIX_CI,
+            RECIPE_REQUEST_REVIEWER,
+            RECIPE_ESCALATE_MERGE_BLOCK,
+        }
+        # 1:1 with the attention-state routing map.
+        assert set(RECIPE_FIRED_AT_GETTERS) == set(RECIPE_ATTENTION_STATES)
+
+    @pytest.mark.parametrize(
+        ("recipe", "field"),
+        [
+            (RECIPE_ADDRESS_REVIEW, "address_review_fired_at"),
+            (RECIPE_AUTO_FIX_CI, "auto_fix_ci_fired_at"),
+            (RECIPE_REQUEST_REVIEWER, "request_reviewer_fired_at"),
+            (RECIPE_ESCALATE_MERGE_BLOCK, "escalate_merge_block_fired_at"),
+        ],
+    )
+    def test_getters_read_the_correct_field(self, recipe: str, field: str) -> None:
+        stamp = datetime(2026, 7, 17, tzinfo=UTC)
+        task = _make_task(**{field: stamp})
+        assert RECIPE_FIRED_AT_GETTERS[recipe](task) == stamp
+        # A row with no latch set reads None (catches a copy-paste field mixup).
+        assert RECIPE_FIRED_AT_GETTERS[recipe](_make_task()) is None
+
+
+class TestRunReviewRecipesRepeatFire:
+    """Integration: run_review_recipes wires the burst detector once per tick."""
+
+    def _enqueue_cr_task(self, worktree: Path) -> TicketTask:
+        task = _cr_task(
+            review_recipes={RECIPE_ADDRESS_REVIEW: True}, worktree_path=worktree
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        return task
+
+    def _rearm_latch(self) -> None:
+        """Simulate a fresh changes_requested episode by clearing the latch."""
+        store = load_dev_queue()
+        store.tasks[0].address_review_fired_at = None
+        save_dev_queue(store)
+
+    def test_run_review_recipes_repeat_fire_triggers_attention_on_fifth_tick(
+        self, tmp_config_dir: Path, make_git_repo: Any, stub_spawn: _SpawnRecorder
+    ) -> None:
+        _write_acme_clients_yaml(tmp_config_dir)
+        self._enqueue_cr_task(make_git_repo("repeat-fire"))
+        base = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+        for i in range(5):
+            with freeze_time(base + timedelta(minutes=i)):
+                self._rearm_latch()
+                run_review_recipes(config=_config())
+        taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
+        assert len(taken) == 5
+        attn = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+        assert len(attn) == 1
+        assert attn[0].payload["recipe"] == RECIPE_ADDRESS_REVIEW
+        assert attn[0].payload["repeat_fire_count"] == 5
+
+    def test_run_review_recipes_threshold_configurable(
+        self, tmp_config_dir: Path, make_git_repo: Any, stub_spawn: _SpawnRecorder
+    ) -> None:
+        _write_acme_clients_yaml(tmp_config_dir)
+        self._enqueue_cr_task(make_git_repo("threshold"))
+        base = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+        for i in range(2):
+            with freeze_time(base + timedelta(minutes=i)):
+                self._rearm_latch()
+                run_review_recipes(
+                    config=_config(review_recipe_repeat_fire_threshold=2)
+                )
+        attn = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+        assert len(attn) == 1
+        assert attn[0].payload["repeat_fire_count"] == 2
+
+    def test_run_review_recipes_repeat_fire_counts_computed_once_per_tick(
+        self,
+        tmp_config_dir: Path,
+        make_git_repo: Any,
+        stub_spawn: _SpawnRecorder,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _write_acme_clients_yaml(tmp_config_dir)
+        self._enqueue_cr_task(make_git_repo("once-per-tick"))
+        calls: list[dict[str, Any]] = []
+
+        def _spy(**kwargs: Any) -> dict[tuple[str, str, str], int]:
+            calls.append(kwargs)
+            return _real_detect_repeat_fire_counts(**kwargs)
+
+        monkeypatch.setattr(
+            "cw.reconcile.review_recipes._detect_repeat_fire_counts", _spy
+        )
+        run_review_recipes(config=_config())
+        # One detector call per tick — NOT once per recipe (four recipes run).
+        assert len(calls) == 1
+
+    def test_run_review_recipes_repeat_fire_isolated_per_recipe(
+        self, tmp_config_dir: Path, make_git_repo: Any, stub_spawn: _SpawnRecorder
+    ) -> None:
+        _write_acme_clients_yaml(tmp_config_dir)
+        task = self._enqueue_cr_task(make_git_repo("isolated"))
+        base = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+        with freeze_time(base):
+            # 4 prior address_review fires + 4 unrelated auto_fix_ci fires.
+            for _ in range(4):
+                _record_taken(task.ticket_id, RECIPE_ADDRESS_REVIEW)
+            for _ in range(4):
+                _record_taken(task.ticket_id, RECIPE_AUTO_FIX_CI)
+        with freeze_time(base + timedelta(minutes=1)):
+            run_review_recipes(config=_config())
+        attn = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+        # Only address_review crossed its threshold; auto_fix_ci counts don't
+        # leak into the address_review key.
+        assert len(attn) == 1
+        assert attn[0].payload["recipe"] == RECIPE_ADDRESS_REVIEW

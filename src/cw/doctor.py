@@ -58,12 +58,18 @@ from cw.models import (
 )
 from cw.native_daemon import _ROSTER_PATH, get_native_daemon_client
 from cw.orchestrate import TickSummary, latest_tick_summary_by_client
+from cw.pr_hydrate import _is_candidate, _parse_pr_url, _repo_slug_mismatch
 from cw.reconcile import (
     SPAWN_GRACE_SECONDS,
     compute_drift,
     feature_branch_key,
     reconcile,
     ticket_id_for_session,
+)
+from cw.reconcile.review_recipes import (
+    RECIPE_ATTENTION_STATES,
+    RECIPE_FIRED_AT_GETTERS,
+    resolve_review_recipe_enabled,
 )
 from cw.review_strategy import HANDLE_KEY_BY_MODE, RECOGNIZED_MODES
 from cw.tracker import PROJECT_CONFIG_RELPATH, load_project_config_dict
@@ -324,6 +330,133 @@ def _check_review_strategy(clients: dict[str, ClientConfig]) -> list[CheckResult
         if warning is not None:
             results.append(warning)
     return results
+
+
+# Check name for the #1201 review-recipe liveness/census anomaly checks.
+_LIVENESS_CHECK_NAME = "review-recipe-liveness"
+_CENSUS_CHECK_NAME = "attention-state-census"
+
+
+def _check_review_recipe_liveness(
+    clients: dict[str, ClientConfig],
+) -> list[CheckResult]:
+    """Warn when an enabled review recipe has candidates but has never fired.
+
+    #1201 anomaly layer. For every ``(recipe, attention_state)`` pair, groups the
+    enabled candidate rows by ``(client, lane, recipe)``; a group where *zero*
+    rows carry a non-None ``<recipe>_fired_at`` latch is a liveness anomaly — the
+    recipe is enabled and has work at its trigger attention_state yet has not
+    fired within the current episode. A group with even one fired row is healthy
+    (partial firing proves the recipe can fire) and is NOT warned. The latch is
+    an already-persisted proxy for "fired this episode" (cleared by
+    ``_clear_ended_episodes`` when the episode ends), so no event replay or
+    config window is needed. Degrades to a single no-warn result when the config
+    or dev-queue fails to load (both are surfaced by their own checks).
+    """
+    try:
+        config = load_orchestrator_config()
+    except (OSError, yaml.YAMLError, CwError, ValidationError):
+        config = OrchestratorConfig()
+    if not config.review_recipes_enabled:
+        return [
+            CheckResult(
+                _LIVENESS_CHECK_NAME,
+                ok=True,
+                detail="review recipes disabled (master switch off)",
+            )
+        ]
+    try:
+        tasks = load_dev_queue().tasks
+    except (OSError, json.JSONDecodeError, ValidationError):
+        return [
+            CheckResult(
+                _LIVENESS_CHECK_NAME,
+                ok=True,
+                detail="dev_queue unreadable (see dev_queue.json check)",
+            )
+        ]
+    groups: dict[tuple[str, str, str], list[TicketTask]] = {}
+    for task in tasks:
+        if not _is_candidate(task) or task.pr_state is None:
+            continue
+        for recipe, attention_state in RECIPE_ATTENTION_STATES.items():
+            if task.pr_state.attention_state != attention_state:
+                continue
+            if not resolve_review_recipe_enabled(task, clients, recipe):
+                continue
+            groups.setdefault((task.client, task.lane, recipe), []).append(task)
+    results: list[CheckResult] = []
+    for (client, lane, recipe), group in sorted(groups.items()):
+        firings = sum(
+            1 for t in group if RECIPE_FIRED_AT_GETTERS[recipe](t) is not None
+        )
+        if firings == 0:
+            results.append(
+                CheckResult(
+                    f"{_LIVENESS_CHECK_NAME}/{client}/{lane}/{recipe}",
+                    ok=True,
+                    warn=True,
+                    detail=(
+                        f"{len(group)} candidate(s) at "
+                        f"{RECIPE_ATTENTION_STATES[recipe]} but recipe {recipe!r} "
+                        "has not fired this episode"
+                    ),
+                )
+            )
+    if not results:
+        return [
+            CheckResult(
+                _LIVENESS_CHECK_NAME,
+                ok=True,
+                detail="all enabled review recipes with candidates have fired",
+            )
+        ]
+    return results
+
+
+def _check_attention_state_census() -> CheckResult:
+    """Warn when a hydrated, non-draft candidate PR carries no attention_state.
+
+    #1201 R4. A non-draft candidate row whose ``pr_state`` is hydrated but whose
+    ``attention_state`` is None means the derivation ladder classified nothing
+    where it should have — an observability gap that would leave the row
+    invisible to every attention-state consumer. Draft PRs (None by design),
+    un-hydrated rows (``pr_state is None``), and terminal PRs (excluded by
+    ``_is_candidate``) are all out of scope. Degrades to a no-warn result when
+    the dev-queue fails to load (surfaced by its own check).
+    """
+    try:
+        tasks = load_dev_queue().tasks
+    except (OSError, json.JSONDecodeError, ValidationError):
+        return CheckResult(
+            _CENSUS_CHECK_NAME,
+            ok=True,
+            detail="dev_queue unreadable (see dev_queue.json check)",
+        )
+    missing = [
+        t
+        for t in tasks
+        if _is_candidate(t)
+        and t.pr_state is not None
+        and not t.pr_state.is_draft
+        and t.pr_state.attention_state is None
+    ]
+    if missing:
+        ids = ", ".join(sorted(t.ticket_id for t in missing))
+        return CheckResult(
+            _CENSUS_CHECK_NAME,
+            ok=True,
+            warn=True,
+            detail=(
+                f"{len(missing)} non-draft hydrated PR(s) with no "
+                f"attention_state: {ids}"
+            ),
+        )
+    return CheckResult(
+        _CENSUS_CHECK_NAME,
+        ok=True,
+        detail="all non-draft hydrated candidate PRs have an attention_state",
+    )
 
 
 def _check_config_file() -> CheckResult:
@@ -610,6 +743,50 @@ def _check_dispatch_repo_head(
                     ),
                 )
             )
+    return results
+
+
+def _check_cross_repo_rows(
+    clients: dict[str, ClientConfig],
+) -> list[CheckResult]:
+    """Advisory warn-only check: dev-queue rows whose client resolves to a
+    different github repo than the row's ``pr_url`` (GitHub #1198).
+
+    Every result is ``ok=True, warn=True`` so it never flips
+    ``DoctorReport.ok`` (mirrors ``_check_dispatch_repo_head``). A broken queue
+    is already surfaced by ``_check_dev_queue``, so a load failure here degrades
+    to ``[]`` rather than double-reporting.
+    """
+    try:
+        store = load_dev_queue()
+    except (OSError, json.JSONDecodeError, ValidationError):
+        return []
+    results: list[CheckResult] = []
+    for task in store.tasks:
+        if task.pr_url is None:
+            continue
+        client = clients.get(task.client)
+        if client is None:
+            continue
+        parsed = _parse_pr_url(task.pr_url)
+        if parsed is None:
+            continue
+        pr_repo = parsed[0]
+        client_repo = _repo_slug_mismatch(pr_repo, client.workspace_path)
+        if client_repo is None:
+            continue
+        results.append(
+            CheckResult(
+                f"cross-repo/{task.ticket_id}",
+                ok=True,
+                warn=True,
+                detail=(
+                    f"row {task.ticket_id} client {task.client!r} workspace repo"
+                    f" {client_repo!r} != pr_url repo {pr_repo!r} — a"
+                    " worker-dispatching recipe would run in the wrong workspace"
+                ),
+            )
+        )
     return results
 
 
@@ -1373,6 +1550,9 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     state_check, link_state = _check_state_file()
     report.checks.append(state_check)
     report.checks.append(_check_dev_queue())
+    # #1201 anomaly layer: review-recipe liveness + attention-state census.
+    report.checks.extend(_check_review_recipe_liveness(_clients))
+    report.checks.append(_check_attention_state_census())
 
     # Linkage checks reuse the state already loaded by _check_state_file.
     # If state failed to load, state_check is ok=False and the user sees the
@@ -1391,6 +1571,7 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     report.checks.append(_check_inbox_size())
     report.checks.extend(_check_workspace_paths())
     report.checks.extend(_check_dispatch_repo_head(_clients))
+    report.checks.extend(_check_cross_repo_rows(_clients))
     report.checks.extend(_check_worktree_paths_sessions(link_state))
 
     if link_state is not None:

@@ -37,6 +37,7 @@ from cw.reconcile._shared import (
     _FINALIZE_BLOCKED_REASON,
     _NEEDS_SALVAGE_REASON,
     _RESCUE_PR_BODY_TEMPLATE,
+    _RESCUE_PR_CLOSES_TRAILER_TEMPLATE,
     _SALVAGE_KIND_GIT_STATE,
     _SALVAGE_PR_BODY_TEMPLATE,
     _SALVAGE_PR_TITLE_TEMPLATE,
@@ -269,6 +270,7 @@ def _salvage_low_path(
     """Execute the LOW-confidence flag-only path."""
     breadcrumbs = f"branch={branch} worktree={worktree_path_str}"
     already_flagged = False
+    now = datetime.now(UTC)
 
     # Update session last_result under sessions_lock. Capture already_flagged
     # before the conditional write so the early-return below can suppress
@@ -290,6 +292,9 @@ def _salvage_low_path(
                     else:
                         s.last_result = {"paused_status": _NEEDS_SALVAGE_REASON}
                     s.reap_reason = ReapReason.SALVAGE_PARKED
+                    s.status = SessionStatus.COMPLETED
+                    s.completed_at = now
+                    s.completed_reason = CompletionReason.CRASHED
                 break
         save_state(fresh_state)
 
@@ -333,6 +338,12 @@ def _salvage_low_path(
     )
     _deps.fire_push_notification(session.name, session.client)
 
+    # Stop the surface if still running — a salvage-parked session is by
+    # definition no longer live (GitHub #1249).
+    if session.surface_ref is not None:
+        with contextlib.suppress(Exception):
+            _deps.get_native_daemon_client().stop(session.surface_ref)
+
 
 def _rescue_mark_attempted(session_id: str) -> None:
     """Write rescue_attempted=True so the session is skipped on future ticks."""
@@ -350,6 +361,9 @@ def _rescue_mark_attempted(session_id: str) -> None:
 
 def _rescue_open_pr(branch: str, default_branch: str, ticket_id: str | None) -> bool:
     """Create a PR from branch → default_branch. Returns True on success."""
+    body = _RESCUE_PR_BODY_TEMPLATE.format(ticket_id=ticket_id or "unknown")
+    if ticket_id is not None and ticket_id.isdigit():
+        body += _RESCUE_PR_CLOSES_TRAILER_TEMPLATE.format(ticket_id=ticket_id)
     try:
         subprocess.run(
             [
@@ -363,7 +377,7 @@ def _rescue_open_pr(branch: str, default_branch: str, ticket_id: str | None) -> 
                 "--title",
                 f"auto-dev: finalize for {ticket_id or 'unknown'}",
                 "--body",
-                _RESCUE_PR_BODY_TEMPLATE.format(ticket_id=ticket_id or "unknown"),
+                body,
             ],
             capture_output=True,
             text=True,

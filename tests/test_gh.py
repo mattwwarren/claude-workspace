@@ -228,6 +228,46 @@ class TestPrIsMergedForTicket:
         assert merged is False
         assert gh_available is True
 
+    def test_cwd_passed_through_issue_link_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """cwd reaches the `gh issue view` subprocess call (#1269)."""
+        want_cwd = Path("/some/client/repo")
+        captured: list[Path | None] = []
+
+        def _fake_run(args: list[str], **kwargs: Any) -> Any:
+            if "issue" in args:
+                captured.append(kwargs.get("cwd"))
+                return _make_issue_result([42])
+            return _make_pr_result("MERGED")
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        merged, gh_available = pr_is_merged_for_ticket("487", cwd=want_cwd)
+        assert merged is True
+        assert gh_available is True
+        assert captured == [want_cwd]
+
+    def test_cwd_passed_through_branch_fallback_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """cwd reaches the `gh pr list --head` subprocess call (#1269)."""
+        want_cwd = Path("/some/client/repo")
+        captured: list[Path | None] = []
+
+        def _fake_run(args: list[str], **kwargs: Any) -> Any:
+            if "issue" in args:
+                return _make_run_result(1, "")  # not a GitHub issue
+            captured.append(kwargs.get("cwd"))
+            return _make_run_result(0, json.dumps([{"number": 1}]))
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        merged, gh_available = pr_is_merged_for_ticket(
+            "GEN-403", branch="dev/GEN-403", cwd=want_cwd
+        )
+        assert merged is True
+        assert gh_available is True
+        assert captured == [want_cwd]
+
     # ------------------------------------------------------------------
     # Branch-keyed fallback tests (Linear / issue-link unsupported)
     # ------------------------------------------------------------------

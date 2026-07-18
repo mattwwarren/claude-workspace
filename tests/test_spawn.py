@@ -6,6 +6,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, get_args
+from unittest.mock import MagicMock
 
 import pytest
 from click.testing import CliRunner
@@ -1255,6 +1256,83 @@ class TestWriteHookContextAtomicAndLiveSession:
         # cw-context.json updated with new session id.
         updated = json.loads((claude_dir / "cw-context.json").read_text())
         assert updated["session_id"] == "new-sess-id"
+
+    def test_daemon_overwrite_allowed_after_salvage_low_path_closes_session(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Acceptance test for #1249: a session parked by ``_salvage_low_path``
+        must be closeable so ``_write_hook_context`` doesn't treat it as a
+        live conflict on the next spawn attempt for the same worktree.
+
+        Reuses this class's ``_call`` helper (issue #427 DAEMON live-session
+        guard coverage) but seeds the prior session through a real
+        ``_salvage_low_path`` call — the ticket's actual reap path — rather
+        than hand-building a ``Session(status=COMPLETED)`` the way
+        ``test_daemon_overwrite_allowed_when_context_references_completed_session``
+        does. That existing test proves the guard's COMPLETED branch works in
+        isolation; this test proves ``_salvage_low_path`` actually reaches it.
+        """
+        from cw.models import (
+            CwState,
+            Session,
+            SessionOrigin,
+            SessionPurpose,
+            SessionStatus,
+        )
+        from cw.reconcile.salvage import _salvage_low_path
+
+        workspace = tmp_path / "workspace" / "test-client"
+        workspace.mkdir(parents=True)
+        worktree = tmp_path / "worktree-salvage-then-respawn"
+        claude_dir = worktree / ".claude"
+        claude_dir.mkdir(parents=True)
+
+        parked_sess = Session(
+            id="parked-1249",
+            name="test-client/auto-dev/1249",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            status=SessionStatus.ACTIVE,
+            workspace_path=workspace,
+            worktree_path=worktree,
+            surface_ref="live-ref-1249",
+        )
+        save_state(CwState(sessions=[parked_sess]))
+
+        # Same collision shape as the ticket: a cw-context.json left behind
+        # by the parked session, referencing its session_id.
+        prior_context = {
+            "session_id": "parked-1249",
+            "session_name": "test-client/auto-dev/1249",
+            "client": "test-client",
+            "purpose": "impl",
+            "ticket_id": "1249",
+            "headless": True,
+        }
+        (claude_dir / "cw-context.json").write_text(json.dumps(prior_context))
+
+        monkeypatch.setattr(
+            "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
+        )
+        monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
+
+        # Exercise the real reap path (fix #1 of #1249's fix set).
+        _salvage_low_path(parked_sess, "1249", "dev/1249", str(worktree))
+
+        reloaded = load_state()
+        s = next(s for s in reloaded.sessions if s.id == "parked-1249")
+        assert s.status == SessionStatus.COMPLETED
+
+        # The acceptance assertion: a subsequent DAEMON spawn attempt on the
+        # same worktree must NOT raise HookContextConflictError.
+        self._call(worktree, origin=SessionOrigin.DAEMON, session_id="new-sess-1249")
+
+        updated = json.loads((claude_dir / "cw-context.json").read_text())
+        assert updated["session_id"] == "new-sess-1249"
 
     def test_daemon_overwrite_allowed_when_no_context_file(
         self, tmp_config_dir: Path, tmp_path: Path

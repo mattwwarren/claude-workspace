@@ -46,6 +46,8 @@ cw event record stage.entered \
 - Data Safety (always when persisted-state mutation is present)
 - Product Manager (always — Mode 2 spec compliance)
 
+**Track `REVIEWER_COUNT`:** as reviewers are spawned in this pass, count the number actually dispatched (conditional roster members — Data Safety, and any Large-scope conditional entry — count only when actually spawned, not when skipped). This count feeds `review.agents_run` in the Stage 3 Completion sentinel below. Carry `REVIEWER_COUNT` unchanged across any Step 3b re-review/fix-loop cycles — it reflects the original review pass, not fix-cycle churn.
+
 Dispatch shape depends on mode (see issues #175 / #176 in claude-workspace for the orphan hazard this avoids):
 
 - **Interactive mode:** all reviewers run with `run_in_background: true` (parallel — a human is watching and USER-origin Stop hooks do not auto-transition session state).
@@ -334,6 +336,8 @@ To resolve the tier:
 
 `scope.tier` must always be a concrete value (`"small"` or `"large"`) in the emitted sentinel — the schema validator requires it for any stage beyond pre-impl. Use the resolved tier when available; fall back to `"small"` when emitting the `scope_tier_unresolvable` blocked sentinel above.
 
+**`review.agents_run` must be set to `REVIEWER_COUNT`** (tracked in Step 3a above), not left at the template's placeholder `0` — it is the count of reviewer agents actually spawned in this review pass.
+
 **Only emit this sentinel when invoked as a standalone `/auto-dev-review <ticket-id> --headless` command. Do NOT emit when running as part of the interactive monolith chain (`auto-dev.md` owns the sentinel in that context).**
 
 ```bash
@@ -343,7 +347,7 @@ printf '%s' "$SENTINEL_JSON" | cw result validate -
 ```
 <<<AUTO_DEV_RESULT
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "ticket_id": "<ticket-id>",
   "status": "<review_pending_approval | blocked>",
   "stage_reached": "stage3_review",
@@ -354,7 +358,7 @@ printf '%s' "$SENTINEL_JSON" | cw result validate -
   "fork_point_sha": "<fork point sha>",
   "commits": ["<sha1>", "<sha2>"],
   "pr": null,
-  "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0, "deferred": 0},
+  "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0, "deferred": 0, "agents_run": 0},
   "health": {
     "lowest_agent_confidence": "<HIGH|MEDIUM|LOW>",
     "any_incomplete_risk": false,

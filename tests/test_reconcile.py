@@ -10338,6 +10338,44 @@ class TestCompleteTimedOutMergedTasks:
 
         assert captured_branch == [f"feat/{ticket_id}"]
 
+    def test_custom_feature_branch_prefix_used_passes_cwd(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """cwd resolved from client's workspace_path reaches the gh check (#1269)."""
+        now = datetime.now(UTC)
+        ticket_id = "TKT-X"
+        session = _mk_timed_out_daemon_session(
+            "sess-custom-prefix-cwd", ticket_id, completed_at=now - timedelta(days=1)
+        )
+        save_state(CwState(sessions=[session]))
+        save_dev_queue(DevQueueStore(tasks=[self._pending_task(ticket_id)]))
+
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            "clients:\n"
+            "  client-a:\n"
+            "    workspace_path: /tmp/ws-feat\n"
+            "    default_branch: main\n"
+            "    feature_branch_prefix: feat\n"
+        )
+
+        captured_cwd: list[Path | None] = []
+
+        def _capture(
+            tid: str, *, branch: str, cwd: Path | None = None, **_kw: object
+        ) -> tuple[bool, bool]:
+            captured_cwd.append(cwd)
+            return True, True
+
+        monkeypatch.setattr("cw.reconcile._deps.pr_is_merged_for_ticket", _capture)
+
+        complete_timed_out_merged_tasks()
+
+        assert captured_cwd == [Path("/tmp/ws-feat")]
+
     def test_default_feature_branch_prefix_fallback(
         self,
         tmp_config_dir: Path,
@@ -10365,6 +10403,54 @@ class TestCompleteTimedOutMergedTasks:
         complete_timed_out_merged_tasks()
 
         assert captured_branch == [f"dev/{ticket_id}"]
+
+    def test_dangling_client_skips_gh_call_stays_pending(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """clients.yaml populated but missing this session's client → skip.
+
+        Distinct from "no clients.yaml at all" (see
+        test_default_feature_branch_prefix_fallback, which must still call
+        gh with cwd=None): here clients.yaml is populated with a *different*
+        client, so this session's client is dangling/config-drifted. An
+        unscoped gh call would risk the same cross-repo misattribution the
+        ticket describes (#1269), so the candidate must be skipped entirely
+        rather than falling back to an ambient-cwd gh call.
+        """
+        now = datetime.now(UTC)
+        ticket_id = "TKT-DANGLING"
+        session = _mk_timed_out_daemon_session(
+            "sess-dangling-client", ticket_id, completed_at=now - timedelta(days=1)
+        )
+        save_state(CwState(sessions=[session]))
+        save_dev_queue(DevQueueStore(tasks=[self._pending_task(ticket_id)]))
+
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            "clients:\n"
+            "  client-b:\n"
+            "    workspace_path: /tmp/ws-other\n"
+            "    default_branch: main\n"
+        )
+
+        calls: list[str] = []
+
+        def _capture(tid: str, *, branch: str, **_kw: object) -> tuple[bool, bool]:
+            calls.append(tid)
+            return True, True
+
+        monkeypatch.setattr("cw.reconcile._deps.pr_is_merged_for_ticket", _capture)
+
+        completed = complete_timed_out_merged_tasks()
+
+        assert calls == []
+        assert completed == []
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.PENDING
 
 
 # ---------------------------------------------------------------------------
@@ -10548,6 +10634,7 @@ class TestSalvageCommittedNoPrSessions:
         monkeypatch.setattr(
             "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
         )
+        monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
 
         candidates: list[tuple[str, str | None, str, str, bool]] = [
             ("sess-low", ticket_id, "dev/low-branch", str(worktree), False)
@@ -10576,6 +10663,7 @@ class TestSalvageCommittedNoPrSessions:
         s = next(s for s in reloaded.sessions if s.id == "sess-low")
         lr = s.last_result or {}
         assert lr.get("paused_status") == _NEEDS_SALVAGE_REASON
+        assert s.status == SessionStatus.COMPLETED
 
     def test_low_path_merges_into_existing_last_result(
         self,
@@ -10613,6 +10701,7 @@ class TestSalvageCommittedNoPrSessions:
         monkeypatch.setattr(
             "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
         )
+        monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
 
         _salvage_low_path(sess, ticket_id, "dev/merge-branch", str(worktree))
 
@@ -10623,6 +10712,7 @@ class TestSalvageCommittedNoPrSessions:
         assert s.last_result["review"] == {"clean": True}
         assert s.last_result["paused_status"] == _NEEDS_SALVAGE_REASON
         assert s.reap_reason == ReapReason.SALVAGE_PARKED
+        assert s.status == SessionStatus.COMPLETED
 
     def test_stalled_needs_salvage_route_stamps_disposition(
         self,
@@ -10663,6 +10753,7 @@ class TestSalvageCommittedNoPrSessions:
         monkeypatch.setattr(
             "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
         )
+        monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
 
         candidates: list[tuple[str, str | None, str, str, bool]] = [
             ("sess-low-disp", ticket_id, "dev/low-disp-branch", str(worktree), False)
@@ -10717,6 +10808,7 @@ class TestSalvageCommittedNoPrSessions:
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
         )
         monkeypatch.setattr("cw.reconcile._deps.fire_push_notification", _capture_push)
+        monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
 
         candidates = [
             ("sess-idem-low", ticket_id, "dev/idem-low-branch", str(worktree), False)
@@ -10783,6 +10875,7 @@ class TestSalvageCommittedNoPrSessions:
         monkeypatch.setattr(
             "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
         )
+        monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
 
         candidates: list[tuple[str, str | None, str, str, bool]] = [
             ("sess-idem", ticket_id, "dev/idem-branch", str(worktree), True)
@@ -11097,6 +11190,7 @@ class TestSalvageCommittedNoPrSessions:
         monkeypatch.setattr(
             "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
         )
+        monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
 
         # post_review_clean=False (different session_id → _detect_post_review_clean
         # returns False → LOW path)
@@ -11311,6 +11405,7 @@ class TestSalvageCommittedNoPrSessions:
         monkeypatch.setattr(
             "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
         )
+        monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
 
         completed = salvage_committed_no_pr_sessions(
             [("sess-pushfail", ticket_id, "dev/pf-branch", str(worktree), True)]
@@ -11372,6 +11467,7 @@ class TestSalvageCommittedNoPrSessions:
         monkeypatch.setattr(
             "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
         )
+        monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
 
         completed = salvage_committed_no_pr_sessions(
             [("sess-createfail", ticket_id, "dev/cf-branch", str(worktree), True)]
@@ -11547,6 +11643,7 @@ class TestSalvageCommittedNoPrSessions:
         )
         pr_check = MagicMock(return_value=(False, True))
         monkeypatch.setattr("cw.reconcile.salvage.pr_exists_for_branch", pr_check)
+        monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
 
         candidates: list[tuple[str, str | None, str, str, bool]] = [
             (
@@ -12400,6 +12497,7 @@ def test_reap_reason_salvage_parked(
     monkeypatch.setattr(
         "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
     )
+    monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
 
     candidates: list[tuple[str, str | None, str, str, bool]] = [
         ("salv-park-1", ticket_id, "dev/salv-park", str(worktree), False)
@@ -12409,6 +12507,7 @@ def test_reap_reason_salvage_parked(
     reloaded = load_state()
     s = next(s for s in reloaded.sessions if s.id == "salv-park-1")
     assert s.reap_reason == ReapReason.SALVAGE_PARKED
+    assert s.status == SessionStatus.COMPLETED
 
 
 def test_reap_reason_not_overwritten_by_backstop(
@@ -14762,13 +14861,17 @@ def test_stalled_veto_park_proceeds_once_quiet(
     assert not any(c.proposed_action == ProposedAction.PARK_VETOED for c in candidates)
 
 
-def test_stalled_veto_does_not_apply_to_cap_exceeded_park(
+def test_stalled_veto_applies_to_cap_exceeded_park_when_transcript_fresh(
     tmp_config_dir: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """attempts >= cap park fires unconditionally even with a fresh transcript
-    — the veto is structurally unreachable for the cap-exceeded branch (#976)."""
+    """attempts >= cap with a fresh transcript -> PARK_VETOED, not
+    PARK_BLOCKED_ON_USER — the veto is now reachable from the cap-exceeded
+    branch too (#1277). Previously this branch parked unconditionally
+    because the veto was only ever consulted from the wall-clock revert
+    path, which the cap-exceeded branch always short-circuits before
+    reaching."""
     from cw.reconcile import (
         DEFAULT_STALLED_RETRY_CAP,
         ProposedAction,
@@ -14808,9 +14911,131 @@ def test_stalled_veto_does_not_apply_to_cap_exceeded_park(
         task_by_ticket={"veto-cap-1": task},
     )
 
-    assert any(
+    veto = next(
+        c for c in candidates if c.proposed_action == ProposedAction.PARK_VETOED
+    )
+    assert veto.reap_reason == ReapReason.STALLED_RETRY_CAP_PARKED
+    assert not any(
         c.proposed_action == ProposedAction.PARK_BLOCKED_ON_USER for c in candidates
     )
+
+
+def test_stalled_veto_cap_exceeded_matches_1266_regression_signature(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end (detect + act) regression guard for #1277: a cap-exceeded,
+    wall-clock-expired session with a fresh transcript must be vetoed all
+    the way through the act phase — task stays RUNNING, session stays
+    ACTIVE, and a SESSION_PARK_VETOED event is emitted with the cap-sourced
+    reap reason, not silently parked BLOCKED_ON_USER."""
+    from cw.reconcile import DEFAULT_STALLED_RETRY_CAP, HEADLESS_TIMEOUT_SECONDS
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / "wt-veto-cap-e2e"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(seconds=3655.8)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("veto-cap-e2e-1", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="veto-cap-e2e-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="veto-cap-e2e-1",
+        stage=Stage.PLAN,
+        attempts=DEFAULT_STALLED_RETRY_CAP,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    transcript = _write_idle_transcript(home, worktree)
+    stale_ts = (now - timedelta(seconds=45)).timestamp()
+    os.utime(str(transcript), (stale_ts, stale_ts))
+
+    reverted = revert_stalled_headless_sessions(state, now=now, config=_auto_config())
+
+    assert "veto-cap-e2e-1" not in reverted
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "veto-cap-e2e-1")
+    assert t.status == QueueItemStatus.RUNNING
+
+    reloaded = load_state()
+    s = next(s for s in reloaded.sessions if s.id == "veto-cap-e2e-1")
+    assert s.status == SessionStatus.ACTIVE
+
+    events = read_events(
+        consumer="test-veto-cap-e2e-1",
+        event_types=[OrchestratorEventType.SESSION_PARK_VETOED],
+    )
+    assert len(events) == 1
+    payload = events[0].payload
+    assert payload["ticket_id"] == "veto-cap-e2e-1"
+    assert payload["reason"] == "stalled_retry_cap_parked"
+
+
+def test_stalled_veto_cap_exceeded_stale_transcript_still_parks(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard: a genuinely dead cap-exceeded session (transcript
+    present but stale past the per-stage floor) must still park
+    BLOCKED_ON_USER — the new liveness check inside the cap branch must not
+    override a real timeout (#1277)."""
+    from cw.reconcile import (
+        DEFAULT_STALLED_RETRY_CAP,
+        ProposedAction,
+        _detect_stalled_candidates,
+    )
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / "wt-veto-cap-stale"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session("veto-cap-stale-1", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="veto-cap-stale-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="veto-cap-stale-1",
+        stage=Stage.PLAN,
+        attempts=DEFAULT_STALLED_RETRY_CAP,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    transcript = _write_idle_transcript(home, worktree)
+    # 40 minutes stale — past the 15-min PLAN-stage floor -> not LIVE.
+    stale_ts = (now - timedelta(minutes=40)).timestamp()
+    os.utime(str(transcript), (stale_ts, stale_ts))
+
+    candidates = _detect_stalled_candidates(
+        state,
+        now=now,
+        config=_auto_config(),
+        task_by_ticket={"veto-cap-stale-1": task},
+    )
+
+    park = next(
+        c
+        for c in candidates
+        if c.proposed_action == ProposedAction.PARK_BLOCKED_ON_USER
+    )
+    assert park.reap_reason == ReapReason.STALLED_RETRY_CAP_PARKED
     assert not any(c.proposed_action == ProposedAction.PARK_VETOED for c in candidates)
 
 
@@ -14845,6 +15070,10 @@ def test_act_on_stalled_park_vetoed_emits_event_no_mutation(
         client="client-a",
         stage=Stage.IMPL,
         stale_minutes=4.2,
+        # Why: stamp explicitly (#1277) so this exercises the post-fix
+        # "read from candidate.reap_reason" emission path, not the
+        # defensive None-fallback that now exists alongside it.
+        reap_reason=ReapReason.WALL_CLOCK_BUDGET,
     )
 
     _act_on_stalled_candidates(state, [candidate], now=now)
@@ -19012,6 +19241,61 @@ class TestWorldStateCheckBeforeRevert:
 
         assert captured_branch == [f"feat/{ticket_id}"]
 
+    def test_reconcile_prepass_passes_cwd(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """reconcile() pre-pass resolves cwd from client's workspace_path (#1269)."""
+        ticket_id = "reconcile-cwd-1"
+        worktree = tmp_path / "wt-reconcile-cwd"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            "clients:\n"
+            "  client-a:\n"
+            "    workspace_path: /tmp/ws-feat\n"
+            "    default_branch: main\n"
+            "    feature_branch_prefix: feat\n"
+        )
+
+        sess = _mk_headless_daemon_session(ticket_id, worktree, started_at)
+        save_state(CwState(sessions=[sess]))
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id=ticket_id,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        captured_cwd: list[Path | None] = []
+
+        def _capture(
+            tid: str, *, branch: str, cwd: Path | None = None, **_kw: object
+        ) -> tuple[bool, bool]:
+            captured_cwd.append(cwd)
+            return False, True
+
+        monkeypatch.setattr("cw.reconcile._deps.pr_is_merged_for_ticket", _capture)
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
+        monkeypatch.setattr("cw.reconcile.core.complete_timed_out_merged_tasks", list)
+        monkeypatch.setattr(
+            "cw.reconcile.core.salvage_committed_no_pr_sessions", lambda _c, **_kw: []
+        )
+
+        with freezegun.freeze_time(now):
+            reconcile()
+
+        assert captured_cwd == [Path("/tmp/ws-feat")]
+
     def test_reconcile_prepass_default_prefix_fallback(
         self,
         tmp_config_dir: Path,
@@ -19056,6 +19340,166 @@ class TestWorldStateCheckBeforeRevert:
             reconcile()
 
         assert captured_branch == [f"dev/{ticket_id}"]
+
+    def test_reconcile_prepass_dangling_client_skips_gh_call(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """reconcile() pre-pass: clients.yaml populated but missing this
+        session's client → skip the gh call entirely (GitHub #1269).
+
+        Distinct from "no clients.yaml at all" (see
+        test_reconcile_prepass_default_prefix_fallback, which must still
+        call gh with cwd=None): here clients.yaml is populated with a
+        *different* client, so this session's client is dangling/config-
+        drifted. An unscoped gh call would risk the same cross-repo
+        misattribution the ticket describes.
+        """
+        ticket_id = "reconcile-dangling-1"
+        worktree = tmp_path / "wt-reconcile-dangling"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            "clients:\n"
+            "  client-b:\n"
+            "    workspace_path: /tmp/ws-other\n"
+            "    default_branch: main\n"
+        )
+
+        sess = _mk_headless_daemon_session(ticket_id, worktree, started_at)
+        save_state(CwState(sessions=[sess]))
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id=ticket_id,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        calls: list[str] = []
+
+        def _capture(tid: str, *, branch: str, **_kw: object) -> tuple[bool, bool]:
+            calls.append(tid)
+            return True, True  # would falsely report merged if ever called
+
+        monkeypatch.setattr("cw.reconcile._deps.pr_is_merged_for_ticket", _capture)
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
+        monkeypatch.setattr("cw.reconcile.core.complete_timed_out_merged_tasks", list)
+        monkeypatch.setattr(
+            "cw.reconcile.core.salvage_committed_no_pr_sessions", lambda _c, **_kw: []
+        )
+
+        with freezegun.freeze_time(now):
+            reconcile()
+
+        assert calls == []
+
+    def test_stalled_dead_session_wrong_repo_merge_does_not_phantom_reap(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A dead stalled session's ticket must not be phantom-reaped as
+        merged/shipped just because the gh CLI's ambient CWD (not scoped to
+        the client's repo) happens to answer a same-numbered ticket in a
+        different repo as merged. Real repro of GitHub #1269: fakes
+        ``cw.gh._sp.run`` itself (not ``_deps.pr_is_merged_for_ticket``) so
+        the exact code path under test — cwd threading through
+        ``pr_is_merged_for_ticket`` — is exercised end to end via the real
+        ``reconcile()`` entry point.
+
+        Pre-fix: no cwd is ever passed to the gh subprocess, so every call
+        lands in the "ambient" branch below, which reports the ticket
+        MERGED — reproducing the incident (task COMPLETED/"shipped",
+        SESSION_COMPLETED with reason="phantom_reap_merged").
+
+        Post-fix: the pre-pass and stalled sweep resolve cwd from the
+        client's ``workspace_path`` via ``_git_dir``, so the gh calls land
+        in the "scoped correctly" branch, which reports the ticket
+        genuinely unmerged in client A's own repo — routing the task to
+        BLOCKED_ON_USER under the default SIGNAL_ONLY reap policy instead.
+        """
+        ticket_id = "wrongrepo-1"
+        repo_a = tmp_path / "repo-a"
+        repo_a.mkdir()
+        worktree = tmp_path / "wt-wrongrepo"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            "clients:\n"
+            "  client-a:\n"
+            f"    workspace_path: {repo_a}\n"
+            "    default_branch: main\n"
+        )
+
+        def _fake_run(args: list[str], **kwargs: object) -> Any:
+            cwd = kwargs.get("cwd")
+            scoped_correctly = cwd == repo_a
+            result = MagicMock()
+            result.returncode = 0
+            if "issue" in args:
+                # Correctly scoped to client A's repo: ticket has no linked
+                # PRs there (genuinely unmerged). Ambient/unscoped: simulate
+                # the collision — a same-numbered ticket that IS merged in
+                # whatever repo the ambient CWD happens to resolve to.
+                refs = [] if scoped_correctly else [{"number": 999}]
+                result.stdout = json.dumps({"closedByPullRequestsReferences": refs})
+            elif "list" in args:
+                result.stdout = json.dumps([])
+            else:
+                result.stdout = json.dumps(
+                    {"state": "OPEN" if scoped_correctly else "MERGED"}
+                )
+            return result
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+
+        sess = _mk_headless_daemon_session(ticket_id, worktree, started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id=ticket_id,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        monkeypatch.setattr("cw.reconcile.core._claude_agents_json", list)
+        monkeypatch.setattr("cw.reconcile.core.complete_timed_out_merged_tasks", list)
+        monkeypatch.setattr(
+            "cw.reconcile.core.salvage_committed_no_pr_sessions", lambda _c, **_kw: []
+        )
+
+        with freezegun.freeze_time(now):
+            reconcile()
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert t.status != QueueItemStatus.COMPLETED
+        assert t.disposition != "shipped"
+
+        events = read_events(
+            consumer=f"test-{ticket_id}-phantom-reap-guard",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert not any(e.payload.get("reason") == "phantom_reap_merged" for e in events)
 
 
 # ---------------------------------------------------------------------------
@@ -22178,10 +22622,76 @@ class TestFinalizeBlocked:
 
     def test_rescue_pr_body_template_in_shared(self) -> None:
         """_RESCUE_PR_BODY_TEMPLATE is importable from _shared (NIT 5)."""
-        from cw.reconcile._shared import _RESCUE_PR_BODY_TEMPLATE
+        from cw.reconcile._shared import (
+            _RESCUE_PR_BODY_TEMPLATE,
+            _RESCUE_PR_CLOSES_TRAILER_TEMPLATE,
+        )
 
         assert "finalize" in _RESCUE_PR_BODY_TEMPLATE.lower()
         assert "{ticket_id}" in _RESCUE_PR_BODY_TEMPLATE
+        assert "Closes #" in _RESCUE_PR_CLOSES_TRAILER_TEMPLATE.format(ticket_id="1293")
+
+    # ── 1.26 _rescue_open_pr Closes trailer wiring (#1293) ──────────────────
+
+    def test_rescue_open_pr_numeric_ticket_includes_closes_trailer(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A real numeric ticket_id gets a 'Closes #<n>' trailer appended to
+        the PR body so the auto-rescued PR auto-closes the linked issue on
+        merge (#1293)."""
+        from cw.reconcile.salvage import _rescue_open_pr
+
+        run_mock = MagicMock()
+        monkeypatch.setattr("cw.reconcile.salvage.subprocess.run", run_mock)
+
+        result = _rescue_open_pr("dev/1293", "main", "1293")
+
+        assert result is True
+        run_mock.assert_called_once()
+        args = run_mock.call_args[0][0]
+        body = args[args.index("--body") + 1]
+        assert "Closes #1293" in body
+
+    def test_rescue_open_pr_unknown_ticket_id_omits_closes_trailer(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A None ticket_id must NOT get a Closes trailer -- falls back to the
+        unconditional 'Ticket: #unknown'-style text via the untouched
+        _RESCUE_PR_BODY_TEMPLATE (#1293)."""
+        from cw.reconcile.salvage import _rescue_open_pr
+
+        run_mock = MagicMock()
+        monkeypatch.setattr("cw.reconcile.salvage.subprocess.run", run_mock)
+
+        result = _rescue_open_pr("dev/none-ticket", "main", None)
+
+        assert result is True
+        run_mock.assert_called_once()
+        args = run_mock.call_args[0][0]
+        body = args[args.index("--body") + 1]
+        assert "Closes #" not in body
+        assert "unknown" in body
+
+    def test_rescue_open_pr_nonnumeric_ticket_id_omits_closes_trailer(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-numeric (e.g. Linear-style) ticket_id must NOT get a Closes
+        trailer -- mirrors the real non-numeric ticket_id case proven live in
+        test_rescue_happy_path, and is the exact case the ticket's root-cause
+        analysis warns against (#1293)."""
+        from cw.reconcile.salvage import _rescue_open_pr
+
+        run_mock = MagicMock()
+        monkeypatch.setattr("cw.reconcile.salvage.subprocess.run", run_mock)
+
+        result = _rescue_open_pr("dev/fb-10", "main", "FB-10")
+
+        assert result is True
+        run_mock.assert_called_once()
+        args = run_mock.call_args[0][0]
+        body = args[args.index("--body") + 1]
+        assert "Closes #" not in body
+        assert "Ticket: #FB-10" in body
 
 
 # ---------------------------------------------------------------------------
@@ -22910,10 +23420,7 @@ def test_local_harvest_fires_when_daemon_query_errors(
     def _boom() -> list[dict[str, object]]:
         raise subprocess.CalledProcessError(1, ["claude", "agents", "--json"])
 
-    def _fake_pr_merged(
-        _tid: str, branch: str | None = None
-    ) -> tuple[bool | None, bool]:
-        del branch
+    def _fake_pr_merged(_tid: str, **_kw: object) -> tuple[bool | None, bool]:
         return (None, True)
 
     monkeypatch.setattr("cw.reconcile.core._claude_agents_json", _boom)

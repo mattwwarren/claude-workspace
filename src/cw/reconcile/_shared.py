@@ -208,6 +208,11 @@ _RESCUE_PR_BODY_TEMPLATE = (
     " the PR (permission classifier / usage limit / transient gh failure)."
     " Ticket: #{ticket_id}"
 )
+# Appended to the rescue PR body only when ticket_id is a real numeric GitHub
+# issue id (mirrors the `ship-it.md` numeric-guard convention) -- feeds
+# closedByPullRequestsReferences so the auto-rescued PR auto-closes its ticket
+# on merge (GitHub #1293).
+_RESCUE_PR_CLOSES_TRAILER_TEMPLATE = "\n\nCloses #{ticket_id}"
 
 # Cause tags for SESSION_TIMED_OUT events emitted by the idle watchdog (#486).
 # idle_stall_recovered — watchdog fired but no usage-limit message found.

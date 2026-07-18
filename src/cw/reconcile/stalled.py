@@ -360,8 +360,31 @@ def _detect_stalled_candidates(
                     continue
         cap = resolve_stalled_retry_cap(task, config)
         # Why: task.attempts is the shared counter for both this per-tier stalled cap
-        # and the future global attempt ceiling (#786). Do not add a parallel counter.
+        # and the global attempt ceiling (#786). Do not add a parallel counter.
         if task is not None and task.attempts >= cap:
+            # #1277: check the liveness veto FIRST — a session that is
+            # demonstrably still making progress (fresh transcript) must not
+            # be parked just because it also happens to be at the retry cap.
+            # Previously the veto was only ever consulted from the ordinary
+            # wall-clock revert path below, which this branch always
+            # short-circuits via `continue`, making the veto structurally
+            # unreachable for cap-exceeded sessions. Stamping
+            # STALLED_RETRY_CAP_PARKED (rather than WALL_CLOCK_BUDGET) keeps
+            # the emitted session.park_vetoed event's reason attributable to
+            # the branch that actually produced it.
+            cap_veto = _liveness_veto_candidate(
+                session,
+                task,
+                ticket_id,
+                elapsed,
+                now=now,
+                config=config,
+                reap_reason=ReapReason.STALLED_RETRY_CAP_PARKED,
+            )
+            if cap_veto is not None:
+                _maybe_append_salvage_skip_reset(candidates, session, ticket_id)
+                candidates.append(cap_veto)
+                continue
             # Why: recovery via retry-cap park — a session can yield both its
             # PARK_BLOCKED_ON_USER disposition and a RESET_SALVAGE_SKIP_COUNTER
             # candidate in the same pass (#974).
@@ -395,10 +418,11 @@ def _detect_stalled_candidates(
         # both its REVERT_TASK disposition and a RESET_SALVAGE_SKIP_COUNTER
         # candidate in the same pass (#974). This is the 5th and final
         # non-SKIP_PARKED detect-phase exit (loop falls through, no continue).
-        # This branch is reached only after the cap-exceeded check above has
-        # already returned/appended its own candidate — the liveness veto
-        # (#976) therefore never applies to a cap-exceeded park; correctness
-        # comes from this call-site placement, not a guard inside the helper.
+        # The liveness veto (#976, #1277) is also checked from inside the
+        # cap-exceeded branch above (with a different reap_reason) — this
+        # call below only runs when that branch was not taken at all (task
+        # is below the retry cap), not as a second chance for a cap-exceeded
+        # session that already declined the veto.
         _maybe_append_salvage_skip_reset(candidates, session, ticket_id)
         candidates.append(
             _resolve_wall_clock_candidate(
@@ -406,6 +430,55 @@ def _detect_stalled_candidates(
             )
         )
     return candidates
+
+
+def _liveness_veto_candidate(
+    session: Session,
+    task: TicketTask | None,
+    ticket_id: str | None,
+    elapsed: float,
+    *,
+    now: datetime,
+    config: OrchestratorConfig,
+    reap_reason: ReapReason,
+) -> ReapCandidate | None:
+    """Return a PARK_VETOED candidate when the session is still LIVE, else None.
+
+    Computes fresh transcript-mtime staleness via :func:`_transcript_age_seconds`
+    and classifies it through the same per-stage-floor liveness ladder the
+    observability sweep (``cw.reconcile.liveness``) uses. When the freshly-
+    classified bucket is :attr:`LivenessBucket.LIVE`, the caller's pending
+    park is vetoed entirely — no disposition, no queue mutation — because the
+    session is demonstrably still making progress despite the wall-clock
+    budget (or retry cap) having been exceeded. Fail-toward-park: a session
+    whose transcript cannot be located (``_transcript_age_seconds`` returns
+    ``None``) returns ``None`` so the caller falls through to its normal
+    park/revert candidate.
+
+    Shared by two call sites (GitHub #1277): the ordinary wall-clock revert
+    path (``reap_reason=WALL_CLOCK_BUDGET``) and the stalled-retry-cap park
+    branch (``reap_reason=STALLED_RETRY_CAP_PARKED``). See GitHub #976.
+    """
+    stage = task.stage if task is not None else DEFAULT_STAGE
+    stale_seconds = _transcript_age_seconds(session, now)
+    if stale_seconds is None:
+        return None
+    stale_minutes = stale_seconds / 60.0
+    bucket = _classify_liveness_bucket(stale_minutes, stage=stage, config=config)
+    if bucket is not LivenessBucket.LIVE:
+        return None
+    return ReapCandidate(
+        session_id=session.id,
+        proposed_action=ProposedAction.PARK_VETOED,
+        ticket_id=ticket_id,
+        elapsed_seconds=elapsed,
+        reap_reason=reap_reason,
+        lane=task.lane if task else DEFAULT_LANE,
+        client=session.client,
+        stage=stage,
+        attempts=task.attempts if task else 0,
+        stale_minutes=stale_minutes,
+    )
 
 
 def _resolve_wall_clock_candidate(
@@ -419,33 +492,21 @@ def _resolve_wall_clock_candidate(
 ) -> ReapCandidate:
     """Return PARK_VETOED when the session is still LIVE, else REVERT_TASK.
 
-    Computes fresh transcript-mtime staleness via :func:`_transcript_age_seconds`
-    and classifies it through the same per-stage-floor liveness ladder the
-    observability sweep (``cw.reconcile.liveness``) uses. When the freshly-
-    classified bucket is :attr:`LivenessBucket.LIVE`, the wall-clock-budget
-    park is vetoed entirely — no disposition, no queue mutation — because the
-    session is demonstrably still making progress despite the wall-clock
-    budget having expired. Fail-toward-park: a session whose transcript
-    cannot be located (``_transcript_age_seconds`` returns ``None``) falls
-    through to the normal REVERT_TASK candidate. See GitHub #976.
+    Delegates the liveness check to :func:`_liveness_veto_candidate` with
+    ``reap_reason=ReapReason.WALL_CLOCK_BUDGET``. See GitHub #976, #1277.
     """
+    veto = _liveness_veto_candidate(
+        session,
+        task,
+        ticket_id,
+        elapsed,
+        now=now,
+        config=config,
+        reap_reason=ReapReason.WALL_CLOCK_BUDGET,
+    )
+    if veto is not None:
+        return veto
     stage = task.stage if task is not None else DEFAULT_STAGE
-    stale_seconds = _transcript_age_seconds(session, now)
-    if stale_seconds is not None:
-        stale_minutes = stale_seconds / 60.0
-        bucket = _classify_liveness_bucket(stale_minutes, stage=stage, config=config)
-        if bucket is LivenessBucket.LIVE:
-            return ReapCandidate(
-                session_id=session.id,
-                proposed_action=ProposedAction.PARK_VETOED,
-                ticket_id=ticket_id,
-                elapsed_seconds=elapsed,
-                lane=task.lane if task else DEFAULT_LANE,
-                client=session.client,
-                stage=stage,
-                attempts=task.attempts if task else 0,
-                stale_minutes=stale_minutes,
-            )
     # #1030: branch reap_reason here (not after) so the SESSION_REAP_PROPOSED
     # audit event (emitted from the candidate before the apply phase runs)
     # reports the correct cause — matching the cap-park branch's pattern below.
@@ -1148,7 +1209,17 @@ def _act_on_stalled_candidates(
                 "client": candidate.client,
                 "session_id": candidate.session_id,
                 "stage": candidate.stage,
-                "reason": ReapReason.WALL_CLOCK_BUDGET.value,
+                # #1030 pattern: read the candidate's own reap_reason (now
+                # branched at construction across two call sites — the
+                # wall-clock revert path and the retry-cap park path, #1277)
+                # instead of hardcoding a single cause. Defensive fallback:
+                # reap_reason is always stamped by _liveness_veto_candidate,
+                # but None is handled rather than raising.
+                "reason": (
+                    candidate.reap_reason.value
+                    if candidate.reap_reason is not None
+                    else ReapReason.WALL_CLOCK_BUDGET.value
+                ),
                 "stale_minutes": candidate.stale_minutes,
             },
             correlation_id=candidate.ticket_id,

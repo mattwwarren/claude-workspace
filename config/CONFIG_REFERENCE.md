@@ -215,6 +215,17 @@ OpenAI-compatible endpoint (e.g. LM Studio). The local model never emits a
 sentinel — `cw` synthesises an `AutoDevResult` from git state after aider
 commits.
 
+> **Edit-format warning:** aider falls back to the **model default** edit
+> format when it doesn't recognize the configured model id — which for any
+> non-Claude / OpenAI-compatible model is `whole`. In `whole` mode aider
+> regenerates the entire target file on every edit, which can blow a stage
+> timeout on a large file and present as a **model/timeout failure** rather
+> than the real cause. Set `edit-format: diff` in `~/.aider.conf.yml` (read
+> per-exec, so it applies to an already-running dispatcher with no restart)
+> — or `AIDER_EDIT_FORMAT=diff` in the *dispatcher's own* environment before
+> it starts (a shell-profile export will not reach an already-running
+> dispatcher).
+
 ```yaml
 clients:
   my-client:
@@ -232,6 +243,7 @@ Requirements:
 - `aider` must be on `$PATH` — missing binary blocks with `aider_not_found` (retry-eligible).
 - `.cw/plan.md` must exist in the worktree — absent plan blocks with `plan_missing`.
 - `OPENAI_API_KEY` env var is optional; defaults to `"local"` (LM Studio ignores the value).
+- `edit-format` is not a `cw` config field — set `edit-format: diff` in `~/.aider.conf.yml` (or `AIDER_EDIT_FORMAT=diff` in the dispatcher's own environment) to avoid aider's `whole`-mode default on unrecognized model ids.
 
 Limitations:
 - Synchronous executor: blocks the dispatch tick for the full aider run. Set
@@ -290,6 +302,13 @@ per_client_ceiling: {}
 max_parallel_clients: null
 
 linear_prefix_map: {}
+# ^ routes a ticket-id prefix to the client/repo that owns it in a
+# multi-client cw deployment — it is not provider selection. cw does not
+# choose between tracker implementations in Python; the daemon's only
+# programmatic tracker client is gh.py (GitHub-only), and all
+# provider-portable ticket I/O is delegated to agent-native tools. See
+# ADR-0013 (../docs/adr/0013-agent-delegated-ticket-work.md) for the full
+# boundary.
 
 # Per-tier headless timeout budgets (seconds). Sessions whose scope.tier is
 # known (from the auto-dev sentinel scope field) are budgeted by this map.
@@ -369,6 +388,16 @@ liveness_first_bucket_by_stage:
 # skips (#974) at which a needs_attention event fires exactly once.
 freshness_block_attention_threshold: 5
 salvage_skip_attention_threshold: 5
+
+# Review-recipe repeat-fire burst detector (RFC 0010 anomaly layer, #1201).
+# When a single (ticket, recipe) records this many PR_ACTION_TAKEN events
+# within review_recipe_repeat_fire_window_minutes, one
+# session.needs_attention (paused_status="review_recipe_repeat_fire") fires on
+# the exact crossing (no re-fire once past it) — surfacing a recipe thrashing
+# on a PR that never clears its attention_state. The sibling `cw doctor`
+# liveness check needs no config.
+review_recipe_repeat_fire_threshold: 5
+review_recipe_repeat_fire_window_minutes: 20
 
 # Reap policy: controls whether the reconciler destroys a stalled session
 # or only signals for human intervention (ADR-0006 invariant 4).

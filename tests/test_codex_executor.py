@@ -104,6 +104,20 @@ def _must_fix_finding(*, file: str, line: int, evidence: str) -> dict[str, objec
     }
 
 
+def _should_fix_finding(*, file: str, line: int, evidence: str) -> dict[str, object]:
+    return {
+        "severity": "SHOULD_FIX",
+        "file": file,
+        "line_start": line,
+        "line_end": line,
+        "summary": "Nit here",
+        "consequence": "Minor",
+        "suggested_fix": "Polish it",
+        "evidence": evidence,
+        "confidence": "HIGH",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Pre-flight (unchanged)
 # ---------------------------------------------------------------------------
@@ -189,6 +203,16 @@ def test_codex_executor_clean_stage_complete(
     assert result.status == "stage_complete"
     assert result.stage_reached == "stage3_review"
     assert result.health.recommendation == "PROCEED"
+    assert result.health.any_incomplete_risk is False
+    assert result.review.must_fix_initial == 0
+    assert result.review.should_fix == 0
+    assert result.review.deferred == 0
+    assert result.review.fix_cycles_used == 0
+    # Every selected role invoked codex exec and returned a clean document, so
+    # agents_run tracks the per-role loop's call count exactly (#1194 wiring
+    # ported onto the per-role path, #1236 Blocker Resolution).
+    assert result.review.agents_run == len(runner.calls)
+    # Round-trips through the strict validator.
     AutoDevResult.model_validate(result.model_dump(mode="json"))
 
     state = load_state()
@@ -224,7 +248,14 @@ def test_codex_executor_must_fix_blocked(
     assert result.status == "blocked"
     assert result.blocker is not None
     assert result.blocker.reason == CODEX_MUST_FIX_FINDINGS
+    # #1203's bug (parsed counts must survive onto the blocked sentinel, not
+    # fall back to hardcoded 0/0/0/0) re-verified on the per-role path: every
+    # role echoes the identical finding, dedup collapses them to exactly one.
     assert result.review.must_fix_initial == 1
+    assert result.review.should_fix == 0
+    assert result.review.deferred == 0
+    assert result.review.fix_cycles_used == 0
+    assert result.review.agents_run == len(runner.calls)
     # A blocking verdict is still posted as a comment.
     post_mock.assert_called_once()
     assert "BLOCKING" in post_mock.call_args.args[1]
@@ -271,6 +302,45 @@ def test_codex_executor_stage_sentinel_schema(tmp_path: Path) -> None:
     schema = executor.stage_sentinel_schema(Stage.REVIEW)
 
     assert schema == AutoDevResult.model_json_schema()
+
+
+def test_codex_executor_should_fix_only_stays_complete(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """A SHOULD_FIX-only finding (no MUST_FIX) → stays stage_complete.
+
+    Retargeted from main's #1203 single-shot-path test onto the per-role
+    architecture (#1236 Blocker Resolution): the old path fed the executor a
+    raw ``{must_fix_initial, should_fix, deferred}`` payload directly; the new
+    path always derives those counts from validated per-role findings, so
+    "should_fix only" here means one accepted SHOULD_FIX finding and zero
+    MUST_FIX findings.
+    """
+    worktree = _worktree_with_change(
+        make_git_repo,
+        "wt-codex-should-fix-only",
+        filename="new.py",
+        content="def broken():\n",
+    )
+    doc = _reviewer_doc(
+        findings=[_should_fix_finding(file="new.py", line=1, evidence="def broken():")]
+    )
+    runner = FakeCodexRunner(returncode=0, output_file_content=doc)
+    config = StageExecutorConfig(backend=CODEX_BACKEND)
+    executor = CodexExecutor(config=config, runner=runner)
+    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
+
+    with patch("cw.executor.shutil.which", return_value="/usr/bin/codex"):
+        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+
+    result = _persisted_result()
+    assert result.status == "stage_complete"
+    assert result.review.must_fix_initial == 0
+    assert result.review.should_fix == 1
+    assert result.review.deferred == 0
+    assert result.review.agents_run == len(runner.calls)
 
 
 def test_resolve_executor_returns_codex_executor(
