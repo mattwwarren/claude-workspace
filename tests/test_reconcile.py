@@ -21357,6 +21357,34 @@ class TestFinalizeBlocked:
 
     # ── 1.10 rescue happy path ────────────────────────────────────────────
 
+    @pytest.mark.parametrize(
+        ("ticket_id", "expected_trailer"),
+        [("1293", "Closes #1293"), (None, None), ("LINEAR-1293", None)],
+    )
+    def test_rescue_pr_body_closes_only_numeric_github_ticket(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        ticket_id: str | None,
+        expected_trailer: str | None,
+    ) -> None:
+        """Rescue links numeric GitHub issues without emitting invalid trailers."""
+        from cw.reconcile.salvage import _rescue_open_pr
+
+        gh_args_seen: list[str] = []
+
+        def _fake_subprocess_run(args: list[str], **_kw: object) -> MagicMock:
+            gh_args_seen.extend(args)
+            return MagicMock(returncode=0, stdout="")
+
+        monkeypatch.setattr("cw.reconcile.salvage.subprocess.run", _fake_subprocess_run)
+
+        assert _rescue_open_pr("dev/test", "main", ticket_id) is True
+        body = gh_args_seen[gh_args_seen.index("--body") + 1]
+        if expected_trailer is None:
+            assert "Closes #" not in body
+        else:
+            assert body.endswith(expected_trailer)
+
     def test_rescue_happy_path(
         self,
         tmp_config_dir: Path,
@@ -22492,10 +22520,16 @@ class TestFinalizeBlocked:
 
     def test_rescue_pr_body_template_in_shared(self) -> None:
         """_RESCUE_PR_BODY_TEMPLATE is importable from _shared (NIT 5)."""
-        from cw.reconcile._shared import _RESCUE_PR_BODY_TEMPLATE
+        from cw.reconcile._shared import (
+            _RESCUE_PR_BODY_TEMPLATE,
+            _RESCUE_PR_CLOSES_TRAILER_TEMPLATE,
+        )
 
         assert "finalize" in _RESCUE_PR_BODY_TEMPLATE.lower()
         assert "{ticket_id}" in _RESCUE_PR_BODY_TEMPLATE
+        assert "Closes #1293" in _RESCUE_PR_CLOSES_TRAILER_TEMPLATE.format(
+            ticket_id="1293"
+        )
 
 
 # ---------------------------------------------------------------------------

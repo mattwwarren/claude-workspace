@@ -208,6 +208,7 @@ _RESCUE_PR_BODY_TEMPLATE = (
     " the PR (permission classifier / usage limit / transient gh failure)."
     " Ticket: #{ticket_id}"
 )
+_RESCUE_PR_CLOSES_TRAILER_TEMPLATE = "\n\nCloses #{ticket_id}"
 
 # Cause tags for SESSION_TIMED_OUT events emitted by the idle watchdog (#486).
 # idle_stall_recovered — watchdog fired but no usage-limit message found.
