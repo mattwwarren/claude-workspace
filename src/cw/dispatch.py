@@ -68,6 +68,7 @@ from cw.exceptions import (
     WorktreeError,
 )
 from cw.executor import resolve_executor, resolve_executor_config
+from cw.executor_diagnostics import cleanup_expired_diagnostics
 from cw.gh import check_gh_availability
 from cw.models import (
     CONTEXT_JSON_RELATIVE_PATH,
@@ -1502,6 +1503,23 @@ def _reconcile_usage_limited() -> bool:
     return reconcile_report is not None and reconcile_report.usage_limited
 
 
+def _sweep_expired_diagnostics(config: OrchestratorConfig) -> None:
+    """Best-effort retention sweep of per-session diagnostics bundles (#1239).
+
+    Runs OUTSIDE ``sessions_lock`` (pure filesystem rmtree, no state mutation)
+    and swallows every error, mirroring :func:`_reconcile_usage_limited`'s
+    broad-catch posture: a cleanup failure (permission, race with a concurrent
+    tick) must never abort the tick — the sweep just retries next tick.
+    Extracted from ``dispatch_tick`` to keep it under the PLR branch/statement
+    caps. Paired test: tests/test_dispatch.py
+    test_dispatch_tick_cleanup_failure_does_not_abort_tick.
+    """
+    try:
+        cleanup_expired_diagnostics(retention_hours=config.diagnostics_retention_hours)
+    except Exception:  # noqa: BLE001
+        _log.exception("diagnostics cleanup failed during dispatch_tick; continuing")
+
+
 def _build_plan_order(*, use_plan: bool) -> dict[str, list[str]]:
     """Build the per-client ticket priority ordering from the persisted plan.
 
@@ -1640,6 +1658,7 @@ def dispatch_tick(
     """
     resolved_native_daemon = native_daemon or get_native_daemon_client()
     any_usage_limit_detected = _reconcile_usage_limited()
+    _sweep_expired_diagnostics(config)
     clients = load_effective_clients()
     if client_filter is not None:
         clients = {client_filter: clients[client_filter]}

@@ -2079,6 +2079,65 @@ class TestDispatchTickReconcileErrors:
         ), "expected ERROR log from cw.dispatch mentioning 'reconcile failed'"
 
 
+def test_dispatch_tick_runs_diagnostics_cleanup_outside_lock(
+    tmp_dispatch_dirs: Path,
+    sample_client_config: ClientConfig,
+    simple_config: OrchestratorConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """dispatch_tick runs the diagnostics cleanup once per tick, with the
+    configured retention window and WITHOUT sessions_lock held (#1239)."""
+    _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+    captured: dict[str, object] = {}
+
+    def _spy(*, retention_hours: int) -> int:
+        from cw.config import _sessions_lock_state
+
+        captured["retention_hours"] = retention_hours
+        captured["lock_held"] = getattr(_sessions_lock_state, "held", False)
+        captured["calls"] = int(captured.get("calls", 0)) + 1
+        return 0
+
+    monkeypatch.setattr("cw.dispatch.cleanup_expired_diagnostics", _spy)
+
+    daemon = FakeNativeDaemonClient()
+    dispatch_tick(simple_config, native_daemon=daemon)
+
+    assert captured["calls"] == 1
+    assert captured["retention_hours"] == simple_config.diagnostics_retention_hours
+    assert captured["lock_held"] is False
+
+
+def test_dispatch_tick_cleanup_failure_does_not_abort_tick(
+    tmp_dispatch_dirs: Path,
+    sample_client_config: ClientConfig,
+    simple_config: OrchestratorConfig,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A raising diagnostics cleanup is swallowed; the tick still spawns (#1239)."""
+    _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+    add_ticket(TicketTask(ticket_id="GEN-diag-cleanup", client="test-client"))
+
+    def _boom(*_a: object, **_k: object) -> int:
+        msg = "simulated cleanup failure"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr("cw.dispatch.cleanup_expired_diagnostics", _boom)
+
+    daemon = FakeNativeDaemonClient()
+    caplog.set_level(logging.ERROR, logger="cw.dispatch")
+
+    spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
+
+    assert spawned == 1
+    assert any(
+        "diagnostics cleanup failed" in record.getMessage().lower()
+        for record in caplog.records
+        if record.name == "cw.dispatch" and record.levelno >= logging.ERROR
+    )
+
+
 class TestClaimNextPendingAttempts:
     """_claim_next_pending increments TicketTask.attempts on each claim.
 

@@ -25,6 +25,7 @@ from cw.models import (
     SessionPurpose,
     SessionStatus,
 )
+from tests.conftest import _make_diff
 
 _EXPECTED_SESSION_FIELDS = {
     "id",
@@ -395,6 +396,38 @@ class TestSessionResult:
         data = json.loads(result.output)
         assert data["status"] == "shipped"
         assert data["pr"] == 42
+
+    def test_result_surfaces_diagnostics_path_in_blocker_details(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """A CODEX_REVIEW_UNPARSEABLE blocked last_result carries the diagnostics
+        bundle path in blocker.details, which `session result` prints (#1239)."""
+        from cw.codex_review import synthesize_codex_review_result
+        from cw.executor_diagnostics import diagnostics_bundle_dir
+        from cw.models import Stage, TicketTask
+        from cw.review_findings import ReviewerRunFailure
+
+        result, _verdict = synthesize_codex_review_result(
+            task=TicketTask(ticket_id="T-1", client="c", stage=Stage.REVIEW),
+            worktree=tmp_path,
+            documents=[],
+            failures=[ReviewerRunFailure(role="Code Quality Reviewer", reason="crash")],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="abcd1234",
+        )
+        session = _make_session(tmp_path, last_result=result.model_dump(mode="json"))
+        _seed(session)
+        runner = CliRunner()
+        cli_result = runner.invoke(main, ["session", "result", "abcd1234"])
+        assert cli_result.exit_code == 0
+        data = json.loads(cli_result.output)
+        assert "diagnostics:" in data["blocker"]["details"]
+        bundle = diagnostics_bundle_dir("abcd1234")
+        assert (
+            str(bundle) in data["blocker"]["details"]
+            or "abcd1234" in (data["blocker"]["details"])
+        )
 
     def test_result_none_exits_1_with_stderr(
         self, tmp_config_dir: Path, tmp_path: Path
