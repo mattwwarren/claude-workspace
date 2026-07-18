@@ -84,6 +84,11 @@ _TRANSIENT_FAILURE_REASONS = frozenset({CODEX_TIMEOUT, CODEX_BUDGET_EXHAUSTED})
 # budget-exhausted instead.
 _MIN_ROLE_TIMEOUT_SECONDS = 30
 
+# Exit code Popen/RealCodexRunner reports when the codex binary is not on PATH
+# (FileNotFoundError → CodexRunResult(returncode=127, ...)); paired with a
+# "command not found" stderr it classifies as a spawn_error (#1239).
+_COMMAND_NOT_FOUND_RETURNCODE = 127
+
 # Reviewer role name -> authoritative agent-spec file under .claude/agents/.
 # Role names match the `/review` Step 3 table and each agent file's `name:`.
 _REVIEWER_ROLE_AGENT_FILES: dict[str, str] = {
@@ -567,29 +572,21 @@ def _parse_reviewer_document(
         return None
 
 
-def _classify_codex_failure(result: CodexRunResult) -> ExecutorFailureCategory:
-    """Map a failed :class:`CodexRunResult` to a typed failure category (#1239).
+def _classify_codex_output_failure(content: str | None) -> ExecutorFailureCategory:
+    """Classify an unparseable codex ``-o`` output into a typed category (#1239).
 
-    First-match order mirrors ``_run_codex_role``'s own branch order, refining
-    the coarse ``ReviewerRunFailure.reason`` into the finer diagnostics
-    taxonomy: a non-zero exit is split into ``spawn_error`` (codex binary
-    missing) vs ``nonzero_exit``, and an unparseable output into
-    ``missing_output`` / ``empty_output`` / ``invalid_json`` /
-    ``schema_mismatch``. Only ever called on a genuine failure, so the final
-    "validated fine" return is unreachable in practice.
+    Split from :func:`_classify_codex_failure` to keep both under the PLR0911
+    return cap. Only called once the process exited 0, so the output itself is
+    the sole failure source: ``missing_output`` / ``empty_output`` /
+    ``invalid_json`` / ``schema_mismatch``. A genuinely valid document never
+    reaches here (the caller returned it), so the final return is unreachable.
     """
-    if result.timed_out:
-        return "timeout"
-    if result.returncode == 127 and "command not found" in result.stderr:
-        return "spawn_error"
-    if result.returncode != 0:
-        return "nonzero_exit"
-    if result.output_file_content is None:
+    if content is None:
         return "missing_output"
-    if not result.output_file_content.strip():
+    if not content.strip():
         return "empty_output"
     try:
-        data = json.loads(result.output_file_content)
+        data = json.loads(content)
     except json.JSONDecodeError:
         return "invalid_json"
     try:
@@ -597,6 +594,27 @@ def _classify_codex_failure(result: CodexRunResult) -> ExecutorFailureCategory:
     except ValueError:
         return "schema_mismatch"
     return "schema_mismatch"  # pragma: no cover — unreachable on the failure path
+
+
+def _classify_codex_failure(result: CodexRunResult) -> ExecutorFailureCategory:
+    """Map a failed :class:`CodexRunResult` to a typed failure category (#1239).
+
+    First-match order mirrors ``_run_codex_role``'s own branch order, refining
+    the coarse ``ReviewerRunFailure.reason`` into the finer diagnostics
+    taxonomy: a non-zero exit is split into ``spawn_error`` (codex binary
+    missing) vs ``nonzero_exit``, and an unparseable output is delegated to
+    :func:`_classify_codex_output_failure`.
+    """
+    if result.timed_out:
+        return "timeout"
+    if (
+        result.returncode == _COMMAND_NOT_FOUND_RETURNCODE
+        and "command not found" in result.stderr
+    ):
+        return "spawn_error"
+    if result.returncode != 0:
+        return "nonzero_exit"
+    return _classify_codex_output_failure(result.output_file_content)
 
 
 def _persist_codex_role_diagnostics(
