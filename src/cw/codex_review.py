@@ -19,6 +19,7 @@ import fnmatch
 import json
 import logging
 import re
+import shutil
 import subprocess
 import time
 import uuid
@@ -44,19 +45,31 @@ if TYPE_CHECKING:
 
     from cw.codex_runner import CodexRunner
     from cw.models import TicketTask
+    from cw.review_findings import Severity
 
 _log = logging.getLogger(__name__)
 
 STAGE3_REVIEW: StageReached = "stage3_review"
 
 # Per-role failure reason codes (Resolution 4: reuse the existing coarse
-# vocabulary per role rather than building a new typed taxonomy). Reused by
-# executor.py, which re-exports them for backward-compatible imports.
+# vocabulary per role rather than building a new typed taxonomy). These are
+# owned here, not re-exported by executor.py — callers (including
+# tests/test_codex_executor.py) import them directly from cw.codex_review.
 CODEX_TIMEOUT = "codex_timeout"
 CODEX_ERROR = "codex_error"
 CODEX_REVIEW_UNPARSEABLE = "codex_review_unparseable"
 CODEX_MUST_FIX_FINDINGS = "codex_must_fix_findings"
 CODEX_BUDGET_EXHAUSTED = "budget_exhausted"
+# A partial review (some roles produced documents, but at least one selected
+# role skipped or errored without one) blocks rather than silently shipping a
+# reduced review pass — Decision 7 (#1236 finish spec).
+CODEX_REVIEW_PARTIAL = "codex_review_partial"
+
+# Failure reasons transient enough that a retry might succeed without any
+# code/config change on our side (the role either never got a turn at all, or
+# codex itself timed out) — used to set Blocker.retry_eligible so reconcile
+# can self-heal instead of parking the ticket (MUST_FIX 2).
+_TRANSIENT_FAILURE_REASONS = frozenset({CODEX_TIMEOUT, CODEX_BUDGET_EXHAUSTED})
 
 # Shared-deadline loop floor (Comment 3): never hand codex a per-role timeout
 # below this; a role that cannot get at least this much budget is skipped as
@@ -78,6 +91,13 @@ _REVIEWER_ROLE_AGENT_FILES: dict[str, str] = {
 }
 
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+# Matches every ``diff --git a/<path> b/<path>`` header, including files with
+# no added lines at all (pure deletions) — the header line is present
+# regardless of what follows, unlike ``+++ b/<path>`` (absent for deletions,
+# replaced with ``+++ /dev/null``). Used to derive the changed-file list from
+# a single already-parsed diff instead of a second ``git diff --name-only``
+# subprocess call (Performance, SHOULD_FIX 11).
+_DIFF_GIT_HEADER_RE = re.compile(r"^diff --git a/.+ b/(.+)$")
 
 _SENSITIVE_HEADER = (
     "SENSITIVE FILES TOUCHED — APPLY ELEVATED SCRUTINY\n\n"
@@ -171,6 +191,16 @@ def _select_reviewer_roles(
 
     Encodes the small-scope table (auto-dev-review.md Step 3a) and the
     large-scope file-category table (review.md Steps 2-3) verbatim.
+
+    ``categories.config`` is intentionally not a direct branch condition here:
+    review.md's file-category table never assigns config its own reviewer row
+    (unlike infra -> Deployment or python -> Performance) — its only defined
+    effect is the Data Safety "skip on doc/config/style-only diffs" rule,
+    which is already satisfied because a config-only diff also has
+    ``python=False`` and ``frontend=False`` and therefore never sets
+    ``mutates_persisted_state`` (see ``run_review``'s Adopted Assumption 2).
+    ``categories.config`` remains a real, tested field of ``_FileCategories``
+    for that categorization contract; it is simply a no-op input here.
     """
     roles: list[str] = []
     code_changed = categories.python or categories.frontend
@@ -180,6 +210,12 @@ def _select_reviewer_roles(
         roles.append("SysAdmin Reviewer")
         if code_changed:
             roles.append("Architecture Reviewer")
+        # review.md's table reads "Test files changed OR testable code
+        # changed without test changes". Boolean-equivalent to `tests or
+        # code_changed` by absorption (A or (B and not A) == A or B) — the
+        # "without test changes" qualifier never changes the outcome, so it
+        # is adopted as a simplification rather than encoded as dead-weight
+        # `and not categories.tests` clauses (SHOULD_FIX 12, #1236).
         if categories.tests or categories.python or categories.frontend:
             roles.append("Test Reviewer")
         if categories.python:
@@ -206,17 +242,23 @@ def _parse_hunk_new_start(header: str) -> int:
 
 def _parse_unified_diff(
     diff_text: str,
-) -> tuple[dict[str, str], dict[str, dict[int, str]]]:
+) -> tuple[dict[str, str], dict[str, dict[int, str]], list[str]]:
     """Split a unified diff into per-file hunk text and per-file added-line text.
 
     Tracks the new-file line number through each ``@@ -a,b +c,d @@`` header:
     ``+`` and context lines advance the counter, ``-`` lines do not. Deleted
     files (``+++ /dev/null``) contribute no new-file lines. Returns
-    ``(file_diffs, file_line_text)``; the caller derives ``files`` from
-    ``file_line_text`` so the two can never drift.
+    ``(file_diffs, file_line_text, changed_files)``; the caller derives
+    ``files`` from ``file_line_text`` so the two can never drift.
+    ``changed_files`` is every path named by a ``diff --git`` header, in diff
+    order — including pure deletions, which contribute nothing to
+    ``file_diffs``/``file_line_text`` but must still appear in the changed-file
+    list (SHOULD_FIX 11, #1236: this replaces a second, redundant
+    ``git diff --name-only`` subprocess call).
     """
     file_diffs: dict[str, str] = {}
     file_line_text: dict[str, dict[int, str]] = {}
+    changed_files: list[str] = []
     current_file: str | None = None
     current_lines: list[str] = []
     new_line_no = 0
@@ -227,6 +269,9 @@ def _parse_unified_diff(
                 file_diffs[current_file] = "\n".join(current_lines)
             current_file = None
             current_lines = []
+            header_match = _DIFF_GIT_HEADER_RE.match(raw)
+            if header_match:
+                changed_files.append(header_match.group(1))
             continue
         if raw.startswith("+++ "):
             path = raw[4:].removeprefix("b/")
@@ -250,14 +295,20 @@ def _parse_unified_diff(
 
     if current_file is not None:
         file_diffs[current_file] = "\n".join(current_lines)
-    return file_diffs, file_line_text
+    return file_diffs, file_line_text, changed_files
 
 
-def _capture_diff(worktree: Path, default_branch: str) -> tuple[CapturedDiff, str]:
+def _capture_diff(
+    worktree: Path, default_branch: str
+) -> tuple[CapturedDiff, str, list[str]]:
     """Capture ``git diff <default_branch>...HEAD`` as a :class:`CapturedDiff`.
 
-    ``files`` is derived from ``file_line_text`` (the added-line map) so it can
-    never drift from the per-line content. Returns ``(diff, reviewed_sha)``.
+    ``files`` (on the returned ``CapturedDiff``) is derived from
+    ``file_line_text`` (the added-line map) so it can never drift from the
+    per-line content. Returns ``(diff, reviewed_sha, changed_files)`` —
+    ``changed_files`` is the full changed-path list (including pure
+    deletions), parsed from this same diff text rather than a second
+    subprocess call (SHOULD_FIX 11, #1236).
     """
     reviewed_sha = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=worktree, text=True
@@ -267,7 +318,7 @@ def _capture_diff(worktree: Path, default_branch: str) -> tuple[CapturedDiff, st
         cwd=worktree,
         text=True,
     )
-    file_diffs, file_line_text = _parse_unified_diff(diff_text)
+    file_diffs, file_line_text, changed_files = _parse_unified_diff(diff_text)
     files = {f: sorted(lines) for f, lines in file_line_text.items()}
     diff = CapturedDiff(
         text=diff_text,
@@ -275,17 +326,7 @@ def _capture_diff(worktree: Path, default_branch: str) -> tuple[CapturedDiff, st
         file_diffs=file_diffs,
         file_line_text=file_line_text,
     )
-    return diff, reviewed_sha
-
-
-def _changed_file_paths(worktree: Path, default_branch: str) -> list[str]:
-    """Return the repo-relative changed-file list (added, modified, deleted)."""
-    out = subprocess.check_output(
-        ["git", "diff", "--name-only", f"{default_branch}...HEAD"],
-        cwd=worktree,
-        text=True,
-    )
-    return [line for line in out.splitlines() if line.strip()]
+    return diff, reviewed_sha, changed_files
 
 
 def _load_optional_text(path: Path) -> str | None:
@@ -474,10 +515,19 @@ def _build_reviewer_prompt(
 def _build_generic_codex_argv(
     *, model: str | None, schema_path: Path, output_path: Path
 ) -> list[str]:
-    """Return the generic ``codex exec`` argv (no ``review``/``--base``)."""
+    """Return the generic ``codex exec`` argv (no ``review``/``--base``).
+
+    ``--sandbox read-only`` (ticket AC, MUST_FIX 4, #1236): every reviewer
+    input is inlined into the prompt over stdin — a reviewer role has no
+    legitimate reason to write to the worktree, so it never gets write
+    access, matching the pre-#1236 ``codex exec review`` path's implicit
+    read-only posture.
+    """
     argv = [
         "codex",
         "exec",
+        "--sandbox",
+        "read-only",
         "--output-schema",
         str(schema_path),
         "-o",
@@ -563,41 +613,55 @@ def run_codex_roles(
     below ``_MIN_ROLE_TIMEOUT_SECONDS``), and a role that cannot get at least the
     floor is skipped as ``budget_exhausted`` — mandatory roles that already ran
     are unaffected.
+
+    The per-run scratch dir (schema/output files, see ``_codex_scratch_dir``)
+    is removed before returning, success or failure — it lives under the
+    shared, long-running ``state_dir()``, not an auto-cleaning
+    ``tempfile.TemporaryDirectory()``, so leaving it behind on every call
+    leaks disk on a long-running dispatch host (MUST_FIX 1, #1236).
     """
     scratch_dir = _codex_scratch_dir(uuid.uuid4().hex)
-    documents: list[ReviewerFindingsDocument] = []
-    failures: list[ReviewerRunFailure] = []
-    deadline: float | None = (
-        None
-        if wall_clock_budget_seconds is None
-        else time.monotonic() + wall_clock_budget_seconds
-    )
-    for role in roles:
-        if deadline is not None:
-            remaining = deadline - time.monotonic()
-            if remaining <= _MIN_ROLE_TIMEOUT_SECONDS:
-                _log.warning("codex review role %r skipped: budget exhausted", role)
-                failures.append(
-                    ReviewerRunFailure(role=role, reason=CODEX_BUDGET_EXHAUSTED)
-                )
-                continue
-            timeout: int | None = max(int(remaining), _MIN_ROLE_TIMEOUT_SECONDS)
-        else:
-            timeout = None
-        doc, failure = _run_codex_role(
-            runner=runner,
-            worktree=worktree,
-            role=role,
-            prompt=prompts_by_role[role],
-            model=model,
-            timeout_seconds=timeout,
-            scratch_dir=scratch_dir,
+    try:
+        documents: list[ReviewerFindingsDocument] = []
+        failures: list[ReviewerRunFailure] = []
+        deadline: float | None = (
+            None
+            if wall_clock_budget_seconds is None
+            else time.monotonic() + wall_clock_budget_seconds
         )
-        if doc is not None:
-            documents.append(doc)
-        if failure is not None:
-            failures.append(failure)
-    return documents, failures
+        for role in roles:
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= _MIN_ROLE_TIMEOUT_SECONDS:
+                    _log.warning("codex review role %r skipped: budget exhausted", role)
+                    failures.append(
+                        ReviewerRunFailure(role=role, reason=CODEX_BUDGET_EXHAUSTED)
+                    )
+                    continue
+                timeout: int | None = max(int(remaining), _MIN_ROLE_TIMEOUT_SECONDS)
+            else:
+                timeout = None
+            doc, failure = _run_codex_role(
+                runner=runner,
+                worktree=worktree,
+                role=role,
+                prompt=prompts_by_role[role],
+                model=model,
+                timeout_seconds=timeout,
+                scratch_dir=scratch_dir,
+            )
+            if doc is not None:
+                documents.append(doc)
+            if failure is not None:
+                failures.append(failure)
+        return documents, failures
+    finally:
+        shutil.rmtree(scratch_dir, ignore_errors=True)
+
+
+def _format_failures_detail(failures: list[ReviewerRunFailure]) -> str:
+    """Render *failures* as a short ``role (reason)`` summary for ``details``."""
+    return "; ".join(f"{f.role} ({f.reason})" for f in failures)
 
 
 def synthesize_codex_review_result(
@@ -612,18 +676,29 @@ def synthesize_codex_review_result(
     """Map consolidated review documents to a typed AutoDevResult.
 
     Disposition:
-    - zero documents (all roles failed/skipped) → blocked/CODEX_REVIEW_UNPARSEABLE
+    - zero documents (all roles failed/skipped) → blocked/CODEX_REVIEW_UNPARSEABLE,
+      with ``failures`` folded into ``details`` and ``retry_eligible=True`` when
+      at least one failure is transient (``codex_timeout``/``budget_exhausted``)
+      (MUST_FIX 2, #1236).
     - consolidated verdict is blocking            → blocked/CODEX_MUST_FIX_FINDINGS
-    - otherwise                                   → stage_complete
+    - documents present but at least one selected role skipped/errored without
+      producing one (a partial review) → blocked/CODEX_REVIEW_PARTIAL — a
+      review that silently proceeded on an incomplete roster would be exactly
+      the "spuriously clean sentinel" risk the ``agents_run`` gate exists to
+      catch (Decision 7, #1236).
+    - otherwise (documents complete, no MUST_FIX)  → stage_complete
 
     Returns ``(result, verdict)``; ``verdict`` is ``None`` only on the zero-
     documents path (nothing to render into a review comment).
     """
     if not documents:
+        transient = any(f.reason in _TRANSIENT_FAILURE_REASONS for f in failures)
         result = make_blocked(
             ticket_id=task.ticket_id,
             worktree=worktree,
             reason=CODEX_REVIEW_UNPARSEABLE,
+            details=_format_failures_detail(failures),
+            retry_eligible=True if transient else None,
             stage_reached=STAGE3_REVIEW,
         )
         return result, None
@@ -638,6 +713,14 @@ def synthesize_codex_review_result(
             stage_reached=STAGE3_REVIEW,
         )
         return blocked.model_copy(update={"review": verdict.review}), verdict
+    if failures:
+        partial = make_blocked(
+            ticket_id=task.ticket_id,
+            worktree=worktree,
+            reason=CODEX_REVIEW_PARTIAL,
+            stage_reached=STAGE3_REVIEW,
+        )
+        return partial.model_copy(update={"review": verdict.review}), verdict
     branch = subprocess.check_output(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=worktree, text=True
     ).strip()
@@ -668,7 +751,9 @@ def synthesize_codex_review_result(
     return result, verdict
 
 
-def _render_findings(verdict: ReviewVerdict, severity: str, heading: str) -> list[str]:
+def _render_findings(
+    verdict: ReviewVerdict, severity: Severity, heading: str
+) -> list[str]:
     findings = [
         af.finding for af in verdict.accepted if af.finding.severity == severity
     ]
@@ -715,8 +800,7 @@ def run_review(
     diff, select reviewers, materialize prompts, run the shared-deadline loop,
     and synthesize the typed result.
     """
-    diff, reviewed_sha = _capture_diff(worktree, default_branch)
-    changed_files = _changed_file_paths(worktree, default_branch)
+    diff, reviewed_sha, changed_files = _capture_diff(worktree, default_branch)
     scope_tier = resolve_tier(task.scope_hint)
     categories = _categorize_changed_files(changed_files)
     sensitive_hits = _load_sensitive_hits(worktree, changed_files, scope_tier)

@@ -506,10 +506,20 @@ def consolidate_verdict(
 
     ``failed_reviewers`` (defaulting to an empty list — never a mutable default)
     each contribute one ``status="failed"`` / ``finding_count=0``
-    :class:`ReviewerRunRecord`, appended after the parsed documents' records.
+    :class:`ReviewerRunRecord`, appended after the parsed documents' records —
+    they are still RECORDED in ``verdict.agents_run`` for audit purposes.
     ``stripped_escalations`` is the concatenation of every document's strip list
     in document order. ``blocking`` is True iff at least one accepted,
     non-deferred MUST_FIX finding exists.
+
+    ``review.agents_run`` (the int count, distinct from the
+    ``verdict.agents_run`` list above) counts only roles that actually
+    produced a document — ``len(documents)`` — excluding every failure/skip
+    regardless of reason. A role that never invoked codex exec (a
+    budget-exhausted skip) or that invoked it but produced no usable document
+    (timeout/error/unparseable) contributed nothing to this review pass and
+    must not inflate the count the ``auto_approve_clean_review`` gate recipe
+    treats as a required-non-zero signal (standing binding decision, #1236).
     """
     failures = failed_reviewers if failed_reviewers is not None else []
     candidates: list[tuple[str, Finding]] = []
@@ -536,7 +546,7 @@ def consolidate_verdict(
     )
 
     accepted_findings = dedupe_findings(candidates)
-    review = derive_review_counts(accepted_findings, agents_run=len(run_records))
+    review = derive_review_counts(accepted_findings, agents_run=len(documents))
     must_fix = [
         af.finding
         for af in accepted_findings

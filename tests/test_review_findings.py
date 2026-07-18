@@ -283,6 +283,12 @@ class TestValidateReviewerDocument:
             "other_file_line = 2",
             files={"src/cw/foo.py": [10], "src/cw/bar.py": [10]},
         )
+        # MUST_FIX 3 (#1236): confirm the "stolen" evidence is genuinely
+        # present in bar.py's OWN hunk — not just absent everywhere, which
+        # would make the rejection below tautological rather than proving
+        # file-scoping.
+        assert diff.file_line_text["src/cw/bar.py"][10] == "other_file_line = 2"
+        assert diff.file_line_text["src/cw/foo.py"][10] == "def broken():"
         f = _make_finding(
             file="src/cw/foo.py",
             evidence="other_file_line = 2",
@@ -559,12 +565,17 @@ class TestConsolidateVerdictFailedReviewers:
                 ReviewerRunFailure(role="Perf Reviewer", reason="timeout")
             ],
         )
+        # The failed reviewer is still RECORDED in the agents_run list (audit
+        # trail)...
         assert len(verdict.agents_run) == 2
         failed = [r for r in verdict.agents_run if r.status == "failed"]
         assert len(failed) == 1
         assert failed[0].reviewer_role == "Perf Reviewer"
         assert failed[0].finding_count == 0
-        assert verdict.review.agents_run == 2
+        # ...but excluded from the countable review.agents_run int — only
+        # roles that actually produced a document count (standing binding
+        # decision, #1236).
+        assert verdict.review.agents_run == 1
 
     def test_failed_reviewer_without_document(self) -> None:
         diff = _make_diff()
@@ -576,6 +587,8 @@ class TestConsolidateVerdictFailedReviewers:
         )
         assert len(verdict.agents_run) == 1
         assert verdict.agents_run[0].status == "failed"
+        # Zero documents produced -> review.agents_run is 0, not 1.
+        assert verdict.review.agents_run == 0
 
     def test_stripped_escalations_union_in_document_order(self) -> None:
         diff = _make_diff()

@@ -231,9 +231,15 @@ def _make_diff(*added_lines: str, **overrides: object) -> CapturedDiff:
     file-level evidence fallback) and ``file_line_text`` (per-file
     ``{line_number: content}`` for the added lines) alongside the flat ``text``,
     so every call site keeps passing under the per-file/per-line
-    ``_classify_finding``. Each file's line numbers are paired positionally with
-    the shared ``added_lines`` (the last content repeats if a file claims more
-    lines than there are added lines), keeping ``files[f] ==
+    ``_classify_finding``. Line numbers are paired with ``added_lines`` via a
+    GLOBAL position counter shared across every file (not reset per file), so
+    each file genuinely gets distinct content when multiple files are passed
+    in ``files`` — MUST_FIX 3 (#1236): the previous per-file-reset ``enumerate``
+    gave every file's first claimed line the same ``lines[0]`` text, so a
+    "stolen from another file" R6 regression test could never actually prove
+    file-scoping (the stolen evidence wasn't genuinely present in ANY file's
+    structured map). The last content repeats if the combined line count
+    across all files exceeds ``len(added_lines)``, keeping ``files[f] ==
     sorted(file_line_text[f])`` an invariant.
     """
     lines = added_lines or ("def broken():",)
@@ -245,11 +251,12 @@ def _make_diff(*added_lines: str, **overrides: object) -> CapturedDiff:
     text = f"{header}\n{body}\n{extra_text}"
     file_diffs: dict[str, str] = {}
     file_line_text: dict[str, dict[int, str]] = {}
+    pos = 0
     for path, line_nums in files.items():
-        per_file: dict[int, str] = {
-            ln: (lines[idx] if idx < len(lines) else lines[-1])
-            for idx, ln in enumerate(line_nums)
-        }
+        per_file: dict[int, str] = {}
+        for ln in line_nums:
+            per_file[ln] = lines[pos] if pos < len(lines) else lines[-1]
+            pos += 1
         file_line_text[path] = per_file
         file_body = "\n".join(f"+{per_file[ln]}" for ln in line_nums)
         file_diffs[path] = f"+++ b/{path}\n{file_body}\n{extra_text}"

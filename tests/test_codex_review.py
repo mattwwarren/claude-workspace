@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import subprocess
+import uuid
 from typing import TYPE_CHECKING
 
 import pytest
@@ -14,6 +15,7 @@ from cw.codex_review import (
     CODEX_BUDGET_EXHAUSTED,
     CODEX_ERROR,
     CODEX_MUST_FIX_FINDINGS,
+    CODEX_REVIEW_PARTIAL,
     CODEX_REVIEW_UNPARSEABLE,
     CODEX_TIMEOUT,
     _build_generic_codex_argv,
@@ -224,7 +226,7 @@ index 555..000
 
 class TestParseUnifiedDiff:
     def test_per_file_line_numbers(self) -> None:
-        _file_diffs, file_line_text = _parse_unified_diff(_MULTI_FILE_DIFF)
+        _file_diffs, file_line_text, _changed = _parse_unified_diff(_MULTI_FILE_DIFF)
         assert file_line_text["src/cw/foo.py"] == {
             2: "added_one = 1",
             3: "added_two = 2",
@@ -234,19 +236,29 @@ class TestParseUnifiedDiff:
         assert file_line_text["src/cw/bar.py"] == {6: "bar_added = 3"}
 
     def test_file_diffs_capture_hunk_text(self) -> None:
-        file_diffs, _ = _parse_unified_diff(_MULTI_FILE_DIFF)
+        file_diffs, _, _changed = _parse_unified_diff(_MULTI_FILE_DIFF)
         assert "+added_one = 1" in file_diffs["src/cw/foo.py"]
         assert "+bar_added = 3" in file_diffs["src/cw/bar.py"]
 
-    def test_deleted_file_contributes_no_lines(self) -> None:
-        file_diffs, file_line_text = _parse_unified_diff(_DELETED_FILE_DIFF)
+    def test_changed_files_in_diff_order(self) -> None:
+        # SHOULD_FIX 11 (#1236): changed_files is derived from the same parse
+        # pass as file_diffs/file_line_text — no second subprocess needed.
+        _file_diffs, _file_line_text, changed = _parse_unified_diff(_MULTI_FILE_DIFF)
+        assert changed == ["src/cw/foo.py", "src/cw/bar.py"]
+
+    def test_deleted_file_contributes_no_lines_but_is_changed(self) -> None:
+        file_diffs, file_line_text, changed = _parse_unified_diff(_DELETED_FILE_DIFF)
         assert "gone.py" not in file_line_text
         assert file_diffs == {}
+        # A pure deletion has no hunk text/added lines, but it IS a changed
+        # file and must still appear in the changed-file list.
+        assert changed == ["gone.py"]
 
     def test_empty_diff(self) -> None:
-        file_diffs, file_line_text = _parse_unified_diff("")
+        file_diffs, file_line_text, changed = _parse_unified_diff("")
         assert file_diffs == {}
         assert file_line_text == {}
+        assert changed == []
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -267,11 +279,12 @@ class TestCaptureDiff:
         _git(repo, "add", "new.py")
         _git(repo, "commit", "-m", "add new.py")
 
-        diff, reviewed_sha = _capture_diff(repo, "main")
+        diff, reviewed_sha, changed_files = _capture_diff(repo, "main")
 
         assert "new.py" in diff.files
         assert diff.file_line_text["new.py"] == {1: "alpha = 1", 2: "beta = 2"}
         assert diff.files["new.py"] == [1, 2]
+        assert changed_files == ["new.py"]
         head = subprocess.check_output(
             ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
         ).strip()
@@ -582,6 +595,15 @@ class TestBuildGenericCodexArgv:
         )
         assert "-m" not in argv
 
+    def test_read_only_sandbox_always_set(self, tmp_path: Path) -> None:
+        # MUST_FIX 4 (#1236): ticket AC requires read-only sandboxing on
+        # every generic codex exec invocation, model or no model.
+        argv = _build_generic_codex_argv(
+            model=None, schema_path=tmp_path / "s.json", output_path=tmp_path / "o.json"
+        )
+        idx = argv.index("--sandbox")
+        assert argv[idx + 1] == "read-only"
+
 
 # ---------------------------------------------------------------------------
 # run_codex_roles — shared deadline (Comment 3)
@@ -620,23 +642,26 @@ class TestRunCodexRoles:
         )
         assert all(call["timeout"] is None for call in runner.calls)
 
-    def test_floor_respected(self, tmp_path: Path) -> None:
-        runner = _SequencedRunner([_ok_result(), _ok_result()])
+    def test_floor_respected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Test Reviewer SHOULD_FIX 9 (#1236): a real clock + 3600s budget
+        # never approaches the floor, so the old version of this test never
+        # actually exercised `max(int(remaining), _MIN_ROLE_TIMEOUT_SECONDS)`.
+        # Deterministic clock: deadline=100 (call0); role1's remaining =
+        # 100 - 69 = 31 seconds — just above the 30s skip threshold, close
+        # enough to the floor that the clamp is genuinely in play.
+        monkeypatch.setattr("cw.codex_review.time.monotonic", _Clock([0, 69]))
+        runner = _SequencedRunner([_ok_result()])
         run_codex_roles(
             runner=runner,
             worktree=tmp_path,
-            roles=["Code Quality Reviewer", "SysAdmin Reviewer"],
-            prompts_by_role={
-                "Code Quality Reviewer": "p1",
-                "SysAdmin Reviewer": "p2",
-            },
+            roles=["Code Quality Reviewer"],
+            prompts_by_role={"Code Quality Reviewer": "p1"},
             model=None,
-            wall_clock_budget_seconds=3600,
+            wall_clock_budget_seconds=100,
         )
-        for call in runner.calls:
-            timeout = call["timeout"]
-            assert isinstance(timeout, int)
-            assert timeout >= 30
+        assert runner.calls[0]["timeout"] == 31
 
     def test_budget_exhausted_skips_later_role(
         self,
@@ -718,6 +743,48 @@ class TestRunCodexRoles:
         assert reasons["Code Quality Reviewer"] == CODEX_TIMEOUT
         assert reasons["SysAdmin Reviewer"] == CODEX_REVIEW_UNPARSEABLE
 
+    def test_native_review_schema_mismatch_one_role_others_succeed(
+        self, tmp_path: Path
+    ) -> None:
+        # MUST_FIX 5 (#1236): synthetic fixture reproducing the historical
+        # native-review schema/prose mismatch. Pre-#1236, ``codex exec
+        # review`` was fed a schema it sometimes ignored, replying with the
+        # OLD ``{must_fix_initial, should_fix, deferred}``-shaped payload (or
+        # raw prose) instead of the per-role ReviewerFindingsDocument shape.
+        # That payload fails schema validation for the role that produced it
+        # (correctly classified as unparseable) but must NOT take down the
+        # whole run — the other, well-behaved roles' documents still survive.
+        old_shape_payload = json.dumps(
+            {"must_fix_initial": 1, "should_fix": 2, "deferred": 0}
+        )
+        runner = _SequencedRunner(
+            [
+                CodexRunResult(
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                    output_file_content=old_shape_payload,
+                ),
+                _ok_result(role="SysAdmin Reviewer"),
+            ]
+        )
+        docs, failures = run_codex_roles(
+            runner=runner,
+            worktree=tmp_path,
+            roles=["Code Quality Reviewer", "SysAdmin Reviewer"],
+            prompts_by_role={
+                "Code Quality Reviewer": "p1",
+                "SysAdmin Reviewer": "p2",
+            },
+            model=None,
+            wall_clock_budget_seconds=None,
+        )
+        assert len(docs) == 1
+        assert docs[0].reviewer_role == "SysAdmin Reviewer"
+        assert len(failures) == 1
+        assert failures[0].role == "Code Quality Reviewer"
+        assert failures[0].reason == CODEX_REVIEW_UNPARSEABLE
+
     def test_stdin_carries_prompt(self, tmp_path: Path) -> None:
         runner = _SequencedRunner([_ok_result()])
         run_codex_roles(
@@ -729,6 +796,43 @@ class TestRunCodexRoles:
             wall_clock_budget_seconds=None,
         )
         assert runner.calls[0]["stdin"] == "PROMPT BODY"
+
+    def test_scratch_dir_cleaned_up_on_success(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # MUST_FIX 1 (#1236): the scratch dir under state_dir() must not leak
+        # after a normal, fully-successful run.
+        fixed_uuid = uuid.UUID("11111111-1111-1111-1111-111111111111")
+        monkeypatch.setattr("cw.codex_review.uuid.uuid4", lambda: fixed_uuid)
+        runner = _SequencedRunner([_ok_result()])
+        run_codex_roles(
+            runner=runner,
+            worktree=tmp_path,
+            roles=["Code Quality Reviewer"],
+            prompts_by_role={"Code Quality Reviewer": "p"},
+            model=None,
+            wall_clock_budget_seconds=None,
+        )
+        assert not (state_dir() / "codex-review" / fixed_uuid.hex).exists()
+
+    def test_scratch_dir_cleaned_up_on_role_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Cleanup must happen on the failure path too, not only on success.
+        fixed_uuid = uuid.UUID("22222222-2222-2222-2222-222222222222")
+        monkeypatch.setattr("cw.codex_review.uuid.uuid4", lambda: fixed_uuid)
+        runner = _SequencedRunner(
+            [CodexRunResult(returncode=1, stdout="", stderr="boom")]
+        )
+        run_codex_roles(
+            runner=runner,
+            worktree=tmp_path,
+            roles=["Code Quality Reviewer"],
+            prompts_by_role={"Code Quality Reviewer": "p"},
+            model=None,
+            wall_clock_budget_seconds=None,
+        )
+        assert not (state_dir() / "codex-review" / fixed_uuid.hex).exists()
 
 
 # ---------------------------------------------------------------------------
@@ -758,6 +862,38 @@ class TestSynthesizeCodexReviewResult:
         assert result.blocker.reason == CODEX_REVIEW_UNPARSEABLE
         assert verdict is None
 
+    @pytest.mark.parametrize(
+        ("reason", "expect_retry"),
+        [
+            (CODEX_BUDGET_EXHAUSTED, True),
+            (CODEX_TIMEOUT, True),
+            (CODEX_ERROR, None),
+        ],
+    )
+    def test_zero_documents_retry_eligible_by_reason(
+        self,
+        make_git_repo: Callable[[str], Path],
+        reason: str,
+        expect_retry: bool | None,
+    ) -> None:
+        # MUST_FIX 2 (#1236): retry_eligible tracks whether the failure(s) are
+        # transient (timeout/budget_exhausted self-heal via reconcile); a hard
+        # codex_error is not retried automatically. failures must also survive
+        # into details rather than being dropped.
+        worktree = make_git_repo(f"wt-synth-zero-{reason}")
+        result, _verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[],
+            failures=[ReviewerRunFailure(role="Code Quality Reviewer", reason=reason)],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+        )
+        assert result.blocker is not None
+        assert result.blocker.retry_eligible == expect_retry
+        assert "Code Quality Reviewer" in result.blocker.details
+        assert reason in result.blocker.details
+
     def test_blocking_must_fix(self, make_git_repo: Callable[[str], Path]) -> None:
         worktree = make_git_repo("wt-synth-block")
         doc = _make_reviewer_doc(_make_finding(severity="MUST_FIX"))
@@ -773,6 +909,60 @@ class TestSynthesizeCodexReviewResult:
         assert result.blocker is not None
         assert result.blocker.reason == CODEX_MUST_FIX_FINDINGS
         assert result.review.must_fix_initial == 1
+        assert verdict is not None
+        assert verdict.blocking is True
+
+    @pytest.mark.parametrize(
+        "reason", [CODEX_BUDGET_EXHAUSTED, CODEX_TIMEOUT, CODEX_ERROR]
+    )
+    def test_partial_review_blocked(
+        self, make_git_repo: Callable[[str], Path], reason: str
+    ) -> None:
+        # Decision 7 (#1236): a non-blocking verdict (no MUST_FIX among the
+        # roles that DID run) still blocks when at least one selected role
+        # skipped or errored without a document, regardless of reason — an
+        # incomplete review must not silently ship as stage_complete.
+        worktree = make_git_repo(f"wt-synth-partial-{reason}")
+        doc = _make_reviewer_doc(_make_finding(severity="SHOULD_FIX"))
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[ReviewerRunFailure(role="Performance Reviewer", reason=reason)],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+        )
+        assert result.status == "blocked"
+        assert result.blocker is not None
+        assert result.blocker.reason == CODEX_REVIEW_PARTIAL
+        # The review counts derived from the roles that DID run still survive
+        # onto the blocked sentinel — same "don't drop the parsed data"
+        # discipline as the zero-documents and must-fix paths.
+        assert result.review.should_fix == 1
+        assert verdict is not None
+        assert verdict.blocking is False
+
+    def test_must_fix_takes_priority_over_partial(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        # When a role that DID run reports a real MUST_FIX finding, that is
+        # the more actionable/specific block reason even if another role also
+        # failed to run — CODEX_MUST_FIX_FINDINGS wins over CODEX_REVIEW_PARTIAL.
+        worktree = make_git_repo("wt-synth-mf-and-partial")
+        doc = _make_reviewer_doc(_make_finding(severity="MUST_FIX"))
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[
+                ReviewerRunFailure(role="Performance Reviewer", reason=CODEX_TIMEOUT)
+            ],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+        )
+        assert result.status == "blocked"
+        assert result.blocker is not None
+        assert result.blocker.reason == CODEX_MUST_FIX_FINDINGS
         assert verdict is not None
         assert verdict.blocking is True
 
@@ -793,6 +983,9 @@ class TestSynthesizeCodexReviewResult:
         assert result.stage_reached == "stage3_review"
         assert result.health.recommendation == "PROCEED"
         assert result.review.should_fix == 1
+        # Fully-documented review (no failures) → unchanged, and agents_run
+        # counts exactly the one role that produced a document.
+        assert result.review.agents_run == 1
         assert verdict is not None
         assert verdict.blocking is False
 
@@ -821,3 +1014,30 @@ class TestRenderVerdictComment:
         verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
         body = render_verdict_comment(verdict)
         assert "Non-blocking" in body
+
+    def test_mixed_must_fix_and_should_fix_both_render(self) -> None:
+        # Test Reviewer SHOULD_FIX 10 (#1236): the old test suite never
+        # rendered an actual SHOULD_FIX finding — assert both headings and
+        # both findings' summaries appear, MUST_FIX first.
+        diff = _make_diff(
+            "def broken():",
+            "second_line = 2",
+            files={"src/cw/foo.py": [10, 11]},
+        )
+        must_fix = _make_finding(severity="MUST_FIX", summary="bad thing")
+        should_fix = _make_finding(
+            severity="SHOULD_FIX",
+            summary="minor nit",
+            line_start=11,
+            line_end=11,
+            evidence="second_line = 2",
+        )
+        doc = _make_reviewer_doc(must_fix, should_fix)
+        verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        body = render_verdict_comment(verdict)
+        assert "BLOCKING" in body
+        assert "### MUST_FIX" in body
+        assert "### SHOULD_FIX" in body
+        assert "bad thing" in body
+        assert "minor nit" in body
+        assert body.index("### MUST_FIX") < body.index("### SHOULD_FIX")
