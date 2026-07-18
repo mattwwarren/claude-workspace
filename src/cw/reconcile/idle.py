@@ -995,6 +995,7 @@ def _emit_idle_events(
                 "paused_status": _SILENTLY_IDLE_REASON,
                 "breadcrumbs": "",
                 "crashed": False,
+                "lane": candidate.lane,
             },
         )
         _deps.fire_push_notification(session.name, session.client)
@@ -1012,6 +1013,7 @@ def _emit_idle_events(
                 "paused_status": _EXTERNAL_COUNTERPARTY_IDLE_REASON,
                 "breadcrumbs": "",
                 "crashed": False,
+                "lane": candidate.lane,
             },
         )
         _deps.fire_push_notification(session.name, session.client)
@@ -1054,6 +1056,7 @@ def _emit_idle_events(
                 if session.worktree_path
                 else "",
                 "crashed": False,
+                "lane": candidate.lane,
             },
             correlation_id=candidate.ticket_id,
         )

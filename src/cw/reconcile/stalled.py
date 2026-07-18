@@ -850,6 +850,7 @@ def _emit_finalize_blocked_events(
                 "paused_status": _FINALIZE_BLOCKED_REASON,
                 "breadcrumbs": candidate.branch or "",
                 "crashed": False,
+                "lane": candidate.lane,
             },
             correlation_id=candidate.ticket_id,
         )
@@ -974,6 +975,7 @@ def _emit_stalled_events(
                 if session.worktree_path
                 else "",
                 "crashed": False,
+                "lane": candidate.lane,
             },
             correlation_id=candidate.ticket_id,
         )
@@ -998,6 +1000,7 @@ def _emit_stalled_events(
                 "crashed": False,
                 "stage": str(candidate.stage),
                 "attempts": candidate.attempts,
+                "lane": candidate.lane,
             },
             correlation_id=candidate.ticket_id,
         )
@@ -1073,6 +1076,7 @@ def _record_salvage_skip(
                     f"salvage-skips; last reason: {_SALVAGE_SKIP_REASON}"
                 ),
                 "crashed": False,
+                "lane": candidate.lane,
             },
             correlation_id=candidate.ticket_id,
         )

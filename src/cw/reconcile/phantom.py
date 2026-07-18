@@ -370,6 +370,7 @@ def _emit_phantom_terminal_events(
                 if candidate.worktree_path
                 else "",
                 "crashed": False,
+                "lane": candidate.lane,
             },
             correlation_id=candidate.ticket_id,
         )
