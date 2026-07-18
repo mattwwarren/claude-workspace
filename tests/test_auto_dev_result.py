@@ -35,6 +35,24 @@ from cw.auto_dev_result import (
 )
 
 # ---------------------------------------------------------------------------
+# Package-split import guard (#1321)
+# ---------------------------------------------------------------------------
+
+
+def test_auto_dev_result_package_submodules_import_without_cycle() -> None:
+    """The schema/parse submodules import with no ImportError (#1321).
+
+    Fast-fails a circular-import regression: parse imports schema at module
+    top; a change that made schema reach back into parse at module top would
+    surface here as an ImportError before the rest of the suite collects.
+    """
+    from cw.auto_dev_result import parse, schema
+
+    assert schema is not None
+    assert parse is not None
+
+
+# ---------------------------------------------------------------------------
 # Payload helpers — keep round-trippable shapes for each terminal status.
 # ---------------------------------------------------------------------------
 
