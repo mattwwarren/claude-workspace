@@ -793,8 +793,7 @@ def test_local_executor_proc_stat_unreadable_marks_session_completed(
     # details carries the liveness detail plus a diagnostics-bundle pointer
     # (#1239) — session id isn't captured by this test, so match the prefix.
     assert result.blocker.details.startswith(
-        f"process {fake_runner.procs[-1].pid} start-time unavailable "
-        "[diagnostics: "
+        f"process {fake_runner.procs[-1].pid} start-time unavailable [diagnostics: "
     )
     assert result.blocker.details.endswith("]")
 
