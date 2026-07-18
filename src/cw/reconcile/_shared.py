@@ -1037,6 +1037,73 @@ def _effective_transcript_timestamp(transcript: Path) -> datetime:
     return datetime.fromtimestamp(transcript.stat().st_mtime, tz=UTC)
 
 
+def _project_transcripts_latest_timestamp(session: Session) -> datetime | None:
+    """Return the max effective timestamp across ALL transcripts in the project dir.
+
+    Widens the single-file csid/surface_ref resolution (#1283): a subagent's own
+    transcript in the same project dir has a filename that matches neither the
+    csid nor the ``<surface_ref>*`` prefix, so :func:`_locate_session_transcript`
+    is blind to it even while it carries fresh activity — leaving a worker that
+    is mid-subagent-delegation for >``TRANSCRIPT_LIVENESS_WINDOW_SECONDS`` (its
+    own tail quiet) to look dead. Globs every ``*.jsonl`` under the project dir
+    and returns the max :func:`_effective_transcript_timestamp` across files
+    whose mtime is strictly after ``session.started_at`` — the same reused-
+    worktree stale-transcript guard (#358/#372) that ``locate_transcript``
+    applies to the surface_ref candidate, here applied per-file across the whole
+    glob so a leftover prior-session transcript never counts. Fails open
+    (``None``) on missing dir / ``OSError``, matching every sibling helper.
+
+    Why no filename filter beyond the mtime guard: a worktree's project dir is
+    reused sequentially per-ticket, never shared concurrently across unrelated
+    tickets, so ``mtime > started_at`` alone bounds the glob to this session's
+    lineage.
+    """
+    project_dir = _session_project_dir(session)
+    if project_dir is None or not project_dir.is_dir():
+        return None
+    max_ts: datetime | None = None
+    for candidate in project_dir.glob("*.jsonl"):
+        # Per-candidate: a stat/read failure on one sibling (deleted/rotated
+        # mid-glob) must not discard max_ts already found from other, valid
+        # siblings -- only that one candidate is skipped.
+        try:
+            mtime = datetime.fromtimestamp(candidate.stat().st_mtime, tz=UTC)
+            if mtime <= session.started_at:
+                continue
+            ts = _effective_transcript_timestamp(candidate)
+        except OSError:
+            continue
+        if max_ts is None or ts > max_ts:
+            max_ts = ts
+    return max_ts
+
+
+def _widened_transcript_timestamp(session: Session) -> datetime | None:
+    """Return the freshest liveness timestamp for *session*, or None (#1283).
+
+    Takes the max of the single-file csid/surface_ref resolution
+    (:func:`_locate_session_transcript` + :func:`_effective_transcript_timestamp`)
+    and :func:`_project_transcripts_latest_timestamp` (the sibling-transcript
+    glob). Monotonic widening — never reports a session as *more* stale than the
+    registered transcript alone would. The two sources are computed
+    independently: a stat failure on the registered transcript alone does not
+    prevent the sibling-glob fallback from being consulted, so the widened
+    signal fix (b) exists to add is never discarded by an unrelated primary-file
+    error. Fails open (``None``) if both sources are unavailable.
+    """
+    best_ts: datetime | None = None
+    transcript = _locate_session_transcript(session)
+    if transcript is not None:
+        try:
+            best_ts = _effective_transcript_timestamp(transcript)
+        except OSError:
+            best_ts = None
+    project_ts = _project_transcripts_latest_timestamp(session)
+    if project_ts is not None and (best_ts is None or project_ts > best_ts):
+        best_ts = project_ts
+    return best_ts
+
+
 def _transcript_recently_active(
     session: Session,
     now: datetime,
@@ -1045,16 +1112,16 @@ def _transcript_recently_active(
 ) -> bool:
     """Return True if the transcript shows activity within *window_seconds* ago.
 
-    Uses :func:`_locate_session_transcript` for precise per-session lookup
-    (surface_ref-prefix glob, #541).  Returns False — permitting the watchdog
-    to proceed — when no transcript is found (pre-first-write or path
-    unavailable).  See GitHub #340.
+    Uses :func:`_widened_transcript_timestamp` — the max of the precise
+    per-session lookup (surface_ref-prefix glob, #541) and any fresher sibling
+    subagent transcript in the same project dir (#1283).  Returns False —
+    permitting the watchdog to proceed — when no transcript is found
+    (pre-first-write or path unavailable).  See GitHub #340.
     """
     try:
-        transcript = _locate_session_transcript(session)
-        if transcript is None:
+        ts = _widened_transcript_timestamp(session)
+        if ts is None:
             return False
-        ts = _effective_transcript_timestamp(transcript)
         return (now - ts).total_seconds() < window_seconds
     except OSError:
         return False
@@ -1066,15 +1133,15 @@ def _transcript_age_seconds(
 ) -> float | None:
     """Return seconds since the session's transcript last showed activity, or None.
 
-    Returns None when the transcript file cannot be located.  Uses
-    :func:`_locate_session_transcript` for precise per-session lookup
-    (surface_ref-prefix glob, #541).
+    Returns None when no transcript file can be located.  Uses
+    :func:`_widened_transcript_timestamp` — the max of the precise per-session
+    lookup (surface_ref-prefix glob, #541) and any fresher sibling subagent
+    transcript in the same project dir (#1283).
     """
     try:
-        transcript = _locate_session_transcript(session)
-        if transcript is None:
+        ts = _widened_transcript_timestamp(session)
+        if ts is None:
             return None
-        ts = _effective_transcript_timestamp(transcript)
         return (now - ts).total_seconds()
     except OSError:
         return None
