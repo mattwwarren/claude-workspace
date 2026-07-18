@@ -474,6 +474,7 @@ class CodexExecutor:
                     default_branch=client.default_branch,
                     model=self._config.model,
                     wall_clock_budget_seconds=wall_clock_budget_seconds,
+                    session_id=sid,
                 )
 
             # Step 4: Persist result under sessions_lock.

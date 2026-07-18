@@ -22,7 +22,9 @@ from cw.codex_review import (
     _build_reviewer_prompt,
     _capture_diff,
     _categorize_changed_files,
+    _classify_codex_failure,
     _codex_scratch_dir,
+    _format_failures_detail,
     _load_optional_text,
     _load_review_policy,
     _load_sensitive_hits,
@@ -30,13 +32,16 @@ from cw.codex_review import (
     _parse_reviewer_document,
     _parse_unified_diff,
     _read_sensitive_manifest,
+    _run_codex_role,
     _select_reviewer_roles,
     render_verdict_comment,
     run_codex_roles,
+    run_review,
     synthesize_codex_review_result,
 )
 from cw.codex_runner import CodexRunResult
 from cw.config import state_dir
+from cw.executor_diagnostics import ExecutorFailure, diagnostics_bundle_dir
 from cw.models import Stage, TicketTask
 from cw.review_findings import ReviewerRunFailure, consolidate_verdict
 from tests.conftest import _make_diff, _make_finding, _make_reviewer_doc
@@ -623,6 +628,7 @@ class TestRunCodexRoles:
             },
             model=None,
             wall_clock_budget_seconds=3600,
+            session_id="s-review",
         )
         assert len(docs) == 2
         assert failures == []
@@ -639,6 +645,7 @@ class TestRunCodexRoles:
             },
             model=None,
             wall_clock_budget_seconds=None,
+            session_id="s-review",
         )
         assert all(call["timeout"] is None for call in runner.calls)
 
@@ -660,6 +667,7 @@ class TestRunCodexRoles:
             prompts_by_role={"Code Quality Reviewer": "p1"},
             model=None,
             wall_clock_budget_seconds=100,
+            session_id="s-review",
         )
         assert runner.calls[0]["timeout"] == 31
 
@@ -669,9 +677,13 @@ class TestRunCodexRoles:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        # deadline=100 (call0); role1 remaining=100 (call1); role2 remaining=100
-        # (call2); role3 remaining=20<=30 -> skip budget_exhausted (call3).
-        monkeypatch.setattr("cw.codex_review.time.monotonic", _Clock([0, 0, 0, 80]))
+        # deadline=100 (call0). Each successful _run_codex_role now consumes two
+        # extra monotonic() reads (start/end duration capture, #1239), so the
+        # deadline-remaining reads land at call1 (role1: 100>30 run), call4
+        # (role2: 100>30 run), call7 (role3: remaining=100-80=20<=30 -> skip).
+        monkeypatch.setattr(
+            "cw.codex_review.time.monotonic", _Clock([0, 0, 0, 0, 0, 0, 0, 80])
+        )
         runner = _SequencedRunner([_ok_result(), _ok_result()])
         with caplog.at_level(logging.WARNING):
             docs, failures = run_codex_roles(
@@ -689,6 +701,7 @@ class TestRunCodexRoles:
                 },
                 model=None,
                 wall_clock_budget_seconds=100,
+                session_id="s-review",
             )
         assert len(docs) == 2
         assert len(failures) == 1
@@ -710,6 +723,7 @@ class TestRunCodexRoles:
                 prompts_by_role={"Code Quality Reviewer": "p"},
                 model=None,
                 wall_clock_budget_seconds=None,
+                session_id="s-review",
             )
         assert docs == []
         assert failures[0].reason == CODEX_ERROR
@@ -738,6 +752,7 @@ class TestRunCodexRoles:
             },
             model=None,
             wall_clock_budget_seconds=None,
+            session_id="s-review",
         )
         reasons = {f.role: f.reason for f in failures}
         assert reasons["Code Quality Reviewer"] == CODEX_TIMEOUT
@@ -778,6 +793,7 @@ class TestRunCodexRoles:
             },
             model=None,
             wall_clock_budget_seconds=None,
+            session_id="s-review",
         )
         assert len(docs) == 1
         assert docs[0].reviewer_role == "SysAdmin Reviewer"
@@ -794,6 +810,7 @@ class TestRunCodexRoles:
             prompts_by_role={"Code Quality Reviewer": "PROMPT BODY"},
             model=None,
             wall_clock_budget_seconds=None,
+            session_id="s-review",
         )
         assert runner.calls[0]["stdin"] == "PROMPT BODY"
 
@@ -812,6 +829,7 @@ class TestRunCodexRoles:
             prompts_by_role={"Code Quality Reviewer": "p"},
             model=None,
             wall_clock_budget_seconds=None,
+            session_id="s-review",
         )
         assert not (state_dir() / "codex-review" / fixed_uuid.hex).exists()
 
@@ -831,6 +849,7 @@ class TestRunCodexRoles:
             prompts_by_role={"Code Quality Reviewer": "p"},
             model=None,
             wall_clock_budget_seconds=None,
+            session_id="s-review",
         )
         assert not (state_dir() / "codex-review" / fixed_uuid.hex).exists()
 
@@ -856,6 +875,7 @@ class TestSynthesizeCodexReviewResult:
             failures=[ReviewerRunFailure(role="R", reason="crash")],
             diff=_make_diff(),
             reviewed_sha="sha",
+            session_id="s-synth",
         )
         assert result.status == "blocked"
         assert result.blocker is not None
@@ -888,6 +908,7 @@ class TestSynthesizeCodexReviewResult:
             failures=[ReviewerRunFailure(role="Code Quality Reviewer", reason=reason)],
             diff=_make_diff(),
             reviewed_sha="sha",
+            session_id="s-synth",
         )
         assert result.blocker is not None
         assert result.blocker.retry_eligible == expect_retry
@@ -904,6 +925,7 @@ class TestSynthesizeCodexReviewResult:
             failures=[],
             diff=_make_diff(),
             reviewed_sha="sha",
+            session_id="s-synth",
         )
         assert result.status == "blocked"
         assert result.blocker is not None
@@ -931,6 +953,7 @@ class TestSynthesizeCodexReviewResult:
             failures=[ReviewerRunFailure(role="Performance Reviewer", reason=reason)],
             diff=_make_diff(),
             reviewed_sha="sha",
+            session_id="s-synth",
         )
         assert result.status == "blocked"
         assert result.blocker is not None
@@ -959,6 +982,7 @@ class TestSynthesizeCodexReviewResult:
             ],
             diff=_make_diff(),
             reviewed_sha="sha",
+            session_id="s-synth",
         )
         assert result.status == "blocked"
         assert result.blocker is not None
@@ -978,6 +1002,7 @@ class TestSynthesizeCodexReviewResult:
             failures=[],
             diff=_make_diff(),
             reviewed_sha="sha",
+            session_id="s-synth",
         )
         assert result.status == "stage_complete"
         assert result.stage_reached == "stage3_review"
@@ -1041,3 +1066,220 @@ class TestRenderVerdictComment:
         assert "bad thing" in body
         assert "minor nit" in body
         assert body.index("### MUST_FIX") < body.index("### SHOULD_FIX")
+
+
+# ---------------------------------------------------------------------------
+# _classify_codex_failure — typed failure taxonomy (#1239)
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyCodexFailure:
+    def test_timeout(self) -> None:
+        result = CodexRunResult(returncode=-1, stdout="", stderr="", timed_out=True)
+        assert _classify_codex_failure(result) == "timeout"
+
+    def test_spawn_error_command_not_found(self) -> None:
+        result = CodexRunResult(
+            returncode=127, stdout="", stderr="codex: command not found"
+        )
+        assert _classify_codex_failure(result) == "spawn_error"
+
+    def test_nonzero_exit(self) -> None:
+        result = CodexRunResult(returncode=1, stdout="", stderr="boom")
+        assert _classify_codex_failure(result) == "nonzero_exit"
+
+    def test_missing_output(self) -> None:
+        result = CodexRunResult(
+            returncode=0, stdout="", stderr="", output_file_content=None
+        )
+        assert _classify_codex_failure(result) == "missing_output"
+
+    def test_empty_output(self) -> None:
+        result = CodexRunResult(
+            returncode=0, stdout="", stderr="", output_file_content="   "
+        )
+        assert _classify_codex_failure(result) == "empty_output"
+
+    def test_invalid_json(self) -> None:
+        result = CodexRunResult(
+            returncode=0, stdout="", stderr="", output_file_content="{not json"
+        )
+        assert _classify_codex_failure(result) == "invalid_json"
+
+    def test_schema_mismatch(self) -> None:
+        result = CodexRunResult(
+            returncode=0,
+            stdout="",
+            stderr="",
+            output_file_content='{"unexpected": "shape"}',
+        )
+        assert _classify_codex_failure(result) == "schema_mismatch"
+
+
+# ---------------------------------------------------------------------------
+# _run_codex_role — diagnostics persistence on failure (#1239)
+# ---------------------------------------------------------------------------
+
+
+def _run_one_role(
+    runner: _SequencedRunner,
+    tmp_path: Path,
+    *,
+    session_id: str = "sess-diag",
+    role: str = "Code Quality Reviewer",
+) -> tuple[object, object]:
+    scratch = tmp_path / "scratch"
+    scratch.mkdir(exist_ok=True)
+    return _run_codex_role(
+        runner=runner,
+        worktree=tmp_path,
+        role=role,
+        prompt="p",
+        model=None,
+        timeout_seconds=None,
+        scratch_dir=scratch,
+        session_id=session_id,
+    )
+
+
+class TestRunCodexRolePersistsDiagnostics:
+    def test_persists_diagnostics_on_timeout(self, tmp_path: Path) -> None:
+        runner = _SequencedRunner(
+            [CodexRunResult(returncode=-1, stdout="", stderr="", timed_out=True)]
+        )
+        _run_one_role(runner, tmp_path)
+        bundle = diagnostics_bundle_dir("sess-diag")
+        path = bundle / "code-quality-reviewer-timeout.json"
+        assert path.exists()
+        failure = ExecutorFailure.model_validate_json(path.read_text())
+        assert failure.category == "timeout"
+        assert failure.executor_name == "codex"
+        assert failure.reviewer_role == "Code Quality Reviewer"
+        assert failure.session_id == "sess-diag"
+
+    def test_persists_diagnostics_on_nonzero_exit(self, tmp_path: Path) -> None:
+        runner = _SequencedRunner(
+            [CodexRunResult(returncode=1, stdout="", stderr="boom")]
+        )
+        _run_one_role(runner, tmp_path)
+        path = diagnostics_bundle_dir("sess-diag") / (
+            "code-quality-reviewer-nonzero_exit.json"
+        )
+        assert path.exists()
+        assert (
+            ExecutorFailure.model_validate_json(path.read_text()).category
+            == "nonzero_exit"
+        )
+
+    @pytest.mark.parametrize(
+        ("output_content", "category"),
+        [
+            (None, "missing_output"),
+            ("", "empty_output"),
+            ("{not json", "invalid_json"),
+            ('{"unexpected": "shape"}', "schema_mismatch"),
+        ],
+    )
+    def test_persists_diagnostics_on_unparseable_output_variants(
+        self, tmp_path: Path, output_content: str | None, category: str
+    ) -> None:
+        runner = _SequencedRunner(
+            [
+                CodexRunResult(
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                    output_file_content=output_content,
+                )
+            ]
+        )
+        _run_one_role(runner, tmp_path)
+        path = diagnostics_bundle_dir("sess-diag") / (
+            f"code-quality-reviewer-{category}.json"
+        )
+        assert path.exists()
+        assert (
+            ExecutorFailure.model_validate_json(path.read_text()).category == category
+        )
+
+    def test_success_does_not_persist_diagnostics(self, tmp_path: Path) -> None:
+        runner = _SequencedRunner([_ok_result()])
+        doc, failure = _run_one_role(runner, tmp_path)
+        assert doc is not None
+        assert failure is None
+        assert not diagnostics_bundle_dir("sess-diag").exists()
+
+
+def test_run_codex_roles_scratch_dir_still_removed_after_persist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Even when a role failure triggers a diagnostics copy from the scratch dir,
+    # run_codex_roles still removes the scratch dir before returning; the
+    # persisted bundle (under a different tree) survives.
+    fixed_uuid = uuid.UUID("33333333-3333-3333-3333-333333333333")
+    monkeypatch.setattr("cw.codex_review.uuid.uuid4", lambda: fixed_uuid)
+    runner = _SequencedRunner([CodexRunResult(returncode=1, stdout="", stderr="boom")])
+    run_codex_roles(
+        runner=runner,
+        worktree=tmp_path,
+        roles=["Code Quality Reviewer"],
+        prompts_by_role={"Code Quality Reviewer": "p"},
+        model=None,
+        wall_clock_budget_seconds=None,
+        session_id="sess-scratch",
+    )
+    assert not (state_dir() / "codex-review" / fixed_uuid.hex).exists()
+    assert (
+        diagnostics_bundle_dir("sess-scratch")
+        / "code-quality-reviewer-nonzero_exit.json"
+    ).exists()
+
+
+def test_format_failures_detail_includes_diagnostics_path() -> None:
+    failures = [ReviewerRunFailure(role="Code Quality Reviewer", reason=CODEX_TIMEOUT)]
+    detail = _format_failures_detail(failures, session_id="sess-fmt")
+    assert "Code Quality Reviewer (codex_timeout)" in detail
+    assert "diagnostics:" in detail
+    # The rendered path points at this session's bundle dir.
+    bundle = diagnostics_bundle_dir("sess-fmt")
+    assert str(bundle) in detail or "sess-fmt" in detail
+
+
+def test_run_review_threads_session_id_to_run_codex_role(
+    make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree = make_git_repo("wt-run-review-thread")
+    captured: dict[str, object] = {}
+
+    def _spy_run_codex_role(**kwargs: object) -> tuple[object, object]:
+        captured["session_id"] = kwargs["session_id"]
+        return _make_reviewer_doc(), None
+
+    monkeypatch.setattr("cw.codex_review._run_codex_role", _spy_run_codex_role)
+    run_review(
+        runner=_SequencedRunner([]),
+        task=_task(),
+        worktree=worktree,
+        default_branch="main",
+        model=None,
+        wall_clock_budget_seconds=None,
+        session_id="sess-thread",
+    )
+    assert captured["session_id"] == "sess-thread"
+
+
+def test_duration_captured_without_extending_codex_run_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # CodexRunResult stays free of a duration attribute; the persisted
+    # ExecutorFailure.duration_seconds is populated from a monotonic() delta.
+    monkeypatch.setattr("cw.codex_review.time.monotonic", _Clock([100.0, 105.5]))
+    runner = _SequencedRunner([CodexRunResult(returncode=1, stdout="", stderr="boom")])
+    _run_one_role(runner, tmp_path, session_id="sess-dur")
+    result = runner._results[0]
+    assert not hasattr(result, "duration")
+    path = (
+        diagnostics_bundle_dir("sess-dur") / "code-quality-reviewer-nonzero_exit.json"
+    )
+    failure = ExecutorFailure.model_validate_json(path.read_text())
+    assert failure.duration_seconds == pytest.approx(5.5)

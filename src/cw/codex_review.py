@@ -23,12 +23,21 @@ import shutil
 import subprocess
 import time
 import uuid
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
 import yaml
 
 from cw.auto_dev_result import AutoDevResult, Health, Scope, StageReached
 from cw.config import state_dir
+from cw.executor_diagnostics import (
+    ExecutorFailure,
+    ExecutorFailureCategory,
+    diagnostics_bundle_dir,
+    persist_diagnostics_bundle,
+    redact_argv,
+)
 from cw.local_runner import _SCHEMA_VERSION, make_blocked, resolve_tier
 from cw.models import CONTEXT_JSON_RELATIVE_PATH
 from cw.review_findings import (
@@ -41,9 +50,8 @@ from cw.review_findings import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
-    from pathlib import Path
 
-    from cw.codex_runner import CodexRunner
+    from cw.codex_runner import CodexRunner, CodexRunResult
     from cw.models import TicketTask
     from cw.review_findings import Severity
 
@@ -559,6 +567,77 @@ def _parse_reviewer_document(
         return None
 
 
+def _classify_codex_failure(result: CodexRunResult) -> ExecutorFailureCategory:
+    """Map a failed :class:`CodexRunResult` to a typed failure category (#1239).
+
+    First-match order mirrors ``_run_codex_role``'s own branch order, refining
+    the coarse ``ReviewerRunFailure.reason`` into the finer diagnostics
+    taxonomy: a non-zero exit is split into ``spawn_error`` (codex binary
+    missing) vs ``nonzero_exit``, and an unparseable output into
+    ``missing_output`` / ``empty_output`` / ``invalid_json`` /
+    ``schema_mismatch``. Only ever called on a genuine failure, so the final
+    "validated fine" return is unreachable in practice.
+    """
+    if result.timed_out:
+        return "timeout"
+    if result.returncode == 127 and "command not found" in result.stderr:
+        return "spawn_error"
+    if result.returncode != 0:
+        return "nonzero_exit"
+    if result.output_file_content is None:
+        return "missing_output"
+    if not result.output_file_content.strip():
+        return "empty_output"
+    try:
+        data = json.loads(result.output_file_content)
+    except json.JSONDecodeError:
+        return "invalid_json"
+    try:
+        ReviewerFindingsDocument.model_validate(data)
+    except ValueError:
+        return "schema_mismatch"
+    return "schema_mismatch"  # pragma: no cover — unreachable on the failure path
+
+
+def _persist_codex_role_diagnostics(
+    *,
+    session_id: str,
+    role: str,
+    result: CodexRunResult,
+    argv: list[str],
+    duration_seconds: float,
+    schema_path: Path,
+    output_path: Path,
+) -> None:
+    """Build the typed :class:`ExecutorFailure` and write its diagnostics bundle."""
+    category = _classify_codex_failure(result)
+    failure = ExecutorFailure(
+        category=category,
+        executor_name="codex",
+        executor_version=None,
+        reviewer_role=role,
+        # Codex argv is content-free (prompt travels over stdin); redact_argv
+        # returns it unchanged, kept for symmetry with the aider path.
+        argv_sanitized=redact_argv(argv, executor_name="codex"),
+        duration_seconds=duration_seconds,
+        exit_code=result.returncode,
+        session_id=session_id,
+        run_id=None,
+        stdout_excerpt=result.stdout,
+        stderr_excerpt=result.stderr,
+        structured_output_excerpt=result.output_file_content,
+        occurred_at=datetime.now(UTC),
+    )
+    persist_diagnostics_bundle(
+        session_id=session_id,
+        role_slug=_slug(role),
+        reason=category,
+        failure=failure,
+        scratch_schema_path=schema_path,
+        scratch_output_path=output_path,
+    )
+
+
 def _run_codex_role(
     *,
     runner: CodexRunner,
@@ -568,11 +647,14 @@ def _run_codex_role(
     model: str | None,
     timeout_seconds: int | None,
     scratch_dir: Path,
+    session_id: str,
 ) -> tuple[ReviewerFindingsDocument | None, ReviewerRunFailure | None]:
     """Run one reviewer role; return ``(document, failure)`` (exactly one set).
 
     Logs each failure mode (timeout, non-zero exit, missing/malformed output)
-    via ``_log.warning`` before constructing the ``ReviewerRunFailure``.
+    via ``_log.warning`` before constructing the ``ReviewerRunFailure``, and
+    persists a typed diagnostics bundle (classified into the finer #1239
+    taxonomy) under ``session_id``'s diagnostics dir on every failure branch.
     """
     slug = _slug(role)
     schema_path = scratch_dir / f"{slug}-schema.json"
@@ -583,18 +665,35 @@ def _run_codex_role(
     argv = _build_generic_codex_argv(
         model=model, schema_path=schema_path, output_path=output_path
     )
+    start = time.monotonic()
     result = runner.run(worktree, argv, timeout_seconds, stdin=prompt)
+    duration = time.monotonic() - start
+
+    reason: str | None = None
     if result.timed_out:
         _log.warning("codex review role %r timed out", role)
-        return None, ReviewerRunFailure(role=role, reason=CODEX_TIMEOUT)
-    if result.returncode != 0:
+        reason = CODEX_TIMEOUT
+    elif result.returncode != 0:
         _log.warning("codex review role %r exited %d", role, result.returncode)
-        return None, ReviewerRunFailure(role=role, reason=CODEX_ERROR)
-    doc = _parse_reviewer_document(result.output_file_content)
-    if doc is None:
-        _log.warning("codex review role %r produced no parseable output", role)
-        return None, ReviewerRunFailure(role=role, reason=CODEX_REVIEW_UNPARSEABLE)
-    return doc, None
+        reason = CODEX_ERROR
+    else:
+        doc = _parse_reviewer_document(result.output_file_content)
+        if doc is None:
+            _log.warning("codex review role %r produced no parseable output", role)
+            reason = CODEX_REVIEW_UNPARSEABLE
+        else:
+            return doc, None
+
+    _persist_codex_role_diagnostics(
+        session_id=session_id,
+        role=role,
+        result=result,
+        argv=argv,
+        duration_seconds=duration,
+        schema_path=schema_path,
+        output_path=output_path,
+    )
+    return None, ReviewerRunFailure(role=role, reason=reason)
 
 
 def run_codex_roles(
@@ -605,6 +704,7 @@ def run_codex_roles(
     prompts_by_role: dict[str, str],
     model: str | None,
     wall_clock_budget_seconds: int | None,
+    session_id: str,
 ) -> tuple[list[ReviewerFindingsDocument], list[ReviewerRunFailure]]:
     """Run every role under one shared wall-clock deadline (Comment 3).
 
@@ -649,6 +749,7 @@ def run_codex_roles(
                 model=model,
                 timeout_seconds=timeout,
                 scratch_dir=scratch_dir,
+                session_id=session_id,
             )
             if doc is not None:
                 documents.append(doc)
@@ -659,9 +760,30 @@ def run_codex_roles(
         shutil.rmtree(scratch_dir, ignore_errors=True)
 
 
-def _format_failures_detail(failures: list[ReviewerRunFailure]) -> str:
-    """Render *failures* as a short ``role (reason)`` summary for ``details``."""
-    return "; ".join(f"{f.role} ({f.reason})" for f in failures)
+def _render_bundle_path(session_id: str) -> str:
+    """Render the diagnostics bundle dir as a stable, home-relative-ish path.
+
+    Falls back to the absolute path when the bundle dir is not under the user's
+    home (e.g. an XDG-relocated or tmp state dir under test) so the rendering
+    never raises. Local-only pointer — no secrets — safe for ``Blocker.details``.
+    """
+    bundle = diagnostics_bundle_dir(session_id)
+    try:
+        return str(bundle.relative_to(Path.home()))
+    except ValueError:
+        return str(bundle)
+
+
+def _format_failures_detail(
+    failures: list[ReviewerRunFailure], *, session_id: str
+) -> str:
+    """Render *failures* as a short ``role (reason)`` summary for ``details``.
+
+    Appends a pointer to the on-disk diagnostics bundle so an operator reading
+    the blocked sentinel knows where the per-role failure artifacts landed.
+    """
+    summary = "; ".join(f"{f.role} ({f.reason})" for f in failures)
+    return f"{summary} [diagnostics: {_render_bundle_path(session_id)}]"
 
 
 def synthesize_codex_review_result(
@@ -672,6 +794,7 @@ def synthesize_codex_review_result(
     failures: list[ReviewerRunFailure],
     diff: CapturedDiff,
     reviewed_sha: str,
+    session_id: str,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Map consolidated review documents to a typed AutoDevResult.
 
@@ -697,7 +820,7 @@ def synthesize_codex_review_result(
             ticket_id=task.ticket_id,
             worktree=worktree,
             reason=CODEX_REVIEW_UNPARSEABLE,
-            details=_format_failures_detail(failures),
+            details=_format_failures_detail(failures, session_id=session_id),
             retry_eligible=True if transient else None,
             stage_reached=STAGE3_REVIEW,
         )
@@ -793,6 +916,7 @@ def run_review(
     default_branch: str,
     model: str | None,
     wall_clock_budget_seconds: int | None,
+    session_id: str,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run the full per-role review pass; return ``(result, verdict)``.
 
@@ -837,6 +961,7 @@ def run_review(
         prompts_by_role=prompts_by_role,
         model=model,
         wall_clock_budget_seconds=wall_clock_budget_seconds,
+        session_id=session_id,
     )
     return synthesize_codex_review_result(
         task=task,
@@ -845,4 +970,5 @@ def run_review(
         failures=failures,
         diff=diff,
         reviewed_sha=reviewed_sha,
+        session_id=session_id,
     )
