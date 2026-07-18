@@ -10558,9 +10558,16 @@ class TestSalvageCommittedNoPrSessions:
         monkeypatch.setattr(
             "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
         )
-        # First call (pre-check): no PR; second call (idempotency): no PR
+        # First call (pre-check): no PR; second call (idempotency): no PR.
+        # Capture cwd from both to prove it is scoped to client-a's repo (#1279).
+        pr_cwds: list[object] = []
+
+        def _capture_pr_exists(_b: str, **kw: object) -> tuple[bool | None, bool]:
+            pr_cwds.append(kw.get("cwd"))
+            return False, True
+
         monkeypatch.setattr(
-            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+            "cw.reconcile.salvage.pr_exists_for_branch", _capture_pr_exists
         )
         monkeypatch.setattr("cw.reconcile._shared.subprocess.run", _fake_subprocess_run)
         monkeypatch.setattr(
@@ -10574,6 +10581,8 @@ class TestSalvageCommittedNoPrSessions:
         completed = salvage_committed_no_pr_sessions(candidates)
 
         assert ticket_id in completed
+        # Both the pre-check and the _salvage_high_path recheck are scoped.
+        assert pr_cwds == [Path("/tmp/ws-staged"), Path("/tmp/ws-staged")]
 
         store = load_dev_queue()
         task = next(t for t in store.tasks if t.ticket_id == ticket_id)
@@ -21528,8 +21537,14 @@ class TestFinalizeBlocked:
             return result
 
         monkeypatch.setattr("cw.reconcile.salvage.subprocess.run", _fake_subprocess_run)
+        pr_cwds: list[object] = []
+
+        def _capture_pr_exists(_b: str, **kw: object) -> tuple[bool | None, bool]:
+            pr_cwds.append(kw.get("cwd"))
+            return False, True
+
         monkeypatch.setattr(
-            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+            "cw.reconcile.salvage.pr_exists_for_branch", _capture_pr_exists
         )
         monkeypatch.setattr(
             "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
@@ -21538,6 +21553,8 @@ class TestFinalizeBlocked:
         completed = rescue_finalize_blocked_sessions()
 
         assert ticket_id in completed
+        # gh call scoped to client-a's repo, not the ambient CWD (#1279).
+        assert pr_cwds == [Path("/tmp/ws-staged")]
 
         store = load_dev_queue()
         t = next(t for t in store.tasks if t.ticket_id == ticket_id)
