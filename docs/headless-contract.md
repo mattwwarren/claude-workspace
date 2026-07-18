@@ -639,7 +639,7 @@ Every `stage` and `prev_stage` payload value MUST match one of:
 **Optional:**
 
 - `prev_stage` (str) — the stage being departed; MUST also match the closed enum in §10.2.
-- `malformed_recommendation_count` (int) — `s1_ambiguity_scan_complete` only. Count of ambiguity items whose `Recommendation:` sub-bullet was missing or malformed (defaulted to `parked` per the fail-closed rule) rather than an explicit `PARK` (#1274). Advisory optional field; absent on payloads from producers that predate this ticket. No schema_version bump required — the payload is an open dict (§10.3, no `extra=forbid`).
+- `malformed_recommendation_count` (int) — `s1_ambiguity_scan_complete` only. Count of ambiguity items whose `Recommendation:` sub-bullet was missing or malformed (defaulted to `parked` per the fail-closed rule) rather than an explicit `PARK` (#1274). Advisory optional field; absent on payloads from producers that predate this ticket. No schema_version bump required — the payload is an open dict (§10.3, no `extra=forbid`). On this event's current emission (the AUTO-CONTINUE path only, where `parked` is empty) the value is always `0`; the non-zero case surfaces instead via the `## Pending Verification Scan` comment note, not this field.
 
 **`stage.errored`-only:**
 

@@ -371,8 +371,10 @@ def test_ambiguity_pre_flight_recommendation_is_mandatory_and_typed() -> None:
     """Step 1b's Ambiguity pre-flight mirrors the PM Reviewer's mandatory framing."""
     section = _step1b_section()
     assert "Recommendation is mandatory on every item — never omit it." in section
-    assert "Recommendation: ADOPT" in section
-    assert "PARK" in section
+    assert (
+        "Recommendation: ADOPT — <why safe to auto-adopt> | "
+        "PARK — <why a human must decide>"
+    ) in section
     assert "is treated as PARK downstream" in section
 
 
