@@ -9157,6 +9157,91 @@ def test_transcript_recently_active_ignores_stale_prior_session_transcript(
     assert _transcript_recently_active(sess, now) is False
 
 
+def test_project_transcripts_latest_timestamp_isolates_one_bad_sibling(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1283 fix-cycle-1 regression guard: a stat() failure on ONE sibling
+    transcript must not discard max_ts already found from other, valid
+    siblings -- locks the per-candidate (not whole-loop) OSError isolation in
+    _project_transcripts_latest_timestamp. Pre-fix, any single bad candidate
+    aborted the whole glob scan and returned None."""
+    from cw.reconcile import _transcript_recently_active
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-widen-partial-fail"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+    # No registered transcript resolvable for this session (surface_ref glob
+    # finds nothing) -- isolates the assertion to the sibling-glob helper.
+    good = _write_idle_transcript(home, worktree, filename="subagent-good.jsonl")
+    good_ts = (now - timedelta(seconds=30)).timestamp()
+    os.utime(good, (good_ts, good_ts))
+    bad = _write_idle_transcript(home, worktree, filename="subagent-bad.jsonl")
+    bad_ts = (now - timedelta(seconds=10)).timestamp()
+    os.utime(bad, (bad_ts, bad_ts))
+
+    real_stat = Path.stat
+    stat_fail_msg = "simulated stat failure mid-glob"
+
+    def _flaky_stat(self: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        if self.name == "subagent-bad.jsonl":
+            raise OSError(stat_fail_msg)
+        return real_stat(self, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", _flaky_stat)
+
+    sess = _mk_content_ts_session("widen-partial-fail-1", worktree, started_at)
+
+    assert _transcript_recently_active(sess, now) is True
+
+
+def test_widened_transcript_timestamp_survives_primary_transcript_oserror(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1283 fix-cycle-1 regression guard: a stat() failure resolving the
+    REGISTERED transcript must not prevent the sibling-glob fallback from
+    being consulted -- locks the independent-computation ordering in
+    _widened_transcript_timestamp. Pre-fix, the primary's OSError propagated
+    before project_ts was ever computed."""
+    from cw.reconcile import _transcript_age_seconds, _transcript_recently_active
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-widen-primary-fail"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+    # Fresh sibling transcript -- the widened fallback this fix protects.
+    sib = _write_idle_transcript(home, worktree, filename="subagent-live.jsonl")
+    sib_ts = (now - timedelta(seconds=30)).timestamp()
+    os.utime(sib, (sib_ts, sib_ts))
+
+    sess = _mk_content_ts_session("widen-primary-fail-1", worktree, started_at)
+
+    # Force registered-transcript resolution to a nonexistent path so
+    # _effective_transcript_timestamp's stat() raises OSError -- same
+    # injection technique as test_transcript_age_seconds_oserror_returns_none
+    # (tests/test_cli.py).
+    fake_path = worktree / "does-not-exist.jsonl"
+    monkeypatch.setattr(
+        "cw.reconcile._shared._locate_session_transcript",
+        lambda *_a, **_kw: fake_path,
+    )
+
+    assert _transcript_recently_active(sess, now) is True
+    age = _transcript_age_seconds(sess, now)
+    assert age is not None
+    assert abs(age - 30) < 5
+
+
 def test_idle_confirm_recovers_via_subagent_transcript_activity(
     tmp_config_dir: Path,
     tmp_path: Path,
