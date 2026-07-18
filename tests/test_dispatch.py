@@ -6154,38 +6154,32 @@ class TestApplyStagedDecision:
         "scope_gated_status",
         ["plan_pending_approval", "review_pending_approval"],
     )
-    def test_scope_gated_large_tier_park_does_not_emit_attention(
+    def test_scope_gated_approval_park_emits_needs_attention(
         self,
         scope_gated_status: str,
         tmp_dispatch_dirs: Path,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
-        """Rule 1's large-tier scope-gated park still emits zero attention (#1117).
+        """Rule 1's large-tier scope-gated park emits SESSION_NEEDS_ATTENTION (#1302).
 
-        Regression guard pinning "no double-fire": Rule 1 fires before Rule 2
-        (SCOPE_GATED_APPROVAL_STATUSES is a subset of
-        PAUSED_FOR_USER_INPUT_STATUSES) and must remain silent on the
-        attention channel even after this ticket's Rule 3b/5/6 emissions are
-        added elsewhere in the same routing table.
+        Before this fix, Rule 1 (SCOPE_GATED_APPROVAL_STATUSES) intercepted
+        these statuses before Rule 2 -- which does emit the event -- ever saw
+        them, since SCOPE_GATED_APPROVAL_STATUSES is a subset of
+        PAUSED_FOR_USER_INPUT_STATUSES. The park left the operator with no
+        attention signal. Also pins "no double-fire": exactly one event, not
+        two, per park.
         """
         from cw.dispatch import apply_staged_decision
 
-        attention_events: list[object] = []
+        attention = capture_events(
+            "cw.dispatch", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
 
-        def capture_event(
-            event_type: object,
-            payload: dict[str, object] | None = None,
-            **_kwargs: object,
-        ) -> object:
-            if event_type == OrchestratorEventType.SESSION_NEEDS_ATTENTION:
-                attention_events.append(event_type)
-            return None
-
-        monkeypatch.setattr("cw.dispatch.record_event", capture_event)
-
-        task = self._make_running_task("SG-LARGE-ATTN-1", stage=Stage.PLAN)
+        task = self._make_running_task("SG-ATTN-1", stage=Stage.PLAN)
         task.scope_hint = "large"
+        task.session_id = "sess-sg1"
+        task.client = "test-client"
         last_result: dict[str, object] = {
             "status": scope_gated_status,
             "scope": {"tier": "large"},
@@ -6195,7 +6189,65 @@ class TestApplyStagedDecision:
         )
 
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
-        assert len(attention_events) == 0
+        assert len(attention) == 1
+        event_type, payload, correlation_id = attention[0]
+        assert event_type == OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        assert payload["paused_status"] == "approval_gate"
+        assert payload["ticket_id"] == "SG-ATTN-1"
+        assert payload["client"] == "test-client"
+        assert payload["session_id"] == "sess-sg1"
+        assert payload["crashed"] is False
+        assert correlation_id == "SG-ATTN-1"
+
+    def test_scope_gated_small_tier_park_does_not_emit_attention(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """Small-tier scope-gated statuses never touch the attention channel (#1302).
+
+        Small tier auto-advances (Stage.PLAN) or parks on the unrelated
+        AWAITING_OPERATOR_SIGNOFF status (Stage.REVIEW with signoff active) --
+        neither is the BLOCKED_ON_USER park this ticket's fix targets, so
+        SESSION_NEEDS_ATTENTION must stay silent for both.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        attention = capture_events(
+            "cw.dispatch", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+
+        plan_task = self._make_running_task("SG-SMALL-ATTN-1", stage=Stage.PLAN)
+        plan_task.scope_hint = "small"
+        plan_last_result: dict[str, object] = {
+            "status": "plan_pending_approval",
+            "scope": {"tier": "small"},
+        }
+        apply_staged_decision(
+            plan_task,
+            "plan_pending_approval",
+            plan_last_result,
+            self._clients(tmp_path),
+        )
+        assert plan_task.status == QueueItemStatus.PENDING
+        assert plan_task.stage == Stage.IMPL
+
+        review_task = self._make_running_task("SG-SMALL-ATTN-2", stage=Stage.REVIEW)
+        review_task.signoff = "operator"
+        review_last_result: dict[str, object] = {
+            "status": "review_pending_approval",
+            "scope": {"tier": "small"},
+        }
+        apply_staged_decision(
+            review_task,
+            "review_pending_approval",
+            review_last_result,
+            self._clients(tmp_path),
+        )
+        assert review_task.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+
+        assert len(attention) == 0
 
     def test_scope_gate_hint_large_tier_small_blocks(
         self, tmp_dispatch_dirs: Path, tmp_path: Path
