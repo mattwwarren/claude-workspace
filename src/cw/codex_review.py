@@ -33,9 +33,9 @@ from cw.config import state_dir
 from cw.executor_diagnostics import (
     ExecutorFailure,
     ExecutorFailureCategory,
+    append_diagnostics_pointer,
     persist_diagnostics_bundle,
     redact_argv,
-    render_bundle_path,
 )
 from cw.local_runner import _SCHEMA_VERSION, make_blocked, resolve_tier
 from cw.models import CONTEXT_JSON_RELATIVE_PATH
@@ -787,7 +787,7 @@ def _format_failures_detail(
     the blocked sentinel knows where the per-role failure artifacts landed.
     """
     summary = "; ".join(f"{f.role} ({f.reason})" for f in failures)
-    return f"{summary} [diagnostics: {render_bundle_path(session_id)}]"
+    return append_diagnostics_pointer(summary, session_id=session_id)
 
 
 def synthesize_codex_review_result(
