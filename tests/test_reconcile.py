@@ -15070,6 +15070,9 @@ def test_act_on_stalled_park_vetoed_emits_event_no_mutation(
         client="client-a",
         stage=Stage.IMPL,
         stale_minutes=4.2,
+        # Why: stamp explicitly (#1277) so this exercises the post-fix
+        # "read from candidate.reap_reason" emission path, not the
+        # defensive None-fallback that now exists alongside it.
         reap_reason=ReapReason.WALL_CLOCK_BUDGET,
     )
 
