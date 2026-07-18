@@ -60,6 +60,7 @@ from cw.models import OrchestratorEventType
 from cw.pr_hydrate import _is_candidate, _parse_pr_url, _repo_slug_mismatch
 from cw.reconcile._shared import _PAUSED_STATUS_KEY
 from cw.review_strategy import MODE_CI, resolve_review_strategy
+from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1079,6 +1080,10 @@ class _ReviewerJob(NamedTuple):
     handle: str
     ticket_id: str
     payload_base: dict[str, object]
+    # Client repo dir the deferred gh call is scoped to (GitHub #1269/#1279).
+    # Mirrors _DispatchJob.client_cfg: resolved under the lock, carried across
+    # the lock boundary so the post-lock gh call targets the right repo.
+    cwd: Path | None
 
 
 def _prepare_request_reviewer_job(
@@ -1164,6 +1169,7 @@ def _prepare_request_reviewer_job(
         handle=strategy.handle,
         ticket_id=task.ticket_id,
         payload_base=payload_base,
+        cwd=_git_dir(client_cfg),
     )
 
 
@@ -1181,7 +1187,7 @@ def _dispatch_request_reviewer(job: _ReviewerJob) -> str | None:
     """
     from cw.gh import add_pr_reviewer
 
-    result = add_pr_reviewer(job.pr_url, job.handle)
+    result = add_pr_reviewer(job.pr_url, job.handle, cwd=job.cwd)
     if result is None:
         _skip_with_anomaly(
             job.payload_base,

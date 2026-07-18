@@ -923,6 +923,7 @@ class TestConsumeCompletesTasks:
         assert payload["client"] == "test-client"
         assert payload["session_id"] == "sess-923"
         assert payload["crashed"] is False
+        assert payload["lane"] == "default"
 
     def test_consume_non_paused_status_routes_to_completed(
         self,
@@ -6039,6 +6040,7 @@ class TestApplyStagedDecision:
         assert payload["client"] == "test-client"
         assert payload["session_id"] == "sess-sf1"
         assert payload["crashed"] is False
+        assert payload["lane"] == "default"
 
     @pytest.mark.parametrize(
         ("status", "blocker", "expected_breadcrumbs"),
@@ -6197,6 +6199,7 @@ class TestApplyStagedDecision:
         assert payload["paused_status"] == "merge_pending"
         assert payload["breadcrumbs"] == ""
         assert payload["crashed"] is False
+        assert payload["lane"] == "default"
 
     def test_unparseable_status_emits_attention(
         self,
@@ -6234,6 +6237,7 @@ class TestApplyStagedDecision:
         _, payload = captured[0]
         assert payload["paused_status"] == "blocked"
         assert payload["breadcrumbs"] == ""
+        assert payload["lane"] == "default"
 
     @pytest.mark.parametrize(
         "scope_gated_status",
@@ -6265,6 +6269,7 @@ class TestApplyStagedDecision:
         task.scope_hint = "large"
         task.session_id = "sess-sg1"
         task.client = "test-client"
+        task.lane = "bugs"
         last_result: dict[str, object] = {
             "status": scope_gated_status,
             "scope": {"tier": "large"},
@@ -6282,6 +6287,7 @@ class TestApplyStagedDecision:
         assert payload["client"] == "test-client"
         assert payload["session_id"] == "sess-sg1"
         assert payload["crashed"] is False
+        assert payload["lane"] == "bugs"
         assert correlation_id == "SG-ATTN-1"
 
     def test_scope_gated_small_tier_park_does_not_emit_attention(

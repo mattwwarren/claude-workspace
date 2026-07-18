@@ -44,7 +44,7 @@ from cw.reconcile._shared import (
     _SalvageCandidate,
     ticket_id_for_session,
 )
-from cw.worktree import _has_commits_beyond_base
+from cw.worktree import _git_dir, _has_commits_beyond_base
 
 if TYPE_CHECKING:
     from cw.models import Session
@@ -99,10 +99,12 @@ def salvage_committed_no_pr_sessions(
 
         wt_path = Path(worktree_path_str)
 
-        # Resolve default_branch from client config; skip session if client no
-        # longer configured (removed between session creation and now).
+        # Resolve client config; skip session if client no longer configured
+        # (removed between session creation and now). Capture the ClientConfig
+        # (not just default_branch) so gh calls can be scoped to its repo cwd
+        # (GitHub #1269/#1279).
         try:
-            default_branch = get_client(session.client).default_branch
+            client_cfg = get_client(session.client)
         except CwError:
             _log.warning(
                 "salvage: unknown client %r for session %s — skipping",
@@ -110,6 +112,8 @@ def salvage_committed_no_pr_sessions(
                 session_id,
             )
             continue
+        default_branch = client_cfg.default_branch
+        cwd = _git_dir(client_cfg)
 
         # Confirm git-state trigger: commits beyond base AND no open PR.
         has_commits = _has_commits_beyond_base(wt_path, default_branch)
@@ -124,7 +128,7 @@ def salvage_committed_no_pr_sessions(
         if ticket_id and (session.client, ticket_id) in merged_client_ticket_ids:
             continue
 
-        pr_result, gh_available = pr_exists_for_branch(branch)
+        pr_result, gh_available = pr_exists_for_branch(branch, cwd=cwd)
         if not gh_available:
             # gh absent — cannot confirm PR absence; treat as non-candidate.
             continue
@@ -145,6 +149,7 @@ def salvage_committed_no_pr_sessions(
                 wt_path,
                 completed_ticket_ids,
                 default_branch,
+                cwd=cwd,
             )
         else:
             # LOW path: flag for human salvage.
@@ -160,10 +165,16 @@ def _salvage_high_path(
     wt_path: Path,
     completed_ticket_ids: list[str],
     default_branch: str,
+    *,
+    cwd: Path | None = None,
 ) -> None:
-    """Execute the HIGH-confidence automated draft PR path."""
+    """Execute the HIGH-confidence automated draft PR path.
+
+    *cwd* scopes the idempotency-recheck gh call to the client's repo
+    (GitHub #1269/#1279); its sole production caller always supplies it.
+    """
     # Idempotency re-check immediately before creating the PR.
-    pr_result, gh_available = pr_exists_for_branch(branch)
+    pr_result, gh_available = pr_exists_for_branch(branch, cwd=cwd)
     if not gh_available or pr_result is True or pr_result is None:
         # Cannot confirm or PR now exists — downgrade to LOW.
         _salvage_low_path(session, ticket_id, branch, str(wt_path))
@@ -533,7 +544,7 @@ def rescue_finalize_blocked_sessions(
             )
             continue
         try:
-            default_branch = get_client(session.client).default_branch
+            client_cfg = get_client(session.client)
         except CwError:
             _log.warning(
                 "rescue_finalize_blocked: unknown client %r for session %s — skipping",
@@ -541,7 +552,8 @@ def rescue_finalize_blocked_sessions(
                 session.id,
             )
             continue
-        pr_result, gh_available = pr_exists_for_branch(branch)
+        default_branch = client_cfg.default_branch
+        pr_result, gh_available = pr_exists_for_branch(branch, cwd=_git_dir(client_cfg))
         # Why: gh-unavailable and transient errors (pr_result=None) are not
         # tombstoned with rescue_attempted. The intent is to retry on the next
         # tick — these conditions are expected to be transient. Only definitive

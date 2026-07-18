@@ -1474,6 +1474,35 @@ def test_act_request_reviewer_configured_mode_calls_gh_helper(
     )
 
 
+def test_act_request_reviewer_scopes_gh_call_to_client_cwd(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1279: the deferred add_pr_reviewer gh call is cwd-scoped to the
+    client's repo (via _ReviewerJob.cwd), not the ambient CWD."""
+    _write_acme_clients_yaml(tmp_config_dir)
+    task = _make_task(pr_url=_PR_URL, pr_state=_pr_state(attention_state="no_reviewer"))
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    _stub_strategy(monkeypatch, ReviewStrategy("repo_owner", "alice"))
+    cwds: list[object] = []
+
+    def _fake_add(
+        _pr_ref: str, _reviewer: str, **kw: Any
+    ) -> subprocess.CompletedProcess[bytes]:
+        cwds.append(kw.get("cwd"))
+        return subprocess.CompletedProcess(args=[], returncode=0)
+
+    monkeypatch.setattr("cw.gh.add_pr_reviewer", _fake_add)
+
+    acted = _act_request_reviewer(
+        [_candidate(task, RECIPE_REQUEST_REVIEWER, "no_reviewer")],
+        clients=load_effective_clients(),
+    )
+
+    assert acted == [task.ticket_id]
+    # _git_dir(acme) == workspace_path == tmp_config_dir (no repo_path set).
+    assert cwds == [tmp_config_dir]
+
+
 def test_act_request_reviewer_gh_call_fails_emits_failed(
     tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

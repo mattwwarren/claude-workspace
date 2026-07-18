@@ -58,6 +58,7 @@ from cw.models import (
 from cw.reconcile import AUTO_DEV_LABEL_PREFIX
 from cw.spawn import spawn_create_impl
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
+from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -551,7 +552,11 @@ class CodexExecutor:
             # failure does not post a duplicate comment. verdict is None only
             # when every reviewer failed (no documents to render).
             if verdict is not None:
-                _post_review_comment(task.ticket_id, render_verdict_comment(verdict))
+                _post_review_comment(
+                    task.ticket_id,
+                    render_verdict_comment(verdict),
+                    cwd=_git_dir(client),
+                )
 
             # Step 5: Emit SESSION_COMPLETED — no "stdout" key so dispatch skips
             # persist_last_result and uses the last_result written in Step 4.
@@ -589,11 +594,15 @@ class CodexExecutor:
         return AutoDevResult.model_json_schema()
 
 
-def _post_review_comment(ticket_id: str, review_text: str) -> None:
+def _post_review_comment(
+    ticket_id: str, review_text: str, *, cwd: Path | None = None
+) -> None:
     """Post codex review findings as a GitHub issue comment (best-effort).
 
     Delegates to the shared ``cw.gh.post_issue_comment`` primitive and discards
     the result — this call site silently swallows every gh failure (missing
     binary, timeout, non-zero exit) exactly as before.
+
+    *cwd* scopes the gh call to the client's repo (GitHub #1269/#1279).
     """
-    post_issue_comment(ticket_id, review_text)
+    post_issue_comment(ticket_id, review_text, cwd=cwd)
