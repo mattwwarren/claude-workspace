@@ -228,6 +228,7 @@ def cleanup_expired_diagnostics(*, retention_hours: int) -> int:
         return 0
     cutoff = datetime.now(UTC).timestamp() - retention_hours * 3600
     removed = 0
+    removed_session_ids: list[str] = []
     try:
         session_dirs = list(sessions_root.iterdir())
     except OSError:
@@ -248,10 +249,12 @@ def cleanup_expired_diagnostics(*, retention_hours: int) -> int:
         except OSError:
             continue
         removed += 1
+        removed_session_ids.append(session_dir.name)
     if removed:
         _log.warning(
-            "diagnostics cleanup removed %d bundle(s) older than %dh",
+            "diagnostics cleanup removed %d bundle(s) older than %dh: %s",
             removed,
             retention_hours,
+            ", ".join(removed_session_ids),
         )
     return removed

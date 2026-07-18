@@ -253,6 +253,7 @@ def _seed_bundle(session_id: str) -> Path:
 
 def test_cleanup_expired_diagnostics_removes_old_bundles(
     tmp_config_dir: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     from cw.config import state_dir
 
@@ -266,12 +267,21 @@ def test_cleanup_expired_diagnostics_removes_old_bundles(
 
         os.utime(f, (old, old))
 
-    removed = cleanup_expired_diagnostics(retention_hours=24)
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        removed = cleanup_expired_diagnostics(retention_hours=24)
     assert removed == 1
     assert not stale.exists()
     assert fresh.exists()
     # Only the stale session's diagnostics dir went; sessions/ tree intact.
     assert (state_dir() / "sessions").exists()
+    # The summary log names which session(s) were swept, not just the count.
+    [record] = [
+        r for r in caplog.records if "diagnostics cleanup removed" in r.getMessage()
+    ]
+    assert "stale-sess" in record.getMessage()
+    assert "fresh-sess" not in record.getMessage()
 
 
 def test_cleanup_expired_diagnostics_keeps_fresh_bundles(
