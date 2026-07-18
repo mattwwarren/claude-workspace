@@ -29,7 +29,11 @@ from cw.auto_dev_result import (
     ScopeTier,
     StageReached,
 )
-from cw.executor_diagnostics import ExecutorFailure, persist_diagnostics_bundle
+from cw.executor_diagnostics import (
+    ExecutorFailure,
+    persist_diagnostics_bundle,
+    render_bundle_path,
+)
 from cw.gh import fetch_approved_plan_comment
 from cw.models import CONTEXT_JSON_RELATIVE_PATH
 
@@ -460,7 +464,9 @@ def synthesize_git_result(
     *session_id* is optional (defaulted for the 8 existing test call sites that
     do not exercise the diagnostics path): when set, the AIDER_NO_OUTPUT branch
     also persists a typed ``missing_output`` diagnostics bundle under that
-    session's diagnostics dir (#1239). None makes that persist a no-op.
+    session's diagnostics dir, and ``details`` gets a trailing
+    ``[diagnostics: <bundle path>]`` pointer appended (#1239). None makes both
+    of those a no-op, leaving ``details`` as the bare log tail (or empty).
     """
     facts = _git_facts(worktree, default_branch)
 
@@ -475,6 +481,8 @@ def synthesize_git_result(
             _persist_aider_no_output_diagnostics(
                 session_id=session_id, log_tail=details
             )
+            pointer = f"[diagnostics: {render_bundle_path(session_id)}]"
+            details = f"{details} {pointer}" if details else pointer
         return make_blocked(
             ticket_id=task.ticket_id,
             worktree=worktree,
