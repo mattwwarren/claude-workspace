@@ -53,6 +53,20 @@ def test_fake_runner_returns_output_file_content(tmp_path: Path) -> None:
     assert result.output_file_content == '{"x": 1}'
 
 
+def test_fake_runner_records_stdin(tmp_path: Path) -> None:
+    """FakeCodexRunner records the stdin passed per call (#1236)."""
+    runner = FakeCodexRunner(returncode=0)
+    runner.run(tmp_path, ["codex", "exec"], 60, stdin="reviewer prompt body")
+    assert runner.calls[0]["stdin"] == "reviewer prompt body"
+
+
+def test_fake_runner_records_none_stdin_by_default(tmp_path: Path) -> None:
+    """FakeCodexRunner records stdin=None when the kwarg is omitted (#1236)."""
+    runner = FakeCodexRunner(returncode=0)
+    runner.run(tmp_path, ["codex", "exec"], 60)
+    assert runner.calls[0]["stdin"] is None
+
+
 # ---------------------------------------------------------------------------
 # RealCodexRunner — subprocess handling
 # ---------------------------------------------------------------------------
@@ -108,3 +122,21 @@ def test_real_runner_non_utf8_output_file_returns_none(tmp_path: Path) -> None:
     runner = RealCodexRunner()
     result = runner.run(tmp_path, ["echo", "hi", "-o", str(output_path)], None)
     assert result.output_file_content is None
+
+
+def test_real_runner_writes_stdin_to_process(tmp_path: Path) -> None:
+    """RealCodexRunner.run() feeds stdin to the process (#1236)."""
+    runner = RealCodexRunner()
+    # `cat` echoes its stdin to stdout, proving the input reached the process.
+    result = runner.run(tmp_path, ["cat"], None, stdin="hello from stdin")
+    assert result.returncode == 0
+    assert "hello from stdin" in result.stdout
+
+
+def test_real_runner_no_stdin_is_backward_compatible(tmp_path: Path) -> None:
+    """RealCodexRunner.run() with no stdin kwarg leaves stdin at /dev/null."""
+    runner = RealCodexRunner()
+    # `cat` with /dev/null stdin produces empty stdout and exits 0.
+    result = runner.run(tmp_path, ["cat"], None)
+    assert result.returncode == 0
+    assert result.stdout == ""

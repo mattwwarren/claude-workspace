@@ -57,8 +57,15 @@ class CodexRunner(Protocol):
         worktree: Path,
         argv: list[str],
         timeout_seconds: int | None,
+        *,
+        stdin: str | None = None,
     ) -> CodexRunResult:
-        """Spawn the codex process and return its outcome."""
+        """Spawn the codex process and return its outcome.
+
+        *stdin*, when set, is written to the process's standard input (used to
+        feed a materialized reviewer prompt to ``codex exec``); when ``None``,
+        the process gets ``/dev/null`` on stdin (the pre-#1236 behavior).
+        """
         ...
 
 
@@ -70,12 +77,14 @@ class RealCodexRunner:
         worktree: Path,
         argv: list[str],
         timeout_seconds: int | None,
+        *,
+        stdin: str | None = None,
     ) -> CodexRunResult:
         try:
             proc = subprocess.Popen(
                 argv,
                 cwd=worktree,
-                stdin=subprocess.DEVNULL,
+                stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -88,7 +97,7 @@ class RealCodexRunner:
                 timed_out=False,
             )
         try:
-            stdout, stderr = proc.communicate(timeout=timeout_seconds)
+            stdout, stderr = proc.communicate(input=stdin, timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
@@ -132,12 +141,15 @@ class FakeCodexRunner:
         worktree: Path,
         argv: list[str],
         timeout_seconds: int | None,
+        *,
+        stdin: str | None = None,
     ) -> CodexRunResult:
         self.calls.append(
             {
                 "argv": list(argv),
                 "cwd": worktree,
                 "timeout": timeout_seconds,
+                "stdin": stdin,
             }
         )
         if self.simulate_timeout:
