@@ -251,7 +251,7 @@ def pr_is_merged_for_ticket(
 
 
 def _fetch_branch_exists_on_origin(
-    branch: str, timeout: int
+    branch: str, timeout: int, *, cwd: Path | None = None
 ) -> tuple[bool | None, bool]:
     """Return (exists, gh_available) for *branch* via ``gh api`` refs endpoint.
 
@@ -277,6 +277,7 @@ def _fetch_branch_exists_on_origin(
             text=True,
             check=False,
             timeout=timeout,
+            cwd=cwd,
         )
     except FileNotFoundError:
         return None, False
@@ -292,7 +293,7 @@ def _fetch_branch_exists_on_origin(
 
 
 def branch_exists_on_origin(
-    branch: str, *, timeout: int = 10
+    branch: str, *, timeout: int = 10, cwd: Path | None = None
 ) -> tuple[bool | None, bool]:
     """Check whether *branch* still exists on origin.
 
@@ -306,8 +307,11 @@ def branch_exists_on_origin(
       (None, False)  — gh binary not found
 
     Fail-open: callers must treat (None, *) as "cannot determine".
+
+    *cwd* scopes the ``gh`` call to a client's repo (defaults to None, i.e.
+    ambient CWD); multi-client callers MUST pass it (GitHub #1269/#1279).
     """
-    return _fetch_branch_exists_on_origin(branch, timeout)
+    return _fetch_branch_exists_on_origin(branch, timeout, cwd=cwd)
 
 
 def current_gh_login(*, timeout: int) -> str | None:
@@ -324,6 +328,9 @@ def current_gh_login(*, timeout: int) -> str | None:
     process-lifetime GitHub-login cache (RFC 0011 S1).
     """
     try:
+        # Why: deliberately unscoped (no cwd) — the gh identity is a
+        # per-user account fact, not a per-repo one, so it is repo-independent
+        # and must stay global (GitHub #1269 R3).
         result = _sp.run(
             ["gh", "api", "user", "--jq", ".login"],
             capture_output=True,
@@ -352,6 +359,9 @@ def check_gh_availability(*, timeout: int) -> bool:
     availability never reports the fleet as available.
     """
     try:
+        # Why: deliberately unscoped (no cwd) — ``gh auth status`` probes the
+        # user's auth session, a repo-independent fact, so it must stay global
+        # (GitHub #1269 R3).
         result = _sp.run(
             ["gh", "auth", "status"],
             capture_output=True,
@@ -439,13 +449,20 @@ def fetch_approved_plan_comment(
 
 
 def post_issue_comment(
-    ticket_id: str, body: str, *, timeout: int = _POST_COMMENT_TIMEOUT_SECONDS
+    ticket_id: str,
+    body: str,
+    *,
+    timeout: int = _POST_COMMENT_TIMEOUT_SECONDS,
+    cwd: Path | None = None,
 ) -> _sp.CompletedProcess[bytes] | None:
     """Post *body* as a GitHub issue comment via ``gh issue comment``.
 
     Returns the completed subprocess (inspect .returncode / .stderr) or None
     if the subprocess could not run / timed out. Policy-free: callers decide
     whether to log or swallow — this neither logs nor raises on gh failure.
+
+    *cwd* scopes the ``gh`` call to a client's repo (defaults to None, i.e.
+    ambient CWD); multi-client callers MUST pass it (GitHub #1269/#1279).
     """
     try:
         return _sp.run(
@@ -453,13 +470,18 @@ def post_issue_comment(
             capture_output=True,
             timeout=timeout,
             check=False,
+            cwd=cwd,
         )
     except (OSError, _sp.TimeoutExpired):
         return None
 
 
 def add_pr_reviewer(
-    pr_ref: str, reviewer: str, *, timeout: int = _POST_COMMENT_TIMEOUT_SECONDS
+    pr_ref: str,
+    reviewer: str,
+    *,
+    timeout: int = _POST_COMMENT_TIMEOUT_SECONDS,
+    cwd: Path | None = None,
 ) -> _sp.CompletedProcess[bytes] | None:
     """Request *reviewer* on *pr_ref* via ``gh pr edit --add-reviewer``.
 
@@ -469,6 +491,9 @@ def add_pr_reviewer(
     ``.returncode`` / ``.stderr``) or None if the subprocess could not run /
     timed out. Policy-free: callers decide whether to log or swallow — this
     neither logs nor raises on gh failure.
+
+    *cwd* scopes the ``gh`` call to a client's repo (defaults to None, i.e.
+    ambient CWD); multi-client callers MUST pass it (GitHub #1269/#1279).
     """
     try:
         return _sp.run(
@@ -476,13 +501,14 @@ def add_pr_reviewer(
             capture_output=True,
             timeout=timeout,
             check=False,
+            cwd=cwd,
         )
     except (OSError, _sp.TimeoutExpired):
         return None
 
 
 def pr_exists_for_branch(
-    branch: str, *, timeout: int = _PR_EXISTS_TIMEOUT
+    branch: str, *, timeout: int = _PR_EXISTS_TIMEOUT, cwd: Path | None = None
 ) -> tuple[bool | None, bool]:
     """Return (open_pr_exists, gh_available).
 
@@ -494,6 +520,9 @@ def pr_exists_for_branch(
     gh_available:
       False  — gh binary not found (FileNotFoundError)
       True   — binary present (even if the call failed transiently)
+
+    *cwd* scopes the ``gh`` call to a client's repo (defaults to None, i.e.
+    ambient CWD); multi-client callers MUST pass it (GitHub #1269/#1279).
     """
     try:
         result = _sp.run(
@@ -512,6 +541,7 @@ def pr_exists_for_branch(
             text=True,
             check=False,
             timeout=timeout,
+            cwd=cwd,
         )
     except FileNotFoundError:
         return None, False

@@ -1264,6 +1264,8 @@ def test_revert_stalled_headless_sessions_not_merged_times_out(
     now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
     assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
 
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
     sess = _mk_headless_daemon_session("315-notmerged", worktree, started_at)
     state = CwState(sessions=[sess])
     save_state(state)
@@ -1276,19 +1278,27 @@ def test_revert_stalled_headless_sessions_not_merged_times_out(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
+    branch_cwds: list[object] = []
+
     monkeypatch.setattr(
         "cw.reconcile._deps.pr_is_merged_for_ticket",
         lambda _tid, **_kw: (False, True),
     )
+
+    def _capture_branch_exists(_branch: str, **kw: object) -> tuple[bool | None, bool]:
+        branch_cwds.append(kw.get("cwd"))
+        return True, True
+
     monkeypatch.setattr(
-        "cw.reconcile._deps.branch_exists_on_origin",
-        lambda _branch, **_kw: (True, True),
+        "cw.reconcile._deps.branch_exists_on_origin", _capture_branch_exists
     )
 
     reverted = revert_stalled_headless_sessions(state, now=now, config=_auto_config())
 
     assert "315-notmerged" in reverted
     assert sess.status == SessionStatus.TIMED_OUT
+    # branch_exists_on_origin scoped to client-a's repo cwd (#1279).
+    assert branch_cwds == [Path("/tmp/ws-staged")]
 
     store = load_dev_queue()
     task_after = next(t for t in store.tasks if t.ticket_id == "315-notmerged")
@@ -1305,6 +1315,74 @@ def test_revert_stalled_headless_sessions_not_merged_times_out(
         event_types=[OrchestratorEventType.SESSION_COMPLETED],
     )
     assert not any(e.payload.get("session_id") == sess.id for e in completed_events)
+
+
+def test_revert_stalled_headless_sessions_dangling_client_skips_gh_blocks_user(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1279 R7: a REVERT_TASK candidate whose client is absent from a populated
+    clients.yaml skips BOTH gh calls (pr_is_merged_for_ticket and
+    branch_exists_on_origin) and routes the ticket to BLOCKED_ON_USER."""
+    from cw.reconcile import HEADLESS_TIMEOUT_SECONDS
+
+    worktree = tmp_path / "wt-1279-dangling"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    # clients.yaml populated with a DIFFERENT client than the session's
+    # (client-a) → client-a is dangling/config-drifted.
+    config_dir = tmp_config_dir / ".config" / "cw"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "clients.yaml").write_text(
+        "clients:\n"
+        "  client-b:\n"
+        "    workspace_path: /tmp/ws-other\n"
+        "    default_branch: main\n"
+    )
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+    )
+    monkeypatch.setattr("cw.reconcile._shared.remove_worktree", lambda *_a, **_kw: None)
+
+    sess = _mk_headless_daemon_session("1279-dangling", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="1279-dangling",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="1279-dangling",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    merged_calls: list[str] = []
+    branch_calls: list[str] = []
+
+    def _capture_merged(tid: str, **_kw: object) -> tuple[bool | None, bool]:
+        merged_calls.append(tid)
+        return True, True
+
+    def _capture_branch(branch: str, **_kw: object) -> tuple[bool | None, bool]:
+        branch_calls.append(branch)
+        return True, True
+
+    monkeypatch.setattr("cw.reconcile._deps.pr_is_merged_for_ticket", _capture_merged)
+    monkeypatch.setattr("cw.reconcile._deps.branch_exists_on_origin", _capture_branch)
+
+    revert_stalled_headless_sessions(state, now=now, config=_auto_config())
+
+    # Neither gh call fires for the dangling client (#1279 R7).
+    assert merged_calls == []
+    assert branch_calls == []
+
+    store = load_dev_queue()
+    task_after = next(t for t in store.tasks if t.ticket_id == "1279-dangling")
+    assert task_after.status == QueueItemStatus.BLOCKED_ON_USER
 
 
 def test_revert_stalled_headless_sessions_transient_gh_error_times_out(
@@ -10558,9 +10636,16 @@ class TestSalvageCommittedNoPrSessions:
         monkeypatch.setattr(
             "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
         )
-        # First call (pre-check): no PR; second call (idempotency): no PR
+        # First call (pre-check): no PR; second call (idempotency): no PR.
+        # Capture cwd from both to prove it is scoped to client-a's repo (#1279).
+        pr_cwds: list[object] = []
+
+        def _capture_pr_exists(_b: str, **kw: object) -> tuple[bool | None, bool]:
+            pr_cwds.append(kw.get("cwd"))
+            return False, True
+
         monkeypatch.setattr(
-            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+            "cw.reconcile.salvage.pr_exists_for_branch", _capture_pr_exists
         )
         monkeypatch.setattr("cw.reconcile._shared.subprocess.run", _fake_subprocess_run)
         monkeypatch.setattr(
@@ -10574,6 +10659,8 @@ class TestSalvageCommittedNoPrSessions:
         completed = salvage_committed_no_pr_sessions(candidates)
 
         assert ticket_id in completed
+        # Both the pre-check and the _salvage_high_path recheck are scoped.
+        assert pr_cwds == [Path("/tmp/ws-staged"), Path("/tmp/ws-staged")]
 
         store = load_dev_queue()
         task = next(t for t in store.tasks if t.ticket_id == ticket_id)
@@ -21468,8 +21555,14 @@ class TestFinalizeBlocked:
         monkeypatch.setattr(
             "cw.reconcile.stalled._has_commits_beyond_base", lambda _p, _b: True
         )
+        pr_cwds: list[object] = []
+
+        def _capture_pr_exists(_b: str, **kw: object) -> tuple[bool | None, bool]:
+            pr_cwds.append(kw.get("cwd"))
+            return False, True
+
         monkeypatch.setattr(
-            "cw.reconcile.stalled.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+            "cw.reconcile.stalled.pr_exists_for_branch", _capture_pr_exists
         )
 
         blocked, branch = _resolve_finalize_blocked_condition(
@@ -21478,12 +21571,62 @@ class TestFinalizeBlocked:
         assert blocked is True
         assert branch is not None
         assert "FB-9" in branch
+        # Fallback path gh call scoped to client-a's repo cwd (#1279).
+        assert pr_cwds == [Path("/tmp/ws-staged")]
 
         blocked2, branch2 = _resolve_finalize_blocked_condition(
             impl_task, sess, worktree, "main"
         )
         assert blocked2 is False
         assert branch2 is None
+
+    def test_resolve_condition_dangling_client_skips_gh_returns_false(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Fallback path with a dangling client (clients.yaml populated but
+        missing session.client) → pr_exists_for_branch NOT called, returns
+        (False, None) → REVERT_TASK fallthrough (GitHub #1279 R7)."""
+        from cw.reconcile.stalled import _resolve_finalize_blocked_condition
+
+        worktree = tmp_path / "wt-fb-dangling"
+        worktree.mkdir(parents=True)
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+        # clients.yaml populated with a DIFFERENT client than the session's.
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            "clients:\n"
+            "  client-b:\n"
+            "    workspace_path: /tmp/ws-other\n"
+            "    default_branch: main\n"
+        )
+
+        sess = self._mk_finalize_session("fb-dangling", "FB-D", worktree, started_at)
+        finalize_task = self._mk_finalize_task("FB-D", "fb-dangling")
+
+        monkeypatch.setattr(
+            "cw.reconcile.stalled._has_commits_beyond_base", lambda _p, _b: True
+        )
+        called: list[str] = []
+
+        def _should_not_run(_b: str, **_kw: object) -> tuple[bool | None, bool]:
+            called.append(_b)
+            return False, True
+
+        monkeypatch.setattr(
+            "cw.reconcile.stalled.pr_exists_for_branch", _should_not_run
+        )
+
+        blocked, branch = _resolve_finalize_blocked_condition(
+            finalize_task, sess, worktree, "main"
+        )
+        assert blocked is False
+        assert branch is None
+        assert called == []
 
     # ── 1.10 rescue happy path ────────────────────────────────────────────
 
@@ -21528,8 +21671,14 @@ class TestFinalizeBlocked:
             return result
 
         monkeypatch.setattr("cw.reconcile.salvage.subprocess.run", _fake_subprocess_run)
+        pr_cwds: list[object] = []
+
+        def _capture_pr_exists(_b: str, **kw: object) -> tuple[bool | None, bool]:
+            pr_cwds.append(kw.get("cwd"))
+            return False, True
+
         monkeypatch.setattr(
-            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+            "cw.reconcile.salvage.pr_exists_for_branch", _capture_pr_exists
         )
         monkeypatch.setattr(
             "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
@@ -21538,6 +21687,8 @@ class TestFinalizeBlocked:
         completed = rescue_finalize_blocked_sessions()
 
         assert ticket_id in completed
+        # gh call scoped to client-a's repo, not the ambient CWD (#1279).
+        assert pr_cwds == [Path("/tmp/ws-staged")]
 
         store = load_dev_queue()
         t = next(t for t in store.tasks if t.ticket_id == ticket_id)
@@ -22349,9 +22500,11 @@ class TestFinalizeBlocked:
         save_dev_queue(DevQueueStore(tasks=[task]))
 
         calls: list[str] = []
+        cwds: list[object] = []
 
-        def _fake_pr_exists(branch: str, **_kw: object) -> tuple[bool | None, bool]:
+        def _fake_pr_exists(branch: str, **kw: object) -> tuple[bool | None, bool]:
             calls.append(branch)
+            cwds.append(kw.get("cwd"))
             return False, True
 
         monkeypatch.setattr("cw.reconcile.core.pr_exists_for_branch", _fake_pr_exists)
@@ -22365,6 +22518,57 @@ class TestFinalizeBlocked:
         assert any(pr is False for pr, _ in result.values())
         # sess_no_tid has no valid ticket_id → excluded; only 1 branch checked.
         assert len(calls) == 1
+        # cwd scoped to client-a's _git_dir (workspace_path, no repo_path) (#1279).
+        assert cwds == [Path("/tmp/ws-staged")]
+
+    def test_build_finalize_pr_map_dangling_client_skips_gh_call(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """_build_finalize_pr_map: session's client absent from a populated
+        clients.yaml → branch never enters result, gh never called (#1279)."""
+        from cw.reconcile.core import _build_finalize_pr_map
+
+        # clients.yaml populated with a DIFFERENT client than the session's.
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            "clients:\n"
+            "  client-b:\n"
+            "    workspace_path: /tmp/ws-other\n"
+            "    default_branch: main\n"
+        )
+
+        worktree = tmp_path / "wt-fb-dangling"
+        worktree.mkdir(parents=True)
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        sess_finalize = self._mk_finalize_session(
+            "fb-dangling", "FB-DANGLING", worktree, started_at
+        )
+        sess_finalize.status = SessionStatus.ACTIVE
+
+        task = TicketTask(
+            ticket_id="FB-DANGLING",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            stage=Stage.FINALIZE,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        calls: list[str] = []
+
+        def _fake_pr_exists(branch: str, **_kw: object) -> tuple[bool | None, bool]:
+            calls.append(branch)
+            return False, True
+
+        monkeypatch.setattr("cw.reconcile.core.pr_exists_for_branch", _fake_pr_exists)
+
+        result = _build_finalize_pr_map(CwState(sessions=[sess_finalize]))
+
+        assert calls == []
+        assert result == {}
 
     # ── 1.21 reconcile(): ticket_id=None and gh_blocked in pr_is_merged pass
 

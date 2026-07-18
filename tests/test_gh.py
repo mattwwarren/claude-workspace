@@ -16,6 +16,7 @@ from cw.gh import (
     current_gh_login,
     fetch_approved_plan_comment,
     fetch_pr_view,
+    post_issue_comment,
     pr_exists_for_branch,
     pr_is_merged_for_ticket,
 )
@@ -454,6 +455,19 @@ class TestPrExistsForBranch:
         assert exists is None
         assert gh_available is False
 
+    def test_cwd_passed_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """cwd reaches the `gh pr list` subprocess call (#1279)."""
+        want_cwd = Path("/some/client-a/repo")
+        captured: list[object] = []
+
+        def _fake_run(*_a: object, **kwargs: object) -> Any:
+            captured.append(kwargs.get("cwd"))
+            return _make_run_result(0, json.dumps([]))
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        pr_exists_for_branch("dev/497", cwd=want_cwd)
+        assert captured == [want_cwd]
+
 
 class TestBranchExistsOnOrigin:
     """Tests for branch_exists_on_origin / _fetch_branch_exists_on_origin."""
@@ -571,6 +585,19 @@ class TestBranchExistsOnOrigin:
         exists, gh_available = branch_exists_on_origin("dev/808")
         assert exists is None
         assert gh_available is True
+
+    def test_cwd_passed_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """cwd reaches the `gh api` refs subprocess call (#1279)."""
+        want_cwd = Path("/some/client-a/repo")
+        captured: list[object] = []
+
+        def _fake_run(*_a: object, **kwargs: object) -> Any:
+            captured.append(kwargs.get("cwd"))
+            return _make_run_result(0, "{}")
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        branch_exists_on_origin("dev/808", cwd=want_cwd)
+        assert captured == [want_cwd]
 
 
 class TestFetchApprovedPlanComment:
@@ -1051,6 +1078,82 @@ class TestAddPrReviewer:
 
         monkeypatch.setattr("cw.gh._sp.run", _raise)
         assert add_pr_reviewer(self._PR_URL, "alice") is None
+
+    def test_cwd_passed_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """cwd reaches the `gh pr edit` subprocess call (#1279).
+
+        Cross-repo regression: the kwarg must arrive as the client's repo dir
+        regardless of the process CWD — proven by the kwarg reaching _sp.run.
+        """
+        want_cwd = Path("/some/client-a/repo")
+        captured: list[object] = []
+
+        def _fake_run(*_a: object, **kwargs: object) -> Any:
+            captured.append(kwargs.get("cwd"))
+            return _make_run_result(0, "")
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        add_pr_reviewer(self._PR_URL, "alice", cwd=want_cwd)
+        assert captured == [want_cwd]
+
+
+class TestPostIssueComment:
+    """post_issue_comment: policy-free, None on failure, cwd-scoped (#1279)."""
+
+    def test_success_returns_completed_process(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sentinel = _make_run_result(0, "")
+        monkeypatch.setattr("cw.gh._sp.run", lambda *_a, **_kw: sentinel)
+        assert post_issue_comment("487", "hi") is sentinel
+
+    def test_argv_carries_ticket_and_body(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: list[list[str]] = []
+
+        def _fake_run(args: list[str], **_kw: object) -> Any:
+            captured.append(list(args))
+            return _make_run_result(0, "")
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        post_issue_comment("487", "body-text")
+        argv = captured[0]
+        assert argv[:3] == ["gh", "issue", "comment"]
+        assert "487" in argv
+        assert argv[argv.index("--body") + 1] == "body-text"
+
+    def test_gh_missing_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raise(*_a: object, **_kw: object) -> Any:
+            msg = "gh"
+            raise FileNotFoundError(msg)
+
+        monkeypatch.setattr("cw.gh._sp.run", _raise)
+        assert post_issue_comment("487", "hi") is None
+
+    def test_timeout_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raise(*_a: object, **_kw: object) -> Any:
+            raise subprocess.TimeoutExpired(["gh"], 30)
+
+        monkeypatch.setattr("cw.gh._sp.run", _raise)
+        assert post_issue_comment("487", "hi") is None
+
+    def test_cwd_passed_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """cwd reaches the `gh issue comment` subprocess call (#1279).
+
+        Cross-repo regression: the kwarg must arrive as the client's repo dir
+        regardless of the process CWD — proven by the kwarg reaching _sp.run.
+        """
+        want_cwd = Path("/some/client-a/repo")
+        captured: list[object] = []
+
+        def _fake_run(*_a: object, **kwargs: object) -> Any:
+            captured.append(kwargs.get("cwd"))
+            return _make_run_result(0, "")
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+        post_issue_comment("487", "hi", cwd=want_cwd)
+        assert captured == [want_cwd]
 
 
 class TestCreateIssue:

@@ -65,6 +65,7 @@ from cw.reconcile._shared import (
     ticket_id_for_session,
 )
 from cw.reconcile.liveness import _classify_liveness_bucket
+from cw.reconcile.tasks import _client_cwd, _is_dangling_client
 from cw.worktree import _has_commits_beyond_base
 
 if TYPE_CHECKING:
@@ -112,11 +113,26 @@ def _resolve_finalize_blocked_condition(
     if finalize_pr_by_branch is not None:
         pr_result, gh_available = finalize_pr_by_branch.get(branch, (None, False))
     else:
+        # Dangling client (clients.yaml populated but missing session.client) →
+        # skip the unscoped gh call and fall through to REVERT_TASK, mirroring
+        # this function's "any short-circuit → (False, None)" contract
+        # (GitHub #1269/#1279 R7). The precomputed-map branch above is already
+        # scoped upstream via core.py's _build_finalize_pr_map.
+        if _is_dangling_client(session.client, effective_clients):
+            _log.warning(
+                "finalize_blocked_check_client_dangling ticket=%s client=%s: "
+                "client missing from clients.yaml (config drift) -- gh call "
+                "skipped, falling through to REVERT_TASK",
+                task.ticket_id,
+                session.client,
+            )
+            return False, None
         # Why: None means caller is outside sessions_lock (e.g.
         # revert_stalled_headless_sessions). Direct gh call is safe there.
         # _reconcile_locked converts None → {} so gh never runs under the lock
         # (#816 SHOULD_FIX 1).
-        pr_result, gh_available = pr_exists_for_branch(branch)
+        cwd = _client_cwd(session.client, effective_clients)
+        pr_result, gh_available = pr_exists_for_branch(branch, cwd=cwd)
     # gh absent, PR already open, or transient error — fall through to REVERT_TASK.
     # Only pr_result is False (confirmed no open PR) triggers FINALIZE_BLOCKED.
     if not gh_available or pr_result is not False:
@@ -1336,6 +1352,19 @@ def revert_stalled_headless_sessions(
             _gh_blocked_tids.append(candidate.ticket_id)
             continue
         _branch = feature_branch_key(candidate.client, candidate.ticket_id, _clients)
+        if _is_dangling_client(candidate.client, _clients):
+            # Client removed/renamed from a populated clients.yaml -- route to
+            # gh_blocked (BLOCKED_ON_USER downstream) rather than risk an
+            # unscoped gh call (GitHub #1269/#1279 R7). Mirrors core.py's guard
+            # position: this also skips the still-unwired pr_is_merged_for_ticket
+            # call for a dangling client only (a deliberate narrowing).
+            _gh_blocked_tids.append(candidate.ticket_id)
+            continue
+        _cwd = _client_cwd(candidate.client, _clients)
+        # Why: pr_is_merged_for_ticket deliberately does NOT get cwd= here --
+        # this function has no production callers (test-only, per GitHub #1279
+        # Discoveries), so wiring its cwd threading is out of scope for this
+        # ticket; _cwd is only used below by branch_exists_on_origin.
         _merged, _gh_avail = _deps.pr_is_merged_for_ticket(
             candidate.ticket_id, branch=_branch
         )
@@ -1350,7 +1379,7 @@ def revert_stalled_headless_sessions(
         else:
             # No merged PR found: consult branch presence for diagnostic annotation.
             # Fail-open: (None, *) → no tag; never blocks disposition.
-            _exists, _ = _deps.branch_exists_on_origin(_branch)
+            _exists, _ = _deps.branch_exists_on_origin(_branch, cwd=_cwd)
             if _exists is False:
                 _branch_absent_tids.append(candidate.ticket_id)
     merged_ticket_ids = frozenset(_merged_tids)
