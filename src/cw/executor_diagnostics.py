@@ -157,8 +157,8 @@ def render_bundle_path(session_id: str) -> str:
     Home-relative when the bundle sits under the user's home dir, absolute
     otherwise (e.g. an XDG-relocated or tmp state dir under test) — the
     rendering never raises. Local-only pointer, no secrets — safe for
-    ``Blocker.details``. Mirrors ``codex_review.py``'s ``_render_bundle_path``
-    so all executor backends (codex/aider) share one rendering rule (#1239).
+    ``Blocker.details``. Shared by every executor backend (codex/aider) so
+    they all use one rendering rule (#1239).
     """
     bundle = diagnostics_bundle_dir(session_id)
     try:
