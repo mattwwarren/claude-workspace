@@ -613,6 +613,21 @@ def _stamp_gate_recipe_failure(ticket_id: str, client: str, *, now: datetime) ->
     save_dev_queue(store)
 
 
+def _log_gate_recipe_comment_skipped(ticket_id: str, client: str) -> None:
+    """Log a dangling-client audit-comment skip (GitHub #1269/#1279 R7).
+
+    Shared by :func:`_act_auto_approve_review` and :func:`_act_auto_adopt_plan`
+    so the two identical skip sites can't drift independently.
+    """
+    _log.warning(
+        "gate_recipe_comment_skipped ticket=%s client=%s: client "
+        "missing from clients.yaml (config drift) -- gh call skipped, "
+        "GitHub #1269",
+        ticket_id,
+        client,
+    )
+
+
 def _act_auto_approve_review(
     candidates: list[GateRecipeCandidate],
     *,
@@ -641,8 +656,10 @@ def _act_auto_approve_review(
     by_key = {(c.ticket_id, c.client): c for c in candidates}
     approved: list[str] = []
     # (ticket_id, client, snapshot): client name is carried across the lock
-    # boundary so the R7 dangling check runs against the freshly-loaded clients
-    # dict at comment-post time, not at detect/lock time (GitHub #1279).
+    # boundary so the R7 dangling check runs against this tick's `clients`
+    # snapshot at comment-post time rather than the detect-time candidate,
+    # matching how every other field here is re-validated post-lock, not
+    # detect-time state (GitHub #1279).
     comment_jobs: list[tuple[str, str, dict[str, object]]] = []
     with dev_queue_lock():
         # Loaded once: dev_queue_lock() is the exclusive writer lock for this
@@ -729,13 +746,7 @@ def _act_auto_approve_review(
             # unscoped cwd (GitHub #1269/#1279 R7). Best-effort-logged, matching
             # this helper's own comment-failure shape — there is no downstream
             # disposition list for an audit comment to route to.
-            _log.warning(
-                "gate_recipe_comment_skipped ticket=%s client=%s: client "
-                "missing from clients.yaml (config drift) -- gh call skipped, "
-                "GitHub #1269",
-                ticket_id,
-                client,
-            )
+            _log_gate_recipe_comment_skipped(ticket_id, client)
             continue
         _post_auto_approve_comment(
             ticket_id, snapshot, cwd=_client_cwd(client, clients or {})
@@ -852,13 +863,7 @@ def _act_auto_adopt_plan(
         if _is_dangling_client(client, clients or {}):
             # See _act_auto_approve_review: skip the audit comment for a
             # config-drifted client rather than post it unscoped (#1269/#1279).
-            _log.warning(
-                "gate_recipe_comment_skipped ticket=%s client=%s: client "
-                "missing from clients.yaml (config drift) -- gh call skipped, "
-                "GitHub #1269",
-                ticket_id,
-                client,
-            )
+            _log_gate_recipe_comment_skipped(ticket_id, client)
             continue
         _post_auto_adopt_comment(
             ticket_id, snapshot, cwd=_client_cwd(client, clients or {})

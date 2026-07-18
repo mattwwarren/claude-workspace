@@ -194,6 +194,12 @@ def _build_finalize_pr_map(
             # Client removed/renamed from a populated clients.yaml -- skip
             # rather than risk an unscoped gh call (GitHub #1269/#1279).
             # Mirrors the _reconcile_locked pre-pass guard above.
+            _log.warning(
+                "finalize_pr_map_client_dangling ticket=%s client=%s: client "
+                "missing from clients.yaml (config drift) -- gh call skipped",
+                ticket_id,
+                session.client,
+            )
             continue
         branch = feature_branch_key(session.client, ticket_id, effective_clients)
         if branch not in result:

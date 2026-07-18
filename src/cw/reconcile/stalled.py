@@ -119,6 +119,13 @@ def _resolve_finalize_blocked_condition(
         # (GitHub #1269/#1279 R7). The precomputed-map branch above is already
         # scoped upstream via core.py's _build_finalize_pr_map.
         if _is_dangling_client(session.client, effective_clients):
+            _log.warning(
+                "finalize_blocked_check_client_dangling ticket=%s client=%s: "
+                "client missing from clients.yaml (config drift) -- gh call "
+                "skipped, falling through to REVERT_TASK",
+                task.ticket_id,
+                session.client,
+            )
             return False, None
         # Why: None means caller is outside sessions_lock (e.g.
         # revert_stalled_headless_sessions). Direct gh call is safe there.
@@ -1354,6 +1361,10 @@ def revert_stalled_headless_sessions(
             _gh_blocked_tids.append(candidate.ticket_id)
             continue
         _cwd = _client_cwd(candidate.client, _clients)
+        # Why: pr_is_merged_for_ticket deliberately does NOT get cwd= here --
+        # this function has no production callers (test-only, per GitHub #1279
+        # Discoveries), so wiring its cwd threading is out of scope for this
+        # ticket; _cwd is only used below by branch_exists_on_origin.
         _merged, _gh_avail = _deps.pr_is_merged_for_ticket(
             candidate.ticket_id, branch=_branch
         )
