@@ -423,4 +423,10 @@ class TestCodexContractDiagnostics:
         assert failure is None
         assert doc is not None
         assert any("codex_contract_probe" in r.getMessage() for r in caplog.records)
+        # A nightly run installs a real codex CLI right before this test, so
+        # it has a live opportunity to catch a capability-probe regression
+        # (e.g. a version-string parsing bug misdiagnosing a capable install)
+        # — assert on it rather than only logging, so a misdiagnosis turns
+        # the nightly run red instead of passing silently (#1238 review).
+        assert probe.diagnosis is None, probe.detail
         runner.assert_clean()

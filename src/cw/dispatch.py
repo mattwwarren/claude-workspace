@@ -425,14 +425,20 @@ class _SpawnOutcome:
     when neither), carried so the caller can stamp ``last_error`` on the
     per-lane circuit-breaker LANE_PAUSED payload (#875).
     ``capability_parked`` — True if the codex capability gate (#1238) parked
-    the task BLOCKED_ON_USER before any spawn was attempted. Deliberately
-    distinct from ``spawn_error``: the caller must NOT treat this as a broad
-    spawn failure (no circuit-breaker increment, no aborting the rest of the
-    tick's lane/client loop) since it's a deterministic, per-task condition,
-    not the sporadic failure the circuit breaker exists to catch.
+    the task BLOCKED_ON_USER before any spawn was attempted. Below
+    :data:`_CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD` consecutive parks this is
+    deliberately decoupled from ``spawn_error`` (no circuit-breaker increment,
+    no aborting the rest of the tick's lane/client loop) since an isolated
+    park is a deterministic, per-task condition, not the sporadic failure the
+    circuit breaker exists to catch. At/above the threshold, ``spawn_error``
+    IS also set (see :func:`_codex_capability_gate`) as a bounded backstop
+    against a systemically wrong probe verdict — ``capability_parked`` and
+    ``spawn_error`` can both be True at once in that case.
 
     ``usage_limit_detected`` and ``spawn_error`` signal the caller to break
-    out of the slot/lane loops; ``capability_parked`` does not.
+    out of the slot/lane loops; ``capability_parked`` alone does not (but see
+    above — it can co-occur with ``spawn_error`` once the park-count
+    threshold is reached).
     """
 
     spawned: bool = False
@@ -896,7 +902,7 @@ def _invalidate_stale_context_json(
 
 
 def _park_running_task_blocked_on_user(
-    ticket_id: str, client_name: str, *, disposition: str
+    *, ticket_id: str, client_name: str, disposition: str
 ) -> None:
     """Move a still-RUNNING claimed task to BLOCKED_ON_USER, clearing session_id.
 
@@ -904,7 +910,9 @@ def _park_running_task_blocked_on_user(
     inspection rather than silently retrying it (the dirty-worktree guard and
     the codex capability gate, #1238) — both need the identical lock, load,
     match-by-(ticket_id, client, status==RUNNING), transition, clear
-    session_id, save shape; this is the single copy.
+    session_id, save shape; this is the single copy. ``ticket_id``/``client_name``
+    are keyword-only (both plain ``str``, no type-system distinction between
+    them) so a future edit can't silently transpose them at a call site.
     """
     with dev_queue_lock():
         store = load_dev_queue()
@@ -924,6 +932,28 @@ def _park_running_task_blocked_on_user(
         save_dev_queue(store)
 
 
+# Timeout for the codex-capability probe's own `codex --version` subprocess
+# call when invoked from this hot path (#1238). `_spawn_claimed_task` runs
+# synchronously inside dispatch_tick's per-client, per-lane loop, so a stuck
+# `codex` binary would otherwise stall that entire tick for up to
+# executor.py's one-shot-appropriate 10s default; use a much smaller budget
+# here since `codex --version` is a trivial local command expected to return
+# near-instantly on a healthy install.
+_CODEX_CAPABILITY_GATE_TIMEOUT_SECONDS = 3
+
+# Consecutive codex-capability parks (across any client/task sharing this
+# process) tolerated before the gate also raises the generic `spawn_error`
+# signal, as a bounded backstop (#1238). Below this count, a park stays
+# decoupled from the per-lane circuit breaker (see _codex_capability_gate's
+# docstring — an isolated park must not durably pause an unrelated lane).
+# At/above it, the condition has stopped looking like an isolated blip and
+# started looking systemic (e.g. a wrong probe verdict, per the TTL-cached
+# result being shared across every codex-backed task in the process), so the
+# existing circuit-breaker/operator-visible-pause machinery is allowed to
+# engage rather than letting every codex-backed task in the queue drain into
+# BLOCKED_ON_USER with no self-limiting mechanism at all.
+_CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD = 3
+
 # In-process cache for the codex-capability probe (#1238). A single-element
 # list is used as a mutable slot -- updates mutate its contents in place
 # rather than rebinding the module-level name, so no `global` statement (and
@@ -932,6 +962,13 @@ def _park_running_task_blocked_on_user(
 # (test support only -- production code never needs to invalidate early since
 # codex CLI presence/version doesn't change mid-process).
 _codex_capability_cache: list[tuple[CodexCapabilityDiagnosis, datetime]] = []
+
+# Consecutive-park counter backing _CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD
+# (#1238). Same mutable-single-element-list-as-slot idiom as the cache above.
+# Incremented on every park; never incremented once the probe reports capable
+# again (the gate returns None before reaching the counter in that case), so
+# a self-healing condition naturally stops advancing it.
+_codex_capability_park_count: list[int] = [0]
 
 
 def _cached_codex_capability_diagnosis() -> CodexCapabilityDiagnosis:
@@ -949,14 +986,20 @@ def _cached_codex_capability_diagnosis() -> CodexCapabilityDiagnosis:
         probe, checked_at = _codex_capability_cache[0]
         if (now - checked_at).total_seconds() < _CODEX_CAPABILITY_PROBE_TTL_SECONDS:
             return probe
-    probe = codex_capability_diagnosis()
+    probe = codex_capability_diagnosis(
+        timeout_seconds=_CODEX_CAPABILITY_GATE_TIMEOUT_SECONDS
+    )
     _codex_capability_cache[:] = [(probe, now)]
     return probe
 
 
 def _reset_codex_capability_cache() -> None:
-    """Clear the in-process codex-capability cache. Test support only (#1238)."""
+    """Clear the in-process codex-capability cache/park counter. Test support only.
+
+    (#1238)
+    """
     _codex_capability_cache.clear()
+    _codex_capability_park_count[0] = 0
 
 
 def _codex_capability_gate(
@@ -972,14 +1015,21 @@ def _codex_capability_gate(
     presence + ``codex --version`` — via the shared
     :func:`_cached_codex_capability_diagnosis` probe; never a live review.
 
-    Deliberately does NOT set ``spawn_error`` on the returned outcome: a
-    codex-incapable host is a deterministic condition that recurs every tick,
-    not the sporadic transient failure the generic spawn-error path (and its
-    per-lane circuit breaker) is designed for. Signaling it as a generic
-    spawn_error would trip the lane's circuit breaker after a few ticks
-    (durably pausing the lane, requiring a manual ``cw lane resume``) and
-    would abort the rest of that tick's lane/client loop for unrelated,
-    non-codex-backed tasks sharing the same lane or client.
+    Below :data:`_CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD` consecutive parks,
+    does NOT set ``spawn_error`` on the returned outcome: a codex-incapable
+    host is a deterministic condition that recurs every tick, not the
+    sporadic transient failure the generic spawn-error path (and its per-lane
+    circuit breaker) is designed for. Signaling it as a generic spawn_error
+    on every occurrence would trip the lane's circuit breaker on the very
+    first park (durably pausing the lane, requiring a manual ``cw lane
+    resume``) and would abort the rest of that tick's lane/client loop for
+    unrelated, non-codex-backed tasks sharing the same lane or client.
+
+    At/above the threshold, the outcome ALSO sets ``spawn_error=True`` — a
+    bounded backstop against a systemically wrong probe verdict (the TTL
+    cache's result is shared across every codex-backed task in the process,
+    so a single bad verdict could otherwise park an unbounded number of tasks
+    with no self-limiting mechanism at all).
     """
     if resolve_executor_config(task.stage, task, client).backend != CODEX_BACKEND:
         return None
@@ -993,9 +1043,17 @@ def _codex_capability_gate(
         probe.detail,
     )
     _park_running_task_blocked_on_user(
-        task.ticket_id, client.name, disposition=probe.diagnosis
+        ticket_id=task.ticket_id, client_name=client.name, disposition=probe.diagnosis
     )
-    return _SpawnOutcome(capability_parked=True, error=probe.diagnosis)
+    _codex_capability_park_count[0] += 1
+    breaker_engaged = (
+        _codex_capability_park_count[0] >= _CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD
+    )
+    return _SpawnOutcome(
+        capability_parked=True,
+        spawn_error=breaker_engaged,
+        error=probe.diagnosis,
+    )
 
 
 def _spawn_claimed_task(
@@ -1067,7 +1125,9 @@ def _spawn_claimed_task(
                     branch,
                 )
                 _park_running_task_blocked_on_user(
-                    task.ticket_id, client.name, disposition="dirty_worktree"
+                    ticket_id=task.ticket_id,
+                    client_name=client.name,
+                    disposition="dirty_worktree",
                 )
             else:
                 with contextlib.suppress(WorktreeError, OSError):

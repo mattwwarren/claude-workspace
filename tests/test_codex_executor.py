@@ -512,3 +512,34 @@ class TestCodexCapabilityDiagnosis:
         assert probe.diagnosis is None
         assert probe.detail == "0.144.5"
         assert isinstance(probe, CodexCapabilityDiagnosis)
+
+    def test_name_prefixed_version_returns_capable(self) -> None:
+        """Real `codex --version` output is name-prefixed, not a bare version.
+
+        Captured live on a snap-installed `codex-cli 0.136.0` — the real CLI
+        prints ``codex-cli 0.136.0``, not ``0.136.0`` alone (#1238 review
+        finding: a first-whitespace-token parse misdiagnosed this shape as
+        CODEX_VERSION_UNKNOWN on every real install).
+        """
+        with (
+            patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+            patch(
+                "cw.executor.subprocess.run",
+                return_value=_mk_codex_proc("codex-cli 0.136.0\n"),
+            ),
+        ):
+            probe = codex_capability_diagnosis()
+        assert probe.diagnosis is None
+        assert probe.detail == "codex-cli 0.136.0"
+
+    def test_timeout_seconds_passed_to_subprocess_run(self) -> None:
+        """The hot-path caller (dispatch's gate) needs to override the timeout."""
+        with (
+            patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+            patch(
+                "cw.executor.subprocess.run",
+                return_value=_mk_codex_proc("codex-cli 0.136.0\n"),
+            ) as mock_run,
+        ):
+            codex_capability_diagnosis(timeout_seconds=3)
+        assert mock_run.call_args.kwargs["timeout"] == 3

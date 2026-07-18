@@ -34,12 +34,16 @@ from cw.dev_queue import (
 from cw.dispatch import (
     _AVAILABILITY_OUTAGE_REASON,
     _AVAILABILITY_PROBE_TTL_SECONDS,
+    _CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD,
+    _CODEX_CAPABILITY_PROBE_TTL_SECONDS,
     FRESHNESS_MAIN_DETACHED,
     FRESHNESS_MAIN_DIRTY_CHECKOUT,
     FRESHNESS_MAIN_DIVERGED,
     FRESHNESS_NON_MAIN_HEAD,
     DispatchTickResult,
     _accumulate_task_cost,
+    _cached_codex_capability_diagnosis,
+    _codex_capability_gate,
     _reset_codex_capability_cache,
     _resolve_dispatch_skip_reason,
     consume_completed_sessions,
@@ -55,6 +59,7 @@ from cw.exceptions import (
     WorktreeError,
 )
 from cw.models import (
+    CODEX_BACKEND,
     DEFAULT_GLOBAL_ATTEMPT_CEILING,
     DEFAULT_LANE,
     ClientConcurrencyOverride,
@@ -74,6 +79,7 @@ from cw.models import (
     SessionPurpose,
     SessionStatus,
     Stage,
+    StageExecutorConfig,
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
@@ -1835,7 +1841,9 @@ class TestDispatchCodexCapabilityGate:
 
         monkeypatch.setattr(
             "cw.dispatch.codex_capability_diagnosis",
-            lambda: CodexCapabilityDiagnosis(CODEX_NOT_FOUND, "codex binary not found"),
+            lambda **_kwargs: CodexCapabilityDiagnosis(
+                CODEX_NOT_FOUND, "codex binary not found"
+            ),
         )
         spy = _SpyExecutor()
         monkeypatch.setattr("cw.dispatch.resolve_executor", lambda *_a, **_k: spy)
@@ -1875,7 +1883,7 @@ class TestDispatchCodexCapabilityGate:
 
         monkeypatch.setattr(
             "cw.dispatch.codex_capability_diagnosis",
-            lambda: CodexCapabilityDiagnosis(
+            lambda **_kwargs: CodexCapabilityDiagnosis(
                 CODEX_VERSION_UNKNOWN, "could not parse version: junk"
             ),
         )
@@ -1907,7 +1915,7 @@ class TestDispatchCodexCapabilityGate:
 
         monkeypatch.setattr(
             "cw.dispatch.codex_capability_diagnosis",
-            lambda: CodexCapabilityDiagnosis(None, "0.144.5"),
+            lambda **_kwargs: CodexCapabilityDiagnosis(None, "0.144.5"),
         )
         spy = _SpyExecutor()
         monkeypatch.setattr("cw.dispatch.resolve_executor", lambda *_a, **_k: spy)
@@ -1948,6 +1956,108 @@ class TestDispatchCodexCapabilityGate:
         assert spawned == 1
         assert probe_calls == 0
         assert len(daemon.spawn_calls) == 1
+
+    def test_cache_hit_reuses_probe_within_ttl(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Two calls within the TTL only invoke the underlying probe once."""
+        from cw.executor import CodexCapabilityDiagnosis
+
+        calls: list[int] = []
+
+        def _counting_probe(**_kwargs: object) -> CodexCapabilityDiagnosis:
+            calls.append(1)
+            return CodexCapabilityDiagnosis(None, "0.144.5")
+
+        monkeypatch.setattr("cw.dispatch.codex_capability_diagnosis", _counting_probe)
+        monkeypatch.setattr(
+            "cw.dispatch.resolve_executor_config",
+            lambda *_a, **_k: StageExecutorConfig(backend=CODEX_BACKEND),
+        )
+
+        add_ticket(TicketTask(ticket_id="GEN-CDX5", client="test-client"))
+        task = load_dev_queue().tasks[0]
+
+        first = _cached_codex_capability_diagnosis()
+        second = _cached_codex_capability_diagnosis()
+        third = _codex_capability_gate(task, sample_client_config)
+
+        assert len(calls) == 1, "second call within the TTL must reuse the cache"
+        assert first == second
+        assert third is None, "a capable probe result is a no-op gate"
+
+    def test_cache_expires_after_ttl(
+        self,
+        tmp_dispatch_dirs: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Advancing past the TTL triggers a fresh probe call."""
+        from freezegun import freeze_time
+
+        from cw.executor import CodexCapabilityDiagnosis
+
+        calls: list[int] = []
+
+        def _counting_probe(**_kwargs: object) -> CodexCapabilityDiagnosis:
+            calls.append(1)
+            return CodexCapabilityDiagnosis(None, "0.144.5")
+
+        monkeypatch.setattr("cw.dispatch.codex_capability_diagnosis", _counting_probe)
+
+        ttl_expiry = _CODEX_CAPABILITY_PROBE_TTL_SECONDS + 5
+        with freeze_time("2026-07-16 12:00:00") as frozen:
+            _cached_codex_capability_diagnosis()
+            frozen.tick(delta=timedelta(seconds=ttl_expiry))
+            _cached_codex_capability_diagnosis()
+
+        assert len(calls) == 2, "TTL expiry must trigger a second real probe call"
+
+    def test_consecutive_parks_trip_circuit_breaker_at_threshold(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A systemically-wrong probe verdict eventually engages spawn_error.
+
+        Below _CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD consecutive parks the
+        gate must stay decoupled from spawn_error (per the prior fix cycle);
+        at/above it, spawn_error must also be set so the existing per-lane
+        circuit breaker provides a bounded backstop (#1238 review finding —
+        an unbounded, un-circuit-broken park has no self-limiting mechanism).
+        """
+        from cw.executor import CODEX_VERSION_UNKNOWN, CodexCapabilityDiagnosis
+
+        monkeypatch.setattr(
+            "cw.dispatch.codex_capability_diagnosis",
+            lambda **_kwargs: CodexCapabilityDiagnosis(
+                CODEX_VERSION_UNKNOWN, "could not parse version: junk"
+            ),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.resolve_executor_config",
+            lambda *_a, **_k: StageExecutorConfig(backend=CODEX_BACKEND),
+        )
+
+        outcomes = []
+        for i in range(_CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD + 1):
+            add_ticket(TicketTask(ticket_id=f"GEN-CDX6-{i}", client="test-client"))
+            task = load_dev_queue().tasks[-1]
+            outcomes.append(_codex_capability_gate(task, sample_client_config))
+
+        assert all(o is not None and o.capability_parked for o in outcomes)
+        below_threshold = outcomes[: _CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD - 1]
+        assert all(o is not None and not o.spawn_error for o in below_threshold), (
+            "isolated parks must not trip the circuit breaker"
+        )
+        at_threshold = outcomes[_CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD - 1]
+        assert at_threshold is not None
+        assert at_threshold.spawn_error, (
+            "reaching the threshold must engage the circuit-breaker backstop"
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import re
 import shutil
 import subprocess
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
@@ -70,9 +71,17 @@ CODEX_REVIEW_ONLY = "codex_review_only"
 # could not be confirmed.
 CODEX_VERSION_UNKNOWN = "codex_version_unknown"
 
-# Leading numeric components (major.minor.patch) required to accept a codex
-# --version string as parseable. No minimum version is enforced (#1238).
-_CODEX_VERSION_PARTS = 3
+# Matches a dotted major.minor.patch version number anywhere in a
+# `codex --version` output line (#1238). Real CLI banners are name-prefixed
+# (e.g. ``codex-cli 0.136.0``, confirmed live), not a bare version string like
+# ``_check_claude_version``'s sibling probe — search the whole line rather
+# than assuming the version is the first whitespace token.
+_CODEX_VERSION_RE = re.compile(r"\d+(?:\.\d+){2}")
+
+# Default subprocess timeout for a one-shot, user-invoked probe (e.g. `cw
+# doctor`). Callers on a hot path (dispatch's pre-spawn gate) should pass a
+# smaller explicit timeout — see the ``timeout_seconds`` parameter below.
+_DEFAULT_PROBE_TIMEOUT_SECONDS = 10
 
 
 class CodexCapabilityDiagnosis(NamedTuple):
@@ -90,20 +99,9 @@ class CodexCapabilityDiagnosis(NamedTuple):
     detail: str
 
 
-def _codex_version_parseable(token: str) -> bool:
-    """True when *token* is a dotted numeric version with >= 3 components."""
-    parts = token.split(".")
-    if len(parts) < _CODEX_VERSION_PARTS:
-        return False
-    try:
-        for part in parts[:_CODEX_VERSION_PARTS]:
-            int(part)
-    except ValueError:
-        return False
-    return True
-
-
-def codex_capability_diagnosis() -> CodexCapabilityDiagnosis:
+def codex_capability_diagnosis(
+    *, timeout_seconds: int = _DEFAULT_PROBE_TIMEOUT_SECONDS
+) -> CodexCapabilityDiagnosis:
     """Probe codex CLI presence and ``codex --version`` (no live review).
 
     Mirrors ``doctor._check_claude_version``'s subprocess/timeout/parse shape as
@@ -112,6 +110,10 @@ def codex_capability_diagnosis() -> CodexCapabilityDiagnosis:
     is the single home of the probe logic — ``doctor._check_codex_capability``
     and dispatch's pre-spawn capability gate are thin call sites over it, so the
     subprocess/parse logic isn't duplicated across two already-oversized modules.
+
+    ``timeout_seconds`` defaults to a one-shot-invocation-appropriate 10s
+    (matching ``_check_claude_version``); dispatch's hot-path caller passes a
+    smaller value since this runs synchronously inside the dispatch tick loop.
     """
     if shutil.which("codex") is None:
         return CodexCapabilityDiagnosis(CODEX_NOT_FOUND, "codex binary not found")
@@ -121,13 +123,13 @@ def codex_capability_diagnosis() -> CodexCapabilityDiagnosis:
             capture_output=True,
             text=True,
             check=False,
-            timeout=10,
+            timeout=timeout_seconds,
         )
     except FileNotFoundError:
         return CodexCapabilityDiagnosis(CODEX_VERSION_UNKNOWN, "codex binary not found")
     except subprocess.TimeoutExpired:
         return CodexCapabilityDiagnosis(
-            CODEX_VERSION_UNKNOWN, "codex --version timed out (10s)"
+            CODEX_VERSION_UNKNOWN, f"codex --version timed out ({timeout_seconds}s)"
         )
 
     output = proc.stdout or proc.stderr or ""
@@ -137,8 +139,7 @@ def codex_capability_diagnosis() -> CodexCapabilityDiagnosis:
             CODEX_VERSION_UNKNOWN,
             f"codex --version exited {proc.returncode}: {version_line}",
         )
-    first_token = version_line.split()[0] if version_line else ""
-    if not _codex_version_parseable(first_token):
+    if _CODEX_VERSION_RE.search(version_line) is None:
         return CodexCapabilityDiagnosis(
             CODEX_VERSION_UNKNOWN, f"could not parse version: {version_line}"
         )
