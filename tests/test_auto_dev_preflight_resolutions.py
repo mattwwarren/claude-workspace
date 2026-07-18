@@ -367,13 +367,15 @@ def test_mode1_recommendation_missing_field_documented_as_parked() -> None:
     assert "is treated as PARK downstream" in content
 
 
-def test_ambiguity_pre_flight_parenthetical_mentions_recommendation() -> None:
-    """Step 1b's Ambiguity pre-flight parenthetical enumerates `recommendation`."""
-    anchor = (
-        "question, plan's assumption, alternatives, why-it-matters, "
-        "ticket quote, recommendation"
-    )
-    assert anchor in _cmd("auto-dev-plan.md")
+def test_ambiguity_pre_flight_recommendation_is_mandatory_and_typed() -> None:
+    """Step 1b's Ambiguity pre-flight mirrors the PM Reviewer's mandatory framing."""
+    section = _step1b_section()
+    assert "Recommendation is mandatory on every item — never omit it." in section
+    assert (
+        "Recommendation: ADOPT — <why safe to auto-adopt> | "
+        "PARK — <why a human must decide>"
+    ) in section
+    assert "is treated as PARK downstream" in section
 
 
 def test_step1c_has_adopted_assumptions_section() -> None:
@@ -496,3 +498,36 @@ def test_stage_entered_adopted_count_is_literal_substitution_not_shell_var() -> 
     assert "$ADOPTED_COUNT" not in payload_line
     assert r"\"adopted_count\":<N>" in payload_line
     assert "substitute the computed `len(adopted)` integer directly" in section
+
+
+# ---------------------------------------------------------------------------
+# Recommendation-field omission invisible to the consumer (#1274)
+# ---------------------------------------------------------------------------
+
+
+def test_stage_entered_payload_has_malformed_recommendation_count() -> None:
+    """The stage.entered payload carries malformed_recommendation_count too."""
+    section = _step1c_section()
+    payload_line = next(
+        line for line in section.splitlines() if "adopted_count" in line
+    )
+    assert r"\"malformed_recommendation_count\":<M>" in payload_line
+    assert "malformed_recommendation_count" in section.replace(payload_line, "", 1)
+
+
+def test_step1c_malformed_recommendation_tally_is_additive_only() -> None:
+    """The new Step 4a tally paragraph is additive, not a third partition bucket."""
+    section = _step1c_section()
+    assert "tally `malformed_recommendation_count`" in section
+    assert (
+        "excluding items that parked via a well-formed, explicit "
+        "`Recommendation: PARK — ...` line"
+    ) in section
+    assert "does not introduce a third partition bucket" in section
+
+
+def test_step1c_malformed_recommendation_note_is_count_only() -> None:
+    """The Pending Verification Scan comment note is count-only, no reclassification."""
+    section = _step1c_section()
+    assert "not because of a genuine PARK decision" in section
+    assert "count-only note — no per-item classification" in section
