@@ -16415,7 +16415,7 @@ def test_stalled_backstop_emits_session_completed_with_salvaged_true(
     # global fallback and understates the budget once task.stage is set.
 
     completed_events = capture_events(
-        "cw.reconcile.stalled", OrchestratorEventType.SESSION_COMPLETED
+        "cw.reconcile.dispositions", OrchestratorEventType.SESSION_COMPLETED
     )
 
     sess = _mk_headless_daemon_session("1149-event", worktree, started_at)
