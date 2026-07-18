@@ -2229,6 +2229,7 @@ def _route_scope_gated_approval(
                 "paused_status": _APPROVAL_GATE_REASON,
                 "breadcrumbs": "",
                 "crashed": False,
+                "lane": task.lane,
             },
             correlation_id=task.ticket_id,
         )
@@ -2352,6 +2353,7 @@ def _route_staged_decision(
                 "paused_status": _PLAN_PARKED_REASON,
                 "breadcrumbs": "",
                 "crashed": False,
+                "lane": task.lane,
             },
             correlation_id=task.ticket_id,
         )
@@ -2376,6 +2378,7 @@ def _route_staged_decision(
                 "paused_status": "merge_pending",
                 "breadcrumbs": "",
                 "crashed": False,
+                "lane": task.lane,
             },
             correlation_id=task.ticket_id,
         )
@@ -2441,6 +2444,7 @@ def _route_staged_decision(
                 ),
                 "breadcrumbs": breadcrumbs,
                 "crashed": False,
+                "lane": task.lane,
             },
             correlation_id=task.ticket_id,
         )
@@ -2463,6 +2467,7 @@ def _route_staged_decision(
                 "paused_status": "blocked",
                 "breadcrumbs": "",
                 "crashed": False,
+                "lane": task.lane,
             },
             correlation_id=task.ticket_id,
         )
