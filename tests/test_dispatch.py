@@ -1769,6 +1769,180 @@ class TestDispatchTickSpawnErrors:
 
 
 # ---------------------------------------------------------------------------
+# TestDispatchCodexCapabilityGate
+# ---------------------------------------------------------------------------
+
+
+def _make_codex_clients_yaml(tmp_path: Path, client: ClientConfig) -> None:
+    """Write a clients.yaml whose plan-stage executor uses the codex backend."""
+    config_dir = tmp_path / ".config" / "cw"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "clients.yaml").write_text(
+        "clients:\n"
+        f"  {client.name}:\n"
+        f"    workspace_path: {client.workspace_path}\n"
+        f"    default_branch: {client.default_branch}\n"
+        f"    worktree_base: {client.worktree_base}\n"
+        "    pipeline:\n"
+        "      executors:\n"
+        "        plan:\n"
+        "          backend: codex\n"
+    )
+
+
+class _SpyExecutor:
+    """Minimal StageExecutor stand-in that records spawn calls."""
+
+    def __init__(self) -> None:
+        self.spawn_calls = 0
+
+    def spawn(self, **_kwargs: object) -> str:
+        self.spawn_calls += 1
+        return "spy-session-id"
+
+    def stage_sentinel_schema(self, _stage: object) -> dict[str, object]:
+        return {}
+
+
+class TestDispatchCodexCapabilityGate:
+    """Pre-spawn codex capability gate parks the task before resolve_executor (#1238).
+
+    Monkeypatches the imported ``cw.dispatch.codex_capability_diagnosis`` name
+    (not shutil/subprocess) — the probe mechanics are covered in
+    test_codex_executor.py.
+    """
+
+    def test_codex_not_found_parks_blocked_on_user(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from cw.executor import CODEX_NOT_FOUND, CodexCapabilityDiagnosis
+
+        _make_codex_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-CDX1", client="test-client"))
+
+        monkeypatch.setattr(
+            "cw.dispatch.codex_capability_diagnosis",
+            lambda: CodexCapabilityDiagnosis(CODEX_NOT_FOUND, "codex binary not found"),
+        )
+        spy = _SpyExecutor()
+        monkeypatch.setattr("cw.dispatch.resolve_executor", lambda *_a, **_k: spy)
+
+        daemon = FakeNativeDaemonClient()
+        caplog.set_level(logging.WARNING, logger="cw.dispatch")
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert result.spawned == 0
+        assert spy.spawn_calls == 0
+        assert daemon.spawn_calls == []
+
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == CODEX_NOT_FOUND
+        assert task.session_id is None
+
+        assert any(
+            "codex capability gate parked" in record.getMessage()
+            and "test-client" in record.getMessage()
+            and "GEN-CDX1" in record.getMessage()
+            for record in caplog.records
+            if record.name == "cw.dispatch"
+        ), "expected WARNING naming the client/ticket"
+
+    def test_codex_version_unknown_parks_blocked_on_user(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.executor import CODEX_VERSION_UNKNOWN, CodexCapabilityDiagnosis
+
+        _make_codex_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-CDX2", client="test-client"))
+
+        monkeypatch.setattr(
+            "cw.dispatch.codex_capability_diagnosis",
+            lambda: CodexCapabilityDiagnosis(
+                CODEX_VERSION_UNKNOWN, "could not parse version: junk"
+            ),
+        )
+        spy = _SpyExecutor()
+        monkeypatch.setattr("cw.dispatch.resolve_executor", lambda *_a, **_k: spy)
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert result.spawned == 0
+        assert spy.spawn_calls == 0
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == CODEX_VERSION_UNKNOWN
+        assert task.session_id is None
+
+    def test_codex_capable_spawns_normally(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Gate is a no-op when the probe reports capable — regression guard."""
+        from cw.executor import CodexCapabilityDiagnosis
+
+        _make_codex_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-CDX3", client="test-client"))
+
+        monkeypatch.setattr(
+            "cw.dispatch.codex_capability_diagnosis",
+            lambda: CodexCapabilityDiagnosis(None, "0.144.5"),
+        )
+        spy = _SpyExecutor()
+        monkeypatch.setattr("cw.dispatch.resolve_executor", lambda *_a, **_k: spy)
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert result.spawned == 1
+        assert spy.spawn_calls == 1
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.RUNNING
+        assert task.session_id == "spy-session-id"
+
+    def test_non_codex_backend_never_probes(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A claude-native task must not invoke the codex probe at all."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-CDX4", client="test-client"))
+
+        probe_calls = 0
+
+        def _spy_probe() -> object:
+            nonlocal probe_calls
+            probe_calls += 1
+            msg = "probe must not run for non-codex backends"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr("cw.dispatch.codex_capability_diagnosis", _spy_probe)
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
+
+        assert spawned == 1
+        assert probe_calls == 0
+        assert len(daemon.spawn_calls) == 1
+
+
+# ---------------------------------------------------------------------------
 # TestDispatchTickFreshnessGate
 # ---------------------------------------------------------------------------
 

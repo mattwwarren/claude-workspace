@@ -67,9 +67,14 @@ from cw.exceptions import (
     VersionDriftError,
     WorktreeError,
 )
-from cw.executor import resolve_executor, resolve_executor_config
+from cw.executor import (
+    codex_capability_diagnosis,
+    resolve_executor,
+    resolve_executor_config,
+)
 from cw.gh import check_gh_availability
 from cw.models import (
+    CODEX_BACKEND,
     CONTEXT_JSON_RELATIVE_PATH,
     LOCAL_BACKEND,
     OCCUPIED_LANE_STATUSES,
@@ -873,6 +878,48 @@ def _invalidate_stale_context_json(
     stale_context.unlink(missing_ok=True)
 
 
+def _codex_capability_gate(
+    task: TicketTask, client: ClientConfig
+) -> _SpawnOutcome | None:
+    """Pre-spawn codex capability gate (#1238).
+
+    Returns a parked ``_SpawnOutcome`` (the RUNNING task moved to
+    BLOCKED_ON_USER, session_id cleared, ``disposition`` set to the probe
+    diagnosis) when the task's stage is codex-backed and the ``codex`` CLI is
+    not usable; returns ``None`` to proceed (non-codex backend, or codex
+    capable). Reads only cheap facts — binary presence + ``codex --version`` —
+    via the shared ``codex_capability_diagnosis`` probe; never a live review.
+    """
+    if resolve_executor_config(task.stage, task, client).backend != CODEX_BACKEND:
+        return None
+    probe = codex_capability_diagnosis()
+    if probe.diagnosis is None:
+        return None
+    _log.warning(
+        "dispatch: codex capability gate parked %s/%s — %s",
+        client.name,
+        task.ticket_id,
+        probe.detail,
+    )
+    with dev_queue_lock():
+        store = load_dev_queue()
+        for stored_task in store.tasks:
+            if (
+                stored_task.ticket_id == task.ticket_id
+                and stored_task.client == client.name
+                and stored_task.status == QueueItemStatus.RUNNING
+            ):
+                transition_task_status(
+                    stored_task,
+                    QueueItemStatus.BLOCKED_ON_USER,
+                    disposition=probe.diagnosis,
+                )
+                stored_task.session_id = None
+                break
+        save_dev_queue(store)
+    return _SpawnOutcome(spawn_error=True, error=probe.diagnosis)
+
+
 def _spawn_claimed_task(
     task: TicketTask,
     client: ClientConfig,
@@ -960,6 +1007,14 @@ def _spawn_claimed_task(
         check_not_main_checkout(worktree_path, client)
 
         _invalidate_stale_context_json(task, client, worktree_path)
+
+        # Codex capability gate (#1238): a codex-backed stage that cannot reach a
+        # usable `codex` CLI parks BLOCKED_ON_USER before any spawn/session is
+        # burned. Extracted to a helper to keep this function within the PLR
+        # branch/statement budget; no-op for non-codex backends.
+        parked = _codex_capability_gate(task, client)
+        if parked is not None:
+            return parked
 
         executor = resolve_executor(task, client, native_daemon=resolved_native_daemon)
         session_id = executor.spawn(
