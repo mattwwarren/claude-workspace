@@ -24,7 +24,6 @@ import subprocess
 import time
 import uuid
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
 import yaml
@@ -34,9 +33,9 @@ from cw.config import state_dir
 from cw.executor_diagnostics import (
     ExecutorFailure,
     ExecutorFailureCategory,
-    diagnostics_bundle_dir,
     persist_diagnostics_bundle,
     redact_argv,
+    render_bundle_path,
 )
 from cw.local_runner import _SCHEMA_VERSION, make_blocked, resolve_tier
 from cw.models import CONTEXT_JSON_RELATIVE_PATH
@@ -50,6 +49,7 @@ from cw.review_findings import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+    from pathlib import Path
 
     from cw.codex_runner import CodexRunner, CodexRunResult
     from cw.models import TicketTask
@@ -778,20 +778,6 @@ def run_codex_roles(
         shutil.rmtree(scratch_dir, ignore_errors=True)
 
 
-def _render_bundle_path(session_id: str) -> str:
-    """Render the diagnostics bundle dir as a stable, home-relative-ish path.
-
-    Falls back to the absolute path when the bundle dir is not under the user's
-    home (e.g. an XDG-relocated or tmp state dir under test) so the rendering
-    never raises. Local-only pointer — no secrets — safe for ``Blocker.details``.
-    """
-    bundle = diagnostics_bundle_dir(session_id)
-    try:
-        return str(bundle.relative_to(Path.home()))
-    except ValueError:
-        return str(bundle)
-
-
 def _format_failures_detail(
     failures: list[ReviewerRunFailure], *, session_id: str
 ) -> str:
@@ -801,7 +787,7 @@ def _format_failures_detail(
     the blocked sentinel knows where the per-role failure artifacts landed.
     """
     summary = "; ".join(f"{f.role} ({f.reason})" for f in failures)
-    return f"{summary} [diagnostics: {_render_bundle_path(session_id)}]"
+    return f"{summary} [diagnostics: {render_bundle_path(session_id)}]"
 
 
 def synthesize_codex_review_result(
