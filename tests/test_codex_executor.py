@@ -25,9 +25,12 @@ from cw.config import load_state
 from cw.executor import (
     CODEX_NOT_FOUND,
     CODEX_REVIEW_ONLY,
+    CODEX_VERSION_UNKNOWN,
+    CodexCapabilityDiagnosis,
     CodexExecutor,
     StageExecutor,
     _post_review_comment,
+    codex_capability_diagnosis,
     resolve_executor,
 )
 from cw.local_runner import UNEXPECTED_ERROR, make_blocked
@@ -429,3 +432,83 @@ def test_make_blocked_stage_reached_override(tmp_path: Path) -> None:
     assert result.stage_reached == "stage3_review"
     assert result.blocker is not None
     assert result.blocker.stage == "stage3_review"
+
+
+def _mk_codex_proc(
+    stdout: str = "", returncode: int = 0
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(
+        args=[], returncode=returncode, stdout=stdout, stderr=""
+    )
+
+
+class TestCodexCapabilityDiagnosis:
+    """Direct tests for the shared codex capability probe (#1238, R15).
+
+    ``shutil.which`` is patched via this file's established
+    ``patch("cw.executor.shutil.which", ...)`` idiom; the ``codex --version``
+    subprocess is patched at ``cw.executor.subprocess.run``.
+    """
+
+    def test_binary_absent_returns_not_found(self) -> None:
+        with patch("cw.executor.shutil.which", return_value=None):
+            probe = codex_capability_diagnosis()
+        assert probe.diagnosis == CODEX_NOT_FOUND
+        assert "not found" in probe.detail
+
+    def test_version_filenotfound_returns_version_unknown(self) -> None:
+        with (
+            patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+            patch("cw.executor.subprocess.run", side_effect=FileNotFoundError("gone")),
+        ):
+            probe = codex_capability_diagnosis()
+        assert probe.diagnosis == CODEX_VERSION_UNKNOWN
+
+    def test_version_timeout_returns_version_unknown(self) -> None:
+        with (
+            patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+            patch(
+                "cw.executor.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(cmd="codex", timeout=10),
+            ),
+        ):
+            probe = codex_capability_diagnosis()
+        assert probe.diagnosis == CODEX_VERSION_UNKNOWN
+        assert "timed out" in probe.detail
+
+    def test_nonzero_returncode_returns_version_unknown(self) -> None:
+        with (
+            patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+            patch(
+                "cw.executor.subprocess.run",
+                return_value=_mk_codex_proc("boom\n", returncode=3),
+            ),
+        ):
+            probe = codex_capability_diagnosis()
+        assert probe.diagnosis == CODEX_VERSION_UNKNOWN
+        assert "3" in probe.detail
+
+    def test_unparseable_version_returns_version_unknown(self) -> None:
+        with (
+            patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+            patch(
+                "cw.executor.subprocess.run",
+                return_value=_mk_codex_proc("not-a-version\n"),
+            ),
+        ):
+            probe = codex_capability_diagnosis()
+        assert probe.diagnosis == CODEX_VERSION_UNKNOWN
+        assert "could not parse" in probe.detail
+
+    def test_parseable_version_returns_capable(self) -> None:
+        with (
+            patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+            patch(
+                "cw.executor.subprocess.run",
+                return_value=_mk_codex_proc("0.144.5\n"),
+            ),
+        ):
+            probe = codex_capability_diagnosis()
+        assert probe.diagnosis is None
+        assert probe.detail == "0.144.5"
+        assert isinstance(probe, CodexCapabilityDiagnosis)

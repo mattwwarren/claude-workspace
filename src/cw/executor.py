@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import shutil
+import subprocess
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 
 from cw.auto_dev_result import AutoDevResult
@@ -63,6 +64,83 @@ if TYPE_CHECKING:
 # CODEX_REVIEW_UNPARSEABLE/CODEX_MUST_FIX_FINDINGS) live in cw.codex_review.
 CODEX_NOT_FOUND = "codex_not_found"
 CODEX_REVIEW_ONLY = "codex_review_only"
+
+# Capability-probe diagnosis (distinct from the R6 per-role review vocabulary):
+# the binary is present but `codex --version` could not be confirmed.
+CODEX_VERSION_UNKNOWN = "codex_version_unknown"
+
+# Leading numeric components (major.minor.patch) required to accept a codex
+# --version string as parseable. No minimum version is enforced (#1238).
+_CODEX_VERSION_PARTS = 3
+
+
+class CodexCapabilityDiagnosis(NamedTuple):
+    """Result of the shared codex capability probe (#1238, R15).
+
+    ``diagnosis`` is ``None`` when codex is capable (binary present and
+    ``codex --version`` parsed), ``CODEX_NOT_FOUND`` when the binary is absent,
+    or ``CODEX_VERSION_UNKNOWN`` when the binary is present but ``--version``
+    failed/timed out/exited non-zero/produced an unparseable string. ``detail``
+    carries the parsed version line on success or a short human-readable failure
+    detail on the two failure branches.
+    """
+
+    diagnosis: str | None
+    detail: str
+
+
+def _codex_version_parseable(token: str) -> bool:
+    """True when *token* is a dotted numeric version with >= 3 components."""
+    parts = token.split(".")
+    if len(parts) < _CODEX_VERSION_PARTS:
+        return False
+    try:
+        for part in parts[:_CODEX_VERSION_PARTS]:
+            int(part)
+    except ValueError:
+        return False
+    return True
+
+
+def codex_capability_diagnosis() -> CodexCapabilityDiagnosis:
+    """Probe codex CLI presence and ``codex --version`` (no live review).
+
+    Mirrors ``doctor._check_claude_version``'s subprocess/timeout/parse shape as
+    a single reusable helper. No version floor is enforced: capability requires
+    only binary presence plus a successfully-parsed ``--version`` string. This
+    is the single home of the probe logic (R15) — ``doctor._check_codex_capability``
+    and dispatch's pre-spawn capability gate are thin call sites over it.
+    """
+    if shutil.which("codex") is None:
+        return CodexCapabilityDiagnosis(CODEX_NOT_FOUND, "codex binary not found")
+    try:
+        proc = subprocess.run(
+            ["codex", "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        return CodexCapabilityDiagnosis(CODEX_VERSION_UNKNOWN, "codex binary not found")
+    except subprocess.TimeoutExpired:
+        return CodexCapabilityDiagnosis(
+            CODEX_VERSION_UNKNOWN, "codex --version timed out (10s)"
+        )
+
+    output = proc.stdout or proc.stderr or ""
+    version_line = output.splitlines()[0] if output else ""
+    if proc.returncode != 0:
+        return CodexCapabilityDiagnosis(
+            CODEX_VERSION_UNKNOWN,
+            f"codex --version exited {proc.returncode}: {version_line}",
+        )
+    first_token = version_line.split()[0] if version_line else ""
+    if not _codex_version_parseable(first_token):
+        return CodexCapabilityDiagnosis(
+            CODEX_VERSION_UNKNOWN, f"could not parse version: {version_line}"
+        )
+    return CodexCapabilityDiagnosis(None, version_line)
 
 
 def resolve_executor_config(
