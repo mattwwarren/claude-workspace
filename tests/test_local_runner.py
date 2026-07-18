@@ -12,7 +12,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from cw.auto_dev_result import AutoDevResult
-from cw.executor_diagnostics import ExecutorFailure, diagnostics_bundle_dir
+from cw.executor_diagnostics import (
+    ExecutorFailure,
+    diagnostics_bundle_dir,
+    render_bundle_path,
+)
 from cw.local_runner import (
     _FIXED_HEALTH,
     AIDER_NO_OUTPUT,
@@ -486,6 +490,10 @@ def test_synthesize_git_result_no_output_persists_diagnostics(
 
     assert result.blocker is not None
     assert result.blocker.reason == AIDER_NO_OUTPUT
+    assert result.blocker.details == (
+        "aider: some diagnostic output\n"
+        f" [diagnostics: {render_bundle_path('s-noout')}]"
+    )
     path = diagnostics_bundle_dir("s-noout") / "aider-missing_output.json"
     assert path.exists()
     failure = ExecutorFailure.model_validate_json(path.read_text())
