@@ -216,7 +216,12 @@ def test_persist_diagnostics_bundle_survives_write_failure(
         msg = "disk full"
         raise OSError(msg)
 
-    # Both the JSON write and the scratch copy fail.
+    # The JSON write fails and raises before the try block ever reaches
+    # shutil.copy2 — the copy2 patch below is inert for this test (it's
+    # never called); it's harmless to leave in place, but it does not
+    # exercise the copy2-failure branch. See
+    # test_persist_diagnostics_bundle_survives_copy2_only_failure below for
+    # a test that isolates that distinct branch (write succeeds, copy2 fails).
     monkeypatch.setattr("pathlib.Path.write_text", _boom)
     monkeypatch.setattr("cw.executor_diagnostics.shutil.copy2", _boom)
 
@@ -232,6 +237,44 @@ def test_persist_diagnostics_bundle_survives_write_failure(
             scratch_schema_path=schema,
         )
     assert bundle == diagnostics_bundle_dir("sess-fail")
+    assert any(
+        "diagnostics bundle write failed" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_persist_diagnostics_bundle_survives_copy2_only_failure(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Isolates the copy2-only failure branch: the JSON write succeeds, then
+    the scratch-schema copy raises — distinct from the write_text-fails case
+    covered above, where the try block never reaches copy2 at all."""
+    schema = tmp_path / "scratch-schema.json"
+    schema.write_text("{}", encoding="utf-8")
+
+    def _boom(*_a: object, **_k: object) -> None:
+        msg = "disk full"
+        raise OSError(msg)
+
+    monkeypatch.setattr("cw.executor_diagnostics.shutil.copy2", _boom)
+
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        # No exception propagates.
+        bundle = persist_diagnostics_bundle(
+            session_id="sess-copy-fail",
+            role_slug="aider",
+            reason="runtime_error",
+            failure=_make_failure(category="runtime_error"),
+            scratch_schema_path=schema,
+        )
+    assert bundle == diagnostics_bundle_dir("sess-copy-fail")
+    # The JSON write succeeded before copy2 raised.
+    assert (bundle / "aider-runtime_error.json").exists()
+    assert not (bundle / "aider-runtime_error-schema.json").exists()
     assert any(
         "diagnostics bundle write failed" in r.getMessage() for r in caplog.records
     )
