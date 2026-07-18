@@ -4880,7 +4880,7 @@ class TestDevQueueRefreshAll:
                 "sha2sha2sha2sha2sha2sha2sha2sha2sha2sha2",
             )
 
-        monkeypatch.setattr("cw.cli.dev_queue.fast_forward_main", _mock_ff)
+        monkeypatch.setattr("cw.cli.dev_queue.tasks.fast_forward_main", _mock_ff)
 
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "refresh-all"])
@@ -4899,7 +4899,7 @@ class TestDevQueueRefreshAll:
         self._write_clients_yaml(tmp_config_dir, [("my-client", str(ws))])
 
         monkeypatch.setattr(
-            "cw.cli.dev_queue.fast_forward_main",
+            "cw.cli.dev_queue.tasks.fast_forward_main",
             lambda _c, **_kw: (
                 "abc123def456abc123def456abc123def456abc1",
                 "abc123def456abc123def456abc123def456abc1",
@@ -4923,7 +4923,7 @@ class TestDevQueueRefreshAll:
         self._write_clients_yaml(tmp_config_dir, [("my-client", str(ws))])
 
         monkeypatch.setattr(
-            "cw.cli.dev_queue.fast_forward_main",
+            "cw.cli.dev_queue.tasks.fast_forward_main",
             lambda _c, **_kw: (
                 "oldsha1oldsha1oldsha1oldsha1oldsha1oldsh",
                 "newsha2newsha2newsha2newsha2newsha2newsh",
@@ -4966,7 +4966,7 @@ class TestDevQueueRefreshAll:
                 raise WorktreeError(msg)
             return ("aaa", "bbb")
 
-        monkeypatch.setattr("cw.cli.dev_queue.fast_forward_main", _mock_ff)
+        monkeypatch.setattr("cw.cli.dev_queue.tasks.fast_forward_main", _mock_ff)
 
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "refresh-all"])
@@ -4989,7 +4989,7 @@ class TestDevQueueRefreshAll:
         self._write_clients_yaml(tmp_config_dir, [("my-client", str(ws))])
 
         monkeypatch.setattr(
-            "cw.cli.dev_queue.fast_forward_main",
+            "cw.cli.dev_queue.tasks.fast_forward_main",
             lambda _c, **_kw: ("aaa", "bbb"),
         )
 
@@ -5034,7 +5034,7 @@ class TestDevQueueRefreshAll:
                 raise MissingWorkspaceError(msg)
             return ("aaa", "bbb")
 
-        monkeypatch.setattr("cw.cli.dev_queue.fast_forward_main", _mock_ff)
+        monkeypatch.setattr("cw.cli.dev_queue.tasks.fast_forward_main", _mock_ff)
 
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "refresh-all"])
@@ -5058,7 +5058,7 @@ class TestDevQueueRefreshAll:
             msg = "workspace missing for client-a"
             raise MissingWorkspaceError(msg)
 
-        monkeypatch.setattr("cw.cli.dev_queue.fast_forward_main", _mock_ff)
+        monkeypatch.setattr("cw.cli.dev_queue.tasks.fast_forward_main", _mock_ff)
 
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "refresh-all"])
@@ -5099,7 +5099,7 @@ class TestDevQueueRefreshAll:
                 raise WorktreeError(msg)
             return ("aaa", "bbb")
 
-        monkeypatch.setattr("cw.cli.dev_queue.fast_forward_main", _mock_ff)
+        monkeypatch.setattr("cw.cli.dev_queue.tasks.fast_forward_main", _mock_ff)
 
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "refresh-all"])
@@ -5848,7 +5848,7 @@ class TestDevQueueRunQuiet:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """With --quiet, run_dispatch_loop is called with emit=None."""
-        from cw.cli import dev_queue as cli_module
+        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
 
         captured_emit: list[object] = []
@@ -5877,7 +5877,7 @@ class TestDevQueueRunQuiet:
 
     def test_verbose_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Without --quiet, run_dispatch_loop is called with a non-None emit."""
-        from cw.cli import dev_queue as cli_module
+        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
 
         captured_emit: list[object] = []
@@ -5907,7 +5907,7 @@ class TestDevQueueRunQuiet:
 
     def test_auto_ff_on_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Bare invocation passes auto_ff=True to run_dispatch_loop."""
-        from cw.cli import dev_queue as cli_module
+        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
 
         captured_auto_ff: list[bool] = []
@@ -5936,7 +5936,7 @@ class TestDevQueueRunQuiet:
 
     def test_no_auto_ff_flag_disables(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """--no-auto-ff passes auto_ff=False to run_dispatch_loop."""
-        from cw.cli import dev_queue as cli_module
+        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
 
         captured_auto_ff: list[bool] = []
@@ -5976,7 +5976,7 @@ class TestDevQueueRunClientFilter:
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """--client X passes client='X' to run_dispatch_loop."""
-        from cw.cli import dev_queue as cli_module
+        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
 
         _write_clients_yaml_for_test(tmp_config_dir, [("my-client", str(tmp_path))])
@@ -6011,7 +6011,7 @@ class TestDevQueueRunClientFilter:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Omitting --client passes client=None to run_dispatch_loop."""
-        from cw.cli import dev_queue as cli_module
+        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
 
         captured_client: list[str | None] = []
@@ -6075,7 +6075,7 @@ class TestDevQueueServe:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Basic invocation calls run_dispatch_serve."""
-        from cw.cli import dev_queue as cli_module
+        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
 
         captured, fake_fn = self._fake_serve()
@@ -6088,7 +6088,7 @@ class TestDevQueueServe:
 
     def test_default_flags(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Default flag values: max_parallel=None, use_plan=False, max_restarts=-1."""
-        from cw.cli import dev_queue as cli_module
+        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
 
         captured, fake_fn = self._fake_serve()
@@ -6106,7 +6106,7 @@ class TestDevQueueServe:
 
     def test_quiet_flag_passes_emit_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """--quiet passes emit=None to run_dispatch_serve."""
-        from cw.cli import dev_queue as cli_module
+        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
 
         captured, fake_fn = self._fake_serve()
@@ -6119,7 +6119,7 @@ class TestDevQueueServe:
 
     def test_verbose_emit_is_callable(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Without --quiet, emit is a callable."""
-        from cw.cli import dev_queue as cli_module
+        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
 
         captured, fake_fn = self._fake_serve()
@@ -6132,7 +6132,7 @@ class TestDevQueueServe:
 
     def test_max_restarts_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """--max-restarts N is forwarded to run_dispatch_serve."""
-        from cw.cli import dev_queue as cli_module
+        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
 
         captured, fake_fn = self._fake_serve()
@@ -6145,7 +6145,7 @@ class TestDevQueueServe:
 
     def test_use_plan_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """--use-plan is forwarded to run_dispatch_serve."""
-        from cw.cli import dev_queue as cli_module
+        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
 
         captured, fake_fn = self._fake_serve()
@@ -6158,7 +6158,7 @@ class TestDevQueueServe:
 
     def test_no_auto_ff_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """--no-auto-ff passes auto_ff=False."""
-        from cw.cli import dev_queue as cli_module
+        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
 
         captured, fake_fn = self._fake_serve()
@@ -6176,7 +6176,7 @@ class TestDevQueueServe:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """--client is validated; unknown client produces non-zero exit."""
-        from cw.cli import dev_queue as cli_module
+        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
 
         _write_clients_yaml_for_test(tmp_config_dir, [("my-client", str(tmp_path))])
@@ -6198,7 +6198,7 @@ class TestDevQueueServe:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """--client MY-CLIENT is forwarded to run_dispatch_serve."""
-        from cw.cli import dev_queue as cli_module
+        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
 
         _write_clients_yaml_for_test(tmp_config_dir, [("my-client", str(tmp_path))])
@@ -6213,7 +6213,7 @@ class TestDevQueueServe:
 
     def test_parent_flag_forwarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """--parent is forwarded to run_dispatch_serve."""
-        from cw.cli import dev_queue as cli_module
+        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
 
         captured, fake_fn = self._fake_serve()
@@ -6998,7 +6998,7 @@ class TestDevQueueWait:
             session_id="sess-10",
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.wait_for_terminal",
+            "cw.cli.dev_queue.wait.wait_for_terminal",
             lambda _ticket_id, _client, **_kw: task,
         )
         runner = CliRunner()
@@ -7021,7 +7021,7 @@ class TestDevQueueWait:
             status=QueueItemStatus.FAILED,
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.wait_for_terminal",
+            "cw.cli.dev_queue.wait.wait_for_terminal",
             lambda _ticket_id, _client, **_kw: task,
         )
         runner = CliRunner()
@@ -7043,7 +7043,7 @@ class TestDevQueueWait:
             status=QueueItemStatus.CANCELLED,
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.wait_for_terminal",
+            "cw.cli.dev_queue.wait.wait_for_terminal",
             lambda _ticket_id, _client, **_kw: task,
         )
         runner = CliRunner()
@@ -7065,7 +7065,7 @@ class TestDevQueueWait:
             status=QueueItemStatus.BLOCKED_ON_USER,
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.wait_for_terminal",
+            "cw.cli.dev_queue.wait.wait_for_terminal",
             lambda _ticket_id, _client, **_kw: task,
         )
         runner = CliRunner()
@@ -7087,7 +7087,7 @@ class TestDevQueueWait:
             status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.wait_for_terminal",
+            "cw.cli.dev_queue.wait.wait_for_terminal",
             lambda _ticket_id, _client, **_kw: task,
         )
         runner = CliRunner()
@@ -7113,7 +7113,7 @@ class TestDevQueueWait:
             status=QueueItemStatus.BLOCKED_ON_USER,
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.wait_for_terminal",
+            "cw.cli.dev_queue.wait.wait_for_terminal",
             lambda _ticket_id, _client, **_kw: task,
         )
         runner = CliRunner()
@@ -7178,7 +7178,7 @@ class TestDevQueueWait:
         def _raise_timeout(ticket_id: str, client: str, *, timeout: float) -> None:
             raise TimeoutError
 
-        monkeypatch.setattr("cw.cli.dev_queue.wait_for_terminal", _raise_timeout)
+        monkeypatch.setattr("cw.cli.dev_queue.wait.wait_for_terminal", _raise_timeout)
         runner = CliRunner()
         result = runner.invoke(
             main, ["dev-queue", "wait", "GEN-14", "--client", "genhealth"]
@@ -7200,7 +7200,7 @@ class TestDevQueueWait:
             session_id="sess-15",
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.wait_for_terminal",
+            "cw.cli.dev_queue.wait.wait_for_terminal",
             lambda _ticket_id, _client, **_kw: task,
         )
         runner = CliRunner()
@@ -7230,7 +7230,7 @@ class TestDevQueueWait:
             session_id=None,
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.wait_for_terminal",
+            "cw.cli.dev_queue.wait.wait_for_terminal",
             lambda _ticket_id, _client, **_kw: task,
         )
         runner = CliRunner()
@@ -7256,7 +7256,7 @@ class TestDevQueueWait:
         def _raise_timeout(ticket_id: str, client: str, *, timeout: float) -> None:
             raise TimeoutError
 
-        monkeypatch.setattr("cw.cli.dev_queue.wait_for_terminal", _raise_timeout)
+        monkeypatch.setattr("cw.cli.dev_queue.wait.wait_for_terminal", _raise_timeout)
         runner = CliRunner()
         result = runner.invoke(
             main,
@@ -7291,7 +7291,7 @@ class TestDevQueueWait:
             captured.append(timeout)
             return task
 
-        monkeypatch.setattr("cw.cli.dev_queue.wait_for_terminal", _capture)
+        monkeypatch.setattr("cw.cli.dev_queue.wait.wait_for_terminal", _capture)
         runner = CliRunner()
         result = runner.invoke(
             main,
@@ -7537,8 +7537,8 @@ class TestDevQueueWaitSentinelAware:
         _save_state(state)
 
         # No real sleep/monotonic needed — sentinel found on first poll.
-        monkeypatch.setattr("cw.cli.dev_queue.time.sleep", lambda _: None)
-        monkeypatch.setattr("cw.cli.dev_queue.time.monotonic", lambda: 0.0)
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.monotonic", lambda: 0.0)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -7597,8 +7597,8 @@ class TestDevQueueWaitSentinelAware:
 
         _save_state(state)
 
-        monkeypatch.setattr("cw.cli.dev_queue.time.sleep", lambda _: None)
-        monkeypatch.setattr("cw.cli.dev_queue.time.monotonic", lambda: 0.0)
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.monotonic", lambda: 0.0)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -7674,15 +7674,15 @@ class TestDevQueueWaitSentinelAware:
             return parse_stdout(self._SHIPPED_SENTINEL)
 
         monkeypatch.setattr(
-            "cw.cli.dev_queue._parse_sentinel_from_transcript", _fake_sentinel
+            "cw.cli.dev_queue.wait._parse_sentinel_from_transcript", _fake_sentinel
         )
-        monkeypatch.setattr("cw.cli.dev_queue.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
 
         # monotonic: first poll returns 0.0 (under deadline=300).
         # After first sleep, return 10.0 (still under deadline).
         monotonic_values = iter([0.0, 0.0, 10.0, 10.0])
         monkeypatch.setattr(
-            "cw.cli.dev_queue.time.monotonic", lambda: next(monotonic_values, 10.0)
+            "cw.cli.dev_queue.wait.time.monotonic", lambda: next(monotonic_values, 10.0)
         )
 
         runner = CliRunner()
@@ -7750,10 +7750,10 @@ class TestDevQueueWaitSentinelAware:
         # Strategy: mock _transcript_age_seconds to return a large value directly,
         # and mock _parse_sentinel_from_transcript to return None.
         monkeypatch.setattr(
-            "cw.cli.dev_queue._parse_sentinel_from_transcript", lambda *_a, **_kw: None
+            "cw.cli.dev_queue.wait._parse_sentinel_from_transcript", lambda *_a, **_kw: None
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue._transcript_age_seconds",
+            "cw.cli.dev_queue.wait._transcript_age_seconds",
             lambda *_a, **_kw: 99999.0,  # very stale
         )
 
@@ -7763,11 +7763,11 @@ class TestDevQueueWaitSentinelAware:
         fake_daemon = FakeNativeDaemonClient()
         # Don't add surface_ref to roster → not in roster.
         monkeypatch.setattr(
-            "cw.cli.dev_queue.get_native_daemon_client", lambda: fake_daemon
+            "cw.cli.dev_queue.wait.get_native_daemon_client", lambda: fake_daemon
         )
 
-        monkeypatch.setattr("cw.cli.dev_queue.time.sleep", lambda _: None)
-        monkeypatch.setattr("cw.cli.dev_queue.time.monotonic", lambda: 0.0)
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.monotonic", lambda: 0.0)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -7793,9 +7793,9 @@ class TestDevQueueWaitSentinelAware:
         # monotonic: first poll → 0.0; second call (deadline check) → 9999.0 (expired).
         monotonic_calls = iter([0.0, 9999.0])
         monkeypatch.setattr(
-            "cw.cli.dev_queue.time.monotonic", lambda: next(monotonic_calls, 9999.0)
+            "cw.cli.dev_queue.wait.time.monotonic", lambda: next(monotonic_calls, 9999.0)
         )
-        monkeypatch.setattr("cw.cli.dev_queue.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -7856,15 +7856,15 @@ class TestDevQueueWaitSentinelAware:
                 ]
             )
 
-        monkeypatch.setattr("cw.cli.dev_queue.load_dev_queue", _fake_load)
+        monkeypatch.setattr("cw.cli.dev_queue.wait.load_dev_queue", _fake_load)
 
         # No sentinel on the first poll (transcript hasn't finished writing yet).
         monkeypatch.setattr(
-            "cw.cli.dev_queue._parse_sentinel_from_transcript", lambda *_a, **_kw: None
+            "cw.cli.dev_queue.wait._parse_sentinel_from_transcript", lambda *_a, **_kw: None
         )
         # Fresh transcript → not stale → normal ATTENTION predicate won't fire.
         monkeypatch.setattr(
-            "cw.cli.dev_queue._transcript_age_seconds", lambda *_a, **_kw: 10.0
+            "cw.cli.dev_queue.wait._transcript_age_seconds", lambda *_a, **_kw: 10.0
         )
         # Session in daemon roster → normal ATTENTION predicate won't fire.
         from cw.native_daemon import FakeNativeDaemonClient
@@ -7872,10 +7872,10 @@ class TestDevQueueWaitSentinelAware:
         fake_daemon = FakeNativeDaemonClient()
         fake_daemon._live.add(surface_ref)
         monkeypatch.setattr(
-            "cw.cli.dev_queue.get_native_daemon_client", lambda: fake_daemon
+            "cw.cli.dev_queue.wait.get_native_daemon_client", lambda: fake_daemon
         )
 
-        monkeypatch.setattr("cw.cli.dev_queue.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
         # Monotonic call sequence:
         #   call 1 — deadline init (0.0 → deadline=300)
         #   call 2 — first-poll _raise_if_deadline_exceeded (0.0 → not expired)
@@ -7884,7 +7884,7 @@ class TestDevQueueWaitSentinelAware:
         #             _handle_reaped_mid_wait raises before this is needed).
         monotonic_calls = iter([0.0, 0.0, 9999.0])
         monkeypatch.setattr(
-            "cw.cli.dev_queue.time.monotonic", lambda: next(monotonic_calls, 9999.0)
+            "cw.cli.dev_queue.wait.time.monotonic", lambda: next(monotonic_calls, 9999.0)
         )
 
         runner = CliRunner()
@@ -7924,7 +7924,7 @@ class TestDevQueueWaitSentinelAware:
             session_id="sess-536",
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.wait_for_terminal",
+            "cw.cli.dev_queue.wait.wait_for_terminal",
             lambda _ticket_id, _client, **_kw: task,
         )
         # Seed so load_dev_queue finds it on the fast-path.
@@ -7934,8 +7934,8 @@ class TestDevQueueWaitSentinelAware:
         save_dev_queue(DevQueueStore(tasks=[task]))
 
         # No sleep/monotonic needed — fast path fires immediately.
-        monkeypatch.setattr("cw.cli.dev_queue.time.sleep", lambda _: None)
-        monkeypatch.setattr("cw.cli.dev_queue.time.monotonic", lambda: 0.0)
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.monotonic", lambda: 0.0)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -7980,8 +7980,8 @@ class TestDevQueueWaitSentinelAware:
 
         _save_state(CwState(sessions=[session]))
 
-        monkeypatch.setattr("cw.cli.dev_queue.time.sleep", lambda _: None)
-        monkeypatch.setattr("cw.cli.dev_queue.time.monotonic", lambda: 0.0)
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.monotonic", lambda: 0.0)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -8014,19 +8014,19 @@ class TestDevQueueWaitSentinelAware:
         _save_state(CwState(sessions=[session]))
 
         monkeypatch.setattr(
-            "cw.cli.dev_queue._parse_sentinel_from_transcript", lambda *_a, **_kw: None
+            "cw.cli.dev_queue.wait._parse_sentinel_from_transcript", lambda *_a, **_kw: None
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue._transcript_age_seconds", lambda *_a, **_kw: 99999.0
+            "cw.cli.dev_queue.wait._transcript_age_seconds", lambda *_a, **_kw: 99999.0
         )
         from cw.native_daemon import FakeNativeDaemonClient
 
         _fake_daemon = FakeNativeDaemonClient()
         monkeypatch.setattr(
-            "cw.cli.dev_queue.get_native_daemon_client", lambda: _fake_daemon
+            "cw.cli.dev_queue.wait.get_native_daemon_client", lambda: _fake_daemon
         )
-        monkeypatch.setattr("cw.cli.dev_queue.time.sleep", lambda _: None)
-        monkeypatch.setattr("cw.cli.dev_queue.time.monotonic", lambda: 0.0)
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.monotonic", lambda: 0.0)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -8058,26 +8058,26 @@ class TestDevQueueWaitSentinelAware:
         _save_state(CwState(sessions=[session]))
 
         monkeypatch.setattr(
-            "cw.cli.dev_queue._parse_sentinel_from_transcript", lambda *_a, **_kw: None
+            "cw.cli.dev_queue.wait._parse_sentinel_from_transcript", lambda *_a, **_kw: None
         )
         # Fresh transcript (not stale) → no ATTENTION.
         monkeypatch.setattr(
-            "cw.cli.dev_queue._transcript_age_seconds", lambda *_a, **_kw: 5.0
+            "cw.cli.dev_queue.wait._transcript_age_seconds", lambda *_a, **_kw: 5.0
         )
         from cw.native_daemon import FakeNativeDaemonClient
 
         _fake_d = FakeNativeDaemonClient()
         monkeypatch.setattr(
-            "cw.cli.dev_queue.get_native_daemon_client", lambda: _fake_d
+            "cw.cli.dev_queue.wait.get_native_daemon_client", lambda: _fake_d
         )
-        monkeypatch.setattr("cw.cli.dev_queue.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
 
         # First monotonic() call (deadline init): 0.0.
         # Subsequent calls (deadline checks): first returns 0.0 (alive),
         # then 9999.0 (deadline exceeded after heartbeat).
         mono_values = iter([0.0, 0.0, 9999.0])
         monkeypatch.setattr(
-            "cw.cli.dev_queue.time.monotonic", lambda: next(mono_values, 9999.0)
+            "cw.cli.dev_queue.wait.time.monotonic", lambda: next(mono_values, 9999.0)
         )
 
         runner = CliRunner()
@@ -8250,9 +8250,9 @@ class TestDevQueueWaitSentinelAware:
         # second deadline check (inside session-None branch): 9999.0 → timeout.
         mono_values = iter([0.0, 9999.0])
         monkeypatch.setattr(
-            "cw.cli.dev_queue.time.monotonic", lambda: next(mono_values, 9999.0)
+            "cw.cli.dev_queue.wait.time.monotonic", lambda: next(mono_values, 9999.0)
         )
-        monkeypatch.setattr("cw.cli.dev_queue.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -8307,7 +8307,7 @@ class TestDevQueueWaitDuplicateResolution:
 
         # Prevent consume_completed_sessions from doing real dispatch work
         monkeypatch.setattr("cw.dev_queue.consume_completed_sessions", lambda: 0)
-        monkeypatch.setattr("cw.cli.dev_queue.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
 
         runner = CliRunner()
         result = runner.invoke(
