@@ -510,6 +510,47 @@ def test_pr_action_taken_emitted_before_mutation(
     assert after_task.model_copy(update={"address_review_fired_at": None}) == task
 
 
+def test_lane_in_needs_attention_payload_matches_task_lane(
+    tmp_config_dir: Path,
+    make_git_repo: Any,
+    stub_spawn: _SpawnRecorder,
+) -> None:
+    """Integration (#1333): the ``lane`` threaded through ``_prepare_dispatch_job``
+    into ``_record_pr_action_taken`` (representative call site, address_review
+    recipe) survives end-to-end through ``_act_address_review``'s repeat-fire
+    escalation into the SESSION_NEEDS_ATTENTION payload, and matches the
+    triggering task's own ``lane`` — not the default."""
+    _write_acme_clients_yaml(tmp_config_dir)
+    worktree = make_git_repo("lane-integration")
+    task = _cr_task(
+        worktree_path=worktree,
+        lane="bugs",
+        pr_state=_pr_state(
+            state="OPEN",
+            attention_state="changes_requested",
+            review_decision="CHANGES_REQUESTED",
+        ),
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    cfg = _config(
+        review_recipe_repeat_fire_threshold=1,
+        review_recipe_repeat_fire_window_minutes=20,
+    )
+
+    acted = _act_address_review(
+        [_candidate_for(task)],
+        clients=load_effective_clients(),
+        config=cfg,
+        repeat_fire_counts={},
+    )
+
+    assert acted == [task.ticket_id]
+    attn = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+    assert len(attn) == 1
+    assert attn[0].payload["lane"] == task.lane == "bugs"
+
+
 @pytest.mark.parametrize("stale_state", ["ready_to_approve", None])
 def test_stale_attention_state_skips_silently(
     tmp_config_dir: Path,
@@ -2121,6 +2162,7 @@ class TestRecordPrActionTaken:
             RECIPE_ADDRESS_REVIEW,
             config=_config(),
             repeat_fire_counts={},
+            lane="default",
         )
         taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
         assert len(taken) == 1
@@ -2141,6 +2183,7 @@ class TestRecordPrActionTaken:
             RECIPE_ADDRESS_REVIEW,
             config=cfg,
             repeat_fire_counts=counts,
+            lane="default",
         )
         attn = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
         assert len(attn) == 1
@@ -2150,6 +2193,7 @@ class TestRecordPrActionTaken:
         assert attn[0].payload["client"] == "acme"
         assert attn[0].payload["repeat_fire_count"] == 5
         assert attn[0].payload["window_minutes"] == 20
+        assert attn[0].payload["lane"] == "default"
 
     def test_below_threshold_no_attention_event(self, tmp_config_dir: Path) -> None:
         cfg = _config(review_recipe_repeat_fire_threshold=5)
@@ -2161,6 +2205,7 @@ class TestRecordPrActionTaken:
             RECIPE_ADDRESS_REVIEW,
             config=cfg,
             repeat_fire_counts=counts,
+            lane="default",
         )
         assert (
             read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
@@ -2177,6 +2222,7 @@ class TestRecordPrActionTaken:
             RECIPE_ADDRESS_REVIEW,
             config=cfg,
             repeat_fire_counts=counts,
+            lane="default",
         )
         assert (
             read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
@@ -2192,6 +2238,7 @@ class TestRecordPrActionTaken:
             RECIPE_ADDRESS_REVIEW,
             config=cfg,
             repeat_fire_counts={},
+            lane="default",
         )
         attn = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
         assert len(attn) == 1
@@ -2207,6 +2254,7 @@ class TestRecordPrActionTaken:
             RECIPE_ADDRESS_REVIEW,
             config=None,
             repeat_fire_counts=None,
+            lane="default",
         )
         assert (
             len(read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])) == 1
@@ -2241,6 +2289,7 @@ class TestRecordPrActionTaken:
             RECIPE_ADDRESS_REVIEW,
             config=cfg,
             repeat_fire_counts=counts,
+            lane="default",
         )
         # Tenant A's own count (absent from the ("acme", "42", recipe) key)
         # starts at 0 + this = 1, nowhere near the threshold — neither the
@@ -2249,6 +2298,29 @@ class TestRecordPrActionTaken:
             read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
             == []
         )
+
+    def test_lane_present_in_attention_payload(self, tmp_config_dir: Path) -> None:
+        """The new ``lane`` kwarg (#1333) lands in the SESSION_NEEDS_ATTENTION
+        payload distinctly from ``_repeat_fire_payload_base``'s own pre-existing
+        ``"lane": "default"`` key, which feeds the unrelated PR_ACTION_TAKEN
+        payload only (via ``_review_payload_base``) and is never read here."""
+        cfg = _config(
+            review_recipe_repeat_fire_threshold=5,
+            review_recipe_repeat_fire_window_minutes=20,
+        )
+        counts = {("acme", "GEN-1", RECIPE_ADDRESS_REVIEW): 4}  # prior 4 + this = 5
+        _record_pr_action_taken(
+            _repeat_fire_payload_base(),
+            "acme",
+            "GEN-1",
+            RECIPE_ADDRESS_REVIEW,
+            config=cfg,
+            repeat_fire_counts=counts,
+            lane="bugs",
+        )
+        attn = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+        assert len(attn) == 1
+        assert attn[0].payload["lane"] == "bugs"
 
 
 class TestRecipeFiredAtGetters:
