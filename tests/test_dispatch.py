@@ -3428,9 +3428,7 @@ class TestDispatchUsageLimitBackoff:
             saved.append(dt)
             real_save(dt)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(
-            "cw.dispatch.loop.save_usage_limited_until", capturing_save
-        )
+        monkeypatch.setattr("cw.dispatch.loop.save_usage_limited_until", capturing_save)
 
         # Patch time.sleep so the loop exits on the second tick.
         call_count = 0
