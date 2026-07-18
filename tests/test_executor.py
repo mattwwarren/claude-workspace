@@ -790,10 +790,13 @@ def test_local_executor_proc_stat_unreadable_marks_session_completed(
     assert result.status == "blocked"
     assert result.blocker is not None
     assert result.blocker.reason == LIVENESS_UNAVAILABLE
-    assert (
-        result.blocker.details
-        == f"process {fake_runner.procs[-1].pid} start-time unavailable"
+    # details carries the liveness detail plus a diagnostics-bundle pointer
+    # (#1239) — session id isn't captured by this test, so match the prefix.
+    assert result.blocker.details.startswith(
+        f"process {fake_runner.procs[-1].pid} start-time unavailable "
+        "[diagnostics: "
     )
+    assert result.blocker.details.endswith("]")
 
 
 def test_local_executor_liveness_unavailable_persists_runtime_error_diagnostics(
