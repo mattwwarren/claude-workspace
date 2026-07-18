@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
@@ -43,7 +44,6 @@ from cw.models import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
 
 def _persisted_result() -> AutoDevResult:
@@ -408,6 +408,14 @@ def test_post_review_comment_suppresses_timeout() -> None:
         side_effect=_subprocess.TimeoutExpired(cmd="gh", timeout=30),
     ):
         _post_review_comment("T-1", "findings")
+
+
+def test_post_review_comment_forwards_cwd() -> None:
+    """#1279: _post_review_comment scopes the gh call to the client's repo."""
+    want_cwd = Path("/some/client-a/repo")
+    with patch("cw.executor.post_issue_comment") as post_mock:
+        _post_review_comment("T-1", "findings", cwd=want_cwd)
+    post_mock.assert_called_once_with("T-1", "findings", cwd=want_cwd)
 
 
 def test_make_blocked_backward_compat(tmp_path: Path) -> None:
