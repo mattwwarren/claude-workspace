@@ -1,0 +1,86 @@
+# Nightly (codex CLI contract integration) — #1238
+#
+# Live contract suite that drives the real `codex exec` CLI against the OpenAI
+# backend to pin cw's executor-neutral review contract (the
+# ReviewerFindingsDocument schema) against actual CLI behavior. Separate from
+# nightly-native.yml (which exercises the claude --bg daemon).
+#
+# Prerequisites:
+#   - `codex` CLI installed (npm install -g @openai/codex)
+#   - OpenAI credentials available to the runner as the OPENAI_CI_KEY secret
+#
+# workflow_dispatch-only: no CI codex credentials are confirmed, so this never
+# runs on push/PR. The live suite self-skips unless INTEGRATION_CODEX_LIVE is
+# set, so a run without credentials degrades to skips rather than hard errors.
+#
+# Local reproduction:
+#   INTEGRATION_CODEX_LIVE=1 \
+#     uv run pytest tests/test_codex_contract_live.py -v -m integration
+#
+# Diagnostics here (the $GITHUB_STEP_SUMMARY steps below) are a job-summary
+# stopgap; re-wire into #1239's diagnostics store once it lands — not this
+# ticket's job.
+
+name: Nightly (codex CLI contract integration)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  codex-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: CI
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+
+      - name: Set up Python 3.13
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --dev --extra mcp
+
+      - name: Install codex CLI
+        run: npm install -g @openai/codex
+
+      - name: Diagnose codex install
+        run: |
+          echo "## codex version"
+          codex --version 2>&1 || true
+          echo "## which codex"
+          which codex || true
+
+      - name: Record codex capability probe (job summary)
+        run: |
+          echo "### Codex capability probe" >> "$GITHUB_STEP_SUMMARY"
+          echo "version: $(codex --version 2>&1)" >> "$GITHUB_STEP_SUMMARY"
+
+      # Fail fast with a clear message when OPENAI_CI_KEY is not configured.
+      - name: Verify OPENAI_CI_KEY is configured
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_CI_KEY }}
+        run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "ERROR: OPENAI_CI_KEY secret is not set."
+            echo "Configure it in Settings → Secrets → Actions before running this workflow."
+            exit 1
+          fi
+
+      - name: Test (codex live contract)
+        id: codex-contract-test
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_CI_KEY }}
+          INTEGRATION_CODEX_LIVE: "1"
+        run: uv run pytest tests/test_codex_contract_live.py -v --tb=short -m integration
+
+      - name: Record observed missing-output failure branch (job summary)
+        if: always() && steps.codex-contract-test.outcome != 'skipped'
+        run: |
+          echo "### Codex missing-output failure branch" >> "$GITHUB_STEP_SUMMARY"
+          echo "See the 'codex_contract_probe missing_output reason=' log line in the" \
+            "test output above for the reason code this codex version returned when" \
+            "the -o target was unwritable (CLI drift signal)." >> "$GITHUB_STEP_SUMMARY"
