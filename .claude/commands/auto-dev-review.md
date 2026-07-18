@@ -46,7 +46,7 @@ cw event record stage.entered \
 - Data Safety (always when persisted-state mutation is present)
 - Product Manager (always — Mode 2 spec compliance)
 
-**Track `REVIEWER_COUNT`:** as reviewers are spawned in this pass, count the number actually dispatched (conditional roster members — Data Safety, and any Large-scope conditional entry — count only when actually spawned, not when skipped). This count feeds `review.agents_run` in the Stage 3 Completion sentinel below. Carry `REVIEWER_COUNT` unchanged across any Step 3b re-review/fix-loop cycles — it reflects the original review pass, not fix-cycle churn.
+**Track `SPAWNED_ROLES`:** as reviewers are spawned in this pass, record the roster of roles actually dispatched (conditional roster members — Data Safety, and any Large-scope conditional entry — count only when actually spawned, not when skipped). After each reviewer returns, extract its `<<<REVIEW_FINDINGS ... REVIEW_FINDINGS>>>` block (see the Output contract below) into that role's `ReviewerFindingsDocument`; when a response has no well-formed block, record a `ReviewerRunFailure {"role": "<role>", "reason": "unparseable_response"}` instead. Together these feed the `documents`/`failed_reviewers` arrays `cw review consolidate` validates at Checkpoint 3a — `review.agents_run` in the Stage 3 Completion sentinel below is sourced from that call's `.review.agents_run`, not a manually tracked int (R3). Carry `SPAWNED_ROLES` (and each role's captured document/failure) unchanged across any Step 3b re-review/fix-loop cycles — Step 3a's own consolidate call is what gets frozen for the sentinel, not fix-cycle churn.
 
 Dispatch shape depends on mode (see issues #175 / #176 in claude-workspace for the orphan hazard this avoids):
 
@@ -95,7 +95,7 @@ Dispatch shape depends on mode (see issues #175 / #176 in claude-workspace for t
   4. Could this break anything downstream?
   5. Debug artifacts left in? (`print()`, `breakpoint()`, `pdb`, `ic()`)
 - **Product Manager Reviewer only:** prepend `Mode: spec compliance` to the prompt (Mode 2 per the agent spec). Other reviewers do not need a mode declaration.
-- Standard output rules: MUST_FIX / SHOULD_FIX only, no praise, NO_ISSUES if clean
+- **Output contract** (see below) — no praise, `NO_ISSUES` if clean.
 - The friction protocol block
 - The following health check block verbatim:
   ```
@@ -107,9 +107,41 @@ Dispatch shape depends on mode (see issues #175 / #176 in claude-workspace for t
   - **Recommendation**: PROCEED | EXIT_FOR_HUMAN_REVIEW
   ```
 
+**Output contract.** Every reviewer's response MUST end with a `<<<REVIEW_FINDINGS ... REVIEW_FINDINGS>>>` block — the same `<<<TOKEN ... TOKEN>>>` convention this file's own `<<<AUTO_DEV_RESULT>>>` sentinel (below) and `prep-pr.md`'s `<<<PREP_PR_BLOCK>>>` already use for mid-pipeline agent→orchestrator signaling — conforming to the #1237 `ReviewerFindingsDocument` schema:
+
+```
+<<<REVIEW_FINDINGS
+{"reviewer_role": "<role>", "status": "ok|degraded|failed", "detail": "...",
+ "findings": [{"severity": "MUST_FIX|SHOULD_FIX|NIT|PRINCIPLE", "file": "...",
+   "line_start": <int|null>, "line_end": <int|null>, "summary": "...",
+   "consequence": "...", "suggested_fix": "...", "evidence": "<verbatim diff substring>",
+   "confidence": "HIGH|MEDIUM|LOW",
+   "escalation": {"target_reviewer": "...", "evidence_quote": "..."} | null}]}
+REVIEW_FINDINGS>>>
+```
+
+`NO_ISSUES` (a clean review) maps to `status="ok", findings=[]`. `evidence` MUST be a verbatim substring of the diff text at the claimed lines — `cw review consolidate` (Checkpoint 3a) rejects any finding whose evidence doesn't literally appear there. This block, plus the Friction Protocol and Health Check blocks, is the reviewer's entire structured output — this instruction **supersedes** the reviewer agent spec's own prose "## Output Format" section (MUST_FIX/SHOULD_FIX headings). The Codex adapter (#1236) applies the same override — see `codex_review.py`'s `_OUTPUT_INSTRUCTIONS`, which inlines each agent spec verbatim then appends its own final JSON-schema instruction last so it takes precedence.
+
 ### Checkpoint 3a: Adjudicate every finding
 
-Consolidate review results: deduplicate, sort by severity, group by file.
+**Extract, assemble, and consolidate mechanically** — this is a `cw review consolidate` call, not a prose "deduplicate/sort/group" step:
+
+1. Extract each reviewer's `<<<REVIEW_FINDINGS ... REVIEW_FINDINGS>>>` block from its raw subagent response into `documents` (a JSON array of `ReviewerFindingsDocument` objects — one entry per role that produced a well-formed block). A role whose response has no well-formed `REVIEW_FINDINGS` block instead contributes a `ReviewerRunFailure {"role": "<role>", "reason": "unparseable_response"}` to `failed_reviewers` (see `SPAWNED_ROLES` tracking in Step 3a above).
+2. Assemble the consolidate-input envelope:
+   ```json
+   {"documents": [...], "diff": "<the same diff text sent to reviewers>", "reviewed_sha": "<HEAD sha>", "failed_reviewers": [...]}
+   ```
+3. Run:
+   ```bash
+   printf '%s' "$CONSOLIDATE_INPUT" | cw review consolidate -
+   ```
+   A non-zero exit here is a hard pipeline error (the mechanical validation itself failed — e.g. malformed JSON or a schema violation) — not a normal adjudication path. Do not attempt to recover by re-running adjudication on the raw prose; treat it the same as any other unrecoverable Stage 3 tool failure.
+4. On success, parse the `ReviewVerdict` JSON from stdout and:
+   - Use `.accepted` (validated MUST_FIX/SHOULD_FIX findings, deduped across reviewers) as the finding set entering the FIX NOW / REJECT / DEFER bucket logic below (unchanged prose, §4a/4b non-deferrable pre-pass, three buckets) — each finding now carries structured `file`/`line_start`/`summary`/`suggested_fix` instead of freeform prose.
+   - Render `.accepted` entries with `severity` in `{NIT, PRINCIPLE}` informationally only — they are never eligible for bucket assignment (R5).
+   - Discard `.rejected` (findings whose evidence didn't match the diff) from adjudication entirely — log them, do not present them to the bucket sort.
+   - Log `.stripped_escalations` (escalations whose evidence quote wasn't in the diff — the underlying finding still survives and is adjudicated normally).
+   - **Freeze** `.review.must_fix_initial`, `.review.should_fix`, and `.review.agents_run` from this *first* `cw review consolidate` call for the final sentinel (the "_initial" naming is the field's own contract). A Step 3b re-review re-invokes `cw review consolidate` on the updated diff purely to re-check `blocking`, not to overwrite these frozen numbers.
 
 **Non-deferrable pre-pass (run BEFORE bucket assignment):**
 
@@ -133,7 +165,7 @@ The **action list** (bucket 1) — not "MUST_FIX only" — is what drives Step 3
 - **Rejections (bucket 2):** record each REJECTED finding + one-line rationale; these are written to the PR body by Stage 4 (Step 4d). Append the same to `friction_highlights`. For a rejection rooted in non-obvious design intent, add an inline `# Why:` comment at the code site (per the global review-culture rule).
 - **Deferrals (bucket 3):** record each deferred finding now; Stage 4 (Step 4d) writes them into the machine-readable `DEFERRED-REVIEW-FINDINGS` block in the PR body for Step H3 to harvest. Append a one-line note to `friction_highlights`.
 
-**Stash adjudication outcomes for Stage 4.** Since PR creation happens in Stage 4 (FINALIZE), not here, write the adjudication outcomes to `.cw/deferred-findings.md` so Stage 4's Step 4d can consume them:
+**Stash adjudication outcomes for Stage 4.** Since PR creation happens in Stage 4 (FINALIZE), not here, write the adjudication outcomes to `.cw/deferred-findings.md` so Stage 4's Step 4d can consume them. Since Checkpoint 3a's adjudication now operates on structured `Finding` objects from `.accepted` (not freeform reviewer prose), the block's four keys below are projected mechanically: `severity` ← `finding.severity`, `summary` ← `finding.summary`, `file` ← `finding.file`, `rationale` ← the adjudication rationale recorded for the deferral. The block's shape itself is unchanged (R6):
 
 ```
 # Deferred Review Findings
@@ -336,7 +368,7 @@ To resolve the tier:
 
 `scope.tier` must always be a concrete value (`"small"` or `"large"`) in the emitted sentinel — the schema validator requires it for any stage beyond pre-impl. Use the resolved tier when available; fall back to `"small"` when emitting the `scope_tier_unresolvable` blocked sentinel above.
 
-**`review.agents_run` must be set to `REVIEWER_COUNT`** (tracked in Step 3a above), not left at the template's placeholder `0` — it is the count of reviewer agents actually spawned in this review pass.
+**`review.agents_run` must be set to the `agents_run` int from the frozen (Step 3a) `cw review consolidate` `.review` block** (see Checkpoint 3a), not left at the template's placeholder `0` and not a manually tracked dispatch count (R3). Likewise, `review.must_fix_initial` and `review.should_fix` must be sourced from that same frozen block, not recomputed at sentinel-emission time.
 
 **Only emit this sentinel when invoked as a standalone `/auto-dev-review <ticket-id> --headless` command. Do NOT emit when running as part of the interactive monolith chain (`auto-dev.md` owns the sentinel in that context).**
 
