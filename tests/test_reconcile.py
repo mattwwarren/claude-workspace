@@ -10790,9 +10790,7 @@ class TestSalvageCommittedNoPrSessions:
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
         )
-        monkeypatch.setattr(
-            "cw.reconcile._shared.detect_usage_limit", lambda _s: True
-        )
+        monkeypatch.setattr("cw.reconcile._shared.detect_usage_limit", lambda _s: True)
         mock_daemon = MagicMock()
         monkeypatch.setattr(
             "cw.reconcile._deps.get_native_daemon_client",
@@ -10871,9 +10869,7 @@ class TestSalvageCommittedNoPrSessions:
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
         )
-        monkeypatch.setattr(
-            "cw.reconcile._shared.detect_usage_limit", lambda _s: False
-        )
+        monkeypatch.setattr("cw.reconcile._shared.detect_usage_limit", lambda _s: False)
         monkeypatch.setattr(
             "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
         )
@@ -10945,9 +10941,7 @@ class TestSalvageCommittedNoPrSessions:
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
         )
-        monkeypatch.setattr(
-            "cw.reconcile._shared.detect_usage_limit", lambda _s: True
-        )
+        monkeypatch.setattr("cw.reconcile._shared.detect_usage_limit", lambda _s: True)
         monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
 
         candidates: list[tuple[str, str | None, str, str, bool]] = [
@@ -10985,7 +10979,9 @@ class TestSalvageCommittedNoPrSessions:
             event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
         )
         dirty_events = [
-            e for e in events if e.payload.get("paused_status") == _DIRTY_WORKTREE_REASON
+            e
+            for e in events
+            if e.payload.get("paused_status") == _DIRTY_WORKTREE_REASON
         ]
         assert len(dirty_events) == 1
         needs_salvage_events = [
@@ -11035,9 +11031,7 @@ class TestSalvageCommittedNoPrSessions:
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
         )
-        monkeypatch.setattr(
-            "cw.reconcile._shared.detect_usage_limit", lambda _s: True
-        )
+        monkeypatch.setattr("cw.reconcile._shared.detect_usage_limit", lambda _s: True)
         monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
 
         candidates: list[tuple[str, str | None, str, str, bool]] = [

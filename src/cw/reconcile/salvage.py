@@ -272,6 +272,89 @@ def _salvage_high_path(
             _deps.get_native_daemon_client().stop(session.surface_ref)
 
 
+def _stamp_low_path_session_state(
+    session: Session, *, usage_limit_detected: bool, now: datetime
+) -> bool:
+    """Stamp session disposition under sessions_lock.
+
+    usage_limit_detected=True stamps TIMED_OUT/TIMED_OUT/USAGE_LIMIT_CUTOFF.
+    Otherwise stamps the pre-#1336 COMPLETED/CRASHED/needs_salvage
+    disposition, unless already flagged on a prior tick.
+
+    Returns already_flagged (always False when usage_limit_detected=True,
+    since that path carries no idempotency marker of its own — it relies on
+    the existing _LIVE_STATUSES gate elsewhere to prevent reclassification).
+    """
+    already_flagged = False
+    with sessions_lock():
+        fresh_state = load_state()
+        for s in fresh_state.sessions:
+            if s.id != session.id:
+                continue
+            if usage_limit_detected:
+                s.status = SessionStatus.TIMED_OUT
+                s.completed_at = now
+                s.completed_reason = CompletionReason.TIMED_OUT
+                s.reap_reason = ReapReason.USAGE_LIMIT_CUTOFF
+                break
+            already_flagged = (
+                isinstance(s.last_result, dict)
+                and s.last_result.get("paused_status") == _NEEDS_SALVAGE_REASON
+            )
+            if not already_flagged:
+                if isinstance(s.last_result, dict):
+                    s.last_result = {
+                        **s.last_result,
+                        "paused_status": _NEEDS_SALVAGE_REASON,
+                    }
+                else:
+                    s.last_result = {"paused_status": _NEEDS_SALVAGE_REASON}
+                s.reap_reason = ReapReason.SALVAGE_PARKED
+                s.status = SessionStatus.COMPLETED
+                s.completed_at = now
+                s.completed_reason = CompletionReason.CRASHED
+            break
+        save_state(fresh_state)
+    return already_flagged
+
+
+def _notify_needs_salvage(
+    session: Session, ticket_id: str | None, breadcrumbs: str
+) -> None:
+    """Route queue task to BLOCKED_ON_USER and emit the needs_salvage alert."""
+    if ticket_id:
+        with dev_queue_lock():
+            store = load_dev_queue()
+            for task in store.tasks:
+                if (
+                    task.ticket_id == ticket_id
+                    and task.status == QueueItemStatus.RUNNING
+                ):
+                    transition_task_status(
+                        task,
+                        QueueItemStatus.BLOCKED_ON_USER,
+                        disposition=_NEEDS_SALVAGE_REASON,
+                    )
+                    save_dev_queue(store)
+                    break
+
+    # Emit SESSION_NEEDS_ATTENTION with breadcrumbs for human salvage.
+    record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {
+            "session_id": session.id,
+            "session_name": session.name,
+            "client": session.client,
+            "ticket_id": ticket_id,
+            "claude_session_id": session.claude_session_id,
+            "paused_status": _NEEDS_SALVAGE_REASON,
+            "breadcrumbs": breadcrumbs,
+            "crashed": False,
+        },
+    )
+    _deps.fire_push_notification(session.name, session.client)
+
+
 def _salvage_low_path(
     session: Session,
     ticket_id: str | None,
@@ -291,41 +374,13 @@ def _salvage_low_path(
     """
     breadcrumbs = f"branch={branch} worktree={worktree_path_str}"
     usage_limit_detected = _shared.detect_usage_limit(session)
-    already_flagged = False
     now = datetime.now(UTC)
 
-    # Update session state under sessions_lock. Capture already_flagged
-    # before the conditional write so the early-return below can suppress
+    # Capture already_flagged so the early-return below can suppress
     # duplicate queue mutation, event, and push notification (#418).
-    with sessions_lock():
-        fresh_state = load_state()
-        for s in fresh_state.sessions:
-            if s.id == session.id:
-                if usage_limit_detected:
-                    s.status = SessionStatus.TIMED_OUT
-                    s.completed_at = now
-                    s.completed_reason = CompletionReason.TIMED_OUT
-                    s.reap_reason = ReapReason.USAGE_LIMIT_CUTOFF
-                else:
-                    already_flagged = (
-                        isinstance(s.last_result, dict)
-                        and s.last_result.get("paused_status")
-                        == _NEEDS_SALVAGE_REASON
-                    )
-                    if not already_flagged:
-                        if isinstance(s.last_result, dict):
-                            s.last_result = {
-                                **s.last_result,
-                                "paused_status": _NEEDS_SALVAGE_REASON,
-                            }
-                        else:
-                            s.last_result = {"paused_status": _NEEDS_SALVAGE_REASON}
-                        s.reap_reason = ReapReason.SALVAGE_PARKED
-                        s.status = SessionStatus.COMPLETED
-                        s.completed_at = now
-                        s.completed_reason = CompletionReason.CRASHED
-                break
-        save_state(fresh_state)
+    already_flagged = _stamp_low_path_session_state(
+        session, usage_limit_detected=usage_limit_detected, now=now
+    )
 
     if not usage_limit_detected:
         # Already dispositioned on a prior tick — suppress duplicate queue
@@ -335,39 +390,7 @@ def _salvage_low_path(
         # relied on).
         if already_flagged:
             return
-
-        # Route queue task to BLOCKED_ON_USER.
-        if ticket_id:
-            with dev_queue_lock():
-                store = load_dev_queue()
-                for task in store.tasks:
-                    if (
-                        task.ticket_id == ticket_id
-                        and task.status == QueueItemStatus.RUNNING
-                    ):
-                        transition_task_status(
-                            task,
-                            QueueItemStatus.BLOCKED_ON_USER,
-                            disposition=_NEEDS_SALVAGE_REASON,
-                        )
-                        save_dev_queue(store)
-                        break
-
-        # Emit SESSION_NEEDS_ATTENTION with breadcrumbs for human salvage.
-        record_event(
-            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-            {
-                "session_id": session.id,
-                "session_name": session.name,
-                "client": session.client,
-                "ticket_id": ticket_id,
-                "claude_session_id": session.claude_session_id,
-                "paused_status": _NEEDS_SALVAGE_REASON,
-                "breadcrumbs": breadcrumbs,
-                "crashed": False,
-            },
-        )
-        _deps.fire_push_notification(session.name, session.client)
+        _notify_needs_salvage(session, ticket_id, breadcrumbs)
 
     # Stop the surface if still running — daemon cleanup is orthogonal to the
     # disposition label above (GitHub #1249, #1336).
