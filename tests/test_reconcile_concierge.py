@@ -916,9 +916,7 @@ def test_park_marker_poison_clear_survives_widened_transcript_lookup(
 
     # The autouse _flat_transcript fixture stubs age to None; restore the real
     # (widened) implementation so this test exercises the glob across all files.
-    monkeypatch.setattr(
-        "cw.reconcile.concierge._transcript_age_seconds", _real_age
-    )
+    monkeypatch.setattr("cw.reconcile.concierge._transcript_age_seconds", _real_age)
 
     home = tmp_path / "home"
     home.mkdir()
@@ -944,8 +942,6 @@ def test_park_marker_poison_clear_survives_widened_transcript_lookup(
     task = _make_task(disposition=None, attempts=1, stage=Stage.IMPL)
 
     assert (
-        _park_marker_transcript_stale_45m(
-            session, task, now=_NOW, config=_config()
-        )
+        _park_marker_transcript_stale_45m(session, task, now=_NOW, config=_config())
         is True
     )

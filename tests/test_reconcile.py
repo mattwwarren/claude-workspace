@@ -3189,7 +3189,13 @@ def test_revert_stalled_no_salvage_without_sentinel_times_out(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Fresh transcript but no terminal sentinel → TIMED_OUT + revert (unchanged)."""
+    """Stale transcript, no terminal sentinel → TIMED_OUT + revert (unchanged).
+
+    The transcript's mtime is pinned stale (past the liveness floor) so the
+    #1277 wall-clock liveness veto does not fire. Since #1283's widened lookup
+    now also globs non-surface_ref-prefixed siblings, an un-pinned (real, fresh)
+    mtime would otherwise be seen as live and veto the revert.
+    """
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -3201,7 +3207,8 @@ def test_revert_stalled_no_salvage_without_sentinel_times_out(
     # Transcript exists but carries no AUTO_DEV_RESULT block.
     proj = claude_project_dir(worktree)
     proj.mkdir(parents=True, exist_ok=True)
-    (proj / "claude-uuid-3.jsonl").write_text(
+    tx = proj / "claude-uuid-3.jsonl"
+    tx.write_text(
         json.dumps(
             {
                 "type": "assistant",
@@ -3213,6 +3220,8 @@ def test_revert_stalled_no_salvage_without_sentinel_times_out(
         )
         + "\n"
     )
+    stale_ts = (started_at + timedelta(seconds=60)).timestamp()
+    os.utime(tx, (stale_ts, stale_ts))
     save_state(CwState(sessions=[sess]))
     save_dev_queue(
         DevQueueStore(
