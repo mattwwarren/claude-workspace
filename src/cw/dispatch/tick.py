@@ -1,0 +1,408 @@
+"""One dispatch tick: preflight gates, per-client snapshot, and lane dispatch.
+
+Part of the ``cw.dispatch`` package split (#1311, part 2): the ``dispatch_tick``
+orchestration and its per-tick helpers, carved out of ``_legacy`` so the tick
+path and the event loop live in separate submodules."""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, NamedTuple
+
+from cw.collision import detect_wave_collisions
+from cw.config import (
+    load_effective_clients,
+    load_state,
+)
+from cw.dev_queue import (
+    dev_queue_lock,
+    load_dev_queue,
+    load_plan,
+)
+from cw.executor_diagnostics import cleanup_expired_diagnostics
+from cw.models import (
+    OCCUPIED_LANE_STATUSES,
+    ClientConfig,
+    QueueItemStatus,
+    SessionOrigin,
+    SessionStatus,
+)
+from cw.native_daemon import get_native_daemon_client
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from cw.models import (
+        ClientConfig,
+        CwState,
+        DevQueueStore,
+        OrchestratorConfig,
+    )
+    from cw.native_daemon import NativeDaemonClient
+from cw.dispatch.gating import (
+    _emit_availability_skip,
+    _emit_stale_skip,
+    _emit_usage_limit_skip_events,
+    _reconcile_usage_limited,
+    _resolve_availability_once,
+    _resolve_freshness,
+)
+from cw.dispatch.lanes import (
+    _dispatch_client_lanes,
+    _record_client_freshness_block,
+    _reset_client_freshness_blocks,
+)
+
+_log = logging.getLogger("cw.dispatch")
+
+
+@dataclass(frozen=True)
+class DispatchTickResult:
+    """Return value of :func:`dispatch_tick`.
+
+    ``spawned`` — number of sessions started this tick.
+    ``usage_limit_detected`` — True if a usage limit was detected this tick
+    (either from spawn-time :class:`~cw.exceptions.UsageLimitError` or from
+    :attr:`~cw.reconcile.ReconcileReport.usage_limited`). The caller
+    (:func:`run_dispatch_loop`) uses this to set the back-off window.
+    ``--once`` mode intentionally does not back off (single tick, no loop state).
+    """
+
+    spawned: int
+    usage_limit_detected: bool = False
+
+
+def _sweep_expired_diagnostics(config: OrchestratorConfig) -> None:
+    """Best-effort retention sweep of per-session diagnostics bundles (#1239).
+
+    Runs OUTSIDE ``sessions_lock`` (pure filesystem rmtree, no state mutation)
+    and swallows every error, mirroring :func:`_reconcile_usage_limited`'s
+    broad-catch posture: a cleanup failure (permission, race with a concurrent
+    tick) must never abort the tick — the sweep just retries next tick.
+    Extracted from ``dispatch_tick`` to keep it under the PLR branch/statement
+    caps. Paired test: tests/test_dispatch.py
+    test_dispatch_tick_cleanup_failure_does_not_abort_tick.
+    """
+    try:
+        cleanup_expired_diagnostics(retention_hours=config.diagnostics_retention_hours)
+    except Exception:  # noqa: BLE001
+        _log.exception("diagnostics cleanup failed during dispatch_tick; continuing")
+
+
+def _build_plan_order(*, use_plan: bool) -> dict[str, list[str]]:
+    """Build the per-client ticket priority ordering from the persisted plan.
+
+    Returns an empty mapping when ``use_plan`` is False or no plan is found;
+    otherwise maps each client to its plan-ordered ticket ids.
+    """
+    plan_order_by_client: dict[str, list[str]] = {}
+    if use_plan:
+        plan = load_plan()
+        if plan is not None:
+            for plan_task in plan.tasks:
+                plan_order_by_client.setdefault(plan_task.client, []).append(
+                    plan_task.ticket_id,
+                )
+    return plan_order_by_client
+
+
+class _ClientTickSnapshot(NamedTuple):
+    """A client's per-tick numeric fields for dispatch.tick skip events.
+
+    ``running_count`` / ``client_ceiling`` / ``pending_count`` are plain
+    ``int``s naming distinct concepts (running sessions, per-client cap,
+    queued tasks) — named fields (vs. a bare positional tuple) prevent a
+    transposition mypy can't catch (e.g. swapping running/pending) while
+    still unpacking positionally at the call site like a plain tuple.
+    """
+
+    running_count: int
+    client_ceiling: int
+    queue_snapshot: DevQueueStore
+    pending_count: int
+
+
+def _client_tick_snapshot(
+    client: ClientConfig,
+    *,
+    state: CwState,
+    config: OrchestratorConfig,
+) -> _ClientTickSnapshot:
+    """Compute a client's per-tick numeric fields for dispatch.tick skip events.
+
+    Extracted from :func:`dispatch_tick`'s loop body so both preflight gates
+    (availability, freshness) can emit a dispatch.tick skip event with all four
+    numeric fields populated. Single dev-queue lock acquisition — the returned
+    ``queue_snapshot`` is reused by the caller for stale-task and per-lane
+    counts.
+    """
+    running_count = sum(
+        1
+        for s in state.sessions
+        if s.client == client.name
+        and s.origin == SessionOrigin.DAEMON
+        and s.status in (SessionStatus.ACTIVE, SessionStatus.IDLE)
+    )
+    client_ceiling = config.per_client_ceiling.get(client.name, config.default_ceiling)
+    with dev_queue_lock():
+        queue_snapshot = load_dev_queue()
+    pending_count = sum(
+        1
+        for t in queue_snapshot.tasks
+        if t.client == client.name and t.status == QueueItemStatus.PENDING
+    )
+    return _ClientTickSnapshot(
+        running_count=running_count,
+        client_ceiling=client_ceiling,
+        queue_snapshot=queue_snapshot,
+        pending_count=pending_count,
+    )
+
+
+def dispatch_tick(
+    config: OrchestratorConfig,
+    *,
+    use_plan: bool = False,
+    parent: str | None = None,
+    native_daemon: NativeDaemonClient | None = None,
+    emit: Callable[[str], None] | None = None,
+    warned_stale: set[tuple[str, str]] | None = None,
+    warned_fetch_fail: set[str] | None = None,
+    warned_collision: set[frozenset[str]] | None = None,
+    usage_limited_until: datetime | None = None,
+    auto_ff: bool = True,
+    client_filter: str | None = None,
+) -> DispatchTickResult:
+    """Run one dispatch tick.
+
+    For each client that has pending TicketTasks, check how many DAEMON
+    sessions are currently ACTIVE or IDLE and compare against the
+    per-client cap from *config*.  If below the cap, claim one pending
+    task and spawn a Claude session for it.
+
+    Args:
+        config: Orchestrator config (per-client caps, tick interval).
+        use_plan: If True, respect the persisted DispatchPlan ordering.
+        parent: Optional parent session ID. When set, every spawned
+            worker is linked to it (``parent_session_id`` +
+            bidirectional ``worker_session_ids``) so ``cw orchestrate
+            workers`` can list dispatched workers as first-class
+            sessions.
+        emit: Optional callable for operator-facing stdout lines.
+            When None, all human-readable output is suppressed (quiet
+            mode).  Typically ``click.echo`` in CLI context.
+        warned_stale: Mutable set of ``(client, ticket_id)`` pairs that
+            have already received a "main behind origin" warning during
+            this dispatcher run.  Prevents repeated spam across ticks.
+            Caller owns the set; mutated in-place.
+        warned_fetch_fail: Mutable set of client names that have already
+            received a fetch-failure WARNING during this dispatcher run.
+            Suppresses repeated WARNINGs for persistently unreachable
+            remotes.  Caller owns the set; mutated in-place.
+        warned_collision: Mutable set of ``frozenset({ticket_id_a,
+            ticket_id_b})`` pairs already warned this loop run. Prevents
+            duplicate WAVE_COLLISION events for persistent in-flight
+            collisions across ticks. Caller owns the set; mutated
+            in-place. When None, dedup is skipped (every tick fires).
+        usage_limited_until: When set and in the future, all clients are
+            skipped with ``skip_reason=USAGE_LIMITED`` and the function
+            returns immediately. The back-off window is set by the
+            caller (:func:`run_dispatch_loop`) when a
+            :class:`~cw.exceptions.UsageLimitError` is detected.
+            Single-tick (``--once``) mode does not set back-off.
+        auto_ff: When True (default), attempt to fast-forward local main
+            automatically before emitting TICKET_NEEDS_SYNC. Only fires
+            when ``check_main_ff_safety`` returns ``"behind"``; other
+            states (``"ahead"``, ``"diverged"``, ``"detached"``) still
+            fall through to the stale-block path. Pass ``False`` to
+            restore legacy block-only behavior.
+        client_filter: When set, narrow the client loop to this single
+            client name. The caller is responsible for validating that the
+            name exists before calling; an unknown name silently produces
+            an empty tick.
+
+    Returns:
+        :class:`DispatchTickResult` with ``spawned`` count and
+        ``usage_limit_detected`` flag.
+    """
+    resolved_native_daemon = native_daemon or get_native_daemon_client()
+    any_usage_limit_detected = _reconcile_usage_limited()
+    _sweep_expired_diagnostics(config)
+    clients = load_effective_clients()
+    if client_filter is not None:
+        clients = {client_filter: clients[client_filter]}
+    state = load_state()
+    spawned = 0
+
+    plan_order_by_client = _build_plan_order(use_plan=use_plan)
+
+    # Wave file-collision detection runs before usage-limit gates so that
+    # RUNNING tasks are checked even during backoff — they continue running
+    # regardless of whether spawning is paused (#784).
+    # Why: writes WAVE_COLLISION events to inbox.jsonl for each new collision pair.
+    with dev_queue_lock():
+        collision_snapshot = load_dev_queue()
+    detect_wave_collisions(
+        collision_snapshot.tasks,
+        warned_collision=warned_collision,
+        emit=emit,
+    )
+
+    # Usage-limit back-off gate: if the window is still active, skip all clients
+    # this tick and emit a dispatch.tick event with skip_reason=USAGE_LIMITED.
+    if usage_limited_until is not None and datetime.now(UTC) < usage_limited_until:
+        _emit_usage_limit_skip_events(clients, config, state)
+        return DispatchTickResult(spawned=0, usage_limit_detected=False)
+
+    # Same-tick race fix: reconcile reverts rate-limited phantom tasks to PENDING
+    # on the same tick they're detected. Without this gate the spawn loop runs
+    # immediately after reconcile and re-spawns the now-PENDING task, hitting the
+    # same limit again. Skip spawning this tick so the caller can set
+    # usage_limited_until before the next tick fires (#804).
+    if any_usage_limit_detected:
+        _emit_usage_limit_skip_events(clients, config, state)
+        return DispatchTickResult(spawned=0, usage_limit_detected=True)
+
+    # Tier-1: optionally cap how many clients are eligible per tick.
+    # max_parallel_clients=None preserves the original behaviour (all clients).
+    dispatched_client_count = 0
+    # Fleet-wide availability verdict, memoized across loop iterations (see
+    # gate below). ``None`` means "not yet resolved this tick".
+    available: bool | None = None
+    for client in clients.values():
+        if (
+            config.max_parallel_clients is not None
+            and dispatched_client_count >= config.max_parallel_clients
+        ):
+            break
+
+        # --- Availability preflight gate (RFC 0011 A5) --- highest
+        # precedence. Fleet-wide TTL-cached `gh auth status` probe: resolved
+        # at most ONCE per tick, not once per client — the cached verdict is
+        # identical for every client in this loop, so a per-client call
+        # would re-read the shared sidecar file N times for the same
+        # answer. Memoized (not hoisted above the loop) via
+        # _resolve_availability_once so it's only called once the loop body
+        # actually runs for at least one client — an empty ``clients`` dict
+        # or a fully-paused fleet (``max_parallel_clients=0``, which breaks
+        # on the first iteration above) never probes or pages, matching the
+        # pre-#1157 invariant that this check only fires when there's
+        # dispatch work it could gate. Checked before the per-client
+        # freshness gate so that during a real GitHub outage no client pays
+        # the freshness git-fetch cost for a verdict that gets discarded
+        # anyway. Fails open on any resolution error, same posture as
+        # _resolve_freshness.
+        available = _resolve_availability_once(available)
+
+        # Numeric fields (running, cap, queue snapshot, pending) hoisted above
+        # both gates so a dispatch.tick skip event for either gate carries all
+        # four. See _client_tick_snapshot.
+        running_count, client_ceiling, queue_snapshot, pending_count = (
+            _client_tick_snapshot(client, state=state, config=config)
+        )
+        # Keep legacy cap alias for skip-event and back-off event payloads.
+        cap = client_ceiling
+
+        # Fleet-wide availability outage: hold every client PENDING (no claim,
+        # no attempts consumed). Composition pin (RFC 0011 A5): on this gated
+        # path NEITHER _record_client_freshness_block NOR
+        # _reset_client_freshness_blocks runs — the freshness counter stays
+        # frozen during an outage, it must not reset.
+        if not available:
+            _emit_availability_skip(
+                client,
+                queue_snapshot,
+                pending_count=pending_count,
+                running_count=running_count,
+                cap=cap,
+            )
+            continue
+
+        # --- Freshness gate --- (only reached when the fleet is available)
+        # Check whether the client's local default branch is behind origin
+        # before claiming any ticket.  Stale repos cause sessions to exit
+        # immediately with local_main_diverged_from_origin, burning a slot.
+        # On any error, log and proceed so a transient network issue never
+        # blocks the whole loop.  When auto_ff and safely behind, this also
+        # fast-forwards local main and clears the stale flag on success.
+        stale, freshness_detail = _resolve_freshness(
+            client, auto_ff=auto_ff, warned_fetch_fail=warned_fetch_fail
+        )
+
+        if stale:
+            _emit_stale_skip(
+                client,
+                queue_snapshot,
+                pending_count=pending_count,
+                running_count=running_count,
+                cap=cap,
+                emit=emit,
+                warned_stale=warned_stale,
+                freshness_detail=freshness_detail,
+            )
+            _record_client_freshness_block(client.name, freshness_detail, config=config)
+            continue
+
+        # Client passed the freshness gate this tick — reset its consecutive
+        # freshness-block latch (RFC 0007 §W2). Short-circuits internally
+        # when already 0, so a steady-state healthy client never rewrites
+        # the override file.
+        _reset_client_freshness_blocks(client.name)
+
+        # Why: incremented only past the freshness gate — a stale/skipped
+        # client does not consume Tier-1 quota, so max_parallel_clients=N
+        # always grants N *dispatchable* clients per tick.
+        dispatched_client_count += 1
+        priority_ids = plan_order_by_client.get(client.name)
+        cap_full = running_count >= client_ceiling
+
+        # Build per-lane running count from tasks→sessions join.
+        # Tasks in RUNNING, BLOCKED_ON_USER, or AWAITING_OPERATOR_SIGNOFF with
+        # an active session_id count toward their lane's cap (ADR-0006:
+        # BLOCKED_ON_USER occupies the slot; #990 extends this to a
+        # signoff-parked ticket, which is likewise not eligible for re-dispatch).
+        # Reuses the queue_snapshot taken above — nothing between the two
+        # points mutates the queue (auto-ff is git-only).
+        running_by_lane: dict[str, int] = {}
+        for qt in queue_snapshot.tasks:
+            if qt.client != client.name:
+                continue
+            if qt.status not in OCCUPIED_LANE_STATUSES:
+                continue
+            lane_key = qt.lane
+            running_by_lane[lane_key] = running_by_lane.get(lane_key, 0) + 1
+
+        # Resolve effective lanes. For clients with no declared lanes, use the
+        # synthesized default lane but override its max_parallel with the client
+        # ceiling so backward-compat behaviour is preserved.
+        effective_lanes = client.effective_lanes
+        if not client.lanes:
+            effective_lanes = [
+                effective_lanes[0].model_copy(update={"max_parallel": client_ceiling})
+            ]
+
+        client_result = _dispatch_client_lanes(
+            client,
+            effective_lanes,
+            queue_snapshot,
+            running_count=running_count,
+            client_ceiling=client_ceiling,
+            cap=cap,
+            pending_count=pending_count,
+            cap_full=cap_full,
+            running_by_lane=running_by_lane,
+            priority_ids=priority_ids,
+            config=config,
+            resolved_native_daemon=resolved_native_daemon,
+            parent=parent,
+            emit=emit,
+        )
+        spawned += client_result.spawned
+        if client_result.usage_limit_detected:
+            any_usage_limit_detected = True
+
+    return DispatchTickResult(
+        spawned=spawned, usage_limit_detected=any_usage_limit_detected
+    )
