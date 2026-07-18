@@ -141,6 +141,32 @@ class TestInstallSkillsFirstRun:
         assert "orphans pruned  : 0" in result.stdout
 
 
+class TestInstallSkillsNestedFiles:
+    """Generic skill-install loop recurses into nested subdirectories.
+
+    A skill directory is not always flat (SKILL.md only) — some ship a
+    scripts/ subdir alongside SKILL.md. rsync -a already recurses, so this
+    is a characterization test proving the mechanism, not a bugfix.
+    """
+
+    def test_nested_subdirectory_file_installed(
+        self, script: Path, fake_repo: Path, fake_home: Path
+    ) -> None:
+        skill_dir = fake_repo / ".claude" / "skills" / "some-skill"
+        scripts_dir = skill_dir / "scripts"
+        scripts_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("# some-skill\n")
+        (scripts_dir / "helper.sh").write_text("#!/usr/bin/env bash\necho hi\n")
+
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+
+        nested = (
+            fake_home / ".claude" / "skills" / "some-skill" / "scripts" / "helper.sh"
+        )
+        assert nested.exists()
+
+
 class TestInstallSkillsPruneSafety:
     """KEY SAFETY TEST: foreign skills are never pruned.
 
