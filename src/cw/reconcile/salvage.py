@@ -553,9 +553,7 @@ def rescue_finalize_blocked_sessions(
             )
             continue
         default_branch = client_cfg.default_branch
-        pr_result, gh_available = pr_exists_for_branch(
-            branch, cwd=_git_dir(client_cfg)
-        )
+        pr_result, gh_available = pr_exists_for_branch(branch, cwd=_git_dir(client_cfg))
         # Why: gh-unavailable and transient errors (pr_result=None) are not
         # tombstoned with rescue_attempted. The intent is to retry on the next
         # tick — these conditions are expected to be transient. Only definitive
