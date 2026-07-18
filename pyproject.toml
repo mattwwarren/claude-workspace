@@ -183,6 +183,11 @@ ignore = [
 # break the reconcile ↔ dispatch circular dependency (#698). Inline import
 # at function level is the sanctioned mechanism, not a workaround.
 "src/cw/reconcile/_shared.py" = ["PLC0415"]
+# claim defers the cw.dispatch.gating import inside _spawn_claimed_task to break
+# the gating ↔ claim circular dependency (#1310): gating imports claim at module
+# top, so claim's own reach back into gating must be function-level. Inline
+# import is the sanctioned mechanism, not a workaround.
+"src/cw/dispatch/claim.py" = ["PLC0415"]
 # review_recipes defers the cw.spawn import inside _dispatch_address_review to
 # break the cw.spawn ↔ cw.reconcile circular dependency (spawn.py imports
 # cw.reconcile at module top). Inline import at function level is the

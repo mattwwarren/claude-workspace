@@ -382,7 +382,7 @@ def _mock_gh_availability(monkeypatch: pytest.MonkeyPatch) -> None:
     stacking lets the test-level patch win. ``test_gh.py`` exercises the real
     helper via ``cw.gh`` directly and is unaffected.
     """
-    monkeypatch.setattr("cw.dispatch.check_gh_availability", lambda **_kw: True)
+    monkeypatch.setattr("cw.dispatch.gating.check_gh_availability", lambda **_kw: True)
 
 
 @pytest.fixture
@@ -479,15 +479,16 @@ def capture_events(
     ``monkeypatch.setattr`` patches a name by the *calling* module's binding,
     so a test that needs to observe events emitted from ``cw.dev_queue`` must
     patch ``cw.dev_queue.record_event`` — the ``capture_event`` closures in
-    ``test_dispatch.py`` that patch ``cw.dispatch.record_event`` will NOT see
-    events emitted from ``cw.dev_queue``. This factory patches
+    ``test_dispatch.py`` that patch ``cw.dispatch._legacy.record_event`` will
+    NOT see events emitted from ``cw.dev_queue``. This factory patches
     ``<module_path>.record_event`` and returns a list that accumulates
     ``(event_type, payload, correlation_id)`` tuples for each emit, optionally
     filtered to a single ``event_type``.
 
     Call it once per module you want to observe; a test that spans two producer
     modules (e.g. the dispatch finalize-regress path, which emits from both
-    ``cw.dispatch`` and ``cw.dev_queue``) calls it twice with distinct lists.
+    ``cw.dispatch._legacy`` and ``cw.dev_queue``) calls it twice with distinct
+    lists.
     """
 
     def _factory(

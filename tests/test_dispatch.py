@@ -85,6 +85,26 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
+# Package-split import guard (#1310)
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_package_submodules_import_without_cycle() -> None:
+    """The gating/claim/lanes submodules import with no ImportError (#1310).
+
+    Fast-fails the gating<->claim circular-import risk: gating imports claim at
+    module top and claim reaches back into gating via a function-level deferred
+    import, so a regression that promotes that deferred import to module top
+    would surface here as an ImportError before the rest of the suite collects.
+    """
+    from cw.dispatch import claim, gating, lanes
+
+    assert gating is not None
+    assert claim is not None
+    assert lanes is not None
+
+
+# ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
@@ -1590,7 +1610,7 @@ class TestDispatchTickSpawnErrors:
             raise WorktreeError(msg)
 
         # Patch the name as imported into cw.dispatch, not the source module.
-        monkeypatch.setattr("cw.dispatch.create_worktree", _boom)
+        monkeypatch.setattr("cw.dispatch.claim.create_worktree", _boom)
 
         daemon = FakeNativeDaemonClient()
 
@@ -1639,8 +1659,8 @@ class TestDispatchTickSpawnErrors:
         ) -> None:
             removed.append((branch, force))
 
-        monkeypatch.setattr("cw.dispatch.create_worktree", _stale)
-        monkeypatch.setattr("cw.dispatch.remove_worktree", _record_remove)
+        monkeypatch.setattr("cw.dispatch.claim.create_worktree", _stale)
+        monkeypatch.setattr("cw.dispatch.claim.remove_worktree", _record_remove)
 
         daemon = FakeNativeDaemonClient()
         spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
@@ -1675,8 +1695,8 @@ class TestDispatchTickSpawnErrors:
             msg = "git worktree remove failed"
             raise WorktreeError(msg)
 
-        monkeypatch.setattr("cw.dispatch.create_worktree", _stale)
-        monkeypatch.setattr("cw.dispatch.remove_worktree", _remove_boom)
+        monkeypatch.setattr("cw.dispatch.claim.create_worktree", _stale)
+        monkeypatch.setattr("cw.dispatch.claim.remove_worktree", _remove_boom)
 
         daemon = FakeNativeDaemonClient()
         spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
@@ -1709,10 +1729,10 @@ class TestDispatchTickSpawnErrors:
         ) -> None:
             removed.append(branch)
 
-        monkeypatch.setattr("cw.dispatch.create_worktree", _stale)
-        monkeypatch.setattr("cw.dispatch.remove_worktree", _record_remove)
+        monkeypatch.setattr("cw.dispatch.claim.create_worktree", _stale)
+        monkeypatch.setattr("cw.dispatch.claim.remove_worktree", _record_remove)
         monkeypatch.setattr(
-            "cw.dispatch.worktree_has_unsaved_work", lambda _c, _b: True
+            "cw.dispatch.claim.worktree_has_unsaved_work", lambda _c, _b: True
         )
 
         daemon = FakeNativeDaemonClient()
@@ -1750,10 +1770,10 @@ class TestDispatchTickSpawnErrors:
         ) -> None:
             removed.append((branch, force))
 
-        monkeypatch.setattr("cw.dispatch.create_worktree", _stale)
-        monkeypatch.setattr("cw.dispatch.remove_worktree", _record_remove)
+        monkeypatch.setattr("cw.dispatch.claim.create_worktree", _stale)
+        monkeypatch.setattr("cw.dispatch.claim.remove_worktree", _record_remove)
         monkeypatch.setattr(
-            "cw.dispatch.worktree_has_unsaved_work", lambda _c, _b: False
+            "cw.dispatch.claim.worktree_has_unsaved_work", lambda _c, _b: False
         )
 
         daemon = FakeNativeDaemonClient()
@@ -1790,7 +1810,7 @@ class TestDispatchTickFreshnessGate:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 3),
         )
 
@@ -1825,7 +1845,7 @@ class TestDispatchTickFreshnessGate:
         add_ticket(TicketTask(ticket_id="CW-11", client="test-client"))
 
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 1),
         )
 
@@ -1883,7 +1903,9 @@ class TestDispatchTickFreshnessGate:
                 return (True, "aaa", "bbb", 2)
             return (False, "abc", "abc", 0)
 
-        monkeypatch.setattr("cw.dispatch.is_main_behind_origin", _freshness_check)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.is_main_behind_origin", _freshness_check
+        )
 
         # fresh-client also needs cap=1
         config = OrchestratorConfig(
@@ -1915,7 +1937,7 @@ class TestDispatchTickFreshnessGate:
         add_ticket(TicketTask(ticket_id="CW-30", client="test-client"))
 
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (False, "abc", "abc", 0),
         )
 
@@ -1952,7 +1974,7 @@ class TestDispatchTickFreshnessGate:
             call_count += 1
             return (False, "abc", "abc", 0)
 
-        monkeypatch.setattr("cw.dispatch.is_main_behind_origin", _counting)
+        monkeypatch.setattr("cw.dispatch.gating.is_main_behind_origin", _counting)
 
         daemon = FakeNativeDaemonClient()
         dispatch_tick(simple_config, native_daemon=daemon)
@@ -2025,7 +2047,7 @@ class TestDispatchTickFreshnessGate:
             msg = "network unreachable"
             raise RuntimeError(msg)
 
-        monkeypatch.setattr("cw.dispatch.is_main_behind_origin", _boom)
+        monkeypatch.setattr("cw.dispatch.gating.is_main_behind_origin", _boom)
 
         daemon = FakeNativeDaemonClient()
 
@@ -2062,7 +2084,7 @@ class TestDispatchTickReconcileErrors:
             raise RuntimeError(msg)
 
         # Patch the name as imported into cw.dispatch (not cw.reconcile).
-        monkeypatch.setattr("cw.dispatch.reconcile", _boom_reconcile)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", _boom_reconcile)
 
         daemon = FakeNativeDaemonClient()
 
@@ -2099,7 +2121,7 @@ def test_dispatch_tick_runs_diagnostics_cleanup_outside_lock(
         captured["calls"] = int(captured.get("calls", 0)) + 1
         return 0
 
-    monkeypatch.setattr("cw.dispatch.cleanup_expired_diagnostics", _spy)
+    monkeypatch.setattr("cw.dispatch._legacy.cleanup_expired_diagnostics", _spy)
 
     daemon = FakeNativeDaemonClient()
     dispatch_tick(simple_config, native_daemon=daemon)
@@ -2124,7 +2146,7 @@ def test_dispatch_tick_cleanup_failure_does_not_abort_tick(
         msg = "simulated cleanup failure"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr("cw.dispatch.cleanup_expired_diagnostics", _boom)
+    monkeypatch.setattr("cw.dispatch._legacy.cleanup_expired_diagnostics", _boom)
 
     daemon = FakeNativeDaemonClient()
     caplog.set_level(logging.ERROR, logger="cw.dispatch")
@@ -2535,7 +2557,7 @@ class TestDispatchDoesNotTouchMainCheckout:
         """
         workspace_dir = sample_client_config.workspace_path
         monkeypatch.setattr(
-            "cw.dispatch.create_worktree",
+            "cw.dispatch.claim.create_worktree",
             lambda _client, _branch: workspace_dir,
         )
 
@@ -2794,14 +2816,14 @@ class TestRunDispatchLoopVerbose:
         add_ticket(TicketTask(ticket_id="CW-420", client="test-client"))
 
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 3),
         )
         monkeypatch.setattr(
-            "cw.dispatch.check_main_ff_safety",
+            "cw.dispatch.gating.check_main_ff_safety",
             lambda _client, **_kw: "behind",
         )
-        monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
 
         lines: list[str] = []
         run_dispatch_loop(
@@ -2824,14 +2846,14 @@ class TestRunDispatchLoopVerbose:
         add_ticket(TicketTask(ticket_id="CW-421", client="test-client"))
 
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 1),
         )
         monkeypatch.setattr(
-            "cw.dispatch.check_main_ff_safety",
+            "cw.dispatch.gating.check_main_ff_safety",
             lambda _client, **_kw: "behind",
         )
-        monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
 
         lines: list[str] = []
         run_dispatch_loop(
@@ -2854,14 +2876,14 @@ class TestRunDispatchLoopVerbose:
         add_ticket(TicketTask(ticket_id="CW-422", client="test-client"))
 
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 2),
         )
         monkeypatch.setattr(
-            "cw.dispatch.check_main_ff_safety",
+            "cw.dispatch.gating.check_main_ff_safety",
             lambda _client, **_kw: "behind",
         )
-        monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
 
         tick_count = 0
 
@@ -2897,7 +2919,7 @@ class TestRunDispatchLoopVerbose:
                 client_filter=client_filter,
             )
 
-        monkeypatch.setattr("cw.dispatch.dispatch_tick", _three_tick_dispatch)
+        monkeypatch.setattr("cw.dispatch._legacy.dispatch_tick", _three_tick_dispatch)
 
         lines: list[str] = []
         # Run three ticks manually by calling dispatch_tick three times via loop
@@ -2926,10 +2948,10 @@ class TestRunDispatchLoopVerbose:
         add_ticket(TicketTask(ticket_id="CW-423", client="test-client"))
 
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (False, "abc", "abc", 0),
         )
-        monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
 
         daemon = FakeNativeDaemonClient()
         lines: list[str] = []
@@ -2955,10 +2977,10 @@ class TestRunDispatchLoopVerbose:
         add_ticket(TicketTask(ticket_id="CW-424", client="test-client"))
 
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (False, "abc", "abc", 0),
         )
-        monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
 
         daemon = FakeNativeDaemonClient()
         lines: list[str] = []
@@ -2983,10 +3005,10 @@ class TestRunDispatchLoopVerbose:
         add_ticket(TicketTask(ticket_id="CW-425", client="test-client"))
 
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 1),
         )
-        monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
 
         # Should not raise; output is silently discarded
         run_dispatch_loop(once=True, emit=None)
@@ -3097,7 +3119,7 @@ class TestDispatchTickEvents:
         add_ticket(TicketTask(ticket_id="TICK-FG-2", client="test-client"))
 
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 3),
         )
 
@@ -3346,7 +3368,7 @@ class TestDispatchUsageLimitBackoff:
 
         # Reconcile returns usage_limited=True (phantom with usage-limit transcript).
         monkeypatch.setattr(
-            "cw.dispatch._reconcile_usage_limited",
+            "cw.dispatch._legacy._reconcile_usage_limited",
             lambda: True,
         )
 
@@ -3369,7 +3391,7 @@ class TestDispatchUsageLimitBackoff:
 
         daemon = FakeNativeDaemonClient()
         monkeypatch.setattr(
-            "cw.dispatch._reconcile_usage_limited",
+            "cw.dispatch._legacy._reconcile_usage_limited",
             lambda: True,
         )
 
@@ -3406,11 +3428,13 @@ class TestDispatchUsageLimitBackoff:
             saved.append(dt)
             real_save(dt)  # type: ignore[arg-type]
 
-        monkeypatch.setattr("cw.dispatch.save_usage_limited_until", capturing_save)
+        monkeypatch.setattr(
+            "cw.dispatch._legacy.save_usage_limited_until", capturing_save
+        )
 
         # Patch time.sleep so the loop exits on the second tick.
         call_count = 0
-        original_tick = cw.dispatch.dispatch_tick
+        original_tick = cw.dispatch._legacy.dispatch_tick
 
         def one_shot_tick(*args: object, **kwargs: object) -> DispatchTickResult:
             nonlocal call_count
@@ -3425,8 +3449,8 @@ class TestDispatchUsageLimitBackoff:
             # Second tick: exit the loop
             raise KeyboardInterrupt
 
-        monkeypatch.setattr("cw.dispatch.dispatch_tick", one_shot_tick)
-        monkeypatch.setattr("cw.dispatch.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.dispatch._legacy.dispatch_tick", one_shot_tick)
+        monkeypatch.setattr("cw.dispatch._legacy.time.sleep", lambda _: None)
 
         with contextlib.suppress(KeyboardInterrupt):
             run_dispatch_loop(native_daemon=daemon)
@@ -3487,7 +3511,7 @@ class TestConfigReloadedEachTick:
             call_count += 1
             return real_load()
 
-        monkeypatch.setattr("cw.dispatch.load_effective_config", counting_load)
+        monkeypatch.setattr("cw.dispatch._legacy.load_effective_config", counting_load)
 
         daemon = FakeNativeDaemonClient()
         run_dispatch_loop(once=True, native_daemon=daemon)
@@ -3560,7 +3584,7 @@ class TestConfigReloadedEachTick:
                 raise yaml.YAMLError(msg)
             return real_load()
 
-        monkeypatch.setattr("cw.dispatch.load_effective_config", patched_load)
+        monkeypatch.setattr("cw.dispatch._legacy.load_effective_config", patched_load)
 
         daemon = FakeNativeDaemonClient()
         # Should NOT raise despite the in-loop reload failing
@@ -3599,7 +3623,7 @@ class TestConfigReloadedEachTick:
                 raise ConfigValidationError(msg)
             return real_load()
 
-        monkeypatch.setattr("cw.dispatch.load_effective_config", patched_load)
+        monkeypatch.setattr("cw.dispatch._legacy.load_effective_config", patched_load)
 
         daemon = FakeNativeDaemonClient()
         # Should NOT raise despite the in-loop reload failing
@@ -3637,15 +3661,15 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (True, "abc12345" * 5, "def67890" * 5, 3),
         )
         monkeypatch.setattr(
-            "cw.dispatch.check_main_ff_safety",
+            "cw.dispatch.gating.check_main_ff_safety",
             lambda _client, **_kw: "behind",
         )
         monkeypatch.setattr(
-            "cw.dispatch.fast_forward_main",
+            "cw.dispatch.gating.fast_forward_main",
             lambda _client, **_kwargs: ("abc12345" * 5, "def67890" * 5),
         )
 
@@ -3675,11 +3699,11 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 1),
         )
         monkeypatch.setattr(
-            "cw.dispatch.check_main_ff_safety",
+            "cw.dispatch.gating.check_main_ff_safety",
             lambda _client, **_kw: "ahead",
         )
 
@@ -3707,11 +3731,11 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 2),
         )
         monkeypatch.setattr(
-            "cw.dispatch.check_main_ff_safety",
+            "cw.dispatch.gating.check_main_ff_safety",
             lambda _client, **_kw: "diverged",
         )
 
@@ -3738,11 +3762,11 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 1),
         )
         monkeypatch.setattr(
-            "cw.dispatch.check_main_ff_safety",
+            "cw.dispatch.gating.check_main_ff_safety",
             lambda _client, **_kw: "detached",
         )
 
@@ -3772,11 +3796,11 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 2),
         )
         monkeypatch.setattr(
-            "cw.dispatch.check_main_ff_safety",
+            "cw.dispatch.gating.check_main_ff_safety",
             lambda _client, **_kw: "behind",
         )
 
@@ -3784,7 +3808,7 @@ class TestFreshnessGateAutoFF:
             msg = "git pull failed"
             raise WorktreeError(msg)
 
-        monkeypatch.setattr("cw.dispatch.fast_forward_main", _boom)
+        monkeypatch.setattr("cw.dispatch.gating.fast_forward_main", _boom)
 
         daemon = FakeNativeDaemonClient()
         # Exception must be swallowed; falls through to TICKET_NEEDS_SYNC.
@@ -3818,11 +3842,11 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 2),
         )
         monkeypatch.setattr(
-            "cw.dispatch.get_head_branch",
+            "cw.dispatch.gating.get_head_branch",
             lambda _client: "feature/xyz",
         )
 
@@ -3832,7 +3856,7 @@ class TestFreshnessGateAutoFF:
             ff_called["count"] += 1
             return ("aaa", "bbb")
 
-        monkeypatch.setattr("cw.dispatch.fast_forward_main", _ff_spy)
+        monkeypatch.setattr("cw.dispatch.gating.fast_forward_main", _ff_spy)
 
         daemon = FakeNativeDaemonClient()
         result = dispatch_tick(simple_config, native_daemon=daemon)
@@ -3874,15 +3898,15 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 2),
         )
         monkeypatch.setattr(
-            "cw.dispatch.get_head_branch",
+            "cw.dispatch.gating.get_head_branch",
             lambda _client: None,  # detached HEAD
         )
         monkeypatch.setattr(
-            "cw.dispatch.check_main_ff_safety",
+            "cw.dispatch.gating.check_main_ff_safety",
             lambda _client, **_kw: "behind",
         )
 
@@ -3892,7 +3916,7 @@ class TestFreshnessGateAutoFF:
             ff_called["count"] += 1
             return ("aaa", "bbb")
 
-        monkeypatch.setattr("cw.dispatch.fast_forward_main", _ff_spy)
+        monkeypatch.setattr("cw.dispatch.gating.fast_forward_main", _ff_spy)
 
         daemon = FakeNativeDaemonClient()
         dispatch_tick(simple_config, native_daemon=daemon)
@@ -3917,15 +3941,15 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 2),
         )
         monkeypatch.setattr(
-            "cw.dispatch.get_head_branch",
+            "cw.dispatch.gating.get_head_branch",
             lambda _client: "main",  # on default branch
         )
         monkeypatch.setattr(
-            "cw.dispatch.check_main_ff_safety",
+            "cw.dispatch.gating.check_main_ff_safety",
             lambda _client, **_kw: "diverged",  # unsafe, so auto-ff skipped
         )
 
@@ -3964,7 +3988,7 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 2),
         )
 
@@ -3976,7 +4000,7 @@ class TestFreshnessGateAutoFF:
                 return "feature/xyz"  # _resolve_freshness: non-default → bail
             return None  # _emit_stale_skip: HEAD detached (TOCTOU)
 
-        monkeypatch.setattr("cw.dispatch.get_head_branch", _get_head_toctou)
+        monkeypatch.setattr("cw.dispatch.gating.get_head_branch", _get_head_toctou)
 
         emitted: list[str] = []
         daemon = FakeNativeDaemonClient()
@@ -4001,7 +4025,7 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 3),
         )
         # check_main_ff_safety must NOT be called; if it is called that's a bug
@@ -4011,7 +4035,7 @@ class TestFreshnessGateAutoFF:
             check_called[0] = True
             return "behind"
 
-        monkeypatch.setattr("cw.dispatch.check_main_ff_safety", _check_boom)
+        monkeypatch.setattr("cw.dispatch.gating.check_main_ff_safety", _check_boom)
 
         daemon = FakeNativeDaemonClient()
         result = dispatch_tick(simple_config, auto_ff=False, native_daemon=daemon)
@@ -4043,11 +4067,11 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 1),
         )
         monkeypatch.setattr(
-            "cw.dispatch.check_main_ff_safety",
+            "cw.dispatch.gating.check_main_ff_safety",
             lambda _client, **_kw: "ahead",
         )
 
@@ -4082,11 +4106,11 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 2),
         )
         monkeypatch.setattr(
-            "cw.dispatch.check_main_ff_safety",
+            "cw.dispatch.gating.check_main_ff_safety",
             lambda _client, **_kw: "diverged",
         )
 
@@ -4121,15 +4145,15 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 1),
         )
         monkeypatch.setattr(
-            "cw.dispatch.check_main_ff_safety",
+            "cw.dispatch.gating.check_main_ff_safety",
             lambda _client, **_kw: "behind",
         )
         monkeypatch.setattr(
-            "cw.dispatch.is_main_checkout_dirty",
+            "cw.dispatch.gating.is_main_checkout_dirty",
             lambda _client: True,
             raising=False,
         )
@@ -4168,15 +4192,15 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 2),
         )
         monkeypatch.setattr(
-            "cw.dispatch.get_head_branch",
+            "cw.dispatch.gating.get_head_branch",
             lambda _client: "main",
         )
         monkeypatch.setattr(
-            "cw.dispatch.check_main_ff_safety",
+            "cw.dispatch.gating.check_main_ff_safety",
             lambda _client, **_kw: "diverged",
         )
 
@@ -4210,15 +4234,15 @@ class TestFreshnessGateAutoFF:
         add_ticket(task)
 
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 1),
         )
         monkeypatch.setattr(
-            "cw.dispatch.get_head_branch",
+            "cw.dispatch.gating.get_head_branch",
             lambda _client: None,  # detached HEAD
         )
         monkeypatch.setattr(
-            "cw.dispatch.check_main_ff_safety",
+            "cw.dispatch.gating.check_main_ff_safety",
             lambda _client, **_kw: "detached",
         )
 
@@ -4381,7 +4405,7 @@ class TestTier1ClientSelection:
 
         # client-a3 is stale (skipped by the freshness gate); client-b3 fresh.
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda client, **_kw: (client.name == "client-a3", "aaa", "bbb", 1),
         )
 
@@ -5042,7 +5066,7 @@ class TestLaneOccupantsPayload:
         """FRESHNESS_GATE skip carries lane_occupants/occupied."""
         self._make_running_lane(tmp_dispatch_dirs, sample_client_config.workspace_path)
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (True, "aaa", "bbb", 2),
         )
 
@@ -5360,7 +5384,7 @@ class TestDispatchLoopExitedEvent:
                 captured.append((event_type, payload or {}))
             return None
 
-        monkeypatch.setattr("cw.dispatch.record_event", capture_event)
+        monkeypatch.setattr("cw.dispatch._legacy.record_event", capture_event)
 
         daemon = FakeNativeDaemonClient()
         run_dispatch_loop(once=True, native_daemon=daemon)
@@ -5390,9 +5414,9 @@ class TestDispatchLoopExitedEvent:
                 captured.append((event_type, payload or {}))
             return None
 
-        monkeypatch.setattr("cw.dispatch.record_event", capture_event)
+        monkeypatch.setattr("cw.dispatch._legacy.record_event", capture_event)
         monkeypatch.setattr(
-            "cw.dispatch.dispatch_tick",
+            "cw.dispatch._legacy.dispatch_tick",
             lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("boom")),
         )
 
@@ -5424,7 +5448,7 @@ class TestDispatchLoopExitedEvent:
                 raise RuntimeError(msg)
             return None
 
-        monkeypatch.setattr("cw.dispatch.record_event", raising_on_loop_exited)
+        monkeypatch.setattr("cw.dispatch._legacy.record_event", raising_on_loop_exited)
 
         daemon = FakeNativeDaemonClient()
         # Should complete without raising despite DISPATCH_LOOP_EXITED emit failing
@@ -5439,7 +5463,7 @@ class TestDispatchLoopExitedEvent:
         """Drift between loaded and installed version raises VersionDriftError."""
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         monkeypatch.setattr(
-            "cw.dispatch.importlib.metadata.version",
+            "cw.dispatch._legacy.importlib.metadata.version",
             lambda _name: "0.0.0-fake",
         )
         daemon = FakeNativeDaemonClient()
@@ -5457,7 +5481,7 @@ class TestDispatchLoopExitedEvent:
 
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         monkeypatch.setattr(
-            "cw.dispatch.importlib.metadata.version",
+            "cw.dispatch._legacy.importlib.metadata.version",
             lambda _name: "0.0.0-fake",
         )
 
@@ -5472,7 +5496,7 @@ class TestDispatchLoopExitedEvent:
                 captured.append((event_type, payload or {}))
             return None
 
-        monkeypatch.setattr("cw.dispatch.record_event", capture_event)
+        monkeypatch.setattr("cw.dispatch._legacy.record_event", capture_event)
 
         daemon = FakeNativeDaemonClient()
         with contextlib.suppress(VersionDriftError):
@@ -5495,13 +5519,13 @@ class TestDispatchLoopExitedEvent:
         """Version check fires before dispatch_tick — tick is never called on drift."""
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         monkeypatch.setattr(
-            "cw.dispatch.importlib.metadata.version",
+            "cw.dispatch._legacy.importlib.metadata.version",
             lambda _name: "0.0.0-fake",
         )
 
         tick_calls: list[object] = []
         monkeypatch.setattr(
-            "cw.dispatch.dispatch_tick",
+            "cw.dispatch._legacy.dispatch_tick",
             lambda *_a, **_kw: tick_calls.append(True),
         )
 
@@ -5521,7 +5545,7 @@ class TestDispatchLoopExitedEvent:
         from cw.dispatch import _resolve_loaded_version
 
         monkeypatch.setattr(
-            "cw.dispatch.importlib.metadata.version",
+            "cw.dispatch._legacy.importlib.metadata.version",
             lambda _name: (_ for _ in ()).throw(
                 importlib.metadata.PackageNotFoundError("cw")
             ),
@@ -5543,9 +5567,9 @@ class TestDispatchLoopExitedEvent:
 
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         # Pin _LOADED_VERSION to the same sentinel so the comparison is equal.
-        monkeypatch.setattr("cw.dispatch._LOADED_VERSION", "0.0.0+unknown")
+        monkeypatch.setattr("cw.dispatch._legacy._LOADED_VERSION", "0.0.0+unknown")
         monkeypatch.setattr(
-            "cw.dispatch.importlib.metadata.version",
+            "cw.dispatch._legacy.importlib.metadata.version",
             lambda _name: (_ for _ in ()).throw(
                 importlib.metadata.PackageNotFoundError("cw")
             ),
@@ -5794,7 +5818,7 @@ class TestApplyStagedDecision:
                 captured.append((event_type, payload or {}))
             return None
 
-        monkeypatch.setattr("cw.dispatch.record_event", capture_event)
+        monkeypatch.setattr("cw.dispatch._legacy.record_event", capture_event)
 
         task = self._make_running_task("EVT-1", stage=Stage.FINALIZE)
         last_result: dict[str, object] = {
@@ -5827,7 +5851,9 @@ class TestApplyStagedDecision:
         """
         from cw.dispatch import apply_staged_decision
 
-        requeued = capture_events("cw.dispatch", OrchestratorEventType.TICKET_REQUEUED)
+        requeued = capture_events(
+            "cw.dispatch._legacy", OrchestratorEventType.TICKET_REQUEUED
+        )
         stage_changed = capture_events(
             "cw.dev_queue", OrchestratorEventType.TASK_STAGE_CHANGED
         )
@@ -5901,7 +5927,7 @@ class TestApplyStagedDecision:
                 captured.append((event_type, payload or {}))
             return None
 
-        monkeypatch.setattr("cw.dispatch.record_event", capture_event)
+        monkeypatch.setattr("cw.dispatch._legacy.record_event", capture_event)
 
         task = self._make_running_task("PK-1", stage=Stage.IMPL)
         task.session_id = "sess-pk1"
@@ -5952,7 +5978,7 @@ class TestApplyStagedDecision:
                 attention_events.append(event_type)
             return None
 
-        monkeypatch.setattr("cw.dispatch.record_event", capture_event)
+        monkeypatch.setattr("cw.dispatch._legacy.record_event", capture_event)
 
         last_result: dict[str, object] = {"status": non_v4_status}
         task = self._make_running_task("NPK-1", stage=Stage.FINALIZE)
@@ -5996,7 +6022,7 @@ class TestApplyStagedDecision:
                 captured.append((event_type, payload or {}))
             return None
 
-        monkeypatch.setattr("cw.dispatch.record_event", capture_event)
+        monkeypatch.setattr("cw.dispatch._legacy.record_event", capture_event)
 
         task = self._make_running_task("SF-1", stage=Stage.IMPL)
         task.session_id = "sess-sf1"
@@ -6085,7 +6111,7 @@ class TestApplyStagedDecision:
                 captured.append((event_type, payload or {}))
             return None
 
-        monkeypatch.setattr("cw.dispatch.record_event", capture_event)
+        monkeypatch.setattr("cw.dispatch._legacy.record_event", capture_event)
 
         task = self._make_running_task("SF-BC-1", stage=Stage.IMPL)
         last_result: dict[str, object] = {"status": status, "blocker": blocker}
@@ -6114,7 +6140,7 @@ class TestApplyStagedDecision:
         from cw.dispatch import apply_staged_decision
 
         attention = capture_events(
-            "cw.dispatch", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+            "cw.dispatch._legacy", OrchestratorEventType.SESSION_NEEDS_ATTENTION
         )
 
         task = self._make_running_task("REGRESS-ATTN-1", stage=Stage.FINALIZE)
@@ -6155,7 +6181,7 @@ class TestApplyStagedDecision:
                 captured.append((event_type, payload or {}))
             return None
 
-        monkeypatch.setattr("cw.dispatch.record_event", capture_event)
+        monkeypatch.setattr("cw.dispatch._legacy.record_event", capture_event)
 
         task = self._make_running_task("MP-ATTN-1", stage=Stage.FINALIZE)
         last_result: dict[str, object] = {
@@ -6200,7 +6226,7 @@ class TestApplyStagedDecision:
                 captured.append((event_type, payload or {}))
             return None
 
-        monkeypatch.setattr("cw.dispatch.record_event", capture_event)
+        monkeypatch.setattr("cw.dispatch._legacy.record_event", capture_event)
 
         task = self._make_running_task("UNPARSE-1", stage=Stage.IMPL)
         apply_staged_decision(task, None, None, self._clients(tmp_path))
@@ -6236,7 +6262,7 @@ class TestApplyStagedDecision:
         from cw.dispatch import apply_staged_decision
 
         attention = capture_events(
-            "cw.dispatch", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+            "cw.dispatch._legacy", OrchestratorEventType.SESSION_NEEDS_ATTENTION
         )
 
         task = self._make_running_task("SG-ATTN-1", stage=Stage.PLAN)
@@ -6280,7 +6306,7 @@ class TestApplyStagedDecision:
         from cw.dispatch import apply_staged_decision
 
         attention = capture_events(
-            "cw.dispatch", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+            "cw.dispatch._legacy", OrchestratorEventType.SESSION_NEEDS_ATTENTION
         )
 
         plan_task = self._make_running_task("SG-SMALL-ATTN-1", stage=Stage.PLAN)
@@ -6804,7 +6830,7 @@ class TestApplyStagedDecision:
         from cw.dispatch import apply_staged_decision
 
         captured = capture_events(
-            "cw.dispatch", OrchestratorEventType.SENTINEL_STAGE_MISMATCH
+            "cw.dispatch._legacy", OrchestratorEventType.SENTINEL_STAGE_MISMATCH
         )
 
         task = self._make_running_task("MISMATCH-EVT-1", stage=Stage.REVIEW)
@@ -6963,7 +6989,7 @@ class TestApplyStagedDecision:
         from cw.dispatch import apply_staged_decision
 
         attention = capture_events(
-            "cw.dispatch", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+            "cw.dispatch._legacy", OrchestratorEventType.SESSION_NEEDS_ATTENTION
         )
         stage_changed = capture_events(
             "cw.dev_queue", OrchestratorEventType.TASK_STAGE_CHANGED
@@ -7212,7 +7238,7 @@ class TestApplyStagedDecision:
         REVIEW->FINALIZE, regress FINALIZE->IMPL]. session_id must still be the
         real value at the moment Rule 5a's regress condition is evaluated.
         """
-        import cw.dispatch as dispatch_mod
+        import cw.dispatch._legacy as dispatch_legacy
         from cw.dispatch import apply_staged_decision
 
         stage_changed = capture_events(
@@ -7220,13 +7246,13 @@ class TestApplyStagedDecision:
         )
 
         captured_session_id: list[str | None] = []
-        real_stage_regress = dispatch_mod._stage_regress
+        real_stage_regress = dispatch_legacy._stage_regress
 
         def _spy_stage_regress(task: TicketTask, target_stage: Stage) -> None:
             captured_session_id.append(task.session_id)
             real_stage_regress(task, target_stage)
 
-        monkeypatch.setattr(dispatch_mod, "_stage_regress", _spy_stage_regress)
+        monkeypatch.setattr("cw.dispatch._legacy._stage_regress", _spy_stage_regress)
 
         task = self._make_running_task("WALK-REGRESS-1", stage=Stage.IMPL)
         task.session_id = "sess-walk-regress-1"
@@ -7334,7 +7360,7 @@ class TestApplyStagedDecision:
                 captured.append((event_type, payload or {}))
             return None
 
-        monkeypatch.setattr("cw.dispatch.record_event", capture_event)
+        monkeypatch.setattr("cw.dispatch._legacy.record_event", capture_event)
 
         task = self._make_running_task("AO-1", stage=Stage.IMPL)
         last_result: dict[str, object] = {
@@ -7570,7 +7596,9 @@ class TestPersistCarriedContext:
         ) -> None:
             calls.append(task)
 
-        monkeypatch.setattr("cw.dispatch._stage_advance_unchecked", _advance_spy)
+        monkeypatch.setattr(
+            "cw.dispatch._legacy._stage_advance_unchecked", _advance_spy
+        )
 
         task = self._make_running_task("RS-1091", stage=Stage.PLAN)
         last_result: dict[str, object] = {
@@ -7660,7 +7688,7 @@ class TestWaveCollisionDetection:
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
 
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (False, "abc", "abc", 0),
         )
 
@@ -7716,12 +7744,12 @@ class TestWaveCollisionDetection:
                 client_filter=client_filter,
             )
 
-        monkeypatch.setattr("cw.dispatch.dispatch_tick", _spy)
+        monkeypatch.setattr("cw.dispatch._legacy.dispatch_tick", _spy)
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (False, "abc", "abc", 0),
         )
-        monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
 
         run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
 
@@ -7769,10 +7797,10 @@ class TestWaveCollisionDetection:
             lambda _path, _base_ref: frozenset({"src/shared.py"}),
         )
         monkeypatch.setattr(
-            "cw.dispatch.is_main_behind_origin",
+            "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (False, "abc", "abc", 0),
         )
-        monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
 
         warned: set[frozenset[str]] = set()
         dispatch_tick(
@@ -8235,14 +8263,15 @@ class TestLaneCircuitBreaker:
         add_ticket(TicketTask(ticket_id="GEN-875G", client="test-client"))
 
         saves: list[object] = []
-        import cw.dispatch as dispatch_mod
         from cw.config import _save_concurrency_overrides as real_save
 
         def _counting_save(overrides: object) -> None:
             saves.append(overrides)
             real_save(overrides)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(dispatch_mod, "_save_concurrency_overrides", _counting_save)
+        monkeypatch.setattr(
+            "cw.dispatch.lanes._save_concurrency_overrides", _counting_save
+        )
 
         daemon = FakeNativeDaemonClient()
         result = dispatch_tick(breaker_config, native_daemon=daemon)
@@ -8494,8 +8523,6 @@ class TestLaneCircuitBreaker:
         add_ticket(TicketTask(ticket_id="GEN-875O1", client="test-client", lane="impl"))
         add_ticket(TicketTask(ticket_id="GEN-875O2", client="test-client", lane="idea"))
 
-        import cw.dispatch as dispatch_mod
-
         loads: list[object] = []
         real_load = _load_concurrency_overrides
 
@@ -8503,7 +8530,9 @@ class TestLaneCircuitBreaker:
             loads.append(None)
             return real_load()
 
-        monkeypatch.setattr(dispatch_mod, "_load_concurrency_overrides", _counting_load)
+        monkeypatch.setattr(
+            "cw.dispatch.lanes._load_concurrency_overrides", _counting_load
+        )
 
         daemon = FakeNativeDaemonClient()
         result = dispatch_tick(breaker_config, native_daemon=daemon)
@@ -8562,13 +8591,13 @@ class TestRunDispatchLoopHydrationHook:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
-        monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
         calls: list[object] = []
 
         def _record(cfg: object) -> None:
             calls.append(cfg)
 
-        monkeypatch.setattr("cw.dispatch.hydrate_pr_states", _record)
+        monkeypatch.setattr("cw.dispatch._legacy.hydrate_pr_states", _record)
         run_dispatch_loop(once=True, emit=None)
         assert len(calls) == 1
 
@@ -8579,13 +8608,13 @@ class TestRunDispatchLoopHydrationHook:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
-        monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
 
         def _boom(_cfg: object) -> None:
             msg = "hydration boom"
             raise RuntimeError(msg)
 
-        monkeypatch.setattr("cw.dispatch.hydrate_pr_states", _boom)
+        monkeypatch.setattr("cw.dispatch._legacy.hydrate_pr_states", _boom)
         # Broad-catch idiom: hydration failure must never crash the tick loop.
         run_dispatch_loop(once=True, emit=None)
 
@@ -8618,13 +8647,13 @@ class TestRunDispatchLoopHydrationHook:
             "    default_branch: main\n"
             f"    worktree_base: {tmp_path / 'worktrees-b'}\n"
         )
-        monkeypatch.setattr("cw.dispatch.reconcile", lambda: None)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
         calls: list[object] = []
 
         def _record(cfg: object) -> None:
             calls.append(cfg)
 
-        monkeypatch.setattr("cw.dispatch.hydrate_pr_states", _record)
+        monkeypatch.setattr("cw.dispatch._legacy.hydrate_pr_states", _record)
         run_dispatch_loop(once=True, emit=None)
         assert len(calls) == 1
 
@@ -8666,7 +8695,7 @@ def _client_freshness_override() -> ClientConcurrencyOverride:
 def _force_stale(monkeypatch: pytest.MonkeyPatch) -> None:
     """Force _resolve_freshness to report test-client as stale (main behind)."""
     monkeypatch.setattr(
-        "cw.dispatch.is_main_behind_origin",
+        "cw.dispatch.gating.is_main_behind_origin",
         lambda _client, **_kw: (True, "aaa", "bbb", 3),
     )
 
@@ -8810,14 +8839,15 @@ class TestFreshnessBlockAttentionLatch:
         add_ticket(TicketTask(ticket_id="GEN-W2F", client="test-client"))
 
         saves: list[object] = []
-        import cw.dispatch as dispatch_mod
         from cw.config import _save_concurrency_overrides as real_save
 
         def _counting_save(overrides: object) -> None:
             saves.append(overrides)
             real_save(overrides)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(dispatch_mod, "_save_concurrency_overrides", _counting_save)
+        monkeypatch.setattr(
+            "cw.dispatch.lanes._save_concurrency_overrides", _counting_save
+        )
 
         daemon = FakeNativeDaemonClient()
         result = dispatch_tick(
@@ -8863,9 +8893,9 @@ def _force_gh_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     """Force the fleet-wide gh-availability probe to report unavailable.
 
     Overrides the autouse ``_mock_gh_availability`` default (which returns
-    True) on the same ``cw.dispatch.check_gh_availability`` seam.
+    True) on the same ``cw.dispatch.gating.check_gh_availability`` seam.
     """
-    monkeypatch.setattr("cw.dispatch.check_gh_availability", lambda **_kw: False)
+    monkeypatch.setattr("cw.dispatch.gating.check_gh_availability", lambda **_kw: False)
 
 
 def _seed_availability_cache(
@@ -9046,7 +9076,7 @@ class TestAvailabilityPreflightGate:
             return False
 
         monkeypatch.setattr(
-            "cw.dispatch.check_gh_availability", _counting_unavailable_probe
+            "cw.dispatch.gating.check_gh_availability", _counting_unavailable_probe
         )
 
         daemon = FakeNativeDaemonClient()
@@ -9111,7 +9141,7 @@ class TestAvailabilityPreflightGate:
             calls.append(1)
             return True
 
-        monkeypatch.setattr("cw.dispatch.check_gh_availability", _counting_probe)
+        monkeypatch.setattr("cw.dispatch.gating.check_gh_availability", _counting_probe)
 
         daemon = FakeNativeDaemonClient()
         dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
@@ -9138,7 +9168,7 @@ class TestAvailabilityPreflightGate:
             calls.append(1)
             return True
 
-        monkeypatch.setattr("cw.dispatch.check_gh_availability", _counting_probe)
+        monkeypatch.setattr("cw.dispatch.gating.check_gh_availability", _counting_probe)
 
         daemon = FakeNativeDaemonClient()
         with freeze_time("2026-07-16 12:00:00") as frozen:
@@ -9200,7 +9230,7 @@ class TestAvailabilityPreflightGate:
             calls.append(1)
             return True
 
-        monkeypatch.setattr("cw.dispatch.check_gh_availability", _counting_probe)
+        monkeypatch.setattr("cw.dispatch.gating.check_gh_availability", _counting_probe)
 
         config = OrchestratorConfig(default_max_parallel=1)
         daemon = FakeNativeDaemonClient()
@@ -9223,7 +9253,7 @@ class TestAvailabilityPreflightGate:
             msg = "probe blew up"
             raise RuntimeError(msg)
 
-        monkeypatch.setattr("cw.dispatch.check_gh_availability", _boom)
+        monkeypatch.setattr("cw.dispatch.gating.check_gh_availability", _boom)
 
         daemon = FakeNativeDaemonClient()
         result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
@@ -9275,7 +9305,7 @@ class TestAvailabilityPreflightGate:
 
         freshness_calls: list[object] = []
         monkeypatch.setattr(
-            "cw.dispatch._resolve_freshness",
+            "cw.dispatch._legacy._resolve_freshness",
             lambda *a, **kw: freshness_calls.append((a, kw)) or (False, None),
         )
 
@@ -9331,11 +9361,11 @@ class TestAvailabilityPreflightGate:
         record_calls: list[object] = []
         reset_calls: list[object] = []
         monkeypatch.setattr(
-            "cw.dispatch._record_client_freshness_block",
+            "cw.dispatch._legacy._record_client_freshness_block",
             lambda *a, **kw: record_calls.append((a, kw)),
         )
         monkeypatch.setattr(
-            "cw.dispatch._reset_client_freshness_blocks",
+            "cw.dispatch._legacy._reset_client_freshness_blocks",
             lambda *a, **kw: reset_calls.append((a, kw)),
         )
 
@@ -9369,7 +9399,7 @@ class TestAvailabilityPreflightGate:
             calls.append(1)
             return True
 
-        monkeypatch.setattr("cw.dispatch.check_gh_availability", _counting_probe)
+        monkeypatch.setattr("cw.dispatch.gating.check_gh_availability", _counting_probe)
 
         paused_config = simple_config.model_copy(update={"max_parallel_clients": 0})
         daemon = FakeNativeDaemonClient()
