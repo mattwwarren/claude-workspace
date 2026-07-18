@@ -6,6 +6,7 @@ import contextlib
 import re
 import shutil
 import subprocess
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 
 from cw.auto_dev_result import AutoDevResult
@@ -17,6 +18,12 @@ from cw.codex_review import (
 from cw.codex_runner import CodexRunner, RealCodexRunner
 from cw.config import load_state, save_state, sessions_lock
 from cw.events import record_event as _record_orchestrator_event
+from cw.executor_diagnostics import (
+    ExecutorFailure,
+    append_diagnostics_pointer,
+    persist_diagnostics_bundle,
+    redact_argv,
+)
 from cw.gh import post_issue_comment
 from cw.local_runner import (
     AIDER_NOT_FOUND,
@@ -53,6 +60,7 @@ from cw.models import (
 from cw.reconcile import AUTO_DEV_LABEL_PREFIX
 from cw.spawn import spawn_create_impl
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
+from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -389,6 +397,10 @@ class LocalExecutor:
         # _PreflightOK → all checks passed; AutoDevResult → blocked.
         preflight = _local_preflight(self._config, task, worktree, client)
 
+        # Captured for diagnostics: empty until the launch path builds it, so
+        # the generic-except branch (which may fire before build_argv) can still
+        # persist an argv-less bundle.
+        argv: list[str] = []
         try:
             if isinstance(preflight, _PreflightOK):
                 # Step 3: Launch aider fire-and-forget (pre-flight all passed).
@@ -419,11 +431,18 @@ class LocalExecutor:
                 with contextlib.suppress(OSError):
                     proc.kill()
                     proc.wait()
+                liveness_detail = f"process {proc.pid} start-time unavailable"
+                # Post-spawn failure (process exited before exec / /proc gone),
+                # classified runtime_error per the inline comment above — not a
+                # spawn_error, the launch itself succeeded.
+                _persist_aider_runtime_error_diagnostics(
+                    session_id=sid, argv=argv, details=liveness_detail
+                )
                 completion_result: AutoDevResult = make_blocked(
                     ticket_id=task.ticket_id,
                     worktree=worktree,
                     reason=LIVENESS_UNAVAILABLE,
-                    details=f"process {proc.pid} start-time unavailable",
+                    details=append_diagnostics_pointer(liveness_detail, session_id=sid),
                 )
             else:
                 completion_result = preflight
@@ -454,6 +473,12 @@ class LocalExecutor:
             # with a blocked result so reconcile can clean it up. SESSION_COMPLETED
             # is NOT emitted; dispatch's exception handler reverts the task to
             # PENDING, which is the correct recovery path.
+            unexpected_error_detail = "unexpected error during aider launch"
+            _persist_aider_runtime_error_diagnostics(
+                session_id=sid,
+                argv=argv,
+                details=unexpected_error_detail,
+            )
             with sessions_lock():
                 state = load_state()
                 target = next((s for s in state.sessions if s.id == sid), None)
@@ -462,6 +487,9 @@ class LocalExecutor:
                         ticket_id=task.ticket_id,
                         worktree=worktree,
                         reason=UNEXPECTED_ERROR,
+                        details=append_diagnostics_pointer(
+                            unexpected_error_detail, session_id=sid
+                        ),
                     ).model_dump(mode="json")
                     target.status = SessionStatus.COMPLETED
                     save_state(state)
@@ -471,6 +499,39 @@ class LocalExecutor:
 
     def stage_sentinel_schema(self, _stage: Stage) -> dict[str, Any]:
         return AutoDevResult.model_json_schema()
+
+
+def _persist_aider_runtime_error_diagnostics(
+    *, session_id: str, argv: list[str], details: str
+) -> None:
+    """Write a ``runtime_error`` diagnostics bundle for a LocalExecutor failure.
+
+    Covers both post-spawn LocalExecutor.spawn failure branches
+    (LIVENESS_UNAVAILABLE and the generic ``except``). Aider's argv embeds the
+    full ticket+plan text via ``--message``, so it is redacted wholesale before
+    persisting. Never raises (persist swallows OSError).
+    """
+    failure = ExecutorFailure(
+        category="runtime_error",
+        executor_name="aider",
+        executor_version=None,
+        reviewer_role=None,
+        argv_sanitized=redact_argv(argv, executor_name="aider"),
+        duration_seconds=None,
+        exit_code=None,
+        session_id=session_id,
+        run_id=None,
+        stdout_excerpt="",
+        stderr_excerpt=details,
+        structured_output_excerpt=None,
+        occurred_at=datetime.now(UTC),
+    )
+    persist_diagnostics_bundle(
+        session_id=session_id,
+        role_slug="aider",
+        reason="runtime_error",
+        failure=failure,
+    )
 
 
 class CodexExecutor:
@@ -555,6 +616,7 @@ class CodexExecutor:
                     default_branch=client.default_branch,
                     model=self._config.model,
                     wall_clock_budget_seconds=wall_clock_budget_seconds,
+                    session_id=sid,
                 )
 
             # Step 4: Persist result under sessions_lock.
@@ -571,7 +633,11 @@ class CodexExecutor:
             # failure does not post a duplicate comment. verdict is None only
             # when every reviewer failed (no documents to render).
             if verdict is not None:
-                _post_review_comment(task.ticket_id, render_verdict_comment(verdict))
+                _post_review_comment(
+                    task.ticket_id,
+                    render_verdict_comment(verdict),
+                    cwd=_git_dir(client),
+                )
 
             # Step 5: Emit SESSION_COMPLETED — no "stdout" key so dispatch skips
             # persist_last_result and uses the last_result written in Step 4.
@@ -609,11 +675,15 @@ class CodexExecutor:
         return AutoDevResult.model_json_schema()
 
 
-def _post_review_comment(ticket_id: str, review_text: str) -> None:
+def _post_review_comment(
+    ticket_id: str, review_text: str, *, cwd: Path | None = None
+) -> None:
     """Post codex review findings as a GitHub issue comment (best-effort).
 
     Delegates to the shared ``cw.gh.post_issue_comment`` primitive and discards
     the result — this call site silently swallows every gh failure (missing
     binary, timeout, non-zero exit) exactly as before.
+
+    *cwd* scopes the gh call to the client's repo (GitHub #1269/#1279).
     """
-    post_issue_comment(ticket_id, review_text)
+    post_issue_comment(ticket_id, review_text, cwd=cwd)

@@ -72,9 +72,11 @@ from cw.events import record_event
 from cw.exceptions import CwError
 from cw.gh import fetch_approved_plan_comment, post_issue_comment
 from cw.models import OrchestratorEventType, QueueItemStatus
+from cw.reconcile.tasks import _client_cwd, _is_dangling_client
 
 if TYPE_CHECKING:
     from datetime import datetime
+    from pathlib import Path
 
     from cw.models import (
         ClientConfig,
@@ -486,13 +488,17 @@ def _detect_auto_adopt_plan(
     return candidates
 
 
-def _post_auto_approve_comment(ticket_id: str, snapshot: dict[str, object]) -> None:
+def _post_auto_approve_comment(
+    ticket_id: str, snapshot: dict[str, object], *, cwd: Path | None = None
+) -> None:
     """Post the auto-approve audit comment to the ticket (best-effort, logged).
 
     A distinct helper from ``executor._post_review_comment``: that one swallows
     failures with zero logging, whereas the ticket's OQ2 resolution requires a
     comment-write failure to be logged (the event remains the source-of-truth
     audit trail — a failed comment never undoes the approve).
+
+    *cwd* scopes the gh call to the client's repo (GitHub #1269/#1279).
     """
     body = _AUTO_APPROVE_COMMENT_TEMPLATE.format(
         recipe=RECIPE_AUTO_APPROVE_REVIEW,
@@ -502,7 +508,7 @@ def _post_auto_approve_comment(ticket_id: str, snapshot: dict[str, object]) -> N
         forbidden_touched=snapshot["forbidden_touched"],
         agents_run=snapshot["agents_run"],
     )
-    result = post_issue_comment(ticket_id, body)
+    result = post_issue_comment(ticket_id, body, cwd=cwd)
     if result is None:
         _log.warning("gate_recipe_comment_failed ticket=%s: gh call failed", ticket_id)
         return
@@ -515,12 +521,16 @@ def _post_auto_approve_comment(ticket_id: str, snapshot: dict[str, object]) -> N
         )
 
 
-def _post_auto_adopt_comment(ticket_id: str, snapshot: dict[str, object]) -> None:
+def _post_auto_adopt_comment(
+    ticket_id: str, snapshot: dict[str, object], *, cwd: Path | None = None
+) -> None:
     """Post the auto-adopt audit comment to the ticket (best-effort, logged).
 
     Mirrors :func:`_post_auto_approve_comment` exactly (same ``gh issue
     comment`` subprocess call, same best-effort log-on-failure behavior),
     formatting the plan template with the two marker-version strings.
+
+    *cwd* scopes the gh call to the client's repo (GitHub #1269/#1279).
     """
     # Explicit named args, not **snapshot: this writes to a public,
     # append-only GitHub comment, so the fields exposed there must stay
@@ -534,7 +544,7 @@ def _post_auto_adopt_comment(ticket_id: str, snapshot: dict[str, object]) -> Non
         plan_spec_reviewed=snapshot[_SNAPSHOT_KEY_SPEC],
         plan_soundness_reviewed=snapshot[_SNAPSHOT_KEY_SOUNDNESS],
     )
-    result = post_issue_comment(ticket_id, body)
+    result = post_issue_comment(ticket_id, body, cwd=cwd)
     if result is None:
         _log.warning("gate_recipe_comment_failed ticket=%s: gh call failed", ticket_id)
         return
@@ -603,8 +613,26 @@ def _stamp_gate_recipe_failure(ticket_id: str, client: str, *, now: datetime) ->
     save_dev_queue(store)
 
 
+def _log_gate_recipe_comment_skipped(ticket_id: str, client: str) -> None:
+    """Log a dangling-client audit-comment skip (GitHub #1269/#1279 R7).
+
+    Shared by :func:`_act_auto_approve_review` and :func:`_act_auto_adopt_plan`
+    so the two identical skip sites can't drift independently.
+    """
+    _log.warning(
+        "gate_recipe_comment_skipped ticket=%s client=%s: client "
+        "missing from clients.yaml (config drift) -- gh call skipped, "
+        "GitHub #1269",
+        ticket_id,
+        client,
+    )
+
+
 def _act_auto_approve_review(
-    candidates: list[GateRecipeCandidate], *, now: datetime
+    candidates: list[GateRecipeCandidate],
+    *,
+    now: datetime,
+    clients: dict[str, ClientConfig] | None = None,
 ) -> list[str]:
     """Act phase: re-validate under lock, emit, then approve via the primitive.
 
@@ -627,7 +655,12 @@ def _act_auto_approve_review(
     # that happen to share a ticket_id collide and silently drop one.
     by_key = {(c.ticket_id, c.client): c for c in candidates}
     approved: list[str] = []
-    comment_jobs: list[tuple[str, dict[str, object]]] = []
+    # (ticket_id, client, snapshot): client name is carried across the lock
+    # boundary so the R7 dangling check runs against this tick's `clients`
+    # snapshot at comment-post time rather than the detect-time candidate,
+    # matching how every other field here is re-validated post-lock, not
+    # detect-time state (GitHub #1279).
+    comment_jobs: list[tuple[str, str, dict[str, object]]] = []
     with dev_queue_lock():
         # Loaded once: dev_queue_lock() is the exclusive writer lock for this
         # file, so no concurrent process can change it mid-loop, and every
@@ -704,14 +737,28 @@ def _act_auto_approve_review(
                 _stamp_gate_recipe_failure(task.ticket_id, task.client, now=now)
                 continue
             approved.append(task.ticket_id)
-            comment_jobs.append((task.ticket_id, snapshot))
-    for ticket_id, snapshot in comment_jobs:
-        _post_auto_approve_comment(ticket_id, snapshot)
+            comment_jobs.append((task.ticket_id, task.client, snapshot))
+    for ticket_id, client, snapshot in comment_jobs:
+        if _is_dangling_client(client, clients or {}):
+            # Config drift: the client was in clients.yaml at detect/approve
+            # time but is absent from the act phase's clients dict now. Skip
+            # the fire-and-forget audit comment rather than post it with an
+            # unscoped cwd (GitHub #1269/#1279 R7). Best-effort-logged, matching
+            # this helper's own comment-failure shape — there is no downstream
+            # disposition list for an audit comment to route to.
+            _log_gate_recipe_comment_skipped(ticket_id, client)
+            continue
+        _post_auto_approve_comment(
+            ticket_id, snapshot, cwd=_client_cwd(client, clients or {})
+        )
     return approved
 
 
 def _act_auto_adopt_plan(
-    candidates: list[GateRecipeCandidate], *, now: datetime
+    candidates: list[GateRecipeCandidate],
+    *,
+    now: datetime,
+    clients: dict[str, ClientConfig] | None = None,
 ) -> list[str]:
     """Act phase for auto_adopt_clean_plan: in-memory re-check, emit, approve.
 
@@ -731,7 +778,9 @@ def _act_auto_adopt_plan(
         return []
     by_key = {(c.ticket_id, c.client): c for c in candidates}
     approved: list[str] = []
-    comment_jobs: list[tuple[str, dict[str, object]]] = []
+    # (ticket_id, client, snapshot): see _act_auto_approve_review for why the
+    # client name is deferred across the lock boundary (GitHub #1279 R7).
+    comment_jobs: list[tuple[str, str, dict[str, object]]] = []
     with dev_queue_lock():
         # Both loaded once, unlike the sibling _act_auto_approve_review (which
         # reloads state per candidate): that function re-derives a fresh
@@ -809,9 +858,16 @@ def _act_auto_adopt_plan(
                 _stamp_gate_recipe_failure(task.ticket_id, task.client, now=now)
                 continue
             approved.append(task.ticket_id)
-            comment_jobs.append((task.ticket_id, snapshot))
-    for ticket_id, snapshot in comment_jobs:
-        _post_auto_adopt_comment(ticket_id, snapshot)
+            comment_jobs.append((task.ticket_id, task.client, snapshot))
+    for ticket_id, client, snapshot in comment_jobs:
+        if _is_dangling_client(client, clients or {}):
+            # See _act_auto_approve_review: skip the audit comment for a
+            # config-drifted client rather than post it unscoped (#1269/#1279).
+            _log_gate_recipe_comment_skipped(ticket_id, client)
+            continue
+        _post_auto_adopt_comment(
+            ticket_id, snapshot, cwd=_client_cwd(client, clients or {})
+        )
     return approved
 
 
@@ -845,9 +901,11 @@ def run_gate_recipes(*, now: datetime, config: OrchestratorConfig) -> list[str]:
     approved = _act_auto_approve_review(
         _detect_auto_approve_review(state, tasks, clients=clients, config=config),
         now=now,
+        clients=clients,
     )
     approved += _act_auto_adopt_plan(
         _detect_auto_adopt_plan(state, tasks, clients=clients, config=config),
         now=now,
+        clients=clients,
     )
     return approved

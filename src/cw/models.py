@@ -1025,6 +1025,11 @@ class OrchestratorConfig(BaseModel):
     # the global attempt ceiling (#786); a paused lane resumes only via
     # ``cw lane resume``. See GitHub issue #875.
     lane_circuit_breaker_threshold: int = 3
+    # Retention window (hours) for per-session executor-diagnostics bundles
+    # under state_dir()/sessions/<id>/diagnostics/. dispatch_tick's cleanup
+    # pass rmtree's any bundle whose newest file is older than this. See
+    # GitHub #1239.
+    diagnostics_retention_hours: int = 24
     # Number of consecutive failed idle-watchdog observations required before a
     # session is dispositioned (reaped/parked/git-salvaged). 1 reproduces the
     # pre-#545 single-observation behavior. See GitHub #545.

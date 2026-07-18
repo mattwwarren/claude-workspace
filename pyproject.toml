@@ -169,11 +169,9 @@ ignore = [
 # (PLC0415) are the sanctioned mechanism here, not a workaround.
 "src/cw/cw_pr_events_server.py" = ["PLC0415"]
 "src/cw/cw_queue_events_server.py" = ["PLC0415"]
-"src/cw/cw_pr_events_channel.py" = ["PLC0415"]
-"src/cw/cw_queue_events_channel.py" = ["PLC0415"]
 "src/cw/cw_operator_events.py" = ["PLC0415"]
-"src/cw/cw_operator_events_channel.py" = ["PLC0415"]
 "src/cw/_sse_util.py" = ["PLC0415"]
+"src/cw/_events_channel_base.py" = ["PLC0415"]
 # dev_queue defers the dispatch import to break the dev_queue ↔ dispatch
 # circular dependency. consume_completed_sessions() is a thin wrapper whose
 # deferred body import is the sanctioned mechanism, not a workaround.
@@ -185,6 +183,11 @@ ignore = [
 # break the reconcile ↔ dispatch circular dependency (#698). Inline import
 # at function level is the sanctioned mechanism, not a workaround.
 "src/cw/reconcile/_shared.py" = ["PLC0415"]
+# claim defers the cw.dispatch.gating import inside _spawn_claimed_task to break
+# the gating ↔ claim circular dependency (#1310): gating imports claim at module
+# top, so claim's own reach back into gating must be function-level. Inline
+# import is the sanctioned mechanism, not a workaround.
+"src/cw/dispatch/claim.py" = ["PLC0415"]
 # review_recipes defers the cw.spawn import inside _dispatch_address_review to
 # break the cw.spawn ↔ cw.reconcile circular dependency (spawn.py imports
 # cw.reconcile at module top). Inline import at function level is the
@@ -205,6 +208,7 @@ ignore = [
 "tests/test_channels_queue_events.py" = ["E402"]
 "tests/test_cw_operator_events_channel.py" = ["E402"]
 "tests/test__sse_util.py" = ["E402"]
+"tests/test__events_channel_base.py" = ["E402"]
 "tests/**" = [
     "S101",     # assert is fine in tests
     "ARG001",   # unused function args common in fixtures/mocks

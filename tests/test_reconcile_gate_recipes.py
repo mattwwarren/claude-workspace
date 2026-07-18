@@ -685,6 +685,89 @@ class TestRunApprove:
         assert store.tasks[0].stage == Stage.FINALIZE
         assert any("GEN-1" in rec.message for rec in caplog.records)
 
+    def test_comment_scoped_to_client_cwd_with_two_clients(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#1279: the audit comment's gh call is cwd-scoped to the task's
+        client (acme), not the ambient CWD or a second configured client."""
+        import subprocess
+
+        acme_ws = tmp_path / "acme"
+        beta_ws = tmp_path / "beta"
+        acme_ws.mkdir()
+        beta_ws.mkdir()
+        _write_two_client_yaml(tmp_config_dir, acme_ws, beta_ws)
+        task = _make_task()  # client="acme"
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
+
+        cwds: list[object] = []
+
+        def _fake_run(
+            argv: list[str], **kwargs: Any
+        ) -> subprocess.CompletedProcess[bytes]:
+            cwds.append(kwargs.get("cwd"))
+            return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
+
+        monkeypatch.setattr("cw.gh._sp.run", _fake_run)
+
+        approved = run_gate_recipes(now=_NOW, config=_config())
+
+        assert approved == ["GEN-1"]
+        # _git_dir(acme) == acme's workspace_path, not beta's.
+        assert cwds == [acme_ws]
+
+    def test_comment_skipped_for_dangling_client(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        stub_gh_comment: list[list[str]],
+    ) -> None:
+        """#1279 R7: at the post-lock comment step, a client absent from the
+        (populated) clients dict passed to the act phase → comment skipped
+        (logged), never posted with an unscoped cwd. The approve itself still
+        stands (client resolves on disk for _approve_ticket_locked)."""
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        task = _make_task()  # client="acme"
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
+
+        candidate = GateRecipeCandidate(
+            ticket_id="GEN-1",
+            client="acme",
+            lane="default",
+            recipe=RECIPE_AUTO_APPROVE_REVIEW,
+            evidence={
+                "must_fix_initial": 0,
+                "deferred": 0,
+                "recommendation": "PROCEED",
+                "forbidden_touched": False,
+            },
+            session_id="sess-1",
+        )
+        # Populated dict missing acme → acme is dangling from the act phase's view.
+        clients_without_acme = {
+            "beta": ClientConfig(
+                name="beta", workspace_path=tmp_path, default_branch="main"
+            )
+        }
+
+        with caplog.at_level("WARNING"):
+            approved = _act_auto_approve_review(
+                [candidate], now=_NOW, clients=clients_without_acme
+            )
+
+        # Approve stands (get_client reads acme off disk), comment is skipped.
+        assert approved == ["GEN-1"]
+        assert stub_gh_comment == []
+        assert any(
+            "gate_recipe_comment_skipped" in rec.message for rec in caplog.records
+        )
+
 
 class TestActApproveFailure:
     def test_event_survives_a_failed_mutation_and_no_comment_is_posted(
@@ -1929,6 +2012,38 @@ class TestActAdoptRecheckRace:
         run_gate_recipes(now=_NOW, config=_config())
 
         assert events == ["locked", "unlocked", "comment_posted"]
+
+    def test_comment_skipped_for_dangling_client(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        stub_gh_comment: list[list[str]],
+    ) -> None:
+        """#1279 R7: adopt-plan audit comment is skipped (logged) for a client
+        absent from the act phase's populated clients dict — never posted with
+        an unscoped cwd. The approve itself still stands."""
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        task = _make_task(stage=Stage.PLAN)  # client="acme"
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[_make_session(last_result=_plan_result())]))
+
+        clients_without_acme = {
+            "beta": ClientConfig(
+                name="beta", workspace_path=tmp_path, default_branch="main"
+            )
+        }
+
+        with caplog.at_level("WARNING"):
+            approved = _act_auto_adopt_plan(
+                [self._plan_candidate()], now=_NOW, clients=clients_without_acme
+            )
+
+        assert approved == ["GEN-1"]
+        assert stub_gh_comment == []
+        assert any(
+            "gate_recipe_comment_skipped" in rec.message for rec in caplog.records
+        )
 
 
 def test_marker_version_fails_closed_when_marker_absent() -> None:
