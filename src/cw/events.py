@@ -274,15 +274,16 @@ def _event_matches(
     since_ts: datetime | None,
     event_types: list[OrchestratorEventType] | None,
     client_names: frozenset[str] | None = None,
+    lane_names: frozenset[str] | None = None,
 ) -> bool:
-    """Return True if *event* passes the timestamp, type, and client filters."""
+    """Return True if *event* passes the timestamp, type, client, and lane filters."""
     if since_ts is not None and event.created_at < since_ts:
         return False
     if event_types is not None and event.type not in event_types:
         return False
-    return not (
-        client_names is not None and event.payload.get("client") not in client_names
-    )
+    if client_names is not None and event.payload.get("client") not in client_names:
+        return False
+    return not (lane_names is not None and event.payload.get("lane") not in lane_names)
 
 
 def _parse_lines(lines: list[str]) -> list[OrchestratorEvent]:
@@ -345,6 +346,7 @@ def read_events(
     since_ts: datetime | None = None,
     event_types: list[OrchestratorEventType] | None = None,
     client_names: frozenset[str] | None = None,
+    lane_names: frozenset[str] | None = None,
     limit: int | None = None,
 ) -> list[OrchestratorEvent]:
     """Read events from the inbox, optionally filtered.
@@ -366,6 +368,7 @@ def read_events(
         since_ts: Skip events with created_at before this timestamp.
         event_types: If set, only return events of these types.
         client_names: If set, only return events whose payload.client is in this set.
+        lane_names: If set, only return events whose payload.lane is in this set.
         limit: Maximum number of events to return.
 
     Returns:
@@ -401,6 +404,7 @@ def read_events(
             since_ts=since_ts,
             event_types=event_types,
             client_names=client_names,
+            lane_names=lane_names,
         ):
             continue
 
@@ -420,6 +424,7 @@ def read_events(
                 since_ts=since_ts,
                 event_types=event_types,
                 client_names=client_names,
+                lane_names=lane_names,
             )
         ]
 
@@ -561,6 +566,7 @@ def tail_events_follow(
     since_ts: datetime | None,
     event_types: list[OrchestratorEventType] | None,
     client_names: frozenset[str] | None = None,
+    lane_names: frozenset[str] | None = None,
     poll_interval: float = _FOLLOW_POLL_INTERVAL,
 ) -> Generator[OrchestratorEvent]:
     """Yield new events as they arrive, polling the inbox for changes.
@@ -585,6 +591,7 @@ def tail_events_follow(
                 since_ts=since_ts,
                 event_types=event_types,
                 client_names=client_names,
+                lane_names=lane_names,
             )
             for ev in new_events:
                 yield ev
