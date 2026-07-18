@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from cw.auto_dev_result import AutoDevResult
+from cw.executor_diagnostics import ExecutorFailure, diagnostics_bundle_dir
 from cw.local_runner import (
     _FIXED_HEALTH,
     AIDER_NO_OUTPUT,
@@ -157,6 +158,15 @@ def test_build_argv_includes_required_flags() -> None:
     assert "--no-auto-test" in argv
     assert "--no-stream" in argv
     assert "--map-tokens" in argv
+
+
+def test_build_argv_message_value_is_redactable_shape() -> None:
+    """The --message flag is immediately followed by its value, so redact_argv
+    can replace that value wholesale by index (#1239)."""
+    argv = build_argv("model", "ticket + plan body")
+    assert "--message" in argv
+    idx = argv.index("--message")
+    assert argv[idx + 1] == "ticket + plan body"
 
 
 # ---------------------------------------------------------------------------
@@ -455,6 +465,55 @@ def test_synthesize_git_result_no_output_with_log_populates_details(
 
     assert result.blocker is not None
     assert "some diagnostic output" in result.blocker.details
+
+
+def test_synthesize_git_result_no_output_persists_diagnostics(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """AIDER_NO_OUTPUT path persists a missing_output bundle using the aider.log
+    tail as stdout_excerpt when session_id is provided (#1239)."""
+    worktree = _make_no_output_worktree(make_git_repo, "wt-no-output-diag")
+    _write_aider_log(worktree, "aider: some diagnostic output\n")
+    task = _make_task()
+
+    result = synthesize_git_result(
+        task=task,
+        worktree=worktree,
+        default_branch="main",
+        session_id="s-noout",
+    )
+
+    assert result.blocker is not None
+    assert result.blocker.reason == AIDER_NO_OUTPUT
+    path = diagnostics_bundle_dir("s-noout") / "aider-missing_output.json"
+    assert path.exists()
+    failure = ExecutorFailure.model_validate_json(path.read_text())
+    assert failure.category == "missing_output"
+    assert failure.executor_name == "aider"
+    assert failure.reviewer_role is None
+    assert "some diagnostic output" in failure.stdout_excerpt
+
+
+def test_synthesize_git_result_no_output_no_session_id_skips_diagnostics(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Default session_id=None makes the diagnostics persist a no-op (#1239)."""
+    worktree = _make_no_output_worktree(make_git_repo, "wt-no-output-nodiag")
+    task = _make_task()
+
+    result = synthesize_git_result(
+        task=task,
+        worktree=worktree,
+        default_branch="main",
+    )
+    assert result.blocker is not None
+    assert result.blocker.reason == AIDER_NO_OUTPUT
+    # No session id → no diagnostics tree created at all.
+    from cw.config import state_dir
+
+    assert not (state_dir() / "sessions").exists()
 
 
 def test_synthesize_git_result_no_output_no_log_empty_details(

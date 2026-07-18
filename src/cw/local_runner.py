@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, TypedDict, runtime_checkable
 
@@ -28,6 +29,7 @@ from cw.auto_dev_result import (
     ScopeTier,
     StageReached,
 )
+from cw.executor_diagnostics import ExecutorFailure, persist_diagnostics_bundle
 from cw.gh import fetch_approved_plan_comment
 from cw.models import CONTEXT_JSON_RELATIVE_PATH
 
@@ -406,12 +408,43 @@ def make_blocked(
     )
 
 
+def _persist_aider_no_output_diagnostics(*, session_id: str, log_tail: str) -> None:
+    """Write a ``missing_output`` diagnostics bundle for an AIDER_NO_OUTPUT harvest.
+
+    No aider exit code / argv is available on the harvest path, so those fields
+    are left None/empty; the .cw/aider.log tail (already bounded upstream) is
+    reused as the stdout excerpt. Never raises (persist swallows OSError).
+    """
+    failure = ExecutorFailure(
+        category="missing_output",
+        executor_name="aider",
+        executor_version=None,
+        reviewer_role=None,
+        argv_sanitized=[],
+        duration_seconds=None,
+        exit_code=None,
+        session_id=session_id,
+        run_id=None,
+        stdout_excerpt=log_tail,
+        stderr_excerpt="",
+        structured_output_excerpt=None,
+        occurred_at=datetime.now(UTC),
+    )
+    persist_diagnostics_bundle(
+        session_id=session_id,
+        role_slug="aider",
+        reason="missing_output",
+        failure=failure,
+    )
+
+
 def synthesize_git_result(
     *,
     task: TicketTask,
     worktree: Path,
     default_branch: str,
     plan_source: PlanSource = "none",
+    session_id: str | None = None,
 ) -> AutoDevResult:
     """Map the worktree's git state to a typed AutoDevResult (RFC 0005 F3, #888).
 
@@ -423,6 +456,11 @@ def synthesize_git_result(
     - commits since fork point  → stage_complete (synthesized from git facts)
     - no commits                → AIDER_NO_OUTPUT (blocked, retry_eligible,
       details populated from the .cw/aider.log tail when readable)
+
+    *session_id* is optional (defaulted for the 8 existing test call sites that
+    do not exercise the diagnostics path): when set, the AIDER_NO_OUTPUT branch
+    also persists a typed ``missing_output`` diagnostics bundle under that
+    session's diagnostics dir (#1239). None makes that persist a no-op.
     """
     facts = _git_facts(worktree, default_branch)
 
@@ -433,6 +471,10 @@ def synthesize_git_result(
             details = log_path.read_text(encoding="utf-8", errors="replace")[
                 -_AIDER_LOG_TAIL_CHARS:
             ]
+        if session_id is not None:
+            _persist_aider_no_output_diagnostics(
+                session_id=session_id, log_tail=details
+            )
         return make_blocked(
             ticket_id=task.ticket_id,
             worktree=worktree,
