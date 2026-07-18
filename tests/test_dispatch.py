@@ -2121,7 +2121,7 @@ def test_dispatch_tick_runs_diagnostics_cleanup_outside_lock(
         captured["calls"] = int(captured.get("calls", 0)) + 1
         return 0
 
-    monkeypatch.setattr("cw.dispatch._legacy.cleanup_expired_diagnostics", _spy)
+    monkeypatch.setattr("cw.dispatch.tick.cleanup_expired_diagnostics", _spy)
 
     daemon = FakeNativeDaemonClient()
     dispatch_tick(simple_config, native_daemon=daemon)
@@ -2146,7 +2146,7 @@ def test_dispatch_tick_cleanup_failure_does_not_abort_tick(
         msg = "simulated cleanup failure"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr("cw.dispatch._legacy.cleanup_expired_diagnostics", _boom)
+    monkeypatch.setattr("cw.dispatch.tick.cleanup_expired_diagnostics", _boom)
 
     daemon = FakeNativeDaemonClient()
     caplog.set_level(logging.ERROR, logger="cw.dispatch")
@@ -2919,7 +2919,7 @@ class TestRunDispatchLoopVerbose:
                 client_filter=client_filter,
             )
 
-        monkeypatch.setattr("cw.dispatch._legacy.dispatch_tick", _three_tick_dispatch)
+        monkeypatch.setattr("cw.dispatch.loop.dispatch_tick", _three_tick_dispatch)
 
         lines: list[str] = []
         # Run three ticks manually by calling dispatch_tick three times via loop
@@ -3368,7 +3368,7 @@ class TestDispatchUsageLimitBackoff:
 
         # Reconcile returns usage_limited=True (phantom with usage-limit transcript).
         monkeypatch.setattr(
-            "cw.dispatch._legacy._reconcile_usage_limited",
+            "cw.dispatch.tick._reconcile_usage_limited",
             lambda: True,
         )
 
@@ -3391,7 +3391,7 @@ class TestDispatchUsageLimitBackoff:
 
         daemon = FakeNativeDaemonClient()
         monkeypatch.setattr(
-            "cw.dispatch._legacy._reconcile_usage_limited",
+            "cw.dispatch.tick._reconcile_usage_limited",
             lambda: True,
         )
 
@@ -3429,12 +3429,12 @@ class TestDispatchUsageLimitBackoff:
             real_save(dt)  # type: ignore[arg-type]
 
         monkeypatch.setattr(
-            "cw.dispatch._legacy.save_usage_limited_until", capturing_save
+            "cw.dispatch.loop.save_usage_limited_until", capturing_save
         )
 
         # Patch time.sleep so the loop exits on the second tick.
         call_count = 0
-        original_tick = cw.dispatch._legacy.dispatch_tick
+        original_tick = cw.dispatch.loop.dispatch_tick
 
         def one_shot_tick(*args: object, **kwargs: object) -> DispatchTickResult:
             nonlocal call_count
@@ -3449,8 +3449,8 @@ class TestDispatchUsageLimitBackoff:
             # Second tick: exit the loop
             raise KeyboardInterrupt
 
-        monkeypatch.setattr("cw.dispatch._legacy.dispatch_tick", one_shot_tick)
-        monkeypatch.setattr("cw.dispatch._legacy.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.dispatch.loop.dispatch_tick", one_shot_tick)
+        monkeypatch.setattr("cw.dispatch.loop.time.sleep", lambda _: None)
 
         with contextlib.suppress(KeyboardInterrupt):
             run_dispatch_loop(native_daemon=daemon)
@@ -3511,7 +3511,7 @@ class TestConfigReloadedEachTick:
             call_count += 1
             return real_load()
 
-        monkeypatch.setattr("cw.dispatch._legacy.load_effective_config", counting_load)
+        monkeypatch.setattr("cw.dispatch.loop.load_effective_config", counting_load)
 
         daemon = FakeNativeDaemonClient()
         run_dispatch_loop(once=True, native_daemon=daemon)
@@ -3584,7 +3584,7 @@ class TestConfigReloadedEachTick:
                 raise yaml.YAMLError(msg)
             return real_load()
 
-        monkeypatch.setattr("cw.dispatch._legacy.load_effective_config", patched_load)
+        monkeypatch.setattr("cw.dispatch.loop.load_effective_config", patched_load)
 
         daemon = FakeNativeDaemonClient()
         # Should NOT raise despite the in-loop reload failing
@@ -3623,7 +3623,7 @@ class TestConfigReloadedEachTick:
                 raise ConfigValidationError(msg)
             return real_load()
 
-        monkeypatch.setattr("cw.dispatch._legacy.load_effective_config", patched_load)
+        monkeypatch.setattr("cw.dispatch.loop.load_effective_config", patched_load)
 
         daemon = FakeNativeDaemonClient()
         # Should NOT raise despite the in-loop reload failing
@@ -5384,7 +5384,7 @@ class TestDispatchLoopExitedEvent:
                 captured.append((event_type, payload or {}))
             return None
 
-        monkeypatch.setattr("cw.dispatch._legacy.record_event", capture_event)
+        monkeypatch.setattr("cw.dispatch.loop.record_event", capture_event)
 
         daemon = FakeNativeDaemonClient()
         run_dispatch_loop(once=True, native_daemon=daemon)
@@ -5414,9 +5414,9 @@ class TestDispatchLoopExitedEvent:
                 captured.append((event_type, payload or {}))
             return None
 
-        monkeypatch.setattr("cw.dispatch._legacy.record_event", capture_event)
+        monkeypatch.setattr("cw.dispatch.loop.record_event", capture_event)
         monkeypatch.setattr(
-            "cw.dispatch._legacy.dispatch_tick",
+            "cw.dispatch.loop.dispatch_tick",
             lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("boom")),
         )
 
@@ -5448,7 +5448,7 @@ class TestDispatchLoopExitedEvent:
                 raise RuntimeError(msg)
             return None
 
-        monkeypatch.setattr("cw.dispatch._legacy.record_event", raising_on_loop_exited)
+        monkeypatch.setattr("cw.dispatch.loop.record_event", raising_on_loop_exited)
 
         daemon = FakeNativeDaemonClient()
         # Should complete without raising despite DISPATCH_LOOP_EXITED emit failing
@@ -5463,7 +5463,7 @@ class TestDispatchLoopExitedEvent:
         """Drift between loaded and installed version raises VersionDriftError."""
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         monkeypatch.setattr(
-            "cw.dispatch._legacy.importlib.metadata.version",
+            "cw.dispatch.loop.importlib.metadata.version",
             lambda _name: "0.0.0-fake",
         )
         daemon = FakeNativeDaemonClient()
@@ -5481,7 +5481,7 @@ class TestDispatchLoopExitedEvent:
 
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         monkeypatch.setattr(
-            "cw.dispatch._legacy.importlib.metadata.version",
+            "cw.dispatch.loop.importlib.metadata.version",
             lambda _name: "0.0.0-fake",
         )
 
@@ -5496,7 +5496,7 @@ class TestDispatchLoopExitedEvent:
                 captured.append((event_type, payload or {}))
             return None
 
-        monkeypatch.setattr("cw.dispatch._legacy.record_event", capture_event)
+        monkeypatch.setattr("cw.dispatch.loop.record_event", capture_event)
 
         daemon = FakeNativeDaemonClient()
         with contextlib.suppress(VersionDriftError):
@@ -5519,13 +5519,13 @@ class TestDispatchLoopExitedEvent:
         """Version check fires before dispatch_tick — tick is never called on drift."""
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         monkeypatch.setattr(
-            "cw.dispatch._legacy.importlib.metadata.version",
+            "cw.dispatch.loop.importlib.metadata.version",
             lambda _name: "0.0.0-fake",
         )
 
         tick_calls: list[object] = []
         monkeypatch.setattr(
-            "cw.dispatch._legacy.dispatch_tick",
+            "cw.dispatch.loop.dispatch_tick",
             lambda *_a, **_kw: tick_calls.append(True),
         )
 
@@ -5545,7 +5545,7 @@ class TestDispatchLoopExitedEvent:
         from cw.dispatch import _resolve_loaded_version
 
         monkeypatch.setattr(
-            "cw.dispatch._legacy.importlib.metadata.version",
+            "cw.dispatch.loop.importlib.metadata.version",
             lambda _name: (_ for _ in ()).throw(
                 importlib.metadata.PackageNotFoundError("cw")
             ),
@@ -5567,9 +5567,9 @@ class TestDispatchLoopExitedEvent:
 
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         # Pin _LOADED_VERSION to the same sentinel so the comparison is equal.
-        monkeypatch.setattr("cw.dispatch._legacy._LOADED_VERSION", "0.0.0+unknown")
+        monkeypatch.setattr("cw.dispatch.loop._LOADED_VERSION", "0.0.0+unknown")
         monkeypatch.setattr(
-            "cw.dispatch._legacy.importlib.metadata.version",
+            "cw.dispatch.loop.importlib.metadata.version",
             lambda _name: (_ for _ in ()).throw(
                 importlib.metadata.PackageNotFoundError("cw")
             ),
@@ -7744,7 +7744,7 @@ class TestWaveCollisionDetection:
                 client_filter=client_filter,
             )
 
-        monkeypatch.setattr("cw.dispatch._legacy.dispatch_tick", _spy)
+        monkeypatch.setattr("cw.dispatch.loop.dispatch_tick", _spy)
         monkeypatch.setattr(
             "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (False, "abc", "abc", 0),
@@ -8597,7 +8597,7 @@ class TestRunDispatchLoopHydrationHook:
         def _record(cfg: object) -> None:
             calls.append(cfg)
 
-        monkeypatch.setattr("cw.dispatch._legacy.hydrate_pr_states", _record)
+        monkeypatch.setattr("cw.dispatch.loop.hydrate_pr_states", _record)
         run_dispatch_loop(once=True, emit=None)
         assert len(calls) == 1
 
@@ -8614,7 +8614,7 @@ class TestRunDispatchLoopHydrationHook:
             msg = "hydration boom"
             raise RuntimeError(msg)
 
-        monkeypatch.setattr("cw.dispatch._legacy.hydrate_pr_states", _boom)
+        monkeypatch.setattr("cw.dispatch.loop.hydrate_pr_states", _boom)
         # Broad-catch idiom: hydration failure must never crash the tick loop.
         run_dispatch_loop(once=True, emit=None)
 
@@ -8653,7 +8653,7 @@ class TestRunDispatchLoopHydrationHook:
         def _record(cfg: object) -> None:
             calls.append(cfg)
 
-        monkeypatch.setattr("cw.dispatch._legacy.hydrate_pr_states", _record)
+        monkeypatch.setattr("cw.dispatch.loop.hydrate_pr_states", _record)
         run_dispatch_loop(once=True, emit=None)
         assert len(calls) == 1
 
@@ -9305,7 +9305,7 @@ class TestAvailabilityPreflightGate:
 
         freshness_calls: list[object] = []
         monkeypatch.setattr(
-            "cw.dispatch._legacy._resolve_freshness",
+            "cw.dispatch.tick._resolve_freshness",
             lambda *a, **kw: freshness_calls.append((a, kw)) or (False, None),
         )
 
@@ -9361,11 +9361,11 @@ class TestAvailabilityPreflightGate:
         record_calls: list[object] = []
         reset_calls: list[object] = []
         monkeypatch.setattr(
-            "cw.dispatch._legacy._record_client_freshness_block",
+            "cw.dispatch.tick._record_client_freshness_block",
             lambda *a, **kw: record_calls.append((a, kw)),
         )
         monkeypatch.setattr(
-            "cw.dispatch._legacy._reset_client_freshness_blocks",
+            "cw.dispatch.tick._reset_client_freshness_blocks",
             lambda *a, **kw: reset_calls.append((a, kw)),
         )
 
