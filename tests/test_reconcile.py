@@ -10634,6 +10634,7 @@ class TestSalvageCommittedNoPrSessions:
         monkeypatch.setattr(
             "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
         )
+        monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
 
         candidates: list[tuple[str, str | None, str, str, bool]] = [
             ("sess-low", ticket_id, "dev/low-branch", str(worktree), False)
@@ -10662,6 +10663,7 @@ class TestSalvageCommittedNoPrSessions:
         s = next(s for s in reloaded.sessions if s.id == "sess-low")
         lr = s.last_result or {}
         assert lr.get("paused_status") == _NEEDS_SALVAGE_REASON
+        assert s.status == SessionStatus.COMPLETED
 
     def test_low_path_merges_into_existing_last_result(
         self,
@@ -10699,6 +10701,7 @@ class TestSalvageCommittedNoPrSessions:
         monkeypatch.setattr(
             "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
         )
+        monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
 
         _salvage_low_path(sess, ticket_id, "dev/merge-branch", str(worktree))
 
@@ -10709,6 +10712,7 @@ class TestSalvageCommittedNoPrSessions:
         assert s.last_result["review"] == {"clean": True}
         assert s.last_result["paused_status"] == _NEEDS_SALVAGE_REASON
         assert s.reap_reason == ReapReason.SALVAGE_PARKED
+        assert s.status == SessionStatus.COMPLETED
 
     def test_stalled_needs_salvage_route_stamps_disposition(
         self,
@@ -10749,6 +10753,7 @@ class TestSalvageCommittedNoPrSessions:
         monkeypatch.setattr(
             "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
         )
+        monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
 
         candidates: list[tuple[str, str | None, str, str, bool]] = [
             ("sess-low-disp", ticket_id, "dev/low-disp-branch", str(worktree), False)
@@ -10803,6 +10808,7 @@ class TestSalvageCommittedNoPrSessions:
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
         )
         monkeypatch.setattr("cw.reconcile._deps.fire_push_notification", _capture_push)
+        monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
 
         candidates = [
             ("sess-idem-low", ticket_id, "dev/idem-low-branch", str(worktree), False)
@@ -10869,6 +10875,7 @@ class TestSalvageCommittedNoPrSessions:
         monkeypatch.setattr(
             "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
         )
+        monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
 
         candidates: list[tuple[str, str | None, str, str, bool]] = [
             ("sess-idem", ticket_id, "dev/idem-branch", str(worktree), True)
@@ -11183,6 +11190,7 @@ class TestSalvageCommittedNoPrSessions:
         monkeypatch.setattr(
             "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
         )
+        monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
 
         # post_review_clean=False (different session_id → _detect_post_review_clean
         # returns False → LOW path)
@@ -11397,6 +11405,7 @@ class TestSalvageCommittedNoPrSessions:
         monkeypatch.setattr(
             "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
         )
+        monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
 
         completed = salvage_committed_no_pr_sessions(
             [("sess-pushfail", ticket_id, "dev/pf-branch", str(worktree), True)]
@@ -11458,6 +11467,7 @@ class TestSalvageCommittedNoPrSessions:
         monkeypatch.setattr(
             "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
         )
+        monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
 
         completed = salvage_committed_no_pr_sessions(
             [("sess-createfail", ticket_id, "dev/cf-branch", str(worktree), True)]
@@ -11633,6 +11643,7 @@ class TestSalvageCommittedNoPrSessions:
         )
         pr_check = MagicMock(return_value=(False, True))
         monkeypatch.setattr("cw.reconcile.salvage.pr_exists_for_branch", pr_check)
+        monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
 
         candidates: list[tuple[str, str | None, str, str, bool]] = [
             (
@@ -12486,6 +12497,7 @@ def test_reap_reason_salvage_parked(
     monkeypatch.setattr(
         "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
     )
+    monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
 
     candidates: list[tuple[str, str | None, str, str, bool]] = [
         ("salv-park-1", ticket_id, "dev/salv-park", str(worktree), False)
@@ -12495,6 +12507,7 @@ def test_reap_reason_salvage_parked(
     reloaded = load_state()
     s = next(s for s in reloaded.sessions if s.id == "salv-park-1")
     assert s.reap_reason == ReapReason.SALVAGE_PARKED
+    assert s.status == SessionStatus.COMPLETED
 
 
 def test_reap_reason_not_overwritten_by_backstop(
