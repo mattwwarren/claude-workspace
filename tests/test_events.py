@@ -2030,6 +2030,173 @@ def test_cli_event_tail_client_comma_only_no_events(tmp_events_dir: Path) -> Non
 
 
 # ---------------------------------------------------------------------------
+# --lane filter (issue #1331)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_event_tail_lane_filter(tmp_events_dir: Path) -> None:
+    """--lane filters events by payload.lane field."""
+    events_record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {"lane": "bugs", "session_id": "aaa"},
+    )
+    events_record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {"lane": "default", "session_id": "bbb"},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--lane", "bugs"])
+    assert result.exit_code == 0, result.output
+    assert "aaa" in result.output
+    assert "default" not in result.output
+
+
+def test_cli_event_tail_lane_filter_multiple(tmp_events_dir: Path) -> None:
+    """--lane can be repeated to include events from multiple lanes."""
+    events_record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {"lane": "bugs", "session_id": "aaa"},
+    )
+    events_record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {"lane": "default", "session_id": "bbb"},
+    )
+    events_record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {"lane": "infra", "session_id": "ccc"},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["event", "tail", "--lane", "bugs", "--lane", "default"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "aaa" in result.output
+    assert "bbb" in result.output
+    assert "infra" not in result.output
+
+
+def test_cli_event_tail_lane_filter_no_match(tmp_events_dir: Path) -> None:
+    """--lane with no matching events outputs 'No events.'"""
+    events_record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {"lane": "bugs"},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--lane", "nonexistent"])
+    assert result.exit_code == 0, result.output
+    assert "No events." in result.output
+
+
+def test_cli_event_tail_lane_filter_events_without_lane_field(
+    tmp_events_dir: Path,
+) -> None:
+    """Events with no payload.lane field are excluded when --lane is used."""
+    events_record_event(OrchestratorEventType.PR_REGISTERED, {"pr": 1})
+    events_record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {"lane": "bugs", "session_id": "aaa"},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--lane", "bugs"])
+    assert result.exit_code == 0, result.output
+    assert "aaa" in result.output
+    assert "pr.registered" not in result.output
+
+
+def test_cli_event_tail_lane_filter_comma_separated(tmp_events_dir: Path) -> None:
+    """--lane a,b is equivalent to --lane a --lane b."""
+    events_record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {"lane": "bugs", "session_id": "aaa"},
+    )
+    events_record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {"lane": "default", "session_id": "bbb"},
+    )
+    events_record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {"lane": "infra", "session_id": "ccc"},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--lane", "bugs,default"])
+    assert result.exit_code == 0, result.output
+    assert "aaa" in result.output
+    assert "bbb" in result.output
+    assert "infra" not in result.output
+
+
+def test_cli_event_tail_no_lane_filter_returns_all(tmp_events_dir: Path) -> None:
+    """Without --lane, all events are returned unfiltered, including lane-less ones."""
+    events_record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {"lane": "bugs", "session_id": "aaa"},
+    )
+    events_record_event(OrchestratorEventType.PR_REGISTERED, {"pr": 1})
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail"])
+    assert result.exit_code == 0, result.output
+    assert "aaa" in result.output
+    assert "pr.registered" in result.output
+
+
+def test_cli_event_tail_lane_filter_with_type(tmp_events_dir: Path) -> None:
+    """--lane and --type compose: only events matching both filters are returned."""
+    events_record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {"lane": "bugs", "session_id": "aaa"},
+    )
+    events_record_event(
+        OrchestratorEventType.SESSION_TIMED_OUT,
+        {"lane": "bugs", "session_id": "aaa"},
+    )
+    events_record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {"lane": "default", "session_id": "bbb"},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["event", "tail", "--lane", "bugs", "--type", "session.needs_attention"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "aaa" in result.output
+    assert "session.timed_out" not in result.output
+    assert "default" not in result.output
+
+
+def test_cli_event_tail_follow_lane_filter(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--follow --lane filters events by payload.lane in the stream."""
+    events_record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {"lane": "bugs", "session_id": "aaa"},
+    )
+    events_record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {"lane": "default", "session_id": "bbb"},
+    )
+
+    def raise_immediately(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("time.sleep", raise_immediately)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--follow", "--lane", "bugs"])
+    assert result.exit_code == 130
+    assert "aaa" in result.output
+    assert "default" not in result.output
+
+
+# ---------------------------------------------------------------------------
 # prune_events (issue #856)
 # ---------------------------------------------------------------------------
 
