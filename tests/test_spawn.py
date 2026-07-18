@@ -1275,7 +1275,13 @@ class TestWriteHookContextAtomicAndLiveSession:
         does. That existing test proves the guard's COMPLETED branch works in
         isolation; this test proves ``_salvage_low_path`` actually reaches it.
         """
-        from cw.models import CwState, Session, SessionOrigin, SessionPurpose, SessionStatus
+        from cw.models import (
+            CwState,
+            Session,
+            SessionOrigin,
+            SessionPurpose,
+            SessionStatus,
+        )
         from cw.reconcile.salvage import _salvage_low_path
 
         workspace = tmp_path / "workspace" / "test-client"
