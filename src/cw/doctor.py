@@ -46,6 +46,11 @@ from cw.dev_queue import (
 from cw.dispatch import TICK_STALE_SECONDS
 from cw.events import inbox_path, read_events, record_event
 from cw.exceptions import CwError
+from cw.executor import (
+    CODEX_NOT_FOUND,
+    CODEX_VERSION_UNKNOWN,
+    codex_capability_diagnosis,
+)
 from cw.gh import TIMED_OUT_MERGED_LOOKBACK_DAYS, pr_is_merged_for_ticket
 from cw.models import (
     CompletionReason,
@@ -1565,6 +1570,7 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     report.checks.append(_check_claude_version())
     report.checks.append(_check_cw_version())
     report.checks.append(_check_cw_deps())
+    report.checks.append(_check_codex_capability())
     report.checks.append(_check_daemon_reachable())
     report.checks.extend(_check_loop_health())
     report.checks.extend(_check_loop_liveness())
@@ -1714,6 +1720,28 @@ def _check_claude_version() -> CheckResult:
         )
 
     return CheckResult("claude-version", ok=True, detail=version_line)
+
+
+def _check_codex_capability() -> CheckResult:
+    """Report codex CLI capability via the shared probe (#1238, R15).
+
+    Thin mapping over ``cw.executor.codex_capability_diagnosis`` — no subprocess
+    logic here. Binary absent → FAIL with an install hint; present but
+    ``--version`` unconfirmed → WARN (informational, mirrors
+    ``_check_claude_version``'s stale-but-present handling); capable → OK with
+    the version line as the diagnostics record (R9a: the ``detail`` field itself
+    is the persisted diagnostic).
+    """
+    probe = codex_capability_diagnosis()
+    if probe.diagnosis == CODEX_NOT_FOUND:
+        return CheckResult(
+            "codex-capability",
+            ok=False,
+            detail=f"{probe.detail} — install via npm install -g @openai/codex",
+        )
+    if probe.diagnosis == CODEX_VERSION_UNKNOWN:
+        return CheckResult("codex-capability", ok=True, warn=True, detail=probe.detail)
+    return CheckResult("codex-capability", ok=True, warn=False, detail=probe.detail)
 
 
 def _resolve_cw_source_path() -> Path | CheckResult:
