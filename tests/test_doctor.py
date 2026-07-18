@@ -41,7 +41,7 @@ def _stub_claude_version_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     # The codex-capability check runs ``codex --version``, absent on GH Actions
     # runners; neutralise it the same way so healthy-path report.ok holds.
     monkeypatch.setattr(
-        "cw.doctor._check_codex_capability",
+        "cw.doctor.core._check_codex_capability",
         lambda: CheckResult("codex-capability", ok=True, detail="0.144.5 (stubbed)"),
     )
 
@@ -1185,7 +1185,7 @@ class TestCheckClaudeVersion:
 class TestCheckCodexCapability:
     """_check_codex_capability maps the 3-state probe onto a CheckResult.
 
-    Monkeypatches ``cw.doctor.codex_capability_diagnosis`` directly — the
+    Monkeypatches ``cw.doctor.core.codex_capability_diagnosis`` directly — the
     subprocess/parse mechanics are covered in test_codex_executor.py.
     """
 
@@ -1196,7 +1196,7 @@ class TestCheckCodexCapability:
         from cw.executor import CODEX_NOT_FOUND, CodexCapabilityDiagnosis
 
         monkeypatch.setattr(
-            "cw.doctor.codex_capability_diagnosis",
+            "cw.doctor.core.codex_capability_diagnosis",
             lambda: CodexCapabilityDiagnosis(CODEX_NOT_FOUND, "codex binary not found"),
         )
         result = _check_codex_capability()
@@ -1209,7 +1209,7 @@ class TestCheckCodexCapability:
         from cw.executor import CODEX_VERSION_UNKNOWN, CodexCapabilityDiagnosis
 
         monkeypatch.setattr(
-            "cw.doctor.codex_capability_diagnosis",
+            "cw.doctor.core.codex_capability_diagnosis",
             lambda: CodexCapabilityDiagnosis(
                 CODEX_VERSION_UNKNOWN, "could not parse version: garbage"
             ),
@@ -1224,7 +1224,7 @@ class TestCheckCodexCapability:
         from cw.executor import CodexCapabilityDiagnosis
 
         monkeypatch.setattr(
-            "cw.doctor.codex_capability_diagnosis",
+            "cw.doctor.core.codex_capability_diagnosis",
             lambda: CodexCapabilityDiagnosis(None, "0.144.5"),
         )
         result = _check_codex_capability()
@@ -1240,11 +1240,11 @@ class TestCheckCodexCapability:
         # Stub only claude-version so the REAL _check_codex_capability is wired
         # into run_doctor; drive its probe via codex_capability_diagnosis.
         monkeypatch.setattr(
-            "cw.doctor._check_claude_version",
+            "cw.doctor.core._check_claude_version",
             lambda: CheckResult("claude-version", ok=True, detail="stubbed"),
         )
         monkeypatch.setattr(
-            "cw.doctor.codex_capability_diagnosis",
+            "cw.doctor.core.codex_capability_diagnosis",
             lambda: CodexCapabilityDiagnosis(None, "0.144.5"),
         )
         report = run_doctor()

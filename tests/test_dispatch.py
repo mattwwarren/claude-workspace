@@ -1835,8 +1835,8 @@ class _SpyExecutor:
 class TestDispatchCodexCapabilityGate:
     """Pre-spawn codex capability gate parks the task before resolve_executor (#1238).
 
-    Monkeypatches the imported ``cw.dispatch.codex_capability_diagnosis`` name
-    (not shutil/subprocess) — the probe mechanics are covered in
+    Monkeypatches the imported ``cw.dispatch.claim.codex_capability_diagnosis``
+    name (not shutil/subprocess) — the probe mechanics are covered in
     test_codex_executor.py. The gate calls the probe through an in-process TTL
     cache (``_cached_codex_capability_diagnosis``); reset it before each test
     so one test's monkeypatched return value can't leak into the next via a
@@ -1861,13 +1861,13 @@ class TestDispatchCodexCapabilityGate:
         add_ticket(TicketTask(ticket_id="GEN-CDX1", client="test-client"))
 
         monkeypatch.setattr(
-            "cw.dispatch.codex_capability_diagnosis",
+            "cw.dispatch.claim.codex_capability_diagnosis",
             lambda **_kwargs: CodexCapabilityDiagnosis(
                 CODEX_NOT_FOUND, "codex binary not found"
             ),
         )
         spy = _SpyExecutor()
-        monkeypatch.setattr("cw.dispatch.resolve_executor", lambda *_a, **_k: spy)
+        monkeypatch.setattr("cw.dispatch.claim.resolve_executor", lambda *_a, **_k: spy)
 
         daemon = FakeNativeDaemonClient()
         caplog.set_level(logging.WARNING, logger="cw.dispatch")
@@ -1903,13 +1903,13 @@ class TestDispatchCodexCapabilityGate:
         add_ticket(TicketTask(ticket_id="GEN-CDX2", client="test-client"))
 
         monkeypatch.setattr(
-            "cw.dispatch.codex_capability_diagnosis",
+            "cw.dispatch.claim.codex_capability_diagnosis",
             lambda **_kwargs: CodexCapabilityDiagnosis(
                 CODEX_VERSION_UNKNOWN, "could not parse version: junk"
             ),
         )
         spy = _SpyExecutor()
-        monkeypatch.setattr("cw.dispatch.resolve_executor", lambda *_a, **_k: spy)
+        monkeypatch.setattr("cw.dispatch.claim.resolve_executor", lambda *_a, **_k: spy)
 
         daemon = FakeNativeDaemonClient()
         result = dispatch_tick(simple_config, native_daemon=daemon)
@@ -1935,11 +1935,11 @@ class TestDispatchCodexCapabilityGate:
         add_ticket(TicketTask(ticket_id="GEN-CDX3", client="test-client"))
 
         monkeypatch.setattr(
-            "cw.dispatch.codex_capability_diagnosis",
+            "cw.dispatch.claim.codex_capability_diagnosis",
             lambda **_kwargs: CodexCapabilityDiagnosis(None, "0.144.5"),
         )
         spy = _SpyExecutor()
-        monkeypatch.setattr("cw.dispatch.resolve_executor", lambda *_a, **_k: spy)
+        monkeypatch.setattr("cw.dispatch.claim.resolve_executor", lambda *_a, **_k: spy)
 
         daemon = FakeNativeDaemonClient()
         result = dispatch_tick(simple_config, native_daemon=daemon)
@@ -1969,7 +1969,7 @@ class TestDispatchCodexCapabilityGate:
             msg = "probe must not run for non-codex backends"
             raise AssertionError(msg)
 
-        monkeypatch.setattr("cw.dispatch.codex_capability_diagnosis", _spy_probe)
+        monkeypatch.setattr("cw.dispatch.claim.codex_capability_diagnosis", _spy_probe)
 
         daemon = FakeNativeDaemonClient()
         spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
@@ -1993,9 +1993,11 @@ class TestDispatchCodexCapabilityGate:
             calls.append(1)
             return CodexCapabilityDiagnosis(None, "0.144.5")
 
-        monkeypatch.setattr("cw.dispatch.codex_capability_diagnosis", _counting_probe)
         monkeypatch.setattr(
-            "cw.dispatch.resolve_executor_config",
+            "cw.dispatch.claim.codex_capability_diagnosis", _counting_probe
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.claim.resolve_executor_config",
             lambda *_a, **_k: StageExecutorConfig(backend=CODEX_BACKEND),
         )
 
@@ -2026,7 +2028,9 @@ class TestDispatchCodexCapabilityGate:
             calls.append(1)
             return CodexCapabilityDiagnosis(None, "0.144.5")
 
-        monkeypatch.setattr("cw.dispatch.codex_capability_diagnosis", _counting_probe)
+        monkeypatch.setattr(
+            "cw.dispatch.claim.codex_capability_diagnosis", _counting_probe
+        )
 
         ttl_expiry = _CODEX_CAPABILITY_PROBE_TTL_SECONDS + 5
         with freeze_time("2026-07-16 12:00:00") as frozen:
@@ -2053,13 +2057,13 @@ class TestDispatchCodexCapabilityGate:
         from cw.executor import CODEX_VERSION_UNKNOWN, CodexCapabilityDiagnosis
 
         monkeypatch.setattr(
-            "cw.dispatch.codex_capability_diagnosis",
+            "cw.dispatch.claim.codex_capability_diagnosis",
             lambda **_kwargs: CodexCapabilityDiagnosis(
                 CODEX_VERSION_UNKNOWN, "could not parse version: junk"
             ),
         )
         monkeypatch.setattr(
-            "cw.dispatch.resolve_executor_config",
+            "cw.dispatch.claim.resolve_executor_config",
             lambda *_a, **_k: StageExecutorConfig(backend=CODEX_BACKEND),
         )
 
@@ -2108,7 +2112,7 @@ class TestDispatchCodexCapabilityGate:
         from cw.executor import CODEX_VERSION_UNKNOWN, CodexCapabilityDiagnosis
 
         monkeypatch.setattr(
-            "cw.dispatch.resolve_executor_config",
+            "cw.dispatch.claim.resolve_executor_config",
             lambda *_a, **_k: StageExecutorConfig(backend=CODEX_BACKEND),
         )
 
@@ -2120,7 +2124,7 @@ class TestDispatchCodexCapabilityGate:
         def _probe_result(idx: int, diagnosis: CodexCapabilityDiagnosis) -> object:
             dispatch_module._codex_capability_cache.clear()
             monkeypatch.setattr(
-                "cw.dispatch.codex_capability_diagnosis",
+                "cw.dispatch.claim.codex_capability_diagnosis",
                 lambda **_kwargs: diagnosis,
             )
             add_ticket(TicketTask(ticket_id=f"GEN-CDX7-{idx}", client="test-client"))
