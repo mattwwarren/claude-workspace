@@ -1031,27 +1031,33 @@ def _record_salvage_skip(
     *,
     config: OrchestratorConfig,
 ) -> None:
-    """Increment a session's salvage-skip latch and emit its events (#974).
+    """Increment a session's salvage-skip latch and emit its events (#974, #1283).
 
-    Always emits SESSION_SALVAGE_SKIPPED (unchanged payload). Additionally
-    emits session.needs_attention exactly once, when the incremented count
-    hits config.salvage_skip_attention_threshold (latch: no re-fire while
-    still at the threshold on subsequent ticks, since detect only re-appends
-    a SKIP_PARKED candidate — the count keeps climbing past the threshold on
-    later ticks, but the emit below only fires on exact equality).
+    Emits SESSION_SALVAGE_SKIPPED only on the 0->1 transition of
+    ``consecutive_salvage_skips`` (the first skip of a fresh parked episode),
+    edge-triggered per #1283 to stop the every-tick event storm -- matching this
+    codebase's established edge-trigger convention (``_emit_reap_proposed``'s
+    ``reap_proposed_at`` dedup and idle.py's ``already_parked_ids`` suppression,
+    both #782). Additionally emits session.needs_attention exactly once, when the
+    incremented count hits config.salvage_skip_attention_threshold (latch: no
+    re-fire while still at the threshold on subsequent ticks, since detect only
+    re-appends a SKIP_PARKED candidate — the count keeps climbing past the
+    threshold on later ticks, but the emit below only fires on exact equality).
     """
     session = session_by_id[candidate.session_id]
+    was_first = session.consecutive_salvage_skips == 0
     session.consecutive_salvage_skips += 1
-    record_event(
-        OrchestratorEventType.SESSION_SALVAGE_SKIPPED,
-        {
-            "session_id": candidate.session_id,
-            "ticket_id": candidate.ticket_id,
-            "reason": _SALVAGE_SKIP_REASON,
-            "paused_status": candidate.paused_status,
-        },
-        correlation_id=candidate.ticket_id,
-    )
+    if was_first:
+        record_event(
+            OrchestratorEventType.SESSION_SALVAGE_SKIPPED,
+            {
+                "session_id": candidate.session_id,
+                "ticket_id": candidate.ticket_id,
+                "reason": _SALVAGE_SKIP_REASON,
+                "paused_status": candidate.paused_status,
+            },
+            correlation_id=candidate.ticket_id,
+        )
     if session.consecutive_salvage_skips == config.salvage_skip_attention_threshold:
         record_event(
             OrchestratorEventType.SESSION_NEEDS_ATTENTION,

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from cw.auto_dev_result import INTERMEDIATE_ADVANCE_STATUSES, AutoDevResult
 from cw.config import save_state
 from cw.dev_queue import (
     _derive_disposition,
@@ -56,6 +57,7 @@ from cw.reconcile._shared import (
     _queue_status_for_salvaged,
     _SalvageCandidate,
     _transcript_recently_active,
+    classify_sentinel_stage_position,
     resolve_idle_retry_cap,
     resolve_idle_watchdog_budget,
     resolve_reap_policy,
@@ -65,8 +67,7 @@ from cw.reconcile._shared import (
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from cw.auto_dev_result import AutoDevResult
-    from cw.models import CwState, Session, TicketTask
+    from cw.models import ClientConfig, CwState, Session, TicketTask
     from cw.pr_hydrate import Counterparty
 
 
@@ -214,6 +215,64 @@ def _classify_idle_threshold(
     )
 
 
+def _idle_advance_sentinel_candidate(
+    session: Session,
+    task: TicketTask | None,
+    ticket_id: str | None,
+    elapsed: float,
+    clients: dict[str, ClientConfig],
+) -> ReapCandidate | None:
+    """ROUTE_EMITTED_SENTINEL candidate for a confirmed-idle stage-advance session.
+
+    idle.py's own near-duplicate of ``stalled._stalled_advance_sentinel_candidate``
+    (#1149) for the silently-idle sweep (#1283). ``salvage_terminal_result``
+    deliberately excludes ``stage_complete`` (not in ``SALVAGE_TERMINAL_STATUSES``),
+    so a session that finished its stage cleanly but whose ``last_result`` is
+    already a non-``None``, status-free park marker — which closes idle.py's
+    pre-existing ``last_result is None`` unrouted-check fast path (#578) — is
+    invisible to ``_detect_idle_confirmed_candidate``'s salvage check and would
+    fall through to ``_classify_idle_threshold``'s SALVAGE_GIT path, a false
+    ``needs_salvage`` park on a healthy stage boundary. Harvest a same-/later-
+    stage advance sentinel here so it routes forward instead. An earlier-stage or
+    unresolvable-position sentinel (a stale replay, #986) returns ``None`` so
+    detection falls through to the existing salvage-git / retry-cap / park chain
+    unchanged. Kept a standalone near-duplicate of ``stalled.py``'s copy per
+    #1149 R1 (it does not need the RESET_SALVAGE_SKIP_COUNTER dance, which is
+    scoped to stalled.py's SKIP_PARKED exits); the 3-way consolidation into
+    ``_shared.py`` is deferred to #1335.
+    """
+    if task is None:
+        return None
+    # FINALIZE-stage parking is owned by stalled.py's finalize-blocked path;
+    # mirror _classify_idle_threshold's explicit FINALIZE-ownership boundary.
+    if task.stage == Stage.FINALIZE:
+        return None
+    parsed = _parse_any_sentinel_from_transcript(session)
+    if parsed is None:
+        return None
+    result, csid = parsed
+    if (
+        not isinstance(result, AutoDevResult)
+        or result.status not in INTERMEDIATE_ADVANCE_STATUSES
+    ):
+        return None
+    position, _stages, _target_idx = classify_sentinel_stage_position(
+        task, result.model_dump(mode="json"), clients
+    )
+    if position not in ("same", "later"):
+        return None
+    return ReapCandidate(
+        session_id=session.id,
+        proposed_action=ProposedAction.ROUTE_EMITTED_SENTINEL,
+        ticket_id=ticket_id,
+        routed_sentinel=result,
+        salvage_csid=csid,
+        elapsed_seconds=elapsed,
+        lane=task.lane,
+        client=session.client,
+    )
+
+
 def _detect_idle_confirmed_candidate(
     session: Session,
     *,
@@ -222,6 +281,7 @@ def _detect_idle_confirmed_candidate(
     config: OrchestratorConfig,
     elapsed: float,
     merged_client_ticket_ids: frozenset[tuple[str, str]],
+    clients: dict[str, ClientConfig],
     counterparty: Counterparty = "self",
 ) -> ReapCandidate | None:
     """Classify a session that already passed the liveness check.
@@ -244,6 +304,16 @@ def _detect_idle_confirmed_candidate(
             lane=task.lane if task else DEFAULT_LANE,
             client=session.client,
         )
+    # #1283 advance-sentinel backstop: a stage_complete sentinel is excluded from
+    # SALVAGE_TERMINAL_STATUSES, so the salvage check above never sees it. Harvest
+    # a same-/later-stage advance sentinel here — evidence-based, not deferred by
+    # counter (same priority tier as the salvage check) — BEFORE the confirm
+    # increment so a cleanly-completed stage is never routed to SALVAGE_GIT.
+    routed_advance = _idle_advance_sentinel_candidate(
+        session, task, ticket_id, elapsed, clients
+    )
+    if routed_advance is not None:
+        return routed_advance
     # Confirm-before-reap: accumulate consecutive failed observations.
     new_count = session.idle_observation_count + 1
     if new_count < config.idle_confirm_observations:
@@ -276,6 +346,7 @@ def _detect_idle_candidate_for_session(
     task: TicketTask | None,
     ticket_id: str | None,
     merged_client_ticket_ids: frozenset[tuple[str, str]],
+    clients: dict[str, ClientConfig],
     counterparty: Counterparty = "self",
 ) -> ReapCandidate | None:
     """Classify a single live DAEMON session for idle disposition, or None.
@@ -329,6 +400,7 @@ def _detect_idle_candidate_for_session(
         config=config,
         elapsed=elapsed,
         merged_client_ticket_ids=merged_client_ticket_ids,
+        clients=clients,
         counterparty=counterparty,
     )
 
@@ -349,6 +421,10 @@ def _detect_idle_candidates(
     but NOT written; it is carried in new_observation_count on the candidate.
     See GitHub #552, ADR-0006.
     """
+    # Load clients once for the advance-sentinel backstop's stage-position
+    # resolution across all sessions in this pass (#1283), mirroring
+    # stalled.py::_detect_stalled_candidates's identical load-once pattern.
+    effective_clients = _deps.load_effective_clients()
     candidates: list[ReapCandidate] = []
     for session in state.sessions:
         if session.origin is not SessionOrigin.DAEMON:
@@ -369,6 +445,7 @@ def _detect_idle_candidates(
             task=task,
             ticket_id=ticket_id,
             merged_client_ticket_ids=merged_client_ticket_ids,
+            clients=effective_clients,
             counterparty=counterparty,
         )
         if candidate is not None:

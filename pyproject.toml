@@ -149,8 +149,15 @@ ignore = [
 # must follow the sys.path mutation, not precede it.
 ".claude/skills/cw-followup/scripts/parse_sentinel.py" = ["E402"]
 ".claude/skills/cw-validate-result/scripts/validate_sentinel.py" = ["E402"]
-"src/cw/models.py" = [
+"src/cw/models/*.py" = [
     "TCH003",  # Pydantic models need runtime access to Path, UUID, datetime etc.
+    # Cross-submodule model/enum imports (e.g. tasks -> events.WatchedPr) are
+    # used only in annotations, but `from __future__ import annotations` makes
+    # pydantic resolve them at class-build time — a TYPE_CHECKING-only import
+    # would raise PydanticUndefinedAnnotation. First-party analog of TCH003
+    # above; only fires since the #1320 models.py -> models/ package split moved
+    # these types across module boundaries.
+    "TC001",
 ]
 "src/cw/tui.py" = [
     "TCH003",  # WatchRow Pydantic model needs runtime access to Path

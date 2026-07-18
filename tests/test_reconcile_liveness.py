@@ -394,3 +394,34 @@ def test_liveness_first_bucket_by_stage_custom_override_respected(
 
     assert below_floor == LivenessBucket.LIVE
     assert at_floor == LivenessBucket.STALE_15M
+
+
+def test_liveness_bucket_reflects_widened_transcript(
+    tmp_config_dir: Path, tmp_path: Path, home: Path
+) -> None:
+    """#1283: a stale registered transcript but a fresh subagent sibling in the
+    same project dir classifies LIVE, not a stale bucket (widened mtime lookup)."""
+    sess, worktree = _mk_liveness_session(tmp_path=tmp_path)
+    sess.liveness_bucket = LivenessBucket.STALE_45M
+    # Registered transcript (surface_ref-prefixed), long stale.
+    _stamp_transcript_stale_minutes(home, worktree, stale_minutes=90)
+    # Fresh sibling subagent transcript (own session id, NOT surface_ref-prefixed).
+    sib = _write_idle_transcript(home, worktree, filename="subagent-fresh.jsonl")
+    sib_ts = (_NOW - timedelta(minutes=1)).timestamp()
+    os.utime(str(sib), (sib_ts, sib_ts))
+
+    state = CwState(sessions=[sess])
+    task = TicketTask(ticket_id="T-1", client="client-a", stage=Stage.IMPL)
+    config = OrchestratorConfig()
+
+    candidates = _detect_liveness_candidates(
+        state,
+        now=_NOW,
+        native_live={"fake-short-id"},
+        config=config,
+        task_by_ticket={"T-1": task},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].old_bucket == LivenessBucket.STALE_45M
+    assert candidates[0].new_bucket == LivenessBucket.LIVE

@@ -896,3 +896,52 @@ class TestComboEntryPoint:
         )
 
         assert recovered == []
+
+
+def test_park_marker_poison_clear_survives_widened_transcript_lookup(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1283 SHOULD_FIX: fix (b)'s widened mtime lookup must not regress recipe 2.
+
+    A stale registered transcript plus a moderately-fresher-but-still->45m-old
+    sibling subagent transcript still classifies STALE_45M, so the park-marker
+    poison-clear still fires. Locks that the widening doesn't drop a genuinely
+    dead worker below the 45m staleness threshold and suppress the clear.
+    """
+    import os
+
+    from cw.reconcile._shared import _transcript_age_seconds as _real_age
+    from cw.reconcile.concierge import _park_marker_transcript_stale_45m
+    from tests.conftest import _write_idle_transcript
+
+    # The autouse _flat_transcript fixture stubs age to None; restore the real
+    # (widened) implementation so this test exercises the glob across all files.
+    monkeypatch.setattr("cw.reconcile.concierge._transcript_age_seconds", _real_age)
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-poison-widen"
+    started_at = _NOW - timedelta(hours=3)
+
+    # Registered transcript (surface_ref-prefixed), long stale.
+    reg = _write_idle_transcript(home, worktree, filename="fake-short-id-sess.jsonl")
+    reg_ts = (_NOW - timedelta(minutes=90)).timestamp()
+    os.utime(str(reg), (reg_ts, reg_ts))
+    # Sibling subagent transcript: fresher, but still older than 45 minutes.
+    sib = _write_idle_transcript(home, worktree, filename="subagent-mid.jsonl")
+    sib_ts = (_NOW - timedelta(minutes=50)).timestamp()
+    os.utime(str(sib), (sib_ts, sib_ts))
+
+    session = _make_session(
+        last_result={"paused_status": "needs_salvage"},
+        surface_ref="fake-short-id",
+        started_at=started_at,
+    )
+    session.worktree_path = worktree
+    task = _make_task(disposition=None, attempts=1, stage=Stage.IMPL)
+
+    assert (
+        _park_marker_transcript_stale_45m(session, task, now=_NOW, config=_config())
+        is True
+    )
