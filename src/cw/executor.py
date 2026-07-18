@@ -18,6 +18,7 @@ from cw.config import load_state, save_state, sessions_lock
 from cw.events import record_event as _record_orchestrator_event
 from cw.executor_diagnostics import (
     ExecutorFailure,
+    append_diagnostics_pointer,
     persist_diagnostics_bundle,
     redact_argv,
 )
@@ -390,10 +391,11 @@ class LocalExecutor:
             # with a blocked result so reconcile can clean it up. SESSION_COMPLETED
             # is NOT emitted; dispatch's exception handler reverts the task to
             # PENDING, which is the correct recovery path.
+            unexpected_error_detail = "unexpected error during aider launch"
             _persist_aider_runtime_error_diagnostics(
                 session_id=sid,
                 argv=argv,
-                details="unexpected error during aider launch",
+                details=unexpected_error_detail,
             )
             with sessions_lock():
                 state = load_state()
@@ -403,6 +405,9 @@ class LocalExecutor:
                         ticket_id=task.ticket_id,
                         worktree=worktree,
                         reason=UNEXPECTED_ERROR,
+                        details=append_diagnostics_pointer(
+                            unexpected_error_detail, session_id=sid
+                        ),
                     ).model_dump(mode="json")
                     target.status = SessionStatus.COMPLETED
                     save_state(state)

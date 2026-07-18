@@ -26,14 +26,12 @@ import logging
 import re
 import shutil
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal
+from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, field_validator
 
 from cw.config import diagnostics_dir, state_dir
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 _log = logging.getLogger(__name__)
 
@@ -151,6 +149,33 @@ class ExecutorFailure(BaseModel):
 def diagnostics_bundle_dir(session_id: str) -> Path:
     """Return the per-session diagnostics bundle dir (wraps config accessor)."""
     return diagnostics_dir(session_id)
+
+
+def render_bundle_path(session_id: str) -> str:
+    """Render *session_id*'s diagnostics bundle dir as a stable, short path.
+
+    Home-relative when the bundle sits under the user's home dir, absolute
+    otherwise (e.g. an XDG-relocated or tmp state dir under test) — the
+    rendering never raises. Local-only pointer, no secrets — safe for
+    ``Blocker.details``. Mirrors ``codex_review.py``'s ``_render_bundle_path``
+    so all executor backends (codex/aider) share one rendering rule (#1239).
+    """
+    bundle = diagnostics_bundle_dir(session_id)
+    try:
+        return str(bundle.relative_to(Path.home()))
+    except ValueError:
+        return str(bundle)
+
+
+def append_diagnostics_pointer(detail: str, *, session_id: str) -> str:
+    """Append a ``[diagnostics: <bundle path>]`` pointer to *detail*.
+
+    Mirrors ``codex_review.py``'s ``_format_failures_detail`` pattern for the
+    non-review executor paths (LocalExecutor/aider), so a blocked sentinel's
+    ``Blocker.details`` always points an operator at the on-disk diagnostics
+    artifacts (#1239).
+    """
+    return f"{detail} [diagnostics: {render_bundle_path(session_id)}]"
 
 
 def persist_diagnostics_bundle(
