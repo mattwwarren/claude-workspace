@@ -129,6 +129,18 @@ def pr_watcher_dir() -> Path:
     return PR_WATCHER_DIR
 
 
+def diagnostics_dir(session_id: str) -> Path:
+    """Return the per-session executor-diagnostics bundle dir (#1239).
+
+    Executor-neutral: ``state_dir()/sessions/<session_id>/diagnostics``. Reads
+    ``state_dir()`` at call time so monkeypatching ``cw.config.STATE_DIR``
+    (the autouse ``tmp_config_dir`` fixture) reaches it, same as every other
+    accessor here. Composition only — the directory is created lazily by the
+    writer (``executor_diagnostics.persist_diagnostics_bundle``), not here.
+    """
+    return state_dir() / "sessions" / session_id / "diagnostics"
+
+
 def review_monitor_dir() -> Path:
     return REVIEW_MONITOR_DIR
 

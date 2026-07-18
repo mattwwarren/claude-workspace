@@ -21,6 +21,11 @@ from cw.executor import (
     resolve_executor,
     resolve_executor_config,
 )
+from cw.executor_diagnostics import (
+    ExecutorFailure,
+    diagnostics_bundle_dir,
+    render_bundle_path,
+)
 from cw.local_runner import (
     AIDER_NOT_FOUND,
     ENDPOINT_NOT_CONFIGURED,
@@ -737,6 +742,10 @@ def test_local_executor_exception_handler_marks_session_completed(
     assert result.status == "blocked"
     assert result.blocker is not None
     assert result.blocker.reason == UNEXPECTED_ERROR
+    assert (
+        result.blocker.details == "unexpected error during aider launch "
+        f"[diagnostics: {render_bundle_path(session.id)}]"
+    )
 
 
 def test_local_executor_proc_stat_unreadable_marks_session_completed(
@@ -771,7 +780,9 @@ def test_local_executor_proc_stat_unreadable_marks_session_completed(
         patch("cw.executor.aider_available", return_value=True),
         patch("cw.executor.read_process_start_time_ns", return_value=None),
     ):
-        executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+        sid = executor.spawn(
+            stage=Stage.IMPL, task=task, worktree=worktree, client=client
+        )
 
     # FakeAiderRunner spawned a sleep process; the None path kills it but
     # suppress in case it already exited.
@@ -789,10 +800,90 @@ def test_local_executor_proc_stat_unreadable_marks_session_completed(
     assert result.status == "blocked"
     assert result.blocker is not None
     assert result.blocker.reason == LIVENESS_UNAVAILABLE
-    assert (
-        result.blocker.details
-        == f"process {fake_runner.procs[-1].pid} start-time unavailable"
+    # details carries the liveness detail plus a diagnostics-bundle pointer
+    # (#1239) — exact match, since the session id is now captured.
+    assert result.blocker.details == (
+        f"process {fake_runner.procs[-1].pid} start-time unavailable "
+        f"[diagnostics: {render_bundle_path(sid)}]"
     )
+
+
+def test_local_executor_liveness_unavailable_persists_runtime_error_diagnostics(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """The LIVENESS_UNAVAILABLE branch persists a runtime_error bundle (#1239)."""
+    import contextlib
+
+    worktree = make_git_repo("wt-liveness-diag")
+    cw_dir = worktree / ".cw"
+    cw_dir.mkdir(exist_ok=True)
+    (cw_dir / "plan.md").write_text("plan", encoding="utf-8")
+
+    fake_runner = FakeAiderRunner()
+    config = StageExecutorConfig(
+        backend=LOCAL_BACKEND, model="qwen", endpoint="http://localhost:1234/v1"
+    )
+    executor = LocalExecutor(config=config, runner=fake_runner)
+    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+    task = TicketTask(ticket_id="T-liveness-diag", client="test", stage=Stage.IMPL)
+
+    with (
+        patch("cw.executor.aider_available", return_value=True),
+        patch("cw.executor.read_process_start_time_ns", return_value=None),
+    ):
+        sid = executor.spawn(
+            stage=Stage.IMPL, task=task, worktree=worktree, client=client
+        )
+
+    for proc in fake_runner.procs:
+        with contextlib.suppress(OSError):
+            proc.kill()
+            proc.wait()
+
+    path = diagnostics_bundle_dir(sid) / "aider-runtime_error.json"
+    assert path.exists()
+    failure = ExecutorFailure.model_validate_json(path.read_text())
+    assert failure.category == "runtime_error"
+    assert failure.executor_name == "aider"
+    # Aider argv is redacted wholesale on the --message value.
+    assert "--message" in failure.argv_sanitized
+    idx = failure.argv_sanitized.index("--message")
+    assert failure.argv_sanitized[idx + 1].startswith("<redacted:")
+
+
+def test_local_executor_unexpected_error_persists_diagnostics(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """The generic except branch persists a runtime_error bundle (#1239)."""
+    worktree = make_git_repo("wt-unexpected-diag")
+    cw_dir = worktree / ".cw"
+    cw_dir.mkdir(exist_ok=True)
+    (cw_dir / "plan.md").write_text("plan", encoding="utf-8")
+
+    fake_runner = FakeAiderRunner()
+    config = StageExecutorConfig(
+        backend=LOCAL_BACKEND, model="qwen", endpoint="http://localhost:1234/v1"
+    )
+    executor = LocalExecutor(config=config, runner=fake_runner)
+    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+    task = TicketTask(ticket_id="T-unexpected-diag", client="test", stage=Stage.IMPL)
+
+    with (
+        patch("cw.executor.aider_available", return_value=True),
+        patch.object(fake_runner, "launch", side_effect=OSError("exec boom")),
+        pytest.raises(OSError, match="exec boom"),
+    ):
+        executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+
+    # spawn raised, so recover sid from the created session in state.
+    session = next(s for s in load_state().sessions if s.last_result is not None)
+    path = diagnostics_bundle_dir(session.id) / "aider-runtime_error.json"
+    assert path.exists()
+    failure = ExecutorFailure.model_validate_json(path.read_text())
+    assert failure.category == "runtime_error"
+    assert failure.executor_name == "aider"
 
 
 # ---------------------------------------------------------------------------

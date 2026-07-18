@@ -154,6 +154,7 @@ def _act_on_local_harvest_candidates(
                 worktree=candidate.worktree_path,
                 default_branch=default_branch,
                 plan_source="none",
+                session_id=candidate.session_id,
             )
         except (OSError, subprocess.CalledProcessError):
             # A git failure on one candidate must not abort the entire harvest
