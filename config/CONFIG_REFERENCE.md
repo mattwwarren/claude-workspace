@@ -215,6 +215,17 @@ OpenAI-compatible endpoint (e.g. LM Studio). The local model never emits a
 sentinel — `cw` synthesises an `AutoDevResult` from git state after aider
 commits.
 
+> **Edit-format warning:** aider falls back to the **model default** edit
+> format when it doesn't recognize the configured model id — which for any
+> non-Claude / OpenAI-compatible model is `whole`. In `whole` mode aider
+> regenerates the entire target file on every edit, which can blow a stage
+> timeout on a large file and present as a **model/timeout failure** rather
+> than the real cause. Set `edit-format: diff` in `~/.aider.conf.yml` (read
+> per-exec, so it applies to an already-running dispatcher with no restart)
+> — or `AIDER_EDIT_FORMAT=diff` in the *dispatcher's own* environment before
+> it starts (a shell-profile export will not reach an already-running
+> dispatcher).
+
 ```yaml
 clients:
   my-client:
@@ -232,6 +243,7 @@ Requirements:
 - `aider` must be on `$PATH` — missing binary blocks with `aider_not_found` (retry-eligible).
 - `.cw/plan.md` must exist in the worktree — absent plan blocks with `plan_missing`.
 - `OPENAI_API_KEY` env var is optional; defaults to `"local"` (LM Studio ignores the value).
+- `edit-format` is not a `cw` config field — set `edit-format: diff` in `~/.aider.conf.yml` (or `AIDER_EDIT_FORMAT=diff` in the dispatcher's own environment) to avoid aider's `whole`-mode default on unrecognized model ids.
 
 Limitations:
 - Synchronous executor: blocks the dispatch tick for the full aider run. Set
