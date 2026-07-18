@@ -1460,3 +1460,70 @@ class TestOrchestratorConfigDisallowedMcpTools:
             "mcp__plugin_linear_linear__*",
             "mcp__foo__*",
         ]
+
+
+class TestPackageExportCompleteness:
+    """Guards that the cw.models package re-exports its full public surface.
+
+    The models.py -> cw/models/ package split (#1320) must preserve every
+    ``from cw.models import X`` call site unchanged. This asserts ``__all__``
+    equals the exhaustive historical top-level surface (49 names) — hardcoded
+    here, NOT re-derived from the package, so a dropped or renamed export is a
+    falsifiable failure rather than a tautology.
+    """
+
+    def test_all_matches_full_surface(self) -> None:
+        from cw import models
+
+        expected = {
+            "CLAUDE_NATIVE_BACKEND",
+            "CODEX_BACKEND",
+            "CONTEXT_JSON_RELATIVE_PATH",
+            "CW_STATE_SCHEMA_VERSION",
+            "ClientConcurrencyOverride",
+            "ClientConfig",
+            "CompletionReason",
+            "ConcurrencyOverrides",
+            "CwState",
+            "DEFAULT_AUTO_PURPOSES",
+            "DEFAULT_GLOBAL_ATTEMPT_CEILING",
+            "DEFAULT_LANE",
+            "DEFAULT_STAGE",
+            "DEV_QUEUE_SCHEMA_VERSION",
+            "DevQueueStore",
+            "DispatchPlan",
+            "DispatchSkipReason",
+            "EventHookRegistry",
+            "HookRule",
+            "LOCAL_BACKEND",
+            "LaneConcurrencyOverride",
+            "LaneConfig",
+            "LivenessBucket",
+            "LocalLivenessHandle",
+            "OCCUPIED_LANE_STATUSES",
+            "OperatorChannelForward",
+            "OrchestratorConfig",
+            "OrchestratorEvent",
+            "OrchestratorEventType",
+            "PrState",
+            "QueueItemStatus",
+            "ReapPolicy",
+            "ReapReason",
+            "Session",
+            "SessionOrigin",
+            "SessionPurpose",
+            "SessionStatus",
+            "Stage",
+            "StageExecutorConfig",
+            "StagePipelineConfig",
+            "TicketTask",
+            "WORKER_PURPOSES",
+            "WatchedPr",
+            "_DEFAULT_OPERATOR_EVENT_TYPES",
+            "_DEFAULT_OPERATOR_TASK_TRANSITION_STATUSES",
+            "_SAFE_TICKET_ID",
+            "_USAGE_LIMIT_BACKOFF_SECONDS",
+            "_validate_gate_recipe_keys",
+            "_validate_review_recipe_keys",
+        }
+        assert set(models.__all__) == expected
