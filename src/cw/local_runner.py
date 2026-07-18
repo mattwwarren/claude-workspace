@@ -31,8 +31,8 @@ from cw.auto_dev_result import (
 )
 from cw.executor_diagnostics import (
     ExecutorFailure,
+    append_diagnostics_pointer,
     persist_diagnostics_bundle,
-    render_bundle_path,
 )
 from cw.gh import fetch_approved_plan_comment
 from cw.models import CONTEXT_JSON_RELATIVE_PATH
@@ -481,8 +481,7 @@ def synthesize_git_result(
             _persist_aider_no_output_diagnostics(
                 session_id=session_id, log_tail=details
             )
-            pointer = f"[diagnostics: {render_bundle_path(session_id)}]"
-            details = f"{details} {pointer}" if details else pointer
+            details = append_diagnostics_pointer(details, session_id=session_id)
         return make_blocked(
             ticket_id=task.ticket_id,
             worktree=worktree,

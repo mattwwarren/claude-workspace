@@ -173,9 +173,11 @@ def append_diagnostics_pointer(detail: str, *, session_id: str) -> str:
     Mirrors ``codex_review.py``'s ``_format_failures_detail`` pattern for the
     non-review executor paths (LocalExecutor/aider), so a blocked sentinel's
     ``Blocker.details`` always points an operator at the on-disk diagnostics
-    artifacts (#1239).
+    artifacts (#1239). When *detail* is empty (e.g. an unreadable aider.log),
+    the pointer is returned bare rather than with a leading space.
     """
-    return f"{detail} [diagnostics: {render_bundle_path(session_id)}]"
+    pointer = f"[diagnostics: {render_bundle_path(session_id)}]"
+    return f"{detail} {pointer}" if detail else pointer
 
 
 def persist_diagnostics_bundle(
