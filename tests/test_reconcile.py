@@ -9059,6 +9059,145 @@ def test_transcript_age_seconds_falls_back_to_mtime_without_content_timestamp(
     assert age < 60
 
 
+def test_transcript_recently_active_widens_to_subagent_transcript(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1283: a stale registered transcript but a fresh sibling subagent
+    transcript in the same project dir -> recently active (widened lookup)."""
+    from cw.reconcile import _transcript_recently_active
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-widen-active"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+    # Registered transcript (surface_ref-prefixed), stale but resolvable.
+    reg = _write_idle_transcript(home, worktree, filename="fake-short-id-sess.jsonl")
+    reg_ts = (started_at + timedelta(seconds=60)).timestamp()
+    os.utime(reg, (reg_ts, reg_ts))
+    # Sibling subagent transcript (own session id, NOT surface_ref-prefixed), fresh.
+    sib = _write_idle_transcript(home, worktree, filename="subagent-abc.jsonl")
+    sib_ts = (now - timedelta(seconds=30)).timestamp()
+    os.utime(sib, (sib_ts, sib_ts))
+
+    sess = _mk_content_ts_session("widen-active-1", worktree, started_at)
+
+    assert _transcript_recently_active(sess, now) is True
+
+
+def test_transcript_age_seconds_widens_to_subagent_transcript(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1283: age is computed from the FRESHER sibling, not the stale registered
+    transcript."""
+    from cw.reconcile import _transcript_age_seconds
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-widen-age"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+    reg = _write_idle_transcript(home, worktree, filename="fake-short-id-sess.jsonl")
+    reg_ts = (started_at + timedelta(seconds=60)).timestamp()
+    os.utime(reg, (reg_ts, reg_ts))
+    sib = _write_idle_transcript(home, worktree, filename="subagent-abc.jsonl")
+    sib_ts = (now - timedelta(seconds=30)).timestamp()
+    os.utime(sib, (sib_ts, sib_ts))
+
+    sess = _mk_content_ts_session("widen-age-1", worktree, started_at)
+
+    age = _transcript_age_seconds(sess, now)
+    assert age is not None
+    assert abs(age - 30) < 5
+
+
+def test_transcript_recently_active_ignores_stale_prior_session_transcript(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1283 regression guard: a sibling transcript from a PRIOR session (mtime
+    before started_at) must NOT count -- the mtime > started_at guard is applied
+    per-file across the whole glob, not just the registered transcript."""
+    from cw.reconcile import _transcript_recently_active
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-widen-guard"
+    # Session starts at 00:10; a prior-session sibling's mtime (00:09:30) is
+    # recent relative to `now` (00:11:00) but predates this session's start.
+    started_at = datetime(2026, 1, 1, 0, 10, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 11, 0, tzinfo=UTC)
+
+    # No registered transcript for this session (surface_ref glob finds nothing).
+    sib = _write_idle_transcript(home, worktree, filename="prior-subagent.jsonl")
+    sib_ts = (started_at - timedelta(seconds=30)).timestamp()
+    os.utime(sib, (sib_ts, sib_ts))
+
+    sess = _mk_content_ts_session("widen-guard-1", worktree, started_at)
+
+    assert _transcript_recently_active(sess, now) is False
+
+
+def test_idle_confirm_recovers_via_subagent_transcript_activity(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1283 end-to-end: a stale registered transcript + a fresh subagent sibling
+    recovers the idle counter (RECOVER_COUNTER) instead of proceeding to reap."""
+    from cw.reconcile import ProposedAction, _detect_idle_candidates
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(minutes=20)
+    config = _auto_config(idle_confirm_observations=2)
+    worktree = tmp_path / "wt-idle-recover"
+
+    sess = _mk_headless_daemon_session("idle-recover-1", worktree, started_at)
+    sess.idle_observation_count = 1
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="idle-recover-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="idle-recover-1",
+        stage=Stage.IMPL,
+        attempts=0,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    reg = _write_idle_transcript(home, worktree, filename="fake-short-id-sess.jsonl")
+    reg_ts = (started_at + timedelta(seconds=60)).timestamp()
+    os.utime(reg, (reg_ts, reg_ts))
+    sib = _write_idle_transcript(home, worktree, filename="subagent-live.jsonl")
+    sib_ts = (now - timedelta(seconds=30)).timestamp()
+    os.utime(sib, (sib_ts, sib_ts))
+
+    candidates = _detect_idle_candidates(
+        state,
+        now=now,
+        native_live={"fake-short-id"},
+        config=config,
+        task_by_ticket={"idle-recover-1": task},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].proposed_action == ProposedAction.RECOVER_COUNTER
+
+
 # ---------------------------------------------------------------------------
 # session.phantom_reverted event tests (GitHub issue #459)
 # ---------------------------------------------------------------------------
@@ -13301,6 +13440,352 @@ def test_detect_idle_candidates_salvage_git(
     assert _state_queue_snapshot() == snap
 
 
+def _setup_idle_stage_complete_session(
+    home: Path,
+    worktree: Path,
+    *,
+    sid: str,
+    started_at: datetime,
+    set_park_marker: bool = True,
+    write_transcript: bool = True,
+) -> Session:
+    """Build a confirmed-idle DAEMON session carrying a stage_complete sentinel.
+
+    Reproduces the #1283 precondition for the idle advance-sentinel backstop:
+    a session that finished its stage (a ``stage_complete`` transcript) but whose
+    ``last_result`` is already a non-``None``, status-free park marker -- which
+    closes idle.py's pre-existing ``last_result is None`` unrouted-check fast path
+    (#578) so the sentinel reaches ``_classify_idle_threshold``. The transcript
+    mtime is pinned strictly after ``started_at`` but far enough before ``now``
+    (``started_at + 60s`` against a ``now`` 20 min later) that
+    ``_transcript_recently_active`` reports ``False`` and the liveness gate falls
+    through to the confirmed-idle classifier. ``_write_salvage_transcript``'s
+    record carries no ``"timestamp"`` field, so ``_effective_transcript_timestamp``
+    falls back to mtime and ``os.utime`` fully controls the liveness math.
+    """
+    sess = _mk_headless_daemon_session(sid, worktree, started_at)
+    sess.idle_observation_count = 1
+    if set_park_marker:
+        sess.last_result = {"paused_status": _SILENTLY_IDLE_REASON}
+    if write_transcript:
+        payload = _stage_complete_payload()
+        payload["ticket_id"] = sid
+        path = _write_salvage_transcript(home, worktree, f"claude-{sid}", payload)
+        ts = (started_at + timedelta(seconds=60)).timestamp()
+        os.utime(path, (ts, ts))
+    return sess
+
+
+def test_idle_advance_sentinel_backstop_prevents_salvage_git(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1283: a confirmed-idle session with a stage_complete sentinel and a
+    non-None park marker routes ROUTE_EMITTED_SENTINEL, not SALVAGE_GIT."""
+    from cw.reconcile import ProposedAction, _detect_idle_candidates
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(minutes=20)
+    config = _auto_config(idle_confirm_observations=2)
+    worktree = tmp_path / "wt-idle-adv-1"
+    sess = _setup_idle_stage_complete_session(
+        home, worktree, sid="idle-adv-1", started_at=started_at
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="idle-adv-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="idle-adv-1",
+        stage=Stage.IMPL,
+        attempts=0,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/idle-adv-1"
+    )
+    monkeypatch.setattr("cw.reconcile.idle._detect_post_review_clean", lambda _s: False)
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_dirty_by_path", lambda _c, _p: False
+    )
+
+    candidates = _detect_idle_candidates(
+        state,
+        now=now,
+        native_live={"fake-short-id"},
+        config=config,
+        task_by_ticket={"idle-adv-1": task},
+    )
+
+    assert len(candidates) == 1
+    c = candidates[0]
+    assert c.proposed_action == ProposedAction.ROUTE_EMITTED_SENTINEL
+    assert c.routed_sentinel is not None
+    assert c.routed_sentinel.status == "stage_complete"
+
+
+def test_idle_advance_sentinel_backstop_later_stage(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later-stage (task behind the sentinel) stage_complete is also harvested."""
+    from cw.reconcile import ProposedAction, _detect_idle_candidates
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(minutes=20)
+    config = _auto_config(idle_confirm_observations=2)
+    worktree = tmp_path / "wt-idle-adv-later"
+    sess = _setup_idle_stage_complete_session(
+        home, worktree, sid="idle-adv-later", started_at=started_at
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    task = TicketTask(
+        ticket_id="idle-adv-later",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="idle-adv-later",
+        # PLAN is EARLIER than the sentinel's mapped IMPL stage -> "later".
+        stage=Stage.PLAN,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidates = _detect_idle_candidates(
+        state,
+        now=now,
+        native_live={"fake-short-id"},
+        config=config,
+        task_by_ticket={"idle-adv-later": task},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].proposed_action == ProposedAction.ROUTE_EMITTED_SENTINEL
+
+
+def test_idle_advance_sentinel_backstop_earlier_stage_falls_through(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An earlier-stage (stale replay) sentinel is NOT harvested -> SALVAGE_GIT."""
+    from cw.reconcile import ProposedAction, _detect_idle_candidates
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(minutes=20)
+    config = _auto_config(idle_confirm_observations=2)
+    worktree = tmp_path / "wt-idle-adv-earlier"
+    sess = _setup_idle_stage_complete_session(
+        home, worktree, sid="idle-adv-earlier", started_at=started_at
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    task = TicketTask(
+        ticket_id="idle-adv-earlier",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="idle-adv-earlier",
+        # REVIEW is LATER than the sentinel's mapped IMPL stage -> "earlier".
+        stage=Stage.REVIEW,
+        attempts=0,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/idle-adv-earlier"
+    )
+    monkeypatch.setattr("cw.reconcile.idle._detect_post_review_clean", lambda _s: False)
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_dirty_by_path", lambda _c, _p: False
+    )
+
+    candidates = _detect_idle_candidates(
+        state,
+        now=now,
+        native_live={"fake-short-id"},
+        config=config,
+        task_by_ticket={"idle-adv-earlier": task},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].proposed_action == ProposedAction.SALVAGE_GIT
+
+
+def test_idle_advance_sentinel_backstop_no_transcript_falls_through(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No transcript -> unchanged SALVAGE_GIT (backward-compat lock)."""
+    from cw.reconcile import ProposedAction, _detect_idle_candidates
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(minutes=20)
+    config = _auto_config(idle_confirm_observations=2)
+    worktree = tmp_path / "wt-idle-adv-notx"
+    sess = _setup_idle_stage_complete_session(
+        home,
+        worktree,
+        sid="idle-adv-notx",
+        started_at=started_at,
+        set_park_marker=False,
+        write_transcript=False,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="idle-adv-notx",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="idle-adv-notx",
+        stage=Stage.IMPL,
+        attempts=0,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/idle-adv-notx"
+    )
+    monkeypatch.setattr("cw.reconcile.idle._detect_post_review_clean", lambda _s: False)
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_dirty_by_path", lambda _c, _p: False
+    )
+
+    candidates = _detect_idle_candidates(
+        state,
+        now=now,
+        native_live={"fake-short-id"},
+        config=config,
+        task_by_ticket={"idle-adv-notx": task},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].proposed_action == ProposedAction.SALVAGE_GIT
+
+
+def test_idle_advance_sentinel_backstop_finalize_stage_deferred(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A FINALIZE-stage session yields no candidate (owned by stalled.py)."""
+    from cw.reconcile import _detect_idle_candidates
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(minutes=20)
+    config = _auto_config(idle_confirm_observations=2)
+    worktree = tmp_path / "wt-idle-adv-finalize"
+    sess = _setup_idle_stage_complete_session(
+        home, worktree, sid="idle-adv-finalize", started_at=started_at
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="idle-adv-finalize",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="idle-adv-finalize",
+        stage=Stage.FINALIZE,
+        attempts=0,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/idle-adv-finalize"
+    )
+    monkeypatch.setattr("cw.reconcile.idle._detect_post_review_clean", lambda _s: False)
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_dirty_by_path", lambda _c, _p: False
+    )
+
+    candidates = _detect_idle_candidates(
+        state,
+        now=now,
+        native_live={"fake-short-id"},
+        config=config,
+        task_by_ticket={"idle-adv-finalize": task},
+    )
+
+    assert candidates == []
+
+
+def test_stage_complete_git_salvage_candidate_not_produced_end_to_end(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end (#1283): flag_silently_idle_daemon_sessions produces no
+    git-salvage candidate for a stage_complete session; the task advances."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(minutes=20)
+    config = _auto_config(idle_confirm_observations=2)
+    worktree = tmp_path / "wt-idle-adv-e2e"
+    sess = _setup_idle_stage_complete_session(
+        home, worktree, sid="idle-adv-e2e", started_at=started_at
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    task = TicketTask(
+        ticket_id="idle-adv-e2e",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="idle-adv-e2e",
+        stage=Stage.IMPL,
+        attempts=0,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/idle-adv-e2e"
+    )
+    monkeypatch.setattr("cw.reconcile.idle._detect_post_review_clean", lambda _s: False)
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_dirty_by_path", lambda _c, _p: False
+    )
+    monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
+
+    blocked, salvage_git = flag_silently_idle_daemon_sessions(
+        state,
+        now=now,
+        native_live={"fake-short-id"},
+        config=config,
+        task_by_ticket={"idle-adv-e2e": task},
+    )
+
+    assert salvage_git == []
+    assert blocked == []
+    task_after = next(
+        t for t in load_dev_queue().tasks if t.ticket_id == "idle-adv-e2e"
+    )
+    assert task_after.stage == Stage.REVIEW
+    assert task_after.status == QueueItemStatus.PENDING
+    assert task_after.session_id is None
+
+
 def test_detect_idle_candidates_finalize_yields_zero_candidates(
     tmp_config_dir: Path,
     tmp_path: Path,
@@ -16227,6 +16712,142 @@ class TestSalvageSkipAttentionLatch:
         reloaded = load_state()
         s = next(s for s in reloaded.sessions if s.id == "skip-sole-1")
         assert s.consecutive_salvage_skips == 1
+
+    # --- #1283: SESSION_SALVAGE_SKIPPED edge-trigger (once per parked episode) ---
+
+    def test_salvage_skipped_emits_once_per_parked_episode(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """#1283: two consecutive SKIP_PARKED ticks emit SESSION_SALVAGE_SKIPPED
+        exactly once (0->1 edge only), not once per tick."""
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_stalled_candidates,
+        )
+
+        worktree = tmp_path / "wt-sk-episode"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("sk-episode-1", worktree, started_at)
+        sess.last_result = {"paused_status": _SALVAGE_SKIP_REASON}
+        state = CwState(sessions=[sess])
+        save_state(state)
+
+        candidate = ReapCandidate(
+            session_id="sk-episode-1",
+            proposed_action=ProposedAction.SKIP_PARKED,
+            ticket_id="sk-episode-1",
+            paused_status=_SALVAGE_SKIP_REASON,
+        )
+        config = OrchestratorConfig(salvage_skip_attention_threshold=99)
+
+        _act_on_stalled_candidates(state, [candidate], now=now, config=config)
+        _act_on_stalled_candidates(state, [candidate], now=now, config=config)
+
+        s = next(s for s in load_state().sessions if s.id == "sk-episode-1")
+        assert s.consecutive_salvage_skips == 2
+
+        events = read_events(
+            consumer="test-1283-episode",
+            event_types=[OrchestratorEventType.SESSION_SALVAGE_SKIPPED],
+        )
+        assert len(events) == 1
+
+    def test_salvage_skipped_still_emits_on_first_occurrence(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """#1283 guard against over-throttling: the very first skip of a fresh
+        episode (0->1) still fires SESSION_SALVAGE_SKIPPED."""
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_stalled_candidates,
+        )
+
+        worktree = tmp_path / "wt-sk-first"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("sk-first-1", worktree, started_at)
+        sess.last_result = {"paused_status": _SALVAGE_SKIP_REASON}
+        state = CwState(sessions=[sess])
+        save_state(state)
+
+        candidate = ReapCandidate(
+            session_id="sk-first-1",
+            proposed_action=ProposedAction.SKIP_PARKED,
+            ticket_id="sk-first-1",
+            paused_status=_SALVAGE_SKIP_REASON,
+        )
+        config = OrchestratorConfig(salvage_skip_attention_threshold=99)
+
+        _act_on_stalled_candidates(state, [candidate], now=now, config=config)
+
+        s = next(s for s in load_state().sessions if s.id == "sk-first-1")
+        assert s.consecutive_salvage_skips == 1
+
+        events = read_events(
+            consumer="test-1283-first",
+            event_types=[OrchestratorEventType.SESSION_SALVAGE_SKIPPED],
+        )
+        assert len(events) == 1
+
+    def test_salvage_skipped_resumes_after_recovery_and_reflag(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """#1283: after a recovery (counter reset to 0) a re-park's first skip
+        (0->1 again) fires SESSION_SALVAGE_SKIPPED anew -- per-episode, not
+        permanent-after-first-ever."""
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_stalled_candidates,
+        )
+
+        worktree = tmp_path / "wt-sk-resume"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("sk-resume-1", worktree, started_at)
+        # Prior episode already climbed past its first skip.
+        sess.consecutive_salvage_skips = 3
+        sess.last_result = {"paused_status": _SALVAGE_SKIP_REASON}
+        state = CwState(sessions=[sess])
+        save_state(state)
+
+        reset_candidate = ReapCandidate(
+            session_id="sk-resume-1",
+            proposed_action=ProposedAction.RESET_SALVAGE_SKIP_COUNTER,
+            ticket_id="sk-resume-1",
+        )
+        skip_candidate = ReapCandidate(
+            session_id="sk-resume-1",
+            proposed_action=ProposedAction.SKIP_PARKED,
+            ticket_id="sk-resume-1",
+            paused_status=_SALVAGE_SKIP_REASON,
+        )
+        config = OrchestratorConfig(salvage_skip_attention_threshold=99)
+
+        # Recovery zeroes the latch, then a fresh park's first skip re-fires.
+        _act_on_stalled_candidates(state, [reset_candidate], now=now, config=config)
+        _act_on_stalled_candidates(state, [skip_candidate], now=now, config=config)
+
+        s = next(s for s in load_state().sessions if s.id == "sk-resume-1")
+        assert s.consecutive_salvage_skips == 1
+
+        events = read_events(
+            consumer="test-1283-resume",
+            event_types=[OrchestratorEventType.SESSION_SALVAGE_SKIPPED],
+        )
+        assert len(events) == 1
 
     # --- detect phase: RESET_SALVAGE_SKIP_COUNTER appended at all 5 exits ---
 
