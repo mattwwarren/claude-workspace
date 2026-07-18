@@ -780,7 +780,9 @@ def test_local_executor_proc_stat_unreadable_marks_session_completed(
         patch("cw.executor.aider_available", return_value=True),
         patch("cw.executor.read_process_start_time_ns", return_value=None),
     ):
-        executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+        sid = executor.spawn(
+            stage=Stage.IMPL, task=task, worktree=worktree, client=client
+        )
 
     # FakeAiderRunner spawned a sleep process; the None path kills it but
     # suppress in case it already exited.
@@ -799,11 +801,11 @@ def test_local_executor_proc_stat_unreadable_marks_session_completed(
     assert result.blocker is not None
     assert result.blocker.reason == LIVENESS_UNAVAILABLE
     # details carries the liveness detail plus a diagnostics-bundle pointer
-    # (#1239) — session id isn't captured by this test, so match the prefix.
-    assert result.blocker.details.startswith(
-        f"process {fake_runner.procs[-1].pid} start-time unavailable [diagnostics: "
+    # (#1239) — exact match, since the session id is now captured.
+    assert result.blocker.details == (
+        f"process {fake_runner.procs[-1].pid} start-time unavailable "
+        f"[diagnostics: {render_bundle_path(sid)}]"
     )
-    assert result.blocker.details.endswith("]")
 
 
 def test_local_executor_liveness_unavailable_persists_runtime_error_diagnostics(
