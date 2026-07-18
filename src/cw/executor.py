@@ -360,7 +360,7 @@ class LocalExecutor:
                     ticket_id=task.ticket_id,
                     worktree=worktree,
                     reason=LIVENESS_UNAVAILABLE,
-                    details=liveness_detail,
+                    details=append_diagnostics_pointer(liveness_detail, session_id=sid),
                 )
             else:
                 completion_result = preflight
