@@ -350,6 +350,7 @@ def _notify_needs_salvage(
             "paused_status": _NEEDS_SALVAGE_REASON,
             "breadcrumbs": breadcrumbs,
             "crashed": False,
+            "lane": session.lane,
         },
     )
     _deps.fire_push_notification(session.name, session.client)

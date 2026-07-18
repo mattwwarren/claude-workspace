@@ -566,6 +566,7 @@ def _record_pr_action_taken(
     *,
     config: OrchestratorConfig | None,
     repeat_fire_counts: dict[tuple[str, str, str], int] | None,
+    lane: str,
 ) -> None:
     """Record PR_ACTION_TAKEN, escalating once on the exact repeat-fire crossing.
 
@@ -601,6 +602,7 @@ def _record_pr_action_taken(
             _PAYLOAD_KEY_REPEAT_FIRE_WINDOW_MINUTES: (
                 config.review_recipe_repeat_fire_window_minutes
             ),
+            _PAYLOAD_KEY_LANE: lane,
         },
         correlation_id=ticket_id,
     )
@@ -699,6 +701,7 @@ def _prepare_dispatch_job(
         RECIPE_ADDRESS_REVIEW,
         config=config,
         repeat_fire_counts=repeat_fire_counts,
+        lane=task.lane,
     )
     task.address_review_fired_at = now
     return _DispatchJob(
@@ -955,6 +958,7 @@ def _prepare_auto_fix_ci_job(
         RECIPE_AUTO_FIX_CI,
         config=config,
         repeat_fire_counts=repeat_fire_counts,
+        lane=task.lane,
     )
     task.auto_fix_ci_fired_at = now
     return _RedispatchJob(
@@ -1162,6 +1166,7 @@ def _prepare_request_reviewer_job(
         RECIPE_REQUEST_REVIEWER,
         config=config,
         repeat_fire_counts=repeat_fire_counts,
+        lane=task.lane,
     )
     task.request_reviewer_fired_at = now
     return _ReviewerJob(
@@ -1374,6 +1379,7 @@ def _fire_escalate_merge_block(
         RECIPE_ESCALATE_MERGE_BLOCK,
         config=config,
         repeat_fire_counts=repeat_fire_counts,
+        lane=task.lane,
     )
     task.escalate_merge_block_fired_at = now
     return True
