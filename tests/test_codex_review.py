@@ -1209,6 +1209,26 @@ class TestRunCodexRolePersistsDiagnostics:
         assert failure is None
         assert not diagnostics_bundle_dir("sess-diag").exists()
 
+    def test_secret_shaped_stderr_is_redacted_in_persisted_bundle(
+        self, tmp_path: Path
+    ) -> None:
+        # Drives a secret-shaped string through the real production path
+        # (_run_codex_role -> _persist_codex_role_diagnostics) rather than
+        # unit-testing redact() in isolation, so a future call site that
+        # forgets to route stderr through the ExecutorFailure validator would
+        # be caught here.
+        secret = "sk-" + "a" * 40
+        runner = _SequencedRunner(
+            [CodexRunResult(returncode=1, stdout="", stderr=f"boom: {secret}")]
+        )
+        _run_one_role(runner, tmp_path)
+        path = diagnostics_bundle_dir("sess-diag") / (
+            "code-quality-reviewer-nonzero_exit.json"
+        )
+        failure = ExecutorFailure.model_validate_json(path.read_text())
+        assert secret not in failure.stderr_excerpt
+        assert "<redacted>" in failure.stderr_excerpt
+
 
 def test_run_codex_roles_scratch_dir_still_removed_after_persist(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
