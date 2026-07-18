@@ -14861,13 +14861,17 @@ def test_stalled_veto_park_proceeds_once_quiet(
     assert not any(c.proposed_action == ProposedAction.PARK_VETOED for c in candidates)
 
 
-def test_stalled_veto_does_not_apply_to_cap_exceeded_park(
+def test_stalled_veto_applies_to_cap_exceeded_park_when_transcript_fresh(
     tmp_config_dir: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """attempts >= cap park fires unconditionally even with a fresh transcript
-    — the veto is structurally unreachable for the cap-exceeded branch (#976)."""
+    """attempts >= cap with a fresh transcript -> PARK_VETOED, not
+    PARK_BLOCKED_ON_USER — the veto is now reachable from the cap-exceeded
+    branch too (#1277). Previously this branch parked unconditionally
+    because the veto was only ever consulted from the wall-clock revert
+    path, which the cap-exceeded branch always short-circuits before
+    reaching."""
     from cw.reconcile import (
         DEFAULT_STALLED_RETRY_CAP,
         ProposedAction,
@@ -14907,9 +14911,131 @@ def test_stalled_veto_does_not_apply_to_cap_exceeded_park(
         task_by_ticket={"veto-cap-1": task},
     )
 
-    assert any(
+    veto = next(
+        c for c in candidates if c.proposed_action == ProposedAction.PARK_VETOED
+    )
+    assert veto.reap_reason == ReapReason.STALLED_RETRY_CAP_PARKED
+    assert not any(
         c.proposed_action == ProposedAction.PARK_BLOCKED_ON_USER for c in candidates
     )
+
+
+def test_stalled_veto_cap_exceeded_matches_1266_regression_signature(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end (detect + act) regression guard for #1277: a cap-exceeded,
+    wall-clock-expired session with a fresh transcript must be vetoed all
+    the way through the act phase — task stays RUNNING, session stays
+    ACTIVE, and a SESSION_PARK_VETOED event is emitted with the cap-sourced
+    reap reason, not silently parked BLOCKED_ON_USER."""
+    from cw.reconcile import DEFAULT_STALLED_RETRY_CAP, HEADLESS_TIMEOUT_SECONDS
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / "wt-veto-cap-e2e"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(seconds=3655.8)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("veto-cap-e2e-1", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="veto-cap-e2e-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="veto-cap-e2e-1",
+        stage=Stage.PLAN,
+        attempts=DEFAULT_STALLED_RETRY_CAP,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    transcript = _write_idle_transcript(home, worktree)
+    stale_ts = (now - timedelta(seconds=45)).timestamp()
+    os.utime(str(transcript), (stale_ts, stale_ts))
+
+    reverted = revert_stalled_headless_sessions(state, now=now, config=_auto_config())
+
+    assert "veto-cap-e2e-1" not in reverted
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "veto-cap-e2e-1")
+    assert t.status == QueueItemStatus.RUNNING
+
+    reloaded = load_state()
+    s = next(s for s in reloaded.sessions if s.id == "veto-cap-e2e-1")
+    assert s.status == SessionStatus.ACTIVE
+
+    events = read_events(
+        consumer="test-veto-cap-e2e-1",
+        event_types=[OrchestratorEventType.SESSION_PARK_VETOED],
+    )
+    assert len(events) == 1
+    payload = events[0].payload
+    assert payload["ticket_id"] == "veto-cap-e2e-1"
+    assert payload["reason"] == "stalled_retry_cap_parked"
+
+
+def test_stalled_veto_cap_exceeded_stale_transcript_still_parks(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard: a genuinely dead cap-exceeded session (transcript
+    present but stale past the per-stage floor) must still park
+    BLOCKED_ON_USER — the new liveness check inside the cap branch must not
+    override a real timeout (#1277)."""
+    from cw.reconcile import (
+        DEFAULT_STALLED_RETRY_CAP,
+        ProposedAction,
+        _detect_stalled_candidates,
+    )
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / "wt-veto-cap-stale"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session("veto-cap-stale-1", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="veto-cap-stale-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="veto-cap-stale-1",
+        stage=Stage.PLAN,
+        attempts=DEFAULT_STALLED_RETRY_CAP,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    transcript = _write_idle_transcript(home, worktree)
+    # 40 minutes stale — past the 15-min PLAN-stage floor -> not LIVE.
+    stale_ts = (now - timedelta(minutes=40)).timestamp()
+    os.utime(str(transcript), (stale_ts, stale_ts))
+
+    candidates = _detect_stalled_candidates(
+        state,
+        now=now,
+        config=_auto_config(),
+        task_by_ticket={"veto-cap-stale-1": task},
+    )
+
+    park = next(
+        c
+        for c in candidates
+        if c.proposed_action == ProposedAction.PARK_BLOCKED_ON_USER
+    )
+    assert park.reap_reason == ReapReason.STALLED_RETRY_CAP_PARKED
     assert not any(c.proposed_action == ProposedAction.PARK_VETOED for c in candidates)
 
 
@@ -14944,6 +15070,10 @@ def test_act_on_stalled_park_vetoed_emits_event_no_mutation(
         client="client-a",
         stage=Stage.IMPL,
         stale_minutes=4.2,
+        # Why: stamp explicitly (#1277) so this exercises the post-fix
+        # "read from candidate.reap_reason" emission path, not the
+        # defensive None-fallback that now exists alongside it.
+        reap_reason=ReapReason.WALL_CLOCK_BUDGET,
     )
 
     _act_on_stalled_candidates(state, [candidate], now=now)
