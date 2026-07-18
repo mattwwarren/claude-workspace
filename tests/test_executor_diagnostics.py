@@ -317,6 +317,54 @@ def test_cleanup_expired_diagnostics_no_sessions_dir_is_noop(
     assert cleanup_expired_diagnostics(retention_hours=24) == 0
 
 
+def test_cleanup_expired_diagnostics_session_without_bundle_is_skipped(
+    tmp_config_dir: Path,
+) -> None:
+    from cw.config import state_dir
+
+    # A session dir carrying no diagnostics/ subdir is skipped (not a bundle).
+    (state_dir() / "sessions" / "plain-sess").mkdir(parents=True)
+    fresh = _seed_bundle("has-bundle")
+    assert cleanup_expired_diagnostics(retention_hours=24) == 0
+    assert fresh.exists()
+
+
+def test_cleanup_expired_diagnostics_swallows_sessions_root_iterdir_error(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cw.config import state_dir
+
+    _seed_bundle("any")
+    sessions_root = state_dir() / "sessions"
+    real_iterdir = type(sessions_root).iterdir
+
+    def _iterdir(self: Path):  # type: ignore[no-untyped-def]
+        if self == sessions_root:
+            msg = "listing denied"
+            raise OSError(msg)
+        return real_iterdir(self)
+
+    monkeypatch.setattr("pathlib.Path.iterdir", _iterdir)
+    assert cleanup_expired_diagnostics(retention_hours=24) == 0
+
+
+def test_cleanup_expired_diagnostics_swallows_bundle_iterdir_error(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = _seed_bundle("unreadable")
+    real_iterdir = type(bundle).iterdir
+
+    def _iterdir(self: Path):  # type: ignore[no-untyped-def]
+        if self == bundle:
+            msg = "bundle unreadable"
+            raise OSError(msg)
+        return real_iterdir(self)
+
+    monkeypatch.setattr("pathlib.Path.iterdir", _iterdir)
+    assert cleanup_expired_diagnostics(retention_hours=24) == 0
+    assert bundle.exists()
+
+
 def test_persist_uses_shutil_copy2(tmp_config_dir: Path) -> None:
     """Guard that shutil is imported at module scope (monkeypatch target)."""
     assert hasattr(shutil, "copy2")
