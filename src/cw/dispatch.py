@@ -965,9 +965,11 @@ _codex_capability_cache: list[tuple[CodexCapabilityDiagnosis, datetime]] = []
 
 # Consecutive-park counter backing _CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD
 # (#1238). Same mutable-single-element-list-as-slot idiom as the cache above.
-# Incremented on every park; never incremented once the probe reports capable
-# again (the gate returns None before reaching the counter in that case), so
-# a self-healing condition naturally stops advancing it.
+# Incremented on every park; reset to 0 as soon as the probe reports capable
+# again (see _codex_capability_gate), so this genuinely tracks a *consecutive*
+# streak of parks, not a lifetime total -- a long-lived dispatch-loop process
+# that recovers between incidents must not have old, unrelated parks silently
+# combine with a later isolated one to trip the circuit breaker.
 _codex_capability_park_count: list[int] = [0]
 
 
@@ -1035,6 +1037,13 @@ def _codex_capability_gate(
         return None
     probe = _cached_codex_capability_diagnosis()
     if probe.diagnosis is None:
+        # Capable again -- clear the streak so a fully-recovered condition
+        # doesn't leave stale park credit sitting on the counter (#1238
+        # review: without this, the counter is a lifetime total, not a
+        # consecutive-parks count, and a long-lived dispatch-loop process
+        # would eventually treat every future isolated park as
+        # breaker-worthy once 3 total parks had *ever* occurred).
+        _codex_capability_park_count[0] = 0
         return None
     _log.warning(
         "dispatch: codex capability gate parked %s/%s — %s",

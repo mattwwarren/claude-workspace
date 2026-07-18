@@ -543,3 +543,15 @@ class TestCodexCapabilityDiagnosis:
         ):
             codex_capability_diagnosis(timeout_seconds=3)
         assert mock_run.call_args.kwargs["timeout"] == 3
+
+    def test_default_timeout_passed_to_subprocess_run(self) -> None:
+        """`cw doctor`'s one-shot call site relies on the 10s default."""
+        with (
+            patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+            patch(
+                "cw.executor.subprocess.run",
+                return_value=_mk_codex_proc("codex-cli 0.136.0\n"),
+            ) as mock_run,
+        ):
+            codex_capability_diagnosis()
+        assert mock_run.call_args.kwargs["timeout"] == 10

@@ -2059,6 +2059,69 @@ class TestDispatchCodexCapabilityGate:
             "reaching the threshold must engage the circuit-breaker backstop"
         )
 
+    def test_recovery_between_parks_resets_the_streak(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A fully-recovered gap between parks must not carry stale streak credit.
+
+        Regression guard for a #1238 review finding: an earlier version of the
+        park counter never reset on a capable probe result, so it behaved as a
+        lifetime total rather than a consecutive-parks count — meaning a
+        long-lived dispatch-loop process that had ever accumulated
+        _CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD parks (however isolated, however
+        long ago, however fully recovered in between) would trip spawn_error on
+        every future park forever after. Drives: park, park, capable, park — the
+        final park is isolated (only one consecutive park since the last capable
+        result) and must NOT trip spawn_error, even though 3 parks total have
+        occurred in this test's lifetime.
+
+        Clears only the TTL cache (not the park counter) between steps, via
+        direct access to the module-level slot — ``_reset_codex_capability_cache``
+        clears both, which would trivially pass this test regardless of whether
+        the gate's own capable-branch reset logic (under test here) is correct.
+        """
+        import cw.dispatch as dispatch_module
+        from cw.executor import CODEX_VERSION_UNKNOWN, CodexCapabilityDiagnosis
+
+        monkeypatch.setattr(
+            "cw.dispatch.resolve_executor_config",
+            lambda *_a, **_k: StageExecutorConfig(backend=CODEX_BACKEND),
+        )
+
+        incapable = CodexCapabilityDiagnosis(
+            CODEX_VERSION_UNKNOWN, "could not parse version: junk"
+        )
+        capable = CodexCapabilityDiagnosis(None, "0.144.5")
+
+        def _probe_result(idx: int, diagnosis: CodexCapabilityDiagnosis) -> object:
+            dispatch_module._codex_capability_cache.clear()
+            monkeypatch.setattr(
+                "cw.dispatch.codex_capability_diagnosis",
+                lambda **_kwargs: diagnosis,
+            )
+            add_ticket(TicketTask(ticket_id=f"GEN-CDX7-{idx}", client="test-client"))
+            task = load_dev_queue().tasks[-1]
+            return _codex_capability_gate(task, sample_client_config)
+
+        first = _probe_result(0, incapable)
+        second = _probe_result(1, incapable)
+        recovered = _probe_result(2, capable)
+        third = _probe_result(3, incapable)
+
+        assert first is not None
+        assert not first.spawn_error
+        assert second is not None
+        assert not second.spawn_error
+        assert recovered is None, "a capable probe result must be a no-op gate"
+        assert third is not None
+        assert not third.spawn_error, (
+            "an isolated park after a full recovery must not inherit stale"
+            " streak credit from before the recovery"
+        )
+
 
 # ---------------------------------------------------------------------------
 # TestDispatchTickFreshnessGate
