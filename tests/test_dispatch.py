@@ -40,6 +40,7 @@ from cw.dispatch import (
     FRESHNESS_NON_MAIN_HEAD,
     DispatchTickResult,
     _accumulate_task_cost,
+    _reset_codex_capability_cache,
     _resolve_dispatch_skip_reason,
     consume_completed_sessions,
     dispatch_tick,
@@ -1809,8 +1810,15 @@ class TestDispatchCodexCapabilityGate:
 
     Monkeypatches the imported ``cw.dispatch.codex_capability_diagnosis`` name
     (not shutil/subprocess) — the probe mechanics are covered in
-    test_codex_executor.py.
+    test_codex_executor.py. The gate calls the probe through an in-process TTL
+    cache (``_cached_codex_capability_diagnosis``); reset it before each test
+    so one test's monkeypatched return value can't leak into the next via a
+    stale cache entry.
     """
+
+    @pytest.fixture(autouse=True)
+    def _reset_capability_cache(self) -> None:
+        _reset_codex_capability_cache()
 
     def test_codex_not_found_parks_blocked_on_user(
         self,

@@ -71,15 +71,16 @@ jobs:
           fi
 
       - name: Test (codex live contract)
+        id: codex-contract-test
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_CI_KEY }}
           INTEGRATION_CODEX_LIVE: "1"
         run: uv run pytest tests/test_codex_contract_live.py -v --tb=short -m integration
 
       - name: Record observed missing-output failure branch (job summary)
-        if: always()
+        if: always() && steps.codex-contract-test.outcome != 'skipped'
         run: |
-          echo "### Codex missing-output failure branch (R13)" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Codex missing-output failure branch" >> "$GITHUB_STEP_SUMMARY"
           echo "See the 'codex_contract_probe missing_output reason=' log line in the" \
             "test output above for the reason code this codex version returned when" \
             "the -o target was unwritable (CLI drift signal)." >> "$GITHUB_STEP_SUMMARY"

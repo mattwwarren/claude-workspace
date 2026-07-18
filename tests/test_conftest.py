@@ -1,7 +1,7 @@
 """Tests for the shared ``make_git_repo`` fixture factory (#1238).
 
-The ``base=`` keyword is additive: the live codex contract suite (R12/R14)
-must build fixture repos under a home-tree base dir because snap-confined
+The ``base=`` keyword is additive: the live codex contract suite must build
+fixture repos under a home-tree base dir because snap-confined
 codex cannot reach ``/tmp``. Every pre-existing positional caller
 (``make_git_repo("name")``) must keep its exact ``tmp_path``-relative
 behavior.

@@ -1,4 +1,4 @@
-"""Secrets-denylist guard for the live codex contract suite (#1238, R10).
+"""Secrets-denylist guard for the live codex contract suite (#1238).
 
 This module carries NO ``pytest.mark.integration`` marker and NO skip gate, so
 it is always collected under the default ``-m 'not integration'`` CI step. The

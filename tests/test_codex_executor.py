@@ -443,7 +443,7 @@ def _mk_codex_proc(
 
 
 class TestCodexCapabilityDiagnosis:
-    """Direct tests for the shared codex capability probe (#1238, R15).
+    """Direct tests for the shared codex capability probe (#1238).
 
     ``shutil.which`` is patched via this file's established
     ``patch("cw.executor.shutil.which", ...)`` idiom; the ``codex --version``

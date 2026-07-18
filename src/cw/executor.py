@@ -65,8 +65,9 @@ if TYPE_CHECKING:
 CODEX_NOT_FOUND = "codex_not_found"
 CODEX_REVIEW_ONLY = "codex_review_only"
 
-# Capability-probe diagnosis (distinct from the R6 per-role review vocabulary):
-# the binary is present but `codex --version` could not be confirmed.
+# Capability-probe diagnosis (distinct from codex_review.py's per-role review
+# failure-reason vocabulary): the binary is present but `codex --version`
+# could not be confirmed.
 CODEX_VERSION_UNKNOWN = "codex_version_unknown"
 
 # Leading numeric components (major.minor.patch) required to accept a codex
@@ -75,7 +76,7 @@ _CODEX_VERSION_PARTS = 3
 
 
 class CodexCapabilityDiagnosis(NamedTuple):
-    """Result of the shared codex capability probe (#1238, R15).
+    """Result of the shared codex capability probe (#1238).
 
     ``diagnosis`` is ``None`` when codex is capable (binary present and
     ``codex --version`` parsed), ``CODEX_NOT_FOUND`` when the binary is absent,
@@ -108,8 +109,9 @@ def codex_capability_diagnosis() -> CodexCapabilityDiagnosis:
     Mirrors ``doctor._check_claude_version``'s subprocess/timeout/parse shape as
     a single reusable helper. No version floor is enforced: capability requires
     only binary presence plus a successfully-parsed ``--version`` string. This
-    is the single home of the probe logic (R15) — ``doctor._check_codex_capability``
-    and dispatch's pre-spawn capability gate are thin call sites over it.
+    is the single home of the probe logic — ``doctor._check_codex_capability``
+    and dispatch's pre-spawn capability gate are thin call sites over it, so the
+    subprocess/parse logic isn't duplicated across two already-oversized modules.
     """
     if shutil.which("codex") is None:
         return CodexCapabilityDiagnosis(CODEX_NOT_FOUND, "codex binary not found")

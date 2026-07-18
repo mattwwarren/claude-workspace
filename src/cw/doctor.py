@@ -1723,14 +1723,15 @@ def _check_claude_version() -> CheckResult:
 
 
 def _check_codex_capability() -> CheckResult:
-    """Report codex CLI capability via the shared probe (#1238, R15).
+    """Report codex CLI capability via the shared probe (#1238).
 
     Thin mapping over ``cw.executor.codex_capability_diagnosis`` — no subprocess
     logic here. Binary absent → FAIL with an install hint; present but
-    ``--version`` unconfirmed → WARN (informational, mirrors
-    ``_check_claude_version``'s stale-but-present handling); capable → OK with
-    the version line as the diagnostics record (R9a: the ``detail`` field itself
-    is the persisted diagnostic).
+    ``--version`` unconfirmed → WARN with a remediation hint (this diagnosis
+    also drives dispatch's pre-spawn capability gate to park codex-backed
+    tasks, so the WARN needs an actionable next step, not just the raw
+    failure detail); capable → OK with the version line as the diagnostics
+    record (the ``detail`` field itself is the persisted diagnostic).
     """
     probe = codex_capability_diagnosis()
     if probe.diagnosis == CODEX_NOT_FOUND:
@@ -1740,7 +1741,13 @@ def _check_codex_capability() -> CheckResult:
             detail=f"{probe.detail} — install via npm install -g @openai/codex",
         )
     if probe.diagnosis == CODEX_VERSION_UNKNOWN:
-        return CheckResult("codex-capability", ok=True, warn=True, detail=probe.detail)
+        return CheckResult(
+            "codex-capability",
+            ok=True,
+            warn=True,
+            detail=f"{probe.detail} — re-run `codex --version` manually to diagnose"
+            " (PATH, permissions, network)",
+        )
     return CheckResult("codex-capability", ok=True, warn=False, detail=probe.detail)
 
 

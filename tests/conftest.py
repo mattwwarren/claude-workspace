@@ -511,6 +511,16 @@ def capture_events(
     return _factory
 
 
+def _clean_git_env() -> dict[str, str]:
+    """``os.environ`` with ``GIT_*`` vars stripped.
+
+    Shared by ``make_git_repo`` and the live codex contract suite's own
+    ``git`` helper (``tests/test_codex_contract_live.py``) so a nested git
+    invocation never inherits a wrapping git call's env (e.g. ``GIT_DIR``).
+    """
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
 @pytest.fixture
 def make_git_repo(tmp_path: Path) -> Callable[..., Path]:
     """Factory fixture to create git repos in tmp_path.
@@ -530,7 +540,7 @@ def make_git_repo(tmp_path: Path) -> Callable[..., Path]:
     def _make(name: str, *, base: Path | None = None) -> Path:
         repo = (base if base is not None else tmp_path) / name
         repo.mkdir(parents=True, exist_ok=True)
-        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        clean_env = _clean_git_env()
 
         def _git(*args: str) -> None:
             subprocess.run(
