@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from cw.events import OrchestratorEventType, read_events
+from cw.events import read_events
+from cw.models import OrchestratorEventType
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile.dispositions import (
     build_salvage_completion_payload,
@@ -62,9 +63,7 @@ def test_build_salvage_completion_payload_is_pure(
         )
         raise AssertionError(msg)
 
-    monkeypatch.setattr(
-        "cw.reconcile.dispositions.record_event", _boom_record_event
-    )
+    monkeypatch.setattr("cw.reconcile.dispositions.record_event", _boom_record_event)
     monkeypatch.setattr(
         "cw.reconcile._deps.get_native_daemon_client", _boom_get_native_daemon_client
     )
@@ -81,9 +80,7 @@ def test_emit_routed_sentinel_completion_emits_session_completed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     daemon = FakeNativeDaemonClient()
-    monkeypatch.setattr(
-        "cw.reconcile._deps.get_native_daemon_client", lambda: daemon
-    )
+    monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", lambda: daemon)
     session = _make_daemon_session(claude_session_id="csid-2", surface_ref="ref-2")
 
     emit_routed_sentinel_completion(session, ticket_id="TKT-2", status="stage_complete")
@@ -110,9 +107,7 @@ def test_emit_routed_sentinel_completion_stops_daemon_when_surface_ref_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     daemon = FakeNativeDaemonClient()
-    monkeypatch.setattr(
-        "cw.reconcile._deps.get_native_daemon_client", lambda: daemon
-    )
+    monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", lambda: daemon)
     session = _make_daemon_session(surface_ref="ref-3")
 
     emit_routed_sentinel_completion(session, ticket_id="TKT-3", status="shipped")
@@ -124,9 +119,7 @@ def test_emit_routed_sentinel_completion_skips_stop_when_surface_ref_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     daemon = FakeNativeDaemonClient()
-    monkeypatch.setattr(
-        "cw.reconcile._deps.get_native_daemon_client", lambda: daemon
-    )
+    monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", lambda: daemon)
     session = _make_daemon_session().model_copy(update={"surface_ref": None})
 
     emit_routed_sentinel_completion(session, ticket_id="TKT-4", status="shipped")
@@ -151,7 +144,7 @@ def test_emit_routed_sentinel_completion_emits_before_stop(
     )
     monkeypatch.setattr(
         "cw.reconcile._deps.get_native_daemon_client",
-        lambda: _RecordingDaemonClient(),
+        _RecordingDaemonClient,
     )
     session = _make_daemon_session(surface_ref="ref-5")
 

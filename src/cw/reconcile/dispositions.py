@@ -71,7 +71,9 @@ def emit_routed_sentinel_completion(
     those same call sites (phantom.py's analogous call does pass one; that
     divergence is deliberate and out of scope here — see GitHub #1306).
     """
-    payload = build_salvage_completion_payload(session, ticket_id=ticket_id, status=status)
+    payload = build_salvage_completion_payload(
+        session, ticket_id=ticket_id, status=status
+    )
     record_event(OrchestratorEventType.SESSION_COMPLETED, payload)
     if session.surface_ref is not None:
         _deps.get_native_daemon_client().stop(session.surface_ref)

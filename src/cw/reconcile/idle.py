@@ -63,6 +63,10 @@ from cw.reconcile._shared import (
     resolve_reap_policy,
     ticket_id_for_session,
 )
+from cw.reconcile.dispositions import (
+    build_salvage_completion_payload,
+    emit_routed_sentinel_completion,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -1077,16 +1081,11 @@ def _emit_idle_completion_events(
         session = session_by_id[candidate.session_id]
         if candidate.salvage_result is None:
             continue  # Invariant: SALVAGE_COMPLETION always has salvage_result
-        completed_payload: dict[str, object] = {
-            "session_id": session.id,
-            "session_name": session.name,
-            "client": session.client,
-            "ticket_id": candidate.ticket_id,
-            "claude_session_id": session.claude_session_id,
-            "crashed": False,
-            "salvaged": True,
-            "status": candidate.salvage_result.status,
-        }
+        completed_payload = build_salvage_completion_payload(
+            session,
+            ticket_id=candidate.ticket_id,
+            status=candidate.salvage_result.status,
+        )
         record_event(OrchestratorEventType.SESSION_COMPLETED, completed_payload)
         if session.surface_ref is not None:
             _deps.get_native_daemon_client().stop(session.surface_ref)
@@ -1095,19 +1094,11 @@ def _emit_idle_completion_events(
         if candidate.routed_sentinel is None:
             continue
         session = session_by_id[candidate.session_id]
-        routed_payload: dict[str, object] = {
-            "session_id": session.id,
-            "session_name": session.name,
-            "client": session.client,
-            "ticket_id": candidate.ticket_id,
-            "claude_session_id": session.claude_session_id,
-            "crashed": False,
-            "salvaged": True,
-            "status": candidate.routed_sentinel.status,
-        }
-        record_event(OrchestratorEventType.SESSION_COMPLETED, routed_payload)
-        if session.surface_ref is not None:
-            _deps.get_native_daemon_client().stop(session.surface_ref)
+        emit_routed_sentinel_completion(
+            session,
+            ticket_id=candidate.ticket_id,
+            status=candidate.routed_sentinel.status,
+        )
 
 
 def flag_silently_idle_daemon_sessions(
