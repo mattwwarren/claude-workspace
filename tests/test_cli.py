@@ -5848,8 +5848,8 @@ class TestDevQueueRunQuiet:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """With --quiet, run_dispatch_loop is called with emit=None."""
-        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
+        from cw.cli.dev_queue import run as cli_module
 
         captured_emit: list[object] = []
 
@@ -5877,8 +5877,8 @@ class TestDevQueueRunQuiet:
 
     def test_verbose_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Without --quiet, run_dispatch_loop is called with a non-None emit."""
-        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
+        from cw.cli.dev_queue import run as cli_module
 
         captured_emit: list[object] = []
 
@@ -5907,8 +5907,8 @@ class TestDevQueueRunQuiet:
 
     def test_auto_ff_on_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Bare invocation passes auto_ff=True to run_dispatch_loop."""
-        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
+        from cw.cli.dev_queue import run as cli_module
 
         captured_auto_ff: list[bool] = []
 
@@ -5936,8 +5936,8 @@ class TestDevQueueRunQuiet:
 
     def test_no_auto_ff_flag_disables(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """--no-auto-ff passes auto_ff=False to run_dispatch_loop."""
-        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
+        from cw.cli.dev_queue import run as cli_module
 
         captured_auto_ff: list[bool] = []
 
@@ -5976,8 +5976,8 @@ class TestDevQueueRunClientFilter:
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """--client X passes client='X' to run_dispatch_loop."""
-        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
+        from cw.cli.dev_queue import run as cli_module
 
         _write_clients_yaml_for_test(tmp_config_dir, [("my-client", str(tmp_path))])
 
@@ -6011,8 +6011,8 @@ class TestDevQueueRunClientFilter:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Omitting --client passes client=None to run_dispatch_loop."""
-        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
+        from cw.cli.dev_queue import run as cli_module
 
         captured_client: list[str | None] = []
 
@@ -6075,8 +6075,8 @@ class TestDevQueueServe:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Basic invocation calls run_dispatch_serve."""
-        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
+        from cw.cli.dev_queue import run as cli_module
 
         captured, fake_fn = self._fake_serve()
         monkeypatch.setattr(cli_module, "run_dispatch_serve", fake_fn)
@@ -6088,8 +6088,8 @@ class TestDevQueueServe:
 
     def test_default_flags(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Default flag values: max_parallel=None, use_plan=False, max_restarts=-1."""
-        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
+        from cw.cli.dev_queue import run as cli_module
 
         captured, fake_fn = self._fake_serve()
         monkeypatch.setattr(cli_module, "run_dispatch_serve", fake_fn)
@@ -6106,8 +6106,8 @@ class TestDevQueueServe:
 
     def test_quiet_flag_passes_emit_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """--quiet passes emit=None to run_dispatch_serve."""
-        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
+        from cw.cli.dev_queue import run as cli_module
 
         captured, fake_fn = self._fake_serve()
         monkeypatch.setattr(cli_module, "run_dispatch_serve", fake_fn)
@@ -6119,8 +6119,8 @@ class TestDevQueueServe:
 
     def test_verbose_emit_is_callable(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Without --quiet, emit is a callable."""
-        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
+        from cw.cli.dev_queue import run as cli_module
 
         captured, fake_fn = self._fake_serve()
         monkeypatch.setattr(cli_module, "run_dispatch_serve", fake_fn)
@@ -6132,8 +6132,8 @@ class TestDevQueueServe:
 
     def test_max_restarts_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """--max-restarts N is forwarded to run_dispatch_serve."""
-        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
+        from cw.cli.dev_queue import run as cli_module
 
         captured, fake_fn = self._fake_serve()
         monkeypatch.setattr(cli_module, "run_dispatch_serve", fake_fn)
@@ -6145,8 +6145,8 @@ class TestDevQueueServe:
 
     def test_use_plan_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """--use-plan is forwarded to run_dispatch_serve."""
-        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
+        from cw.cli.dev_queue import run as cli_module
 
         captured, fake_fn = self._fake_serve()
         monkeypatch.setattr(cli_module, "run_dispatch_serve", fake_fn)
@@ -6158,8 +6158,8 @@ class TestDevQueueServe:
 
     def test_no_auto_ff_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """--no-auto-ff passes auto_ff=False."""
-        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
+        from cw.cli.dev_queue import run as cli_module
 
         captured, fake_fn = self._fake_serve()
         monkeypatch.setattr(cli_module, "run_dispatch_serve", fake_fn)
@@ -6176,8 +6176,8 @@ class TestDevQueueServe:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """--client is validated; unknown client produces non-zero exit."""
-        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
+        from cw.cli.dev_queue import run as cli_module
 
         _write_clients_yaml_for_test(tmp_config_dir, [("my-client", str(tmp_path))])
 
@@ -6198,8 +6198,8 @@ class TestDevQueueServe:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """--client MY-CLIENT is forwarded to run_dispatch_serve."""
-        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
+        from cw.cli.dev_queue import run as cli_module
 
         _write_clients_yaml_for_test(tmp_config_dir, [("my-client", str(tmp_path))])
 
@@ -6213,8 +6213,8 @@ class TestDevQueueServe:
 
     def test_parent_flag_forwarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """--parent is forwarded to run_dispatch_serve."""
-        from cw.cli.dev_queue import run as cli_module
         from cw.cli import main
+        from cw.cli.dev_queue import run as cli_module
 
         captured, fake_fn = self._fake_serve()
         monkeypatch.setattr(cli_module, "run_dispatch_serve", fake_fn)
@@ -7750,7 +7750,8 @@ class TestDevQueueWaitSentinelAware:
         # Strategy: mock _transcript_age_seconds to return a large value directly,
         # and mock _parse_sentinel_from_transcript to return None.
         monkeypatch.setattr(
-            "cw.cli.dev_queue.wait._parse_sentinel_from_transcript", lambda *_a, **_kw: None
+            "cw.cli.dev_queue.wait._parse_sentinel_from_transcript",
+            lambda *_a, **_kw: None,
         )
         monkeypatch.setattr(
             "cw.cli.dev_queue.wait._transcript_age_seconds",
@@ -7793,7 +7794,8 @@ class TestDevQueueWaitSentinelAware:
         # monotonic: first poll → 0.0; second call (deadline check) → 9999.0 (expired).
         monotonic_calls = iter([0.0, 9999.0])
         monkeypatch.setattr(
-            "cw.cli.dev_queue.wait.time.monotonic", lambda: next(monotonic_calls, 9999.0)
+            "cw.cli.dev_queue.wait.time.monotonic",
+            lambda: next(monotonic_calls, 9999.0),
         )
         monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
 
@@ -7860,7 +7862,8 @@ class TestDevQueueWaitSentinelAware:
 
         # No sentinel on the first poll (transcript hasn't finished writing yet).
         monkeypatch.setattr(
-            "cw.cli.dev_queue.wait._parse_sentinel_from_transcript", lambda *_a, **_kw: None
+            "cw.cli.dev_queue.wait._parse_sentinel_from_transcript",
+            lambda *_a, **_kw: None,
         )
         # Fresh transcript → not stale → normal ATTENTION predicate won't fire.
         monkeypatch.setattr(
@@ -7884,7 +7887,8 @@ class TestDevQueueWaitSentinelAware:
         #             _handle_reaped_mid_wait raises before this is needed).
         monotonic_calls = iter([0.0, 0.0, 9999.0])
         monkeypatch.setattr(
-            "cw.cli.dev_queue.wait.time.monotonic", lambda: next(monotonic_calls, 9999.0)
+            "cw.cli.dev_queue.wait.time.monotonic",
+            lambda: next(monotonic_calls, 9999.0),
         )
 
         runner = CliRunner()
@@ -8014,7 +8018,8 @@ class TestDevQueueWaitSentinelAware:
         _save_state(CwState(sessions=[session]))
 
         monkeypatch.setattr(
-            "cw.cli.dev_queue.wait._parse_sentinel_from_transcript", lambda *_a, **_kw: None
+            "cw.cli.dev_queue.wait._parse_sentinel_from_transcript",
+            lambda *_a, **_kw: None,
         )
         monkeypatch.setattr(
             "cw.cli.dev_queue.wait._transcript_age_seconds", lambda *_a, **_kw: 99999.0
@@ -8058,7 +8063,8 @@ class TestDevQueueWaitSentinelAware:
         _save_state(CwState(sessions=[session]))
 
         monkeypatch.setattr(
-            "cw.cli.dev_queue.wait._parse_sentinel_from_transcript", lambda *_a, **_kw: None
+            "cw.cli.dev_queue.wait._parse_sentinel_from_transcript",
+            lambda *_a, **_kw: None,
         )
         # Fresh transcript (not stale) → no ATTENTION.
         monkeypatch.setattr(
