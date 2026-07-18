@@ -10985,6 +10985,324 @@ class TestSalvageCommittedNoPrSessions:
         assert lr.get("paused_status") == _NEEDS_SALVAGE_REASON
         assert s.status == SessionStatus.COMPLETED
 
+    def test_low_path_usage_limit_true_clean_worktree_routes_to_timed_out_cutoff(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """LOW path + usage-limit cutoff detected → TIMED_OUT/USAGE_LIMIT_CUTOFF,
+        NOT needs_salvage/CRASHED; task stays RUNNING (no BLOCKED_ON_USER); no
+        SESSION_NEEDS_ATTENTION false alarm (#1336)."""
+        worktree = tmp_path / "wt-ul-clean"
+        worktree.mkdir(parents=True)
+        ticket_id = "TKT-UL-CLEAN"
+        sess = _mk_live_daemon_session_with_worktree(
+            "sess-ul-clean", worktree, ticket_id
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="sess-ul-clean",
+                    )
+                ]
+            )
+        )
+        # No stage event written → post_review_clean=False (LOW path)
+
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+        monkeypatch.setattr(
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+        )
+        monkeypatch.setattr("cw.reconcile._shared.detect_usage_limit", lambda _s: True)
+        mock_daemon = MagicMock()
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client",
+            lambda: mock_daemon,
+        )
+
+        candidates: list[tuple[str, str | None, str, str, bool]] = [
+            ("sess-ul-clean", ticket_id, "dev/ul-clean-branch", str(worktree), False)
+        ]
+        completed = salvage_committed_no_pr_sessions(candidates)
+
+        assert completed == []
+
+        reloaded = load_state()
+        s = next(s for s in reloaded.sessions if s.id == "sess-ul-clean")
+        assert s.status == SessionStatus.TIMED_OUT
+        assert s.completed_reason == CompletionReason.TIMED_OUT
+        assert s.reap_reason == ReapReason.USAGE_LIMIT_CUTOFF
+        lr = s.last_result or {}
+        assert lr.get("paused_status") != _NEEDS_SALVAGE_REASON
+
+        # Task must NOT be routed to BLOCKED_ON_USER — stays RUNNING for the
+        # tasks.py:revert_timed_out_tasks backstop to pick up next tick.
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.RUNNING
+
+        # No SESSION_NEEDS_ATTENTION false alarm for needs_salvage.
+        events = read_events(
+            consumer="test-ul-clean-attn",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        attn_events = [
+            e for e in events if e.payload.get("paused_status") == _NEEDS_SALVAGE_REASON
+        ]
+        assert attn_events == []
+
+        # Daemon surface cleanup still happens on both branches.
+        mock_daemon.stop.assert_called_once_with("live-ref")
+
+    def test_low_path_usage_limit_false_keeps_needs_salvage_disposition(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Explicit-mock companion to test_low_path_flags_needs_salvage: with
+        detect_usage_limit patched to return False, behavior is unchanged from
+        the pre-#1336 needs_salvage disposition."""
+        worktree = tmp_path / "wt-ul-false"
+        worktree.mkdir(parents=True)
+        ticket_id = "TKT-UL-FALSE"
+        sess = _mk_live_daemon_session_with_worktree(
+            "sess-ul-false", worktree, ticket_id
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="sess-ul-false",
+                    )
+                ]
+            )
+        )
+        # No stage event written → post_review_clean=False
+
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+        monkeypatch.setattr(
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+        )
+        monkeypatch.setattr("cw.reconcile._shared.detect_usage_limit", lambda _s: False)
+        monkeypatch.setattr(
+            "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
+        )
+        monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
+
+        candidates: list[tuple[str, str | None, str, str, bool]] = [
+            ("sess-ul-false", ticket_id, "dev/ul-false-branch", str(worktree), False)
+        ]
+        completed = salvage_committed_no_pr_sessions(candidates)
+
+        assert completed == []
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+
+        events = read_events(
+            consumer="test-ul-false-attn",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        attn_events = [
+            e for e in events if e.payload.get("paused_status") == _NEEDS_SALVAGE_REASON
+        ]
+        assert len(attn_events) == 1
+
+        reloaded = load_state()
+        s = next(s for s in reloaded.sessions if s.id == "sess-ul-false")
+        lr = s.last_result or {}
+        assert lr.get("paused_status") == _NEEDS_SALVAGE_REASON
+        assert s.reap_reason == ReapReason.SALVAGE_PARKED
+        assert s.status == SessionStatus.COMPLETED
+        assert s.completed_reason == CompletionReason.CRASHED
+
+    def test_low_path_usage_limit_true_dirty_worktree_still_parks_via_backstop(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Usage-limit cutoff stamps TIMED_OUT/USAGE_LIMIT_CUTOFF, but a
+        dirty worktree still routes the task to BLOCKED_ON_USER via the
+        tasks.py:revert_timed_out_tasks backstop — the reap_reason stamped by
+        salvage.py survives untouched (#1336)."""
+        worktree = tmp_path / "wt-ul-dirty"
+        worktree.mkdir(parents=True)
+        ticket_id = "TKT-UL-DIRTY"
+        sess = _mk_live_daemon_session_with_worktree(
+            "sess-ul-dirty", worktree, ticket_id
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="sess-ul-dirty",
+                    )
+                ]
+            )
+        )
+
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+        monkeypatch.setattr(
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+        )
+        monkeypatch.setattr("cw.reconcile._shared.detect_usage_limit", lambda _s: True)
+        monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
+
+        candidates: list[tuple[str, str | None, str, str, bool]] = [
+            ("sess-ul-dirty", ticket_id, "dev/ul-dirty-branch", str(worktree), False)
+        ]
+        salvage_committed_no_pr_sessions(candidates)
+
+        reloaded = load_state()
+        s = next(s for s in reloaded.sessions if s.id == "sess-ul-dirty")
+        assert s.status == SessionStatus.TIMED_OUT
+        assert s.reap_reason == ReapReason.USAGE_LIMIT_CUTOFF
+
+        # Now simulate the backstop tick observing a dirty worktree.
+        monkeypatch.setattr(
+            "cw.reconcile._deps.checked_out_branch",
+            lambda _p: "dev/ul-dirty-branch",
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._shared.get_client",
+            lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: True
+        )
+
+        reverted = revert_timed_out_tasks()
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert ticket_id not in reverted
+
+        events = read_events(
+            consumer="test-ul-dirty-attn",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        dirty_events = [
+            e
+            for e in events
+            if e.payload.get("paused_status") == _DIRTY_WORKTREE_REASON
+        ]
+        assert len(dirty_events) == 1
+        needs_salvage_events = [
+            e for e in events if e.payload.get("paused_status") == _NEEDS_SALVAGE_REASON
+        ]
+        assert needs_salvage_events == []
+
+        reloaded2 = load_state()
+        s2 = next(s for s in reloaded2.sessions if s.id == "sess-ul-dirty")
+        assert s2.reap_reason == ReapReason.USAGE_LIMIT_CUTOFF
+
+    def test_revert_timed_out_preserves_worktree_for_usage_limit_salvage_origin(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Mandatory regression (#1336): a usage-limit-cutoff-stamped session
+        must NOT have its worktree deleted by the revert_timed_out_tasks
+        backstop, and a clean worktree must still auto-retry (RUNNING→PENDING)."""
+        worktree = tmp_path / "wt-ul-preserve"
+        worktree.mkdir(parents=True)
+        (worktree / "committed.txt").write_text("work")
+        ticket_id = "TKT-UL-PRESERVE"
+        sess = _mk_live_daemon_session_with_worktree(
+            "sess-ul-preserve", worktree, ticket_id
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="sess-ul-preserve",
+                    )
+                ]
+            )
+        )
+
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+        monkeypatch.setattr(
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+        )
+        monkeypatch.setattr("cw.reconcile._shared.detect_usage_limit", lambda _s: True)
+        monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
+
+        candidates: list[tuple[str, str | None, str, str, bool]] = [
+            (
+                "sess-ul-preserve",
+                ticket_id,
+                "dev/ul-preserve-branch",
+                str(worktree),
+                False,
+            )
+        ]
+        salvage_committed_no_pr_sessions(candidates)
+
+        reloaded = load_state()
+        s = next(s for s in reloaded.sessions if s.id == "sess-ul-preserve")
+        assert s.status == SessionStatus.TIMED_OUT
+        assert s.reap_reason == ReapReason.USAGE_LIMIT_CUTOFF
+
+        remove_worktree_calls: list[object] = []
+        monkeypatch.setattr(
+            "cw.reconcile._shared.remove_worktree",
+            lambda *a, **kw: remove_worktree_calls.append((a, kw)),
+        )
+
+        # Clean worktree (not a real git repo → checked_out_branch returns
+        # None → not dirty) — no dirty patch needed here.
+        reverted = revert_timed_out_tasks()
+
+        assert remove_worktree_calls == []
+        assert worktree.exists()
+        assert (worktree / "committed.txt").exists()
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.PENDING
+        assert task.session_id is None
+        assert ticket_id in reverted
+
     def test_low_path_merges_into_existing_last_result(
         self,
         tmp_config_dir: Path,

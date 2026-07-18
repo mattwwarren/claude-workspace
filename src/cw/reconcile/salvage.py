@@ -32,7 +32,7 @@ from cw.models import (
     ReapReason,
     SessionStatus,
 )
-from cw.reconcile import _deps
+from cw.reconcile import _deps, _shared
 from cw.reconcile._shared import (
     _FINALIZE_BLOCKED_REASON,
     _NEEDS_SALVAGE_REASON,
@@ -272,51 +272,56 @@ def _salvage_high_path(
             _deps.get_native_daemon_client().stop(session.surface_ref)
 
 
-def _salvage_low_path(
-    session: Session,
-    ticket_id: str | None,
-    branch: str,
-    worktree_path_str: str,
-) -> None:
-    """Execute the LOW-confidence flag-only path."""
-    breadcrumbs = f"branch={branch} worktree={worktree_path_str}"
-    already_flagged = False
-    now = datetime.now(UTC)
+def _stamp_low_path_session_state(
+    session: Session, *, usage_limit_detected: bool, now: datetime
+) -> bool:
+    """Stamp session disposition under sessions_lock.
 
-    # Update session last_result under sessions_lock. Capture already_flagged
-    # before the conditional write so the early-return below can suppress
-    # duplicate queue mutation, event, and push notification (#418).
+    usage_limit_detected=True stamps TIMED_OUT/TIMED_OUT/USAGE_LIMIT_CUTOFF.
+    Otherwise stamps the pre-#1336 COMPLETED/CRASHED/needs_salvage
+    disposition, unless already flagged on a prior tick.
+
+    Returns already_flagged (always False when usage_limit_detected=True,
+    since that path carries no idempotency marker of its own — it relies on
+    the existing _LIVE_STATUSES gate elsewhere to prevent reclassification).
+    """
+    already_flagged = False
     with sessions_lock():
         fresh_state = load_state()
         for s in fresh_state.sessions:
-            if s.id == session.id:
-                already_flagged = (
-                    isinstance(s.last_result, dict)
-                    and s.last_result.get("paused_status") == _NEEDS_SALVAGE_REASON
-                )
-                if not already_flagged:
-                    if isinstance(s.last_result, dict):
-                        s.last_result = {
-                            **s.last_result,
-                            "paused_status": _NEEDS_SALVAGE_REASON,
-                        }
-                    else:
-                        s.last_result = {"paused_status": _NEEDS_SALVAGE_REASON}
-                    s.reap_reason = ReapReason.SALVAGE_PARKED
-                    s.status = SessionStatus.COMPLETED
-                    s.completed_at = now
-                    s.completed_reason = CompletionReason.CRASHED
+            if s.id != session.id:
+                continue
+            if usage_limit_detected:
+                s.status = SessionStatus.TIMED_OUT
+                s.completed_at = now
+                s.completed_reason = CompletionReason.TIMED_OUT
+                s.reap_reason = ReapReason.USAGE_LIMIT_CUTOFF
                 break
+            already_flagged = (
+                isinstance(s.last_result, dict)
+                and s.last_result.get("paused_status") == _NEEDS_SALVAGE_REASON
+            )
+            if not already_flagged:
+                if isinstance(s.last_result, dict):
+                    s.last_result = {
+                        **s.last_result,
+                        "paused_status": _NEEDS_SALVAGE_REASON,
+                    }
+                else:
+                    s.last_result = {"paused_status": _NEEDS_SALVAGE_REASON}
+                s.reap_reason = ReapReason.SALVAGE_PARKED
+                s.status = SessionStatus.COMPLETED
+                s.completed_at = now
+                s.completed_reason = CompletionReason.CRASHED
+            break
         save_state(fresh_state)
+    return already_flagged
 
-    # Already dispositioned on a prior tick — suppress duplicate queue mutation,
-    # event, and push notification so the idle watchdog re-collecting this parked
-    # session does not re-fire every reconcile tick (#418 removed the upstream
-    # _has_terminal_sentinel skip this relied on).
-    if already_flagged:
-        return
 
-    # Route queue task to BLOCKED_ON_USER.
+def _notify_needs_salvage(
+    session: Session, ticket_id: str | None, breadcrumbs: str
+) -> None:
+    """Route queue task to BLOCKED_ON_USER and emit the needs_salvage alert."""
     if ticket_id:
         with dev_queue_lock():
             store = load_dev_queue()
@@ -349,8 +354,46 @@ def _salvage_low_path(
     )
     _deps.fire_push_notification(session.name, session.client)
 
-    # Stop the surface if still running — a salvage-parked session is by
-    # definition no longer live (GitHub #1249).
+
+def _salvage_low_path(
+    session: Session,
+    ticket_id: str | None,
+    branch: str,
+    worktree_path_str: str,
+) -> None:
+    """Execute the LOW-confidence flag-only path.
+
+    When the timeout was caused by the operator hitting their Claude usage
+    limit (detected via :func:`_shared.detect_usage_limit`) rather than an
+    agent crash, stamps TIMED_OUT/TIMED_OUT/USAGE_LIMIT_CUTOFF instead of the
+    COMPLETED/CRASHED/needs_salvage disposition, and skips the BLOCKED_ON_USER
+    routing and SESSION_NEEDS_ATTENTION push notification — the existing
+    tasks.py:revert_timed_out_tasks backstop already knows how to preserve
+    the worktree and route a dirty worktree to BLOCKED_ON_USER on its own
+    (GitHub #1336).
+    """
+    breadcrumbs = f"branch={branch} worktree={worktree_path_str}"
+    usage_limit_detected = _shared.detect_usage_limit(session)
+    now = datetime.now(UTC)
+
+    # Capture already_flagged so the early-return below can suppress
+    # duplicate queue mutation, event, and push notification (#418).
+    already_flagged = _stamp_low_path_session_state(
+        session, usage_limit_detected=usage_limit_detected, now=now
+    )
+
+    if not usage_limit_detected:
+        # Already dispositioned on a prior tick — suppress duplicate queue
+        # mutation, event, and push notification so the idle watchdog
+        # re-collecting this parked session does not re-fire every reconcile
+        # tick (#418 removed the upstream _has_terminal_sentinel skip this
+        # relied on).
+        if already_flagged:
+            return
+        _notify_needs_salvage(session, ticket_id, breadcrumbs)
+
+    # Stop the surface if still running — daemon cleanup is orthogonal to the
+    # disposition label above (GitHub #1249, #1336).
     if session.surface_ref is not None:
         with contextlib.suppress(Exception):
             _deps.get_native_daemon_client().stop(session.surface_ref)
