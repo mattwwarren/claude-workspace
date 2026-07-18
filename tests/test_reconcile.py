@@ -22492,22 +22492,16 @@ class TestFinalizeBlocked:
 
     def test_rescue_pr_body_template_in_shared(self) -> None:
         """_RESCUE_PR_BODY_TEMPLATE is importable from _shared (NIT 5)."""
-        from cw.reconcile._shared import _RESCUE_PR_BODY_TEMPLATE
+        from cw.reconcile._shared import (
+            _RESCUE_PR_BODY_TEMPLATE,
+            _RESCUE_PR_CLOSES_TRAILER_TEMPLATE,
+        )
 
         assert "finalize" in _RESCUE_PR_BODY_TEMPLATE.lower()
         assert "{ticket_id}" in _RESCUE_PR_BODY_TEMPLATE
-
-    # ── 1.26 _RESCUE_PR_CLOSES_TRAILER_TEMPLATE in _shared (#1293) ─────────
-
-    def test_rescue_pr_closes_trailer_template_in_shared(self) -> None:
-        """_RESCUE_PR_CLOSES_TRAILER_TEMPLATE formats a Closes trailer for a
-        real numeric ticket id (#1293) -- feeds closedByPullRequestsReferences
-        linkage so the auto-rescued PR auto-closes its ticket on merge."""
-        from cw.reconcile._shared import _RESCUE_PR_CLOSES_TRAILER_TEMPLATE
-
         assert "Closes #" in _RESCUE_PR_CLOSES_TRAILER_TEMPLATE.format(ticket_id="1293")
 
-    # ── 1.27 _rescue_open_pr Closes trailer wiring (#1293) ──────────────────
+    # ── 1.26 _rescue_open_pr Closes trailer wiring (#1293) ──────────────────
 
     def test_rescue_open_pr_numeric_ticket_includes_closes_trailer(
         self, monkeypatch: pytest.MonkeyPatch
@@ -22528,12 +22522,12 @@ class TestFinalizeBlocked:
         body = args[args.index("--body") + 1]
         assert "Closes #1293" in body
 
-    def test_rescue_open_pr_non_numeric_ticket_omits_closes_trailer(
+    def test_rescue_open_pr_unknown_ticket_id_omits_closes_trailer(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A None or non-numeric ticket_id must NOT get a Closes trailer --
-        falls back to the unconditional 'Ticket: #unknown'-style text via the
-        untouched _RESCUE_PR_BODY_TEMPLATE (#1293)."""
+        """A None ticket_id must NOT get a Closes trailer -- falls back to the
+        unconditional 'Ticket: #unknown'-style text via the untouched
+        _RESCUE_PR_BODY_TEMPLATE (#1293)."""
         from cw.reconcile.salvage import _rescue_open_pr
 
         run_mock = MagicMock()
@@ -22547,6 +22541,27 @@ class TestFinalizeBlocked:
         body = args[args.index("--body") + 1]
         assert "Closes #" not in body
         assert "unknown" in body
+
+    def test_rescue_open_pr_nonnumeric_ticket_id_omits_closes_trailer(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-numeric (e.g. Linear-style) ticket_id must NOT get a Closes
+        trailer -- mirrors the real non-numeric ticket_id case proven live in
+        test_rescue_happy_path, and is the exact case the ticket's root-cause
+        analysis warns against (#1293)."""
+        from cw.reconcile.salvage import _rescue_open_pr
+
+        run_mock = MagicMock()
+        monkeypatch.setattr("cw.reconcile.salvage.subprocess.run", run_mock)
+
+        result = _rescue_open_pr("dev/fb-10", "main", "FB-10")
+
+        assert result is True
+        run_mock.assert_called_once()
+        args = run_mock.call_args[0][0]
+        body = args[args.index("--body") + 1]
+        assert "Closes #" not in body
+        assert "Ticket: #FB-10" in body
 
 
 # ---------------------------------------------------------------------------
