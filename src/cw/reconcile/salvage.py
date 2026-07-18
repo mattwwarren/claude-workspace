@@ -37,6 +37,7 @@ from cw.reconcile._shared import (
     _FINALIZE_BLOCKED_REASON,
     _NEEDS_SALVAGE_REASON,
     _RESCUE_PR_BODY_TEMPLATE,
+    _RESCUE_PR_CLOSES_TRAILER_TEMPLATE,
     _SALVAGE_KIND_GIT_STATE,
     _SALVAGE_PR_BODY_TEMPLATE,
     _SALVAGE_PR_TITLE_TEMPLATE,
@@ -360,6 +361,9 @@ def _rescue_mark_attempted(session_id: str) -> None:
 
 def _rescue_open_pr(branch: str, default_branch: str, ticket_id: str | None) -> bool:
     """Create a PR from branch → default_branch. Returns True on success."""
+    body = _RESCUE_PR_BODY_TEMPLATE.format(ticket_id=ticket_id or "unknown")
+    if ticket_id is not None and ticket_id.isdigit():
+        body += _RESCUE_PR_CLOSES_TRAILER_TEMPLATE.format(ticket_id=ticket_id)
     try:
         subprocess.run(
             [
@@ -373,7 +377,7 @@ def _rescue_open_pr(branch: str, default_branch: str, ticket_id: str | None) -> 
                 "--title",
                 f"auto-dev: finalize for {ticket_id or 'unknown'}",
                 "--body",
-                _RESCUE_PR_BODY_TEMPLATE.format(ticket_id=ticket_id or "unknown"),
+                body,
             ],
             capture_output=True,
             text=True,
