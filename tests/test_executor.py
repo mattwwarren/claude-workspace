@@ -21,7 +21,11 @@ from cw.executor import (
     resolve_executor,
     resolve_executor_config,
 )
-from cw.executor_diagnostics import ExecutorFailure, diagnostics_bundle_dir
+from cw.executor_diagnostics import (
+    ExecutorFailure,
+    diagnostics_bundle_dir,
+    render_bundle_path,
+)
 from cw.local_runner import (
     AIDER_NOT_FOUND,
     ENDPOINT_NOT_CONFIGURED,
@@ -738,6 +742,10 @@ def test_local_executor_exception_handler_marks_session_completed(
     assert result.status == "blocked"
     assert result.blocker is not None
     assert result.blocker.reason == UNEXPECTED_ERROR
+    assert (
+        result.blocker.details == "unexpected error during aider launch "
+        f"[diagnostics: {render_bundle_path(session.id)}]"
+    )
 
 
 def test_local_executor_proc_stat_unreadable_marks_session_completed(
