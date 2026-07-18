@@ -1037,7 +1037,7 @@ def _effective_transcript_timestamp(transcript: Path) -> datetime:
     return datetime.fromtimestamp(transcript.stat().st_mtime, tz=UTC)
 
 
-def _project_transcripts_max_age_timestamp(session: Session) -> datetime | None:
+def _project_transcripts_latest_timestamp(session: Session) -> datetime | None:
     """Return the max effective timestamp across ALL transcripts in the project dir.
 
     Widens the single-file csid/surface_ref resolution (#1283): a subagent's own
@@ -1062,16 +1062,19 @@ def _project_transcripts_max_age_timestamp(session: Session) -> datetime | None:
     if project_dir is None or not project_dir.is_dir():
         return None
     max_ts: datetime | None = None
-    try:
-        for candidate in project_dir.glob("*.jsonl"):
+    for candidate in project_dir.glob("*.jsonl"):
+        # Per-candidate: a stat/read failure on one sibling (deleted/rotated
+        # mid-glob) must not discard max_ts already found from other, valid
+        # siblings -- only that one candidate is skipped.
+        try:
             mtime = datetime.fromtimestamp(candidate.stat().st_mtime, tz=UTC)
             if mtime <= session.started_at:
                 continue
             ts = _effective_transcript_timestamp(candidate)
-            if max_ts is None or ts > max_ts:
-                max_ts = ts
-    except OSError:
-        return None
+        except OSError:
+            continue
+        if max_ts is None or ts > max_ts:
+            max_ts = ts
     return max_ts
 
 
@@ -1080,16 +1083,22 @@ def _widened_transcript_timestamp(session: Session) -> datetime | None:
 
     Takes the max of the single-file csid/surface_ref resolution
     (:func:`_locate_session_transcript` + :func:`_effective_transcript_timestamp`)
-    and :func:`_project_transcripts_max_age_timestamp` (the sibling-transcript
+    and :func:`_project_transcripts_latest_timestamp` (the sibling-transcript
     glob). Monotonic widening — never reports a session as *more* stale than the
-    registered transcript alone would. Raises ``OSError`` if the registered
-    transcript cannot be stat'd — callers catch it, matching fail-open behavior.
+    registered transcript alone would. The two sources are computed
+    independently: a stat failure on the registered transcript alone does not
+    prevent the sibling-glob fallback from being consulted, so the widened
+    signal fix (b) exists to add is never discarded by an unrelated primary-file
+    error. Fails open (``None``) if both sources are unavailable.
     """
     best_ts: datetime | None = None
     transcript = _locate_session_transcript(session)
     if transcript is not None:
-        best_ts = _effective_transcript_timestamp(transcript)
-    project_ts = _project_transcripts_max_age_timestamp(session)
+        try:
+            best_ts = _effective_transcript_timestamp(transcript)
+        except OSError:
+            best_ts = None
+    project_ts = _project_transcripts_latest_timestamp(session)
     if project_ts is not None and (best_ts is None or project_ts > best_ts):
         best_ts = project_ts
     return best_ts
