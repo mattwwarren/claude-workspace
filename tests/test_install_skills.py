@@ -104,6 +104,21 @@ def fake_repo_with_agents(fake_repo: Path) -> Path:
     return fake_repo
 
 
+@pytest.fixture
+def fake_repo_with_nested_skill(fake_repo: Path) -> Path:
+    """fake_repo plus a skill dir with a nested scripts/ subdirectory.
+
+    A skill directory is not always flat (SKILL.md only) — some ship a
+    scripts/ subdir alongside SKILL.md.
+    """
+    skill_dir = fake_repo / ".claude" / "skills" / "some-skill"
+    scripts_dir = skill_dir / "scripts"
+    scripts_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# some-skill\n")
+    (scripts_dir / "helper.sh").write_text("#!/usr/bin/env bash\necho hi\n")
+    return fake_repo
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -144,20 +159,13 @@ class TestInstallSkillsFirstRun:
 class TestInstallSkillsNestedFiles:
     """Generic skill-install loop recurses into nested subdirectories.
 
-    A skill directory is not always flat (SKILL.md only) — some ship a
-    scripts/ subdir alongside SKILL.md. rsync -a already recurses, so this
-    is a characterization test proving the mechanism, not a bugfix.
+    rsync -a already recurses, so this is a characterization test proving
+    the mechanism, not a bugfix.
     """
 
     def test_nested_subdirectory_file_installed(
-        self, script: Path, fake_repo: Path, fake_home: Path
+        self, script: Path, fake_repo_with_nested_skill: Path, fake_home: Path
     ) -> None:
-        skill_dir = fake_repo / ".claude" / "skills" / "some-skill"
-        scripts_dir = skill_dir / "scripts"
-        scripts_dir.mkdir(parents=True)
-        (skill_dir / "SKILL.md").write_text("# some-skill\n")
-        (scripts_dir / "helper.sh").write_text("#!/usr/bin/env bash\necho hi\n")
-
         result = _run(script, fake_home)
         assert result.returncode == 0, result.stderr
 
