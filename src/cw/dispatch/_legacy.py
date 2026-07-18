@@ -1,11 +1,14 @@
-"""Tick-based dispatch loop: claim pending TicketTasks and spawn Claude sessions."""
+"""Dispatch tick orchestration, sentinel/stage routing, and the event loop.
+
+The ``core.py``-equivalent leftover of the ``cw.dispatch`` package split
+(#1310): everything not yet carved into gating/claim/lanes (targets of parts
+2-3)."""
 
 from __future__ import annotations
 
 import contextlib
 import importlib.metadata
 import logging
-import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -31,17 +34,11 @@ from cw.auto_dev_result import (
 )
 from cw.collision import detect_wave_collisions
 from cw.config import (
-    AvailabilityProbeCache,
-    _load_concurrency_overrides,
-    _save_concurrency_overrides,
-    concurrency_override_lock,
-    load_availability_probe_cache,
     load_clients,
     load_effective_clients,
     load_effective_config,
     load_state,
     load_usage_limited_until,
-    save_availability_probe_cache,
     save_state,
     save_usage_limited_until,
     sessions_lock,
@@ -61,24 +58,12 @@ from cw.dev_queue import (
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import (
     ConfigValidationError,
-    MissingWorkspaceError,
-    StaleWorktreeError,
-    UsageLimitError,
     VersionDriftError,
-    WorktreeError,
 )
-from cw.executor import resolve_executor, resolve_executor_config
 from cw.executor_diagnostics import cleanup_expired_diagnostics
-from cw.gh import check_gh_availability
 from cw.models import (
-    CONTEXT_JSON_RELATIVE_PATH,
-    LOCAL_BACKEND,
     OCCUPIED_LANE_STATUSES,
-    ClientConcurrencyOverride,
     ClientConfig,
-    ConcurrencyOverrides,
-    DispatchSkipReason,
-    LaneConcurrencyOverride,
     OrchestratorEventType,
     QueueItemStatus,
     SessionOrigin,
@@ -88,48 +73,51 @@ from cw.models import (
 from cw.native_daemon import get_native_daemon_client
 from cw.pr_hydrate import hydrate_pr_states
 from cw.reconcile import (
-    _FRESHNESS_BLOCK_ESCALATED_REASON,
-    reconcile,
-    resolve_headless_budget,
     ticket_id_for_session,
-)
-from cw.worktree import (
-    check_main_ff_safety,
-    check_not_main_checkout,
-    create_worktree,
-    fast_forward_main,
-    get_head_branch,
-    is_main_behind_origin,
-    is_main_checkout_dirty,
-    remove_worktree,
-    worktree_has_unsaved_work,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from cw.models import (
         ClientConfig,
         CwState,
         DevQueueStore,
-        LaneConfig,
         OrchestratorConfig,
         OrchestratorEvent,
         TicketTask,
     )
     from cw.native_daemon import NativeDaemonClient
+from cw.dispatch.gating import (
+    _emit_availability_skip,
+    _emit_stale_skip,
+    _emit_usage_limit_skip_events,
+    _reconcile_usage_limited,
+    _resolve_availability_once,
+    _resolve_freshness,
+)
+from cw.dispatch.lanes import (
+    _dispatch_client_lanes,
+    _record_client_freshness_block,
+    _reset_client_freshness_blocks,
+)
+
+_log = logging.getLogger("cw.dispatch")
+
 
 _DISPATCH_CONSUMER = "dispatch"
-_log = logging.getLogger(__name__)
-_SPAWN_ERROR_BACKOFF_INITIAL_SECONDS: int = 2
-_SPAWN_ERROR_BACKOFF_CAP_SECONDS: int = 300
+
+
 # Duplicated from cw.doctor; importing from there creates a circular dep.
 # A future cw.const cleanup can consolidate these.
 _CW_PACKAGE_NAME: str = "claude-workspace"
+
+
 # paused_status written to SESSION_NEEDS_ATTENTION when a session parks at plan
 # stage (ambiguities_pending_resolution / premises_pending_verification).
 _PLAN_PARKED_REASON = "plan_parked"
+
+
 # paused_status written to SESSION_NEEDS_ATTENTION when Rule 1 parks a
 # non-small-tier scope-gated approval status (plan_pending_approval /
 # review_pending_approval) to BLOCKED_ON_USER. Deliberately distinct from
@@ -137,17 +125,23 @@ _PLAN_PARKED_REASON = "plan_parked"
 # ambiguities/premises statuses, an unrelated park reason -- per the
 # operator's R1 resolution. See GitHub #1302.
 _APPROVAL_GATE_REASON = "approval_gate"
+
+
 # Disposition stamped by _stage_advance_unchecked when the task's client is
 # absent from the effective clients dict — a config error, not a
 # transient/recoverable state. Deliberately excluded from both
 # concierge._FALSE_PARK_ELIGIBLE_DISPOSITIONS and
 # escalation._ELIGIBLE_DISPOSITIONS. See GitHub #976.
 _UNKNOWN_CLIENT_REASON = "unknown_client"
+
+
 # Disposition stamped by _stage_advance_unchecked when task.stage is not in
 # the client's configured pipeline stages — a config error, not a
 # transient/recoverable state. Same exclusion as _UNKNOWN_CLIENT_REASON. See
 # GitHub #976.
 _INVALID_STAGE_REASON = "invalid_stage_config"
+
+
 # paused_status written to SESSION_NEEDS_ATTENTION when Rule 5's blocked
 # status carries a blocker reason in OPERATOR_UNAVAILABLE_BLOCKER_REASONS
 # (RFC 0011 A1). Deliberately distinct from QueueItemStatus.
@@ -156,26 +150,6 @@ _INVALID_STAGE_REASON = "invalid_stage_config"
 # unavailability, an unrelated concept that happens to share the "awaiting
 # operator" phrase. See GitHub #1155.
 _AWAITING_OPERATOR_REASON = "awaiting_operator_availability"
-# paused_status written to SESSION_NEEDS_ATTENTION when the fleet-wide
-# gh-availability latch trips (RFC 0011 A5). Deliberately distinct from
-# _AWAITING_OPERATOR_REASON, which is scoped (see its own comment above) to
-# Rule 5's per-task blocked status with session_id/ticket_id populated
-# (RFC 0011 A1) -- an unrelated, per-task event shape. This constant's event
-# is fleet-wide and sessionless (session_id="", client="", ticket_id=None).
-# See GitHub #1157.
-_AVAILABILITY_OUTAGE_REASON = "gh_availability_outage"
-# Timeout (seconds) for the fleet-wide `gh auth status` availability probe.
-# Value mirrors cw.operator_identity._GH_LOGIN_TIMEOUT_SECONDS (also 10); not
-# imported directly because that would invert the circular-import direction.
-_AVAILABILITY_PROBE_TIMEOUT_SECONDS = 10
-# TTL (seconds) for the fleet-wide availability probe cache. Within this
-# window a tick reuses the cached verdict instead of re-shelling `gh auth
-# status`, so a multi-client fleet pays at most one probe per TTL, not one per
-# client per tick.
-_AVAILABILITY_PROBE_TTL_SECONDS = 60
-# ``source`` field on a LANE_PAUSED event emitted by the per-lane circuit breaker
-# (as opposed to an operator-initiated ``cw lane pause``). See GitHub issue #875.
-_LANE_PAUSE_SOURCE_CIRCUIT_BREAKER = "circuit_breaker"
 
 
 def _resolve_loaded_version() -> str:
@@ -204,1310 +178,6 @@ class DispatchTickResult:
 
     spawned: int
     usage_limit_detected: bool = False
-
-
-def _emit_attempt_cap_blocked_event(client_name: str, ticket_id: str) -> None:
-    """Emit a dispatch.tick event when a task is parked at the global attempt ceiling.
-
-    Per-task event (not per-client-per-tick) for operator observability: a quiet
-    loop after several failures should be distinguishable from a healthy idle loop.
-    See GitHub #786.
-    """
-    record_event(
-        OrchestratorEventType.DISPATCH_TICK,
-        {
-            "client": client_name,
-            "claimed": 0,
-            "skip_reason": DispatchSkipReason.ATTEMPT_CAP_BLOCKED,
-            "ticket_id": ticket_id,
-        },
-    )
-
-
-def _claim_next_pending(
-    client_name: str,
-    *,
-    lane: str,
-    config: OrchestratorConfig,
-    priority_ticket_ids: list[str] | None = None,
-) -> tuple[TicketTask | None, bool]:
-    """Atomically claim the next PENDING task for a client in a specific lane.
-
-    Acquires the dev-queue file lock, loads the queue, marks the first
-    PENDING task for *client_name* in *lane* as RUNNING, saves, and returns it.
-    Returns (None, spawn_backoff_skipped) if no pending task exists or all
-    eligible tasks are in spawn_error backoff.
-
-    If *priority_ticket_ids* is provided, prefer claiming PENDING tasks in
-    that order (only those whose ticket_id appears in the list).  Tasks not
-    referenced by the list are skipped at this stage; they will be claimed
-    by subsequent ticks once the prioritised tasks are exhausted (the
-    parameter is intentionally a *preference*, not a filter — see the
-    fallback after the priority loop).
-
-    Global attempt ceiling: if task.attempts >= config.global_attempt_ceiling,
-    the task is parked BLOCKED_ON_USER instead of claimed. A dispatch.tick
-    event with skip_reason=ATTEMPT_CAP_BLOCKED is emitted per parked task for
-    observability. See GitHub #786.
-
-    Returns a tuple (task, spawn_backoff_skipped) where spawn_backoff_skipped
-    is True when at least one PENDING task was skipped due to active
-    spawn_error backoff (next_eligible_at in the future). See GitHub #868.
-    """
-    now = datetime.now(UTC)
-    with dev_queue_lock():
-        store = load_dev_queue()
-        spawn_backoff_skipped = False
-        if priority_ticket_ids:
-            for ticket_id in priority_ticket_ids:
-                for task in store.tasks:
-                    if (
-                        task.client == client_name
-                        and task.ticket_id == ticket_id
-                        and task.lane == lane
-                        and task.status == QueueItemStatus.PENDING
-                    ):
-                        in_backoff = (
-                            task.next_eligible_at is not None
-                            and now < task.next_eligible_at
-                        )
-                        if in_backoff:
-                            spawn_backoff_skipped = True
-                            break
-                        if task.attempts >= config.global_attempt_ceiling:
-                            transition_task_status(
-                                task,
-                                QueueItemStatus.BLOCKED_ON_USER,
-                                disposition="attempt_cap_blocked",
-                            )
-                            save_dev_queue(store)
-                            _emit_attempt_cap_blocked_event(client_name, task.ticket_id)
-                            break
-                        transition_task_status(task, QueueItemStatus.RUNNING)
-                        task.attempts += 1
-                        save_dev_queue(store)
-                        return task, spawn_backoff_skipped
-        pending = sorted(
-            [
-                t
-                for t in store.tasks
-                if t.client == client_name
-                and t.lane == lane
-                and t.status == QueueItemStatus.PENDING
-            ],
-            key=lambda t: (-t.priority, t.created_at),
-        )
-        for task in pending:
-            if task.next_eligible_at is not None and now < task.next_eligible_at:
-                spawn_backoff_skipped = True
-                continue
-            if task.attempts >= config.global_attempt_ceiling:
-                transition_task_status(
-                    task,
-                    QueueItemStatus.BLOCKED_ON_USER,
-                    disposition="attempt_cap_blocked",
-                )
-                save_dev_queue(store)
-                _emit_attempt_cap_blocked_event(client_name, task.ticket_id)
-                return None, spawn_backoff_skipped
-            transition_task_status(task, QueueItemStatus.RUNNING)
-            task.attempts += 1
-            save_dev_queue(store)
-            return task, spawn_backoff_skipped
-    return None, spawn_backoff_skipped
-
-
-def _lane_occupants_for_client(
-    client: ClientConfig, queue_snapshot: DevQueueStore
-) -> dict[str, list[dict[str, str]]]:
-    """Per-lane occupant ``{ticket_id, status}`` list for dispatch.tick payloads.
-
-    Sibling of :func:`_lane_stats_for_client` -- same OCCUPIED_LANE_STATUSES
-    join over ``client``/``lane``, but returns identifying detail instead
-    of counts, so a ``lane_cap_blocked`` reader can name the occupant
-    instead of inferring a (possibly phantom) cross-client cap. See #1243.
-
-    Deliberately a NEW top-level dispatch.tick payload key, never nested
-    inside ``lanes`` -- orchestrate.py's ``_extract_lanes`` hard-filters
-    ``lanes`` values to numerics, so a nested ticket-id string would be
-    silently stripped downstream.
-    """
-    occupants: dict[str, list[dict[str, str]]] = {}
-    for lane_cfg in client.effective_lanes:
-        occupants[lane_cfg.name] = [
-            {"ticket_id": t.ticket_id, "status": t.status.value}
-            for t in queue_snapshot.tasks
-            if t.client == client.name
-            and t.lane == lane_cfg.name
-            and t.status in OCCUPIED_LANE_STATUSES
-        ]
-    return occupants
-
-
-def _lane_stats_for_client(
-    client: ClientConfig,
-    queue_snapshot: DevQueueStore,
-    *,
-    occupants: dict[str, list[dict[str, str]]] | None = None,
-) -> dict[str, dict[str, int]]:
-    """Per-lane ``{claimed, running, blocked, signoff, pending}`` counts for
-    event payloads.
-
-    Why task-based running: RUNNING/BLOCKED_ON_USER tasks carry ``lane``;
-    sessions carry ``lane`` as of #594, but occupancy counting stays task-join
-    based per ADR-0006 / Phase 4a scope (stamped-but-not-read by the
-    scheduler). BLOCKED_ON_USER occupies its lane slot per ADR-0006, so
-    ``running + blocked + signoff`` is the total occupied count. ``blocked``
-    and ``signoff`` are split out so operators can see at a glance why
-    claimed=0 when pending>0 (#588, #990). Derives running/blocked/signoff
-    from :func:`_lane_occupants_for_client` -- see #1243.
-
-    *occupants* lets a caller that already computed the occupant lookup (e.g.
-    to also emit ``lane_occupants``/``occupied`` on the same dispatch.tick
-    payload) pass it in and avoid a second full scan of ``queue_snapshot.tasks``.
-    """
-    if occupants is None:
-        occupants = _lane_occupants_for_client(client, queue_snapshot)
-    stats: dict[str, dict[str, int]] = {}
-    for lane_cfg in client.effective_lanes:
-        lane_occupants = occupants.get(lane_cfg.name, [])
-        running = sum(
-            1 for o in lane_occupants if o["status"] == QueueItemStatus.RUNNING.value
-        )
-        blocked = sum(
-            1
-            for o in lane_occupants
-            if o["status"] == QueueItemStatus.BLOCKED_ON_USER.value
-        )
-        signoff = sum(
-            1
-            for o in lane_occupants
-            if o["status"] == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF.value
-        )
-        pending = sum(
-            1
-            for t in queue_snapshot.tasks
-            if t.client == client.name
-            and t.lane == lane_cfg.name
-            and t.status == QueueItemStatus.PENDING
-        )
-        stats[lane_cfg.name] = {
-            "claimed": 0,
-            "running": running,
-            "blocked": blocked,
-            "signoff": signoff,
-            "pending": pending,
-        }
-    return stats
-
-
-@dataclass(frozen=True)
-class _SpawnOutcome:
-    """Result of attempting to spawn one claimed task.
-
-    ``spawned`` — True if a session was started (counters should be bumped).
-    ``usage_limit_detected`` — True if a :class:`UsageLimitError` fired.
-    ``spawn_error`` — True if a broad spawn failure reverted the task.
-    ``error`` — the exception string from a broad spawn failure (``""`` when
-    none), carried so the caller can stamp ``last_error`` on the per-lane
-    circuit-breaker LANE_PAUSED payload (#875).
-
-    Both error flags signal the caller to break out of the slot/lane loops.
-    """
-
-    spawned: bool = False
-    usage_limit_detected: bool = False
-    spawn_error: bool = False
-    error: str = ""
-
-
-def _revert_claimed_task_to_pending(
-    client_name: str, ticket_id: str, *, stamp_backoff: bool = False
-) -> None:
-    """Revert a still-RUNNING claimed task back to PENDING, clearing session_id.
-
-    Used by both the usage-limit and broad spawn-error paths: the task was
-    claimed to RUNNING by :func:`_claim_next_pending` but spawn never
-    succeeded, so it must return to PENDING for a later tick to retry.
-
-    When *stamp_backoff* is True (generic spawn_error path only), increments
-    spawn_error_count and sets next_eligible_at to enforce exponential backoff
-    before the task is re-claimed.  The usage-limit path passes stamp_backoff=False
-    because it has its own fleet-wide backoff mechanism.  See GitHub #868.
-
-    # Why: task.attempts is NOT decremented here. The increment-at-claim
-    # contract is intentional — usage_limit deaths and spawn errors consume
-    # real dispatch budget and must count toward the global_attempt_ceiling
-    # (#786). Decrementing would let churn bypass the backstop. The corollary
-    # (#756 stalled-stage cap) uses the same task.attempts field; both caps
-    # are outer backstops sharing one counter, not parallel counters.
-    """
-    with dev_queue_lock():
-        store = load_dev_queue()
-        for stored_task in store.tasks:
-            if (
-                stored_task.ticket_id == ticket_id
-                and stored_task.client == client_name
-                and stored_task.status == QueueItemStatus.RUNNING
-            ):
-                transition_task_status(stored_task, QueueItemStatus.PENDING)
-                stored_task.session_id = None
-                if stamp_backoff:
-                    stored_task.spawn_error_count += 1
-                    delay = min(
-                        _SPAWN_ERROR_BACKOFF_INITIAL_SECONDS
-                        * (2 ** (stored_task.spawn_error_count - 1)),
-                        _SPAWN_ERROR_BACKOFF_CAP_SECONDS,
-                    )
-                    stored_task.next_eligible_at = datetime.now(UTC) + timedelta(
-                        seconds=delay
-                    )
-                break
-        save_dev_queue(store)
-
-
-def _emit_usage_limit_skip_events(
-    clients: dict[str, ClientConfig],
-    config: OrchestratorConfig,
-    state: CwState,
-) -> None:
-    """Emit dispatch.tick(skip_reason=USAGE_LIMITED) for every client.
-
-    Called when the usage-limit back-off window is still active: no client is
-    dispatched this tick; each gets a skip event with ``claimed=0`` and a
-    per-lane breakdown.
-    """
-    for client in clients.values():
-        running_count = sum(
-            1
-            for s in state.sessions
-            if s.client == client.name
-            and s.origin == SessionOrigin.DAEMON
-            and s.status in (SessionStatus.ACTIVE, SessionStatus.IDLE)
-        )
-        cap = config.per_client_ceiling.get(client.name, config.default_ceiling)
-        with dev_queue_lock():
-            queue_snapshot = load_dev_queue()
-        pending_count = sum(
-            1
-            for t in queue_snapshot.tasks
-            if t.client == client.name and t.status == QueueItemStatus.PENDING
-        )
-        # Per-lane breakdown for the event payload (claimed=0 for all).
-        backoff_lane_occupants = _lane_occupants_for_client(client, queue_snapshot)
-        backoff_lane_stats = _lane_stats_for_client(
-            client, queue_snapshot, occupants=backoff_lane_occupants
-        )
-        record_event(
-            OrchestratorEventType.DISPATCH_TICK,
-            {
-                "client": client.name,
-                "claimed": 0,
-                "pending": pending_count,
-                "running": running_count,
-                "cap": cap,
-                "skip_reason": DispatchSkipReason.USAGE_LIMITED,
-                "lanes": backoff_lane_stats,
-                "lane_occupants": backoff_lane_occupants,
-                "occupied": sum(len(v) for v in backoff_lane_occupants.values()),
-            },
-        )
-
-
-FRESHNESS_NON_MAIN_HEAD = "non_main_head"
-FRESHNESS_MAIN_BEHIND = "main_behind_origin"
-FRESHNESS_MAIN_DIRTY_CHECKOUT = "main_dirty_checkout"
-FRESHNESS_MAIN_DIVERGED = "main_diverged_from_origin"
-FRESHNESS_MAIN_DETACHED = "main_detached_head"
-
-
-def _resolve_availability() -> bool:
-    """Fleet-wide TTL-cached gh-availability probe (RFC 0011 A5).
-
-    Mirrors :func:`_resolve_freshness`'s check-and-cache shape but fleet-wide,
-    not per-client: state lives in config.py's DISPATCH_STATE_FILE sidecar
-    (:class:`~cw.config.AvailabilityProbeCache`), not a ConcurrencyOverrides
-    client entry. On a cache hit (probed within
-    ``_AVAILABILITY_PROBE_TTL_SECONDS``) returns the cached verdict without
-    calling gh or touching the latch. On a cache miss, calls
-    :func:`~cw.gh.check_gh_availability`, persists the fresh verdict, and
-    updates the fleet-wide latch: :func:`_record_availability_block` on a
-    fresh failure (fires SESSION_NEEDS_ATTENTION once per outage episode --
-    edge-triggered), :func:`_reset_availability_block` on a fresh success. On
-    any resolution error, fails open -- same posture as _resolve_freshness's
-    own ``except Exception`` fail-open.
-    """
-    try:
-        cache = load_availability_probe_cache()
-        now = datetime.now(UTC)
-        if (
-            cache is not None
-            and (now - cache.probed_at).total_seconds()
-            < _AVAILABILITY_PROBE_TTL_SECONDS
-        ):
-            return cache.available
-
-        available = check_gh_availability(timeout=_AVAILABILITY_PROBE_TIMEOUT_SECONDS)
-        was_latched = cache.latched if cache is not None else False
-        if available:
-            _reset_availability_block(now=now)
-        else:
-            _record_availability_block(now=now, was_latched=was_latched)
-    except Exception:  # noqa: BLE001
-        # Defense-in-depth: check_gh_availability already fails closed on its
-        # own subprocess errors; this catches an error resolving the cache or
-        # persisting the verdict. Fail open so a transient sidecar issue never
-        # blocks the whole loop, mirroring _resolve_freshness's fail-open.
-        _log.warning("dispatch_tick: availability probe failed to resolve; proceeding")
-        return True
-    return available
-
-
-def _resolve_availability_once(available: bool | None) -> bool:
-    """Return *available* unchanged, or resolve it via :func:`_resolve_availability`.
-
-    Per-tick memoization helper for :func:`dispatch_tick`'s client loop:
-    ``available`` starts ``None`` each tick and is only ever resolved once,
-    the first time the loop body runs for a client (not hoisted above the
-    loop, so an empty ``clients`` dict or a fully-paused fleet never probes).
-    Extracted to keep the branch this adds out of ``dispatch_tick`` itself
-    (PLR0912).
-    """
-    return _resolve_availability() if available is None else available
-
-
-def _record_availability_block(*, now: datetime, was_latched: bool) -> None:
-    """Persist a fresh failed probe and fire attention once per outage episode.
-
-    Writes the AvailabilityProbeCache with ``latched=True`` and, when the
-    fleet was not already latched (edge-triggered), emits a single fleet-wide
-    ``session.needs_attention``. Sibling of
-    :func:`_record_client_freshness_block`, but the latch lives in the probe
-    cache (fleet-wide) rather than a per-client override counter. The event is
-    sessionless and clientless (``session_id=""``, ``client=""``): a
-    fleet-wide outage has no single node to name. No push notification
-    (deliberate -- matches the freshness-block escalation precedent).
-
-    Why edge-triggered, not debounce-N: this fleet latch fires on the FIRST
-    bad probe, diverging from its three sibling latches
-    (``freshness_block_attention_threshold``, ``salvage_skip_attention_threshold``,
-    ``lane_circuit_breaker_threshold``), which all debounce N>=2 observations
-    before paging. Those three exist to filter single-node/single-lane
-    transient noise; a fleet-wide `gh auth status` failure has no analogous
-    per-node noise source (every client observes the identical outage
-    simultaneously), so debouncing would only delay the operator's first
-    signal of an already-fleet-wide condition. See RFC 0011 A5 / #1157.
-    """
-    save_availability_probe_cache(
-        AvailabilityProbeCache(probed_at=now, available=False, latched=True)
-    )
-    if not was_latched:
-        record_event(
-            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-            {
-                "session_id": "",
-                "session_name": "",
-                "client": "",
-                "ticket_id": None,
-                "claude_session_id": None,
-                "paused_status": _AVAILABILITY_OUTAGE_REASON,
-                "breadcrumbs": "availability_probe_failed",
-                "crashed": False,
-            },
-            correlation_id=None,
-        )
-
-
-def _reset_availability_block(*, now: datetime) -> None:
-    """Persist a fresh successful probe, clearing the fleet-wide outage latch.
-
-    Edge-triggered reset: writes the AvailabilityProbeCache with
-    ``latched=False`` so the next outage episode re-fires attention. Sibling
-    of :func:`_reset_client_freshness_blocks`; unlike that helper it always
-    writes, because the fresh ``probed_at`` also refreshes the TTL window.
-    """
-    save_availability_probe_cache(
-        AvailabilityProbeCache(probed_at=now, available=True, latched=False)
-    )
-
-
-def _emit_availability_skip(
-    client: ClientConfig,
-    queue_snapshot: DevQueueStore,
-    *,
-    pending_count: int,
-    running_count: int,
-    cap: int,
-) -> None:
-    """Emit a dispatch.tick skip event for an availability-gated client.
-
-    Mirrors :func:`_emit_stale_skip`'s dispatch.tick emission (same
-    ``pending``/``running``/``cap``/``lanes`` fields, ``claimed=0``) minus its
-    freshness-specific TICKET_NEEDS_SYNC + resync-WARN loop -- a fleet-wide gh
-    outage is not a per-ticket sync problem. ``skip_reason`` is
-    ``AVAILABILITY_GATE``.
-    """
-    lane_occupants = _lane_occupants_for_client(client, queue_snapshot)
-    record_event(
-        OrchestratorEventType.DISPATCH_TICK,
-        {
-            "client": client.name,
-            "claimed": 0,
-            "pending": pending_count,
-            "running": running_count,
-            "cap": cap,
-            "skip_reason": DispatchSkipReason.AVAILABILITY_GATE,
-            "lanes": _lane_stats_for_client(
-                client, queue_snapshot, occupants=lane_occupants
-            ),
-            "lane_occupants": lane_occupants,
-            "occupied": sum(len(v) for v in lane_occupants.values()),
-        },
-    )
-
-
-def _resolve_freshness(
-    client: ClientConfig,
-    *,
-    auto_ff: bool,
-    warned_fetch_fail: set[str] | None,
-) -> tuple[bool, str | None]:
-    """Run the freshness gate for a client, returning (stale, freshness_detail).
-
-    Checks whether the client's local default branch is behind origin.  When
-    ``auto_ff`` is set and the branch is safely behind, attempts a
-    fast-forward and clears the stale flag on success.  On any freshness-check
-    error, logs and treats the client as fresh so a transient network issue
-    never blocks the whole loop.
-
-    Returns ``(False, None)`` when fresh (or successfully fast-forwarded).
-    Returns ``(True, "non_main_head")`` when the dispatch repo's HEAD is on a
-    non-default branch — ``fast_forward_main`` is skipped entirely to avoid a
-    spurious WorktreeError.  Returns ``(True, "main_behind_origin")`` for all
-    other stale conditions.
-    """
-    try:
-        stale, local_sha, origin_sha, behind_count = is_main_behind_origin(
-            client, warned_fetch_fail=warned_fetch_fail
-        )
-    except Exception:  # noqa: BLE001
-        # Defense-in-depth: _fetch_default_branch now handles
-        # FileNotFoundError/PermissionError internally; this catches
-        # other unexpected OS errors (e.g., git not on PATH, network
-        # issues raising RuntimeError from the adapter).
-        _log.warning(
-            "dispatch_tick: freshness check failed for %s; proceeding",
-            client.name,
-        )
-        return (False, None)
-
-    if stale:
-        # Guard: detect non-default HEAD before attempting auto-ff.
-        # When HEAD != default_branch, fast_forward_main would raise WorktreeError
-        # and log a confusing message. Bail early with a distinct detail key so
-        # the operator WARN can surface the specific remedy.
-        head_branch = get_head_branch(client)
-        if head_branch is not None and head_branch != client.default_branch:
-            return (True, FRESHNESS_NON_MAIN_HEAD)
-
-    if stale and auto_ff:
-        ff_safety = check_main_ff_safety(client)
-        if ff_safety == "detached":
-            return (True, FRESHNESS_MAIN_DETACHED)
-        # "ahead" is theoretically unreachable here: stale=True requires
-        # is_main_behind_origin to return behind_count>0, which means local
-        # is behind origin — not ahead. The guard is kept for defensive
-        # completeness (worktree.py:check_main_ff_safety documents this).
-        if ff_safety in ("ahead", "diverged"):
-            return (True, FRESHNESS_MAIN_DIVERGED)
-        if ff_safety == "behind" and is_main_checkout_dirty(client):
-            return (True, FRESHNESS_MAIN_DIRTY_CHECKOUT)
-        if ff_safety == "behind":
-            try:
-                fast_forward_main(client, ignore_untracked=True)
-                # Why: double-fetch accepted — is_main_behind_origin fetches
-                # and git pull --ff-only fetches again. Acceptable for a
-                # single-user tool.
-                _log.info(
-                    "auto-ff: %s/main: %s..%s (%d commits)",
-                    client.name,
-                    local_sha[:8],
-                    origin_sha[:8],
-                    behind_count,
-                )
-                stale = False
-            except (WorktreeError, MissingWorkspaceError) as exc:
-                _log.warning(
-                    "auto-ff: fast-forward failed for %s: %s",
-                    client.name,
-                    exc,
-                )
-            # Why: no git-level lock — concurrent dispatch loops are safe;
-            # git pull --ff-only is idempotent when already current.
-    return (stale, FRESHNESS_MAIN_BEHIND if stale else None)
-
-
-def _emit_stale_skip(
-    client: ClientConfig,
-    queue_snapshot: DevQueueStore,
-    *,
-    pending_count: int,
-    running_count: int,
-    cap: int,
-    emit: Callable[[str], None] | None,
-    warned_stale: set[tuple[str, str]] | None,
-    freshness_detail: str | None = None,
-) -> None:
-    """Emit TICKET_NEEDS_SYNC + dispatch.tick for a freshness-gated client.
-
-    Records one TICKET_NEEDS_SYNC per pending task (de-duplicating the
-    operator WARN via ``warned_stale``), then a single dispatch.tick with
-    ``skip_reason=FRESHNESS_GATE`` and ``freshness_detail`` set to the
-    provided value (``"non_main_head"``, ``"main_behind_origin"``,
-    ``"main_dirty_checkout"``, ``"main_diverged_from_origin"``, or
-    ``"main_detached_head"``).
-    """
-    stale_tasks = [
-        {"ticket_id": t.ticket_id, "client": client.name, "lane": t.lane}
-        for t in queue_snapshot.tasks
-        if t.client == client.name and t.status == QueueItemStatus.PENDING
-    ]
-    # Fetch branch name once for the non-main-head WARN (not per ticket).
-    non_main_branch: str | None = None
-    if freshness_detail == FRESHNESS_NON_MAIN_HEAD:
-        non_main_branch = get_head_branch(client)
-    for payload in stale_tasks:
-        record_event(OrchestratorEventType.TICKET_NEEDS_SYNC, payload)
-        if emit is not None:
-            ticket_key = (client.name, payload["ticket_id"])
-            if warned_stale is None or ticket_key not in warned_stale:
-                if freshness_detail == FRESHNESS_NON_MAIN_HEAD:
-                    branch_str = non_main_branch or "(detached)"
-                    emit(
-                        f"WARN {client.name}/{payload['ticket_id']}:"
-                        f" repo HEAD is on '{branch_str}',"
-                        f" expected '{client.default_branch}'"
-                        f" — run: git -C {client.workspace_path}"
-                        f" checkout {client.default_branch}"
-                    )
-                elif freshness_detail == FRESHNESS_MAIN_DIRTY_CHECKOUT:
-                    emit(
-                        f"WARN {client.name}/{payload['ticket_id']}:"
-                        " main checkout has uncommitted changes, ticket skipped"
-                        f" — commit or stash changes in {client.workspace_path}"
-                    )
-                elif freshness_detail == FRESHNESS_MAIN_DETACHED:
-                    emit(
-                        f"WARN {client.name}/{payload['ticket_id']}:"
-                        " main checkout has a detached HEAD, ticket skipped"
-                        f" — run: git -C {client.workspace_path}"
-                        f" checkout {client.default_branch}"
-                    )
-                elif freshness_detail == FRESHNESS_MAIN_DIVERGED:
-                    emit(
-                        f"WARN {client.name}/{payload['ticket_id']}:"
-                        " main has diverged from origin, ticket skipped"
-                        " — inspect before touching it: git -C"
-                        f" {client.workspace_path} log origin/"
-                        f"{client.default_branch}..HEAD --oneline —"
-                        " do NOT auto-rebase or reset; stray commits"
-                        " may need manual triage"
-                    )
-                else:
-                    emit(
-                        f"WARN {client.name}/{payload['ticket_id']}:"
-                        " main behind origin, ticket skipped"
-                    )
-                if warned_stale is not None:
-                    warned_stale.add(ticket_key)
-    lane_occupants = _lane_occupants_for_client(client, queue_snapshot)
-    record_event(
-        OrchestratorEventType.DISPATCH_TICK,
-        {
-            "client": client.name,
-            "claimed": 0,
-            "pending": pending_count,
-            "running": running_count,
-            "cap": cap,
-            "skip_reason": DispatchSkipReason.FRESHNESS_GATE,
-            "freshness_detail": freshness_detail,
-            "blocked_branch": non_main_branch,
-            "lanes": _lane_stats_for_client(
-                client, queue_snapshot, occupants=lane_occupants
-            ),
-            "lane_occupants": lane_occupants,
-            "occupied": sum(len(v) for v in lane_occupants.values()),
-        },
-    )
-
-
-def _invalidate_stale_context_json(
-    task: TicketTask, client: ClientConfig, worktree_path: Path
-) -> None:
-    """Delete a stale ``.cw/context.json`` before spawning a re-spawned task.
-
-    Requeue idempotency guard (#1046): a re-spawned task (``attempts > 1``,
-    covering true requeues as well as normal plan->impl->review stage
-    advances) may reuse a worktree that still carries a prior session's
-    materialized ``.cw/context.json``. Left in place, a worker can silently
-    replan against stale ticket context and miss operator-folded
-    resolutions/comments (the #1030 incident). Delete it before spawn so the
-    new session always materializes fresh context.
-
-    Excluded for LocalExecutor: ``local_runner.build_task_message`` reads
-    ``.cw/context.json`` directly and degrades silently to an empty
-    ``## Ticket:`` header if it is missing (the #952 regression class).
-    """
-    if task.attempts <= 1:
-        return
-    if resolve_executor_config(task.stage, task, client).backend == LOCAL_BACKEND:
-        return
-    stale_context = worktree_path / CONTEXT_JSON_RELATIVE_PATH
-    if stale_context.exists():
-        _log.info(
-            "dispatch: invalidated stale .cw/context.json for"
-            " ticket_id=%s attempts=%d worktree_path=%s",
-            task.ticket_id,
-            task.attempts,
-            worktree_path,
-        )
-    stale_context.unlink(missing_ok=True)
-
-
-def _spawn_claimed_task(
-    task: TicketTask,
-    client: ClientConfig,
-    *,
-    config: OrchestratorConfig,
-    resolved_native_daemon: NativeDaemonClient,
-    parent: str | None,
-    emit: Callable[[str], None] | None,
-) -> _SpawnOutcome:
-    """Spawn a Claude session for one already-claimed (RUNNING) task.
-
-    Creates the worktree, spawns the session, stamps session_id +
-    stage_base_ref, and emits SESSION_SPAWNED. On :class:`UsageLimitError` or
-    any other spawn failure, reverts the task to PENDING and returns an outcome
-    flagging the caller to break out of the slot/lane loops.
-    """
-    try:
-        # Provision the worktree on the feature branch the auto-dev
-        # skills push to (`<feature_branch_prefix>/<id>`, e.g.
-        # dev/662) so cw and the worker agree on one branch — no
-        # mid-pipeline rename that would trip the reuse guard (#712).
-        # The session NAME still uses AUTO_DEV_LABEL_PREFIX (set in
-        # the executor), which reconcile parses for the ticket id.
-        branch = f"{client.feature_branch_prefix}/{task.ticket_id}"
-        # Create a real git worktree (idempotent — returns existing
-        # path if already created). Replaces a previous bug where
-        # dispatch made an empty directory and relied on
-        # ``claude -w`` to turn it into a worktree, which never
-        # worked because that flag takes a name rather than a path.
-        try:
-            # allow_dirty_reuse: staged stages reuse one per-ticket
-            # worktree and legitimately leave cross-stage churn (#712).
-            worktree_path = create_worktree(client, branch, allow_dirty_reuse=True)
-        except StaleWorktreeError:
-            # A stale worktree (wrong branch / not a worktree) refused
-            # reuse (#404). No session exists yet, so reconcile's
-            # TIMED_OUT cleanup will never fire for it — without
-            # removing it here the task reverts to PENDING and re-hits
-            # the same stale tree every tick (an infinite spin). Force-
-            # remove it (best-effort) so the next claim rebuilds fresh,
-            # then re-raise into the handler below to revert to PENDING.
-            # Caught narrowly as StaleWorktreeError (not WorktreeError)
-            # so the main-checkout guard never triggers a removal.
-            #
-            # Dirty-check guard (#425): if the stale tree contains
-            # unsaved work, skip the removal and park the task as
-            # BLOCKED_ON_USER instead of PENDING so the operator can
-            # inspect. The outer except handler will not overwrite
-            # BLOCKED_ON_USER (it checks status == RUNNING before
-            # reverting).
-            if worktree_has_unsaved_work(client, branch):
-                _log.warning(
-                    "dispatch: stale worktree %s/%s has unsaved work"
-                    " — leaving for operator inspection; parking as"
-                    " BLOCKED_ON_USER",
-                    client.name,
-                    branch,
-                )
-                with dev_queue_lock():
-                    store = load_dev_queue()
-                    for stored_task in store.tasks:
-                        if (
-                            stored_task.ticket_id == task.ticket_id
-                            and stored_task.client == client.name
-                            and stored_task.status == QueueItemStatus.RUNNING
-                        ):
-                            transition_task_status(
-                                stored_task,
-                                QueueItemStatus.BLOCKED_ON_USER,
-                                disposition="dirty_worktree",
-                            )
-                            stored_task.session_id = None
-                            break
-                    save_dev_queue(store)
-            else:
-                with contextlib.suppress(WorktreeError, OSError):
-                    remove_worktree(client, branch, force=True)
-            raise
-
-        # Guard against the #300 regression: if create_worktree
-        # returns the main checkout path (degenerate path-computation
-        # or symlink indirection), refuse the spawn.  create_worktree
-        # normally catches this itself, but a mocked or buggy
-        # implementation could still return the same path.
-        check_not_main_checkout(worktree_path, client)
-
-        _invalidate_stale_context_json(task, client, worktree_path)
-
-        executor = resolve_executor(task, client, native_daemon=resolved_native_daemon)
-        session_id = executor.spawn(
-            stage=task.stage,
-            task=task,
-            worktree=worktree_path,
-            client=client,
-            parent=parent,
-            wall_clock_budget_seconds=resolve_headless_budget(task, None, config),
-        )
-
-        # Stamp session_id on the queued task so the completion
-        # consumer can match SESSION_COMPLETED events to the
-        # correct (current) session and reject stale events from
-        # prior crashed sessions for the same ticket. See GitHub
-        # issue #97.
-        with dev_queue_lock():
-            store = load_dev_queue()
-            for stored_task in store.tasks:
-                if (
-                    stored_task.ticket_id == task.ticket_id
-                    and stored_task.client == client.name
-                    and stored_task.status == QueueItemStatus.RUNNING
-                ):
-                    stored_task.session_id = session_id
-                    stored_task.spawn_error_count = 0
-                    stored_task.next_eligible_at = None
-                    # R5: stamp stage_base_ref -- non-fatal on failure
-                    try:
-                        head_sha = subprocess.check_output(
-                            [
-                                "git",
-                                "-C",
-                                str(worktree_path),
-                                "rev-parse",
-                                "HEAD",
-                            ],
-                            text=True,
-                            timeout=5,
-                        )
-                        stored_task.stage_base_ref = head_sha.strip()
-                    except subprocess.SubprocessError as exc:
-                        _log.warning(
-                            "dispatch: stage_base_ref failed for %s: %s",
-                            task.ticket_id,
-                            exc,
-                        )
-                    break
-            save_dev_queue(store)
-
-        record_event(
-            OrchestratorEventType.SESSION_SPAWNED,
-            {
-                "ticket_id": task.ticket_id,
-                "client": client.name,
-                "session_id": session_id,
-                "lane": task.lane,
-            },
-        )
-
-        if emit is not None:
-            emit(
-                f"SPAWN {client.name}/{task.ticket_id}"
-                f" session={session_id}"
-                f" worktree={worktree_path}"
-            )
-    except UsageLimitError:
-        # Narrow catch for fleet-wide usage limits. Raised by
-        # executor.spawn → NativeDaemonClient.spawn_bg when the
-        # claude output matches USAGE_LIMIT_RE. The task was claimed
-        # to RUNNING but no session_id was assigned (spawn failed);
-        # revert it explicitly to PENDING below, then break so no
-        # further slots are tried this tick.
-        _log.warning(
-            "dispatch_tick: usage limit detected for %s/%s; setting back-off",
-            client.name,
-            task.ticket_id,
-        )
-        # Revert the claimed task back to PENDING — spawn never succeeded.
-        _revert_claimed_task_to_pending(client.name, task.ticket_id)
-        return _SpawnOutcome(usage_limit_detected=True)
-    except Exception as exc:  # noqa: BLE001
-        # Sanctioned broad-catch per PYTHON-PATTERNS.md:316-331.
-        # Paired tests: TestDispatchTickSpawnErrors in
-        # tests/test_dispatch.py:1097+ (asserts the loop survives
-        # spawn failures and the task is reverted to PENDING).
-        #
-        # Catch broad like the reconcile guard above: a backend
-        # outage (tmux pane exhaustion, transient daemon failure,
-        # OSError from the adapter) must NOT kill the loop. The
-        # task was just claimed RUNNING by _claim_next_pending; it
-        # would otherwise be left in a half-state (status=RUNNING,
-        # session_id=None) requiring manual repair. Revert to
-        # PENDING + clear session_id so the next tick (or
-        # reconcile) can retry. Break to skip this client's
-        # remaining slots this tick — re-trying the same failing
-        # backend immediately would just spin. See GitHub issue
-        # #149.
-        _log.exception(
-            "dispatch_tick: spawn failed for %s/%s; reverting task to PENDING",
-            client.name,
-            task.ticket_id,
-        )
-        _revert_claimed_task_to_pending(client.name, task.ticket_id, stamp_backoff=True)
-        return _SpawnOutcome(spawn_error=True, error=str(exc))
-
-    return _SpawnOutcome(spawned=True)
-
-
-@dataclass(frozen=True)
-class _ClientDispatchResult:
-    """Aggregate outcome of dispatching one client's lanes for a tick.
-
-    ``spawned`` — sessions started for the client this tick.
-    ``usage_limit_detected`` — True if any lane hit a usage limit.
-    """
-
-    spawned: int = 0
-    usage_limit_detected: bool = False
-
-
-def _check_lane_circuit_paused(
-    lane_cfg: LaneConfig,
-    queue_snapshot: DevQueueStore,
-    client_name: str,
-    *,
-    overrides: ConcurrencyOverrides,
-    config: OrchestratorConfig,
-) -> bool:
-    """Return True when a lane is paused *by the breaker* and has pending work.
-
-    Distinguishes a circuit-breaker trip (consecutive_spawn_errors >= threshold)
-    from a plain operator pause: only the former, with pending work still
-    waiting, warrants the LANE_CIRCUIT_PAUSED skip_reason. See GitHub #875.
-
-    ``overrides`` is loaded once per :func:`_dispatch_client_lanes` call (not
-    once per paused lane) and passed in by the caller.
-    """
-    override = overrides.lanes.get(f"{client_name}/{lane_cfg.name}")
-    if override is None:
-        return False
-    if override.consecutive_spawn_errors < config.lane_circuit_breaker_threshold:
-        return False
-    pending_in_lane = sum(
-        1
-        for t in queue_snapshot.tasks
-        if t.client == client_name
-        and t.lane == lane_cfg.name
-        and t.status == QueueItemStatus.PENDING
-    )
-    return pending_in_lane > 0
-
-
-def _record_lane_spawn_error(
-    lane_cfg: LaneConfig,
-    client_name: str,
-    last_error: str,
-    *,
-    config: OrchestratorConfig,
-) -> None:
-    """Increment the lane's spawn-error counter; trip the breaker at threshold.
-
-    Under the override lock: load → increment → save.  When the post-increment
-    count reaches ``lane_circuit_breaker_threshold`` the lane is paused and a
-    circuit-breaker-sourced LANE_PAUSED event is emitted with the post-increment
-    count and the (always-string) last error.  See GitHub #875.
-    """
-    lane_key = f"{client_name}/{lane_cfg.name}"
-    tripped = False
-    with concurrency_override_lock():
-        overrides = _load_concurrency_overrides()
-        override = overrides.lanes.get(lane_key, LaneConcurrencyOverride())
-        count = override.consecutive_spawn_errors + 1
-        updates: dict[str, object] = {"consecutive_spawn_errors": count}
-        if count >= config.lane_circuit_breaker_threshold:
-            updates["paused"] = True
-            tripped = True
-        overrides.lanes[lane_key] = override.model_copy(update=updates)
-        _save_concurrency_overrides(overrides)
-    if tripped:
-        record_event(
-            OrchestratorEventType.LANE_PAUSED,
-            {
-                "client": client_name,
-                "lane": lane_cfg.name,
-                "source": _LANE_PAUSE_SOURCE_CIRCUIT_BREAKER,
-                "consecutive_count": count,
-                "last_error": last_error,
-            },
-        )
-
-
-def _reset_lane_spawn_errors(lane_cfg: LaneConfig, client_name: str) -> None:
-    """Reset the lane's spawn-error counter to zero after a successful spawn.
-
-    Short-circuits (no write) when the counter is already zero or the lane has
-    no override, so a steady-state healthy lane never rewrites the override
-    file.  Never clears ``paused`` — a breaker-paused lane resumes only via
-    ``cw lane resume``.  See GitHub #875.
-    """
-    lane_key = f"{client_name}/{lane_cfg.name}"
-    with concurrency_override_lock():
-        overrides = _load_concurrency_overrides()
-        override = overrides.lanes.get(lane_key)
-        if override is None or override.consecutive_spawn_errors == 0:
-            return
-        overrides.lanes[lane_key] = override.model_copy(
-            update={"consecutive_spawn_errors": 0}
-        )
-        _save_concurrency_overrides(overrides)
-
-
-def _record_client_freshness_block(
-    client_name: str,
-    freshness_detail: str | None,
-    *,
-    config: OrchestratorConfig,
-) -> None:
-    """Increment the client's freshness-gate-block latch (RFC 0007 §W2).
-
-    Under the override lock: load → increment → save. When the
-    post-increment count reaches ``freshness_block_attention_threshold``
-    (exact equality — latch semantics, no re-fire while still at/above the
-    threshold on subsequent stale ticks) a ``session.needs_attention`` event
-    is emitted AFTER releasing the lock, mirroring
-    :func:`_record_lane_spawn_error`. No push notification (deliberate — see
-    the gh_blocked/finalize_blocked precedent, neither of which pushes).
-    """
-    tripped = False
-    count = 0
-    with concurrency_override_lock():
-        overrides = _load_concurrency_overrides()
-        override = overrides.clients.get(client_name, ClientConcurrencyOverride())
-        count = override.consecutive_freshness_blocks + 1
-        overrides.clients[client_name] = override.model_copy(
-            update={"consecutive_freshness_blocks": count}
-        )
-        _save_concurrency_overrides(overrides)
-        if count == config.freshness_block_attention_threshold:
-            tripped = True
-    if tripped:
-        record_event(
-            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-            {
-                "session_id": "",
-                "session_name": "",
-                "client": client_name,
-                "ticket_id": None,
-                "claude_session_id": None,
-                "paused_status": _FRESHNESS_BLOCK_ESCALATED_REASON,
-                "breadcrumbs": freshness_detail or "",
-                "crashed": False,
-            },
-            correlation_id=None,
-        )
-
-
-def _reset_client_freshness_blocks(client_name: str) -> None:
-    """Reset the client's freshness-gate-block counter to zero (RFC 0007 §W2).
-
-    Short-circuits (no write) when the counter is already zero or the client
-    has no override, mirroring :func:`_reset_lane_spawn_errors`.
-    """
-    with concurrency_override_lock():
-        overrides = _load_concurrency_overrides()
-        override = overrides.clients.get(client_name)
-        if override is None or override.consecutive_freshness_blocks == 0:
-            return
-        overrides.clients[client_name] = override.model_copy(
-            update={"consecutive_freshness_blocks": 0}
-        )
-        _save_concurrency_overrides(overrides)
-
-
-def _dispatch_client_lanes(
-    client: ClientConfig,
-    effective_lanes: list[LaneConfig],
-    queue_snapshot: DevQueueStore,
-    *,
-    running_count: int,
-    client_ceiling: int,
-    cap: int,
-    pending_count: int,
-    cap_full: bool,
-    running_by_lane: dict[str, int],
-    priority_ids: list[str] | None,
-    config: OrchestratorConfig,
-    resolved_native_daemon: NativeDaemonClient,
-    parent: str | None,
-    emit: Callable[[str], None] | None,
-) -> _ClientDispatchResult:
-    """Claim + spawn across a client's lanes, then emit its dispatch.tick.
-
-    Walks each effective lane within the Tier-1 client slot budget, claiming
-    and spawning one task per granted slot.  Breaks out of the lane walk on
-    the first usage-limit or spawn-error.  Always records the per-client
-    dispatch.tick event (with the resolved skip_reason and per-lane stats).
-    """
-    client_spawned = 0
-    spawn_error = False
-    usage_limit_detected = False
-    # True when any lane has pending>0 but grant<=0 due to occupied slots
-    # (RUNNING + BLOCKED_ON_USER >= max_parallel). Distinguishes the
-    # previously misleading skip_reason=no_pending case (#588).
-    lane_cap_blocked = False
-    # True when at least one PENDING task was skipped due to active
-    # spawn_error backoff (next_eligible_at in the future). See GitHub #868.
-    spawn_backoff_skipped = False
-    # True when a lane is skipped because its circuit breaker has tripped
-    # (consecutive_spawn_errors >= threshold) and pending work waits. See #875.
-    lane_circuit_paused = False
-    # Lazily loaded at most once per call (only if a paused lane is seen),
-    # not once per paused lane -- see _check_lane_circuit_paused. See #875.
-    overrides: ConcurrencyOverrides | None = None
-
-    # Tier-1 client slot budget: use the session-based running_count (not
-    # the task-based total_running) so pre-existing DAEMON sessions without
-    # a corresponding task still occupy slots (backward compat). The per-
-    # lane running_by_lane counts govern per-lane grants within this budget.
-    available_client_slots = client_ceiling - running_count
-    lane_stats: dict[str, dict[str, int]] = {}
-    # Per-lane occupant {ticket_id, status} lists for the dispatch.tick payload
-    # (#1243). Computed once here (all lanes), the same OCCUPIED_LANE_STATUSES
-    # join _lane_stats_for_client uses -- so blocked_in_lane/signoff_in_lane
-    # below derive from it rather than re-scanning the queue.
-    occupants_by_lane = _lane_occupants_for_client(client, queue_snapshot)
-
-    for lane_cfg in effective_lanes:
-        if available_client_slots <= 0:
-            break
-        if lane_cfg.paused:
-            overrides = overrides or _load_concurrency_overrides()
-            lane_circuit_paused = lane_circuit_paused or _check_lane_circuit_paused(
-                lane_cfg,
-                queue_snapshot,
-                client.name,
-                overrides=overrides,
-                config=config,
-            )
-            continue
-        # running_in_lane = RUNNING + BLOCKED_ON_USER + AWAITING_OPERATOR_SIGNOFF
-        # (total occupied slots, OCCUPIED_LANE_STATUSES, #990).
-        running_in_lane = running_by_lane.get(lane_cfg.name, 0)
-        # blocked_in_lane = BLOCKED_ON_USER only (for per-lane breakdown),
-        # derived from occupants_by_lane rather than re-scanning the queue.
-        blocked_in_lane = sum(
-            1
-            for o in occupants_by_lane.get(lane_cfg.name, [])
-            if o["status"] == QueueItemStatus.BLOCKED_ON_USER.value
-        )
-        # signoff_in_lane = AWAITING_OPERATOR_SIGNOFF only (for per-lane
-        # breakdown). Must be subtracted out of running_in_lane below, else a
-        # signoff-parked ticket is misreported as "running" (#990).
-        signoff_in_lane = sum(
-            1
-            for o in occupants_by_lane.get(lane_cfg.name, [])
-            if o["status"] == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF.value
-        )
-        pending_in_lane = sum(
-            1
-            for t in queue_snapshot.tasks
-            if t.client == client.name
-            and t.lane == lane_cfg.name
-            and t.status == QueueItemStatus.PENDING
-        )
-        grant = min(
-            lane_cfg.max_parallel - running_in_lane,
-            pending_in_lane,
-            available_client_slots,
-        )
-        # Detect: pending work exists but the lane cap is full of occupied
-        # slots (RUNNING + BLOCKED_ON_USER >= max_parallel). Raises the
-        # skip_reason to LANE_CAP_BLOCKED instead of the misleading NO_PENDING.
-        if grant <= 0 and pending_in_lane > 0:
-            lane_cap_blocked = True
-        lane_claimed = 0
-        for _ in range(max(0, grant)):
-            task, backoff_skipped = _claim_next_pending(
-                client.name,
-                lane=lane_cfg.name,
-                config=config,
-                priority_ticket_ids=priority_ids,
-            )
-            spawn_backoff_skipped |= backoff_skipped
-            if task is None:
-                break
-
-            outcome = _spawn_claimed_task(
-                task,
-                client,
-                config=config,
-                resolved_native_daemon=resolved_native_daemon,
-                parent=parent,
-                emit=emit,
-            )
-            if outcome.usage_limit_detected:
-                usage_limit_detected = True
-            if outcome.spawn_error:
-                spawn_error = True
-                _record_lane_spawn_error(
-                    lane_cfg,
-                    client_name=client.name,
-                    last_error=outcome.error or "",
-                    config=config,
-                )
-            if outcome.spawned:
-                running_count += 1
-                client_spawned += 1
-                lane_claimed += 1
-                available_client_slots -= 1
-                _reset_lane_spawn_errors(lane_cfg, client.name)
-
-            if usage_limit_detected or spawn_error:
-                break
-
-        lane_stats[lane_cfg.name] = {
-            "claimed": lane_claimed,
-            "running": running_in_lane - blocked_in_lane - signoff_in_lane,
-            "blocked": blocked_in_lane,
-            "signoff": signoff_in_lane,
-            "pending": pending_in_lane,
-        }
-
-        if usage_limit_detected or spawn_error:
-            break
-
-    if emit is not None:
-        emit(
-            f"{client.name}: spawned={client_spawned}"
-            f" cap_full={int(cap_full)}"
-            f" lane_cap_blocked={int(lane_cap_blocked)}"
-        )
-
-    skip_reason = _resolve_dispatch_skip_reason(
-        usage_limit_detected=usage_limit_detected,
-        cap_full=cap_full,
-        spawn_error=spawn_error,
-        lane_cap_blocked=lane_cap_blocked,
-        spawn_backoff_skipped=spawn_backoff_skipped,
-        lane_circuit_paused=lane_circuit_paused,
-        client_spawned=client_spawned,
-    )
-
-    record_event(
-        OrchestratorEventType.DISPATCH_TICK,
-        {
-            "client": client.name,
-            "claimed": client_spawned,
-            "pending": pending_count,
-            "running": running_count,
-            "cap": cap,
-            "skip_reason": skip_reason,
-            "lanes": lane_stats,
-            "lane_occupants": occupants_by_lane,
-            "occupied": sum(len(v) for v in occupants_by_lane.values()),
-        },
-    )
-    return _ClientDispatchResult(
-        spawned=client_spawned, usage_limit_detected=usage_limit_detected
-    )
-
-
-def _resolve_low_precedence_skip_reason(
-    *,
-    lane_circuit_paused: bool,
-    spawn_backoff_skipped: bool,
-    client_spawned: int,
-) -> DispatchSkipReason:
-    """Resolve the low-precedence tail of the skip_reason chain (#875).
-
-    LANE_CIRCUIT_PAUSED > (SPAWN_ERROR_BACKOFF | NO_PENDING when nothing
-    spawned this tick) > NONE.  Split out of _resolve_dispatch_skip_reason so
-    that function stays within the PLR0911 six-return ceiling.
-    """
-    if lane_circuit_paused:
-        return DispatchSkipReason.LANE_CIRCUIT_PAUSED
-    if client_spawned == 0:
-        return (
-            DispatchSkipReason.SPAWN_ERROR_BACKOFF
-            if spawn_backoff_skipped
-            else DispatchSkipReason.NO_PENDING
-        )
-    return DispatchSkipReason.NONE
-
-
-def _resolve_dispatch_skip_reason(
-    *,
-    usage_limit_detected: bool,
-    cap_full: bool,
-    spawn_error: bool,
-    lane_cap_blocked: bool,
-    spawn_backoff_skipped: bool,
-    lane_circuit_paused: bool,
-    client_spawned: int,
-) -> DispatchSkipReason:
-    """Resolve the dispatch.tick skip_reason via first-match precedence.
-
-    Mirrors the operator resolution order (issue #459, #588, #875):
-    1. freshness_gate — handled by early-continue before this is called
-    2. usage_limited — usage limit detected this tick for this client
-    3. cap_full — running_count >= cap before loop entered
-    4. lane_cap_blocked — pending>0 but every lane slot is occupied by
-       RUNNING or BLOCKED_ON_USER tasks; grant<=0 for all lanes
-    5. spawn_error — exception broke the loop (regardless of client_spawned)
-    6. lane_circuit_paused — a lane's circuit breaker has tripped and pending
-       work is stranded behind it (see _resolve_low_precedence_skip_reason)
-    7. spawn_error_backoff — pending tasks exist but all are in spawn_error
-       backoff (next_eligible_at in the future); no exception occurred
-    8. no_pending — loop exited with zero claims and no spawn error
-    9. none — at least one session spawned
-    """
-    if usage_limit_detected:
-        return DispatchSkipReason.USAGE_LIMITED
-    if cap_full:
-        return DispatchSkipReason.CAP_FULL
-    if lane_cap_blocked:
-        return DispatchSkipReason.LANE_CAP_BLOCKED
-    if spawn_error:
-        return DispatchSkipReason.SPAWN_ERROR
-    return _resolve_low_precedence_skip_reason(
-        lane_circuit_paused=lane_circuit_paused,
-        spawn_backoff_skipped=spawn_backoff_skipped,
-        client_spawned=client_spawned,
-    )
-
-
-def _reconcile_usage_limited() -> bool:
-    """Run the best-effort reconcile preamble, returning its usage-limit flag.
-
-    Returns True if reconcile reported a usage limit; False on success without
-    a limit or when reconcile raised (logged and swallowed so a transient
-    failure never kills the tick — phantoms are reaped next tick).
-    """
-    reconcile_report = None
-    try:
-        reconcile_report = reconcile()
-    except Exception:  # noqa: BLE001
-        # Sanctioned broad-catch per PYTHON-PATTERNS.md:316-331 (4-part justification):
-        # 1. reconcile() calls ``claude agents --json`` and native-daemon roster
-        #    I/O — failure modes include subprocess crash and JSON decode errors.
-        # 2. Logging: _log.exception captures the full traceback with exc_info.
-        # 3. Non-critical: reconcile is best-effort housekeeping. Skipping a tick
-        #    just means phantoms get reaped on the next dispatch_tick.
-        # 4. Paired test: tests/test_dispatch.py
-        #    test_reconcile_failure_does_not_crash_dispatch_tick.
-        _log.exception("reconcile failed during dispatch_tick; continuing")
-    return reconcile_report is not None and reconcile_report.usage_limited
 
 
 def _sweep_expired_diagnostics(config: OrchestratorConfig) -> None:
@@ -2041,6 +711,8 @@ _STAGE_REACHED_TO_STAGE: dict[str, Stage] = {
     "stage4b_pr_create": Stage.FINALIZE,
     "stage5_post_create": Stage.FINALIZE,
 }
+
+
 # Fail fast at import time if this mapping's keys ever drift from the
 # canonical StageReached value set (e.g. a new stage added to the Literal in
 # auto_dev_result.py without a matching entry here) -- a silent gap here
@@ -2229,6 +901,7 @@ def _route_scope_gated_approval(
                 "paused_status": _APPROVAL_GATE_REASON,
                 "breadcrumbs": "",
                 "crashed": False,
+                "lane": task.lane,
             },
             correlation_id=task.ticket_id,
         )
@@ -2352,6 +1025,7 @@ def _route_staged_decision(
                 "paused_status": _PLAN_PARKED_REASON,
                 "breadcrumbs": "",
                 "crashed": False,
+                "lane": task.lane,
             },
             correlation_id=task.ticket_id,
         )
@@ -2376,6 +1050,7 @@ def _route_staged_decision(
                 "paused_status": "merge_pending",
                 "breadcrumbs": "",
                 "crashed": False,
+                "lane": task.lane,
             },
             correlation_id=task.ticket_id,
         )
@@ -2441,6 +1116,7 @@ def _route_staged_decision(
                 ),
                 "breadcrumbs": breadcrumbs,
                 "crashed": False,
+                "lane": task.lane,
             },
             correlation_id=task.ticket_id,
         )
@@ -2463,6 +1139,7 @@ def _route_staged_decision(
                 "paused_status": "blocked",
                 "breadcrumbs": "",
                 "crashed": False,
+                "lane": task.lane,
             },
             correlation_id=task.ticket_id,
         )

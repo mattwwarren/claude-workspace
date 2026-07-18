@@ -887,7 +887,7 @@ class TestStageBaseRefStamping:
             per_client_max_parallel={"sbr-client": 1},
         )
         with unittest.mock.patch(
-            "cw.dispatch.subprocess.check_output",
+            "cw.dispatch.claim.subprocess.check_output",
             side_effect=subprocess.SubprocessError("git failure"),
         ):
             dispatch_tick(cfg, native_daemon=mock_native_daemon)

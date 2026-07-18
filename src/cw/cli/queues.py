@@ -201,6 +201,7 @@ def _follow_loop(
     *,
     as_json: bool,
     client_names: frozenset[str] | None = None,
+    lane_names: frozenset[str] | None = None,
     dedup_terminal: bool = False,
 ) -> None:
     """Stream events from the inbox until SIGINT or broken pipe."""
@@ -211,6 +212,7 @@ def _follow_loop(
             since_ts=since_ts,
             event_types=etype_filter,
             client_names=client_names,
+            lane_names=lane_names,
         ):
             if dedup_terminal:
                 key = _terminal_dedup_key(ev)
@@ -243,6 +245,12 @@ def _follow_loop(
     multiple=True,
     help="Filter by payload.client field (repeatable).",
 )
+@click.option(
+    "--lane",
+    "lane_filter",
+    multiple=True,
+    help="Filter by payload.lane field (repeatable).",
+)
 @click.option("--json", "as_json", is_flag=True, help="Output full event JSON.")
 @click.option("--follow", "-f", is_flag=True, help="Stream new events as they arrive.")
 @click.option(
@@ -259,6 +267,7 @@ def event_tail(
     since: str | None,
     type_filter: tuple[str, ...],
     client_filter: tuple[str, ...],
+    lane_filter: tuple[str, ...],
     as_json: bool,
     follow: bool,
     dedup_terminal: bool,
@@ -271,6 +280,9 @@ def event_tail(
 
     When a consumer name is given, the cursor advances automatically
     after reading (one-shot mode only; --follow never advances the cursor).
+
+    --client filters by payload.client; --lane filters by payload.lane.
+    Both are repeatable and accept comma-separated values.
     """
     consumer: str | None = None
     since_ts: datetime | None = None
@@ -281,6 +293,11 @@ def event_tail(
     client_names: frozenset[str] | None = (
         frozenset(c for raw in client_filter for c in raw.split(",") if c) or None
         if client_filter
+        else None
+    )
+    lane_names: frozenset[str] | None = (
+        frozenset(v for raw in lane_filter for v in raw.split(",") if v) or None
+        if lane_filter
         else None
     )
 
@@ -300,6 +317,7 @@ def event_tail(
             etype_filter,
             as_json=as_json,
             client_names=client_names,
+            lane_names=lane_names,
             dedup_terminal=dedup_terminal,
         )
         return
@@ -314,6 +332,7 @@ def event_tail(
         since_ts=since_ts,
         event_types=etype_filter,
         client_names=client_names,
+        lane_names=lane_names,
     )
 
     if dedup_terminal:
