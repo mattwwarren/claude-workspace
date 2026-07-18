@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Documentation
+
+- **Aider `edit-format` guidance for the local backend** (#1204): documents
+  that aider's `whole`-mode default for model ids it doesn't recognize (i.e.
+  most non-Claude models) can regenerate the entire target file on every
+  edit and blow a stage timeout — a symptom that looks like a model/timeout
+  failure rather than the real cause. Operators should set
+  `edit-format: diff` in `~/.aider.conf.yml` (or `AIDER_EDIT_FORMAT=diff` in
+  the dispatcher's own environment before it starts) to force `diff` mode.
+  Doc-only — no `src/cw` changes; edit-format policy stays with aider's own
+  config/env precedence rather than a new `cw` passthrough flag.
+
 ## [1.21.0] — 2026-07-17
 
 Dispatch-latch hardening plus installer ownership of subagents. The two
