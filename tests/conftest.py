@@ -512,7 +512,7 @@ def capture_events(
 
 
 @pytest.fixture
-def make_git_repo(tmp_path: Path) -> Callable[[str], Path]:
+def make_git_repo(tmp_path: Path) -> Callable[..., Path]:
     """Factory fixture to create git repos in tmp_path.
 
     Initialises with a single empty commit on ``main`` so callers that
@@ -520,10 +520,15 @@ def make_git_repo(tmp_path: Path) -> Callable[[str], Path]:
     have a real commit to branch from. Sets per-repo user.name/email so
     the commit succeeds without a global git config (CI runners often
     lack one).
+
+    The keyword-only ``base`` overrides the parent directory (default
+    ``tmp_path``). The live codex contract suite (#1238) passes a home-tree
+    base because snap-confined codex cannot reach ``/tmp``; every pre-existing
+    positional caller keeps its exact ``tmp_path``-relative behavior.
     """
 
-    def _make(name: str) -> Path:
-        repo = tmp_path / name
+    def _make(name: str, *, base: Path | None = None) -> Path:
+        repo = (base if base is not None else tmp_path) / name
         repo.mkdir(parents=True, exist_ok=True)
         clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 
