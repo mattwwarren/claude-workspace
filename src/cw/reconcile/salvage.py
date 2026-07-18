@@ -269,6 +269,7 @@ def _salvage_low_path(
     """Execute the LOW-confidence flag-only path."""
     breadcrumbs = f"branch={branch} worktree={worktree_path_str}"
     already_flagged = False
+    now = datetime.now(UTC)
 
     # Update session last_result under sessions_lock. Capture already_flagged
     # before the conditional write so the early-return below can suppress
@@ -290,6 +291,9 @@ def _salvage_low_path(
                     else:
                         s.last_result = {"paused_status": _NEEDS_SALVAGE_REASON}
                     s.reap_reason = ReapReason.SALVAGE_PARKED
+                    s.status = SessionStatus.COMPLETED
+                    s.completed_at = now
+                    s.completed_reason = CompletionReason.CRASHED
                 break
         save_state(fresh_state)
 
@@ -332,6 +336,12 @@ def _salvage_low_path(
         },
     )
     _deps.fire_push_notification(session.name, session.client)
+
+    # Stop the surface if still running — a salvage-parked session is by
+    # definition no longer live (GitHub #1249).
+    if session.surface_ref is not None:
+        with contextlib.suppress(Exception):
+            _deps.get_native_daemon_client().stop(session.surface_ref)
 
 
 def _rescue_mark_attempted(session_id: str) -> None:
