@@ -1,11 +1,17 @@
-"""cw doctor preflight — report environment health in one place.
+"""Core ``cw doctor`` checks: wedge detection, loop health, versions, reap, run.
 
-When the environment is missing required binaries or the state file is
-corrupted, every cw command fails with a cryptic error. `cw doctor` is
-the one place to find out *what* is wrong before starting a session.
+This is the deliberately-oversized interim "shim" module from part 1 of the
+doctor package split (#1313). It holds every check not yet clustered into
+``config_checks`` or ``linkage`` — wedge detection and reap, loop
+health/liveness, TIMED_OUT-merged detection, claude/cw version + dependency
+checks, daemon reachability, the bypass-disclaimer check — plus the
+:func:`run_doctor` orchestrator that assembles the full report from every
+cluster. Part 2 will split ``core.py`` further.
 
-Returns structured results so the CLI can format them and tests can
-assert on specific checks.
+``run_doctor`` reaches the ``config_checks`` / ``linkage`` clusters through
+direct submodule imports (never through the package ``__init__``) so the
+package import graph stays acyclic. The one-directional discipline holds:
+``cw.dispatch`` never imports ``cw.doctor``.
 """
 
 from __future__ import annotations
@@ -14,108 +20,66 @@ import contextlib
 import importlib.metadata
 import json
 import logging
-import shutil
 import subprocess as _sp
 import tomllib
 import urllib.parse
-from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import yaml
 from pydantic import ValidationError
 
 from cw import __version__
-from cw.config import (
-    clients_file,
-    load_clients,
-    load_orchestrator_config,
-    load_state,
-    orchestrator_config_file,
-    save_state,
-    sessions_lock,
-    state_file,
-)
-from cw.dev_queue import (
-    dev_queue_lock,
-    load_dev_queue,
-    save_dev_queue,
-    transition_task_status,
-)
+from cw.config import load_state, save_state, sessions_lock, state_file
+from cw.dev_queue import dev_queue_lock, save_dev_queue, transition_task_status
 from cw.dispatch import TICK_STALE_SECONDS
-from cw.events import inbox_path, read_events, record_event
+from cw.doctor import _deps
+from cw.doctor._shared import CheckResult, DoctorReport, WedgeFinding
+from cw.doctor.config_checks import (
+    _check_attention_state_census,
+    _check_config_file,
+    _check_dev_queue,
+    _check_inbox_size,
+    _check_orchestrator_config,
+    _check_project_configs,
+    _check_review_recipe_liveness,
+    _check_review_strategy,
+    _check_state_file,
+)
+from cw.doctor.linkage import (
+    _check_cross_repo_rows,
+    _check_dispatch_repo_head,
+    _check_linkage,
+    _check_reconcile,
+    _check_workspace_paths,
+    _check_worktree_paths_sessions,
+)
+from cw.events import read_events, record_event
 from cw.exceptions import CwError
 from cw.gh import TIMED_OUT_MERGED_LOOKBACK_DAYS, pr_is_merged_for_ticket
 from cw.models import (
     CompletionReason,
     DispatchSkipReason,
-    OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
     SessionOrigin,
     SessionStatus,
 )
 from cw.native_daemon import _ROSTER_PATH, get_native_daemon_client
-from cw.orchestrate import TickSummary, latest_tick_summary_by_client
-from cw.pr_hydrate import _is_candidate, _parse_pr_url, _repo_slug_mismatch
+from cw.orchestrate import latest_tick_summary_by_client
 from cw.reconcile import (
     SPAWN_GRACE_SECONDS,
     compute_drift,
     feature_branch_key,
-    reconcile,
     ticket_id_for_session,
 )
-from cw.reconcile.review_recipes import (
-    RECIPE_ATTENTION_STATES,
-    RECIPE_FIRED_AT_GETTERS,
-    resolve_review_recipe_enabled,
-)
-from cw.review_strategy import HANDLE_KEY_BY_MODE, RECOGNIZED_MODES
-from cw.tracker import PROJECT_CONFIG_RELPATH, load_project_config_dict
-from cw.worktree import _git_dir, get_head_branch
 
 if TYPE_CHECKING:
+    from typing import Any
+
     from cw.models import ClientConfig, CwState, DevQueueStore, Session, TicketTask
-
-
-@dataclass(frozen=True)
-class CheckResult:
-    """One preflight check and whether it passed."""
-
-    name: str
-    ok: bool
-    detail: str
-    warn: bool = False
-
-
-@dataclass(frozen=True)
-class WedgeFinding:
-    """A detected wedge condition with an actionable recipe."""
-
-    wedge_class: str
-    session_id: str | None
-    ticket_id: str | None
-    recipe: str
-    state_file: str
-
-
-@dataclass
-class DoctorReport:
-    """Aggregated output from :func:`run_doctor`."""
-
-    version: str
-    checks: list[CheckResult] = field(default_factory=list)
-    wedge_findings: list[WedgeFinding] = field(default_factory=list)
-
-    @property
-    def ok(self) -> bool:
-        return all(c.ok for c in self.checks)
-
-    @property
-    def clean(self) -> bool:
-        """True only when every check is both ok and not warned."""
-        return all(c.ok and not c.warn for c in self.checks)
+    from cw.orchestrate import TickSummary
 
 
 # Path to Claude Code user settings — read for the disclaimer-acceptance flag.
@@ -147,19 +111,6 @@ _DEP_NAME_SEPARATORS = "<>=!~; "
 # Number of consecutive FRESHNESS_GATE ticks required to declare a loop stall.
 _LOOP_STALL_CONSECUTIVE_TICKS = 3
 
-# Session statuses that represent an expected terminal lifecycle end-state.
-# A missing worktree on a terminal session is normal (cleaned after merge);
-# only non-terminal sessions with missing worktrees indicate a potential fault.
-_TERMINAL_SESSION_STATUSES: frozenset[SessionStatus] = frozenset(
-    {SessionStatus.COMPLETED, SessionStatus.TIMED_OUT}
-)
-
-
-# Tracker systems cw recognizes in .claude/project-config.yaml. Anything else
-# is a config error: the headless worker would silently fall back to its
-# built-in default (Linear MCP) and stall on OAuth (see #675 / project-config).
-_RECOGNIZED_TRACKERS: frozenset[str] = frozenset({"github-issues", "linear"})
-
 # Wedge class for BLOCKED_ON_USER tasks whose sessions are dead (OOM/crash path).
 _WEDGE_BLOCKED_DEAD_SESSION = "wedge/blocked-on-user-dead-session"
 
@@ -168,670 +119,6 @@ _WEDGE_BLOCKED_DEAD_SESSION = "wedge/blocked-on-user-dead-session"
 _WEDGE_ACTIVE_NO_DAEMON_ENTRY = "wedge/active-no-daemon-entry"
 
 _log = logging.getLogger(__name__)
-
-
-def _gh_on_path() -> bool:
-    """True when the ``gh`` binary is resolvable on PATH (testable seam)."""
-    return shutil.which("gh") is not None
-
-
-def _tracker_system(raw: object) -> object:
-    """Extract ``tracking.primary.system`` from parsed YAML, or None if absent."""
-    if not isinstance(raw, dict):
-        return None
-    tracking = raw.get("tracking")
-    if not isinstance(tracking, dict):
-        return None
-    primary = tracking.get("primary")
-    if not isinstance(primary, dict):
-        return None
-    return primary.get("system")
-
-
-def _tracker_prereq_result(name: str, system: object, path: Path) -> CheckResult:
-    """Build the CheckResult for a recognized tracker's prerequisite probe."""
-    if system == "github-issues":
-        if _gh_on_path():
-            return CheckResult(name, ok=True, detail=f"github-issues ({path})")
-        return CheckResult(
-            name,
-            ok=True,
-            warn=True,
-            detail="github-issues tracker but `gh` is not on PATH",
-        )
-    # linear: cw cannot deterministically probe the Linear MCP from here, so
-    # surface it informationally rather than fail.
-    return CheckResult(
-        name,
-        ok=True,
-        detail=f"linear tracker ({path}); requires Linear MCP reachable in worker",
-    )
-
-
-def _check_project_configs(clients: dict[str, ClientConfig]) -> list[CheckResult]:
-    """Validate each client's ``.claude/project-config.yaml`` tracker config.
-
-    Per client, resolves the repo root (``repo_path`` when worktree-based, else
-    ``workspace_path``), reads ``.claude/project-config.yaml``, and checks that
-    ``tracking.primary.system`` is a recognized tracker whose prerequisites are
-    present. An absent file warns (github-issues is the documented default);
-    an unrecognized system or a parse failure is a hard failure.
-    """
-    results: list[CheckResult] = []
-    for client_name, client in clients.items():
-        root = client.repo_path or client.workspace_path
-        path = root / PROJECT_CONFIG_RELPATH
-        name = f"project-config/{client_name}"
-        if not path.exists():
-            results.append(
-                CheckResult(
-                    name,
-                    ok=True,
-                    warn=True,
-                    detail=(
-                        f"no project-config.yaml at {path}; headless workers"
-                        " fall back to the legacy Linear MCP default and can"
-                        " stall on OAuth — pin tracking.primary.system"
-                        " (github-issues or linear)"
-                    ),
-                )
-            )
-            continue
-        try:
-            raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except (OSError, yaml.YAMLError) as exc:
-            results.append(CheckResult(name, ok=False, detail=f"parse failed: {exc}"))
-            continue
-        system = _tracker_system(raw)
-        if system not in _RECOGNIZED_TRACKERS:
-            results.append(
-                CheckResult(
-                    name,
-                    ok=False,
-                    detail=(
-                        f"tracking.primary.system={system!r} is not recognized"
-                        f" (expected one of {sorted(_RECOGNIZED_TRACKERS)})"
-                    ),
-                )
-            )
-            continue
-        results.append(_tracker_prereq_result(name, system, path))
-    return results
-
-
-def _review_strategy_block(root: Path) -> object:
-    """Return the raw ``review_strategy`` value from project-config.yaml, or None.
-
-    Returns None (a "nothing to warn about" signal) for an absent file,
-    unparseable YAML, a non-dict root, or an absent key — a YAML parse failure
-    is already surfaced by ``_check_project_configs``, so this check stays quiet
-    rather than double-reporting. The file-read walk itself is shared with
-    every other project-config.yaml consumer via
-    ``cw.tracker.load_project_config_dict``.
-    """
-    raw = load_project_config_dict(root)
-    if raw is None:
-        return None
-    return raw.get("review_strategy")
-
-
-def _review_strategy_warning(name: str, block: object) -> CheckResult | None:
-    """Return a WARN CheckResult for a misconfigured review_strategy, else None.
-
-    Never a hard fail: the runtime silently degrades a bad value to ``ci`` (see
-    ``cw.review_strategy.resolve_review_strategy``), so doctor's job is only to
-    surface the typo. Clean configs (absent, ``ci``, or a mode with its handle)
-    return None so no line is emitted.
-    """
-    if block is None:
-        return None
-    if not isinstance(block, dict):
-        return CheckResult(
-            name, ok=True, warn=True, detail="review_strategy is not a mapping"
-        )
-    mode = block.get("mode")
-    if mode not in RECOGNIZED_MODES:
-        return CheckResult(
-            name,
-            ok=True,
-            warn=True,
-            detail=(
-                f"review_strategy.mode={mode!r} is not recognized"
-                f" (expected one of {sorted(RECOGNIZED_MODES)})"
-                " — runtime degrades to ci"
-            ),
-        )
-    handle_key = HANDLE_KEY_BY_MODE.get(mode)
-    if handle_key is not None and not block.get(handle_key):
-        return CheckResult(
-            name,
-            ok=True,
-            warn=True,
-            detail=(
-                f"review_strategy.mode={mode!r} but {handle_key!r} handle is"
-                " missing — request_reviewer will emit PR_ACTION_FAILED"
-            ),
-        )
-    return None
-
-
-def _check_review_strategy(clients: dict[str, ClientConfig]) -> list[CheckResult]:
-    """Warn on a misconfigured review_strategy per client (RFC 0010 P4, #1099).
-
-    Advisory-only: emits a WARN (never a FAIL) when ``review_strategy.mode`` is
-    unrecognized, non-mapping, or names a ``repo_owner``/``reviewer_team`` mode
-    with a missing handle. A clean or absent config emits nothing.
-    """
-    results: list[CheckResult] = []
-    for client_name, client in clients.items():
-        root = client.repo_path or client.workspace_path
-        block = _review_strategy_block(root)
-        warning = _review_strategy_warning(f"review-strategy/{client_name}", block)
-        if warning is not None:
-            results.append(warning)
-    return results
-
-
-# Check name for the #1201 review-recipe liveness/census anomaly checks.
-_LIVENESS_CHECK_NAME = "review-recipe-liveness"
-_CENSUS_CHECK_NAME = "attention-state-census"
-
-
-def _check_review_recipe_liveness(
-    clients: dict[str, ClientConfig],
-) -> list[CheckResult]:
-    """Warn when an enabled review recipe has candidates but has never fired.
-
-    #1201 anomaly layer. For every ``(recipe, attention_state)`` pair, groups the
-    enabled candidate rows by ``(client, lane, recipe)``; a group where *zero*
-    rows carry a non-None ``<recipe>_fired_at`` latch is a liveness anomaly — the
-    recipe is enabled and has work at its trigger attention_state yet has not
-    fired within the current episode. A group with even one fired row is healthy
-    (partial firing proves the recipe can fire) and is NOT warned. The latch is
-    an already-persisted proxy for "fired this episode" (cleared by
-    ``_clear_ended_episodes`` when the episode ends), so no event replay or
-    config window is needed. Degrades to a single no-warn result when the config
-    or dev-queue fails to load (both are surfaced by their own checks).
-    """
-    try:
-        config = load_orchestrator_config()
-    except (OSError, yaml.YAMLError, CwError, ValidationError):
-        config = OrchestratorConfig()
-    if not config.review_recipes_enabled:
-        return [
-            CheckResult(
-                _LIVENESS_CHECK_NAME,
-                ok=True,
-                detail="review recipes disabled (master switch off)",
-            )
-        ]
-    try:
-        tasks = load_dev_queue().tasks
-    except (OSError, json.JSONDecodeError, ValidationError):
-        return [
-            CheckResult(
-                _LIVENESS_CHECK_NAME,
-                ok=True,
-                detail="dev_queue unreadable (see dev_queue.json check)",
-            )
-        ]
-    groups: dict[tuple[str, str, str], list[TicketTask]] = {}
-    for task in tasks:
-        if not _is_candidate(task) or task.pr_state is None:
-            continue
-        for recipe, attention_state in RECIPE_ATTENTION_STATES.items():
-            if task.pr_state.attention_state != attention_state:
-                continue
-            if not resolve_review_recipe_enabled(task, clients, recipe):
-                continue
-            groups.setdefault((task.client, task.lane, recipe), []).append(task)
-    results: list[CheckResult] = []
-    for (client, lane, recipe), group in sorted(groups.items()):
-        firings = sum(
-            1 for t in group if RECIPE_FIRED_AT_GETTERS[recipe](t) is not None
-        )
-        if firings == 0:
-            results.append(
-                CheckResult(
-                    f"{_LIVENESS_CHECK_NAME}/{client}/{lane}/{recipe}",
-                    ok=True,
-                    warn=True,
-                    detail=(
-                        f"{len(group)} candidate(s) at "
-                        f"{RECIPE_ATTENTION_STATES[recipe]} but recipe {recipe!r} "
-                        "has not fired this episode"
-                    ),
-                )
-            )
-    if not results:
-        return [
-            CheckResult(
-                _LIVENESS_CHECK_NAME,
-                ok=True,
-                detail="all enabled review recipes with candidates have fired",
-            )
-        ]
-    return results
-
-
-def _check_attention_state_census() -> CheckResult:
-    """Warn when a hydrated, non-draft candidate PR carries no attention_state.
-
-    #1201 R4. A non-draft candidate row whose ``pr_state`` is hydrated but whose
-    ``attention_state`` is None means the derivation ladder classified nothing
-    where it should have — an observability gap that would leave the row
-    invisible to every attention-state consumer. Draft PRs (None by design),
-    un-hydrated rows (``pr_state is None``), and terminal PRs (excluded by
-    ``_is_candidate``) are all out of scope. Degrades to a no-warn result when
-    the dev-queue fails to load (surfaced by its own check).
-    """
-    try:
-        tasks = load_dev_queue().tasks
-    except (OSError, json.JSONDecodeError, ValidationError):
-        return CheckResult(
-            _CENSUS_CHECK_NAME,
-            ok=True,
-            detail="dev_queue unreadable (see dev_queue.json check)",
-        )
-    missing = [
-        t
-        for t in tasks
-        if _is_candidate(t)
-        and t.pr_state is not None
-        and not t.pr_state.is_draft
-        and t.pr_state.attention_state is None
-    ]
-    if missing:
-        ids = ", ".join(sorted(t.ticket_id for t in missing))
-        return CheckResult(
-            _CENSUS_CHECK_NAME,
-            ok=True,
-            warn=True,
-            detail=(
-                f"{len(missing)} non-draft hydrated PR(s) with no "
-                f"attention_state: {ids}"
-            ),
-        )
-    return CheckResult(
-        _CENSUS_CHECK_NAME,
-        ok=True,
-        detail="all non-draft hydrated candidate PRs have an attention_state",
-    )
-
-
-def _check_config_file() -> CheckResult:
-    """Verify the clients.yaml exists or that no clients is acceptable."""
-    path = clients_file()
-    if not path.exists():
-        return CheckResult(
-            "clients.yaml",
-            ok=True,
-            detail=f"not yet created at {path} (run `cw init`)",
-        )
-    try:
-        load_clients()
-    except (OSError, yaml.YAMLError, CwError, ValidationError) as exc:
-        return CheckResult("clients.yaml", ok=False, detail=f"parse failed: {exc}")
-    return CheckResult("clients.yaml", ok=True, detail=str(path))
-
-
-def _check_orchestrator_config() -> CheckResult:
-    """Verify orchestrator.yaml parses, mirroring _check_config_file above."""
-    path = orchestrator_config_file()
-    if not path.exists():
-        return CheckResult(
-            "orchestrator.yaml",
-            ok=True,
-            detail=f"not yet created at {path} (will be generated on first use)",
-        )
-    try:
-        load_orchestrator_config()
-    except (OSError, yaml.YAMLError, CwError, ValidationError) as exc:
-        return CheckResult("orchestrator.yaml", ok=False, detail=f"parse failed: {exc}")
-    return CheckResult("orchestrator.yaml", ok=True, detail=str(path))
-
-
-def _check_state_file() -> tuple[CheckResult, CwState | None]:
-    """Verify sessions.json parses, returning the loaded state for downstream consumers.
-
-    Returning the parsed state avoids a second ``load_state()`` call in
-    ``run_doctor``: linkage checks reuse the same parsed object. On parse
-    failure the second tuple element is ``None`` and downstream checks that
-    need state should skip themselves; the failure is already visible via
-    the returned ``CheckResult``.
-    """
-    path = state_file()
-    try:
-        state = load_state()
-    except (OSError, json.JSONDecodeError, ValidationError) as exc:
-        return (
-            CheckResult("sessions.json", ok=False, detail=f"load failed: {exc}"),
-            None,
-        )
-    return CheckResult("sessions.json", ok=True, detail=str(path)), state
-
-
-def _check_dev_queue() -> CheckResult:
-    try:
-        load_dev_queue()
-    except (OSError, json.JSONDecodeError, ValidationError) as exc:
-        return CheckResult("dev_queue.json", ok=False, detail=f"load failed: {exc}")
-    return CheckResult("dev_queue.json", ok=True, detail="parseable")
-
-
-def _check_inbox_size() -> CheckResult:
-    """Warn when events/inbox.jsonl exceeds its configured size/line thresholds.
-
-    Read-only: never mutates or prunes the inbox. Absent inbox is healthy
-    (nothing has been recorded yet). See ``cw event prune`` (GitHub #856).
-    """
-    inbox = inbox_path()
-    if not inbox.exists():
-        return CheckResult("inbox-size", ok=True, detail="no inbox file")
-
-    try:
-        config = load_orchestrator_config()
-    except (OSError, yaml.YAMLError, CwError, ValidationError):
-        # Degrade to defaults rather than raising: a bad orchestrator.yaml is
-        # already reported by _check_orchestrator_config() above. Letting it
-        # propagate here would crash run_doctor() before that ok=False
-        # result is ever printed. See GitHub #1200.
-        config = OrchestratorConfig()
-    size_bytes = inbox.stat().st_size
-    with inbox.open("r", encoding="utf-8") as f:
-        line_count = sum(1 for _ in f)
-
-    problems: list[str] = []
-    if size_bytes > config.inbox_size_warn_bytes:
-        problems.append(
-            f"size {size_bytes}B exceeds inbox_size_warn_bytes"
-            f" ({config.inbox_size_warn_bytes}B)"
-        )
-    if line_count > config.inbox_line_count_warn:
-        problems.append(
-            f"{line_count} lines exceeds inbox_line_count_warn"
-            f" ({config.inbox_line_count_warn})"
-        )
-    if problems:
-        detail = "; ".join(problems) + " — run `cw event prune`"
-        return CheckResult("inbox-size", ok=False, detail=detail)
-
-    return CheckResult(
-        "inbox-size", ok=True, detail=f"{size_bytes}B, {line_count} lines"
-    )
-
-
-def _check_linkage(state: CwState) -> list[CheckResult]:
-    """Detect parent/worker linkage drift in session state.
-
-    Returns one :class:`CheckResult` per drift type:
-
-    * ``linkage/dangling-worker`` — an orchestrator's ``worker_session_ids``
-      references a session ID absent from state.
-    * ``linkage/dangling-parent`` — a worker's ``parent_session_id`` points at
-      a session absent from state.
-    * ``linkage/asymmetric`` — one side knows about the link but the other
-      side doesn't (forward-only or reverse-only reference).
-
-    All three results are always returned; each is ``ok=True`` when no drift
-    of that type is detected.
-    """
-    # Index built once: O(1) membership (via .keys()) and lookup throughout.
-    session_by_id: dict[str, Session] = {s.id: s for s in state.sessions}
-
-    # --- dangling-worker: orchestrator.worker_session_ids → missing session ---
-    dangling_worker_msgs: list[str] = [
-        f"orchestrator {sess.id!r} references missing worker {wid!r}"
-        " — remove the stale ID from worker_session_ids"
-        for sess in state.sessions
-        for wid in sess.worker_session_ids
-        if wid not in session_by_id
-    ]
-
-    if dangling_worker_msgs:
-        dw_detail = "; ".join(dangling_worker_msgs)
-        dw_result = CheckResult("linkage/dangling-worker", ok=False, detail=dw_detail)
-    else:
-        dw_result = CheckResult("linkage/dangling-worker", ok=True, detail="")
-
-    # --- dangling-parent: worker.parent_session_id → missing session ---
-    dangling_parent_msgs: list[str] = [
-        f"worker {sess.id!r} references missing parent {sess.parent_session_id!r}"
-        " — clear parent_session_id or restore the parent session"
-        for sess in state.sessions
-        if sess.parent_session_id is not None
-        and sess.parent_session_id not in session_by_id
-    ]
-
-    if dangling_parent_msgs:
-        dp_detail = "; ".join(dangling_parent_msgs)
-        dp_result = CheckResult("linkage/dangling-parent", ok=False, detail=dp_detail)
-    else:
-        dp_result = CheckResult("linkage/dangling-parent", ok=True, detail="")
-
-    # --- asymmetric: one side of the link is missing ---
-    # Build a map: parent_id → {set of worker IDs that claim it as parent}
-    claimed_by: dict[str, set[str]] = {}
-    for sess in state.sessions:
-        parent_id = sess.parent_session_id
-        if parent_id is not None and parent_id in session_by_id:
-            claimed_by.setdefault(parent_id, set()).add(sess.id)
-
-    # Forward check: orchestrator lists a worker, but worker doesn't claim it back.
-    # Workers already caught as dangling are skipped (wid not in session_by_id).
-    fwd_msgs: list[str] = []
-    for sess in state.sessions:
-        for wid in sess.worker_session_ids:
-            worker = session_by_id.get(wid)
-            if worker is None or worker.parent_session_id == sess.id:
-                continue
-            fwd_msgs.append(
-                f"orchestrator {sess.id!r} lists worker {wid!r},"
-                f" but worker's parent_session_id is {worker.parent_session_id!r}"
-                " — update parent_session_id on the worker"
-            )
-
-    # Reverse check: worker claims this session as parent, but session
-    # doesn't list the worker in its worker_session_ids.
-    rev_msgs: list[str] = [
-        f"worker {wid!r} claims parent {sess.id!r},"
-        f" but {sess.id!r}'s worker_session_ids does not include it"
-        " — add the worker ID to worker_session_ids"
-        for sess in state.sessions
-        for wid in claimed_by.get(sess.id, set())
-        if wid not in sess.worker_session_ids
-    ]
-
-    asym_msgs = fwd_msgs + rev_msgs
-
-    if asym_msgs:
-        asym_detail = "; ".join(asym_msgs)
-        asym_result = CheckResult("linkage/asymmetric", ok=False, detail=asym_detail)
-    else:
-        asym_result = CheckResult("linkage/asymmetric", ok=True, detail="")
-
-    return [dw_result, dp_result, asym_result]
-
-
-def _check_reconcile() -> CheckResult:
-    """Run reconciliation and describe the outcome as a check result."""
-    try:
-        reconcile_report = reconcile()
-    except CwError as exc:
-        return CheckResult(
-            "reconciliation",
-            ok=False,
-            detail=f"reconcile failed: {exc}",
-        )
-    reaped = len(reconcile_report.phantom_session_ids)
-    reverted = len(reconcile_report.reverted_ticket_ids)
-    if reaped == 0 and reverted == 0:
-        return CheckResult("reconciliation", ok=True, detail="no phantoms")
-    return CheckResult(
-        "reconciliation",
-        ok=True,
-        detail=(
-            f"reaped {reaped} session(s), reverted {reverted} ticket(s); "
-            f"ids: {reconcile_report.phantom_session_ids}"
-        ),
-    )
-
-
-def _check_workspace_paths() -> list[CheckResult]:
-    """Verify each client's effective git directory exists."""
-    try:
-        clients = load_clients()
-    except Exception:  # noqa: BLE001
-        return []  # _check_config_file() already surfaces parse errors
-    results = []
-    for name, client in clients.items():
-        git_dir = _git_dir(client)
-        if not git_dir.exists():
-            results.append(
-                CheckResult(
-                    f"workspace/{name}",
-                    ok=False,
-                    detail=f"path does not exist: {git_dir}",
-                )
-            )
-    return results
-
-
-def _check_dispatch_repo_head(
-    clients: dict[str, ClientConfig],
-) -> list[CheckResult]:
-    """Check each client's dispatch repo HEAD is on its default branch."""
-    results: list[CheckResult] = []
-    for name, client in clients.items():
-        try:
-            branch = get_head_branch(client)
-        except OSError as exc:
-            results.append(
-                CheckResult(
-                    f"dispatch-repo-head/{name}",
-                    ok=True,
-                    warn=True,
-                    detail=f"could not read HEAD: {exc}",
-                )
-            )
-            continue
-        if branch is None:
-            git_dir = _git_dir(client)
-            default = client.default_branch
-            results.append(
-                CheckResult(
-                    f"dispatch-repo-head/{name}",
-                    ok=True,
-                    warn=True,
-                    detail=(
-                        f"repo HEAD is detached, expected '{default}'"
-                        f" — run: git -C {git_dir} checkout {default}"
-                    ),
-                )
-            )
-        elif branch != client.default_branch:
-            git_dir = _git_dir(client)
-            default = client.default_branch
-            results.append(
-                CheckResult(
-                    f"dispatch-repo-head/{name}",
-                    ok=True,
-                    warn=True,
-                    detail=(
-                        f"repo HEAD is on '{branch}', expected '{default}'"
-                        f" — run: git -C {git_dir} checkout {default}"
-                    ),
-                )
-            )
-    return results
-
-
-def _check_cross_repo_rows(
-    clients: dict[str, ClientConfig],
-) -> list[CheckResult]:
-    """Advisory warn-only check: dev-queue rows whose client resolves to a
-    different github repo than the row's ``pr_url`` (GitHub #1198).
-
-    Every result is ``ok=True, warn=True`` so it never flips
-    ``DoctorReport.ok`` (mirrors ``_check_dispatch_repo_head``). A broken queue
-    is already surfaced by ``_check_dev_queue``, so a load failure here degrades
-    to ``[]`` rather than double-reporting.
-    """
-    try:
-        store = load_dev_queue()
-    except (OSError, json.JSONDecodeError, ValidationError):
-        return []
-    results: list[CheckResult] = []
-    for task in store.tasks:
-        if task.pr_url is None:
-            continue
-        client = clients.get(task.client)
-        if client is None:
-            continue
-        parsed = _parse_pr_url(task.pr_url)
-        if parsed is None:
-            continue
-        pr_repo = parsed[0]
-        client_repo = _repo_slug_mismatch(pr_repo, client.workspace_path)
-        if client_repo is None:
-            continue
-        results.append(
-            CheckResult(
-                f"cross-repo/{task.ticket_id}",
-                ok=True,
-                warn=True,
-                detail=(
-                    f"row {task.ticket_id} client {task.client!r} workspace repo"
-                    f" {client_repo!r} != pr_url repo {pr_repo!r} — a"
-                    " worker-dispatching recipe would run in the wrong workspace"
-                ),
-            )
-        )
-    return results
-
-
-def _check_worktree_paths_sessions(
-    state: CwState | None = None,
-) -> list[CheckResult]:
-    """Verify each non-terminal session's worktree_path exists. Read-only, warn-only.
-
-    Terminal sessions (COMPLETED, TIMED_OUT) have their worktrees cleaned up
-    as part of normal lifecycle — a missing path is expected, not a fault.
-    Only non-terminal sessions with a missing worktree path emit a warn.
-    """
-    if state is None:
-        return []
-    wt_paths: list[tuple[str, Path, SessionStatus]] = [
-        (s.id, s.worktree_path, s.status)
-        for s in state.sessions
-        if s.worktree_path is not None
-    ]
-    total_checked = len(wt_paths)
-    results: list[CheckResult] = []
-    for session_id, wt, status in wt_paths:
-        if status in _TERMINAL_SESSION_STATUSES:
-            continue
-        if not wt.exists():
-            results.append(
-                CheckResult(
-                    f"worktree/{session_id}",
-                    ok=True,
-                    warn=True,
-                    detail=f"path does not exist: {wt}",
-                )
-            )
-    missing_count = len(results)
-    results.append(
-        CheckResult(
-            "worktree/summary",
-            ok=True,
-            warn=False,
-            detail=(
-                f"{total_checked} sessions checked, {missing_count} missing worktrees"
-            ),
-        )
-    )
-    return results
 
 
 # ---------------------------------------------------------------------------
@@ -959,7 +246,7 @@ def _check_wedge_repo_ahead(
     # clients and fall back to the default feature-branch prefix below
     # (mirrors the guard around load_clients in run_doctor).
     try:
-        clients = load_clients()
+        clients = _deps.load_clients()
     except (OSError, yaml.YAMLError, CwError, ValidationError):
         clients = {}
     for task in queue.tasks:
@@ -1224,7 +511,7 @@ def _reap_wedge_findings(findings: list[WedgeFinding]) -> None:
         return
 
     with dev_queue_lock():
-        queue = load_dev_queue()
+        queue = _deps.load_dev_queue()
         changed = False
         for task in queue.tasks:
             if (
@@ -1480,7 +767,7 @@ def _reap_session_by_selector(
     mutations: list[str] = ["session_status_completed", "daemon_stopped"]
     if ticket_id:
         with dev_queue_lock():
-            store = load_dev_queue()
+            store = _deps.load_dev_queue()
             running_reverted = False
             for task in store.tasks:
                 if (
@@ -1542,7 +829,7 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     # Per-client tracker config. A broken clients.yaml is already surfaced by
     # _check_config_file; degrade to no clients rather than crash the run.
     try:
-        _clients = load_clients()
+        _clients = _deps.load_clients()
     except (OSError, yaml.YAMLError, CwError, ValidationError):
         _clients = {}
     report.checks.extend(_check_project_configs(_clients))
@@ -1577,7 +864,7 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     if link_state is not None:
         report.checks.extend(_check_timed_out_merged(link_state, _clients))
         # Wedge checks: load queue once, run all three checks.
-        queue = load_dev_queue()
+        queue = _deps.load_dev_queue()
         report.wedge_findings.extend(
             _check_wedge_task_running_no_session(link_state, queue)
         )
@@ -1944,61 +1231,4 @@ def _check_daemon_reachable() -> CheckResult:
         ok=True,
         warn=True,
         detail="supervisorPid absent or zero — daemon may not be running",
-    )
-
-
-def format_report(report: DoctorReport) -> str:
-    """Render a :class:`DoctorReport` as a human-readable block."""
-    lines = [f"cw {report.version}"]
-    for check in report.checks:
-        if check.warn:
-            mark = "WARN"
-        elif check.ok:
-            mark = "OK"
-        else:
-            mark = "FAIL"
-        line = f"  [{mark}] {check.name}"
-        if check.detail:
-            line += f" — {check.detail}"
-        lines.append(line)
-    if report.wedge_findings:
-        lines.append("")
-        lines.append("wedge findings:")
-        for wf in report.wedge_findings:
-            lines.append(f"  [{wf.wedge_class}] ticket={wf.ticket_id}")
-            lines.append(f"    {wf.recipe}")
-    lines.append("")
-    if not report.ok:
-        footer = "status: problems detected"
-    elif report.clean:
-        footer = "status: healthy"
-    else:
-        footer = "status: healthy — advisory warnings"
-    lines.append(footer)
-    return "\n".join(lines)
-
-
-def format_report_json(report: DoctorReport) -> str:
-    """Render a :class:`DoctorReport` as JSON."""
-    return json.dumps(
-        {
-            "version": 1,
-            "ok": report.ok,
-            "clean": report.clean,
-            "checks": [
-                {"name": c.name, "ok": c.ok, "warn": c.warn, "detail": c.detail}
-                for c in report.checks
-            ],
-            "wedge_findings": [
-                {
-                    "wedge_class": f.wedge_class,
-                    "session_id": f.session_id,
-                    "ticket_id": f.ticket_id,
-                    "recipe": f.recipe,
-                    "state_file": f.state_file,
-                }
-                for f in report.wedge_findings
-            ],
-        },
-        indent=2,
     )
