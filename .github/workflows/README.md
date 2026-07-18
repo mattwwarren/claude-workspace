@@ -5,6 +5,7 @@
 | `ci.yml` | Push / PR | ubuntu + macOS | Lint, type check, unit tests, tmux integration, diff coverage |
 | `nightly.yml` | 09:00 UTC daily | macOS | cmux integration (requires live cmux daemon) |
 | `nightly-native.yml` | Manual (`workflow_dispatch`) | ubuntu | Full test suite (excl. cmux) + native daemon smoke tests |
+| `nightly-codex.yml` | Manual (`workflow_dispatch`) | ubuntu | Live `codex exec` CLI contract suite (requires `OPENAI_CI_KEY`) |
 | `release.yml` | Tag push | ubuntu | Build and publish to PyPI |
 | `dispatch-guard.yml` | Push to `main` (dispatch/reconcile/spawn) | ubuntu | Opens a `dispatch-drift` issue when critical files are unreleased; closes on next release |
 | `pr-events.yml` | PR closed / review submitted / CI workflow_run completed | ubuntu | Pushes PR lifecycle events to `cw_pr_events_server` `/pr-event` via an operator-provisioned relay (GitHub #930); no-ops if `CW_PR_EVENTS_RELAY_URL` repo variable is unset |
@@ -14,6 +15,9 @@
 ```bash
 # Trigger the native nightly
 gh workflow run nightly-native.yml
+
+# Trigger the codex contract nightly
+gh workflow run nightly-codex.yml
 
 # Trigger the cmux nightly
 gh workflow run nightly.yml

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import contextlib
+import re
 import shutil
+import subprocess
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 
@@ -71,6 +73,85 @@ if TYPE_CHECKING:
 # CODEX_REVIEW_UNPARSEABLE/CODEX_MUST_FIX_FINDINGS) live in cw.codex_review.
 CODEX_NOT_FOUND = "codex_not_found"
 CODEX_REVIEW_ONLY = "codex_review_only"
+
+# Capability-probe diagnosis (distinct from codex_review.py's per-role review
+# failure-reason vocabulary): the binary is present but `codex --version`
+# could not be confirmed.
+CODEX_VERSION_UNKNOWN = "codex_version_unknown"
+
+# Matches a dotted major.minor.patch version number anywhere in a
+# `codex --version` output line (#1238). Real CLI banners are name-prefixed
+# (e.g. ``codex-cli 0.136.0``, confirmed live), not a bare version string like
+# ``_check_claude_version``'s sibling probe — search the whole line rather
+# than assuming the version is the first whitespace token.
+_CODEX_VERSION_RE = re.compile(r"\d+(?:\.\d+){2}")
+
+# Default subprocess timeout for a one-shot, user-invoked probe (e.g. `cw
+# doctor`). Callers on a hot path (dispatch's pre-spawn gate) should pass a
+# smaller explicit timeout — see the ``timeout_seconds`` parameter below.
+_DEFAULT_PROBE_TIMEOUT_SECONDS = 10
+
+
+class CodexCapabilityDiagnosis(NamedTuple):
+    """Result of the shared codex capability probe (#1238).
+
+    ``diagnosis`` is ``None`` when codex is capable (binary present and
+    ``codex --version`` parsed), ``CODEX_NOT_FOUND`` when the binary is absent,
+    or ``CODEX_VERSION_UNKNOWN`` when the binary is present but ``--version``
+    failed/timed out/exited non-zero/produced an unparseable string. ``detail``
+    carries the parsed version line on success or a short human-readable failure
+    detail on the two failure branches.
+    """
+
+    diagnosis: str | None
+    detail: str
+
+
+def codex_capability_diagnosis(
+    *, timeout_seconds: int = _DEFAULT_PROBE_TIMEOUT_SECONDS
+) -> CodexCapabilityDiagnosis:
+    """Probe codex CLI presence and ``codex --version`` (no live review).
+
+    Mirrors ``doctor._check_claude_version``'s subprocess/timeout/parse shape as
+    a single reusable helper. No version floor is enforced: capability requires
+    only binary presence plus a successfully-parsed ``--version`` string. This
+    is the single home of the probe logic — ``doctor._check_codex_capability``
+    and dispatch's pre-spawn capability gate are thin call sites over it, so the
+    subprocess/parse logic isn't duplicated across two already-oversized modules.
+
+    ``timeout_seconds`` defaults to a one-shot-invocation-appropriate 10s
+    (matching ``_check_claude_version``); dispatch's hot-path caller passes a
+    smaller value since this runs synchronously inside the dispatch tick loop.
+    """
+    if shutil.which("codex") is None:
+        return CodexCapabilityDiagnosis(CODEX_NOT_FOUND, "codex binary not found")
+    try:
+        proc = subprocess.run(
+            ["codex", "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout_seconds,
+        )
+    except FileNotFoundError:
+        return CodexCapabilityDiagnosis(CODEX_VERSION_UNKNOWN, "codex binary not found")
+    except subprocess.TimeoutExpired:
+        return CodexCapabilityDiagnosis(
+            CODEX_VERSION_UNKNOWN, f"codex --version timed out ({timeout_seconds}s)"
+        )
+
+    output = proc.stdout or proc.stderr or ""
+    version_line = output.splitlines()[0] if output else ""
+    if proc.returncode != 0:
+        return CodexCapabilityDiagnosis(
+            CODEX_VERSION_UNKNOWN,
+            f"codex --version exited {proc.returncode}: {version_line}",
+        )
+    if _CODEX_VERSION_RE.search(version_line) is None:
+        return CodexCapabilityDiagnosis(
+            CODEX_VERSION_UNKNOWN, f"could not parse version: {version_line}"
+        )
+    return CodexCapabilityDiagnosis(None, version_line)
 
 
 def resolve_executor_config(
