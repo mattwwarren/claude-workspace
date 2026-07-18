@@ -190,9 +190,15 @@ def _build_finalize_pr_map(
         task = pre_tasks.get(ticket_id)
         if task is None or task.stage != Stage.FINALIZE:
             continue
+        if _is_dangling_client(session.client, effective_clients):
+            # Client removed/renamed from a populated clients.yaml -- skip
+            # rather than risk an unscoped gh call (GitHub #1269/#1279).
+            # Mirrors the _reconcile_locked pre-pass guard above.
+            continue
         branch = feature_branch_key(session.client, ticket_id, effective_clients)
         if branch not in result:
-            result[branch] = pr_exists_for_branch(branch)
+            cwd = _client_cwd(session.client, effective_clients)
+            result[branch] = pr_exists_for_branch(branch, cwd=cwd)
     return result
 
 

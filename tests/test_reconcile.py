@@ -22349,9 +22349,11 @@ class TestFinalizeBlocked:
         save_dev_queue(DevQueueStore(tasks=[task]))
 
         calls: list[str] = []
+        cwds: list[object] = []
 
-        def _fake_pr_exists(branch: str, **_kw: object) -> tuple[bool | None, bool]:
+        def _fake_pr_exists(branch: str, **kw: object) -> tuple[bool | None, bool]:
             calls.append(branch)
+            cwds.append(kw.get("cwd"))
             return False, True
 
         monkeypatch.setattr("cw.reconcile.core.pr_exists_for_branch", _fake_pr_exists)
@@ -22365,6 +22367,57 @@ class TestFinalizeBlocked:
         assert any(pr is False for pr, _ in result.values())
         # sess_no_tid has no valid ticket_id → excluded; only 1 branch checked.
         assert len(calls) == 1
+        # cwd scoped to client-a's _git_dir (workspace_path, no repo_path) (#1279).
+        assert cwds == [Path("/tmp/ws-staged")]
+
+    def test_build_finalize_pr_map_dangling_client_skips_gh_call(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """_build_finalize_pr_map: session's client absent from a populated
+        clients.yaml → branch never enters result, gh never called (#1279)."""
+        from cw.reconcile.core import _build_finalize_pr_map
+
+        # clients.yaml populated with a DIFFERENT client than the session's.
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            "clients:\n"
+            "  client-b:\n"
+            "    workspace_path: /tmp/ws-other\n"
+            "    default_branch: main\n"
+        )
+
+        worktree = tmp_path / "wt-fb-dangling"
+        worktree.mkdir(parents=True)
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        sess_finalize = self._mk_finalize_session(
+            "fb-dangling", "FB-DANGLING", worktree, started_at
+        )
+        sess_finalize.status = SessionStatus.ACTIVE
+
+        task = TicketTask(
+            ticket_id="FB-DANGLING",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            stage=Stage.FINALIZE,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        calls: list[str] = []
+
+        def _fake_pr_exists(branch: str, **_kw: object) -> tuple[bool | None, bool]:
+            calls.append(branch)
+            return False, True
+
+        monkeypatch.setattr("cw.reconcile.core.pr_exists_for_branch", _fake_pr_exists)
+
+        result = _build_finalize_pr_map(CwState(sessions=[sess_finalize]))
+
+        assert calls == []
+        assert result == {}
 
     # ── 1.21 reconcile(): ticket_id=None and gh_blocked in pr_is_merged pass
 
