@@ -924,11 +924,14 @@ def _park_running_task_blocked_on_user(
         save_dev_queue(store)
 
 
-# In-process cache for the codex-capability probe (#1238). Populated lazily by
+# In-process cache for the codex-capability probe (#1238). A single-element
+# list is used as a mutable slot -- updates mutate its contents in place
+# rather than rebinding the module-level name, so no `global` statement (and
+# no PLW0603 suppression) is needed. Populated lazily by
 # _cached_codex_capability_diagnosis; reset via _reset_codex_capability_cache
 # (test support only -- production code never needs to invalidate early since
 # codex CLI presence/version doesn't change mid-process).
-_codex_capability_cache: tuple[CodexCapabilityDiagnosis, datetime] | None = None
+_codex_capability_cache: list[tuple[CodexCapabilityDiagnosis, datetime]] = []
 
 
 def _cached_codex_capability_diagnosis() -> CodexCapabilityDiagnosis:
@@ -941,23 +944,19 @@ def _cached_codex_capability_diagnosis() -> CodexCapabilityDiagnosis:
     persistence) -- unlike the fleet-wide gh-availability latch, this gate has
     no cross-process coordination requirement.
     """
-    global _codex_capability_cache  # noqa: PLW0603
     now = datetime.now(UTC)
-    if (
-        _codex_capability_cache is not None
-        and (now - _codex_capability_cache[1]).total_seconds()
-        < _CODEX_CAPABILITY_PROBE_TTL_SECONDS
-    ):
-        return _codex_capability_cache[0]
+    if _codex_capability_cache:
+        probe, checked_at = _codex_capability_cache[0]
+        if (now - checked_at).total_seconds() < _CODEX_CAPABILITY_PROBE_TTL_SECONDS:
+            return probe
     probe = codex_capability_diagnosis()
-    _codex_capability_cache = (probe, now)
+    _codex_capability_cache[:] = [(probe, now)]
     return probe
 
 
 def _reset_codex_capability_cache() -> None:
     """Clear the in-process codex-capability cache. Test support only (#1238)."""
-    global _codex_capability_cache  # noqa: PLW0603
-    _codex_capability_cache = None
+    _codex_capability_cache.clear()
 
 
 def _codex_capability_gate(
