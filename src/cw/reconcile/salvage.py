@@ -32,7 +32,7 @@ from cw.models import (
     ReapReason,
     SessionStatus,
 )
-from cw.reconcile import _deps
+from cw.reconcile import _deps, _shared
 from cw.reconcile._shared import (
     _FINALIZE_BLOCKED_REASON,
     _NEEDS_SALVAGE_REASON,
@@ -278,79 +278,99 @@ def _salvage_low_path(
     branch: str,
     worktree_path_str: str,
 ) -> None:
-    """Execute the LOW-confidence flag-only path."""
+    """Execute the LOW-confidence flag-only path.
+
+    When the timeout was caused by the operator hitting their Claude usage
+    limit (detected via :func:`_shared.detect_usage_limit`) rather than an
+    agent crash, stamps TIMED_OUT/TIMED_OUT/USAGE_LIMIT_CUTOFF instead of the
+    COMPLETED/CRASHED/needs_salvage disposition, and skips the BLOCKED_ON_USER
+    routing and SESSION_NEEDS_ATTENTION push notification — the existing
+    tasks.py:revert_timed_out_tasks backstop already knows how to preserve
+    the worktree and route a dirty worktree to BLOCKED_ON_USER on its own
+    (GitHub #1336).
+    """
     breadcrumbs = f"branch={branch} worktree={worktree_path_str}"
+    usage_limit_detected = _shared.detect_usage_limit(session)
     already_flagged = False
     now = datetime.now(UTC)
 
-    # Update session last_result under sessions_lock. Capture already_flagged
+    # Update session state under sessions_lock. Capture already_flagged
     # before the conditional write so the early-return below can suppress
     # duplicate queue mutation, event, and push notification (#418).
     with sessions_lock():
         fresh_state = load_state()
         for s in fresh_state.sessions:
             if s.id == session.id:
-                already_flagged = (
-                    isinstance(s.last_result, dict)
-                    and s.last_result.get("paused_status") == _NEEDS_SALVAGE_REASON
-                )
-                if not already_flagged:
-                    if isinstance(s.last_result, dict):
-                        s.last_result = {
-                            **s.last_result,
-                            "paused_status": _NEEDS_SALVAGE_REASON,
-                        }
-                    else:
-                        s.last_result = {"paused_status": _NEEDS_SALVAGE_REASON}
-                    s.reap_reason = ReapReason.SALVAGE_PARKED
-                    s.status = SessionStatus.COMPLETED
+                if usage_limit_detected:
+                    s.status = SessionStatus.TIMED_OUT
                     s.completed_at = now
-                    s.completed_reason = CompletionReason.CRASHED
+                    s.completed_reason = CompletionReason.TIMED_OUT
+                    s.reap_reason = ReapReason.USAGE_LIMIT_CUTOFF
+                else:
+                    already_flagged = (
+                        isinstance(s.last_result, dict)
+                        and s.last_result.get("paused_status")
+                        == _NEEDS_SALVAGE_REASON
+                    )
+                    if not already_flagged:
+                        if isinstance(s.last_result, dict):
+                            s.last_result = {
+                                **s.last_result,
+                                "paused_status": _NEEDS_SALVAGE_REASON,
+                            }
+                        else:
+                            s.last_result = {"paused_status": _NEEDS_SALVAGE_REASON}
+                        s.reap_reason = ReapReason.SALVAGE_PARKED
+                        s.status = SessionStatus.COMPLETED
+                        s.completed_at = now
+                        s.completed_reason = CompletionReason.CRASHED
                 break
         save_state(fresh_state)
 
-    # Already dispositioned on a prior tick — suppress duplicate queue mutation,
-    # event, and push notification so the idle watchdog re-collecting this parked
-    # session does not re-fire every reconcile tick (#418 removed the upstream
-    # _has_terminal_sentinel skip this relied on).
-    if already_flagged:
-        return
+    if not usage_limit_detected:
+        # Already dispositioned on a prior tick — suppress duplicate queue
+        # mutation, event, and push notification so the idle watchdog
+        # re-collecting this parked session does not re-fire every reconcile
+        # tick (#418 removed the upstream _has_terminal_sentinel skip this
+        # relied on).
+        if already_flagged:
+            return
 
-    # Route queue task to BLOCKED_ON_USER.
-    if ticket_id:
-        with dev_queue_lock():
-            store = load_dev_queue()
-            for task in store.tasks:
-                if (
-                    task.ticket_id == ticket_id
-                    and task.status == QueueItemStatus.RUNNING
-                ):
-                    transition_task_status(
-                        task,
-                        QueueItemStatus.BLOCKED_ON_USER,
-                        disposition=_NEEDS_SALVAGE_REASON,
-                    )
-                    save_dev_queue(store)
-                    break
+        # Route queue task to BLOCKED_ON_USER.
+        if ticket_id:
+            with dev_queue_lock():
+                store = load_dev_queue()
+                for task in store.tasks:
+                    if (
+                        task.ticket_id == ticket_id
+                        and task.status == QueueItemStatus.RUNNING
+                    ):
+                        transition_task_status(
+                            task,
+                            QueueItemStatus.BLOCKED_ON_USER,
+                            disposition=_NEEDS_SALVAGE_REASON,
+                        )
+                        save_dev_queue(store)
+                        break
 
-    # Emit SESSION_NEEDS_ATTENTION with breadcrumbs for human salvage.
-    record_event(
-        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-        {
-            "session_id": session.id,
-            "session_name": session.name,
-            "client": session.client,
-            "ticket_id": ticket_id,
-            "claude_session_id": session.claude_session_id,
-            "paused_status": _NEEDS_SALVAGE_REASON,
-            "breadcrumbs": breadcrumbs,
-            "crashed": False,
-        },
-    )
-    _deps.fire_push_notification(session.name, session.client)
+        # Emit SESSION_NEEDS_ATTENTION with breadcrumbs for human salvage.
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": session.client,
+                "ticket_id": ticket_id,
+                "claude_session_id": session.claude_session_id,
+                "paused_status": _NEEDS_SALVAGE_REASON,
+                "breadcrumbs": breadcrumbs,
+                "crashed": False,
+            },
+        )
+        _deps.fire_push_notification(session.name, session.client)
 
-    # Stop the surface if still running — a salvage-parked session is by
-    # definition no longer live (GitHub #1249).
+    # Stop the surface if still running — daemon cleanup is orthogonal to the
+    # disposition label above (GitHub #1249, #1336).
     if session.surface_ref is not None:
         with contextlib.suppress(Exception):
             _deps.get_native_daemon_client().stop(session.surface_ref)
