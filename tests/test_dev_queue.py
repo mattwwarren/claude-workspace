@@ -423,7 +423,7 @@ class TestCLIDevQueueAdd:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # Patch events.record_event to no-op
-        monkeypatch.setattr("cw.cli.dev_queue.record_event", lambda *_, **__: None)
+        monkeypatch.setattr("cw.cli.dev_queue.crud.record_event", lambda *_, **__: None)
         runner = CliRunner()
         result = runner.invoke(
             main, ["dev-queue", "add", "ABC-5", "--client", "genhealth"]
@@ -451,7 +451,7 @@ class TestCLIDevQueueAdd:
             "linear_prefix_map:\n"
             "  GEN: genhealth\n"
         )
-        monkeypatch.setattr("cw.cli.dev_queue.record_event", lambda *_, **__: None)
+        monkeypatch.setattr("cw.cli.dev_queue.crud.record_event", lambda *_, **__: None)
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "add", "GEN-100"])
         assert result.exit_code == 0, result.output
@@ -474,7 +474,7 @@ class TestCLIDevQueueAdd:
             "linear_prefix_map:\n"
             "  GEN: genhealth\n"
         )
-        monkeypatch.setattr("cw.cli.dev_queue.record_event", lambda *_, **__: None)
+        monkeypatch.setattr("cw.cli.dev_queue.crud.record_event", lambda *_, **__: None)
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "add", "GEN-100", "GEN-101"])
         assert result.exit_code == 0, result.output
@@ -487,7 +487,7 @@ class TestCLIDevQueueAdd:
         tmp_orchestrator_config: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setattr("cw.cli.dev_queue.record_event", lambda *_, **__: None)
+        monkeypatch.setattr("cw.cli.dev_queue.crud.record_event", lambda *_, **__: None)
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "add", "UNKNOWN-1"])
         assert result.exit_code != 0
@@ -499,7 +499,7 @@ class TestCLIDevQueueAdd:
         tmp_orchestrator_config: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setattr("cw.cli.dev_queue.record_event", lambda *_, **__: None)
+        monkeypatch.setattr("cw.cli.dev_queue.crud.record_event", lambda *_, **__: None)
         runner = CliRunner()
         result = runner.invoke(
             main,
@@ -516,7 +516,7 @@ class TestCLIDevQueueAdd:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """cw dev-queue add with undeclared --lane exits non-zero."""
-        monkeypatch.setattr("cw.cli.dev_queue.record_event", lambda *_, **__: None)
+        monkeypatch.setattr("cw.cli.dev_queue.crud.record_event", lambda *_, **__: None)
         runner = CliRunner()
         result = runner.invoke(
             main,
@@ -599,7 +599,7 @@ class TestCLIDevQueueStatus:
             claimed=0, pending=1, running=0, cap=3, skip_reason="none", tick_at=stale_at
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.latest_tick_summary_by_client",
+            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
             lambda: {"genhealth": tick},
         )
         runner = CliRunner()
@@ -624,7 +624,7 @@ class TestCLIDevQueueStatus:
             claimed=0, pending=1, running=0, cap=3, skip_reason="none", tick_at=fresh_at
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.latest_tick_summary_by_client",
+            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
             lambda: {"genhealth": tick},
         )
         runner = CliRunner()
@@ -651,7 +651,7 @@ def _patch_tick_for(monkeypatch: pytest.MonkeyPatch, client_name: str) -> None:
         tick_at=datetime.now(UTC),
     )
     monkeypatch.setattr(
-        "cw.cli.dev_queue.latest_tick_summary_by_client",
+        "cw.cli.dev_queue.status.latest_tick_summary_by_client",
         lambda: {client_name: tick},
     )
 
@@ -875,7 +875,7 @@ class TestLaneCapsForClient:
         tmp_dev_queue: Path,
     ) -> None:
         """No declared lanes → single default lane capped at the client ceiling."""
-        from cw.cli.dev_queue import _lane_caps_for_client
+        from cw.cli.dev_queue.status import _lane_caps_for_client
 
         config = OrchestratorConfig(default_ceiling=3)
         assert _lane_caps_for_client("genhealth", config) == {DEFAULT_LANE: 3}
@@ -885,7 +885,7 @@ class TestLaneCapsForClient:
         tmp_dev_queue: Path,
     ) -> None:
         """Declared lanes → each lane's max_parallel is its cap."""
-        from cw.cli.dev_queue import _lane_caps_for_client
+        from cw.cli.dev_queue.status import _lane_caps_for_client
 
         ws = tmp_dev_queue / "ws"
         clients_file().write_text(
@@ -904,7 +904,7 @@ class TestLaneCapsForClient:
         tmp_dev_queue: Path,
     ) -> None:
         """Unknown client → single default lane at the config default ceiling."""
-        from cw.cli.dev_queue import _lane_caps_for_client
+        from cw.cli.dev_queue.status import _lane_caps_for_client
 
         config = OrchestratorConfig(default_ceiling=5)
         assert _lane_caps_for_client("ghost-client", config) == {DEFAULT_LANE: 5}
@@ -941,7 +941,7 @@ class TestStatusFreshnessSubline:
             blocked_branch="docs/foo",
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.latest_tick_summary_by_client",
+            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
             lambda: {"my-client": tick},
         )
         ws = Path("/repo/my-client")
@@ -983,7 +983,7 @@ class TestStatusFreshnessSubline:
             blocked_branch=None,
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.latest_tick_summary_by_client",
+            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
             lambda: {"my-client": tick},
         )
         monkeypatch.setattr(
@@ -1022,7 +1022,7 @@ class TestStatusFreshnessSubline:
             blocked_branch="feat/x",
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.latest_tick_summary_by_client",
+            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
             lambda: {"unknown-client": tick},
         )
         msg = "not found"
@@ -1060,7 +1060,7 @@ class TestStatusFreshnessSubline:
             blocked_branch=None,
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.latest_tick_summary_by_client",
+            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
             lambda: {"my-client": tick},
         )
         runner = CliRunner()
@@ -1091,7 +1091,7 @@ class TestStatusFreshnessSubline:
             blocked_branch=None,
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.latest_tick_summary_by_client",
+            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
             lambda: {"my-client": tick},
         )
         runner = CliRunner()
@@ -1120,7 +1120,7 @@ class TestStatusFreshnessSubline:
             blocked_branch="docs/foo",
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.latest_tick_summary_by_client",
+            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
             lambda: {"my-client": tick},
         )
         runner = CliRunner()
@@ -1140,7 +1140,7 @@ class TestStatusFreshnessSubline:
     ) -> None:
         """--json emits {} when there are no tick events."""
         monkeypatch.setattr(
-            "cw.cli.dev_queue.latest_tick_summary_by_client",
+            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
             dict,
         )
         runner = CliRunner()
@@ -1179,7 +1179,7 @@ class TestStatusFreshnessSubline:
             blocked_branch=None,
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.latest_tick_summary_by_client",
+            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
             lambda: {"client-a": tick_a, "client-b": tick_b},
         )
         runner = CliRunner()
@@ -1213,7 +1213,7 @@ class TestStatusFreshnessSubline:
             blocked_branch=None,
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.latest_tick_summary_by_client",
+            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
             lambda: {"my-client": tick},
         )
         runner = CliRunner()
@@ -1243,7 +1243,7 @@ class TestStatusFreshnessSubline:
             blocked_branch=None,
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.latest_tick_summary_by_client",
+            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
             lambda: {"my-client": tick},
         )
         runner = CliRunner()
@@ -1273,7 +1273,7 @@ class TestStatusFreshnessSubline:
             blocked_branch=None,
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.latest_tick_summary_by_client",
+            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
             lambda: {"my-client": tick},
         )
         runner = CliRunner()
@@ -5106,7 +5106,7 @@ class TestCLIApprove:
 
         _write_client_yaml(tmp_config_dir, tmp_path)
         events = capture_events(
-            "cw.cli.dev_queue", OrchestratorEventType.TICKET_APPROVED
+            "cw.cli.dev_queue.crud", OrchestratorEventType.TICKET_APPROVED
         )
         runner = CliRunner()
 
@@ -5352,7 +5352,7 @@ class TestCLIRequeue:
 
         captured: list[dict[str, object]] = []
         monkeypatch.setattr(
-            "cw.cli.dev_queue.record_event",
+            "cw.cli.dev_queue.crud.record_event",
             lambda _type, payload=None, **__: captured.append(payload or {}),
         )
 
@@ -5387,7 +5387,7 @@ class TestCLIRequeue:
 
         captured: list[dict[str, object]] = []
         monkeypatch.setattr(
-            "cw.cli.dev_queue.record_event",
+            "cw.cli.dev_queue.crud.record_event",
             lambda _type, payload=None, **__: captured.append(payload or {}),
         )
 
@@ -5479,7 +5479,7 @@ class TestCLIRequeue:
 
         captured: list[dict[str, object]] = []
         monkeypatch.setattr(
-            "cw.cli.dev_queue.record_event",
+            "cw.cli.dev_queue.crud.record_event",
             lambda _type, payload=None, **__: captured.append(payload or {}),
         )
 
@@ -5518,7 +5518,7 @@ class TestCLIRequeue:
 
         captured: list[dict[str, object]] = []
         monkeypatch.setattr(
-            "cw.cli.dev_queue.record_event",
+            "cw.cli.dev_queue.crud.record_event",
             lambda _type, payload=None, **__: captured.append(payload or {}),
         )
 
@@ -5605,7 +5605,7 @@ class TestCLIRequeue:
 
         captured: list[dict[str, object]] = []
         monkeypatch.setattr(
-            "cw.cli.dev_queue.record_event",
+            "cw.cli.dev_queue.crud.record_event",
             lambda _type, payload=None, **__: captured.append(payload or {}),
         )
 
@@ -5644,7 +5644,7 @@ class TestCLIRequeue:
 
         captured: list[dict[str, object]] = []
         monkeypatch.setattr(
-            "cw.cli.dev_queue.record_event",
+            "cw.cli.dev_queue.crud.record_event",
             lambda _type, payload=None, **__: captured.append(payload or {}),
         )
 
