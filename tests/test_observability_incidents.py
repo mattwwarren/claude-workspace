@@ -298,7 +298,7 @@ def test_incident_315_timed_out_merged_warns(
     state = CwState(sessions=[sess])
 
     monkeypatch.setattr(
-        "cw.doctor.pr_is_merged_for_ticket",
+        "cw.doctor.core.pr_is_merged_for_ticket",
         lambda *_args, **_kwargs: (True, True),
     )
 

@@ -8431,7 +8431,7 @@ class TestDoctorTargetedReap:
         from cw.native_daemon import FakeNativeDaemonClient
 
         monkeypatch.setattr(
-            "cw.doctor.get_native_daemon_client", FakeNativeDaemonClient
+            "cw.doctor.core.get_native_daemon_client", FakeNativeDaemonClient
         )
 
         from cw.models import Session
@@ -8487,7 +8487,7 @@ class TestDoctorTargetedReap:
         from cw.doctor import CheckResult
 
         monkeypatch.setattr(
-            "cw.doctor._check_claude_version",
+            "cw.doctor.core._check_claude_version",
             lambda: CheckResult("claude-version", ok=True, detail="stubbed"),
         )
 
@@ -8504,7 +8504,7 @@ class TestDoctorTargetedReap:
         from cw.doctor import CheckResult
 
         monkeypatch.setattr(
-            "cw.doctor._check_claude_version",
+            "cw.doctor.core._check_claude_version",
             lambda: CheckResult("claude-version", ok=True, detail="stubbed"),
         )
 
