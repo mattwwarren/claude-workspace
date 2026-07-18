@@ -1473,7 +1473,7 @@ class TestPackageExportCompleteness:
     """
 
     def test_all_matches_full_surface(self) -> None:
-        import cw.models as models
+        from cw import models
 
         expected = {
             "CLAUDE_NATIVE_BACKEND",
