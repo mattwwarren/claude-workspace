@@ -34,6 +34,7 @@ from cw.events import read_events
 from cw.exceptions import WorktreeError
 from cw.models import (
     CW_STATE_SCHEMA_VERSION,
+    DEFAULT_LANE,
     ClientConfig,
     CompletionReason,
     CwState,
@@ -2301,6 +2302,7 @@ def test_stalled_retry_cap_parks_when_at_cap(
         session_id="at-cap",
         stage=Stage.IMPL,
         attempts=DEFAULT_STALLED_RETRY_CAP,
+        lane="stalled-park-lane",
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
@@ -2333,6 +2335,7 @@ def test_stalled_retry_cap_parks_when_at_cap(
     payload = events[0].payload
     assert payload["ticket_id"] == "at-cap"
     assert payload["paused_status"] == _STALLED_CAP_PARKED_REASON
+    assert payload["lane"] == "stalled-park-lane"
 
 
 def test_stalled_retry_cap_no_retried_event_when_parked(
@@ -9741,6 +9744,7 @@ def test_revert_timed_out_dirty_worktree_routes_to_blocked_on_user(
     sess = _mk_daemon_session_with_worktree(
         "to-dirty", SessionStatus.TIMED_OUT, wt_path
     )
+    sess.lane = "tasks-lane"
     save_state(CwState(sessions=[sess]))
 
     task = TicketTask(
@@ -9780,6 +9784,7 @@ def test_revert_timed_out_dirty_worktree_routes_to_blocked_on_user(
     p = events[0].payload
     assert p["session_id"] == "to-dirty"
     assert p["paused_status"] == _DIRTY_WORKTREE_REASON
+    assert p["lane"] == "tasks-lane"
 
 
 def test_revert_timed_out_clean_worktree_routes_to_pending(
@@ -10928,6 +10933,7 @@ class TestSalvageCommittedNoPrSessions:
         worktree.mkdir(parents=True)
         ticket_id = "TKT-LOW"
         sess = _mk_live_daemon_session_with_worktree("sess-low", worktree, ticket_id)
+        sess.lane = "salvage-lane"
         save_state(CwState(sessions=[sess]))
         save_dev_queue(
             DevQueueStore(
@@ -10978,12 +10984,76 @@ class TestSalvageCommittedNoPrSessions:
         bc = attn_events[0].payload.get("breadcrumbs", "")
         assert "dev/low-branch" in str(bc)
         assert str(worktree) in str(bc)
+        assert attn_events[0].payload["lane"] == "salvage-lane"
 
         reloaded = load_state()
         s = next(s for s in reloaded.sessions if s.id == "sess-low")
         lr = s.last_result or {}
         assert lr.get("paused_status") == _NEEDS_SALVAGE_REASON
         assert s.status == SessionStatus.COMPLETED
+
+    def test_low_path_flags_needs_salvage_lane_none_survives_uncoerced(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """LOW path with session.lane=None: payload carries lane=None, not
+        coerced to DEFAULT_LANE or any other default (#1333 R4)."""
+        worktree = tmp_path / "wt-low-none-lane"
+        worktree.mkdir(parents=True)
+        ticket_id = "TKT-LOW-NONE-LANE"
+        sess = _mk_live_daemon_session_with_worktree(
+            "sess-low-none-lane", worktree, ticket_id
+        )
+        assert sess.lane is None  # precondition: default, not stamped
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="sess-low-none-lane",
+                    )
+                ]
+            )
+        )
+
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+        monkeypatch.setattr(
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
+        )
+        monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
+
+        candidates: list[tuple[str, str | None, str, str, bool]] = [
+            (
+                "sess-low-none-lane",
+                ticket_id,
+                "dev/low-none-lane-branch",
+                str(worktree),
+                False,
+            )
+        ]
+        salvage_committed_no_pr_sessions(candidates)
+
+        events = read_events(
+            consumer="test-low-path-salvage-none-lane",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        attn_events = [
+            e for e in events if e.payload.get("paused_status") == _NEEDS_SALVAGE_REASON
+        ]
+        assert len(attn_events) == 1
+        assert attn_events[0].payload["lane"] is None
 
     def test_low_path_usage_limit_true_clean_worktree_routes_to_timed_out_cutoff(
         self,
@@ -15355,6 +15425,7 @@ def test_act_on_idle_park_emits_needs_attention_and_sets_reap_reason(
         proposed_action=ProposedAction.PARK_BLOCKED_ON_USER,
         ticket_id="idle-park-evt-1",
         new_observation_count=2,
+        lane="idle-park-lane",
     )
 
     _act_on_idle_candidates(state, [candidate], now=now)
@@ -15367,6 +15438,7 @@ def test_act_on_idle_park_emits_needs_attention_and_sets_reap_reason(
     )
     assert len(events) == 1
     assert events[0].payload["paused_status"] == _SILENTLY_IDLE_REASON
+    assert events[0].payload["lane"] == "idle-park-lane"
 
 
 def test_act_on_idle_candidates_escalate_external_emits_needs_attention_zero_mutation(
@@ -15417,6 +15489,7 @@ def test_act_on_idle_candidates_escalate_external_emits_needs_attention_zero_mut
         new_observation_count=4,
         client="client-a",
         paused_status=_EXTERNAL_COUNTERPARTY_IDLE_REASON,
+        lane="idle-ext-lane",
     )
 
     with patch("cw.reconcile._deps.fire_push_notification") as mock_notify:
@@ -15432,6 +15505,7 @@ def test_act_on_idle_candidates_escalate_external_emits_needs_attention_zero_mut
     assert payload["session_name"] == "client-a/auto-dev/idle-ext-evt-1"
     assert payload["claude_session_id"] == "csid-ext-evt-1"
     assert payload["paused_status"] == _EXTERNAL_COUNTERPARTY_IDLE_REASON
+    assert payload["lane"] == "idle-ext-lane"
 
     # Zero mutation: neither Session nor TicketTask state changed.
     assert sess.model_dump() == session_before.model_dump()
@@ -16876,7 +16950,7 @@ class TestSalvageSkipAttentionLatch:
         tmp_config_dir: Path,
         tmp_path: Path,
     ) -> None:
-        """Reaching the threshold emits session.needs_attention with all 8 fields."""
+        """Reaching the threshold emits session.needs_attention with all 9 fields."""
         from cw.reconcile import (
             _SALVAGE_SKIP_ESCALATED_REASON,
             ProposedAction,
@@ -16924,6 +16998,7 @@ class TestSalvageSkipAttentionLatch:
                 f"2 consecutive salvage-skips; last reason: {_SALVAGE_SKIP_REASON}"
             ),
             "crashed": False,
+            "lane": DEFAULT_LANE,
         }
         assert events[0].correlation_id == "sk-thresh-1"
 
@@ -19752,6 +19827,7 @@ class TestWorldStateCheckBeforeRevert:
             ticket_id="stalled-ghblock-1",
             elapsed_seconds=3700.0,
             reap_reason=ReapReason.WALL_CLOCK_BUDGET,
+            lane="stalled-ghblock-lane",
         )
 
         reverted, merged = _act_on_stalled_candidates(
@@ -19776,6 +19852,7 @@ class TestWorldStateCheckBeforeRevert:
             event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
         )
         assert len(events) == 1
+        assert events[0].payload["lane"] == "stalled-ghblock-lane"
 
     # --- idle ---
 
@@ -20054,6 +20131,7 @@ class TestWorldStateCheckBeforeRevert:
             ticket_id="idle-ghblock-1",
             elapsed_seconds=3700.0,
             reap_reason=ReapReason.IDLE_STALL,
+            lane="idle-ghblock-lane",
         )
 
         blocked, merged, _salvage = _act_on_idle_candidates(
@@ -20077,6 +20155,7 @@ class TestWorldStateCheckBeforeRevert:
             event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
         )
         assert len(events) == 1
+        assert events[0].payload["lane"] == "idle-ghblock-lane"
 
     # --- phantom ---
 
@@ -20183,6 +20262,7 @@ class TestWorldStateCheckBeforeRevert:
             ticket_id="phantom-ghblock-1",
             worktree_dirty=False,
             client="client-a",
+            lane="phantom-lane",
         )
 
         reverted, _names, _limited, _salvaged, _results, merged = (
@@ -20209,6 +20289,7 @@ class TestWorldStateCheckBeforeRevert:
             event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
         )
         assert len(events) == 1
+        assert events[0].payload["lane"] == "phantom-lane"
 
     # --- reconcile() pre-pass ---
 
@@ -22136,13 +22217,16 @@ class TestFinalizeBlocked:
         )
         return sess
 
-    def _mk_finalize_task(self, ticket_id: str, sid: str) -> TicketTask:
+    def _mk_finalize_task(
+        self, ticket_id: str, sid: str, *, lane: str = DEFAULT_LANE
+    ) -> TicketTask:
         return TicketTask(
             ticket_id=ticket_id,
             client="client-a",
             status=QueueItemStatus.RUNNING,
             session_id=sid,
             stage=Stage.FINALIZE,
+            lane=lane,
         )
 
     # ── 1.1 happy path ───────────────────────────────────────────────────
@@ -22164,7 +22248,7 @@ class TestFinalizeBlocked:
 
         sess = self._mk_finalize_session("fb-sess-1", ticket_id, worktree, started_at)
         save_state(CwState(sessions=[sess]))
-        task = self._mk_finalize_task(ticket_id, "fb-sess-1")
+        task = self._mk_finalize_task(ticket_id, "fb-sess-1", lane="finalize-lane")
         save_dev_queue(DevQueueStore(tasks=[task]))
 
         daemon = FakeNativeDaemonClient()
@@ -22203,6 +22287,13 @@ class TestFinalizeBlocked:
         assert t.session_id is None
 
         assert push_calls  # push notification fired
+
+        events = read_events(
+            consumer="test-fb-1-attn",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert len(events) == 1
+        assert events[0].payload["lane"] == "finalize-lane"
 
     # ── 1.2 no commits → REVERT_TASK ─────────────────────────────────────
 
