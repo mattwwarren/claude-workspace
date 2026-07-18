@@ -21,6 +21,7 @@ from cw.executor_diagnostics import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 
@@ -391,7 +392,7 @@ def test_cleanup_expired_diagnostics_swallows_sessions_root_iterdir_error(
     sessions_root = state_dir() / "sessions"
     real_iterdir = type(sessions_root).iterdir
 
-    def _iterdir(self: Path):  # type: ignore[no-untyped-def]
+    def _iterdir(self: Path) -> Iterator[Path]:
         if self == sessions_root:
             msg = "listing denied"
             raise OSError(msg)
@@ -407,7 +408,7 @@ def test_cleanup_expired_diagnostics_swallows_bundle_iterdir_error(
     bundle = _seed_bundle("unreadable")
     real_iterdir = type(bundle).iterdir
 
-    def _iterdir(self: Path):  # type: ignore[no-untyped-def]
+    def _iterdir(self: Path) -> Iterator[Path]:
         if self == bundle:
             msg = "bundle unreadable"
             raise OSError(msg)
