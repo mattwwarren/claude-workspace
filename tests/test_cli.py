@@ -41,7 +41,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.sprint import AppliedBuildout, BuildoutPlan
-from tests.conftest import _write_project_config_yaml
+from tests.conftest import _make_daemon_session, _write_project_config_yaml
 from tests.test_result import _valid_payload
 from tests.test_sprint import CONFIG_YAML, MINIMAL_RFC, _plan
 
@@ -379,15 +379,14 @@ class TestSignalStop:
         workspace.mkdir(parents=True, exist_ok=True)
         worktree = tmp_path / "worktree"
         worktree.mkdir(parents=True, exist_ok=True)
-        session = Session(
+        session = _make_daemon_session(
             id=sess_id,
             name="test-client/auto-dev/137",
             client="test-client",
-            purpose=SessionPurpose.IMPL,
-            origin=SessionOrigin.DAEMON,
             workspace_path=workspace,
             worktree_path=worktree,
-            status=SessionStatus.ACTIVE,
+            surface_ref=None,
+            started_at=datetime.now(UTC),
         )
         state = load_state()
         state.sessions.append(session)
@@ -5460,15 +5459,14 @@ class TestSpawnCloseTaskCancellation:
     ) -> Session:
         workspace = tmp_path / "workspace"
         workspace.mkdir(parents=True, exist_ok=True)
-        sess = Session(
+        sess = _make_daemon_session(
             id=sess_id,
             name=f"test-client/auto-dev/{sess_id}",
             client="test-client",
-            purpose=SessionPurpose.IMPL,
-            origin=SessionOrigin.DAEMON,
             workspace_path=workspace,
-            status=SessionStatus.ACTIVE,
             surface_ref="fake-ref",
+            worktree_path=None,
+            started_at=datetime.now(UTC),
         )
         state = load_state()
         state.sessions.append(sess)
@@ -5578,15 +5576,17 @@ class TestPeek:
         workspace.mkdir(parents=True, exist_ok=True)
         worktree = tmp_path / "worktree"
         worktree.mkdir(parents=True, exist_ok=True)
-        session = Session(
+        session = _make_daemon_session(
             id=sess_id,
             name=name,
             client="test-client",
-            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.USER,
             status=status,
             workspace_path=workspace,
             worktree_path=worktree,
+            surface_ref=None,
             claude_session_id=claude_session_id,
+            started_at=datetime.now(UTC),
         )
         state = load_state()
         state.sessions.append(session)
@@ -7491,15 +7491,10 @@ class TestDevQueueWaitSentinelAware:
         started_at: datetime | None = None,
     ) -> Session:
         """Build an ACTIVE Session pointing at *worktree*."""
-        from cw.models import SessionOrigin, SessionPurpose, SessionStatus
-
-        return Session(
+        return _make_daemon_session(
             id=session_id,
             name="genhealth/impl",
             client="genhealth",
-            purpose=SessionPurpose.IMPL,
-            status=SessionStatus.ACTIVE,
-            origin=SessionOrigin.DAEMON,
             workspace_path=worktree,
             worktree_path=worktree,
             surface_ref=surface_ref,

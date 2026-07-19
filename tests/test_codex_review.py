@@ -44,7 +44,12 @@ from cw.config import state_dir
 from cw.executor_diagnostics import ExecutorFailure, diagnostics_bundle_dir
 from cw.models import Stage, TicketTask
 from cw.review_findings import ReviewerRunFailure, consolidate_verdict
-from tests.conftest import _make_diff, _make_finding, _make_reviewer_doc
+from tests.conftest import (
+    _make_diff,
+    _make_finding,
+    _make_reviewer_doc,
+    _make_ticket_task,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -860,7 +865,7 @@ class TestRunCodexRoles:
 
 
 def _task() -> TicketTask:
-    return TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
+    return _make_ticket_task(ticket_id="T-1", client="test", stage=Stage.REVIEW)
 
 
 class TestSynthesizeCodexReviewResult:

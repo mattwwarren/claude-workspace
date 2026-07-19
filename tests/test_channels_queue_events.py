@@ -48,10 +48,10 @@ from cw.models import (
     ReapReason,
     Session,
     SessionOrigin,
-    SessionPurpose,
     SessionStatus,
     TicketTask,
 )
+from tests.conftest import _make_daemon_session, _make_ticket_task
 
 # Captured at module-load time, BEFORE the _no_real_poller_thread autouse
 # fixture (below) monkeypatches _server_mod._run_poller to a no-op for every
@@ -142,7 +142,7 @@ def _make_task(
     session_id: str | None = None,
     attempts: int = 0,
 ) -> TicketTask:
-    return TicketTask(
+    return _make_ticket_task(
         ticket_id=ticket_id,
         client=client,
         status=status,
@@ -160,13 +160,15 @@ def _make_session(
 ) -> Session:
     from pathlib import Path
 
-    return Session(
+    return _make_daemon_session(
         id=session_id,
         name=name,
         client=client,
-        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.USER,
         status=status,
         workspace_path=Path("/tmp/test"),
+        surface_ref=None,
+        worktree_path=None,
         started_at=datetime(2025, 1, 15, 10, 0, 0, tzinfo=UTC),
         last_result=last_result,
     )
@@ -1189,16 +1191,16 @@ def _make_reaped_session(
 ) -> Session:
     from pathlib import Path
 
-    return Session(
+    return _make_daemon_session(
         id=session_id,
         name=f"test-client/auto-dev/{session_id}",
         client="test-client",
-        purpose=SessionPurpose.IMPL,
         status=status,
         origin=origin,
         workspace_path=Path("/tmp/test"),
-        started_at=datetime(2025, 1, 15, 10, 0, 0, tzinfo=UTC),
         surface_ref=surface_ref,
+        worktree_path=None,
+        started_at=datetime(2025, 1, 15, 10, 0, 0, tzinfo=UTC),
         reap_reason=reap_reason,
     )
 

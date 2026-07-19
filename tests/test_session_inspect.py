@@ -25,7 +25,7 @@ from cw.models import (
     SessionPurpose,
     SessionStatus,
 )
-from tests.conftest import _make_diff
+from tests.conftest import _make_daemon_session, _make_diff
 
 _EXPECTED_SESSION_FIELDS = {
     "id",
@@ -67,7 +67,7 @@ def _make_session(
 ) -> Session:
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
-    return Session(
+    return _make_daemon_session(
         id=session_id,
         name=name,
         client=client,
