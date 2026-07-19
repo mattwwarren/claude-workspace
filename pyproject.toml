@@ -179,10 +179,24 @@ ignore = [
 "src/cw/cw_operator_events.py" = ["PLC0415"]
 "src/cw/_sse_util.py" = ["PLC0415"]
 "src/cw/_events_channel_base.py" = ["PLC0415"]
-# dev_queue defers the dispatch import to break the dev_queue ↔ dispatch
-# circular dependency. consume_completed_sessions() is a thin wrapper whose
-# deferred body import is the sanctioned mechanism, not a workaround.
+# dev_queue.__init__ still hosts the inline approval/requeue functions (part 2
+# split in progress, #1318): _approve_ticket_locked defers cw.dispatch
+# ._should_gate_for_signoff / cw.config.load_state and unblock_ticket defers
+# cw.config.load_state|save_state|sessions_lock / cw.models.ReapReason to break
+# the dev_queue ↔ dispatch|config cycles. Deferred imports are the sanctioned
+# mechanism, not a workaround. (Removed once those functions move to approval.py
+# / requeue.py.)
 "src/cw/dev_queue/__init__.py" = ["PLC0415"]
+# lifecycle defers cw.dispatch.consume_completed_sessions (dev_queue ↔ dispatch
+# cycle) inside the consume_completed_sessions wrapper, and cw.dev_queue.crud
+# ._find_ticket inside wait_for_terminal: crud imports lifecycle
+# .transition_task_status at module level, so lifecycle's reach back into crud
+# must be function-level. Deferred imports are the sanctioned mechanism.
+"src/cw/dev_queue/lifecycle.py" = ["PLC0415"]
+# crud defers ``import click`` inside _find_ticket so the CLI dependency stays
+# off module import. Deferred import is the sanctioned mechanism, not a
+# workaround.
+"src/cw/dev_queue/crud.py" = ["PLC0415"]
 # result defers the cli._hook_io import to break the cli <-> result circular
 # dependency; inline import is the sanctioned mechanism, not a workaround.
 "src/cw/result.py" = ["PLC0415"]

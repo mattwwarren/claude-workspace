@@ -191,7 +191,7 @@ def stub_fetch_plan(
     """Patch ``fetch_approved_plan_comment`` at *target* to return *body*.
 
     Default target matches ``gate_recipes``' module-level import binding;
-    pass ``target="cw.dev_queue.fetch_approved_plan_comment"`` to stub the
+    pass ``target="cw.dev_queue.lifecycle.fetch_approved_plan_comment"`` to stub the
     binding ``_plan_is_reviewed`` reads instead (#968).
     """
     monkeypatch.setattr(target, lambda _ticket_id, **_k: body)

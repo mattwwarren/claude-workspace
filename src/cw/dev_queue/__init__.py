@@ -1,17 +1,17 @@
 """Dev-queue management for orchestrator ticket dispatch.
 
-Package split (#1317, part 1 of 2). The historical flat ``cw.dev_queue`` module
-is being converted into a package of focused submodules. This part extracts the
-two low-coupling concerns; the remaining CRUD / lifecycle / approval / requeue
-concerns still live in this ``__init__`` shim and move out in part 2.
+Package split (#1317 part 1, #1318 part 2). The historical flat ``cw.dev_queue``
+module is being converted into a package of focused submodules:
 
-* ``migrate`` — the pure dict-in / dict-out schema-normalisation layer: the
-  per-task ``_fill_*_default`` helpers, ``_fill_watched_prs_default``, and the
-  ``migrate_dev_queue`` entry point.
-* ``storage`` — the on-disk persistence layer: the ``_lock`` / ``_plan_lock``
-  file-lock context managers (plus the ``dev_queue_lock`` alias),
-  ``plan_path`` / ``save_plan`` / ``load_plan``, and ``load_dev_queue`` /
-  ``save_dev_queue``.
+* ``migrate`` — the pure dict-in / dict-out schema-normalisation layer.
+* ``storage`` — the on-disk persistence layer (file locks + load/save).
+* ``lifecycle`` — task status transitions, stage-pointer helpers, and the
+  terminal-wait poll loop (#1318 part 2).
+* ``crud`` — operator-facing queue mutations and the ticket-resolution helpers
+  (#1318 part 2).
+
+The remaining ``approval`` / ``requeue`` concerns still live in this ``__init__``
+and move out in the rest of part 2.
 
 This ``__init__`` re-exports the full historical public + private surface (see
 ``__all__``) so every ``from cw.dev_queue import X`` import site keeps working
@@ -20,16 +20,40 @@ unchanged.
 
 from __future__ import annotations
 
-import time
-from datetime import UTC, datetime
-from typing import Literal
+from typing import TYPE_CHECKING
 
-from cw.auto_dev_result import (
-    PAUSED_FOR_USER_INPUT_STATUSES,
-    STAGE_FAILURE_STATUSES,
-    STAGE_SUCCESS_STATUSES,
-)
 from cw.config import get_client
+from cw.dev_queue.crud import (
+    _APPROVABLE_STATUSES,
+    _find_ticket,
+    _newest_by_created_at,
+    add_ticket,
+    cancel_task_for_session,
+    cancel_ticket,
+    clear_tickets,
+    list_tickets,
+    move_ticket,
+    register_watched_pr,
+    remove_ticket,
+    resolve_client,
+)
+from cw.dev_queue.lifecycle import (
+    _PLAN_SOUNDNESS_MARKER,
+    _PLAN_SPEC_MARKER,
+    SIGNOFF_GATE_DISPOSITION,
+    _advance_task_pointer,
+    _clear_signoff_gate,
+    _derive_disposition,
+    _emit_stage_change,
+    _extract_pr_url,
+    _plan_is_reviewed,
+    _raise_stage_high_water,
+    _reset_for_same_stage_requeue,
+    _stage_regress,
+    consume_completed_sessions,
+    transition_task_status,
+    wait_for_terminal,
+)
 from cw.dev_queue.migrate import migrate_dev_queue
 from cw.dev_queue.storage import (
     _lock,
@@ -40,352 +64,21 @@ from cw.dev_queue.storage import (
     save_dev_queue,
     save_plan,
 )
-from cw.events import record_event
 from cw.exceptions import (
     ApproveGateError,
-    CwError,
-    LaneMoveError,
     LaneNotFoundError,
     RequeueStageError,
     RequeueStateError,
     UnblockStateError,
 )
-from cw.gh import fetch_approved_plan_comment
-from cw.models import (
-    DevQueueStore,
-    OrchestratorConfig,
-    OrchestratorEventType,
-    QueueItemStatus,
-    Stage,
-    TicketTask,
-    WatchedPr,
-)
+from cw.models import QueueItemStatus, Stage
 
-_WAIT_POLL_INTERVAL: int = 5
+if TYPE_CHECKING:
+    from cw.models import DevQueueStore, TicketTask
 
 # Issue #917: --regress requires an explicit backward --stage target.
 _REGRESS_NEEDS_BACKWARD_STAGE_MSG = (
     "--regress requires a backward --stage target on a blocked task."
-)
-
-_TERMINAL_STATUSES: frozenset[QueueItemStatus] = frozenset(
-    [
-        QueueItemStatus.COMPLETED,
-        QueueItemStatus.FAILED,
-        QueueItemStatus.CANCELLED,
-        QueueItemStatus.BLOCKED_ON_USER,
-        QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
-    ]
-)
-
-# Statuses that should stamp disposition/pr_url/completed_at on the task.
-_TERMINAL_DISPOSITION_STATUSES: frozenset[QueueItemStatus] = frozenset(
-    [
-        QueueItemStatus.COMPLETED,
-        QueueItemStatus.BLOCKED_ON_USER,
-        QueueItemStatus.FAILED,
-        QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
-    ]
-)
-
-# Disposition stamped when a ticket is parked AWAITING_OPERATOR_SIGNOFF by
-# either dispatch's staged-decision routing (RFC 0007 Phase 3, dispatch.py) or
-# approve_ticket's own REVIEW-stage re-check below. Imported by dispatch.py via
-# a function-level import to break the dev_queue<->dispatch circularity
-# (mirrors reconcile/_shared.py's precedent for the same import shape).
-SIGNOFF_GATE_DISPOSITION = "signoff_gate"
-
-# Statuses that should clear disposition/pr_url/completed_at (requeue/cancel).
-_RESET_DISPOSITION_STATUSES: frozenset[QueueItemStatus] = frozenset(
-    [
-        QueueItemStatus.PENDING,
-        QueueItemStatus.CANCELLED,
-    ]
-)
-
-
-def transition_task_status(
-    task: TicketTask,
-    new_status: QueueItemStatus,
-    *,
-    disposition: str | None = None,
-    pr_url: str | None = None,
-) -> None:
-    """Single authority for TicketTask status transitions. Mutates in place.
-
-    Stamps disposition/pr_url/completed_at on terminal transitions
-    (COMPLETED/BLOCKED_ON_USER/FAILED/AWAITING_OPERATOR_SIGNOFF); clears them
-    on PENDING/CANCELLED (requeue/cancel).  Companion field resets (session_id,
-    stage_base_ref) stay at call sites.  GitHub #310, #990.
-
-    Emits a ``task.transition`` orchestrator event on a real status change (RFC
-    0008 W1, closes #978); the emit is suppressed when new_status == old_status
-    so a re-assert of the same status stays silent.
-    """
-    old_status = task.status
-    task.status = new_status
-    if new_status in _TERMINAL_DISPOSITION_STATUSES:
-        task.disposition = disposition
-        task.pr_url = pr_url
-        task.completed_at = datetime.now(UTC)
-    elif new_status in _RESET_DISPOSITION_STATUSES:
-        task.disposition = None
-        task.pr_url = None
-        task.completed_at = None
-    # RFC 0008 capstone (#1015, Q5): unconditional clear-site for the
-    # durable-escalation-latch fields. transition_task_status is the single
-    # authority for every status/disposition mutation on a TicketTask (see
-    # docstring above), so clearing here — on every call, regardless of which
-    # branch above fired — covers approve_ticket, requeue_ticket,
-    # cancel_ticket, unblock_ticket, and _advance_task_pointer/_stage_regress
-    # all at once. This is deliberately NOT gated on old_status != new_status:
-    # a re-park to the same status (e.g. a fresh BLOCKED_ON_USER disposition
-    # overwriting a stale one) must also start the latch clean, and clearing
-    # an already-None pair is a no-op. cw.reconcile.escalation re-stamps
-    # escalation_parked_at on the next sweep tick if the row is still (or
-    # newly) in the escalation-eligible set.
-    task.escalation_parked_at = None
-    task.escalation_fired_at = None
-    # RFC 0009 P1+P2 (#1065): same unconditional-clear treatment for the
-    # gate-recipe failure latch — a fresh episode (any status transition,
-    # including a same-status re-park by a new review session) always starts
-    # with a clean latch. See cw.reconcile.gate_recipes for what stamps it.
-    task.gate_recipe_failed_at = None
-    if old_status != new_status:
-        # Why: emit inline while callers still hold dev_queue_lock. record_event
-        # takes the events-inbox lock (_inbox_lock) *inside* dev_queue_lock; the
-        # reverse nesting never occurs (no path takes _inbox_lock then
-        # dev_queue_lock), so this ordering is deadlock-safe. RFC 0008 W1.
-        record_event(
-            OrchestratorEventType.TASK_TRANSITION,
-            {
-                "ticket_id": task.ticket_id,
-                "client": task.client,
-                "lane": task.lane,
-                "stage": task.stage,
-                "old_status": old_status,
-                "new_status": new_status,
-                "disposition": task.disposition,
-                "session_id": task.session_id,
-                "pr_url": task.pr_url,
-            },
-            correlation_id=task.ticket_id,
-        )
-
-
-_VERBATIM_DISPOSITION_STATUSES: frozenset[str] = (
-    STAGE_SUCCESS_STATUSES
-    | frozenset({"no_op", "merge_pending"})
-    | STAGE_FAILURE_STATUSES
-    | PAUSED_FOR_USER_INPUT_STATUSES
-)
-
-
-def _derive_disposition(status: str | None) -> str | None:
-    """Map an AutoDevResult status to the task-level disposition string.
-
-    Used alongside transition_task_status at terminal call sites to record
-    the sentinel status verbatim (for operator-visible batch health).  GitHub #310.
-    """
-    if status is None:
-        return "abandoned"
-    if status in _VERBATIM_DISPOSITION_STATUSES:
-        return status
-    return "abandoned"
-
-
-def _extract_pr_url(last_result: dict[str, object] | None) -> str | None:
-    """Extract the PR URL from an AutoDevResult dict, or None if absent."""
-    if last_result is None:
-        return None
-    pr = last_result.get("pr")
-    if isinstance(pr, dict):
-        url = pr.get("url")
-        return str(url) if url is not None else None
-    return None
-
-
-def add_ticket(task: TicketTask) -> bool:
-    """Enqueue a TicketTask, acquiring the file lock atomically.
-
-    Returns True if the task was inserted, False if a task with the same
-    (client, ticket_id) is already PENDING or RUNNING, or if the same
-    (client, ticket_id, stage) is already COMPLETED or CANCELLED
-    (deduplication guard — terminal check is stage-scoped to allow normal
-    multi-stage progression, e.g. COMPLETED PLAN does not block IMPL, #876).
-
-    Raises:
-        LaneNotFoundError: if task.lane is not declared for the client.
-    """
-    _active = {QueueItemStatus.PENDING, QueueItemStatus.RUNNING}
-    _terminal = {QueueItemStatus.COMPLETED, QueueItemStatus.CANCELLED}
-    with _lock():
-        try:
-            client_cfg = get_client(task.client)
-        except CwError:
-            pass  # Unknown client — lane validation deferred to dispatch
-        else:
-            declared_lane_names = [ln.name for ln in client_cfg.effective_lanes]
-            if task.lane not in declared_lane_names:
-                msg = (
-                    f"Lane '{task.lane}' is not declared for client '{task.client}'."
-                    f" Declared lanes: {', '.join(declared_lane_names)}."
-                    f" Run: cw lane add {task.client} {task.lane}"
-                )
-                raise LaneNotFoundError(msg)
-        store = load_dev_queue()
-        for existing in store.tasks:
-            if existing.client != task.client or existing.ticket_id != task.ticket_id:
-                continue
-            if existing.status in _active:
-                return False
-            if existing.status in _terminal and existing.stage == task.stage:
-                return False
-        store.tasks.append(task)
-        save_dev_queue(store)
-    return True
-
-
-def register_watched_pr(watched: WatchedPr) -> bool:
-    """Insert a WatchedPr into the store's watched_prs list, atomically.
-
-    Returns True if inserted, False if an ``active`` watched PR with the same
-    ``(repo, pr_number)`` already exists (idempotency dedup, RFC 0011 S2 R7 —
-    mirrors ``add_ticket``'s ``with _lock(): load -> scan -> append/return
-    False -> save`` shape). The guard is scoped to ``status == "active"`` so a
-    future ``dismissed`` transition can re-open registration (adopted #5).
-    """
-    with _lock():
-        store = load_dev_queue()
-        for existing in store.watched_prs:
-            if (
-                existing.repo == watched.repo
-                and existing.pr_number == watched.pr_number
-                and existing.status == "active"
-            ):
-                return False
-        store.watched_prs.append(watched)
-        save_dev_queue(store)
-    return True
-
-
-def _emit_task_deleted(
-    removed: TicketTask, reason: Literal["operator_remove", "operator_clear"]
-) -> None:
-    """Emit a ``task.deleted`` event for a single removed row.
-
-    Shared chokepoint for both row-removal sites (RFC 0008 W1, closes #978):
-    called from ``remove_ticket`` (``operator_remove``) and ``clear_tickets``
-    (``operator_clear``), once per removed row.
-    """
-    # Why: emit inline under dev_queue_lock — one task.deleted per removed
-    # row (not per API call). record_event nests _inbox_lock INSIDE
-    # dev_queue_lock; the reverse never happens, so this is deadlock-safe.
-    record_event(
-        OrchestratorEventType.TASK_DELETED,
-        {
-            "ticket_id": removed.ticket_id,
-            "client": removed.client,
-            "stage": removed.stage,
-            "status_at_deletion": removed.status,
-            "reason": reason,
-        },
-        correlation_id=removed.ticket_id,
-    )
-
-
-def remove_ticket(ticket_id: str, client: str, *, remove_all: bool = False) -> None:
-    """Remove one (or all) matching TicketTask(s) from the dev queue.
-
-    Raises CwError when no task matches.  Raises CwError when multiple tasks
-    match and *remove_all* is False.
-    """
-    with _lock():
-        store = load_dev_queue()
-        matches = [
-            t for t in store.tasks if t.ticket_id == ticket_id and t.client == client
-        ]
-        n = len(matches)
-        if n == 0:
-            msg = (
-                f"No dev-queue task found for ticket '{ticket_id}'"
-                f" in client '{client}'."
-            )
-            raise CwError(msg)
-        if n > 1 and not remove_all:
-            msg = (
-                f"Multiple dev-queue tasks ({n}) match ticket '{ticket_id}' in"
-                f" client '{client}'; pass --all to remove all."
-            )
-            raise CwError(msg)
-        match_set = {id(m) for m in matches}
-        store.tasks = [t for t in store.tasks if id(t) not in match_set]
-        save_dev_queue(store)
-        for removed in matches:
-            _emit_task_deleted(removed, "operator_remove")
-
-
-def cancel_ticket(ticket_id: str, client: str) -> list[str | None]:
-    """Mark a TicketTask as CANCELLED, clearing its session_id.
-
-    Returns the list of session_ids that were cleared (one per cancelled task).
-    Raises CwError when no task matches. Idempotent for already-CANCELLED tasks.
-    """
-    with _lock():
-        store = load_dev_queue()
-        matches = [
-            t for t in store.tasks if t.ticket_id == ticket_id and t.client == client
-        ]
-        if not matches:
-            msg = (
-                f"No dev-queue task found for ticket '{ticket_id}'"
-                f" in client '{client}'."
-            )
-            raise CwError(msg)
-        cleared: list[str | None] = []
-        changed = False
-        for task in matches:
-            if task.status == QueueItemStatus.CANCELLED:
-                continue
-            cleared.append(task.session_id)
-            transition_task_status(task, QueueItemStatus.CANCELLED)
-            task.session_id = None
-            changed = True
-        if changed:
-            save_dev_queue(store)
-    return cleared
-
-
-def cancel_task_for_session(session_id: str) -> bool:
-    """Mark the RUNNING TicketTask that owns *session_id* as CANCELLED.
-
-    Returns True if a task was cancelled, False if none matched.
-    Used by _spawn_close_impl to atomically preempt the dispatcher before
-    the session is marked COMPLETED. See GitHub issue #317.
-    """
-    with _lock():
-        store = load_dev_queue()
-        for task in store.tasks:
-            if task.session_id == session_id and task.status == QueueItemStatus.RUNNING:
-                transition_task_status(task, QueueItemStatus.CANCELLED)
-                task.session_id = None
-                save_dev_queue(store)
-                return True
-    return False
-
-
-_UNMOVABLE_STATUSES: frozenset[QueueItemStatus] = frozenset(
-    [
-        QueueItemStatus.RUNNING,
-        QueueItemStatus.BLOCKED_ON_USER,
-        QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
-    ]
-)
-
-# Statuses eligible for approve_ticket (an existing BLOCKED_ON_USER approval
-# gate, or a parked operator-signoff gate to clear). See GitHub #990.
-_APPROVABLE_STATUSES: frozenset[QueueItemStatus] = frozenset(
-    [QueueItemStatus.BLOCKED_ON_USER, QueueItemStatus.AWAITING_OPERATOR_SIGNOFF]
 )
 
 # Statuses requeue_ticket's forward/same-stage path additionally accepts, but
@@ -409,377 +102,6 @@ _REQUEUE_FROM_CANCELLED_STATUSES: frozenset[QueueItemStatus] = frozenset(
 _REQUEUE_FROM_FAILED_STATUSES: frozenset[QueueItemStatus] = frozenset(
     [QueueItemStatus.FAILED]
 )
-
-# The two signoff markers auto-dev-plan appends to the plan-of-record body.
-# Local copy of cw.reconcile.gate_recipes._PLAN_SPEC_MARKER /
-# _PLAN_SOUNDNESS_MARKER -- importing gate_recipes from here would create an
-# import cycle (gate_recipes already imports from dev_queue), so this module
-# keeps its own copy. Keep the two pairs in sync; drift is caught by
-# test_approve_plan_reviewed_marker_constants_match_gate_recipes. See #968.
-_PLAN_SPEC_MARKER = "<!-- plan-spec-reviewed"
-_PLAN_SOUNDNESS_MARKER = "<!-- plan-soundness-reviewed"
-
-
-def move_ticket(ticket_id: str, client_name: str, to_lane: str) -> str:
-    """Move a pending ticket to a different lane.
-
-    Returns the previous lane name (from_lane) for event emission by the caller.
-
-    Raises:
-        CwError: if no matching task is found for (ticket_id, client_name).
-        LaneNotFoundError: if to_lane is not declared for the client.
-        LaneMoveError: if the task status is RUNNING, BLOCKED_ON_USER, or
-            AWAITING_OPERATOR_SIGNOFF.
-
-    Note: record_event is NOT called here — the CLI layer fires TICKET_MOVED.
-    """
-    with _lock():
-        store = load_dev_queue()
-        task = next(
-            (
-                t
-                for t in store.tasks
-                if t.ticket_id == ticket_id and t.client == client_name
-            ),
-            None,
-        )
-        if task is None:
-            msg = (
-                f"No dev-queue task found for ticket '{ticket_id}'"
-                f" in client '{client_name}'."
-            )
-            raise CwError(msg)
-
-        client = get_client(client_name)
-        declared_lane_names = [ln.name for ln in client.effective_lanes]
-        if to_lane not in declared_lane_names:
-            msg = (
-                f"Lane '{to_lane}' is not declared for client '{client_name}'."
-                f" Declared lanes: {', '.join(declared_lane_names)}."
-                f" Run: cw lane add {client_name} {to_lane}"
-            )
-            raise LaneNotFoundError(msg)
-
-        if task.status in _UNMOVABLE_STATUSES:
-            msg = (
-                f"Cannot move ticket '{ticket_id}': task is {task.status.value}."
-                " Only PENDING tasks can be moved between lanes."
-            )
-            raise LaneMoveError(msg)
-
-        from_lane = task.lane
-        task.lane = to_lane
-        save_dev_queue(store)
-    return from_lane
-
-
-def clear_tickets(client: str, status: QueueItemStatus | None = None) -> int:
-    """Remove all TicketTasks for *client*, optionally filtered by *status*.
-
-    Returns the number of tasks removed.
-    """
-    with _lock():
-        store = load_dev_queue()
-        if status is None:
-            removed_tasks = [t for t in store.tasks if t.client == client]
-        else:
-            removed_tasks = [
-                t for t in store.tasks if t.client == client and t.status == status
-            ]
-        removed_ids = {id(t) for t in removed_tasks}
-        store.tasks = [t for t in store.tasks if id(t) not in removed_ids]
-        save_dev_queue(store)
-        for task in removed_tasks:
-            _emit_task_deleted(task, "operator_clear")
-    return len(removed_tasks)
-
-
-def resolve_client(
-    ticket_id: str,
-    config: OrchestratorConfig,
-    client_override: str | None,
-) -> str:
-    """Resolve the target client for a ticket.
-
-    Resolution order:
-    1. ``client_override`` (--client flag) if provided
-    2. Prefix map: ``GEN-100`` -> prefix ``GEN`` -> client name
-    3. Raise ``CwError`` if neither resolves
-    """
-    if client_override is not None:
-        return client_override
-
-    # Extract prefix: everything before the first '-'
-    if "-" in ticket_id:
-        prefix = ticket_id.split("-", maxsplit=1)[0]
-        if prefix in config.linear_prefix_map:
-            return config.linear_prefix_map[prefix]
-
-    msg = (
-        f"Cannot resolve client for ticket '{ticket_id}'."
-        " Use --client to specify, or add the prefix to linear_prefix_map in"
-        " ~/.claude-workspace/orchestrator.yaml."
-    )
-    raise CwError(msg)
-
-
-def list_tickets(client: str | None = None) -> list[TicketTask]:
-    """Return tickets from the dev queue, optionally filtered by client."""
-    store = load_dev_queue()
-    if client is None:
-        return list(store.tasks)
-    return [t for t in store.tasks if t.client == client]
-
-
-def _newest_by_created_at(tasks: list[TicketTask]) -> TicketTask:
-    """Return the task with the newest created_at (duplicate-row tie-break).
-
-    Callers must pass a non-empty list (raises via max() on empty by design;
-    every existing call site already guards emptiness).
-    """
-    return max(tasks, key=lambda t: t.created_at)
-
-
-def _find_ticket(store: DevQueueStore, ticket_id: str, client: str) -> TicketTask:
-    """Return the TicketTask matching (ticket_id, client) or raise CwError.
-
-    Selection priority: PENDING/RUNNING (live, newest created_at) →
-    BLOCKED_ON_USER (newest created_at) → terminal (newest created_at).
-    Re-resolved on every call — callers that poll (e.g. dev_queue_wait)
-    pick up re-enqueued tasks on the next tick automatically.
-
-    Emits a one-time stderr warning when multiple live PENDING/RUNNING tasks
-    exist for the same (ticket_id, client).
-    """
-    # Why: add-after-terminal creates duplicate (client, ticket_id) rows.
-    # Returning the oldest terminal record would cause wait to resolve
-    # immediately on a stale status while a fresh RUNNING task is live.
-    import click
-
-    matches = [
-        t for t in store.tasks if t.ticket_id == ticket_id and t.client == client
-    ]
-    if not matches:
-        msg = f"No dev-queue task found for ticket '{ticket_id}' in client '{client}'."
-        raise CwError(msg)
-
-    live = [
-        t
-        for t in matches
-        if t.status in {QueueItemStatus.PENDING, QueueItemStatus.RUNNING}
-    ]
-    if live:
-        if len(live) > 1:
-            click.echo(
-                f"Warning: {len(live)} live tasks for ticket '{ticket_id}' "
-                f"in client '{client}'; binding to newest.",
-                err=True,
-            )
-        return _newest_by_created_at(live)
-
-    blocked = [t for t in matches if t.status in _APPROVABLE_STATUSES]
-    if blocked:
-        return _newest_by_created_at(blocked)
-
-    return _newest_by_created_at(matches)
-
-
-def consume_completed_sessions() -> int:
-    """Thin wrapper around dispatch.consume_completed_sessions.
-
-    Exists as a named module-level function so that tests can monkeypatch
-    ``cw.dev_queue.consume_completed_sessions`` without depending on a
-    module-level circular import.  The real import is deferred to call time
-    to break the dev_queue ↔ dispatch circular dependency.
-    """
-    from cw.dispatch import consume_completed_sessions as _impl
-
-    return _impl()
-
-
-def wait_for_terminal(
-    ticket_id: str,
-    client: str,
-    *,
-    timeout: float,
-    poll_interval: float = _WAIT_POLL_INTERVAL,
-) -> TicketTask:
-    """Block until the given ticket reaches a terminal status.
-
-    Calls consume_completed_sessions() once per poll tick before reading the
-    queue, so it works whether or not a dispatch loop is active.
-
-    # Why: before #471 merges, TIMED_OUT-but-PR-merged tickets may stay PENDING;
-    # wait will then hit --timeout (exit 124) rather than returning COMPLETED.
-
-    Terminal statuses: COMPLETED, FAILED, CANCELLED, BLOCKED_ON_USER,
-    AWAITING_OPERATOR_SIGNOFF.
-    Raises CwError if the ticket is not found.
-    Raises TimeoutError if *timeout* seconds elapse before a terminal status.
-    """
-    store = load_dev_queue()
-    task = _find_ticket(store, ticket_id, client)
-    if task.status in _TERMINAL_STATUSES:
-        return task
-
-    deadline = time.monotonic() + timeout
-    while True:
-        consume_completed_sessions()
-        store = load_dev_queue()
-        task = _find_ticket(store, ticket_id, client)
-        if task.status in _TERMINAL_STATUSES:
-            return task
-        if time.monotonic() >= deadline:
-            raise TimeoutError
-        time.sleep(poll_interval)
-
-
-def _emit_stage_change(
-    task: TicketTask,
-    old_stage: Stage,
-    new_stage: Stage,
-    direction: Literal["advance", "regress"],
-) -> None:
-    """Emit a ``task.stage_changed`` event for a single real stage move.
-
-    Single shared chokepoint for every stage-pointer mutation (RFC 0008 W1,
-    closes #978): called from ``_advance_task_pointer`` (advance),
-    ``_stage_regress`` (regress), and ``_apply_requeue_stage``'s forward/
-    same-stage tail (advance). Guarded on ``old_stage != new_stage`` so a
-    same-stage requeue stays silent. ``direction`` is the closed enum
-    ``"advance" | "regress"``.
-    """
-    if old_stage == new_stage:
-        return
-    # Why: emit inline while callers still hold dev_queue_lock. record_event
-    # takes the events-inbox lock (_inbox_lock) *inside* dev_queue_lock; the
-    # reverse nesting never occurs (no path takes _inbox_lock then
-    # dev_queue_lock), so this ordering is deadlock-safe. RFC 0008 W1.
-    record_event(
-        OrchestratorEventType.TASK_STAGE_CHANGED,
-        {
-            "ticket_id": task.ticket_id,
-            "client": task.client,
-            "old_stage": old_stage,
-            "new_stage": new_stage,
-            "direction": direction,
-        },
-        correlation_id=task.ticket_id,
-    )
-
-
-def _raise_stage_high_water(
-    task: TicketTask, stages: list[Stage], new_stage: Stage
-) -> None:
-    """Raise ``task.stage_high_water`` to ``new_stage`` iff that's further along
-    the pipeline than the current value (GitHub #1361).
-
-    Compares via ``stages.index()`` -- pipeline order -- never StrEnum ``<``/
-    ``>``, whose lexicographic string-value ordering does NOT match pipeline
-    order (e.g. "finalize" < "harden" lexicographically). Degrades gracefully
-    (stamps ``new_stage`` outright) if the existing ``stage_high_water`` value
-    is not a member of the current ``stages`` list -- e.g. seeded from a stage
-    a since-reconfigured client pipeline no longer includes -- rather than
-    raising on a bare ``.index()`` call.
-    """
-    current = task.stage_high_water
-    current_idx = stages.index(current) if current in stages else -1
-    if stages.index(new_stage) > current_idx:
-        task.stage_high_water = new_stage
-
-
-def _advance_task_pointer(task: TicketTask, stages: list[Stage]) -> None:
-    """Advance task to the next pipeline stage (no status precondition check).
-
-    Mutates task in-place. The caller is responsible for any precondition checks.
-    Does NOT check current status — approve path calls this directly;
-    _stage_advance retains its RUNNING assert and calls this after.
-    """
-    old_stage = task.stage
-    idx = stages.index(task.stage)
-    task.stage = stages[idx + 1]
-    _raise_stage_high_water(task, stages, task.stage)
-    transition_task_status(task, QueueItemStatus.PENDING)
-    task.session_id = None  # R6: clear session_id on advance
-    task.stage_base_ref = None  # cleared so next spawn stamps fresh ref
-    _emit_stage_change(task, old_stage, task.stage, "advance")
-
-
-def _stage_regress(task: TicketTask, target_stage: Stage) -> None:
-    """Regress task to a prior pipeline stage for self-heal.
-
-    Mutates task in-place: sets stage to target_stage, increments
-    regress_attempts, reverts status to PENDING, and clears session anchors.
-    worktree_path is preserved so the next impl session resumes the branch.
-    Caller is responsible for stage selection and regress-cap enforcement.
-    See GitHub #770. stage_high_water is deliberately NOT touched here --
-    it is monotonic and must never be lowered by a regress (GitHub #1361).
-    """
-    old_stage = task.stage
-    task.stage = target_stage
-    task.regress_attempts += 1
-    transition_task_status(task, QueueItemStatus.PENDING)
-    task.session_id = None
-    task.stage_base_ref = None
-    _emit_stage_change(task, old_stage, target_stage, "regress")
-
-
-def _plan_is_reviewed(task: TicketTask) -> bool:
-    """True iff the plan-of-record for *task* carries both signoff markers.
-
-    Mirrors ``gate_recipes._plan_of_record_body``'s tracker-first,
-    ``.cw/plan.md``-fallback fetch shape: the tracker (GitHub issue comments)
-    is checked first via :func:`fetch_approved_plan_comment`, then the
-    worktree's ``.cw/plan.md`` if the tracker read returns ``None``. A row
-    with no materialized worktree, or a read failure between ``.exists()``
-    and ``.read_text()``, degrades to "not reviewed" (fail-closed) rather
-    than raising. See GitHub #968.
-    """
-    body = fetch_approved_plan_comment(task.ticket_id)
-    if body is None:
-        if task.worktree_path is None:
-            return False
-        plan_path = task.worktree_path / ".cw" / "plan.md"
-        if not plan_path.exists():
-            return False
-        try:
-            body = plan_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            return False
-    return _PLAN_SPEC_MARKER in body and _PLAN_SOUNDNESS_MARKER in body
-
-
-def _reset_for_same_stage_requeue(task: TicketTask) -> None:
-    """Reset session anchors and revert *task* to PENDING for a non-advancing
-    requeue at its current stage.
-
-    Shared 3-line mutation extracted from ``requeue_ticket``'s forward/same-
-    stage tail: reused here for the #968 unreviewed-plan re-park path.
-    ``regress_attempts`` is intentionally NOT touched -- ``requeue_ticket``
-    resets it itself immediately after calling this helper; the approve path
-    never regresses, so it has no analogous reset to make.
-    """
-    transition_task_status(task, QueueItemStatus.PENDING)
-    task.session_id = None
-    task.stage_base_ref = None
-
-
-def _clear_signoff_gate(task: TicketTask, stages: list[Stage]) -> None:
-    """Clear an operator-signoff gate parked on *task*, advancing the pipeline.
-
-    The gate was parked *before* the terminal/non-terminal advance decision
-    was made (dispatch's ``_stage_advance_unchecked`` was skipped in favor of
-    the park), so this helper makes that decision now: complete at the
-    pipeline's terminal stage, otherwise advance the stage pointer -- mirrors
-    ``_stage_advance_unchecked``'s branch shape. Mutates task in place.
-    See GitHub #990.
-    """
-    if task.stage == stages[-1]:
-        transition_task_status(
-            task, QueueItemStatus.COMPLETED, disposition=SIGNOFF_GATE_DISPOSITION
-        )
-    else:
-        _advance_task_pointer(task, stages)
 
 
 def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str | bool]:
