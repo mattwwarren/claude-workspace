@@ -135,7 +135,7 @@ you'll just starve yourself of attention bandwidth.
 Arm the attention monitor **via the Monitor tool, with `persistent: true`**:
 
 ```
-Monitor(command: "bash ~/.claude/skills/orchestrate-sprint/scripts/attention_monitor.sh <client>",
+Monitor(command: "bash ~/.claude/skills/orchestrate-sprint/scripts/attention_monitor.sh <client> [<lane>]",
         description: "cw attention events for <client>", persistent: true)
 ```
 

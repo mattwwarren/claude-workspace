@@ -19,15 +19,25 @@
 # it lives inside a single-quoted bash -c, where f-strings with escaped quotes
 # (f"{\" \".join(x)}") break across shells/Python versions. Keep it boring.
 #
-# Usage:  attention_monitor.sh [CLIENT]      (default client: claude-workspace)
+# Usage:  attention_monitor.sh [CLIENT] [LANE]   (default client: claude-workspace)
+#   LANE, if set, scopes the event stream to that lane (--lane) — use in a
+#   parallel-orchestrator setup so two orchestrators on the same client don't
+#   cross-deliver each other's attention events.
 # Arm via the Monitor tool with persistent: true.
 
 set -euo pipefail
 CLIENT="${1:-claude-workspace}"
+LANE="${2:-}"
 SINCE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+LANE_ARGS=()
+if [[ -n "$LANE" ]]; then
+  LANE_ARGS=(--lane "$LANE")
+fi
 
 cw event tail --follow --client "$CLIENT" --dedup-terminal \
   --since "$SINCE" \
+  "${LANE_ARGS[@]}" \
   --type session.needs_attention \
   --type operator.escalation \
   --type session.timed_out \
