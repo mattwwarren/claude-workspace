@@ -93,7 +93,7 @@ def run_dispatch_serve(
             _log.info("dispatch_serve: version drift — exiting for fresh reload")
             time.sleep(_SERVE_INITIAL_BACKOFF_SECONDS)
             return
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 — supervisor must survive any loop crash to self-heal via backoff/restart; see module docstring
             run_duration = time.monotonic() - run_start
             now = time.time()
             crash_times.append(now)

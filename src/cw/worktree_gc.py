@@ -398,7 +398,7 @@ def _live_worktree_paths() -> frozenset[Path]:
                 and session.worktree_path is not None
             ):
                 live.add(session.worktree_path)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — corrupted session state must not block worktree GC; degrades to no live-session guard for this run (see docstring)
         _log.warning("gc: failed to load session state for live-path guard: %s", exc)
 
     try:
@@ -409,7 +409,7 @@ def _live_worktree_paths() -> frozenset[Path]:
                 and task.worktree_path is not None
             ):
                 live.add(task.worktree_path)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — corrupted dev-queue state must not block worktree GC; degrades to no live-session guard for this run (see docstring)
         _log.warning("gc: failed to load dev-queue for live-path guard: %s", exc)
 
     return frozenset(live)
