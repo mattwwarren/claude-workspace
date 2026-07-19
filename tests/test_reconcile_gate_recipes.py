@@ -23,9 +23,6 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
     Session,
-    SessionOrigin,
-    SessionPurpose,
-    SessionStatus,
     Stage,
     TicketTask,
 )
@@ -46,7 +43,12 @@ from cw.reconcile.gate_recipes import (
     resolve_gate_recipe_enabled,
     run_gate_recipes,
 )
-from tests.conftest import plan_body, stub_fetch_plan
+from tests.conftest import (
+    _make_daemon_session,
+    _make_ticket_task,
+    plan_body,
+    stub_fetch_plan,
+)
 
 _NOW = datetime(2026, 7, 8, 12, 0, 0, tzinfo=UTC)
 
@@ -131,7 +133,7 @@ def _make_task(
     session_id: str | None = "sess-1",
     **kwargs: Any,
 ) -> TicketTask:
-    return TicketTask(
+    return _make_ticket_task(
         ticket_id=ticket_id,
         client=client,
         status=status,
@@ -147,14 +149,13 @@ def _make_session(
     session_id: str = "sess-1",
     last_result: dict[str, Any] | None = None,
 ) -> Session:
-    return Session(
+    return _make_daemon_session(
         id=session_id,
         name=f"{client}/auto-dev/{ticket_id}",
         client=client,
-        purpose=SessionPurpose.IMPL,
-        origin=SessionOrigin.DAEMON,
-        status=SessionStatus.ACTIVE,
-        workspace_path=Path("/tmp/ws"),
+        surface_ref=None,
+        worktree_path=None,
+        started_at=datetime.now(UTC),
         last_result=last_result,
     )
 

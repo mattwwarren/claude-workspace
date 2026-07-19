@@ -49,6 +49,7 @@ from tests._reconcile_helpers import (
     _mk_phantom_daemon_session,
 )
 from tests.conftest import (
+    _make_ticket_task,
     plan_body,
     stub_fetch_plan,
 )
@@ -1090,7 +1091,7 @@ class TestReconcileGateRecipeIntegration:
 
     @staticmethod
     def _blocked_task(stage: Stage) -> TicketTask:
-        return TicketTask(
+        return _make_ticket_task(
             ticket_id="GEN-1",
             client="acme",
             status=QueueItemStatus.BLOCKED_ON_USER,

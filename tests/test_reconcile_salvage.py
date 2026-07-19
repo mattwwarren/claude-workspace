@@ -52,6 +52,7 @@ from tests._reconcile_helpers import (
     _mk_timed_out_daemon_session,
     _write_staged_clients_yaml,
 )
+from tests.conftest import _make_daemon_session, _make_ticket_task
 
 
 def _mk_live_daemon_session_with_worktree(
@@ -60,18 +61,10 @@ def _mk_live_daemon_session_with_worktree(
     ticket_id: str,
 ) -> Session:
     """Build a live DAEMON ACTIVE session with a headless context and worktree."""
-    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
-    sess = Session(
+    sess = _make_daemon_session(
         id=sid,
         name=f"client-a/auto-dev/{ticket_id}",
-        client="client-a",
-        purpose=SessionPurpose.IMPL,
-        origin=SessionOrigin.DAEMON,
-        status=SessionStatus.ACTIVE,
-        workspace_path=Path("/tmp/ws"),
         worktree_path=worktree,
-        surface_ref="live-ref",
-        started_at=started_at,
     )
     context_dir = worktree / ".claude"
     context_dir.mkdir(parents=True, exist_ok=True)
@@ -1798,14 +1791,9 @@ class TestFinalizeBlocked:
 
         Name uses ticket_id (not sid) so ticket_id_for_session() resolves correctly.
         """
-        sess = Session(
+        sess = _make_daemon_session(
             id=sid,
             name=f"client-a/auto-dev/{ticket_id}",
-            client="client-a",
-            purpose=SessionPurpose.IMPL,
-            origin=SessionOrigin.DAEMON,
-            status=SessionStatus.ACTIVE,
-            workspace_path=Path("/tmp/ws"),
             worktree_path=worktree,
             surface_ref="surf-ref",
             started_at=started_at,
@@ -1820,7 +1808,7 @@ class TestFinalizeBlocked:
     def _mk_finalize_task(
         self, ticket_id: str, sid: str, *, lane: str = DEFAULT_LANE
     ) -> TicketTask:
-        return TicketTask(
+        return _make_ticket_task(
             ticket_id=ticket_id,
             client="client-a",
             status=QueueItemStatus.RUNNING,

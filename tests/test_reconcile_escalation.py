@@ -19,6 +19,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.reconcile.escalation import ESCALATION_PARK_MINUTES, run_escalation_sweep
+from tests.conftest import _make_ticket_task
 
 _NOW = datetime(2026, 7, 6, 12, 0, 0, tzinfo=UTC)
 
@@ -60,7 +61,7 @@ def _make_task(
     escalation_parked_at: datetime | None = None,
     escalation_fired_at: datetime | None = None,
 ) -> TicketTask:
-    return TicketTask(
+    return _make_ticket_task(
         ticket_id=ticket_id,
         client=client,
         status=status,

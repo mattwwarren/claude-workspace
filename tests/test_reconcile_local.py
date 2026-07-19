@@ -32,8 +32,6 @@ from cw.models import (
     ReapPolicy,
     ReapReason,
     Session,
-    SessionOrigin,
-    SessionPurpose,
     SessionStatus,
     Stage,
     TicketTask,
@@ -46,6 +44,7 @@ from cw.reconcile import (
 from tests._reconcile_helpers import (
     _write_staged_clients_yaml,
 )
+from tests.conftest import _make_daemon_session
 
 
 def _local_git_worktree(
@@ -93,16 +92,9 @@ def _mk_local_session(
     surface_ref is None (LOCAL sessions never register on the daemon roster);
     local_liveness is what harvest keys off.
     """
-    return Session(
+    return _make_daemon_session(
         id=sid,
         name=f"client-a/auto-dev/{sid}",
-        client="client-a",
-        purpose=SessionPurpose.IMPL,
-        origin=SessionOrigin.DAEMON,
-        status=SessionStatus.ACTIVE,
-        workspace_path=ClientConfig(
-            name="client-a", workspace_path=Path("/tmp/ws")
-        ).workspace_path,
         worktree_path=worktree,
         surface_ref=None,
         started_at=started_at or datetime(2026, 1, 1, tzinfo=UTC),
@@ -538,7 +530,7 @@ def test_park_terminal_sibling_tasks_auto_policy_cancels_pending(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """PENDING task with COMPLETED sibling → CANCELLED under auto policy."""
-    from cw.models import ClientConfig, LaneConfig
+    from cw.models import LaneConfig
     from cw.reconcile import park_terminal_sibling_tasks
 
     completed = TicketTask(

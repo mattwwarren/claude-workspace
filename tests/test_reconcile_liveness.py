@@ -45,10 +45,12 @@ def _mk_liveness_session(
     Returns (session, worktree_path). Caller writes and stamps the transcript.
     """
     worktree = tmp_path / "wt"
-    sess = _make_daemon_session(surface_ref=surface_ref)
-    sess.worktree_path = worktree
-    sess.started_at = _STARTED_AT
-    sess.name = f"client-a/auto-dev/{ticket_id}"
+    sess = _make_daemon_session(
+        surface_ref=surface_ref,
+        worktree_path=worktree,
+        started_at=_STARTED_AT,
+        name=f"client-a/auto-dev/{ticket_id}",
+    )
     return sess, worktree
 
 

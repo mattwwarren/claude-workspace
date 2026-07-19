@@ -1594,16 +1594,9 @@ def _mk_content_ts_session(
     sid: str, worktree: Path, started_at: datetime, surface_ref: str = "fake-short-id"
 ) -> Session:
     """Build a DAEMON ACTIVE session for the #1076 content-timestamp tests."""
-    return Session(
+    return _make_daemon_session(
         id=sid,
         name=f"client-a/auto-dev/{sid}",
-        client="client-a",
-        purpose=SessionPurpose.IMPL,
-        origin=SessionOrigin.DAEMON,
-        status=SessionStatus.ACTIVE,
-        workspace_path=ClientConfig(
-            name="client-a", workspace_path=Path("/tmp/ws")
-        ).workspace_path,
         worktree_path=worktree,
         surface_ref=surface_ref,
         started_at=started_at,
@@ -2316,14 +2309,9 @@ def _make_locate_session(
     claude_session_id: str | None = None,
 ) -> Session:
     """Build a minimal DAEMON ACTIVE session for locate-transcript tests."""
-    return Session(
+    return _make_daemon_session(
         id="test-locate",
         name="client-a/impl",
-        client="client-a",
-        purpose=SessionPurpose.IMPL,
-        origin=SessionOrigin.DAEMON,
-        status=SessionStatus.ACTIVE,
-        workspace_path=Path("/tmp/ws"),
         worktree_path=worktree,
         surface_ref=surface_ref,
         claude_session_id=claude_session_id,
@@ -2949,14 +2937,9 @@ class TestParseAnySentinelFromTranscript:
         path.write_text(json.dumps(record) + "\n")
 
     def _mk_session(self, worktree: Path, csid: str | None = None) -> Session:
-        return Session(
+        return _make_daemon_session(
             id="892-sess",
             name="client-a/auto-dev/892",
-            client="client-a",
-            purpose=SessionPurpose.IMPL,
-            origin=SessionOrigin.DAEMON,
-            status=SessionStatus.ACTIVE,
-            workspace_path=Path("/tmp/ws"),
             worktree_path=worktree,
             surface_ref=self._SURFACE_REF,
             claude_session_id=csid,
