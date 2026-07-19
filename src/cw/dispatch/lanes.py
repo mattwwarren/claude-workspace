@@ -30,6 +30,7 @@ from cw.reconcile import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from datetime import datetime
 
     from cw.models import (
         ClientConfig,
@@ -233,6 +234,7 @@ def _dispatch_client_lanes(
     resolved_native_daemon: NativeDaemonClient,
     parent: str | None,
     emit: Callable[[str], None] | None,
+    usage_limited_until: datetime | None = None,
 ) -> _ClientDispatchResult:
     """Claim + spawn across a client's lanes, then emit its dispatch.tick.
 
@@ -240,6 +242,10 @@ def _dispatch_client_lanes(
     and spawning one task per granted slot.  Breaks out of the lane walk on
     the first usage-limit or spawn-error.  Always records the per-client
     dispatch.tick event (with the resolved skip_reason and per-lane stats).
+
+    *usage_limited_until* is threaded straight through to
+    :func:`_claim_next_pending` as defense-in-depth (#1346) — the caller
+    (dispatch_tick) already gates the whole tick on this same value.
     """
     client_spawned = 0
     spawn_error = False
@@ -325,6 +331,7 @@ def _dispatch_client_lanes(
                 lane=lane_cfg.name,
                 config=config,
                 priority_ticket_ids=priority_ids,
+                usage_limited_until=usage_limited_until,
             )
             spawn_backoff_skipped |= backoff_skipped
             if task is None:
