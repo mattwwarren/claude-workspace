@@ -904,7 +904,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_20(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 20
+        assert DEV_QUEUE_SCHEMA_VERSION == 21
 
     def test_pr_state_defaults(self) -> None:
         state = PrState()
@@ -931,6 +931,24 @@ class TestPrStateAndSchemaV8:
 
     def test_config_pr_hydration_interval_default(self) -> None:
         assert OrchestratorConfig().pr_hydration_interval_seconds == 150
+
+
+class TestStageHighWaterField:
+    """TicketTask.stage_high_water (schema v21, GitHub #1361)."""
+
+    def test_defaults_to_none(self) -> None:
+        task = TicketTask(ticket_id="T-1", client="c")
+        assert task.stage_high_water is None
+
+    def test_round_trip(self) -> None:
+        task = TicketTask(ticket_id="T-1", client="c", stage_high_water=Stage.REVIEW)
+        dumped = task.model_dump(mode="json")
+        restored = TicketTask.model_validate(dumped)
+        assert restored.stage_high_water == Stage.REVIEW
+
+    def test_rejects_invalid_stage_string(self) -> None:
+        with pytest.raises(ValidationError):
+            TicketTask(ticket_id="T-1", client="c", stage_high_water="not-a-stage")
 
 
 class TestWatchedPrModel:

@@ -5,7 +5,7 @@ Durable audit of every operational lesson accumulated by the retired
 that replaced them in `cw`: the ported attention-state / CI-summary logic in
 [`src/cw/pr_hydrate.py`](../src/cw/pr_hydrate.py) and the review-recipe
 automation layer in
-[`src/cw/reconcile/review_recipes.py`](../src/cw/reconcile/review_recipes.py).
+[`src/cw/reconcile/review_recipes/__init__.py`](../src/cw/reconcile/review_recipes/__init__.py).
 
 Source of the lessons: `global-claude/wiki/review-monitor.md` — **47** dated
 `##`-level entries (each tagged `[session:<id>, <date>]`). This index enumerates

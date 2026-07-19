@@ -33,7 +33,7 @@ from cw.auto_dev_result import (
 )
 from cw.dev_queue import list_tickets
 from cw.gh import _fetch_pr_state
-from cw.models import QueueItemStatus, TicketTask
+from cw.models import QueueItemStatus, Stage, TicketTask
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -51,6 +51,22 @@ IDLE_PEEK_MIN: int = 7  # idle this long with no PR → check for stall
 IDLE_STALL_MIN: int = 15  # idle this long → likely stuck
 IDLE_POST_PR_MIN: int = 5  # idle this long after PR shipped → stuck in stage5
 STOP_ATTEMPTS_MIN: int = 3  # at or above this attempt count → systemic failure
+
+_STAGE_ORDER: tuple[Stage, ...] = (
+    Stage.HARDEN,
+    Stage.PLAN,
+    Stage.IMPL,
+    Stage.REVIEW,
+    Stage.FINALIZE,
+)
+
+
+def _reached_deep_stage(high_water: Stage | None) -> bool:
+    if high_water is None:
+        # unknown = no signal; does NOT suppress STOP (per R2)
+        return False
+    return _STAGE_ORDER.index(high_water) >= _STAGE_ORDER.index(Stage.REVIEW)
+
 
 RECOMMEND_BLIND = "PEEK-BLIND"
 _SIGNAL_SOURCE_BLIND = "blind"
@@ -415,6 +431,7 @@ def _score_session(
     pr_state: str | None,
     sentinel_status: str | None,
     attempts: int,
+    stage_high_water: Stage | None = None,
 ) -> tuple[str, str]:
     """Return recommendation when age_min is known."""
     if pr_state == "MERGED" and idle_min is not None and idle_min > IDLE_POST_PR_MIN:
@@ -427,7 +444,7 @@ def _score_session(
     if age_min > STOP_AGE_MIN:
         reason = f"age {age_min:.0f}min approaches 60-min timeout — stop or hand off"
         return ("STOP", reason)
-    if attempts >= STOP_ATTEMPTS_MIN:
+    if attempts >= STOP_ATTEMPTS_MIN and not _reached_deep_stage(stage_high_water):
         return ("STOP", f"attempt {attempts} — systemic, not transient")
     return _stall_check(age_min, idle_min, pr_state)
 
@@ -438,11 +455,14 @@ def recommend(
     pr_state: str | None,
     sentinel_status: str | None,
     attempts: int,
+    stage_high_water: Stage | None = None,
 ) -> tuple[str, str]:
     """Return (recommendation, reasoning) from the peek-stop ladder."""
     if age_min is None:
         return ("PEEK", "no transcript timestamps — verify session is alive")
-    return _score_session(age_min, idle_min, pr_state, sentinel_status, attempts)
+    return _score_session(
+        age_min, idle_min, pr_state, sentinel_status, attempts, stage_high_water
+    )
 
 
 def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
@@ -470,6 +490,7 @@ def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[st
             "reason": reason,
             "signal_source": signal_source,
             "jsonl_idle_min": jsonl_idle_min,
+            "stage_high_water": t.stage_high_water,
         }
 
     age = minutes_since(info.get("first_user_ts"), now)
@@ -478,7 +499,12 @@ def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[st
     if info.get("last_pr_number"):
         pr_state = gh_pr_state(info["last_pr_number"])
     rec, reason = recommend(
-        age, idle, pr_state, info.get("last_sentinel_status"), t.attempts
+        age,
+        idle,
+        pr_state,
+        info.get("last_sentinel_status"),
+        t.attempts,
+        t.stage_high_water,
     )
     return {
         "ticket": t.ticket_id,
@@ -495,6 +521,7 @@ def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[st
         "reason": reason,
         "signal_source": signal_source,
         "jsonl_idle_min": None,
+        "stage_high_water": t.stage_high_water,
     }
 
 

@@ -201,11 +201,18 @@ ignore = [
 # loop_health at module top, so loop_health's reach back into wedge must be
 # function-level. Inline import is the sanctioned mechanism, not a workaround.
 "src/cw/doctor/loop_health.py" = ["PLC0415"]
-# review_recipes defers the cw.spawn import inside _dispatch_address_review to
-# break the cw.spawn ↔ cw.reconcile circular dependency (spawn.py imports
-# cw.reconcile at module top). Inline import at function level is the
-# sanctioned mechanism, not a workaround.
-"src/cw/reconcile/review_recipes.py" = ["PLC0415"]
+# review_recipes.address_review defers the cw.spawn import inside
+# _dispatch_address_review to break the cw.spawn ↔ cw.reconcile circular
+# dependency (spawn.py imports cw.reconcile at module top). Inline import at
+# function level is the sanctioned mechanism, not a workaround.
+"src/cw/reconcile/review_recipes/address_review.py" = ["PLC0415"]
+# review_recipes._remaining defers cw.dev_queue.add_ticket / cw.dispatch
+# .run_dispatch_loop / cw.models.TicketTask inside _dispatch_auto_fix_ci (the
+# add_ticket lock IS dev_queue_lock, and dispatch imports cw.reconcile at module
+# top) and cw.gh.add_pr_reviewer inside _dispatch_request_reviewer (keeps cw.gh
+# off module import). Inline imports at function level are the sanctioned
+# mechanism, not a workaround.
+"src/cw/reconcile/review_recipes/_remaining.py" = ["PLC0415"]
 # pr_hydrate defers the operator_identity import inside hydrate_pr_states so a
 # test-time monkeypatch of cw.operator_identity.cached_gh_login takes effect —
 # a module-level import would bind a stale reference at import time. Mirrors

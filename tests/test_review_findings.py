@@ -188,6 +188,27 @@ class TestReviewerFindingsDocument:
         assert doc.findings == []
 
 
+class TestReviewerFindingsDocumentNullNormalization:
+    """A ``None`` detail/findings (from an OpenAI strict-schema nullable-wrapped
+    field, #1364) normalizes to the same default a caller omitting the key
+    would get, rather than failing type validation.
+    """
+
+    def test_null_detail_normalizes_to_empty_string(self) -> None:
+        doc = _make_reviewer_doc(detail=None)
+        assert doc.detail == ""
+
+    def test_null_findings_normalizes_to_empty_list(self) -> None:
+        doc = _make_reviewer_doc(findings=None)
+        assert doc.findings == []
+
+    def test_status_failed_with_null_findings_still_passes_no_findings_check(
+        self,
+    ) -> None:
+        doc = _make_reviewer_doc(status="failed", findings=None)
+        assert doc.findings == []
+
+
 class TestValidateReviewerDocument:
     def test_invalid_severity_rejected(self) -> None:
         bad = Finding.model_construct(**_finding_kwargs(severity="BOGUS"))
