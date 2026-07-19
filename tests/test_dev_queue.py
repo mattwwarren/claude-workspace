@@ -2986,7 +2986,7 @@ class TestWaitForTerminal:
     @pytest.fixture(autouse=True)
     def _patch_consume(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Stub consume_completed_sessions so tests don't touch event cursor."""
-        monkeypatch.setattr("cw.dev_queue.consume_completed_sessions", lambda: 0)
+        monkeypatch.setattr("cw.dev_queue.lifecycle.consume_completed_sessions", lambda: 0)
 
     def test_wait_completed_returns_immediately(self, tmp_config_dir: Path) -> None:
         """COMPLETED ticket returns on the first load, no polling."""
@@ -3085,7 +3085,7 @@ class TestWaitForTerminal:
                 save_dev_queue(updated)
             return 0
 
-        monkeypatch.setattr("cw.dev_queue.consume_completed_sessions", _side_effect)
+        monkeypatch.setattr("cw.dev_queue.lifecycle.consume_completed_sessions", _side_effect)
 
         result = wait_for_terminal("GEN-6", "genhealth", timeout=60, poll_interval=0)
         assert result.status == QueueItemStatus.COMPLETED
@@ -3208,7 +3208,7 @@ class TestFindTicket:
         COMPLETED record must not cause wait_for_terminal to return early.
         The active PENDING record should be returned and polling should proceed.
         """
-        monkeypatch.setattr("cw.dev_queue.consume_completed_sessions", lambda: 0)
+        monkeypatch.setattr("cw.dev_queue.lifecycle.consume_completed_sessions", lambda: 0)
 
         stale_terminal = TicketTask(
             ticket_id="GEN-12",

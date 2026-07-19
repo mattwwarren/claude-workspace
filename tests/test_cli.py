@@ -8307,7 +8307,7 @@ class TestDevQueueWaitDuplicateResolution:
         save_dev_queue(store)
 
         # Prevent consume_completed_sessions from doing real dispatch work
-        monkeypatch.setattr("cw.dev_queue.consume_completed_sessions", lambda: 0)
+        monkeypatch.setattr("cw.dev_queue.lifecycle.consume_completed_sessions", lambda: 0)
         monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
 
         runner = CliRunner()
