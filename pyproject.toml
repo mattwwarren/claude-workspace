@@ -197,6 +197,11 @@ ignore = [
 # off module import. Deferred import is the sanctioned mechanism, not a
 # workaround.
 "src/cw/dev_queue/crud.py" = ["PLC0415"]
+# approval defers cw.dispatch._should_gate_for_signoff (dev_queue ↔ dispatch
+# cycle) plus cw.auto_dev_result.SCOPE_GATED_APPROVAL_STATUSES / cw.config
+# .load_state inside _approve_ticket_locked. Deferred imports are the
+# sanctioned mechanism, not a workaround.
+"src/cw/dev_queue/approval.py" = ["PLC0415"]
 # result defers the cli._hook_io import to break the cli <-> result circular
 # dependency; inline import is the sanctioned mechanism, not a workaround.
 "src/cw/result.py" = ["PLC0415"]
