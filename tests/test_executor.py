@@ -841,7 +841,8 @@ def test_local_executor_liveness_unavailable_persists_runtime_error_diagnostics(
             proc.kill()
             proc.wait()
 
-    path = diagnostics_bundle_dir(sid) / "aider-runtime_error.json"
+    # Filename now carries an occurred_at timestamp suffix (#1330 item 7).
+    [path] = list(diagnostics_bundle_dir(sid).glob("aider-runtime_error-*.json"))
     assert path.exists()
     failure = ExecutorFailure.model_validate_json(path.read_text())
     assert failure.category == "runtime_error"
@@ -879,7 +880,10 @@ def test_local_executor_unexpected_error_persists_diagnostics(
 
     # spawn raised, so recover sid from the created session in state.
     session = next(s for s in load_state().sessions if s.last_result is not None)
-    path = diagnostics_bundle_dir(session.id) / "aider-runtime_error.json"
+    # Filename now carries an occurred_at timestamp suffix (#1330 item 7).
+    [path] = list(
+        diagnostics_bundle_dir(session.id).glob("aider-runtime_error-*.json")
+    )
     assert path.exists()
     failure = ExecutorFailure.model_validate_json(path.read_text())
     assert failure.category == "runtime_error"
