@@ -1,9 +1,10 @@
 """Tests for cw_operator_events: operator-attention filter + inbox->SSE bridge.
 
-RFC 0008 W3 (#1002). ``cw_operator_events`` is a self-contained sibling of
-``cw_queue_events_server``/``cw_pr_events_server`` — it owns its own
-subscriber registry, durable-replay cursor/offset plumbing, and MCP route
-builder, mirroring that pair's full-duplication convention (no shared base).
+RFC 0008 W3 (#1002). ``cw_operator_events`` is a sibling of
+``cw_queue_events_server``/``cw_pr_events_server`` — its append/subscribe/
+broadcast/cursor machinery is shared via ``EventBus`` (``cw.event_bus``,
+#1303), mirroring that pair's own migration onto the same core; it still owns
+its own subscriber registry and MCP route builder.
 """
 
 from __future__ import annotations

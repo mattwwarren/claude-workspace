@@ -14,15 +14,38 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+import cw.cw_operator_events as _operator_mod
+import cw.cw_pr_events_server as _pr_mod
+
 if TYPE_CHECKING:
     from pathlib import Path
+
+# Module references are captured here, at collection time, rather than via a
+# fresh `import cw.cw_pr_events_server as ...` inside a test body. Why: a
+# sibling test (TestLazyStarlette in test_cw_pr_events_server.py) pops and
+# reimports this module from sys.modules to exercise the lazy-starlette
+# contract; its restoration fixes up ``sys.modules`` but not the ``cw``
+# package's own submodule attribute, so `import cw.cw_pr_events_server as x`
+# executed *after* that test runs would silently resolve to a stale module
+# object. Capturing the reference at collection time (before any test body
+# runs) sidesteps that ordering hazard entirely.
 
 
 def _write_events_fixture(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
-        {"notification_type": "cw-pr-event", "message": "m0", "title": "t0", "offset": 0},
-        {"notification_type": "cw-pr-event", "message": "m1", "title": "t1", "offset": 1},
+        {
+            "notification_type": "cw-pr-event",
+            "message": "m0",
+            "title": "t0",
+            "offset": 0,
+        },
+        {
+            "notification_type": "cw-pr-event",
+            "message": "m1",
+            "title": "t1",
+            "offset": 1,
+        },
     ]
     path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
 
@@ -80,14 +103,14 @@ class TestPrChannelStateFileFormatRoundtrip:
     def test_append_event_produces_fixture_shaped_line(
         self, tmp_config_dir: Path
     ) -> None:
-        import cw.cw_pr_events_server as _pr_mod
         from cw.config import state_dir
         from cw.cw_pr_events_server import _append_event, _load_offset_from_file
 
         events_path = state_dir() / "channel-events.jsonl"
         _write_events_fixture(events_path)
         # Seed the in-memory offset counter from the fixture, mirroring the
-        # real module-import-time seeding (`_event_offset[0] = _load_offset_from_file()`).
+        # real module-import-time seeding (`_event_offset[0] =
+        # _load_offset_from_file()`).
         _pr_mod._event_offset[0] = _load_offset_from_file()
 
         _append_event(
@@ -97,7 +120,12 @@ class TestPrChannelStateFileFormatRoundtrip:
         lines = events_path.read_text().splitlines()
         assert len(lines) == 3
         appended = json.loads(lines[2])
-        assert list(appended.keys()) == ["notification_type", "message", "title", "offset"]
+        assert list(appended.keys()) == [
+            "notification_type",
+            "message",
+            "title",
+            "offset",
+        ]
         assert appended["offset"] == 2
 
 
@@ -149,14 +177,14 @@ class TestOperatorChannelStateFileFormatRoundtrip:
     def test_append_event_produces_fixture_shaped_line(
         self, tmp_config_dir: Path
     ) -> None:
-        import cw.cw_operator_events as _operator_mod
         from cw.config import state_dir
         from cw.cw_operator_events import _append_event, _load_offset_from_file
 
         events_path = state_dir() / "operator-channel-events.jsonl"
         _write_events_fixture(events_path)
         # Seed the in-memory offset counter from the fixture, mirroring the
-        # real module-import-time seeding (`_event_offset[0] = _load_offset_from_file()`).
+        # real module-import-time seeding (`_event_offset[0] =
+        # _load_offset_from_file()`).
         _operator_mod._event_offset[0] = _load_offset_from_file()
 
         _append_event(
@@ -166,5 +194,10 @@ class TestOperatorChannelStateFileFormatRoundtrip:
         lines = events_path.read_text().splitlines()
         assert len(lines) == 3
         appended = json.loads(lines[2])
-        assert list(appended.keys()) == ["notification_type", "message", "title", "offset"]
+        assert list(appended.keys()) == [
+            "notification_type",
+            "message",
+            "title",
+            "offset",
+        ]
         assert appended["offset"] == 2
