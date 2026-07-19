@@ -57,6 +57,7 @@ _log = logging.getLogger(__name__)
 
 _CODEX_LIVE = os.environ.get("INTEGRATION_CODEX_LIVE", "").strip() not in ("", "0")
 
+_LIVE_SESSION_ID = "live-contract-suite"
 _ROLE = "Code Quality Reviewer"
 
 
@@ -177,6 +178,7 @@ class TestCodexContractCleanDiff:
             model=None,
             timeout_seconds=120,
             scratch_dir=_scratch(base),
+            session_id=_LIVE_SESSION_ID,
         )
         assert failure is None
         assert doc is not None
@@ -212,6 +214,7 @@ class TestCodexContractSeededDefect:
             model=None,
             timeout_seconds=120,
             scratch_dir=_scratch(base),
+            session_id=_LIVE_SESSION_ID,
         )
         assert failure is None
         assert doc is not None
@@ -258,6 +261,7 @@ class TestCodexContractSchemaEnforcement:
             model=None,
             timeout_seconds=120,
             scratch_dir=_scratch(base),
+            session_id=_LIVE_SESSION_ID,
         )
         assert failure is None
         assert doc is not None
@@ -306,6 +310,7 @@ class TestCodexContractMissingOutput:
             model=None,
             timeout_seconds=120,
             scratch_dir=scratch,
+            session_id=_LIVE_SESSION_ID,
         )
         # Tolerant: npm-installed codex versions differ on exit code for an
         # unwritable -o target.
@@ -340,6 +345,7 @@ class TestCodexContractSubprocessFailure:
             model="definitely-not-a-real-model-xyz",
             timeout_seconds=120,
             scratch_dir=_scratch(base),
+            session_id=_LIVE_SESSION_ID,
         )
         assert doc is None
         assert failure is not None
@@ -376,6 +382,7 @@ class TestCodexContractTimeout:
             model=None,
             timeout_seconds=2,
             scratch_dir=_scratch(base),
+            session_id=_LIVE_SESSION_ID,
         )
         assert doc is None
         assert failure is not None
@@ -413,6 +420,7 @@ class TestCodexContractDiagnostics:
                 model=None,
                 timeout_seconds=120,
                 scratch_dir=_scratch(base),
+                session_id=_LIVE_SESSION_ID,
             )
             probe = codex_capability_diagnosis()
             _log.info(
