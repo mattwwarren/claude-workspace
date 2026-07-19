@@ -26,6 +26,7 @@ from cw.session import (
     resume_session,
     start_session,
 )
+from tests.conftest import _make_daemon_session
 from tests.test_spawn import _write_orchestrator_disallow
 
 if TYPE_CHECKING:
@@ -2231,7 +2232,9 @@ class TestResolveResumeCwd:
         workspace_path: Path,
         worktree_path: Path | None,
     ) -> Session:
-        return Session(
+        from datetime import UTC, datetime
+
+        return _make_daemon_session(
             id="sess940a",
             name=f"test-client/{purpose.value}",
             client="test-client",
@@ -2240,6 +2243,8 @@ class TestResolveResumeCwd:
             status=SessionStatus.BACKGROUNDED,
             workspace_path=workspace_path,
             worktree_path=worktree_path,
+            surface_ref=None,
+            started_at=datetime.now(UTC),
         )
 
     def test_daemon_origin_worktree_none_raises(self, tmp_path: Path) -> None:

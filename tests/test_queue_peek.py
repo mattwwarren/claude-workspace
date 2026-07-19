@@ -12,6 +12,7 @@ import pytest
 
 from cw import queue_peek
 from cw.models import QueueItemStatus, Stage, TicketTask
+from tests.conftest import _make_ticket_task as _cw_make_ticket_task
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -62,7 +63,7 @@ def _make_ticket_task(
     worktree_path: Path | None = None,
     stage_high_water: Stage | None = None,
 ) -> TicketTask:
-    return TicketTask(
+    return _cw_make_ticket_task(
         ticket_id=ticket_id,
         client=client,
         status=QueueItemStatus.RUNNING,

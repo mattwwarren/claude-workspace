@@ -19,8 +19,6 @@ from cw.models import (
     ReapPolicy,
     ReapReason,
     Session,
-    SessionOrigin,
-    SessionPurpose,
     SessionStatus,
     Stage,
     TicketTask,
@@ -33,6 +31,7 @@ from cw.reconcile.concierge import (
     resolve_concierge_recipe_enabled,
     run_concierge_recoveries,
 )
+from tests.conftest import _make_daemon_session, _make_ticket_task
 
 _NOW = datetime(2026, 7, 6, 12, 0, 0, tzinfo=UTC)
 
@@ -56,7 +55,7 @@ def _make_task(
     stage: Stage = Stage.PLAN,
     **kwargs: Any,
 ) -> TicketTask:
-    return TicketTask(
+    return _make_ticket_task(
         ticket_id=ticket_id,
         client=client,
         status=status,
@@ -76,15 +75,12 @@ def _make_session(
     consecutive_salvage_skips: int = 0,
     started_at: datetime = _NOW,
 ) -> Session:
-    return Session(
+    return _make_daemon_session(
         id=session_id,
         name=f"{client}/auto-dev/{ticket_id}",
         client=client,
-        purpose=SessionPurpose.IMPL,
-        origin=SessionOrigin.DAEMON,
-        status=SessionStatus.ACTIVE,
-        workspace_path=Path("/tmp/ws"),
         surface_ref=surface_ref,
+        worktree_path=None,
         last_result=last_result,
         consecutive_salvage_skips=consecutive_salvage_skips,
         started_at=started_at,

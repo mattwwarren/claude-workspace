@@ -19,6 +19,7 @@ from cw.doctor import (
     format_report,
     run_doctor,
 )
+from tests.conftest import _make_daemon_session, _make_ticket_task
 
 if TYPE_CHECKING:
     import pytest
@@ -643,15 +644,17 @@ def _mk_session(
     worker_session_ids: list[str] | None = None,
 ) -> Session:
     """Build a minimal Session for linkage testing."""
-    from cw.models import Session, SessionPurpose, SessionStatus
+    from cw.models import SessionOrigin
 
-    return Session(
+    return _make_daemon_session(
         id=sid,
         name=f"client/{sid}",
         client="client",
-        purpose=SessionPurpose.IMPL,
-        status=SessionStatus.ACTIVE,
+        origin=SessionOrigin.USER,
         workspace_path=workspace_path,
+        surface_ref=None,
+        worktree_path=None,
+        started_at=datetime.now(UTC),
         parent_session_id=parent_session_id,
         worker_session_ids=worker_session_ids or [],
     )
@@ -1648,15 +1651,17 @@ class TestWedgeTaskRunningCompletedSession:
     ) -> Session:
         from datetime import UTC, datetime
 
-        from cw.models import CompletionReason, Session, SessionPurpose, SessionStatus
+        from cw.models import CompletionReason, SessionOrigin, SessionStatus
 
-        return Session(
+        return _make_daemon_session(
             id=sid,
             name="client-a/auto-dev/TST-C1",
             client="client-a",
-            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.USER,
             status=SessionStatus.COMPLETED,
             workspace_path=tmp_path,
+            surface_ref=None,
+            worktree_path=None,
             completed_reason=CompletionReason.NORMAL,
             started_at=datetime(2026, 1, 1, tzinfo=UTC),
         )
@@ -1763,9 +1768,9 @@ class TestWedgeRepoAheadOfQueue:
         ticket_id: str = "TST-R1",
         session_id: str | None = None,
     ) -> TicketTask:
-        from cw.models import QueueItemStatus, TicketTask
+        from cw.models import QueueItemStatus
 
-        return TicketTask(
+        return _make_ticket_task(
             ticket_id=ticket_id,
             client="client-a",
             status=QueueItemStatus.RUNNING,
@@ -2067,16 +2072,16 @@ class TestWedgeReapRecipes:
     def _make_session(self, tmp_path: Path, sid: str = "reap-sess") -> Session:
         from datetime import UTC, datetime
 
-        from cw.models import Session, SessionPurpose, SessionStatus
+        from cw.models import SessionOrigin
 
-        return Session(
+        return _make_daemon_session(
             id=sid,
             name="client-a/auto-dev/TST-REAP",
             client="client-a",
-            purpose=SessionPurpose.IMPL,
-            status=SessionStatus.ACTIVE,
+            origin=SessionOrigin.USER,
             workspace_path=tmp_path,
             surface_ref="s:0.1",
+            worktree_path=None,
             started_at=datetime(2026, 1, 1, tzinfo=UTC),
         )
 
@@ -2881,16 +2886,17 @@ class TestCheckTimedOutMerged:
         """Return a TIMED_OUT DAEMON session with completed_at within 7 days."""
         from datetime import timedelta
 
-        from cw.models import Session, SessionOrigin, SessionPurpose, SessionStatus
+        from cw.models import SessionStatus
 
-        return Session(
+        return _make_daemon_session(
             id=sid,
             name=f"client-a/auto-dev/{sid}",
             client="client-a",
-            purpose=SessionPurpose.IMPL,
             status=SessionStatus.TIMED_OUT,
-            origin=SessionOrigin.DAEMON,
             workspace_path=tmp_path,
+            surface_ref=None,
+            worktree_path=None,
+            started_at=datetime.now(UTC),
             completed_at=datetime.now(UTC) - timedelta(days=1),
         )
 
@@ -4330,16 +4336,16 @@ class TestWedgeDeadSessionBlockedOnUser:
         sid: str,
         surface_ref: str | None = "s:dead.1",
     ) -> Session:
-        from cw.models import Session, SessionPurpose, SessionStatus
+        from cw.models import SessionOrigin
 
-        return Session(
+        return _make_daemon_session(
             id=sid,
             name=f"client-a/auto-dev/{sid}",
             client="client-a",
-            purpose=SessionPurpose.IMPL,
-            status=SessionStatus.ACTIVE,
+            origin=SessionOrigin.USER,
             workspace_path=Path("/tmp/ws"),
             surface_ref=surface_ref,
+            worktree_path=None,
             started_at=datetime(2026, 1, 1, tzinfo=UTC),
         )
 
@@ -4350,10 +4356,10 @@ class TestWedgeDeadSessionBlockedOnUser:
         created_at: datetime | None = None,
         pr_url: str | None = None,
     ) -> TicketTask:
-        from cw.models import QueueItemStatus, TicketTask
+        from cw.models import QueueItemStatus
 
         if created_at is not None:
-            return TicketTask(
+            return _make_ticket_task(
                 ticket_id=ticket_id,
                 client="client-a",
                 status=QueueItemStatus.BLOCKED_ON_USER,
@@ -4361,7 +4367,7 @@ class TestWedgeDeadSessionBlockedOnUser:
                 created_at=created_at,
                 pr_url=pr_url,
             )
-        return TicketTask(
+        return _make_ticket_task(
             ticket_id=ticket_id,
             client="client-a",
             status=QueueItemStatus.BLOCKED_ON_USER,
@@ -5174,8 +5180,6 @@ class TestWedgeActiveNoDaemonEntry:
         purpose_orchestrate: bool = False,
     ) -> Session:
         from cw.models import (
-            Session,
-            SessionOrigin,
             SessionPurpose,
             SessionStatus,
         )
@@ -5189,15 +5193,15 @@ class TestWedgeActiveNoDaemonEntry:
         purpose = (
             SessionPurpose.ORCHESTRATE if purpose_orchestrate else SessionPurpose.IMPL
         )
-        return Session(
+        return _make_daemon_session(
             id=sid,
             name=f"client-a/auto-dev/{sid}",
             client="client-a",
             purpose=purpose,
             status=status,
-            origin=SessionOrigin.DAEMON,
             workspace_path=Path("/tmp/ws"),
             surface_ref=surface_ref,
+            worktree_path=None,
             started_at=started,
         )
 

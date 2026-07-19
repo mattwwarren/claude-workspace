@@ -45,6 +45,7 @@ from tests._reconcile_helpers import (
     _mk_session,
     _mk_timed_out_daemon_session,
 )
+from tests.conftest import _make_ticket_task
 
 # ---------------------------------------------------------------------------
 # revert_completed_silent_tasks tests
@@ -489,7 +490,7 @@ class TestCompleteTimedOutMergedTasks:
     """complete_timed_out_merged_tasks() auto-completes PENDING tasks on merged PR."""
 
     def _pending_task(self, ticket_id: str) -> TicketTask:
-        return TicketTask(ticket_id=ticket_id, client="client-a")
+        return _make_ticket_task(ticket_id=ticket_id, client="client-a")
 
     def test_happy_path(
         self,

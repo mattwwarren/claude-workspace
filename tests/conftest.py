@@ -20,6 +20,7 @@ from cw.models import (
     SessionOrigin,
     SessionPurpose,
     SessionStatus,
+    TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.review_findings import (
@@ -59,20 +60,28 @@ def _seed_daemon_session(
     name: str | None = None,
     surface_ref: str | None = "fake-pane-99",
     status: SessionStatus = SessionStatus.ACTIVE,
+    **overrides: object,
 ) -> Session:
-    """Create and save a daemon session in state."""
+    """Create and save a daemon session in state.
+
+    Extra ``**overrides`` are merged after the named params, so a caller can
+    set any additional ``Session`` field (e.g. ``purpose``, ``origin``,
+    ``worktree_path``) without a parallel seed helper (#1308).
+    """
     workspace = tmp_path / "workspace" / client
     workspace.mkdir(parents=True, exist_ok=True)
-    sess = Session(
-        id=session_id,
-        name=name or f"{client}/auto-dev/GEN-42",
-        client=client,
-        purpose=SessionPurpose.IMPL,
-        origin=SessionOrigin.DAEMON,
-        status=status,
-        workspace_path=workspace,
-        surface_ref=surface_ref,
-    )
+    kwargs: dict[str, object] = {
+        "id": session_id,
+        "name": name or f"{client}/auto-dev/GEN-42",
+        "client": client,
+        "purpose": SessionPurpose.IMPL,
+        "origin": SessionOrigin.DAEMON,
+        "status": status,
+        "workspace_path": workspace,
+        "surface_ref": surface_ref,
+    }
+    kwargs.update(overrides)
+    sess = Session.model_validate(kwargs)
     state = CwState(sessions=[sess])
     save_state(state)
     return sess
@@ -99,22 +108,44 @@ def _write_idle_transcript(
     return path
 
 
-def _make_daemon_session(
-    *, claude_session_id: str | None = None, surface_ref: str = "live-ref"
-) -> Session:
-    return Session(
-        id="sess-1",
-        name="client-a/auto-dev/T-1",
-        client="client-a",
-        purpose=SessionPurpose.IMPL,
-        origin=SessionOrigin.DAEMON,
-        status=SessionStatus.ACTIVE,
-        workspace_path=Path("/tmp/ws"),
-        worktree_path=Path("/tmp/wt"),
-        surface_ref=surface_ref,
-        claude_session_id=claude_session_id,
-        started_at=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
-    )
+def _make_daemon_session(**overrides: object) -> Session:
+    """Canonical non-persisting DAEMON ``Session`` builder (#1308).
+
+    Builds a fixed baseline daemon session; any ``**overrides`` are merged
+    after the defaults so every local ``Session(...)`` construction across the
+    test suite can delegate here as ``_make_daemon_session(field=value, ...)``.
+    """
+    kwargs: dict[str, object] = {
+        "id": "sess-1",
+        "name": "client-a/auto-dev/T-1",
+        "client": "client-a",
+        "purpose": SessionPurpose.IMPL,
+        "origin": SessionOrigin.DAEMON,
+        "status": SessionStatus.ACTIVE,
+        "workspace_path": Path("/tmp/ws"),
+        "worktree_path": Path("/tmp/wt"),
+        "surface_ref": "live-ref",
+        "claude_session_id": None,
+        "started_at": datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+    }
+    kwargs.update(overrides)
+    return Session.model_validate(kwargs)
+
+
+def _make_ticket_task(**overrides: object) -> TicketTask:
+    """Minimal-but-valid ``TicketTask`` with keyword overrides (#1308).
+
+    Only ``ticket_id`` and ``client`` are required by the model; both are
+    defaulted here so ``_make_ticket_task()`` yields a valid PENDING task.
+    Follows the same dict-merge + ``model_validate`` idiom as
+    ``_make_escalation`` / ``_make_finding``.
+    """
+    kwargs: dict[str, object] = {
+        "ticket_id": "T-1",
+        "client": "test-client",
+    }
+    kwargs.update(overrides)
+    return TicketTask.model_validate(kwargs)
 
 
 def _write_project_config_yaml(root: Path, content: str) -> None:
@@ -173,7 +204,7 @@ def _make_escalation(**overrides: object) -> EscalationMetadata:
         "evidence_quote": "def broken():",
     }
     kwargs.update(overrides)
-    return EscalationMetadata(**kwargs)  # type: ignore[arg-type]
+    return EscalationMetadata.model_validate(kwargs)
 
 
 def _finding_kwargs(**overrides: object) -> dict[str, object]:
@@ -203,7 +234,7 @@ def _finding_kwargs(**overrides: object) -> dict[str, object]:
 
 def _make_finding(**overrides: object) -> Finding:
     """Minimal-but-valid Finding with keyword overrides (#1237)."""
-    return Finding(**_finding_kwargs(**overrides))  # type: ignore[arg-type]
+    return Finding.model_validate(_finding_kwargs(**overrides))
 
 
 def _make_reviewer_doc(
@@ -217,7 +248,7 @@ def _make_reviewer_doc(
         "findings": list(findings),
     }
     kwargs.update(overrides)
-    return ReviewerFindingsDocument(**kwargs)  # type: ignore[arg-type]
+    return ReviewerFindingsDocument.model_validate(kwargs)
 
 
 def _make_diff(*added_lines: str, **overrides: object) -> CapturedDiff:

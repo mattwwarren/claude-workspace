@@ -20,9 +20,6 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
     Session,
-    SessionOrigin,
-    SessionPurpose,
-    SessionStatus,
     TicketTask,
 )
 from cw.watchdog import (
@@ -39,6 +36,7 @@ from cw.watchdog import (
     systemd_timer_path,
     uninstall,
 )
+from tests.conftest import _make_daemon_session, _make_ticket_task
 
 _NOW = datetime(2026, 7, 6, 12, 0, 0, tzinfo=UTC)
 
@@ -49,7 +47,7 @@ def _make_task(
     status_val: QueueItemStatus = QueueItemStatus.BLOCKED_ON_USER,
     disposition: str | None = None,
 ) -> TicketTask:
-    return TicketTask(
+    return _make_ticket_task(
         ticket_id=ticket_id, client=client, status=status_val, disposition=disposition
     )
 
@@ -61,15 +59,13 @@ def _make_session(
     last_result: dict[str, object] | None = None,
     consecutive_salvage_skips: int = 0,
 ) -> Session:
-    return Session(
+    return _make_daemon_session(
         id=session_id,
         name=f"{client}/auto-dev/{ticket_id}",
         client=client,
-        purpose=SessionPurpose.IMPL,
-        origin=SessionOrigin.DAEMON,
-        status=SessionStatus.ACTIVE,
-        workspace_path=Path("/tmp/ws"),
         surface_ref="surf-1",
+        worktree_path=None,
+        started_at=datetime.now(UTC),
         last_result=last_result,
         consecutive_salvage_skips=consecutive_salvage_skips,
     )

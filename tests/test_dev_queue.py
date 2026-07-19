@@ -59,7 +59,12 @@ from cw.models import (
     TicketTask,
     WatchedPr,
 )
-from tests.conftest import plan_body, stub_fetch_plan
+from tests.conftest import (
+    _make_daemon_session,
+    _make_ticket_task,
+    plan_body,
+    stub_fetch_plan,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -3637,7 +3642,7 @@ def _make_blocked_task(
     session_id: str | None = "sess1234",
     status: QueueItemStatus = QueueItemStatus.BLOCKED_ON_USER,
 ) -> TicketTask:
-    return TicketTask(
+    return _make_ticket_task(
         ticket_id=ticket_id,
         client=client,
         status=status,
@@ -3655,14 +3660,17 @@ def _make_session(
     """Build a Session with minimal required fields."""
     from pathlib import Path
 
-    from cw.models import Session, SessionPurpose
+    from cw.models import SessionOrigin
 
-    return Session(
+    return _make_daemon_session(
         id=session_id,
         name=f"genhealth/impl-{session_id}",
         client="genhealth",
-        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.USER,
         workspace_path=workspace_path or Path("/tmp/ws"),
+        surface_ref=None,
+        worktree_path=None,
+        started_at=datetime.now(UTC),
         last_result=last_result,
         reap_reason=reap_reason,
     )
@@ -6142,7 +6150,7 @@ def _make_stage_task(
     worktree_path: Path | None = None,
     stage_high_water: Stage | None = None,
 ) -> TicketTask:
-    return TicketTask(
+    return _make_ticket_task(
         ticket_id="REGRESS-1",
         client="test-client",
         status=QueueItemStatus.RUNNING,

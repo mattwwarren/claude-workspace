@@ -63,6 +63,7 @@ from tests._reconcile_helpers import (
     _write_transcript_records,
 )
 from tests.conftest import (
+    _make_ticket_task,
     _write_idle_transcript,
 )
 
@@ -3826,7 +3827,7 @@ def test_act_on_idle_salvage_git_persists_observation_counter(
 
 
 def _mk_running_task(ticket_id: str, client: str = "client-a") -> TicketTask:
-    task = TicketTask(
+    task = _make_ticket_task(
         ticket_id=ticket_id,
         client=client,
         status=QueueItemStatus.RUNNING,

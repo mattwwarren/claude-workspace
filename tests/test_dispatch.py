@@ -83,6 +83,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
+from tests.conftest import _make_daemon_session, _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1122,14 +1123,14 @@ class TestConsumeCompletesTasks:
 class TestPersistLastResult:
     @staticmethod
     def _seed_session(session_id: str = "sess0001") -> Session:
-        s = Session(
+        s = _make_daemon_session(
             id=session_id,
             name="test-client/impl",
             client="test-client",
-            purpose=SessionPurpose.IMPL,
             workspace_path=Path("/tmp/wt"),
-            origin=SessionOrigin.DAEMON,
-            status=SessionStatus.ACTIVE,
+            surface_ref=None,
+            worktree_path=None,
+            started_at=datetime.now(UTC),
         )
         save_state(CwState(sessions=[s]))
         return s
@@ -3021,7 +3022,7 @@ class TestAccumulateTaskCost:
     def _make_running_task(
         self, session_id: str, ticket_id: str = "GEN-1"
     ) -> TicketTask:
-        task = TicketTask(
+        task = _make_ticket_task(
             ticket_id=ticket_id,
             client="test-client",
             status=QueueItemStatus.RUNNING,
@@ -3037,13 +3038,15 @@ class TestAccumulateTaskCost:
         cost_usd: float | None = None,
         last_result: dict[str, object] | None = None,
     ) -> None:
-        sess = Session(
+        sess = _make_daemon_session(
             id=session_id,
             name="test-client/auto-dev/GEN-1",
             client="test-client",
-            purpose=SessionPurpose.IMPL,
-            status=SessionStatus.ACTIVE,
+            origin=SessionOrigin.USER,
             workspace_path=Path("/dev/null"),
+            surface_ref=None,
+            worktree_path=None,
+            started_at=datetime.now(UTC),
             cost_usd=cost_usd,
             last_result=last_result,
         )
@@ -6193,7 +6196,7 @@ class TestApplyStagedDecision:
         ticket_id: str,
         stage: Stage = Stage.FINALIZE,
     ) -> TicketTask:
-        task = TicketTask(
+        task = _make_ticket_task(
             ticket_id=ticket_id,
             client="test-client",
             status=QueueItemStatus.RUNNING,
@@ -8028,14 +8031,14 @@ class TestPersistCarriedContext:
         plan_source: str | None = None,
         computed_scope_tier: str | None = None,
     ) -> TicketTask:
-        task = TicketTask(
+        task = _make_ticket_task(
             ticket_id=ticket_id,
             client="test-client",
             status=QueueItemStatus.RUNNING,
             stage=stage,
             plan_source=plan_source,
+            computed_scope_tier=computed_scope_tier,
         )
-        task.computed_scope_tier = computed_scope_tier
         save_dev_queue(DevQueueStore(tasks=[task]))
         return task
 

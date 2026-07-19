@@ -41,6 +41,7 @@ from tests._reconcile_helpers import (
     _mk_session,
     _write_idle_transcript_with_text,
 )
+from tests.conftest import _make_daemon_session
 
 
 def test_reconcile_matches_short_id_against_full_uuid_session_id(
@@ -449,16 +450,11 @@ class TestVerifySupervisorSessionId:
         claude_session_id: str | None,
         status: SessionStatus = SessionStatus.ACTIVE,
     ) -> Session:
-        return Session(
+        return _make_daemon_session(
             id=sid,
             name=f"client-a/auto-dev/{sid}",
-            client="client-a",
-            purpose=SessionPurpose.IMPL,
-            origin=SessionOrigin.DAEMON,
             status=status,
-            workspace_path=ClientConfig(
-                name="client-a", workspace_path=Path("/tmp/ws")
-            ).workspace_path,
+            worktree_path=None,
             surface_ref=surface_ref,
             claude_session_id=claude_session_id,
             started_at=datetime(2026, 4, 19, tzinfo=UTC),

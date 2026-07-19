@@ -36,8 +36,6 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
     Session,
-    SessionOrigin,
-    SessionPurpose,
     SessionStatus,
     TicketTask,
 )
@@ -46,6 +44,7 @@ from cw.reconcile import (
     reconcile,
     revert_stalled_headless_sessions,
 )
+from tests.conftest import _make_daemon_session as _cw_make_daemon_session
 
 
 def _make_daemon_session(
@@ -59,21 +58,16 @@ def _make_daemon_session(
     status: SessionStatus = SessionStatus.ACTIVE,
 ) -> Session:
     """Build a minimal DAEMON-origin session for replay fixtures."""
-    return Session(
+    return _cw_make_daemon_session(
         id=sid,
         name=f"{client}/auto-dev/{ticket_id}",
         client=client,
-        purpose=SessionPurpose.IMPL,
         status=status,
-        origin=SessionOrigin.DAEMON,
         workspace_path=(
-            workspace_path
-            if workspace_path is not None
-            else ClientConfig(
-                name=client, workspace_path=Path("/tmp/ws")
-            ).workspace_path
+            workspace_path if workspace_path is not None else Path("/tmp/ws")
         ),
         surface_ref=surface_ref,
+        worktree_path=None,
         started_at=started_at or datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
     )
 

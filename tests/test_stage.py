@@ -7,6 +7,7 @@ and an E2E acceptance test for the full staged pipeline.
 from __future__ import annotations
 
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -26,6 +27,7 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
     Session,
+    SessionOrigin,
     SessionPurpose,
     SessionStatus,
     Stage,
@@ -33,6 +35,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
+from tests.conftest import _make_daemon_session, _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -96,13 +99,15 @@ def _make_session(
     workspace_path: Path,
     last_result: dict | None = None,
 ) -> Session:
-    return Session(
+    return _make_daemon_session(
         id=session_id,
         name=f"{client_name}/auto-dev/{ticket_id}",
         client=client_name,
-        purpose=SessionPurpose.IMPL,
-        status=SessionStatus.ACTIVE,
+        origin=SessionOrigin.USER,
         workspace_path=workspace_path,
+        surface_ref=None,
+        worktree_path=None,
+        started_at=datetime.now(UTC),
         last_result=last_result,
     )
 
@@ -114,7 +119,7 @@ def _running_task(
     stage: Stage = Stage.PLAN,
     scope_hint: str | None = None,
 ) -> TicketTask:
-    return TicketTask(
+    return _make_ticket_task(
         ticket_id=ticket_id,
         client=client,
         status=QueueItemStatus.RUNNING,

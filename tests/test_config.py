@@ -35,6 +35,7 @@ from cw.models import (
     SessionOrigin,
     SessionPurpose,
 )
+from tests.conftest import _make_daemon_session
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1423,12 +1424,14 @@ class TestMutateState:
         from datetime import UTC, datetime
         from pathlib import Path
 
-        return Session(
+        return _make_daemon_session(
             id=sid,
             name=f"client-a/{sid}",
             client="client-a",
-            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.USER,
             workspace_path=Path("/tmp/ws"),
+            surface_ref=None,
+            worktree_path=None,
             started_at=datetime(2026, 1, 1, tzinfo=UTC),
         )
 

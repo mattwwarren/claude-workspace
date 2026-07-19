@@ -23,6 +23,7 @@ from cw.models import (
     SessionPurpose,
     SessionStatus,
 )
+from tests.conftest import _make_daemon_session
 
 
 def _mk_session(
@@ -32,15 +33,13 @@ def _mk_session(
     started_at: datetime | None = None,
     purpose: SessionPurpose = SessionPurpose.IMPL,
 ) -> Session:
-    return Session(
+    return _make_daemon_session(
         id=sid,
         name=f"client-a/{sid}",
-        client="client-a",
         purpose=purpose,
+        origin=SessionOrigin.USER,
         status=status,
-        workspace_path=ClientConfig(
-            name="client-a", workspace_path=Path("/tmp/ws")
-        ).workspace_path,
+        worktree_path=None,
         surface_ref=surface_ref,
         started_at=(
             started_at if started_at is not None else datetime(2026, 4, 19, tzinfo=UTC)
@@ -50,14 +49,14 @@ def _mk_session(
 
 def _mk_daemon_completed_session(sid: str) -> Session:
     """Build a DAEMON COMPLETED session for silent-revert testing."""
-    from cw.models import ClientConfig
-
-    sess = _mk_session(sid, surface_ref=None, status=SessionStatus.COMPLETED)
-    sess.origin = SessionOrigin.DAEMON
-    sess.workspace_path = ClientConfig(
-        name="client-a", workspace_path=Path("/tmp/ws")
-    ).workspace_path
-    return sess
+    return _make_daemon_session(
+        id=sid,
+        name=f"client-a/{sid}",
+        status=SessionStatus.COMPLETED,
+        worktree_path=None,
+        surface_ref=None,
+        started_at=datetime(2026, 4, 19, tzinfo=UTC),
+    )
 
 
 def _mk_headless_daemon_session(
@@ -67,16 +66,9 @@ def _mk_headless_daemon_session(
     surface_ref: str | None = "fake-short-id",
 ) -> Session:
     """Build a headless DAEMON ACTIVE session with a cw-context.json."""
-    sess = Session(
+    sess = _make_daemon_session(
         id=sid,
         name=f"client-a/auto-dev/{sid}",
-        client="client-a",
-        purpose=SessionPurpose.IMPL,
-        origin=SessionOrigin.DAEMON,
-        status=SessionStatus.ACTIVE,
-        workspace_path=ClientConfig(
-            name="client-a", workspace_path=Path("/tmp/ws")
-        ).workspace_path,
         worktree_path=worktree,
         surface_ref=surface_ref,
         started_at=started_at,
@@ -404,16 +396,10 @@ def _mk_daemon_session_with_worktree(
     wt_path: Path,
 ) -> Session:
     """Build a DAEMON session with worktree_path set, branch=None."""
-    return Session(
+    return _make_daemon_session(
         id=sid,
         name=f"client-a/auto-dev/{sid}",
-        client="client-a",
-        purpose=SessionPurpose.IMPL,
-        origin=SessionOrigin.DAEMON,
         status=status,
-        workspace_path=ClientConfig(
-            name="client-a", workspace_path=Path("/tmp/ws")
-        ).workspace_path,
         surface_ref=None,
         started_at=datetime(2026, 4, 19, tzinfo=UTC),
         worktree_path=wt_path,
@@ -431,14 +417,13 @@ def _mk_timed_out_daemon_session(
     branch=None because DAEMON sessions always have branch=None (spawn.py never
     sets it). name follows the auto-dev/<ticket_id> convention.
     """
-    return Session(
+    return _make_daemon_session(
         id=sid,
         name=f"client-a/auto-dev/{ticket_id}",
-        client="client-a",
-        purpose=SessionPurpose.IMPL,
         status=SessionStatus.TIMED_OUT,
-        origin=SessionOrigin.DAEMON,
-        workspace_path=Path("/tmp/ws"),
+        worktree_path=None,
+        surface_ref=None,
+        started_at=datetime.now(UTC),
         branch=None,
         completed_at=completed_at,
     )
@@ -461,16 +446,9 @@ def _mk_live_idle_daemon_session(
     worktree_path: Path | None = None,
 ) -> Session:
     """Build a live DAEMON ACTIVE session suitable for idle watchdog tests."""
-    return Session(
+    return _make_daemon_session(
         id=sid,
         name=f"client-a/auto-dev/{sid}",
-        client="client-a",
-        purpose=SessionPurpose.IMPL,
-        origin=SessionOrigin.DAEMON,
-        status=SessionStatus.ACTIVE,
-        workspace_path=ClientConfig(
-            name="client-a", workspace_path=Path("/tmp/ws")
-        ).workspace_path,
         surface_ref=surface_ref,
         started_at=started_at,
         idle_observation_count=idle_observation_count,
@@ -484,16 +462,9 @@ def _mk_phantom_daemon_session(
     surface_ref: str = "dead-ref",
     worktree_path: Path | None = None,
 ) -> Session:
-    return Session(
+    return _make_daemon_session(
         id=sid,
         name=f"client-a/auto-dev/{sid}",
-        client="client-a",
-        purpose=SessionPurpose.IMPL,
-        origin=SessionOrigin.DAEMON,
-        status=SessionStatus.ACTIVE,
-        workspace_path=ClientConfig(
-            name="client-a", workspace_path=Path("/tmp/ws")
-        ).workspace_path,
         surface_ref=surface_ref,
         started_at=started_at,
         worktree_path=worktree_path,
