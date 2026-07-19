@@ -124,6 +124,7 @@ def _revert_running_tasks_for_sessions(
                 if session.worktree_path
                 else "",
                 "crashed": False,
+                "lane": session.lane,
             },
         )
         _deps.fire_push_notification(session.name, session.client)

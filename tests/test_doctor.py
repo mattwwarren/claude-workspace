@@ -38,6 +38,12 @@ def _stub_claude_version_ok(monkeypatch: pytest.MonkeyPatch) -> None:
         "cw.doctor.core._check_claude_version",
         lambda: CheckResult("claude-version", ok=True, detail="2.1.139 (stubbed)"),
     )
+    # The codex-capability check runs ``codex --version``, absent on GH Actions
+    # runners; neutralise it the same way so healthy-path report.ok holds.
+    monkeypatch.setattr(
+        "cw.doctor.core._check_codex_capability",
+        lambda: CheckResult("codex-capability", ok=True, detail="0.144.5 (stubbed)"),
+    )
 
 
 class TestRunDoctorHealthy:
@@ -1169,6 +1175,83 @@ class TestCheckClaudeVersion:
         assert result.ok is True
         assert result.warn is True
         assert "1" in result.detail  # returncode appears in detail
+
+
+# ---------------------------------------------------------------------------
+# _check_codex_capability: thin mapping over codex_capability_diagnosis (#1238)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckCodexCapability:
+    """_check_codex_capability maps the 3-state probe onto a CheckResult.
+
+    Monkeypatches ``cw.doctor.core.codex_capability_diagnosis`` directly — the
+    subprocess/parse mechanics are covered in test_codex_executor.py.
+    """
+
+    def test_not_found_fails_with_install_hint(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.doctor import _check_codex_capability
+        from cw.executor import CODEX_NOT_FOUND, CodexCapabilityDiagnosis
+
+        monkeypatch.setattr(
+            "cw.doctor.core.codex_capability_diagnosis",
+            lambda: CodexCapabilityDiagnosis(CODEX_NOT_FOUND, "codex binary not found"),
+        )
+        result = _check_codex_capability()
+        assert result.name == "codex-capability"
+        assert result.ok is False
+        assert "npm install -g @openai/codex" in result.detail
+
+    def test_version_unknown_warns(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cw.doctor import _check_codex_capability
+        from cw.executor import CODEX_VERSION_UNKNOWN, CodexCapabilityDiagnosis
+
+        monkeypatch.setattr(
+            "cw.doctor.core.codex_capability_diagnosis",
+            lambda: CodexCapabilityDiagnosis(
+                CODEX_VERSION_UNKNOWN, "could not parse version: garbage"
+            ),
+        )
+        result = _check_codex_capability()
+        assert result.ok is True
+        assert result.warn is True
+        assert "garbage" in result.detail
+
+    def test_capable_ok_no_warn(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cw.doctor import _check_codex_capability
+        from cw.executor import CodexCapabilityDiagnosis
+
+        monkeypatch.setattr(
+            "cw.doctor.core.codex_capability_diagnosis",
+            lambda: CodexCapabilityDiagnosis(None, "0.144.5"),
+        )
+        result = _check_codex_capability()
+        assert result.ok is True
+        assert result.warn is False
+        assert result.detail == "0.144.5"
+
+    def test_run_doctor_includes_codex_capability_check(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        from cw.executor import CodexCapabilityDiagnosis
+
+        # Stub only claude-version so the REAL _check_codex_capability is wired
+        # into run_doctor; drive its probe via codex_capability_diagnosis.
+        monkeypatch.setattr(
+            "cw.doctor.core._check_claude_version",
+            lambda: CheckResult("claude-version", ok=True, detail="stubbed"),
+        )
+        monkeypatch.setattr(
+            "cw.doctor.core.codex_capability_diagnosis",
+            lambda: CodexCapabilityDiagnosis(None, "0.144.5"),
+        )
+        report = run_doctor()
+        codex_checks = [c for c in report.checks if c.name == "codex-capability"]
+        assert len(codex_checks) == 1
+        assert codex_checks[0].ok is True
+        assert codex_checks[0].detail == "0.144.5"
 
 
 # ---------------------------------------------------------------------------

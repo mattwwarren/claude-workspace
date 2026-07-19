@@ -8496,6 +8496,13 @@ class TestDoctorTargetedReap:
             "cw.doctor.core._check_claude_version",
             lambda: CheckResult("claude-version", ok=True, detail="stubbed"),
         )
+        # Why: codex-capability FAILs hard when the codex binary is absent
+        # (CI, most dev machines) — stub it like claude-version so this test
+        # still asserts a healthy-env exit 0.
+        monkeypatch.setattr(
+            "cw.doctor.core._check_codex_capability",
+            lambda: CheckResult("codex-capability", ok=True, detail="stubbed"),
+        )
 
         runner = CliRunner()
         result = runner.invoke(main, ["doctor", "--reap"])

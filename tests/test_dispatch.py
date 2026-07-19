@@ -34,12 +34,17 @@ from cw.dev_queue import (
 from cw.dispatch import (
     _AVAILABILITY_OUTAGE_REASON,
     _AVAILABILITY_PROBE_TTL_SECONDS,
+    _CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD,
+    _CODEX_CAPABILITY_PROBE_TTL_SECONDS,
     FRESHNESS_MAIN_DETACHED,
     FRESHNESS_MAIN_DIRTY_CHECKOUT,
     FRESHNESS_MAIN_DIVERGED,
     FRESHNESS_NON_MAIN_HEAD,
     DispatchTickResult,
     _accumulate_task_cost,
+    _cached_codex_capability_diagnosis,
+    _codex_capability_gate,
+    _reset_codex_capability_cache,
     _resolve_dispatch_skip_reason,
     consume_completed_sessions,
     dispatch_tick,
@@ -54,6 +59,7 @@ from cw.exceptions import (
     WorktreeError,
 )
 from cw.models import (
+    CODEX_BACKEND,
     DEFAULT_GLOBAL_ATTEMPT_CEILING,
     DEFAULT_LANE,
     ClientConcurrencyOverride,
@@ -73,6 +79,7 @@ from cw.models import (
     SessionPurpose,
     SessionStatus,
     Stage,
+    StageExecutorConfig,
     TicketTask,
 )
 from cw.native_daemon import FakeNativeDaemonClient
@@ -1790,6 +1797,358 @@ class TestDispatchTickSpawnErrors:
 
 
 # ---------------------------------------------------------------------------
+# TestDispatchCodexCapabilityGate
+# ---------------------------------------------------------------------------
+
+
+def _make_codex_clients_yaml(tmp_path: Path, client: ClientConfig) -> None:
+    """Write a clients.yaml whose plan-stage executor uses the codex backend."""
+    config_dir = tmp_path / ".config" / "cw"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "clients.yaml").write_text(
+        "clients:\n"
+        f"  {client.name}:\n"
+        f"    workspace_path: {client.workspace_path}\n"
+        f"    default_branch: {client.default_branch}\n"
+        f"    worktree_base: {client.worktree_base}\n"
+        "    pipeline:\n"
+        "      executors:\n"
+        "        plan:\n"
+        "          backend: codex\n"
+    )
+
+
+class _SpyExecutor:
+    """Minimal StageExecutor stand-in that records spawn calls."""
+
+    def __init__(self) -> None:
+        self.spawn_calls = 0
+
+    def spawn(self, **_kwargs: object) -> str:
+        self.spawn_calls += 1
+        return "spy-session-id"
+
+    def stage_sentinel_schema(self, _stage: object) -> dict[str, object]:
+        return {}
+
+
+class TestDispatchCodexCapabilityGate:
+    """Pre-spawn codex capability gate parks the task before resolve_executor (#1238).
+
+    Monkeypatches the imported ``cw.dispatch.claim.codex_capability_diagnosis``
+    name (not shutil/subprocess) — the probe mechanics are covered in
+    test_codex_executor.py. The gate calls the probe through an in-process TTL
+    cache (``_cached_codex_capability_diagnosis``); reset it before each test
+    so one test's monkeypatched return value can't leak into the next via a
+    stale cache entry.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_capability_cache(self) -> None:
+        _reset_codex_capability_cache()
+
+    def test_codex_not_found_parks_blocked_on_user(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from cw.executor import CODEX_NOT_FOUND, CodexCapabilityDiagnosis
+
+        _make_codex_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-CDX1", client="test-client"))
+
+        monkeypatch.setattr(
+            "cw.dispatch.claim.codex_capability_diagnosis",
+            lambda **_kwargs: CodexCapabilityDiagnosis(
+                CODEX_NOT_FOUND, "codex binary not found"
+            ),
+        )
+        spy = _SpyExecutor()
+        monkeypatch.setattr("cw.dispatch.claim.resolve_executor", lambda *_a, **_k: spy)
+
+        daemon = FakeNativeDaemonClient()
+        caplog.set_level(logging.WARNING, logger="cw.dispatch")
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert result.spawned == 0
+        assert spy.spawn_calls == 0
+        assert daemon.spawn_calls == []
+
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == CODEX_NOT_FOUND
+        assert task.session_id is None
+
+        assert any(
+            "codex capability gate parked" in record.getMessage()
+            and "test-client" in record.getMessage()
+            and "GEN-CDX1" in record.getMessage()
+            for record in caplog.records
+            if record.name == "cw.dispatch"
+        ), "expected WARNING naming the client/ticket"
+
+    def test_codex_version_unknown_parks_blocked_on_user(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.executor import CODEX_VERSION_UNKNOWN, CodexCapabilityDiagnosis
+
+        _make_codex_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-CDX2", client="test-client"))
+
+        monkeypatch.setattr(
+            "cw.dispatch.claim.codex_capability_diagnosis",
+            lambda **_kwargs: CodexCapabilityDiagnosis(
+                CODEX_VERSION_UNKNOWN, "could not parse version: junk"
+            ),
+        )
+        spy = _SpyExecutor()
+        monkeypatch.setattr("cw.dispatch.claim.resolve_executor", lambda *_a, **_k: spy)
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert result.spawned == 0
+        assert spy.spawn_calls == 0
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == CODEX_VERSION_UNKNOWN
+        assert task.session_id is None
+
+    def test_codex_capable_spawns_normally(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Gate is a no-op when the probe reports capable — regression guard."""
+        from cw.executor import CodexCapabilityDiagnosis
+
+        _make_codex_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-CDX3", client="test-client"))
+
+        monkeypatch.setattr(
+            "cw.dispatch.claim.codex_capability_diagnosis",
+            lambda **_kwargs: CodexCapabilityDiagnosis(None, "0.144.5"),
+        )
+        spy = _SpyExecutor()
+        monkeypatch.setattr("cw.dispatch.claim.resolve_executor", lambda *_a, **_k: spy)
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert result.spawned == 1
+        assert spy.spawn_calls == 1
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.RUNNING
+        assert task.session_id == "spy-session-id"
+
+    def test_non_codex_backend_never_probes(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A claude-native task must not invoke the codex probe at all."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-CDX4", client="test-client"))
+
+        probe_calls = 0
+
+        def _spy_probe() -> object:
+            nonlocal probe_calls
+            probe_calls += 1
+            msg = "probe must not run for non-codex backends"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr("cw.dispatch.claim.codex_capability_diagnosis", _spy_probe)
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
+
+        assert spawned == 1
+        assert probe_calls == 0
+        assert len(daemon.spawn_calls) == 1
+
+    def test_cache_hit_reuses_probe_within_ttl(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Two calls within the TTL only invoke the underlying probe once."""
+        from cw.executor import CodexCapabilityDiagnosis
+
+        calls: list[int] = []
+
+        def _counting_probe(**_kwargs: object) -> CodexCapabilityDiagnosis:
+            calls.append(1)
+            return CodexCapabilityDiagnosis(None, "0.144.5")
+
+        monkeypatch.setattr(
+            "cw.dispatch.claim.codex_capability_diagnosis", _counting_probe
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.claim.resolve_executor_config",
+            lambda *_a, **_k: StageExecutorConfig(backend=CODEX_BACKEND),
+        )
+
+        add_ticket(TicketTask(ticket_id="GEN-CDX5", client="test-client"))
+        task = load_dev_queue().tasks[0]
+
+        first = _cached_codex_capability_diagnosis()
+        second = _cached_codex_capability_diagnosis()
+        third = _codex_capability_gate(task, sample_client_config)
+
+        assert len(calls) == 1, "second call within the TTL must reuse the cache"
+        assert first == second
+        assert third is None, "a capable probe result is a no-op gate"
+
+    def test_cache_expires_after_ttl(
+        self,
+        tmp_dispatch_dirs: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Advancing past the TTL triggers a fresh probe call."""
+        from freezegun import freeze_time
+
+        from cw.executor import CodexCapabilityDiagnosis
+
+        calls: list[int] = []
+
+        def _counting_probe(**_kwargs: object) -> CodexCapabilityDiagnosis:
+            calls.append(1)
+            return CodexCapabilityDiagnosis(None, "0.144.5")
+
+        monkeypatch.setattr(
+            "cw.dispatch.claim.codex_capability_diagnosis", _counting_probe
+        )
+
+        ttl_expiry = _CODEX_CAPABILITY_PROBE_TTL_SECONDS + 5
+        with freeze_time("2026-07-16 12:00:00") as frozen:
+            _cached_codex_capability_diagnosis()
+            frozen.tick(delta=timedelta(seconds=ttl_expiry))
+            _cached_codex_capability_diagnosis()
+
+        assert len(calls) == 2, "TTL expiry must trigger a second real probe call"
+
+    def test_consecutive_parks_trip_circuit_breaker_at_threshold(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A systemically-wrong probe verdict eventually engages spawn_error.
+
+        Below _CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD consecutive parks the
+        gate must stay decoupled from spawn_error (per the prior fix cycle);
+        at/above it, spawn_error must also be set so the existing per-lane
+        circuit breaker provides a bounded backstop (#1238 review finding —
+        an unbounded, un-circuit-broken park has no self-limiting mechanism).
+        """
+        from cw.executor import CODEX_VERSION_UNKNOWN, CodexCapabilityDiagnosis
+
+        monkeypatch.setattr(
+            "cw.dispatch.claim.codex_capability_diagnosis",
+            lambda **_kwargs: CodexCapabilityDiagnosis(
+                CODEX_VERSION_UNKNOWN, "could not parse version: junk"
+            ),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.claim.resolve_executor_config",
+            lambda *_a, **_k: StageExecutorConfig(backend=CODEX_BACKEND),
+        )
+
+        outcomes = []
+        for i in range(_CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD + 1):
+            add_ticket(TicketTask(ticket_id=f"GEN-CDX6-{i}", client="test-client"))
+            task = load_dev_queue().tasks[-1]
+            outcomes.append(_codex_capability_gate(task, sample_client_config))
+
+        assert all(o is not None and o.capability_parked for o in outcomes)
+        below_threshold = outcomes[: _CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD - 1]
+        assert all(o is not None and not o.spawn_error for o in below_threshold), (
+            "isolated parks must not trip the circuit breaker"
+        )
+        at_threshold = outcomes[_CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD - 1]
+        assert at_threshold is not None
+        assert at_threshold.spawn_error, (
+            "reaching the threshold must engage the circuit-breaker backstop"
+        )
+
+    def test_recovery_between_parks_resets_the_streak(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A fully-recovered gap between parks must not carry stale streak credit.
+
+        Regression guard for a #1238 review finding: an earlier version of the
+        park counter never reset on a capable probe result, so it behaved as a
+        lifetime total rather than a consecutive-parks count — meaning a
+        long-lived dispatch-loop process that had ever accumulated
+        _CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD parks (however isolated, however
+        long ago, however fully recovered in between) would trip spawn_error on
+        every future park forever after. Drives: park, park, capable, park — the
+        final park is isolated (only one consecutive park since the last capable
+        result) and must NOT trip spawn_error, even though 3 parks total have
+        occurred in this test's lifetime.
+
+        Clears only the TTL cache (not the park counter) between steps, via
+        direct access to the module-level slot — ``_reset_codex_capability_cache``
+        clears both, which would trivially pass this test regardless of whether
+        the gate's own capable-branch reset logic (under test here) is correct.
+        """
+        import cw.dispatch as dispatch_module
+        from cw.executor import CODEX_VERSION_UNKNOWN, CodexCapabilityDiagnosis
+
+        monkeypatch.setattr(
+            "cw.dispatch.claim.resolve_executor_config",
+            lambda *_a, **_k: StageExecutorConfig(backend=CODEX_BACKEND),
+        )
+
+        incapable = CodexCapabilityDiagnosis(
+            CODEX_VERSION_UNKNOWN, "could not parse version: junk"
+        )
+        capable = CodexCapabilityDiagnosis(None, "0.144.5")
+
+        def _probe_result(idx: int, diagnosis: CodexCapabilityDiagnosis) -> object:
+            dispatch_module._codex_capability_cache.clear()
+            monkeypatch.setattr(
+                "cw.dispatch.claim.codex_capability_diagnosis",
+                lambda **_kwargs: diagnosis,
+            )
+            add_ticket(TicketTask(ticket_id=f"GEN-CDX7-{idx}", client="test-client"))
+            task = load_dev_queue().tasks[-1]
+            return _codex_capability_gate(task, sample_client_config)
+
+        first = _probe_result(0, incapable)
+        second = _probe_result(1, incapable)
+        recovered = _probe_result(2, capable)
+        third = _probe_result(3, incapable)
+
+        assert first is not None
+        assert not first.spawn_error
+        assert second is not None
+        assert not second.spawn_error
+        assert recovered is None, "a capable probe result must be a no-op gate"
+        assert third is not None
+        assert not third.spawn_error, (
+            "an isolated park after a full recovery must not inherit stale"
+            " streak credit from before the recovery"
+        )
+
+
+# ---------------------------------------------------------------------------
 # TestDispatchTickFreshnessGate
 # ---------------------------------------------------------------------------
 
@@ -2121,7 +2480,7 @@ def test_dispatch_tick_runs_diagnostics_cleanup_outside_lock(
         captured["calls"] = int(captured.get("calls", 0)) + 1
         return 0
 
-    monkeypatch.setattr("cw.dispatch._legacy.cleanup_expired_diagnostics", _spy)
+    monkeypatch.setattr("cw.dispatch.tick.cleanup_expired_diagnostics", _spy)
 
     daemon = FakeNativeDaemonClient()
     dispatch_tick(simple_config, native_daemon=daemon)
@@ -2146,7 +2505,7 @@ def test_dispatch_tick_cleanup_failure_does_not_abort_tick(
         msg = "simulated cleanup failure"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr("cw.dispatch._legacy.cleanup_expired_diagnostics", _boom)
+    monkeypatch.setattr("cw.dispatch.tick.cleanup_expired_diagnostics", _boom)
 
     daemon = FakeNativeDaemonClient()
     caplog.set_level(logging.ERROR, logger="cw.dispatch")
@@ -2919,7 +3278,7 @@ class TestRunDispatchLoopVerbose:
                 client_filter=client_filter,
             )
 
-        monkeypatch.setattr("cw.dispatch._legacy.dispatch_tick", _three_tick_dispatch)
+        monkeypatch.setattr("cw.dispatch.loop.dispatch_tick", _three_tick_dispatch)
 
         lines: list[str] = []
         # Run three ticks manually by calling dispatch_tick three times via loop
@@ -3368,7 +3727,7 @@ class TestDispatchUsageLimitBackoff:
 
         # Reconcile returns usage_limited=True (phantom with usage-limit transcript).
         monkeypatch.setattr(
-            "cw.dispatch._legacy._reconcile_usage_limited",
+            "cw.dispatch.tick._reconcile_usage_limited",
             lambda: True,
         )
 
@@ -3391,7 +3750,7 @@ class TestDispatchUsageLimitBackoff:
 
         daemon = FakeNativeDaemonClient()
         monkeypatch.setattr(
-            "cw.dispatch._legacy._reconcile_usage_limited",
+            "cw.dispatch.tick._reconcile_usage_limited",
             lambda: True,
         )
 
@@ -3428,13 +3787,11 @@ class TestDispatchUsageLimitBackoff:
             saved.append(dt)
             real_save(dt)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(
-            "cw.dispatch._legacy.save_usage_limited_until", capturing_save
-        )
+        monkeypatch.setattr("cw.dispatch.loop.save_usage_limited_until", capturing_save)
 
         # Patch time.sleep so the loop exits on the second tick.
         call_count = 0
-        original_tick = cw.dispatch._legacy.dispatch_tick
+        original_tick = cw.dispatch.loop.dispatch_tick
 
         def one_shot_tick(*args: object, **kwargs: object) -> DispatchTickResult:
             nonlocal call_count
@@ -3449,8 +3806,8 @@ class TestDispatchUsageLimitBackoff:
             # Second tick: exit the loop
             raise KeyboardInterrupt
 
-        monkeypatch.setattr("cw.dispatch._legacy.dispatch_tick", one_shot_tick)
-        monkeypatch.setattr("cw.dispatch._legacy.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.dispatch.loop.dispatch_tick", one_shot_tick)
+        monkeypatch.setattr("cw.dispatch.loop.time.sleep", lambda _: None)
 
         with contextlib.suppress(KeyboardInterrupt):
             run_dispatch_loop(native_daemon=daemon)
@@ -3511,7 +3868,7 @@ class TestConfigReloadedEachTick:
             call_count += 1
             return real_load()
 
-        monkeypatch.setattr("cw.dispatch._legacy.load_effective_config", counting_load)
+        monkeypatch.setattr("cw.dispatch.loop.load_effective_config", counting_load)
 
         daemon = FakeNativeDaemonClient()
         run_dispatch_loop(once=True, native_daemon=daemon)
@@ -3584,7 +3941,7 @@ class TestConfigReloadedEachTick:
                 raise yaml.YAMLError(msg)
             return real_load()
 
-        monkeypatch.setattr("cw.dispatch._legacy.load_effective_config", patched_load)
+        monkeypatch.setattr("cw.dispatch.loop.load_effective_config", patched_load)
 
         daemon = FakeNativeDaemonClient()
         # Should NOT raise despite the in-loop reload failing
@@ -3623,7 +3980,7 @@ class TestConfigReloadedEachTick:
                 raise ConfigValidationError(msg)
             return real_load()
 
-        monkeypatch.setattr("cw.dispatch._legacy.load_effective_config", patched_load)
+        monkeypatch.setattr("cw.dispatch.loop.load_effective_config", patched_load)
 
         daemon = FakeNativeDaemonClient()
         # Should NOT raise despite the in-loop reload failing
@@ -5384,7 +5741,7 @@ class TestDispatchLoopExitedEvent:
                 captured.append((event_type, payload or {}))
             return None
 
-        monkeypatch.setattr("cw.dispatch._legacy.record_event", capture_event)
+        monkeypatch.setattr("cw.dispatch.loop.record_event", capture_event)
 
         daemon = FakeNativeDaemonClient()
         run_dispatch_loop(once=True, native_daemon=daemon)
@@ -5414,9 +5771,9 @@ class TestDispatchLoopExitedEvent:
                 captured.append((event_type, payload or {}))
             return None
 
-        monkeypatch.setattr("cw.dispatch._legacy.record_event", capture_event)
+        monkeypatch.setattr("cw.dispatch.loop.record_event", capture_event)
         monkeypatch.setattr(
-            "cw.dispatch._legacy.dispatch_tick",
+            "cw.dispatch.loop.dispatch_tick",
             lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("boom")),
         )
 
@@ -5448,7 +5805,7 @@ class TestDispatchLoopExitedEvent:
                 raise RuntimeError(msg)
             return None
 
-        monkeypatch.setattr("cw.dispatch._legacy.record_event", raising_on_loop_exited)
+        monkeypatch.setattr("cw.dispatch.loop.record_event", raising_on_loop_exited)
 
         daemon = FakeNativeDaemonClient()
         # Should complete without raising despite DISPATCH_LOOP_EXITED emit failing
@@ -5463,7 +5820,7 @@ class TestDispatchLoopExitedEvent:
         """Drift between loaded and installed version raises VersionDriftError."""
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         monkeypatch.setattr(
-            "cw.dispatch._legacy.importlib.metadata.version",
+            "cw.dispatch.loop.importlib.metadata.version",
             lambda _name: "0.0.0-fake",
         )
         daemon = FakeNativeDaemonClient()
@@ -5481,7 +5838,7 @@ class TestDispatchLoopExitedEvent:
 
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         monkeypatch.setattr(
-            "cw.dispatch._legacy.importlib.metadata.version",
+            "cw.dispatch.loop.importlib.metadata.version",
             lambda _name: "0.0.0-fake",
         )
 
@@ -5496,7 +5853,7 @@ class TestDispatchLoopExitedEvent:
                 captured.append((event_type, payload or {}))
             return None
 
-        monkeypatch.setattr("cw.dispatch._legacy.record_event", capture_event)
+        monkeypatch.setattr("cw.dispatch.loop.record_event", capture_event)
 
         daemon = FakeNativeDaemonClient()
         with contextlib.suppress(VersionDriftError):
@@ -5519,13 +5876,13 @@ class TestDispatchLoopExitedEvent:
         """Version check fires before dispatch_tick — tick is never called on drift."""
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         monkeypatch.setattr(
-            "cw.dispatch._legacy.importlib.metadata.version",
+            "cw.dispatch.loop.importlib.metadata.version",
             lambda _name: "0.0.0-fake",
         )
 
         tick_calls: list[object] = []
         monkeypatch.setattr(
-            "cw.dispatch._legacy.dispatch_tick",
+            "cw.dispatch.loop.dispatch_tick",
             lambda *_a, **_kw: tick_calls.append(True),
         )
 
@@ -5545,7 +5902,7 @@ class TestDispatchLoopExitedEvent:
         from cw.dispatch import _resolve_loaded_version
 
         monkeypatch.setattr(
-            "cw.dispatch._legacy.importlib.metadata.version",
+            "cw.dispatch.loop.importlib.metadata.version",
             lambda _name: (_ for _ in ()).throw(
                 importlib.metadata.PackageNotFoundError("cw")
             ),
@@ -5567,9 +5924,9 @@ class TestDispatchLoopExitedEvent:
 
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         # Pin _LOADED_VERSION to the same sentinel so the comparison is equal.
-        monkeypatch.setattr("cw.dispatch._legacy._LOADED_VERSION", "0.0.0+unknown")
+        monkeypatch.setattr("cw.dispatch.loop._LOADED_VERSION", "0.0.0+unknown")
         monkeypatch.setattr(
-            "cw.dispatch._legacy.importlib.metadata.version",
+            "cw.dispatch.loop.importlib.metadata.version",
             lambda _name: (_ for _ in ()).throw(
                 importlib.metadata.PackageNotFoundError("cw")
             ),
@@ -7744,7 +8101,7 @@ class TestWaveCollisionDetection:
                 client_filter=client_filter,
             )
 
-        monkeypatch.setattr("cw.dispatch._legacy.dispatch_tick", _spy)
+        monkeypatch.setattr("cw.dispatch.loop.dispatch_tick", _spy)
         monkeypatch.setattr(
             "cw.dispatch.gating.is_main_behind_origin",
             lambda _client, **_kw: (False, "abc", "abc", 0),
@@ -8597,7 +8954,7 @@ class TestRunDispatchLoopHydrationHook:
         def _record(cfg: object) -> None:
             calls.append(cfg)
 
-        monkeypatch.setattr("cw.dispatch._legacy.hydrate_pr_states", _record)
+        monkeypatch.setattr("cw.dispatch.loop.hydrate_pr_states", _record)
         run_dispatch_loop(once=True, emit=None)
         assert len(calls) == 1
 
@@ -8614,7 +8971,7 @@ class TestRunDispatchLoopHydrationHook:
             msg = "hydration boom"
             raise RuntimeError(msg)
 
-        monkeypatch.setattr("cw.dispatch._legacy.hydrate_pr_states", _boom)
+        monkeypatch.setattr("cw.dispatch.loop.hydrate_pr_states", _boom)
         # Broad-catch idiom: hydration failure must never crash the tick loop.
         run_dispatch_loop(once=True, emit=None)
 
@@ -8653,7 +9010,7 @@ class TestRunDispatchLoopHydrationHook:
         def _record(cfg: object) -> None:
             calls.append(cfg)
 
-        monkeypatch.setattr("cw.dispatch._legacy.hydrate_pr_states", _record)
+        monkeypatch.setattr("cw.dispatch.loop.hydrate_pr_states", _record)
         run_dispatch_loop(once=True, emit=None)
         assert len(calls) == 1
 
@@ -9305,7 +9662,7 @@ class TestAvailabilityPreflightGate:
 
         freshness_calls: list[object] = []
         monkeypatch.setattr(
-            "cw.dispatch._legacy._resolve_freshness",
+            "cw.dispatch.tick._resolve_freshness",
             lambda *a, **kw: freshness_calls.append((a, kw)) or (False, None),
         )
 
@@ -9361,11 +9718,11 @@ class TestAvailabilityPreflightGate:
         record_calls: list[object] = []
         reset_calls: list[object] = []
         monkeypatch.setattr(
-            "cw.dispatch._legacy._record_client_freshness_block",
+            "cw.dispatch.tick._record_client_freshness_block",
             lambda *a, **kw: record_calls.append((a, kw)),
         )
         monkeypatch.setattr(
-            "cw.dispatch._legacy._reset_client_freshness_blocks",
+            "cw.dispatch.tick._reset_client_freshness_blocks",
             lambda *a, **kw: reset_calls.append((a, kw)),
         )
 
