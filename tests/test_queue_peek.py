@@ -11,7 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from cw import queue_peek
-from cw.models import QueueItemStatus, TicketTask
+from cw.models import QueueItemStatus, Stage, TicketTask
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -60,6 +60,7 @@ def _make_ticket_task(
     client: str = "test",
     attempts: int = 1,
     worktree_path: Path | None = None,
+    stage_high_water: Stage | None = None,
 ) -> TicketTask:
     return TicketTask(
         ticket_id=ticket_id,
@@ -68,6 +69,7 @@ def _make_ticket_task(
         session_id=session_id,
         attempts=attempts,
         worktree_path=worktree_path,
+        stage_high_water=stage_high_water,
     )
 
 
@@ -810,6 +812,121 @@ class TestRecommend:
         assert "early" in reason
 
 
+class TestReachedDeepStage:
+    """_reached_deep_stage — pipeline-order gate for stage_high_water (#1361)."""
+
+    def test_review_is_deep(self) -> None:
+        assert queue_peek._reached_deep_stage(Stage.REVIEW) is True
+
+    def test_finalize_is_deep(self) -> None:
+        assert queue_peek._reached_deep_stage(Stage.FINALIZE) is True
+
+    def test_impl_is_not_deep(self) -> None:
+        assert queue_peek._reached_deep_stage(Stage.IMPL) is False
+
+    def test_plan_is_not_deep(self) -> None:
+        assert queue_peek._reached_deep_stage(Stage.PLAN) is False
+
+    def test_harden_is_not_deep(self) -> None:
+        assert queue_peek._reached_deep_stage(Stage.HARDEN) is False
+
+    def test_none_is_not_deep(self) -> None:
+        assert queue_peek._reached_deep_stage(None) is False
+
+    def test_stage_order_is_pipeline_order_not_lexicographic(self) -> None:
+        """_STAGE_ORDER must be pipeline order (HARDEN..FINALIZE), NOT the
+        lexicographic order plain StrEnum '<' comparison would give — this
+        documents the exact trap a naive '<'/'>' comparison would create."""
+        order = queue_peek._STAGE_ORDER
+        assert (
+            order.index(Stage.HARDEN)
+            < order.index(Stage.PLAN)
+            < order.index(Stage.IMPL)
+            < order.index(Stage.REVIEW)
+            < order.index(Stage.FINALIZE)
+        )
+        # Plain StrEnum '<' is lexicographic on the string values and gives
+        # the opposite (wrong) answer for this pair.
+        assert (Stage.FINALIZE < Stage.HARDEN) is True
+
+
+class TestScoreSessionStageHighWater:
+    """_score_session's attempt-count STOP branch gated on stage_high_water
+    (#1361): a ticket that demonstrably reached REVIEW or later falls
+    through to the stall-check ladder instead of hard-stopping."""
+
+    def test_high_attempts_with_deep_high_water_falls_through_not_stop(self) -> None:
+        rec, reason = queue_peek.recommend(
+            age_min=10.0,
+            idle_min=0.0,
+            pr_state=None,
+            sentinel_status=None,
+            attempts=queue_peek.STOP_ATTEMPTS_MIN,
+            stage_high_water=Stage.REVIEW,
+        )
+        assert rec != "STOP"
+        assert "systemic" not in reason
+
+    def test_high_attempts_with_shallow_high_water_still_stops(self) -> None:
+        rec, reason = queue_peek.recommend(
+            age_min=10.0,
+            idle_min=0.0,
+            pr_state=None,
+            sentinel_status=None,
+            attempts=queue_peek.STOP_ATTEMPTS_MIN,
+            stage_high_water=Stage.IMPL,
+        )
+        assert rec == "STOP"
+        assert "systemic" in reason
+
+    def test_high_attempts_with_none_high_water_still_stops(self) -> None:
+        rec, reason = queue_peek.recommend(
+            age_min=10.0,
+            idle_min=0.0,
+            pr_state=None,
+            sentinel_status=None,
+            attempts=queue_peek.STOP_ATTEMPTS_MIN,
+            stage_high_water=None,
+        )
+        assert rec == "STOP"
+        assert "systemic" in reason
+
+    def test_merged_pr_stuck_stops_even_with_finalize_high_water(self) -> None:
+        rec, reason = queue_peek.recommend(
+            age_min=10.0,
+            idle_min=queue_peek.IDLE_POST_PR_MIN + 1.0,
+            pr_state="MERGED",
+            sentinel_status=None,
+            attempts=1,
+            stage_high_water=Stage.FINALIZE,
+        )
+        assert rec == "STOP"
+        assert "merged" in reason.lower()
+
+    def test_age_timeout_stops_even_with_finalize_high_water(self) -> None:
+        rec, reason = queue_peek.recommend(
+            age_min=queue_peek.STOP_AGE_MIN + 1.0,
+            idle_min=0.0,
+            pr_state=None,
+            sentinel_status=None,
+            attempts=1,
+            stage_high_water=Stage.FINALIZE,
+        )
+        assert rec == "STOP"
+        assert "timeout" in reason
+
+    def test_grinding_but_idle_stalled_falls_through_to_nonwait(self) -> None:
+        rec, _ = queue_peek.recommend(
+            age_min=10.0,
+            idle_min=queue_peek.IDLE_STALL_MIN + 1.0,
+            pr_state=None,
+            sentinel_status=None,
+            attempts=queue_peek.STOP_ATTEMPTS_MIN,
+            stage_high_water=Stage.REVIEW,
+        )
+        assert rec == "STOP-OR-PEEK"
+
+
 # ---------------------------------------------------------------------------
 # parse_transcript
 # ---------------------------------------------------------------------------
@@ -1059,6 +1176,7 @@ class TestFormatRow:
             "reason",
             "signal_source",
             "jsonl_idle_min",
+            "stage_high_water",
         }
         assert required_keys == set(row.keys())
 
@@ -1086,6 +1204,19 @@ class TestFormatRow:
             row = queue_peek.format_row(task, info, _NOW)
         mock_gh.assert_called_once_with(99)
         assert row["pr_state"] == "OPEN"
+
+    def test_stage_high_water_present_in_row(self) -> None:
+        task = _make_ticket_task(stage_high_water=Stage.REVIEW)
+        info: dict[str, Any] = {
+            "first_user_ts": "2026-06-20T11:50:00+00:00",
+            "last_asst_ts": "2026-06-20T11:55:00+00:00",
+            "last_sentinel_status": None,
+            "last_sentinel_stage": None,
+            "last_pr_number": None,
+            "signal_source": "transcript",
+        }
+        row = queue_peek.format_row(task, info, _NOW)
+        assert row["stage_high_water"] == Stage.REVIEW
 
 
 # ---------------------------------------------------------------------------
@@ -1458,6 +1589,12 @@ class TestBlindRow:
         assert row["stage"] is None
         assert row["status"] is None
         assert row["pr"] is None
+
+    def test_blind_row_includes_stage_high_water(self) -> None:
+        task = _make_ticket_task(stage_high_water=Stage.REVIEW)
+        row = queue_peek.format_row(task, _make_blind_info(), _NOW)
+        assert "stage_high_water" in row
+        assert row["stage_high_water"] == Stage.REVIEW
 
     def test_non_blind_signal_source_is_transcript(self) -> None:
         task = _make_ticket_task()

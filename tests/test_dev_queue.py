@@ -2363,7 +2363,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["pr_state"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 20
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 21
 
     def test_v8_pr_state_preserved_idempotently(self) -> None:
         """Existing pr_state survives a second migration pass (idempotent)."""
@@ -2407,7 +2407,7 @@ class TestMigrateDevQueue:
         """migrate_dev_queue bumps schema_version to current regardless of input."""
         raw: dict[str, object] = {"schema_version": 1, "tasks": []}
         migrated = migrate_dev_queue(raw)
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 20
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 21
 
     def test_v9_signoff_preserved_idempotently(self) -> None:
         """Existing signoff value survives a second migration pass."""
@@ -2442,7 +2442,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["escalation_parked_at"] is None
         assert migrated["tasks"][0]["escalation_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 20
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 21
 
     def test_v10_escalation_fields_preserved_idempotently(self) -> None:
         """Existing escalation timestamps survive a second migration pass."""
@@ -2485,7 +2485,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["false_park_recovery_count"] == 0
         assert migrated["tasks"][0]["false_park_recovery_next_eligible_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 20
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 21
 
     def test_v11_false_park_recovery_backoff_preserved_idempotently(self) -> None:
         """Existing false-park-recovery backoff state survives a second
@@ -2527,7 +2527,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["gate_recipe_failed_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 20
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 21
 
     def test_v12_gate_recipe_failed_at_preserved_idempotently(self) -> None:
         """Existing gate_recipe_failed_at timestamp survives a second
@@ -2565,7 +2565,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["escalate_merge_block_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 20
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 21
 
     def test_v14_escalate_merge_block_fired_at_preserved_idempotently(self) -> None:
         """Existing escalate_merge_block_fired_at survives a second migration."""
@@ -2602,7 +2602,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["request_reviewer_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 20
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 21
 
     def test_v16_request_reviewer_fired_at_preserved_idempotently(self) -> None:
         """Existing request_reviewer_fired_at survives a second migration."""
@@ -2639,7 +2639,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["auto_fix_ci_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 20
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 21
 
     def test_v17_auto_fix_ci_fired_at_preserved_idempotently(self) -> None:
         """Existing auto_fix_ci_fired_at survives a second migration."""
@@ -2676,7 +2676,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["address_review_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 20
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 21
 
     def test_v18_address_review_fired_at_preserved_idempotently(self) -> None:
         """Existing address_review_fired_at survives a second migration."""
@@ -2713,7 +2713,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["last_blocked_result"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 20
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 21
 
     def test_v19_last_blocked_result_preserved_idempotently(self) -> None:
         """Existing last_blocked_result survives a second migration."""
@@ -2754,7 +2754,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["cross_repo_override"] is False
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 20
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 21
 
     def test_v20_cross_repo_override_preserved_idempotently(self) -> None:
         """Existing cross_repo_override survives a second migration."""
@@ -2773,12 +2773,77 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["cross_repo_override"] is True
 
+    def test_migrate_dev_queue_fills_stage_high_water_default_seeded_from_stage(
+        self,
+    ) -> None:
+        """migrate_dev_queue seeds stage_high_water from the task's current
+        stage when the key is missing (v21, GitHub #1361)."""
+        raw: dict[str, object] = {
+            "schema_version": 20,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-203",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                    "stage": "impl",
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["stage_high_water"] == "impl"
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 21
+
+    def test_migrate_dev_queue_fills_stage_high_water_default_when_stage_also_missing(
+        self,
+    ) -> None:
+        """migrate_dev_queue seeds both stage and stage_high_water to
+        DEFAULT_STAGE when a legacy task is missing both keys (v21,
+        GitHub #1361)."""
+        raw: dict[str, object] = {
+            "schema_version": 3,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-204",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["stage"] == DEFAULT_STAGE.value == "plan"
+        assert migrated["tasks"][0]["stage_high_water"] == DEFAULT_STAGE.value == "plan"
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 21
+
+    def test_v21_stage_high_water_preserved_idempotently(self) -> None:
+        """Existing stage_high_water survives a second migration pass unchanged,
+        even when it differs from the task's current stage (a legitimate
+        state: the task regressed backward after reaching REVIEW)."""
+        raw: dict[str, object] = {
+            "schema_version": 21,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-205",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "blocked_on_user",
+                    "stage": "harden",
+                    "stage_high_water": "review",
+                }
+            ],
+        }
+        once = migrate_dev_queue(raw)
+        twice = migrate_dev_queue(once)
+        assert twice["tasks"][0]["stage_high_water"] == "review"
+        assert twice["tasks"][0]["stage"] == "harden"
+
     def test_migrate_dev_queue_fills_watched_prs_default(self) -> None:
         """migrate_dev_queue fills watched_prs=[] on a store missing the key (v15)."""
         raw: dict[str, object] = {"schema_version": 14, "tasks": []}
         migrated = migrate_dev_queue(raw)
         assert migrated["watched_prs"] == []
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 20
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 21
 
     def test_migrate_dev_queue_preserves_existing_watched_prs(self) -> None:
         """An existing watched_prs list survives migration untouched (idempotent)."""
@@ -4365,6 +4430,23 @@ class TestRequeueTicket:
         t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
         assert t.stage == Stage.IMPL
         assert t.status == QueueItemStatus.PENDING
+
+    def test_requeue_forward_to_review_sets_high_water_to_review(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """A forward requeue (plan -> review) raises stage_high_water to the
+        target stage (GitHub #1361)."""
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-hw1")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        requeue_ticket("GEN-500", "genhealth", stage_override="review")
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.stage_high_water == Stage.REVIEW
 
     def test_requeue_forward_override_emits_stage_changed(
         self,
@@ -6055,31 +6137,35 @@ class TestExtractPrUrl:
 # ---------------------------------------------------------------------------
 
 
+def _make_stage_task(
+    stage: Stage = Stage.FINALIZE,
+    worktree_path: Path | None = None,
+    stage_high_water: Stage | None = None,
+) -> TicketTask:
+    return TicketTask(
+        ticket_id="REGRESS-1",
+        client="test-client",
+        status=QueueItemStatus.RUNNING,
+        stage=stage,
+        worktree_path=worktree_path,
+        stage_high_water=stage_high_water,
+    )
+
+
 class TestStageRegress:
     """Unit tests for _stage_regress (GitHub #770)."""
-
-    def _make_task(
-        self, stage: Stage = Stage.FINALIZE, worktree_path: Path | None = None
-    ) -> TicketTask:
-        return TicketTask(
-            ticket_id="REGRESS-1",
-            client="test-client",
-            status=QueueItemStatus.RUNNING,
-            stage=stage,
-            worktree_path=worktree_path,
-        )
 
     def test_sets_target_stage(self) -> None:
         from cw.dev_queue import _stage_regress
 
-        task = self._make_task(stage=Stage.FINALIZE)
+        task = _make_stage_task(stage=Stage.FINALIZE)
         _stage_regress(task, Stage.IMPL)
         assert task.stage == Stage.IMPL
 
     def test_increments_regress_attempts(self) -> None:
         from cw.dev_queue import _stage_regress
 
-        task = self._make_task()
+        task = _make_stage_task()
         assert task.regress_attempts == 0
         _stage_regress(task, Stage.IMPL)
         assert task.regress_attempts == 1
@@ -6090,14 +6176,14 @@ class TestStageRegress:
     def test_sets_pending(self) -> None:
         from cw.dev_queue import _stage_regress
 
-        task = self._make_task()
+        task = _make_stage_task()
         _stage_regress(task, Stage.IMPL)
         assert task.status == QueueItemStatus.PENDING
 
     def test_clears_session_id(self) -> None:
         from cw.dev_queue import _stage_regress
 
-        task = self._make_task()
+        task = _make_stage_task()
         task.session_id = "abc123"
         _stage_regress(task, Stage.IMPL)
         assert task.session_id is None
@@ -6105,7 +6191,7 @@ class TestStageRegress:
     def test_clears_stage_base_ref(self) -> None:
         from cw.dev_queue import _stage_regress
 
-        task = self._make_task()
+        task = _make_stage_task()
         task.stage_base_ref = "deadbeef"
         _stage_regress(task, Stage.IMPL)
         assert task.stage_base_ref is None
@@ -6116,7 +6202,7 @@ class TestStageRegress:
         from cw.dev_queue import _stage_regress
 
         wt = Path("/some/worktree/path")
-        task = self._make_task(worktree_path=wt)
+        task = _make_stage_task(worktree_path=wt)
         _stage_regress(task, Stage.IMPL)
         assert task.worktree_path == wt
 
@@ -6129,7 +6215,7 @@ class TestStageRegress:
         events = capture_events(
             "cw.dev_queue", OrchestratorEventType.TASK_STAGE_CHANGED
         )
-        task = self._make_task(stage=Stage.FINALIZE)
+        task = _make_stage_task(stage=Stage.FINALIZE)
         _stage_regress(task, Stage.IMPL)
         assert len(events) == 1
         etype, payload, corr = events[0]
@@ -6140,6 +6226,68 @@ class TestStageRegress:
         assert payload["old_stage"] == Stage.FINALIZE
         assert payload["new_stage"] == Stage.IMPL
         assert payload["direction"] == "regress"
+
+
+class TestStageHighWaterStamping:
+    """Unit tests for stage_high_water stamping (GitHub #1361)."""
+
+    def test_advance_raises_high_water_from_none(self) -> None:
+        from cw.dev_queue import _advance_task_pointer
+
+        stages = [Stage.HARDEN, Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE]
+        task = _make_stage_task(stage=Stage.HARDEN, stage_high_water=None)
+        _advance_task_pointer(task, stages)
+        assert task.stage_high_water == Stage.PLAN
+
+    def test_advance_harden_plan_impl_sets_high_water_to_impl(self) -> None:
+        from cw.dev_queue import _advance_task_pointer
+
+        stages = [Stage.HARDEN, Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE]
+        task = _make_stage_task(stage=Stage.HARDEN, stage_high_water=None)
+        _advance_task_pointer(task, stages)  # HARDEN -> PLAN
+        task.status = QueueItemStatus.RUNNING
+        _advance_task_pointer(task, stages)  # PLAN -> IMPL
+        assert task.stage_high_water == Stage.IMPL
+
+    def test_advance_does_not_lower_high_water(self) -> None:
+        from cw.dev_queue import _advance_task_pointer
+
+        stages = [Stage.HARDEN, Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE]
+        task = _make_stage_task(stage=Stage.HARDEN, stage_high_water=Stage.REVIEW)
+        _advance_task_pointer(task, stages)  # HARDEN -> PLAN
+        assert task.stage_high_water == Stage.REVIEW
+
+    def test_stage_regress_leaves_high_water_unchanged(self) -> None:
+        from cw.dev_queue import _stage_regress
+
+        task = _make_stage_task(stage=Stage.IMPL, stage_high_water=Stage.IMPL)
+        _stage_regress(task, Stage.HARDEN)
+        assert task.stage_high_water == Stage.IMPL
+
+    def test_apply_requeue_stage_backward_leaves_high_water_unchanged(self) -> None:
+        from cw.dev_queue import _apply_requeue_stage
+
+        stages = [Stage.HARDEN, Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE]
+        task = _make_stage_task(stage=Stage.IMPL, stage_high_water=Stage.IMPL)
+        task.status = QueueItemStatus.BLOCKED_ON_USER
+        _apply_requeue_stage(task, stages, "harden", allow_regress=True)
+        assert task.stage_high_water == Stage.IMPL
+
+    def test_apply_requeue_stage_forward_raises_high_water(self) -> None:
+        from cw.dev_queue import _apply_requeue_stage
+
+        stages = [Stage.HARDEN, Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE]
+        task = _make_stage_task(stage=Stage.PLAN, stage_high_water=Stage.PLAN)
+        _apply_requeue_stage(task, stages, "review", allow_regress=False)
+        assert task.stage_high_water == Stage.REVIEW
+
+    def test_apply_requeue_stage_forward_does_not_lower_high_water(self) -> None:
+        from cw.dev_queue import _apply_requeue_stage
+
+        stages = [Stage.HARDEN, Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE]
+        task = _make_stage_task(stage=Stage.PLAN, stage_high_water=Stage.FINALIZE)
+        _apply_requeue_stage(task, stages, "review", allow_regress=False)
+        assert task.stage_high_water == Stage.FINALIZE
 
 
 class TestRegisterWatchedPr:
