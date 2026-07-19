@@ -70,6 +70,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    from cw.models import ReapReason, Session
     from tests.conftest import CapturedEvent
 
 
@@ -3660,9 +3661,9 @@ def _make_blocked_task(
 def _make_session(
     session_id: str = "sess1234",
     last_result: dict[str, object] | None = None,
-    reap_reason: object = None,
-    workspace_path: object = None,
-) -> object:
+    reap_reason: ReapReason | None = None,
+    workspace_path: Path | None = None,
+) -> Session:
     """Build a Session with minimal required fields."""
     from pathlib import Path
 
