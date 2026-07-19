@@ -1,0 +1,2630 @@
+"""Unit tests for cw.reconcile._shared — reap-policy routing and budgets.
+
+Headless-budget resolution, reap-proposed emission, per-lane reap_policy
+routing, emitted-sentinel routing, and _apply_sentinel_to_task disposition.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from cw.auto_dev_result import (
+    BLOCKER_REASON_VALIDATION_FAILED,
+    AutoDevResult,
+    BlockedResult,
+    Blocker,
+    parse_stdout,
+)
+from cw.config import (
+    load_state,
+    save_state,
+)
+from cw.dev_queue import load_dev_queue, save_dev_queue
+from cw.events import read_events
+from cw.models import (
+    DEFAULT_LANE,
+    ClientConfig,
+    CompletionReason,
+    CwState,
+    DevQueueStore,
+    OrchestratorConfig,
+    OrchestratorEventType,
+    QueueItemStatus,
+    ReapPolicy,
+    ReapReason,
+    Session,
+    SessionOrigin,
+    SessionPurpose,
+    SessionStatus,
+    Stage,
+    TicketTask,
+)
+from cw.native_daemon import FakeNativeDaemonClient
+from cw.reconcile import (
+    _VALIDATION_FAILED_MAX_ATTEMPTS,
+    HEADLESS_TIMEOUT_SECONDS,
+    IDLE_WATCHDOG_SECONDS,
+    SentinelRouteOutcome,
+    _apply_sentinel_to_task,
+    _has_terminal_sentinel,
+    flag_silently_idle_daemon_sessions,
+    resolve_headless_budget,
+)
+from cw.reconcile._shared import _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
+from tests._reconcile_helpers import (
+    _auto_config,
+    _client_with_lane,
+    _make_terminal_payload,
+    _mk_headless_daemon_session,
+    _mk_session,
+    _no_op_salvage_payload,
+    _shipped_salvage_payload,
+    _stage_complete_payload,
+    _state_queue_snapshot,
+    _write_salvage_transcript,
+    _write_staged_clients_yaml,
+)
+
+
+def test_resolve_headless_budget_small_tier(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Per-tier default: session with scope.tier='small' → 1800s."""
+    worktree = tmp_path / "wt-small"
+    worktree.mkdir(parents=True, exist_ok=True)
+
+    sess = Session(
+        id="small-tier-sess",
+        name="client-a/auto-dev/GEN-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        worktree_path=worktree,
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        last_result={"scope": {"tier": "small"}},
+    )
+    config = _auto_config(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    budget = resolve_headless_budget(None, sess, config)
+    assert budget == 1800
+
+
+def test_resolve_headless_budget_large_tier(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Per-tier default: session with scope.tier='large' → 5400s."""
+    worktree = tmp_path / "wt-large"
+    worktree.mkdir(parents=True, exist_ok=True)
+
+    sess = Session(
+        id="large-tier-sess",
+        name="client-a/auto-dev/GEN-2",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        worktree_path=worktree,
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        last_result={"scope": {"tier": "large"}},
+    )
+    config = _auto_config(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    budget = resolve_headless_budget(None, sess, config)
+    assert budget == 5400
+
+
+def test_resolve_headless_budget_per_ticket_override(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Per-ticket override beats tier: headless_timeout_override=7200 > small=1800."""
+    worktree = tmp_path / "wt-override"
+    worktree.mkdir(parents=True, exist_ok=True)
+
+    sess = Session(
+        id="override-sess",
+        name="client-a/auto-dev/GEN-3",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        worktree_path=worktree,
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        last_result={"scope": {"tier": "small"}},
+    )
+    task = TicketTask(
+        ticket_id="GEN-3",
+        client="client-a",
+        headless_timeout_override=7200,
+    )
+    config = _auto_config(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    budget = resolve_headless_budget(task, sess, config)
+    assert budget == 7200
+
+
+def test_resolve_headless_budget_pre_stage1_fallback(
+    tmp_config_dir: Path,
+) -> None:
+    """Pre-Stage-1 fallback: no task, no last_result → HEADLESS_TIMEOUT_SECONDS."""
+    sess = Session(
+        id="fallback-sess",
+        name="client-a/auto-dev/GEN-4",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        last_result=None,
+    )
+    config = _auto_config(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    budget = resolve_headless_budget(None, sess, config)
+    assert budget == HEADLESS_TIMEOUT_SECONDS
+
+
+def test_resolve_headless_budget_scope_hint_large_no_session(
+    tmp_config_dir: Path,
+) -> None:
+    """Step 2.5 (#314): scope_hint='large' + session=None → large-tier budget."""
+    config = _auto_config(
+        headless_timeout_by_tier={"small": 1800, "large": 5400},
+        headless_timeout_by_stage={},
+    )
+    task = TicketTask(ticket_id="GEN-314", client="client-a", scope_hint="large")
+    budget = resolve_headless_budget(task, None, config)
+    assert budget == 5400
+    assert budget != HEADLESS_TIMEOUT_SECONDS
+
+
+def test_resolve_headless_budget_scope_hint_small_no_session(
+    tmp_config_dir: Path,
+) -> None:
+    """Step 2.5 (#314): scope_hint='small' + session=None → small-tier budget."""
+    config = _auto_config(
+        headless_timeout_by_tier={"small": 1800, "large": 5400},
+        headless_timeout_by_stage={},
+    )
+    task = TicketTask(ticket_id="GEN-314", client="client-a", scope_hint="small")
+    budget = resolve_headless_budget(task, None, config)
+    assert budget == 1800
+
+
+def test_resolve_headless_budget_no_scope_hint_no_session(
+    tmp_config_dir: Path,
+) -> None:
+    """Step 2.5 (#314): scope_hint=None + session=None → global timeout."""
+    config = _auto_config(
+        headless_timeout_by_tier={"small": 1800, "large": 5400},
+        headless_timeout_by_stage={},
+    )
+    task = TicketTask(ticket_id="GEN-314", client="client-a")
+    budget = resolve_headless_budget(task, None, config)
+    assert budget == HEADLESS_TIMEOUT_SECONDS
+
+
+def test_resolve_headless_budget_override_beats_scope_hint(
+    tmp_config_dir: Path,
+) -> None:
+    """Step 1 (override) beats step 2.5 (scope_hint): override=9999 > large=5400."""
+    config = _auto_config(headless_timeout_by_tier={"small": 1800, "large": 5400})
+    task = TicketTask(
+        ticket_id="GEN-314",
+        client="client-a",
+        scope_hint="large",
+        headless_timeout_override=9999,
+    )
+    budget = resolve_headless_budget(task, None, config)
+    assert budget == 9999
+
+
+def test_resolve_headless_budget_last_result_beats_scope_hint(
+    tmp_config_dir: Path,
+) -> None:
+    """Step 2 (last_result tier) beats step 2.5 (scope_hint) when tier is present."""
+    config = _auto_config(
+        headless_timeout_by_tier={"small": 1800, "large": 5400},
+        headless_timeout_by_stage={},
+    )
+    task = TicketTask(ticket_id="GEN-314", client="client-a", scope_hint="large")
+    sess = Session(
+        name="client-a/auto-dev/GEN-314",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        workspace_path=Path("/tmp/ws"),
+        last_result={"scope": {"tier": "small"}},
+    )
+    budget = resolve_headless_budget(task, sess, config)
+    assert budget == 1800  # small from last_result, not large from scope_hint
+
+
+def test_resolve_headless_budget_non_dict_last_result_falls_to_scope_hint(
+    tmp_config_dir: Path,
+) -> None:
+    """Non-dict last_result → AttributeError caught → step 2.5 scope_hint fires."""
+    config = _auto_config(
+        headless_timeout_by_tier={"small": 1800, "large": 5400},
+        headless_timeout_by_stage={},
+    )
+    task = TicketTask(ticket_id="GEN-314", client="client-a", scope_hint="large")
+    sess = Session(
+        name="client-a/auto-dev/GEN-314",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        workspace_path=Path("/tmp/ws"),
+    )
+    sess.last_result = ["not", "a", "dict"]  # type: ignore[assignment]
+    budget = resolve_headless_budget(task, sess, config)
+    assert budget == 5400  # scope_hint fires after AttributeError caught
+
+
+def test_resolve_headless_budget_per_stage_hit_beats_tier(
+    tmp_config_dir: Path,
+) -> None:
+    """Per-stage REVIEW default (7200) beats the small-tier default (1800)."""
+    config = _auto_config(
+        headless_timeout_by_tier={"small": 1800, "large": 5400},
+        headless_timeout_by_stage={Stage.REVIEW: 7200},
+    )
+    task = TicketTask(ticket_id="GEN-1020", client="client-a", stage=Stage.REVIEW)
+    sess = Session(
+        name="client-a/auto-dev/GEN-1020",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        workspace_path=Path("/tmp/ws"),
+        last_result={"scope": {"tier": "small"}},
+    )
+    budget = resolve_headless_budget(task, sess, config)
+    assert budget == 7200
+
+
+def test_resolve_headless_budget_per_stage_hit_beats_scope_hint(
+    tmp_config_dir: Path,
+) -> None:
+    """Per-stage PLAN default (3600) beats the large-tier scope_hint (5400)."""
+    config = _auto_config(
+        headless_timeout_by_tier={"small": 1800, "large": 5400},
+        headless_timeout_by_stage={Stage.PLAN: 3600},
+    )
+    task = TicketTask(
+        ticket_id="GEN-1020",
+        client="client-a",
+        stage=Stage.PLAN,
+        scope_hint="large",
+    )
+    budget = resolve_headless_budget(task, None, config)
+    assert budget == 3600
+
+
+def test_resolve_headless_budget_per_stage_hit_beats_global(
+    tmp_config_dir: Path,
+) -> None:
+    """Per-stage IMPL default (4200) beats the global HEADLESS_TIMEOUT_SECONDS."""
+    config = _auto_config(headless_timeout_by_stage={Stage.IMPL: 4200})
+    task = TicketTask(ticket_id="GEN-1020", client="client-a", stage=Stage.IMPL)
+    budget = resolve_headless_budget(task, None, config)
+    assert budget == 4200
+
+
+def test_resolve_headless_budget_per_stage_override_still_beats_stage(
+    tmp_config_dir: Path,
+) -> None:
+    """Step 1 (headless_timeout_override) still outranks step 1.5 (per-stage)."""
+    config = _auto_config(headless_timeout_by_stage={Stage.REVIEW: 7200})
+    task = TicketTask(
+        ticket_id="GEN-1020",
+        client="client-a",
+        stage=Stage.REVIEW,
+        headless_timeout_override=9999,
+    )
+    budget = resolve_headless_budget(task, None, config)
+    assert budget == 9999
+
+
+def test_resolve_headless_budget_stage_absent_falls_through_to_tier(
+    tmp_config_dir: Path,
+) -> None:
+    """Stage absent from the per-stage map (HARDEN) falls through to tier."""
+    config = _auto_config(
+        headless_timeout_by_tier={"small": 1800, "large": 5400},
+        headless_timeout_by_stage={Stage.PLAN: 3600},
+    )
+    task = TicketTask(ticket_id="GEN-1020", client="client-a", stage=Stage.HARDEN)
+    sess = Session(
+        name="client-a/auto-dev/GEN-1020",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        workspace_path=Path("/tmp/ws"),
+        last_result={"scope": {"tier": "large"}},
+    )
+    budget = resolve_headless_budget(task, sess, config)
+    assert budget == 5400
+
+
+def test_resolve_headless_budget_stage_absent_falls_through_to_scope_hint(
+    tmp_config_dir: Path,
+) -> None:
+    """Stage absent from the per-stage map (HARDEN) falls through to scope_hint."""
+    config = _auto_config(
+        headless_timeout_by_tier={"small": 1800, "large": 5400},
+        headless_timeout_by_stage={Stage.PLAN: 3600},
+    )
+    task = TicketTask(
+        ticket_id="GEN-1020",
+        client="client-a",
+        stage=Stage.HARDEN,
+        scope_hint="small",
+    )
+    budget = resolve_headless_budget(task, None, config)
+    assert budget == 1800
+
+
+def test_resolve_headless_budget_task_none_skips_stage_step(
+    tmp_config_dir: Path,
+) -> None:
+    """task=None short-circuits step 1.5 exactly as it already short-circuits step 1."""
+    config = _auto_config(
+        headless_timeout_by_tier={"small": 1800, "large": 5400},
+        headless_timeout_by_stage={Stage.PLAN: 3600},
+    )
+    sess = Session(
+        name="client-a/auto-dev/GEN-1020",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        workspace_path=Path("/tmp/ws"),
+        last_result={"scope": {"tier": "large"}},
+    )
+    budget = resolve_headless_budget(None, sess, config)
+    assert budget == 5400
+
+
+class TestEmitReapProposed:
+    """_emit_reap_proposed emits SESSION_REAP_PROPOSED and stamps reap_proposed_at."""
+
+    def test_reap_proposed_emits_event_for_revert_task(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """REVERT_TASK candidate → SESSION_REAP_PROPOSED event emitted, stamped."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _emit_reap_proposed
+
+        worktree = tmp_path / "wt-prop-revert"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("prop-revert-1", worktree, started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        candidate = ReapCandidate(
+            session_id="prop-revert-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="prop-revert-1",
+            elapsed_seconds=3700.0,
+            reap_reason=ReapReason.WALL_CLOCK_BUDGET,
+        )
+
+        _emit_reap_proposed(state, [candidate], native_live=set(), now=now)
+
+        # Event was emitted
+        events = read_events()
+        reap_events = [
+            e for e in events if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+        ]
+        assert len(reap_events) == 1
+        ev = reap_events[0]
+        assert ev.payload["session_id"] == "prop-revert-1"
+        assert ev.payload["proposed_action"] == "revert_task"
+        assert ev.payload["reason"] == "wall_clock_budget"
+        assert ev.correlation_id == "prop-revert-1"
+
+        # Session stamped
+        assert sess.reap_proposed_at == now
+
+    def test_reap_proposed_emits_event_for_crash_complete(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """CRASH_COMPLETE candidate → SESSION_REAP_PROPOSED event emitted."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _emit_reap_proposed
+
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+
+        sess = _mk_session("prop-crash-1", "gone-ref")
+        sess.origin = SessionOrigin.DAEMON
+        sess.name = "client-a/auto-dev/prop-crash-1"
+        sess.started_at = started_at
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        candidate = ReapCandidate(
+            session_id="prop-crash-1",
+            proposed_action=ProposedAction.CRASH_COMPLETE,
+            ticket_id="prop-crash-1",
+        )
+
+        _emit_reap_proposed(state, [candidate], native_live=set(), now=now)
+
+        events = read_events()
+        reap_events = [
+            e for e in events if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+        ]
+        assert len(reap_events) == 1
+        assert reap_events[0].payload["proposed_action"] == "crash_complete"
+        assert sess.reap_proposed_at == now
+
+    def test_reap_proposed_emits_for_park_blocked_on_user(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """PARK_BLOCKED_ON_USER candidate → SESSION_REAP_PROPOSED event emitted."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _emit_reap_proposed
+
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+        sess = _mk_session("prop-park-1", "live-ref")
+        sess.origin = SessionOrigin.DAEMON
+        sess.started_at = started_at
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        candidate = ReapCandidate(
+            session_id="prop-park-1",
+            proposed_action=ProposedAction.PARK_BLOCKED_ON_USER,
+            ticket_id="prop-park-1",
+        )
+
+        _emit_reap_proposed(state, [candidate], native_live=set(), now=now)
+
+        events = read_events()
+        reap_events = [
+            e for e in events if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+        ]
+        assert len(reap_events) == 1
+        assert reap_events[0].payload["proposed_action"] == "park_blocked_on_user"
+
+    def test_reap_proposed_skips_non_reap_actions(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """INCREMENT_COUNTER / SKIP_PARKED candidates → no event emitted."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _emit_reap_proposed
+
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+
+        sess = _mk_session("prop-skip-1", "live-ref")
+        sess.started_at = started_at
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+        snap = _state_queue_snapshot()
+
+        candidate = ReapCandidate(
+            session_id="prop-skip-1",
+            proposed_action=ProposedAction.INCREMENT_COUNTER,
+            ticket_id="prop-skip-1",
+        )
+
+        _emit_reap_proposed(state, [candidate], native_live=set(), now=now)
+
+        assert _state_queue_snapshot() == snap
+        assert sess.reap_proposed_at is None
+
+    def test_reap_proposed_dedup_skips_already_stamped(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Session already stamped with reap_proposed_at → no duplicate event."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _emit_reap_proposed
+
+        worktree = tmp_path / "wt-prop-dedup"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        first_stamp = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("prop-dedup-1", worktree, started_at)
+        sess.reap_proposed_at = first_stamp  # pre-stamped
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        candidate = ReapCandidate(
+            session_id="prop-dedup-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="prop-dedup-1",
+            elapsed_seconds=3700.0,
+        )
+
+        _emit_reap_proposed(state, [candidate], native_live=set(), now=now)
+
+        # No event emitted (already proposed)
+        events = read_events()
+        reap_events = [
+            e for e in events if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+        ]
+        assert reap_events == []
+        # Stamp NOT overwritten
+        assert sess.reap_proposed_at == first_stamp
+
+    def test_reap_proposed_in_roster_sets_in_roster_true(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """When surface_ref is in native_live, evidence.in_roster=True."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _emit_reap_proposed
+
+        worktree = tmp_path / "wt-prop-roster"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("prop-roster-1", worktree, started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        candidate = ReapCandidate(
+            session_id="prop-roster-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="prop-roster-1",
+            elapsed_seconds=3700.0,
+        )
+
+        _emit_reap_proposed(
+            state,
+            [candidate],
+            native_live={"fake-short-id"},  # matches sess.surface_ref
+            now=now,
+        )
+
+        events = read_events()
+        reap_events = [
+            e for e in events if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+        ]
+        assert len(reap_events) == 1
+        assert reap_events[0].payload["evidence"]["in_roster"] is True
+
+    def test_reap_proposed_not_in_roster_sets_in_roster_false(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """When surface_ref not in native_live, evidence.in_roster=False."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _emit_reap_proposed
+
+        worktree = tmp_path / "wt-prop-norost"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("prop-norost-1", worktree, started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        candidate = ReapCandidate(
+            session_id="prop-norost-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="prop-norost-1",
+            elapsed_seconds=3700.0,
+        )
+
+        _emit_reap_proposed(state, [candidate], native_live=set(), now=now)
+
+        events = read_events()
+        reap_events = [
+            e for e in events if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+        ]
+        assert len(reap_events) == 1
+        assert reap_events[0].payload["evidence"]["in_roster"] is False
+
+    def test_reap_proposed_empty_candidates_no_writes(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Empty candidates list → no events, no state writes."""
+        from cw.reconcile import _emit_reap_proposed
+
+        worktree = tmp_path / "wt-prop-empty"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("prop-empty-1", worktree, started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+        snap = _state_queue_snapshot()
+
+        _emit_reap_proposed(state, [], native_live=set(), now=now)
+
+        assert _state_queue_snapshot() == snap
+
+
+# ---------------------------------------------------------------------------
+# Per-lane reap_policy tests (GitHub #560)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveReapPolicy:
+    """resolve_reap_policy respects lane → global → SIGNAL_ONLY precedence."""
+
+    def test_lane_policy_beats_global(self) -> None:
+        """Lane AUTO overrides global SIGNAL_ONLY."""
+        from cw.reconcile import ProposedAction, ReapCandidate, resolve_reap_policy
+
+        clients = {
+            "client-a": _client_with_lane("client-a", "fast", ReapPolicy.AUTO),
+        }
+        cfg = OrchestratorConfig(reap_policy=ReapPolicy.SIGNAL_ONLY)
+        candidate = ReapCandidate(
+            session_id="s1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="t1",
+            lane="fast",
+            client="client-a",
+        )
+        assert resolve_reap_policy(candidate, clients, cfg) is ReapPolicy.AUTO
+
+    def test_global_used_when_lane_not_in_client(self) -> None:
+        """Lane name absent from client's lanes → falls back to global."""
+        from cw.reconcile import ProposedAction, ReapCandidate, resolve_reap_policy
+
+        clients = {
+            "client-a": _client_with_lane("client-a", "slow", ReapPolicy.SIGNAL_ONLY),
+        }
+        cfg = OrchestratorConfig(reap_policy=ReapPolicy.AUTO)
+        candidate = ReapCandidate(
+            session_id="s2",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="t2",
+            lane="fast",  # not in client's lanes
+            client="client-a",
+        )
+        assert resolve_reap_policy(candidate, clients, cfg) is ReapPolicy.AUTO
+
+    def test_global_used_when_client_not_in_dict(self) -> None:
+        """Unknown client → falls back to global."""
+        from cw.reconcile import ProposedAction, ReapCandidate, resolve_reap_policy
+
+        clients: dict[str, ClientConfig] = {}
+        cfg = OrchestratorConfig(reap_policy=ReapPolicy.AUTO)
+        candidate = ReapCandidate(
+            session_id="s3",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="t3",
+            lane="fast",
+            client="unknown-client",
+        )
+        assert resolve_reap_policy(candidate, clients, cfg) is ReapPolicy.AUTO
+
+    def test_signal_only_failsafe_when_no_client(self) -> None:
+        """candidate.client=None + global defaults → SIGNAL_ONLY."""
+        from cw.reconcile import ProposedAction, ReapCandidate, resolve_reap_policy
+
+        clients: dict[str, ClientConfig] = {}
+        cfg = OrchestratorConfig()  # default: SIGNAL_ONLY
+        candidate = ReapCandidate(
+            session_id="s4",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="t4",
+        )
+        assert resolve_reap_policy(candidate, clients, cfg) is ReapPolicy.SIGNAL_ONLY
+
+    def test_default_lane_resolves_via_global(self) -> None:
+        """DEFAULT_LANE not in custom lanes → global policy used."""
+        from cw.reconcile import ProposedAction, ReapCandidate, resolve_reap_policy
+
+        lane_cfg = _client_with_lane("client-a", "custom-lane", ReapPolicy.SIGNAL_ONLY)
+        clients = {"client-a": lane_cfg}
+        cfg = OrchestratorConfig(reap_policy=ReapPolicy.AUTO)
+        candidate = ReapCandidate(
+            session_id="s5",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="t5",
+            lane=DEFAULT_LANE,
+            client="client-a",
+        )
+        # "default" lane not in client's declared lanes → global AUTO
+        assert resolve_reap_policy(candidate, clients, cfg) is ReapPolicy.AUTO
+
+
+class TestMixedLanePolicySingleTick:
+    """Single reconcile tick with two candidates on different lane policies."""
+
+    def test_mixed_policy_stalled_one_acts_one_signals(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Lane A (auto) acts while lane B (signal_only) routes BLOCKED_ON_USER."""
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_stalled_candidates,
+        )
+
+        worktree_a = tmp_path / "wt-mixed-a"
+        worktree_b = tmp_path / "wt-mixed-b"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", lambda: daemon
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._shared.get_client",
+            lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: False
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._shared.remove_worktree", lambda *_a, **_kw: None
+        )
+
+        from cw.models import LaneConfig
+
+        client = ClientConfig(
+            name="client-a",
+            workspace_path=tmp_path / "ws",
+            lanes=[
+                LaneConfig(name="fast", reap_policy=ReapPolicy.AUTO),
+                LaneConfig(name="slow", reap_policy=ReapPolicy.SIGNAL_ONLY),
+            ],
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.load_effective_clients",
+            lambda: {"client-a": client},
+        )
+
+        sess_a = _mk_headless_daemon_session("mixed-auto-1", worktree_a, started_at)
+        sess_b = _mk_headless_daemon_session("mixed-sig-1", worktree_b, started_at)
+        state = CwState(sessions=[sess_a, sess_b])
+        save_state(state)
+        task_a = TicketTask(
+            ticket_id="mixed-auto-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="mixed-auto-1",
+        )
+        task_b = TicketTask(
+            ticket_id="mixed-sig-1",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="mixed-sig-1",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task_a, task_b]))
+
+        candidate_a = ReapCandidate(
+            session_id="mixed-auto-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="mixed-auto-1",
+            elapsed_seconds=3700.0,
+            lane="fast",
+            client="client-a",
+        )
+        candidate_b = ReapCandidate(
+            session_id="mixed-sig-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="mixed-sig-1",
+            elapsed_seconds=3700.0,
+            lane="slow",
+            client="client-a",
+        )
+
+        # Global is SIGNAL_ONLY; lane A is AUTO, lane B is SIGNAL_ONLY
+        reverted, _ = _act_on_stalled_candidates(
+            state,
+            [candidate_a, candidate_b],
+            now=now,
+            config=OrchestratorConfig(),
+        )
+
+        # Lane A (fast/AUTO): reverted to PENDING
+        assert "mixed-auto-1" in reverted
+        # Lane B (slow/SIGNAL_ONLY): routes to BLOCKED_ON_USER
+        assert "mixed-sig-1" not in reverted
+
+        store = load_dev_queue()
+        t_a = next(t for t in store.tasks if t.ticket_id == "mixed-auto-1")
+        t_b = next(t for t in store.tasks if t.ticket_id == "mixed-sig-1")
+        assert t_a.status == QueueItemStatus.PENDING
+        assert t_b.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+class TestReapProposedPayloadLane:
+    """SESSION_REAP_PROPOSED payload includes lane field (GitHub #560)."""
+
+    def test_reap_proposed_payload_includes_lane(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Candidate with lane='fast' → payload has lane='fast'."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _emit_reap_proposed
+
+        worktree = tmp_path / "wt-lane-payload"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("lane-payload-1", worktree, started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        candidate = ReapCandidate(
+            session_id="lane-payload-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="lane-payload-1",
+            elapsed_seconds=3700.0,
+            lane="fast",
+        )
+
+        _emit_reap_proposed(state, [candidate], native_live=set(), now=now)
+
+        events = read_events()
+        reap_events = [
+            e for e in events if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+        ]
+        assert len(reap_events) == 1
+        assert reap_events[0].payload["lane"] == "fast"
+
+    def test_reap_proposed_default_lane_in_payload(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Candidate with default lane → payload has lane='default'."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _emit_reap_proposed
+
+        worktree = tmp_path / "wt-default-lane-payload"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("default-lane-1", worktree, started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        candidate = ReapCandidate(
+            session_id="default-lane-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="default-lane-1",
+            elapsed_seconds=3700.0,
+        )
+
+        _emit_reap_proposed(state, [candidate], native_live=set(), now=now)
+
+        events = read_events()
+        reap_events = [
+            e for e in events if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+        ]
+        assert len(reap_events) == 1
+        assert reap_events[0].payload["lane"] == DEFAULT_LANE
+
+
+# ---------------------------------------------------------------------------
+# GitHub #578 — ROUTE_EMITTED_SENTINEL: reconcile honors emitted-but-unrouted
+# sentinels without waiting for signal_stop
+# ---------------------------------------------------------------------------
+
+
+class TestRouteEmittedSentinel:
+    """flag_silently_idle_daemon_sessions routes a transcript sentinel before
+    the idle watchdog budget fires (GitHub #578)."""
+
+    def test_detect_sentinel_present_routes_before_watchdog(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Sentinel present + last_result None + elapsed >= 300 s
+        → ROUTE_EMITTED_SENTINEL, task COMPLETED, session COMPLETED."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        worktree = tmp_path / "wt-578-detect"
+        # 305 s elapsed — past the 300-s check but well under 900-s watchdog.
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 5, 5, tzinfo=UTC)
+        assert (now - started_at).total_seconds() >= 300
+        assert (now - started_at).total_seconds() < IDLE_WATCHDOG_SECONDS
+
+        sess = _mk_headless_daemon_session("578-detect", worktree, started_at)
+        sess.last_result = None
+        _write_salvage_transcript(
+            home, worktree, "claude-578-uuid-1", _shipped_salvage_payload()
+        )
+        save_state(CwState(sessions=[sess]))
+        # B2: apply_staged_decision needs a pipeline to decide COMPLETED vs advance.
+        # Ship at FINALIZE (terminal) → COMPLETED; must have clients.yaml on disk.
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="578-detect",
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="578-detect",
+                        stage=Stage.FINALIZE,  # terminal; shipped here → COMPLETED
+                    )
+                ]
+            )
+        )
+
+        mock_daemon = MagicMock()
+        with patch(
+            "cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon
+        ):
+            state = load_state()
+            blocked, _salvage = flag_silently_idle_daemon_sessions(
+                state,
+                now=now,
+                native_live={"fake-short-id"},
+                config=_auto_config(),
+            )
+
+        assert blocked == []
+        reloaded = next(s for s in load_state().sessions if s.id == "578-detect")
+        assert reloaded.status == SessionStatus.COMPLETED
+        assert reloaded.completed_reason == CompletionReason.NORMAL
+        assert reloaded.last_result is not None
+        assert reloaded.last_result["status"] == "shipped"
+
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == "578-detect")
+        assert task.status == QueueItemStatus.COMPLETED
+
+        mock_daemon.stop.assert_called_once_with("fake-short-id")
+
+    def test_detect_elapsed_under_threshold_no_candidate(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """elapsed < sentinel_unrouted_check_seconds → no ROUTE_EMITTED_SENTINEL
+        candidate, sentinel left in transcript for next tick."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        worktree = tmp_path / "wt-578-under"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 4, 0, tzinfo=UTC)  # 240 s < 300 s threshold
+        assert (now - started_at).total_seconds() < 300
+
+        sess = _mk_headless_daemon_session("578-under", worktree, started_at)
+        sess.last_result = None
+        _write_salvage_transcript(
+            home, worktree, "claude-578-uuid-2", _shipped_salvage_payload()
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="578-under",
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="578-under",
+                    )
+                ]
+            )
+        )
+
+        state = load_state()
+        blocked, _salvage = flag_silently_idle_daemon_sessions(
+            state,
+            now=now,
+            native_live={"fake-short-id"},
+            config=_auto_config(),
+        )
+
+        assert blocked == []
+        reloaded = next(s for s in load_state().sessions if s.id == "578-under")
+        # Session must NOT be completed — too early for the sentinel check.
+        assert reloaded.status == SessionStatus.ACTIVE
+
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == "578-under")
+        assert task.status == QueueItemStatus.RUNNING
+
+    def test_detect_last_result_set_skips_double_route(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """session.last_result already set → ROUTE_EMITTED_SENTINEL skipped
+        (signal_stop already ran; prevents double-routing)."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        worktree = tmp_path / "wt-578-dbl"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 5, 5, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("578-dbl", worktree, started_at)
+        # Simulate: signal_stop already ran and stored last_result.
+        sess.last_result = {"status": "shipped"}
+        _write_salvage_transcript(
+            home, worktree, "claude-578-uuid-3", _shipped_salvage_payload()
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="578-dbl",
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="578-dbl",
+                    )
+                ]
+            )
+        )
+
+        state = load_state()
+        blocked, _salvage = flag_silently_idle_daemon_sessions(
+            state,
+            now=now,
+            native_live={"fake-short-id"},
+            config=_auto_config(),
+        )
+
+        assert blocked == []
+        # Session stays ACTIVE — watchdog budget not yet exhausted, no route.
+        reloaded = next(s for s in load_state().sessions if s.id == "578-dbl")
+        assert reloaded.status == SessionStatus.ACTIVE
+
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == "578-dbl")
+        assert task.status == QueueItemStatus.RUNNING
+
+    def test_detect_live_session_with_sentinel_routes_not_crash_complete(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Live-roster session + sentinel → ROUTE_EMITTED_SENTINEL, NOT a crash path.
+        Session ends COMPLETED/NORMAL (not TIMED_OUT)."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        worktree = tmp_path / "wt-578-live"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 5, 5, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("578-live", worktree, started_at)
+        sess.last_result = None
+        _write_salvage_transcript(
+            home, worktree, "claude-578-uuid-4", _no_op_salvage_payload()
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="578-live",
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="578-live",
+                    )
+                ]
+            )
+        )
+
+        mock_daemon = MagicMock()
+        with patch(
+            "cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon
+        ):
+            state = load_state()
+            blocked, _salvage = flag_silently_idle_daemon_sessions(
+                state,
+                now=now,
+                native_live={"fake-short-id"},
+                config=_auto_config(),
+            )
+
+        assert blocked == []
+        reloaded = next(s for s in load_state().sessions if s.id == "578-live")
+        assert reloaded.status == SessionStatus.COMPLETED
+        assert reloaded.completed_reason == CompletionReason.NORMAL
+        assert reloaded.last_result is not None
+        assert reloaded.last_result["status"] == "no_op"
+
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == "578-live")
+        assert task.status == QueueItemStatus.COMPLETED
+
+    def test_act_blocked_retry_eligible_routes_to_pending(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Sentinel status=blocked + retry_eligible=True → task reverts to PENDING."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        worktree = tmp_path / "wt-578-retry"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 5, 5, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("578-retry", worktree, started_at)
+        sess.last_result = None
+
+        blocked_retry_payload: dict[str, Any] = {
+            "schema_version": 4,
+            "ticket_id": "578-retry",
+            "status": "blocked",
+            "stage_reached": "stage2_impl",
+            "scope": {
+                "tier": "small",
+                "files": 0,
+                "lines_estimate": 0,
+                "lines_actual": None,
+                "forbidden_touched": False,
+            },
+            "plan_source": "generated",
+            "branch": None,
+            "worktree_path": None,
+            "fork_point_sha": None,
+            "commits": [],
+            "pr": None,
+            "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+            "health": {
+                "lowest_agent_confidence": "LOW",
+                "any_incomplete_risk": True,
+                "shortcuts": [],
+                "recommendation": "EXIT_FOR_HUMAN_REVIEW",
+                "downgrade_applied": False,
+                "fix_loop_escalated": False,
+            },
+            "friction_highlights": [],
+            "blocker": {
+                "stage": "stage2_impl",
+                "reason": "impl_failed",
+                "retry_eligible": True,
+                "details": "agent timed out",
+                "next_actions": ["redispatch_ticket"],
+            },
+            "next_actions": ["redispatch_ticket"],
+        }
+        _write_salvage_transcript(
+            home, worktree, "claude-578-uuid-5", blocked_retry_payload
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="578-retry",
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="578-retry",
+                    )
+                ]
+            )
+        )
+
+        mock_daemon = MagicMock()
+        with patch(
+            "cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon
+        ):
+            state = load_state()
+            blocked, _salvage = flag_silently_idle_daemon_sessions(
+                state,
+                now=now,
+                native_live={"fake-short-id"},
+                config=_auto_config(),
+            )
+
+        assert blocked == []
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == "578-retry")
+        assert task.status == QueueItemStatus.PENDING
+        assert task.session_id is None
+
+    def test_act_signal_only_does_not_gate_route_emitted_sentinel(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """signal_only policy does NOT block ROUTE_EMITTED_SENTINEL — routing an
+        emitted sentinel is constructive, not a destructive reap."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        worktree = tmp_path / "wt-578-sigonly"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 5, 5, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("578-sigonly", worktree, started_at)
+        sess.last_result = None
+        _write_salvage_transcript(
+            home, worktree, "claude-578-uuid-6", _shipped_salvage_payload()
+        )
+        save_state(CwState(sessions=[sess]))
+        # B2: apply_staged_decision needs a pipeline to decide COMPLETED vs advance.
+        # Ship at FINALIZE (terminal) → COMPLETED; must have clients.yaml on disk.
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="578-sigonly",
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="578-sigonly",
+                        stage=Stage.FINALIZE,  # terminal; shipped here → COMPLETED
+                    )
+                ]
+            )
+        )
+
+        mock_daemon = MagicMock()
+        with patch(
+            "cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon
+        ):
+            state = load_state()
+            # signal_only policy — normally gates reaps.
+            blocked, _salvage = flag_silently_idle_daemon_sessions(
+                state,
+                now=now,
+                native_live={"fake-short-id"},
+                config=OrchestratorConfig(reap_policy=ReapPolicy.SIGNAL_ONLY),
+            )
+
+        assert blocked == []
+        reloaded = next(s for s in load_state().sessions if s.id == "578-sigonly")
+        # ROUTE_EMITTED_SENTINEL is exempt from signal_only → session COMPLETED.
+        assert reloaded.status == SessionStatus.COMPLETED
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == "578-sigonly")
+        assert task.status == QueueItemStatus.COMPLETED
+
+    def test_act_session_completed_event_emitted(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """ROUTE_EMITTED_SENTINEL emits a SESSION_COMPLETED event."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        worktree = tmp_path / "wt-578-event"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 5, 5, tzinfo=UTC)
+
+        sess = _mk_headless_daemon_session("578-event", worktree, started_at)
+        sess.last_result = None
+        _write_salvage_transcript(
+            home, worktree, "claude-578-uuid-7", _shipped_salvage_payload()
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="578-event",
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="578-event",
+                        # Matches _shipped_salvage_payload()'s stage_reached
+                        # ("stage5_post_create") so the #1019/#1031
+                        # stage-match guard accepts the route.
+                        stage=Stage.FINALIZE,
+                    )
+                ]
+            )
+        )
+
+        mock_daemon = MagicMock()
+        with patch(
+            "cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon
+        ):
+            state = load_state()
+            flag_silently_idle_daemon_sessions(
+                state,
+                now=now,
+                native_live={"fake-short-id"},
+                config=_auto_config(),
+            )
+
+        events = read_events(
+            consumer="test-578-event",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["session_id"] == "578-event"
+        assert payload["status"] == "shipped"
+        assert payload["salvaged"] is True
+        assert payload["crashed"] is False
+
+    def test_review_pending_approval_sentinel_routes_blocked_on_user(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression: review_pending_approval-shaped sentinel emitted without
+        signal_stop routes task to BLOCKED_ON_USER (PAUSED_FOR_USER_INPUT path),
+        not stuck as RUNNING indefinitely. See #633."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        worktree = tmp_path / "wt-578-rpa"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 5, 5, tzinfo=UTC)
+
+        ticket_id = "578-rpa"
+        sess = _mk_headless_daemon_session(ticket_id, worktree, started_at)
+        sess.last_result = None
+        payload = _make_terminal_payload("review_pending_approval", ticket_id)
+        _write_salvage_transcript(home, worktree, "claude-578-uuid-8", payload)
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id=ticket_id,
+                        # stage_reached=stage3_review in the payload above must
+                        # match the seeded task's stage -- otherwise #1019's
+                        # stage-mismatch guard refuses to route it (a task at
+                        # the default Stage.PLAN could never realistically
+                        # emit a review-stage sentinel).
+                        stage=Stage.REVIEW,
+                    )
+                ]
+            )
+        )
+
+        mock_daemon = MagicMock()
+        with patch(
+            "cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon
+        ):
+            state = load_state()
+            blocked, _salvage = flag_silently_idle_daemon_sessions(
+                state,
+                now=now,
+                native_live={"fake-short-id"},
+                config=_auto_config(),
+            )
+
+        assert blocked == []
+        reloaded = next(s for s in load_state().sessions if s.id == ticket_id)
+        assert reloaded.status == SessionStatus.COMPLETED
+        assert reloaded.last_result is not None
+        assert reloaded.last_result["status"] == "review_pending_approval"
+
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        # review_pending_approval is in PAUSED_FOR_USER_INPUT_STATUSES (#633).
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_route_emitted_sentinel_refusal_stops_refiring(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """GitHub #1149: a stage-mismatch refusal stamps a paused_status-only
+        marker on session.last_result AND persists it, so the doomed candidate
+        is not re-proposed on a subsequent tick (extends #1031's non-orphan
+        guard with the actual anti-refiring fix).
+
+        Same shape as ``test_idle_stage_mismatch_does_not_orphan_task_or_
+        complete_session`` (task row already advanced past the sentinel's
+        stage_reached), but drives the full ``flag_silently_idle_daemon_
+        sessions`` act phase end-to-end, then reloads from disk to prove the
+        marker survived. This exercises the #1149 save-gate fix: on a
+        pure-refusal tick the ``accepted`` routed-sentinel list is empty, so
+        ``has_dispositions`` is False; without ``_apply_idle_routed_mutations``
+        signalling that it mutated session state, ``_act_on_idle_candidates``
+        would skip ``save_state`` and lose the marker, and the candidate would
+        re-fire on the next (fresh ``load_state``) tick forever.
+        """
+        from cw.reconcile import ProposedAction, _detect_idle_candidates
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        worktree = tmp_path / "wt-1149-refusal"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = started_at + timedelta(seconds=400)
+
+        sess = _mk_headless_daemon_session("1149-refusal", worktree, started_at)
+        sess.last_result = None  # sentinel NOT yet consumed -> ROUTE_EMITTED eligible
+        payload = _stage_complete_payload()  # stage_reached="stage2_impl" (IMPL)
+        payload["ticket_id"] = "1149-refusal"
+        _write_salvage_transcript(home, worktree, "claude-1149-refusal", payload)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+        task = TicketTask(
+            ticket_id="1149-refusal",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="1149-refusal",
+            # Row already advanced past IMPL by the time this stale IMPL-leg
+            # sentinel is discovered -- the #986 shape.
+            stage=Stage.REVIEW,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        mock_daemon = MagicMock()
+        with patch(
+            "cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon
+        ):
+            flag_silently_idle_daemon_sessions(
+                state,
+                now=now,
+                native_live={"fake-short-id"},
+                config=_auto_config(),
+                task_by_ticket={"1149-refusal": task},
+            )
+
+        # Refusal must not complete the still-alive surface, and the marker must
+        # be PERSISTED (the #1149 save-gate fix) so the next fresh-load tick sees
+        # it. Read back from disk, not the in-memory object.
+        mock_daemon.stop.assert_not_called()
+        reloaded_state = load_state()
+        reloaded = next(s for s in reloaded_state.sessions if s.id == "1149-refusal")
+        assert reloaded.status != SessionStatus.COMPLETED
+        assert reloaded.last_result == {
+            "paused_status": _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
+        }
+        task_after = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == "1149-refusal"
+        )
+        assert task_after.stage == Stage.REVIEW
+        assert task_after.status == QueueItemStatus.RUNNING
+
+        # Second tick over the reloaded (marked) session: the marker flips
+        # `last_result is None` false, so the ROUTE_EMITTED_SENTINEL candidate is
+        # not re-proposed -- the refusal loop is broken.
+        candidates_2 = _detect_idle_candidates(
+            reloaded_state,
+            now=now + timedelta(seconds=1),
+            native_live={"fake-short-id"},
+            config=_auto_config(),
+            task_by_ticket={"1149-refusal": task_after},
+        )
+        assert all(
+            c.proposed_action != ProposedAction.ROUTE_EMITTED_SENTINEL
+            for c in candidates_2
+        )
+
+    def test_route_emitted_sentinel_refusal_marker_is_not_terminal_sentinel(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The #1149 refusal marker carries no "status" key, so
+        _has_terminal_sentinel stays False -- the session is not mistaken for
+        genuinely terminal and the ordinary idle-stall machinery still runs."""
+        from cw.reconcile import _detect_idle_candidates
+        from cw.reconcile.idle import _apply_idle_routed_mutations
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        worktree = tmp_path / "wt-1149-not-terminal"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = started_at + timedelta(seconds=400)
+
+        sess = _mk_headless_daemon_session("1149-not-terminal", worktree, started_at)
+        sess.last_result = None
+        payload = _stage_complete_payload()
+        payload["ticket_id"] = "1149-not-terminal"
+        _write_salvage_transcript(home, worktree, "claude-1149-nt", payload)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+        task = TicketTask(
+            ticket_id="1149-not-terminal",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="1149-not-terminal",
+            stage=Stage.REVIEW,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        candidates = _detect_idle_candidates(
+            state,
+            now=now,
+            native_live={"fake-short-id"},
+            config=_auto_config(),
+            task_by_ticket={"1149-not-terminal": task},
+        )
+        session_by_id = {s.id: s for s in state.sessions}
+        _apply_idle_routed_mutations(session_by_id, candidates, now=now)
+
+        reloaded = session_by_id["1149-not-terminal"]
+        assert reloaded.last_result == {
+            "paused_status": _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
+        }
+        assert _has_terminal_sentinel(reloaded) is False
+
+    def test_idle_later_stage_sentinel_routes_forward_instead_of_looping(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """GitHub #1149 R1, idle.py wiring: a later-stage sentinel (a legitimate
+        self-escalation the row hasn't caught up to) routes forward via the
+        shared staged-advance authority through the full alive-idle sweep
+        (flag_silently_idle_daemon_sessions -> _detect_idle_candidates ->
+        _apply_idle_routed_mutations) -- it does NOT hit the #1149 R4 refusal
+        branch, so no paused_status marker is stamped and the session
+        completes normally. Mirrors
+        test_phantom_later_stage_sentinel_routes_forward_instead_of_looping's
+        coverage for the idle-sweep call path, which was previously untested.
+        """
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        worktree = tmp_path / "wt-1149-idle-later"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = started_at + timedelta(seconds=400)
+
+        sess = _mk_headless_daemon_session("1149-idle-later", worktree, started_at)
+        sess.last_result = None  # sentinel NOT yet consumed -> ROUTE_EMITTED eligible
+        payload = _stage_complete_payload()
+        payload["ticket_id"] = "1149-idle-later"
+        payload["status"] = "blocked"
+        payload["stage_reached"] = "stage4b_pr_create"  # FINALIZE
+        payload["blocker"] = {
+            "stage": "stage4b_pr_create",
+            "reason": "merge_gate_failed",
+            "retry_eligible": False,
+            "details": "self-escalated",
+            "next_actions": [],
+        }
+        _write_salvage_transcript(home, worktree, "claude-1149-idle-later", payload)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+        task = TicketTask(
+            ticket_id="1149-idle-later",
+            client="client-a",
+            status=QueueItemStatus.RUNNING,
+            session_id="1149-idle-later",
+            # IMPL is EARLIER than the sentinel's mapped FINALIZE stage ->
+            # "later" position: a legitimate self-escalation, walked forward.
+            stage=Stage.IMPL,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        mock_daemon = MagicMock()
+        with patch(
+            "cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon
+        ):
+            blocked, _salvage = flag_silently_idle_daemon_sessions(
+                state,
+                now=now,
+                native_live={"fake-short-id"},
+                config=_auto_config(),
+                task_by_ticket={"1149-idle-later": task},
+            )
+
+        assert blocked == []
+        reloaded = next(s for s in load_state().sessions if s.id == "1149-idle-later")
+        assert reloaded.status == SessionStatus.COMPLETED
+        assert reloaded.completed_reason == CompletionReason.NORMAL
+        assert reloaded.last_result is not None
+        assert reloaded.last_result.get("paused_status") is None
+        mock_daemon.stop.assert_called_once_with("fake-short-id")
+
+        task_after = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == "1149-idle-later"
+        )
+        # Walk IMPL -> REVIEW -> FINALIZE, then Rule 5 routes the blocked
+        # status at the landed FINALIZE stage.
+        assert task_after.stage == Stage.FINALIZE
+        assert task_after.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+# ---------------------------------------------------------------------------
+# _apply_sentinel_to_task — staged advance tests (GitHub issue #698)
+# Regression coverage for the reconcile path that was unreachable in B2:
+# a plan_pending_approval sentinel with small scope must advance PLAN→IMPL
+# via _apply_sentinel_to_task, not fall through to BLOCKED_ON_USER via the
+# stale monolith mapping.
+# ---------------------------------------------------------------------------
+
+
+def _plan_pending_approval_sentinel(
+    ticket_id: str, scope_tier: str | None
+) -> AutoDevResult:
+    """Build a valid AutoDevResult for status=plan_pending_approval at stage1_plan.
+
+    Reproduces the real #663 dogfood sentinel: PLAN stage exits before impl
+    so lines_actual=None and scope.tier may be None (B2 pre-impl exempt rule).
+    """
+    return AutoDevResult.model_validate(
+        {
+            "schema_version": 4,
+            "ticket_id": ticket_id,
+            "status": "plan_pending_approval",
+            "stage_reached": "stage1_plan",
+            "scope": {
+                "tier": scope_tier,
+                "files": 4,
+                "lines_estimate": 120,
+                "lines_actual": None,
+                "forbidden_touched": False,
+            },
+            "plan_source": "github_issue_existing",
+            "branch": None,
+            "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+            "health": {
+                # None allowed pre-impl (§3.3 scope.tier/confidence exemption)
+                "lowest_agent_confidence": None,
+                "any_incomplete_risk": False,
+                "shortcuts": [],
+                "recommendation": "PROCEED",
+                "downgrade_applied": False,
+            },
+            "next_actions": ["user_approve_plan"],
+        }
+    )
+
+
+class TestApplySentinelToTaskStagedAdvance:
+    """Regression tests for GitHub #698: _apply_sentinel_to_task must use the
+    staged advance decision (apply_staged_decision) rather than the stale
+    monolith mapping that predates B2.
+    """
+
+    def test_plan_pending_approval_small_scope_advances_plan_to_impl(
+        self,
+        tmp_config_dir: Path,
+    ) -> None:
+        """plan_pending_approval + scope.tier='small' → PENDING at IMPL stage.
+
+        This is the exact production failure from #698: the monolith path
+        routed this sentinel to BLOCKED_ON_USER; the staged path auto-advances.
+        """
+        client_name = "staged-client"
+        _write_staged_clients_yaml(tmp_config_dir, client_name)
+
+        ticket_id = "GH-698-small"
+        session_id = "sess-698-small"
+
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client=client_name,
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.PLAN,
+            scope_hint="small",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        sentinel = _plan_pending_approval_sentinel(ticket_id, scope_tier="small")
+        _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.PENDING, (
+            f"expected PENDING (staged advance), got {t.status!r} — "
+            "monolith mapping was BLOCKED_ON_USER (#698)"
+        )
+        assert t.stage == Stage.IMPL, (
+            f"expected stage=IMPL after PLAN→IMPL advance, got {t.stage!r}"
+        )
+
+    def test_status_unknown_blocked_does_not_complete_task(
+        self,
+        tmp_config_dir: Path,
+    ) -> None:
+        """#750: an unknown-status sentinel must NOT be marked COMPLETED.
+
+        A worker that emitted status='proceed' (not a valid Status) parses to a
+        BlockedResult(status_unknown). The old `else → COMPLETED` fallback
+        silently marked the ticket shipped despite no branch/PR (the #728 loss).
+        It must route to FAILED — never claim false success.
+        """
+        client_name = "staged-client"
+        _write_staged_clients_yaml(tmp_config_dir, client_name)
+        ticket_id = "GH-750"
+        session_id = "sess-750"
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client=client_name,
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.PLAN,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        sentinel = parse_stdout(
+            "<<<AUTO_DEV_RESULT\n"
+            '{"schema_version": 4, "ticket_id": "GH-750", "status": "proceed"}\n'
+            "AUTO_DEV_RESULT>>>"
+        )
+        assert isinstance(sentinel, BlockedResult)
+        assert sentinel.blocker.reason == "status_unknown"
+
+        _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.FAILED, (
+            f"unknown-status sentinel must not COMPLETE (silent false-ship); "
+            f"got {t.status!r}"
+        )
+
+    def test_plan_pending_approval_null_tier_scope_hint_small_advances(
+        self,
+        tmp_config_dir: Path,
+    ) -> None:
+        """plan_pending_approval + scope.tier=None + scope_hint='small' → IMPL.
+
+        Reproduces the #663 dogfood shape: real PLAN sentinels emit tier=None
+        (lines_actual unknown pre-impl). The #696 scope_hint fallback must
+        reach production via the reconcile path, not just the consume path.
+        """
+        client_name = "staged-client"
+        _write_staged_clients_yaml(tmp_config_dir, client_name)
+
+        ticket_id = "GH-698-null-tier"
+        session_id = "sess-698-null-tier"
+
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client=client_name,
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.PLAN,
+            scope_hint="small",  # fallback tier source per #696
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        sentinel = _plan_pending_approval_sentinel(ticket_id, scope_tier=None)
+        _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.PENDING
+        assert t.stage == Stage.IMPL
+
+    def test_plan_pending_approval_large_scope_blocks(
+        self,
+        tmp_config_dir: Path,
+    ) -> None:
+        """plan_pending_approval + scope.tier='large' → BLOCKED_ON_USER (gate)."""
+        client_name = "staged-client"
+        _write_staged_clients_yaml(tmp_config_dir, client_name)
+
+        ticket_id = "GH-698-large"
+        session_id = "sess-698-large"
+
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client=client_name,
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.PLAN,
+            scope_hint="large",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        sentinel = _plan_pending_approval_sentinel(ticket_id, scope_tier="large")
+        _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+def _blocked_autodev_payload(ticket_id: str) -> dict[str, Any]:
+    """Minimal valid AutoDevResult with status='blocked' at IMPL.
+
+    Routes through STAGE_FAILURE (Rule 5) → BLOCKED_ON_USER when applied.
+    """
+    return {
+        "schema_version": 4,
+        "ticket_id": ticket_id,
+        "status": "blocked",
+        "stage_reached": "stage2_impl",
+        "scope": {
+            "tier": "small",
+            "files": 1,
+            "lines_estimate": 10,
+            "lines_actual": 5,
+            "forbidden_touched": False,
+        },
+        "plan_source": "github_issue_existing",
+        "branch": None,
+        "worktree_path": None,
+        "fork_point_sha": None,
+        "commits": [],
+        "pr": None,
+        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": "HIGH",
+            "any_incomplete_risk": False,
+            "shortcuts": [],
+            "recommendation": "EXIT_FOR_HUMAN_REVIEW",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        },
+        "friction_highlights": [],
+        "blocker": {
+            "stage": "stage2_impl",
+            "reason": "agent_block",
+            "details": "still failing",
+        },
+        "next_actions": [],
+    }
+
+
+class TestApplySentinelToTaskLateRescue:
+    """GitHub #918: a late Stop-hook sentinel must rescue an idle-parked task.
+
+    The idle watchdog can park a still-completing session BLOCKED_ON_USER
+    (retaining session_id). When the late sentinel arrives, the widened
+    _apply_sentinel_to_task lookup re-finds the parked task and routes it
+    through the shared _route_staged_decision. Returns True iff a parked task
+    was rescued via the AutoDevResult arm.
+    """
+
+    def _seed_parked_task(
+        self,
+        tmp_config_dir: Path,
+        *,
+        ticket_id: str,
+        session_id: str,
+        stage: Stage,
+        scope_hint: str = "small",
+        status: QueueItemStatus = QueueItemStatus.BLOCKED_ON_USER,
+    ) -> None:
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=status,
+            session_id=session_id,  # retained across the park (#918)
+            stage=stage,
+            scope_hint=scope_hint,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+    def test_late_stage_complete_rescues_parked_task_nonterminal(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Parked at IMPL + late stage_complete → PENDING at REVIEW; return True."""
+        ticket_id, session_id = "GH-918-nonterm", "sess-918-nonterm"
+        self._seed_parked_task(
+            tmp_config_dir,
+            ticket_id=ticket_id,
+            session_id=session_id,
+            stage=Stage.IMPL,
+        )
+        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+
+        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel).rescued
+
+        assert rescued is True
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.PENDING
+        assert t.stage == Stage.REVIEW
+
+    def test_late_shipped_rescues_parked_task_terminal_preserves_pr_url(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Parked at FINALIZE + late shipped → COMPLETED + pr_url; return True."""
+        ticket_id, session_id = "GH-918-ship", "sess-918-ship"
+        self._seed_parked_task(
+            tmp_config_dir,
+            ticket_id=ticket_id,
+            session_id=session_id,
+            stage=Stage.FINALIZE,
+        )
+        sentinel = AutoDevResult.model_validate(_shipped_salvage_payload())
+
+        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel).rescued
+
+        assert rescued is True
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.COMPLETED
+        assert t.disposition == "shipped"
+        assert t.pr_url == "https://github.com/foo/bar/pull/99"
+
+    def test_late_no_op_rescues_parked_task(self, tmp_config_dir: Path) -> None:
+        """Parked + late no_op → COMPLETED disposition='no_op'; return True."""
+        ticket_id, session_id = "GH-918-noop", "sess-918-noop"
+        self._seed_parked_task(
+            tmp_config_dir,
+            ticket_id=ticket_id,
+            session_id=session_id,
+            stage=Stage.PLAN,
+        )
+        sentinel = AutoDevResult.model_validate(_no_op_salvage_payload())
+
+        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel).rescued
+
+        assert rescued is True
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.COMPLETED
+        assert t.disposition == "no_op"
+
+    def test_late_blocked_autodevresult_reparks_parked_task(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Parked + late AutoDevResult(blocked) → stays BLOCKED_ON_USER; return True.
+
+        The #923 disposition re-stamp is allowed (Comment 2 rule 5) — rescue
+        reports True because the AutoDevResult arm handled a parked task.
+        """
+        ticket_id, session_id = "GH-918-blk", "sess-918-blk"
+        self._seed_parked_task(
+            tmp_config_dir,
+            ticket_id=ticket_id,
+            session_id=session_id,
+            stage=Stage.IMPL,
+        )
+        sentinel = AutoDevResult.model_validate(_blocked_autodev_payload(ticket_id))
+
+        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel).rescued
+
+        assert rescued is True
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert t.disposition == "blocked"
+
+    def test_late_blocked_result_leaves_parked_task_untouched(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Parked + late BlockedResult → task untouched; return False (Comment 9).
+
+        A malformed/unknown-status sentinel carries no success signal, so the
+        parked task must not be mutated (no false FAILED, no false completion).
+        """
+        ticket_id, session_id = "GH-918-blkres", "sess-918-blkres"
+        self._seed_parked_task(
+            tmp_config_dir,
+            ticket_id=ticket_id,
+            session_id=session_id,
+            stage=Stage.IMPL,
+        )
+        sentinel = parse_stdout(
+            "<<<AUTO_DEV_RESULT\n"
+            f'{{"schema_version": 4, "ticket_id": "{ticket_id}", '
+            '"status": "proceed"}\n'
+            "AUTO_DEV_RESULT>>>"
+        )
+        assert isinstance(sentinel, BlockedResult)
+        assert sentinel.blocker.reason == "status_unknown"
+
+        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel).rescued
+
+        assert rescued is False
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert t.disposition is None
+
+    def test_running_task_autodevresult_returns_false(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """RUNNING task + stage_complete advances (existing #698) and returns False.
+
+        Only a parked (BLOCKED_ON_USER) rescue reports True; the live RUNNING
+        path returns False even though it advances.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-918-run", "sess-918-run"
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            scope_hint="small",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+
+        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel).rescued
+
+        assert rescued is False
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.PENDING
+        assert t.stage == Stage.REVIEW
+
+    def test_running_blocked_result_unchanged(self, tmp_config_dir: Path) -> None:
+        """RUNNING task + validation_failed BlockedResult still routes as today.
+
+        Regression guard on the widened lookup: the BlockedResult arms must run
+        only for RUNNING and behave exactly as before (PENDING + clear session).
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-918-runblk", "sess-918-runblk"
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            attempts=1,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        sentinel = parse_stdout(
+            "<<<AUTO_DEV_RESULT\n"
+            "{\n"
+            '  "schema_version": 4,\n'
+            f'  "ticket_id": "{ticket_id}",\n'
+            '  "status": "shipped",\n'
+            '  "stage_reached": "stage5_post_create",\n'
+            '  "scope": {"tier": "small", "files": 1, "lines_estimate": 10, '
+            '"lines_actual": 5, "forbidden_touched": false},\n'
+            '  "plan_source": "github_issue_existing",\n'
+            '  "branch": "auto-dev/918",\n'
+            '  "worktree_path": null,\n'
+            '  "fork_point_sha": "abc123",\n'
+            '  "commits": ["def456"],\n'
+            '  "pr": null,\n'
+            '  "review": {"must_fix_initial": 0, "should_fix": 0, '
+            '"fix_cycles_used": 0},\n'
+            '  "health": {"lowest_agent_confidence": "HIGH", '
+            '"any_incomplete_risk": false, "shortcuts": [], '
+            '"recommendation": "PROCEED", "downgrade_applied": false, '
+            '"fix_loop_escalated": false},\n'
+            '  "friction_highlights": [],\n'
+            '  "blocker": null,\n'
+            '  "next_actions": ["wait_for_ci"]\n'
+            "}\n"
+            "AUTO_DEV_RESULT>>>"
+        )
+        assert isinstance(sentinel, BlockedResult)
+        assert sentinel.blocker.reason == "validation_failed"
+
+        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert outcome.rescued is False
+        assert outcome.routed is True
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.PENDING
+        assert t.session_id is None
+
+    def test_running_no_result_emitted_requeues(self, tmp_config_dir: Path) -> None:
+        """RUNNING task + transient no_result_emitted → PENDING, session cleared.
+
+        Regression guard on the extracted _route_blocked_result_to_task helper:
+        the transient parse-failure branch must still re-queue a RUNNING task.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-918-transient", "sess-918-transient"
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            attempts=1,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        sentinel = parse_stdout("narrative only, no sentinel block emitted\n")
+        assert isinstance(sentinel, BlockedResult)
+        assert sentinel.blocker.reason == "no_result_emitted"
+
+        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert outcome.rescued is False
+        assert outcome.routed is True
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.PENDING
+        assert t.session_id is None
+
+    def test_late_sentinel_rescues_signoff_parked_task(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A signoff-parked (AWAITING_OPERATOR_SIGNOFF) task is rescued by a late
+        sentinel the same way a BLOCKED_ON_USER task is (#990).
+
+        No signoff is configured on `_write_staged_clients_yaml`'s client, so
+        this exercises only the widened membership lookup (touch-point #30)
+        -- not the signoff gate re-firing.
+        """
+        ticket_id, session_id = "GH-990-signoff", "sess-990-signoff"
+        self._seed_parked_task(
+            tmp_config_dir,
+            ticket_id=ticket_id,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        )
+        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+
+        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel).rescued
+
+        assert rescued is True
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.PENDING
+        assert t.stage == Stage.REVIEW
+
+    def test_late_sentinel_re_parks_signoff_ticket_at_review_idempotently(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """The realistic signoff-rescue case: a task parked AWAITING_OPERATOR_
+        SIGNOFF at Stage.REVIEW (the only stage the gate ever fires at) with
+        signoff still configured, re-entering via a late duplicate sentinel.
+
+        Unlike ``test_late_sentinel_rescues_signoff_parked_task`` (which seeds
+        an IMPL-stage state unreachable through any real gate-firing path, to
+        isolate the widened membership lookup), this seeds the actual
+        production state: the gate re-fires on re-entry through
+        ``_route_staged_decision`` and re-parks the ticket at
+        AWAITING_OPERATOR_SIGNOFF -- a true no-op, not an accidental advance
+        to FINALIZE (#990).
+        """
+        ticket_id, session_id = "GH-990-signoff-review", "sess-990-signoff-review"
+        self._seed_parked_task(
+            tmp_config_dir,
+            ticket_id=ticket_id,
+            session_id=session_id,
+            stage=Stage.REVIEW,
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        )
+        store = load_dev_queue()
+        store.tasks[0].signoff = "operator"
+        save_dev_queue(store)
+        # stage_reached must match the seeded Stage.REVIEW task -- the shared
+        # _stage_complete_payload() fixture carries stage_reached=stage2_impl
+        # (IMPL), which would now be a stage-mismatch refusal under #1019's
+        # guard rather than exercising the #918 rescue arm's signoff re-park.
+        payload = _stage_complete_payload()
+        payload["stage_reached"] = "stage3_review"
+        sentinel = AutoDevResult.model_validate(payload)
+
+        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel).rescued
+
+        assert rescued is True
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+        assert t.stage == Stage.REVIEW
+        assert t.disposition == "signoff_gate"
+
+    def test_late_sentinel_stage_mismatch_refuses_rescue_reports_not_rescued(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A stale sentinel against a parked task refuses the #918 rescue (#1019).
+
+        Parked at REVIEW; the late sentinel carries stage_reached=stage2_impl
+        (a previous IMPL leg). The shared stage-mismatch guard refuses to route
+        it -- the task must stay untouched at REVIEW, and rescued must report
+        False (no rescue actually happened), not True.
+        """
+        ticket_id, session_id = "GH-1019-mismatch-parked", "sess-1019-mismatch-parked"
+        self._seed_parked_task(
+            tmp_config_dir,
+            ticket_id=ticket_id,
+            session_id=session_id,
+            stage=Stage.REVIEW,
+        )
+        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+
+        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert outcome.rescued is False
+        assert outcome.routed is False
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert t.stage == Stage.REVIEW
+        assert t.disposition is None
+
+    def test_running_task_stage_mismatch_returns_not_routed(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """RUNNING + mismatched sentinel → SentinelRouteOutcome(False, False) (#1019).
+
+        The task stays RUNNING (no status transition, no disposition stamp) --
+        a true no-op on the mismatch path, mirroring the parked-task refusal.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-1019-mismatch-running", "sess-1019-mismatch-running"
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.REVIEW,
+            scope_hint="small",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+
+        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert outcome.rescued is False
+        assert outcome.routed is False
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.RUNNING
+        assert t.stage == Stage.REVIEW
+        assert t.disposition is None
+
+    def test_apply_sentinel_to_task_target_none_returns_routed_true(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """No matching task found → SentinelRouteOutcome(rescued=False, routed=True).
+
+        Regression guard: a lookup miss has nothing to refuse, so `routed` must
+        stay True -- callers that gate session completion on `routed` (the
+        phantom sweep, #1019) must still complete the session in this case,
+        matching pre-#1019 behavior for an unmatched ticket_id/session_id pair.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+
+        outcome = _apply_sentinel_to_task(
+            "GH-1019-no-target", "sess-no-target", sentinel
+        )
+
+        assert outcome == SentinelRouteOutcome(rescued=False, routed=True)
+
+
+class TestApplySentinelToTaskRoutedFalseFailedRace:
+    """GitHub #1189: `routed` must reflect a FAILED-landing BlockedResult write,
+    and a lookup miss must distinguish "raced to terminal" from "no such task".
+
+    Pre-#1189, ``_route_blocked_result_to_task`` returned ``None`` and its sole
+    call site discarded the value, so ``routed`` stayed at its default ``True``
+    even when the call just landed the task terminal-FAILED. Separately, the
+    lookup-miss branch conflated "no matching task at all" with "a matching
+    task exists but is outside OCCUPIED_LANE_STATUSES" (raced to terminal by a
+    concurrent caller) -- both returned ``routed=True``. Both must now report
+    ``routed=False`` so callers do not complete/rescue a session whose task
+    independently landed FAILED.
+    """
+
+    def test_running_task_blocked_result_deterministic_failure_returns_routed_false(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """RUNNING + deterministic parse-failure BlockedResult → routed=False."""
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-1189-schema", "sess-1189-schema"
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            attempts=1,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        sentinel = BlockedResult(
+            blocker=Blocker(
+                stage="unknown",
+                reason="schema_version_unsupported",
+                details="test: unsupported schema_version",
+            )
+        )
+
+        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert outcome.routed is False
+        assert outcome.rescued is False
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.FAILED
+        assert t.disposition == "abandoned"
+        # GitHub #1266: the last_blocked_result diagnostic write is scoped to
+        # the unrecognized-reason catch-all only -- this deterministic-parse-
+        # failure branch is untouched and must leave it unset.
+        assert t.last_blocked_result is None
+
+    def test_running_task_blocked_result_validation_failed_at_cap_returns_routed_false(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """RUNNING + validation_failed at the attempt cap → routed=False, FAILED."""
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-1189-vfcap", "sess-1189-vfcap"
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            attempts=_VALIDATION_FAILED_MAX_ATTEMPTS,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        sentinel = BlockedResult(
+            blocker=Blocker(
+                stage="unknown",
+                reason=BLOCKER_REASON_VALIDATION_FAILED,
+                details="test: validation failed at cap",
+            )
+        )
+
+        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert outcome.routed is False
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.FAILED
+        assert t.disposition == "abandoned"
+        # GitHub #1266: the last_blocked_result diagnostic write is scoped to
+        # the unrecognized-reason catch-all only -- this validation_failed-
+        # at-cap branch is untouched and must leave it unset.
+        assert t.last_blocked_result is None
+
+    def test_running_task_blocked_result_unknown_reason_returns_routed_false(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """RUNNING + unrecognised blocker reason → routed=False, FAILED.
+
+        Companion/superset of ``test_signal_stop_unknown_blocker_reason_marks_
+        failed`` (tests/test_cli.py), which pins the same call through the real
+        CLI-adjacent path and now also asserts ``outcome.routed is False``.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-1189-unknown", "sess-1189-unknown"
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            attempts=1,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        sentinel = BlockedResult(
+            blocker=Blocker(
+                stage="unknown",
+                reason="unknown_reason_xyz",
+                details="test: unrecognised reason code",
+            )
+        )
+
+        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert outcome.routed is False
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.FAILED
+        assert t.disposition == "abandoned"
+        # GitHub #1266: the unrecognized-reason catch-all now persists the
+        # rejected sentinel.
+        assert t.last_blocked_result == sentinel.model_dump(mode="json")
+
+    def test_route_blocked_result_catch_all_writes_last_blocked_result(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """GitHub #1266: the unrecognized-reason catch-all persists the
+        rejected sentinel.
+
+        Calls _route_blocked_result_to_task directly with an
+        unrecognized-reason BlockedResult. Confirms the existing FAILED/
+        abandoned landing is unchanged AND the new diagnostic write lands
+        so an operator can distinguish "no sentinel yet"
+        (last_blocked_result=None) from "a rejected sentinel landed this
+        FAILED."
+        """
+        from cw.reconcile._shared import _route_blocked_result_to_task
+
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        target = TicketTask(
+            ticket_id="GH-1266-catchall",
+            client="staged-client",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-1266-catchall",
+            stage=Stage.IMPL,
+            attempts=1,
+        )
+        sentinel = BlockedResult(
+            blocker=Blocker(
+                stage="unknown",
+                reason="status_unknown",
+                details="test: unresolved placeholder sentinel",
+            )
+        )
+
+        routed = _route_blocked_result_to_task(target, sentinel)
+
+        assert routed is False
+        assert target.status == QueueItemStatus.FAILED
+        assert target.disposition == "abandoned"
+        assert target.last_blocked_result == sentinel.model_dump(mode="json")
+
+    def test_apply_sentinel_to_task_race_already_failed_task_returns_routed_false(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A same-ticket/session task already raced to FAILED → routed=False.
+
+        Simulates a concurrent winner's ``_route_blocked_result_to_task`` write
+        landing FAILED just before this caller's own lookup runs. The task row
+        must be left byte-for-byte unchanged -- this call has nothing to route.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-1189-race", "sess-1189-race"
+        completed_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.FAILED,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            disposition="abandoned",
+            completed_at=completed_at,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        # An arbitrary valid sentinel -- must never reach the dispatch branch,
+        # since the lookup misses (task is outside OCCUPIED_LANE_STATUSES).
+        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+
+        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert outcome == SentinelRouteOutcome(rescued=False, routed=False)
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.FAILED
+        assert t.disposition == "abandoned"
+        assert t.completed_at == completed_at
+
+    def test_apply_sentinel_to_task_race_miss_logs_warning(
+        self, tmp_config_dir: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A race-miss (matched-but-excluded lookup) logs a WARNING.
+
+        Companion to ``test_apply_sentinel_to_task_race_already_failed_task_
+        returns_routed_false``: this pins the operator-visibility signal
+        added alongside that fix -- before it, this branch resolved with no
+        signal at all distinguishing it from "no such task ever existed."
+        """
+        import logging
+
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-1189-race-log", "sess-1189-race-log"
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.FAILED,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            disposition="abandoned",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+
+        with caplog.at_level(logging.WARNING):
+            outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert outcome.routed is False
+        assert any(
+            "sentinel_race_miss_detected" in rec.message for rec in caplog.records
+        )
+        assert any(ticket_id in rec.message for rec in caplog.records)
+
+    def test_apply_sentinel_to_task_unrelated_task_present_still_returns_routed_true(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A non-empty store with no matching row still reports routed=True.
+
+        Companion to ``test_apply_sentinel_to_task_target_none_returns_routed_
+        true`` (which pins the fully-empty-store case): this pins the
+        non-empty-store, no-match variant, proving the loop doesn't
+        false-positive the race flag on an unrelated row.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        other_task = TicketTask(
+            ticket_id="GH-1189-other",
+            client="staged-client",
+            status=QueueItemStatus.RUNNING,
+            session_id="sess-1189-other",
+            stage=Stage.IMPL,
+        )
+        save_dev_queue(DevQueueStore(tasks=[other_task]))
+        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+
+        outcome = _apply_sentinel_to_task(
+            "GH-1189-no-match", "sess-1189-no-match", sentinel
+        )
+
+        assert outcome == SentinelRouteOutcome(rescued=False, routed=True)
+
+    def test_lookup_excluded_row_before_occupied_row_still_routes(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """An excluded-status row preceding the occupied match must not short-
+        circuit the loop to a false race-miss (post-review amendment A2).
+
+        Seeds TWO tasks sharing the same ticket_id+session_id shape -- an
+        excluded-status (FAILED) row ordered before the occupied (RUNNING)
+        row -- and asserts the loop keeps scanning and routes to the occupied
+        match rather than reporting routed=False on the first (excluded) hit.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-1189-order", "sess-1189-order"
+        excluded_row = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.FAILED,
+            session_id=session_id,
+            stage=Stage.IMPL,
+            disposition="abandoned",
+        )
+        occupied_row = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.IMPL,
+        )
+        save_dev_queue(DevQueueStore(tasks=[excluded_row, occupied_row]))
+        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+
+        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert outcome.routed is True
+        t = next(
+            t
+            for t in load_dev_queue().tasks
+            if t.ticket_id == ticket_id and t.status != QueueItemStatus.FAILED
+        )
+        assert t.status == QueueItemStatus.PENDING
+        assert t.stage == Stage.REVIEW
+
+    def test_lookup_terminal_row_with_cleared_session_id_falls_to_true_miss(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A terminal row whose session_id was cleared must not match the
+        excluded-status branch (post-review amendment A3, soundness pin).
+
+        The R3 lookup split's safety rests on an assumed precondition: every
+        write that lands a task terminal with a cleared session_id
+        (``cancel_ticket``/``cancel_task_for_session``/the PENDING branches of
+        ``_route_blocked_result_to_task``) clears ``session_id`` in the SAME
+        write as the status transition, so a terminal row should never carry a
+        session_id that still matches an in-flight caller's lookup. This test
+        exercises that assumed precondition directly (not a system-wide
+        guarantee across every write site): given a CANCELLED task with
+        session_id=None, the lookup must fall through to the truly-absent
+        (routed=True) case, not the excluded-status-match (routed=False) case.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        ticket_id, session_id = "GH-1189-cleared", "sess-1189-cleared"
+        stale_row = TicketTask(
+            ticket_id=ticket_id,
+            client="staged-client",
+            status=QueueItemStatus.CANCELLED,
+            session_id=None,
+            stage=Stage.IMPL,
+            disposition="cancelled",
+        )
+        save_dev_queue(DevQueueStore(tasks=[stale_row]))
+        sentinel = AutoDevResult.model_validate(_stage_complete_payload())
+
+        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+
+        assert outcome == SentinelRouteOutcome(rescued=False, routed=True)
