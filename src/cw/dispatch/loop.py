@@ -26,9 +26,7 @@ from cw.config import (
     load_effective_clients,
     load_effective_config,
     load_state,
-    load_usage_limited_until,
     save_state,
-    save_usage_limited_until,
     sessions_lock,
 )
 from cw.dev_queue import (
@@ -36,6 +34,7 @@ from cw.dev_queue import (
     load_dev_queue,
     save_dev_queue,
 )
+from cw.dispatch_state import load_usage_limited_until, save_usage_limited_until
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import (
     ConfigValidationError,
@@ -265,7 +264,7 @@ def _merge_persisted_usage_limited_until(
     persisted. Merge rather than overwrite: take the later of {in-memory,
     on-disk}, treating None as "no window". ``load_usage_limited_until()``
     returns None for a file that is absent, unreadable, malformed, OR merely
-    expired (config.py) -- a bare assignment would let a transient disk-read
+    expired (dispatch_state.py) -- a bare assignment would let a transient disk-read
     failure silently reopen the spawn gate mid-backoff. A read must never
     shorten an active window.
     """
