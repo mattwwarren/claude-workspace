@@ -133,7 +133,7 @@ def _revert_running_tasks_for_sessions(
 
 def _collect_timed_out_merged_candidates(
     sessions: list[Session],
-    task_by_ticket: dict[str, TicketTask],
+    task_by_ticket: dict[tuple[str, str], TicketTask],
     cutoff: datetime,
 ) -> list[tuple[Session, str]]:
     """Cheap pre-gh filter for ``complete_timed_out_merged_tasks`` (Phase 1).
@@ -158,7 +158,7 @@ def _collect_timed_out_merged_candidates(
             continue
         # Idempotency gate: only PENDING tasks are safe to auto-complete.
         # RUNNING means a new session already picked it up; terminal means done.
-        task = task_by_ticket.get(ticket_id)
+        task = task_by_ticket.get((session.client, ticket_id))
         if task is None or task.status != QueueItemStatus.PENDING:
             continue
         candidates.append((session, ticket_id))
@@ -247,9 +247,12 @@ def complete_timed_out_merged_tasks() -> list[str]:
     now = datetime.now(UTC)
     cutoff = now - timedelta(days=TIMED_OUT_MERGED_LOOKBACK_DAYS)
 
-    # Build a cheap lookup: ticket_id → task (for PENDING filter before gh call).
-    task_by_ticket: dict[str, TicketTask] = {
-        t.ticket_id: t for t in load_dev_queue().tasks
+    # Build a cheap lookup: (client, ticket_id) → task (for PENDING filter
+    # before gh call). Scoped by client so a TIMED_OUT session in one
+    # client's queue cannot match a same-numbered ticket in another
+    # client's queue (GitHub #1385, mirrors the #1054 fix in core.py).
+    task_by_ticket: dict[tuple[str, str], TicketTask] = {
+        (t.client, t.ticket_id): t for t in load_dev_queue().tasks
     }
 
     # Phase 1: Cheap filters before any gh subprocess call.
@@ -272,10 +275,11 @@ def complete_timed_out_merged_tasks() -> list[str]:
     with dev_queue_lock():
         store = load_dev_queue()
         changed = False
-        for _, ticket_id in to_complete:
+        for session, ticket_id in to_complete:
             for task in store.tasks:
                 if (
                     task.ticket_id == ticket_id
+                    and task.client == session.client
                     and task.status == QueueItemStatus.PENDING
                 ):
                     # Why: PR URL is not retrieved here — a second gh call is

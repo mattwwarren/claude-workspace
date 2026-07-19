@@ -45,7 +45,7 @@ from tests._reconcile_helpers import (
     _mk_session,
     _mk_timed_out_daemon_session,
 )
-from tests.conftest import _make_ticket_task
+from tests.conftest import _make_daemon_session, _make_ticket_task
 
 # ---------------------------------------------------------------------------
 # revert_completed_silent_tasks tests
@@ -972,6 +972,48 @@ class TestCompleteTimedOutMergedTasks:
         store = load_dev_queue()
         task = next(t for t in store.tasks if t.ticket_id == ticket_id)
         assert task.status == QueueItemStatus.PENDING
+
+    def test_does_not_complete_different_clients_same_ticket(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """client-a's TIMED_OUT merged session must not complete client-b's
+        identically-numbered PENDING task (#1385) -- mirrors the #1054 fix in
+        core.py's merged_client_ticket_ids scoping, applied here to
+        complete_timed_out_merged_tasks's own (client, ticket_id) matching."""
+        now = datetime.now(UTC)
+        ticket_id = "1"
+        session = _make_daemon_session(
+            name="client-a/auto-dev/1",
+            client="client-a",
+            status=SessionStatus.TIMED_OUT,
+            completed_at=now - timedelta(days=1),
+        )
+        client_b_task = _make_ticket_task(ticket_id=ticket_id, client="client-b")
+        save_state(CwState(sessions=[session]))
+        # Intentionally no client-a queue row -- reproduces the bug even
+        # without a same-client task present.
+        save_dev_queue(DevQueueStore(tasks=[client_b_task]))
+
+        monkeypatch.setattr(
+            "cw.reconcile._deps.pr_is_merged_for_ticket",
+            lambda _tid, **_kw: (True, True),
+        )
+
+        completed = complete_timed_out_merged_tasks()
+
+        assert completed == []
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.PENDING
+
+        events = read_events(
+            consumer="test-does-not-complete-different-clients",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert len(events) == 0
 
 
 def test_reap_reason_completed_backstop_timed_out(
