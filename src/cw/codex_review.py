@@ -23,7 +23,6 @@ import shutil
 import subprocess
 import time
 import uuid
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, NamedTuple
 
 import yaml
@@ -31,11 +30,10 @@ import yaml
 from cw.auto_dev_result import AutoDevResult, Health, Scope, StageReached
 from cw.config import state_dir
 from cw.executor_diagnostics import (
-    ExecutorFailure,
     ExecutorFailureCategory,
     append_diagnostics_pointer,
+    build_executor_failure,
     persist_diagnostics_bundle,
-    redact_argv,
 )
 from cw.local_runner import _SCHEMA_VERSION, make_blocked, resolve_tier
 from cw.models import CONTEXT_JSON_RELATIVE_PATH
@@ -89,6 +87,33 @@ _MIN_ROLE_TIMEOUT_SECONDS = 30
 # (FileNotFoundError → CodexRunResult(returncode=127, ...)); paired with a
 # "command not found" stderr it classifies as a spawn_error (#1239).
 _COMMAND_NOT_FOUND_RETURNCODE = 127
+
+# Maps the fine-grained ExecutorFailureCategory (#1239 diagnostics taxonomy)
+# to the coarse ReviewerRunFailure.reason vocabulary above — the single source
+# of truth _run_codex_role delegates to instead of independently re-deriving
+# the same reason via its own branch walk (#1330 item 5). Total (all 9
+# category members are explicit keys, no .get() fallback) so a future category
+# addition fails loudly (see test_category_to_reason_mapping_is_total) rather
+# than silently KeyError-ing at runtime.
+#
+# spawn_error and nonzero_exit both map to CODEX_ERROR — exactly what the old
+# `elif result.returncode != 0` branch produced for both shapes, so
+# spawn_error's retry-eligibility (excluded from _TRANSIENT_FAILURE_REASONS)
+# is unchanged by this refactor. runtime_error and semantic_validation_failure
+# are unreachable through _classify_codex_failure today (the former is
+# aider-only; the latter is a reserved category with no live producer) — both
+# get the closest semantically-adjacent reason purely so the dict is total.
+_CATEGORY_TO_REASON: dict[ExecutorFailureCategory, str] = {
+    "timeout": CODEX_TIMEOUT,
+    "spawn_error": CODEX_ERROR,
+    "nonzero_exit": CODEX_ERROR,
+    "runtime_error": CODEX_ERROR,
+    "missing_output": CODEX_REVIEW_UNPARSEABLE,
+    "empty_output": CODEX_REVIEW_UNPARSEABLE,
+    "invalid_json": CODEX_REVIEW_UNPARSEABLE,
+    "schema_mismatch": CODEX_REVIEW_UNPARSEABLE,
+    "semantic_validation_failure": CODEX_REVIEW_UNPARSEABLE,
+}
 
 # Reviewer role name -> authoritative agent-spec file under .claude/agents/.
 # Role names match the `/review` Step 3 table and each agent file's `name:`.
@@ -600,10 +625,11 @@ def _classify_codex_output_failure(content: str | None) -> ExecutorFailureCatego
 def _classify_codex_failure(result: CodexRunResult) -> ExecutorFailureCategory:
     """Map a failed :class:`CodexRunResult` to a typed failure category (#1239).
 
-    First-match order mirrors ``_run_codex_role``'s own branch order, refining
-    the coarse ``ReviewerRunFailure.reason`` into the finer diagnostics
-    taxonomy: a non-zero exit is split into ``spawn_error`` (codex binary
-    missing) vs ``nonzero_exit``, and an unparseable output is delegated to
+    The single source of truth ``_run_codex_role`` delegates to (#1330 item 5)
+    for the timed_out -> returncode -> output-parse ordering, refining the
+    coarse ``ReviewerRunFailure.reason`` into the finer diagnostics taxonomy: a
+    non-zero exit is split into ``spawn_error`` (codex binary missing) vs
+    ``nonzero_exit``, and an unparseable output is delegated to
     :func:`_classify_codex_output_failure`.
     """
     if result.timed_out:
@@ -622,35 +648,37 @@ def _persist_codex_role_diagnostics(
     *,
     session_id: str,
     role: str,
+    category: ExecutorFailureCategory,
     result: CodexRunResult,
     argv: list[str],
     duration_seconds: float,
     schema_path: Path,
     output_path: Path,
 ) -> None:
-    """Build the typed :class:`ExecutorFailure` and write its diagnostics bundle."""
-    category = _classify_codex_failure(result)
-    failure = ExecutorFailure(
+    """Build the typed :class:`ExecutorFailure` and write its diagnostics bundle.
+
+    *category* is classified once by the caller (``_run_codex_role``) and
+    threaded through here rather than re-derived via a second
+    ``_classify_codex_failure(result)`` call (#1330 item 5).
+    """
+    failure = build_executor_failure(
         category=category,
         executor_name="codex",
-        executor_version=None,
-        reviewer_role=role,
-        # Codex argv is content-free (prompt travels over stdin); redact_argv
-        # returns it unchanged, kept for symmetry with the aider path.
-        argv_sanitized=redact_argv(argv, executor_name="codex"),
-        duration_seconds=duration_seconds,
-        exit_code=result.returncode,
         session_id=session_id,
-        run_id=None,
+        # Codex argv is content-free (prompt travels over stdin); the model's
+        # own argv_sanitized field_validator leaves it unchanged, kept as raw
+        # here for symmetry with the aider call sites.
+        argv=argv,
         stdout_excerpt=result.stdout,
         stderr_excerpt=result.stderr,
+        reviewer_role=role,
+        duration_seconds=duration_seconds,
+        exit_code=result.returncode,
         structured_output_excerpt=result.output_file_content,
-        occurred_at=datetime.now(UTC),
     )
     persist_diagnostics_bundle(
         session_id=session_id,
         role_slug=_slug(role),
-        reason=category,
         failure=failure,
         scratch_schema_path=schema_path,
         scratch_output_path=output_path,
@@ -691,24 +719,18 @@ def _run_codex_role(
     result = runner.run(worktree, argv, timeout_seconds, stdin=prompt)
     duration = time.monotonic() - start
 
-    reason: str | None = None
-    if result.timed_out:
-        _log.warning("codex review role %r timed out", role)
-        reason = CODEX_TIMEOUT
-    elif result.returncode != 0:
-        _log.warning("codex review role %r exited %d", role, result.returncode)
-        reason = CODEX_ERROR
-    else:
+    if not result.timed_out and result.returncode == 0:
         doc = _parse_reviewer_document(result.output_file_content)
-        if doc is None:
-            _log.warning("codex review role %r produced no parseable output", role)
-            reason = CODEX_REVIEW_UNPARSEABLE
-        else:
+        if doc is not None:
             return doc, None
 
+    category = _classify_codex_failure(result)
+    reason = _CATEGORY_TO_REASON[category]
+    _log.warning("codex review role %r failed: %s (%s)", role, reason, category)
     _persist_codex_role_diagnostics(
         session_id=session_id,
         role=role,
+        category=category,
         result=result,
         argv=argv,
         duration_seconds=duration,

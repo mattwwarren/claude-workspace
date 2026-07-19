@@ -16,22 +16,26 @@ executor-neutral and keyed by the cw session id.
 
 ## Bundle contents (naming convention)
 
-Each failure writes up to three files, all prefixed `<role-slug>-<reason>`:
+Each failure writes up to three files, all prefixed
+`<role-slug>-<category>-<timestamp>`:
 
-- `<role-slug>-<reason>.json` — the typed, **sanitized** `ExecutorFailure`
-  record: classified failure category, redacted `argv`, secret-scrubbed and
-  length-bounded (4000 char) stdout/stderr/structured-output excerpts, timing,
-  and exit code.
-- `<role-slug>-<reason>-schema.json` — a raw copy of the output schema handed to
-  the executor (codex reviewer roles only), when present.
-- `<role-slug>-<reason>-output.json` — a raw, **unredacted** copy of the
-  executor's structured output scratch file, when present.
+- `<role-slug>-<category>-<timestamp>.json` — the typed, **sanitized**
+  `ExecutorFailure` record: classified failure category, redacted `argv`,
+  secret-scrubbed and length-bounded (4000 char) stdout/stderr/
+  structured-output excerpts, timing, and exit code.
+- `<role-slug>-<category>-<timestamp>-schema.json` — a raw copy of the output
+  schema handed to the executor (codex reviewer roles only), when present.
+- `<role-slug>-<category>-<timestamp>-output.json` — a raw, **unredacted**
+  copy of the executor's structured output scratch file, when present.
 
 `<role-slug>` is the reviewer role for codex (e.g. `code-quality-reviewer`) or
-`aider` for LocalExecutor failures. `<reason>` is the typed failure category:
-`timeout`, `nonzero_exit`, `spawn_error`, `missing_output`, `empty_output`,
-`invalid_json`, `schema_mismatch`, `runtime_error`, or (reserved)
-`semantic_validation_failure`.
+`aider` for LocalExecutor failures. `<category>` is the typed failure
+category: `timeout`, `nonzero_exit`, `spawn_error`, `missing_output`,
+`empty_output`, `invalid_json`, `schema_mismatch`, `runtime_error`, or
+(reserved) `semantic_validation_failure`. `<timestamp>` is the failure's
+`occurred_at` field (microsecond precision, `%Y%m%dT%H%M%S%f`), which
+disambiguates repeat same-role/same-category failures within one session so
+they no longer overwrite each other's bundle files.
 
 The `-schema.json` / `-output.json` copies are the only unredacted tier and are
 **state-dir-only** — never echoed to stdout or GitHub. The blocked sentinel's
@@ -42,7 +46,10 @@ excerpts.
 
 Bundles are swept on a retention window. Every `dispatch_tick` runs a best-effort
 cleanup pass (outside any lock, errors swallowed) that removes any bundle whose
-newest file is older than the window.
+newest file is older than the window. The sweep itself is internally throttled
+to at most once per hour (tracked via a sentinel file's mtime under
+`state_dir()`), independent of the retention window, so a full
+`sessions/` filesystem walk doesn't run on every tick.
 
 - **Default:** 24 hours.
 - **Configurable** via `diagnostics_retention_hours` in `orchestrator.yaml`:

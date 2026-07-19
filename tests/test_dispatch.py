@@ -6461,7 +6461,7 @@ class TestApplyStagedDecision:
             "cw.dispatch.routing", OrchestratorEventType.TICKET_REQUEUED
         )
         stage_changed = capture_events(
-            "cw.dev_queue", OrchestratorEventType.TASK_STAGE_CHANGED
+            "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_STAGE_CHANGED
         )
 
         task = self._make_running_task("DUAL-1", stage=Stage.FINALIZE)
@@ -7598,7 +7598,7 @@ class TestApplyStagedDecision:
             "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
         )
         stage_changed = capture_events(
-            "cw.dev_queue", OrchestratorEventType.TASK_STAGE_CHANGED
+            "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_STAGE_CHANGED
         )
 
         task = self._make_running_task("WALK-1", stage=Stage.IMPL)
@@ -7637,7 +7637,7 @@ class TestApplyStagedDecision:
         from cw.dispatch import apply_staged_decision
 
         stage_changed = capture_events(
-            "cw.dev_queue", OrchestratorEventType.TASK_STAGE_CHANGED
+            "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_STAGE_CHANGED
         )
 
         task = self._make_running_task("WALK-SIGNOFF-1", stage=Stage.IMPL)
@@ -7814,7 +7814,7 @@ class TestApplyStagedDecision:
         from cw.dispatch import apply_staged_decision
 
         stage_changed = capture_events(
-            "cw.dev_queue", OrchestratorEventType.TASK_STAGE_CHANGED
+            "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_STAGE_CHANGED
         )
 
         task = self._make_running_task("WALK-CHOKE-1", stage=Stage.PLAN)
@@ -7848,7 +7848,7 @@ class TestApplyStagedDecision:
         from cw.dispatch import apply_staged_decision
 
         stage_changed = capture_events(
-            "cw.dev_queue", OrchestratorEventType.TASK_STAGE_CHANGED
+            "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_STAGE_CHANGED
         )
 
         captured_session_id: list[str | None] = []
@@ -7902,7 +7902,7 @@ class TestApplyStagedDecision:
         from cw.dispatch import apply_staged_decision
 
         stage_changed = capture_events(
-            "cw.dev_queue", OrchestratorEventType.TASK_STAGE_CHANGED
+            "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_STAGE_CHANGED
         )
 
         task = self._make_running_task("WALK-TERMINAL-1", stage=Stage.PLAN)

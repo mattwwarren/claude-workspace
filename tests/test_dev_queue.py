@@ -70,6 +70,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    from cw.models import ReapReason, Session
     from tests.conftest import CapturedEvent
 
 
@@ -1632,7 +1633,7 @@ class TestRemoveTicket:
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
         """remove_ticket emits task.deleted reason=operator_remove with payload."""
-        events = capture_events("cw.dev_queue", OrchestratorEventType.TASK_DELETED)
+        events = capture_events("cw.dev_queue.crud", OrchestratorEventType.TASK_DELETED)
         task = TicketTask(
             ticket_id="TKT-DEL1",
             client="genhealth",
@@ -1657,7 +1658,7 @@ class TestRemoveTicket:
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
         """remove_all removing N tasks emits N task.deleted events (Decision 2)."""
-        events = capture_events("cw.dev_queue", OrchestratorEventType.TASK_DELETED)
+        events = capture_events("cw.dev_queue.crud", OrchestratorEventType.TASK_DELETED)
         tasks = [
             TicketTask(ticket_id="TKT-DUP", client="genhealth"),
             TicketTask(ticket_id="TKT-DUP", client="genhealth"),
@@ -1729,7 +1730,7 @@ class TestClearTickets:
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
         """clear_tickets emits one task.deleted (reason=operator_clear) per removed."""
-        events = capture_events("cw.dev_queue", OrchestratorEventType.TASK_DELETED)
+        events = capture_events("cw.dev_queue.crud", OrchestratorEventType.TASK_DELETED)
         tasks = [
             TicketTask(ticket_id="TKT-CL1", client="genhealth"),
             TicketTask(ticket_id="TKT-CL2", client="genhealth"),
@@ -1750,7 +1751,7 @@ class TestClearTickets:
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
         """Status-filtered clear emits task.deleted only for removed tasks."""
-        events = capture_events("cw.dev_queue", OrchestratorEventType.TASK_DELETED)
+        events = capture_events("cw.dev_queue.crud", OrchestratorEventType.TASK_DELETED)
         tasks = [
             TicketTask(
                 ticket_id="TKT-SP",
@@ -2986,7 +2987,9 @@ class TestWaitForTerminal:
     @pytest.fixture(autouse=True)
     def _patch_consume(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Stub consume_completed_sessions so tests don't touch event cursor."""
-        monkeypatch.setattr("cw.dev_queue.consume_completed_sessions", lambda: 0)
+        monkeypatch.setattr(
+            "cw.dev_queue.lifecycle.consume_completed_sessions", lambda: 0
+        )
 
     def test_wait_completed_returns_immediately(self, tmp_config_dir: Path) -> None:
         """COMPLETED ticket returns on the first load, no polling."""
@@ -3085,7 +3088,9 @@ class TestWaitForTerminal:
                 save_dev_queue(updated)
             return 0
 
-        monkeypatch.setattr("cw.dev_queue.consume_completed_sessions", _side_effect)
+        monkeypatch.setattr(
+            "cw.dev_queue.lifecycle.consume_completed_sessions", _side_effect
+        )
 
         result = wait_for_terminal("GEN-6", "genhealth", timeout=60, poll_interval=0)
         assert result.status == QueueItemStatus.COMPLETED
@@ -3208,7 +3213,9 @@ class TestFindTicket:
         COMPLETED record must not cause wait_for_terminal to return early.
         The active PENDING record should be returned and polling should proceed.
         """
-        monkeypatch.setattr("cw.dev_queue.consume_completed_sessions", lambda: 0)
+        monkeypatch.setattr(
+            "cw.dev_queue.lifecycle.consume_completed_sessions", lambda: 0
+        )
 
         stale_terminal = TicketTask(
             ticket_id="GEN-12",
@@ -3654,9 +3661,9 @@ def _make_blocked_task(
 def _make_session(
     session_id: str = "sess1234",
     last_result: dict[str, object] | None = None,
-    reap_reason: object = None,
-    workspace_path: object = None,
-) -> object:
+    reap_reason: ReapReason | None = None,
+    workspace_path: Path | None = None,
+) -> Session:
     """Build a Session with minimal required fields."""
     from pathlib import Path
 
@@ -3695,7 +3702,9 @@ class TestApproveTicket:
 
         _write_client_yaml(tmp_config_dir, tmp_path)
         stub_fetch_plan(
-            monkeypatch, plan_body(), target="cw.dev_queue.fetch_approved_plan_comment"
+            monkeypatch,
+            plan_body(),
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess0001")
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -3703,7 +3712,7 @@ class TestApproveTicket:
             session_id="sess0001",
             last_result={"status": "plan_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         result = approve_ticket("GEN-500", "genhealth")
 
@@ -3729,7 +3738,9 @@ class TestApproveTicket:
 
         _write_client_yaml(tmp_config_dir, tmp_path)
         stub_fetch_plan(
-            monkeypatch, plan_body(), target="cw.dev_queue.fetch_approved_plan_comment"
+            monkeypatch,
+            plan_body(),
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
         )
         stale_parked_at = datetime(2020, 1, 1, tzinfo=UTC)
         stale_fired_at = datetime(2020, 1, 1, tzinfo=UTC)
@@ -3741,7 +3752,7 @@ class TestApproveTicket:
             session_id="sess0001",
             last_result={"status": "plan_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         approve_ticket("GEN-500", "genhealth")
 
@@ -3774,7 +3785,7 @@ class TestApproveTicket:
             session_id="sess0002",
             last_result={"status": "review_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         result = approve_ticket("GEN-500", "genhealth")
 
@@ -3800,7 +3811,7 @@ class TestApproveTicket:
             session_id="sess0003",
             last_result={"status": "ambiguities_pending_resolution"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         with pytest.raises(ApproveGateError, match="not at an approval gate"):
             approve_ticket("GEN-500", "genhealth")
@@ -3854,7 +3865,7 @@ class TestApproveTicket:
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess0004")
         save_dev_queue(DevQueueStore(tasks=[task]))
         session = _make_session(session_id="sess0004", last_result=None)
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         with pytest.raises(ApproveGateError, match="not at an approval gate"):
             approve_ticket("GEN-500", "genhealth")
@@ -3875,7 +3886,7 @@ class TestApproveTicket:
             session_id="sess0005",
             last_result={"status": "review_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         with pytest.raises(ApproveGateError, match="terminal stage"):
             approve_ticket("GEN-500", "genhealth")
@@ -3892,7 +3903,9 @@ class TestApproveTicket:
 
         _write_client_yaml(tmp_config_dir, tmp_path)
         stub_fetch_plan(
-            monkeypatch, plan_body(), target="cw.dev_queue.fetch_approved_plan_comment"
+            monkeypatch,
+            plan_body(),
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-plain-1")
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -3900,7 +3913,7 @@ class TestApproveTicket:
             session_id="sess-plain-1",
             last_result={"status": "plan_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         result = approve_ticket("GEN-500", "genhealth")
 
@@ -3983,7 +3996,7 @@ class TestApproveTicket:
             session_id="sess-signoff-1",
             last_result={"status": "review_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         result = approve_ticket("GEN-500", "genhealth")
 
@@ -4012,7 +4025,7 @@ class TestApproveTicket:
             session_id="sess-signoff-2",
             last_result={"status": "review_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         first = approve_ticket("GEN-500", "genhealth")
         assert first["awaiting_signoff"] is True
@@ -4091,10 +4104,12 @@ class TestApproveTicket:
 
         _write_client_yaml(tmp_config_dir, tmp_path)
         stub_fetch_plan(
-            monkeypatch, plan_body(), target="cw.dev_queue.fetch_approved_plan_comment"
+            monkeypatch,
+            plan_body(),
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
         )
         events = capture_events(
-            "cw.dev_queue", OrchestratorEventType.TASK_STAGE_CHANGED
+            "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_STAGE_CHANGED
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-adv1")
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -4102,7 +4117,7 @@ class TestApproveTicket:
             session_id="sess-adv1",
             last_result={"status": "plan_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         result = approve_ticket("GEN-500", "genhealth")
 
@@ -4130,10 +4145,12 @@ class TestApproveTicket:
 
         _write_client_yaml(tmp_config_dir, tmp_path)
         stub_fetch_plan(
-            monkeypatch, None, target="cw.dev_queue.fetch_approved_plan_comment"
+            monkeypatch,
+            None,
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
         )
         events = capture_events(
-            "cw.dev_queue", OrchestratorEventType.TASK_STAGE_CHANGED
+            "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_STAGE_CHANGED
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-adv2")
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -4141,7 +4158,7 @@ class TestApproveTicket:
             session_id="sess-adv2",
             last_result={"status": "plan_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         result = approve_ticket("GEN-500", "genhealth")
 
@@ -4160,7 +4177,9 @@ class TestApproveTicket:
 
         _write_client_yaml(tmp_config_dir, tmp_path)
         stub_fetch_plan(
-            monkeypatch, None, target="cw.dev_queue.fetch_approved_plan_comment"
+            monkeypatch,
+            None,
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-unrev1")
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -4168,7 +4187,7 @@ class TestApproveTicket:
             session_id="sess-unrev1",
             last_result={"status": "plan_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         result = approve_ticket("GEN-500", "genhealth")
 
@@ -4193,7 +4212,9 @@ class TestApproveTicket:
 
         _write_client_yaml(tmp_config_dir, tmp_path)
         stub_fetch_plan(
-            monkeypatch, None, target="cw.dev_queue.fetch_approved_plan_comment"
+            monkeypatch,
+            None,
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-fallback1")
         task.worktree_path = tmp_path / "wt"
@@ -4206,7 +4227,7 @@ class TestApproveTicket:
             session_id="sess-fallback1",
             last_result={"status": "plan_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         result = approve_ticket("GEN-500", "genhealth")
 
@@ -4225,7 +4246,9 @@ class TestApproveTicket:
 
         _write_client_yaml(tmp_config_dir, tmp_path)
         stub_fetch_plan(
-            monkeypatch, None, target="cw.dev_queue.fetch_approved_plan_comment"
+            monkeypatch,
+            None,
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-noplanmd")
         task.worktree_path = tmp_path / "wt-noplanmd"
@@ -4235,7 +4258,7 @@ class TestApproveTicket:
             session_id="sess-noplanmd",
             last_result={"status": "plan_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         result = approve_ticket("GEN-500", "genhealth")
 
@@ -4255,7 +4278,9 @@ class TestApproveTicket:
 
         _write_client_yaml(tmp_config_dir, tmp_path)
         stub_fetch_plan(
-            monkeypatch, None, target="cw.dev_queue.fetch_approved_plan_comment"
+            monkeypatch,
+            None,
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-planmderr")
         task.worktree_path = tmp_path / "wt-planmderr"
@@ -4265,7 +4290,7 @@ class TestApproveTicket:
             session_id="sess-planmderr",
             last_result={"status": "plan_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         result = approve_ticket("GEN-500", "genhealth")
 
@@ -4310,7 +4335,9 @@ class TestApproveTicketLockedResolved:
 
         _write_client_yaml(tmp_config_dir, tmp_path)
         stub_fetch_plan(
-            monkeypatch, plan_body(), target="cw.dev_queue.fetch_approved_plan_comment"
+            monkeypatch,
+            plan_body(),
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
         )
         row_a = _make_blocked_task(stage=Stage.PLAN, session_id="sess0001")
         row_a.created_at = datetime(2026, 7, 1, tzinfo=UTC)
@@ -4325,7 +4352,7 @@ class TestApproveTicketLockedResolved:
             session_id="sess0001",
             last_result={"status": "plan_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         with dev_queue_lock():
             result = _approve_ticket_locked("GEN-500", "genhealth", resolved_task=row_a)
@@ -4467,7 +4494,7 @@ class TestRequeueTicket:
 
         _write_client_yaml(tmp_config_dir, tmp_path)
         events = capture_events(
-            "cw.dev_queue", OrchestratorEventType.TASK_STAGE_CHANGED
+            "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_STAGE_CHANGED
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-fwd1")
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -4500,7 +4527,7 @@ class TestRequeueTicket:
         _write_client_yaml(tmp_config_dir, tmp_path)
         # One capture for all event types — a second capture_events on the same
         # module would clobber the first's monkeypatch of record_event.
-        events = capture_events("cw.dev_queue")
+        events = capture_events("cw.dev_queue.lifecycle")
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-same1")
         save_dev_queue(DevQueueStore(tasks=[task]))
 
@@ -5020,7 +5047,7 @@ class TestUnblockTicket:
             last_result={"status": "salvage_parked"},
             reap_reason=ReapReason.SALVAGE_PARKED,
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         unblock_ticket("GEN-500", "genhealth")
 
@@ -5056,7 +5083,7 @@ class TestUnblockTicket:
             last_result={"status": "salvage_parked"},
             reap_reason=ReapReason.SALVAGE_PARKED,
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         unblock_ticket("GEN-500", "genhealth")
 
@@ -5082,7 +5109,7 @@ class TestUnblockTicket:
             last_result=None,
             reap_reason=None,
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         with pytest.raises(UnblockStateError, match="not park-marked"):
             unblock_ticket("GEN-500", "genhealth")
@@ -5141,7 +5168,9 @@ class TestCLIApprove:
 
         _write_client_yaml(tmp_config_dir, tmp_path)
         stub_fetch_plan(
-            monkeypatch, plan_body(), target="cw.dev_queue.fetch_approved_plan_comment"
+            monkeypatch,
+            plan_body(),
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess7001")
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -5149,7 +5178,7 @@ class TestCLIApprove:
             session_id="sess7001",
             last_result={"status": "plan_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         runner = CliRunner()
         result = runner.invoke(
@@ -5173,7 +5202,7 @@ class TestCLIApprove:
             session_id="sess7002",
             last_result={"status": "ambiguities_pending_resolution"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         runner = CliRunner()
         result = runner.invoke(
@@ -5202,7 +5231,9 @@ class TestCLIApprove:
 
         # Case 1: unreviewed plan -> plan_requeued=True, echoed re-queue message.
         stub_fetch_plan(
-            monkeypatch, None, target="cw.dev_queue.fetch_approved_plan_comment"
+            monkeypatch,
+            None,
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-evt1")
         save_dev_queue(DevQueueStore(tasks=[task]))
@@ -5214,7 +5245,7 @@ class TestCLIApprove:
                         last_result={"status": "plan_pending_approval"},
                     )
                 ]
-            )  # type: ignore[list-item]
+            )
         )
 
         result = runner.invoke(
@@ -5232,7 +5263,9 @@ class TestCLIApprove:
 
         # Case 2: reviewed plan -> plan_requeued=False, ordinary advance message.
         stub_fetch_plan(
-            monkeypatch, plan_body(), target="cw.dev_queue.fetch_approved_plan_comment"
+            monkeypatch,
+            plan_body(),
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
         )
         task2 = _make_blocked_task(
             ticket_id="GEN-501", stage=Stage.PLAN, session_id="sess-evt2"
@@ -5246,7 +5279,7 @@ class TestCLIApprove:
                         last_result={"status": "plan_pending_approval"},
                     )
                 ]
-            )  # type: ignore[list-item]
+            )
         )
 
         result2 = runner.invoke(
@@ -5777,7 +5810,7 @@ class TestCLIUnblock:
             last_result={"status": "salvage_parked"},
             reap_reason=ReapReason.SALVAGE_PARKED,
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         runner = CliRunner()
         result = runner.invoke(
@@ -5798,7 +5831,7 @@ class TestCLIUnblock:
         task = _make_blocked_task(stage=Stage.IMPL, session_id="sess5002")
         save_dev_queue(DevQueueStore(tasks=[task]))
         session = _make_session(session_id="sess5002", reap_reason=None)
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         runner = CliRunner()
         result = runner.invoke(
@@ -5846,7 +5879,7 @@ class TestTransitionTaskStatus:
         save_dev_queue(DevQueueStore(tasks=[task]))
 
         with patch(
-            "cw.dev_queue.transition_task_status", wraps=transition_task_status
+            "cw.dev_queue.crud.transition_task_status", wraps=transition_task_status
         ) as spy:
             result = cancel_task_for_session("sess-seam-1")
 
@@ -5994,7 +6027,9 @@ class TestTransitionTaskStatus:
         self, capture_events: Callable[..., list[CapturedEvent]]
     ) -> None:
         """A RUNNING→COMPLETED move emits one task.transition with full payload."""
-        events = capture_events("cw.dev_queue", OrchestratorEventType.TASK_TRANSITION)
+        events = capture_events(
+            "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_TRANSITION
+        )
         task = TicketTask(
             ticket_id="T-TR1",
             client="genhealth",
@@ -6027,7 +6062,9 @@ class TestTransitionTaskStatus:
         self, capture_events: Callable[..., list[CapturedEvent]]
     ) -> None:
         """new_status == old_status emits nothing (Decision 6, no-op guard)."""
-        events = capture_events("cw.dev_queue", OrchestratorEventType.TASK_TRANSITION)
+        events = capture_events(
+            "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_TRANSITION
+        )
         task = TicketTask(
             ticket_id="T-TR2",
             client="genhealth",
@@ -6040,7 +6077,9 @@ class TestTransitionTaskStatus:
         self, capture_events: Callable[..., list[CapturedEvent]]
     ) -> None:
         """A terminal→PENDING (reset) move emits task.transition."""
-        events = capture_events("cw.dev_queue", OrchestratorEventType.TASK_TRANSITION)
+        events = capture_events(
+            "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_TRANSITION
+        )
         task = TicketTask(
             ticket_id="T-TR3",
             client="genhealth",
@@ -6056,7 +6095,9 @@ class TestTransitionTaskStatus:
         self, capture_events: Callable[..., list[CapturedEvent]]
     ) -> None:
         """A RUNNING→AWAITING_OPERATOR_SIGNOFF (park) move emits task.transition."""
-        events = capture_events("cw.dev_queue", OrchestratorEventType.TASK_TRANSITION)
+        events = capture_events(
+            "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_TRANSITION
+        )
         task = TicketTask(
             ticket_id="T-TR4",
             client="genhealth",
@@ -6221,7 +6262,7 @@ class TestStageRegress:
         from cw.dev_queue import _stage_regress
 
         events = capture_events(
-            "cw.dev_queue", OrchestratorEventType.TASK_STAGE_CHANGED
+            "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_STAGE_CHANGED
         )
         task = _make_stage_task(stage=Stage.FINALIZE)
         _stage_regress(task, Stage.IMPL)
