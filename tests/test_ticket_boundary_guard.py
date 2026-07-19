@@ -34,7 +34,7 @@ _DIRECT_GH_CALLER_ALLOWLIST = frozenset(
         # Pre-existing daemon-side direct callers, grandfathered.
         # Consolidation into gh.py is tracked as a follow-up in #1284,
         # not this ticket's scope.
-        "cw/doctor/core.py",
+        "cw/doctor/loop_health.py",
         "cw/worktree_gc.py",
         "cw/reconcile/salvage.py",
     }
