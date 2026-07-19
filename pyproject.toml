@@ -195,8 +195,8 @@ ignore = [
 # sanctioned mechanism, not a workaround.
 "src/cw/dev_queue/approval.py" = ["PLC0415"]
 # requeue defers cw.config.load_state|save_state|sessions_lock / cw.models
-# .ReapReason inside unblock_ticket to break the dev_queue ↔ config cycle.
-# Deferred imports are the sanctioned mechanism, not a workaround.
+# .ReapReason inside unblock_ticket. Preserved verbatim from the pre-split
+# flat module — not a cycle-break (cw.config never imports cw.dev_queue).
 "src/cw/dev_queue/requeue.py" = ["PLC0415"]
 # result defers the cli._hook_io import to break the cli <-> result circular
 # dependency; inline import is the sanctioned mechanism, not a workaround.
