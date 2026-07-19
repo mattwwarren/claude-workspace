@@ -8437,7 +8437,7 @@ class TestDoctorTargetedReap:
         from cw.native_daemon import FakeNativeDaemonClient
 
         monkeypatch.setattr(
-            "cw.doctor.core.get_native_daemon_client", FakeNativeDaemonClient
+            "cw.doctor.loop_health.get_native_daemon_client", FakeNativeDaemonClient
         )
 
         from cw.models import Session

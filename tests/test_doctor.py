@@ -869,14 +869,15 @@ class TestRunDoctor10Checks:
         if roster_content is not None:
             roster_path.write_text(roster_content)
 
-        monkeypatch.setattr("cw.doctor.core._CLAUDE_SETTINGS_PATH", settings_path)
-        monkeypatch.setattr("cw.doctor.core._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.versions._CLAUDE_SETTINGS_PATH", settings_path)
+        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
 
         if fake_run is not None:
-            monkeypatch.setattr("cw.doctor.core._sp.run", fake_run)
+            monkeypatch.setattr("cw.doctor.versions._sp.run", fake_run)
         else:
             monkeypatch.setattr(
-                "cw.doctor.core._sp.run",
+                "cw.doctor.versions._sp.run",
                 _make_fake_run_version(),
             )
         return settings_path, roster_path
@@ -894,9 +895,10 @@ class TestRunDoctor10Checks:
         )
         roster_path.write_text(json.dumps({"supervisorPid": 12345, "workers": {}}))
 
-        monkeypatch.setattr("cw.doctor.core._CLAUDE_SETTINGS_PATH", settings_path)
-        monkeypatch.setattr("cw.doctor.core._ROSTER_PATH", roster_path)
-        monkeypatch.setattr("cw.doctor.core._sp.run", _make_fake_run_version())
+        monkeypatch.setattr("cw.doctor.versions._CLAUDE_SETTINGS_PATH", settings_path)
+        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.versions._sp.run", _make_fake_run_version())
 
         report = run_doctor()
         names = {c.name for c in report.checks}
@@ -1109,7 +1111,7 @@ class TestCheckClaudeVersion:
         from cw.doctor import _check_claude_version
 
         monkeypatch.setattr(
-            "cw.doctor.core._sp.run",
+            "cw.doctor.versions._sp.run",
             lambda *_a, **_kw: self._mk_proc("2.1.150 (Claude Code)\n"),
         )
         result = _check_claude_version()
@@ -1124,7 +1126,7 @@ class TestCheckClaudeVersion:
         from cw.doctor import _check_claude_version
 
         monkeypatch.setattr(
-            "cw.doctor.core._sp.run",
+            "cw.doctor.versions._sp.run",
             lambda *_a, **_kw: self._mk_proc("2.1.139 (Claude Code)\n"),
         )
         result = _check_claude_version()
@@ -1138,7 +1140,7 @@ class TestCheckClaudeVersion:
         from cw.doctor import _check_claude_version
 
         monkeypatch.setattr(
-            "cw.doctor.core._sp.run",
+            "cw.doctor.versions._sp.run",
             lambda *_a, **_kw: self._mk_proc("2.0.0 (Claude Code)\n"),
         )
         result = _check_claude_version()
@@ -1153,7 +1155,7 @@ class TestCheckClaudeVersion:
         from cw.doctor import _check_claude_version
 
         monkeypatch.setattr(
-            "cw.doctor.core._sp.run",
+            "cw.doctor.versions._sp.run",
             lambda *_a, **_kw: self._mk_proc("not-a-version\n"),
         )
         result = _check_claude_version()
@@ -1168,7 +1170,7 @@ class TestCheckClaudeVersion:
         from cw.doctor import _check_claude_version
 
         monkeypatch.setattr(
-            "cw.doctor.core._sp.run",
+            "cw.doctor.versions._sp.run",
             lambda *_a, **_kw: self._mk_proc("some output\n", returncode=1),
         )
         result = _check_claude_version()
@@ -1185,7 +1187,7 @@ class TestCheckClaudeVersion:
 class TestCheckCodexCapability:
     """_check_codex_capability maps the 3-state probe onto a CheckResult.
 
-    Monkeypatches ``cw.doctor.core.codex_capability_diagnosis`` directly — the
+    Monkeypatches ``cw.doctor.versions.codex_capability_diagnosis`` directly — the
     subprocess/parse mechanics are covered in test_codex_executor.py.
     """
 
@@ -1196,7 +1198,7 @@ class TestCheckCodexCapability:
         from cw.executor import CODEX_NOT_FOUND, CodexCapabilityDiagnosis
 
         monkeypatch.setattr(
-            "cw.doctor.core.codex_capability_diagnosis",
+            "cw.doctor.versions.codex_capability_diagnosis",
             lambda: CodexCapabilityDiagnosis(CODEX_NOT_FOUND, "codex binary not found"),
         )
         result = _check_codex_capability()
@@ -1209,7 +1211,7 @@ class TestCheckCodexCapability:
         from cw.executor import CODEX_VERSION_UNKNOWN, CodexCapabilityDiagnosis
 
         monkeypatch.setattr(
-            "cw.doctor.core.codex_capability_diagnosis",
+            "cw.doctor.versions.codex_capability_diagnosis",
             lambda: CodexCapabilityDiagnosis(
                 CODEX_VERSION_UNKNOWN, "could not parse version: garbage"
             ),
@@ -1224,7 +1226,7 @@ class TestCheckCodexCapability:
         from cw.executor import CodexCapabilityDiagnosis
 
         monkeypatch.setattr(
-            "cw.doctor.core.codex_capability_diagnosis",
+            "cw.doctor.versions.codex_capability_diagnosis",
             lambda: CodexCapabilityDiagnosis(None, "0.144.5"),
         )
         result = _check_codex_capability()
@@ -1244,7 +1246,7 @@ class TestCheckCodexCapability:
             lambda: CheckResult("claude-version", ok=True, detail="stubbed"),
         )
         monkeypatch.setattr(
-            "cw.doctor.core.codex_capability_diagnosis",
+            "cw.doctor.versions.codex_capability_diagnosis",
             lambda: CodexCapabilityDiagnosis(None, "0.144.5"),
         )
         report = run_doctor()
@@ -1799,7 +1801,7 @@ class TestWedgeRepoAheadOfQueue:
                 return _Proc(0, "[]\n")
             return _Proc(0, "")
 
-        monkeypatch.setattr("cw.doctor.core._sp.run", fake_run)
+        monkeypatch.setattr("cw.doctor.wedge._sp.run", fake_run)
         findings = _check_wedge_repo_ahead(state, queue)
         assert len(findings) == 1
         f = findings[0]
@@ -1832,7 +1834,7 @@ class TestWedgeRepoAheadOfQueue:
                 return _Proc(0, json.dumps([{"state": "OPEN"}]))
             return _Proc(0, "")
 
-        monkeypatch.setattr("cw.doctor.core._sp.run", fake_run)
+        monkeypatch.setattr("cw.doctor.wedge._sp.run", fake_run)
         findings = _check_wedge_repo_ahead(state, queue)
         assert len(findings) == 1
         assert "cw spawn-complete" in findings[0].recipe
@@ -1859,7 +1861,7 @@ class TestWedgeRepoAheadOfQueue:
                 return _Proc(0, "")  # empty — not ahead
             return _Proc(0, "")
 
-        monkeypatch.setattr("cw.doctor.core._sp.run", fake_run)
+        monkeypatch.setattr("cw.doctor.wedge._sp.run", fake_run)
         findings = _check_wedge_repo_ahead(state, queue)
         assert findings == []
 
@@ -1885,7 +1887,7 @@ class TestWedgeRepoAheadOfQueue:
                 return _Proc(1, "")  # failure
             return _Proc(0, "")
 
-        monkeypatch.setattr("cw.doctor.core._sp.run", fake_run)
+        monkeypatch.setattr("cw.doctor.wedge._sp.run", fake_run)
         findings = _check_wedge_repo_ahead(state, queue)
         assert findings == []
 
@@ -1959,7 +1961,7 @@ class TestWedgeRepoAheadOfQueue:
                 return _Proc(0, "[]\n")
             return _Proc(0, "")
 
-        monkeypatch.setattr("cw.doctor.core._sp.run", fake_run)
+        monkeypatch.setattr("cw.doctor.wedge._sp.run", fake_run)
         _check_wedge_repo_ahead(state, queue)
         # The ls-remote call must reference my-branch, not auto-dev/TST-R6
         assert any("my-branch" in str(a) for a in ls_remote_args_seen)
@@ -1988,7 +1990,7 @@ class TestWedgeRepoAheadOfQueue:
                 raise subprocess.TimeoutExpired(cmd=args, timeout=10)
             return _Proc(0, "")
 
-        monkeypatch.setattr("cw.doctor.core._sp.run", fake_run)
+        monkeypatch.setattr("cw.doctor.wedge._sp.run", fake_run)
         findings = _check_wedge_repo_ahead(state, queue)
         assert findings == []
 
@@ -2018,7 +2020,7 @@ class TestWedgeRepoAheadOfQueue:
                 raise subprocess.TimeoutExpired(cmd=args, timeout=10)
             return _Proc(0, "")
 
-        monkeypatch.setattr("cw.doctor.core._sp.run", fake_run)
+        monkeypatch.setattr("cw.doctor.wedge._sp.run", fake_run)
         # TimeoutExpired on gh pr list → treated as no PRs → recipe mentions no open PR
         findings = _check_wedge_repo_ahead(state, queue)
         assert len(findings) == 1
@@ -2053,7 +2055,7 @@ class TestWedgeRepoAheadOfQueue:
             return _Proc(1, "")
 
         monkeypatch.setattr("cw.doctor._deps.load_clients", _raise)
-        monkeypatch.setattr("cw.doctor.core._sp.run", fake_run)
+        monkeypatch.setattr("cw.doctor.wedge._sp.run", fake_run)
         # The CwError from load_clients must be swallowed (degrade to no
         # clients), not propagate out of the wedge check.
         assert _check_wedge_repo_ahead(state, queue) == []
@@ -2906,7 +2908,7 @@ class TestCheckTimedOutMerged:
         state = CwState(sessions=[session])
 
         monkeypatch.setattr(
-            "cw.doctor.core.pr_is_merged_for_ticket",
+            "cw.doctor.loop_health.pr_is_merged_for_ticket",
             lambda *_args, **_kwargs: (True, True),
         )
         results = _check_timed_out_merged(state, {})
@@ -2928,7 +2930,7 @@ class TestCheckTimedOutMerged:
         state = CwState(sessions=[session])
 
         monkeypatch.setattr(
-            "cw.doctor.core.pr_is_merged_for_ticket",
+            "cw.doctor.loop_health.pr_is_merged_for_ticket",
             lambda *_args, **_kwargs: (False, True),
         )
         results = _check_timed_out_merged(state, {})
@@ -3046,7 +3048,7 @@ class TestCheckTimedOutMerged:
         state = CwState(sessions=[session])
 
         monkeypatch.setattr(
-            "cw.doctor.core.pr_is_merged_for_ticket",
+            "cw.doctor.loop_health.pr_is_merged_for_ticket",
             lambda *_args, **_kwargs: (None, False),
         )
         results = _check_timed_out_merged(state, {})
@@ -3068,7 +3070,7 @@ class TestCheckTimedOutMerged:
         state = CwState(sessions=[session])
 
         monkeypatch.setattr(
-            "cw.doctor.core.pr_is_merged_for_ticket",
+            "cw.doctor.loop_health.pr_is_merged_for_ticket",
             lambda *_args, **_kwargs: (None, True),
         )
         results = _check_timed_out_merged(state, {})
@@ -3101,7 +3103,7 @@ class TestCheckTimedOutMerged:
             captured_branch.append(str(branch))
             return True, True
 
-        monkeypatch.setattr("cw.doctor.core.pr_is_merged_for_ticket", _capture)
+        monkeypatch.setattr("cw.doctor.loop_health.pr_is_merged_for_ticket", _capture)
 
         results = _check_timed_out_merged(state, clients)
 
@@ -3128,7 +3130,7 @@ class TestCheckTimedOutMerged:
             captured_branch.append(str(branch))
             return False, True
 
-        monkeypatch.setattr("cw.doctor.core.pr_is_merged_for_ticket", _capture)
+        monkeypatch.setattr("cw.doctor.loop_health.pr_is_merged_for_ticket", _capture)
 
         results = _check_timed_out_merged(state, {})
 
@@ -3669,7 +3671,7 @@ class TestReapSessionBySelector:
         from cw.native_daemon import FakeNativeDaemonClient
 
         monkeypatch.setattr(
-            "cw.doctor.core.get_native_daemon_client", FakeNativeDaemonClient
+            "cw.doctor.loop_health.get_native_daemon_client", FakeNativeDaemonClient
         )
 
         from cw.models import Session
@@ -3725,7 +3727,7 @@ class TestReapSessionBySelector:
         from cw.native_daemon import FakeNativeDaemonClient
 
         monkeypatch.setattr(
-            "cw.doctor.core.get_native_daemon_client", FakeNativeDaemonClient
+            "cw.doctor.loop_health.get_native_daemon_client", FakeNativeDaemonClient
         )
 
         from cw.models import Session
@@ -3834,7 +3836,7 @@ class TestReapSessionBySelector:
         from cw.native_daemon import FakeNativeDaemonClient
 
         monkeypatch.setattr(
-            "cw.doctor.core.get_native_daemon_client", FakeNativeDaemonClient
+            "cw.doctor.loop_health.get_native_daemon_client", FakeNativeDaemonClient
         )
         # No need to stub load_orchestrator_config — _reap_session_by_selector
         # bypasses reap_policy entirely (that's the AC2 invariant being tested).
@@ -3881,7 +3883,7 @@ class TestReapSessionBySelector:
         from cw.native_daemon import FakeNativeDaemonClient
 
         monkeypatch.setattr(
-            "cw.doctor.core.get_native_daemon_client", FakeNativeDaemonClient
+            "cw.doctor.loop_health.get_native_daemon_client", FakeNativeDaemonClient
         )
 
         sess = Session(
@@ -3930,7 +3932,7 @@ class TestReapSessionBySelector:
         from cw.native_daemon import FakeNativeDaemonClient
 
         monkeypatch.setattr(
-            "cw.doctor.core.get_native_daemon_client", FakeNativeDaemonClient
+            "cw.doctor.loop_health.get_native_daemon_client", FakeNativeDaemonClient
         )
 
         sess = Session(
@@ -4010,7 +4012,7 @@ class TestReapSessionBySelector:
         from cw.native_daemon import FakeNativeDaemonClient
 
         monkeypatch.setattr(
-            "cw.doctor.core.get_native_daemon_client", FakeNativeDaemonClient
+            "cw.doctor.loop_health.get_native_daemon_client", FakeNativeDaemonClient
         )
 
         sess = Session(
@@ -4380,7 +4382,7 @@ class TestWedgeDeadSessionBlockedOnUser:
 
         daemon = FakeNativeDaemonClient()
         # surface_ref NOT added to live — it's dead
-        monkeypatch.setattr("cw.doctor.core.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
 
         sess = self._make_session("dead-sess-1", surface_ref="s:dead.1")
         save_state(CwState(sessions=[sess]))
@@ -4409,7 +4411,7 @@ class TestWedgeDeadSessionBlockedOnUser:
         from cw.native_daemon import FakeNativeDaemonClient
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.core.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
 
         save_state(CwState(sessions=[]))
         task = self._make_blocked_task("TST-590-B", session_id=None)
@@ -4436,7 +4438,7 @@ class TestWedgeDeadSessionBlockedOnUser:
         from cw.native_daemon import FakeNativeDaemonClient
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.core.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
 
         save_state(CwState(sessions=[]))
         t1 = self._make_blocked_task(
@@ -4479,7 +4481,7 @@ class TestWedgeDeadSessionBlockedOnUser:
         from cw.native_daemon import FakeNativeDaemonClient
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.core.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
 
         save_state(CwState(sessions=[]))
         task = self._make_blocked_task(
@@ -4508,7 +4510,7 @@ class TestWedgeDeadSessionBlockedOnUser:
         from cw.native_daemon import FakeNativeDaemonClient
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.core.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
 
         save_state(CwState(sessions=[]))
         oldest = self._make_blocked_task(
@@ -4543,7 +4545,7 @@ class TestWedgeDeadSessionBlockedOnUser:
         from cw.native_daemon import FakeNativeDaemonClient
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.core.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
 
         save_state(CwState(sessions=[]))
         task = self._make_blocked_task("TST-912-C", session_id=None, pr_url=None)
@@ -4570,7 +4572,7 @@ class TestWedgeDeadSessionBlockedOnUser:
         daemon = FakeNativeDaemonClient()
         live_ref = "s:live.1"
         daemon._live.add(live_ref)  # surface IS in the live roster
-        monkeypatch.setattr("cw.doctor.core.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
 
         sess = self._make_session("live-sess-d", surface_ref=live_ref)
         save_state(CwState(sessions=[sess]))
@@ -4604,7 +4606,7 @@ class TestWedgeDeadSessionBlockedOnUser:
         from cw.native_daemon import FakeNativeDaemonClient
 
         monkeypatch.setattr(
-            "cw.doctor.core.get_native_daemon_client", FakeNativeDaemonClient
+            "cw.doctor.loop_health.get_native_daemon_client", FakeNativeDaemonClient
         )
 
         # session name must encode ticket_id via client-a/auto-dev/<ticket_id>
@@ -4654,7 +4656,7 @@ class TestWedgeDeadSessionBlockedOnUser:
         from cw.native_daemon import FakeNativeDaemonClient
 
         monkeypatch.setattr(
-            "cw.doctor.core.get_native_daemon_client", FakeNativeDaemonClient
+            "cw.doctor.loop_health.get_native_daemon_client", FakeNativeDaemonClient
         )
 
         # session name encodes ticket_id "dup-ticket-1"
@@ -4705,7 +4707,7 @@ class TestWedgeDeadSessionBlockedOnUser:
 
         daemon = FakeNativeDaemonClient()
         # surface NOT in live
-        monkeypatch.setattr("cw.doctor.core.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
         _stub_claude_version_ok(monkeypatch)
 
         sess = self._make_session("integ-sess", surface_ref="s:gone.1")
@@ -4734,7 +4736,7 @@ class TestWedgeDeadSessionBlockedOnUser:
         from cw.native_daemon import FakeNativeDaemonClient
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.core.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
 
         sess = self._make_session("no-ref-sess", surface_ref=None)
         save_state(CwState(sessions=[sess]))
@@ -4777,7 +4779,7 @@ class TestCheckLoopLiveness:
 
         stale_at = datetime.now(UTC) - timedelta(seconds=200)
         monkeypatch.setattr(
-            "cw.doctor.core.latest_tick_summary_by_client",
+            "cw.doctor.loop_health.latest_tick_summary_by_client",
             lambda: {
                 "test-client": self._make_tick_summary(pending=2, tick_at=stale_at)
             },
@@ -4798,7 +4800,7 @@ class TestCheckLoopLiveness:
 
         fresh_at = datetime.now(UTC) - timedelta(seconds=10)
         monkeypatch.setattr(
-            "cw.doctor.core.latest_tick_summary_by_client",
+            "cw.doctor.loop_health.latest_tick_summary_by_client",
             lambda: {
                 "test-client": self._make_tick_summary(pending=2, tick_at=fresh_at)
             },
@@ -4813,7 +4815,7 @@ class TestCheckLoopLiveness:
         from cw.doctor import _check_loop_liveness
 
         monkeypatch.setattr(
-            "cw.doctor.core.latest_tick_summary_by_client",
+            "cw.doctor.loop_health.latest_tick_summary_by_client",
             dict,
         )
         results = _check_loop_liveness()
@@ -4831,7 +4833,7 @@ class TestCheckLoopLiveness:
 
         stale_at = datetime.now(UTC) - timedelta(seconds=200)
         monkeypatch.setattr(
-            "cw.doctor.core.latest_tick_summary_by_client",
+            "cw.doctor.loop_health.latest_tick_summary_by_client",
             lambda: {
                 "test-client": self._make_tick_summary(pending=0, tick_at=stale_at)
             },
@@ -4847,7 +4849,7 @@ class TestCheckLoopLiveness:
         """run_doctor() includes at least one loop-liveness CheckResult."""
         _stub_claude_version_ok(monkeypatch)
         monkeypatch.setattr(
-            "cw.doctor.core.latest_tick_summary_by_client",
+            "cw.doctor.loop_health.latest_tick_summary_by_client",
             dict,
         )
         report = run_doctor()
@@ -5221,11 +5223,15 @@ class TestWedgeActiveNoDaemonEntry:
 
         roster_path = tmp_path / "roster.json"
         self._write_roster(tmp_path)
-        monkeypatch.setattr("cw.doctor.core._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
 
         daemon = FakeNativeDaemonClient()
         # surface_ref NOT in live — phantom
-        monkeypatch.setattr("cw.doctor.core.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.loop_health.get_native_daemon_client", lambda: daemon
+        )
 
         sess = self._make_session("phantom-act-1", surface_ref="s:act.1")
         save_state(CwState(sessions=[sess]))
@@ -5265,10 +5271,14 @@ class TestWedgeActiveNoDaemonEntry:
 
         roster_path = tmp_path / "roster.json"
         self._write_roster(tmp_path)
-        monkeypatch.setattr("cw.doctor.core._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.core.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.loop_health.get_native_daemon_client", lambda: daemon
+        )
 
         sess = self._make_session(
             "idle-sess-1", surface_ref="s:idle.1", status_active=False
@@ -5297,10 +5307,11 @@ class TestWedgeActiveNoDaemonEntry:
 
         roster_path = tmp_path / "roster.json"
         self._write_roster(tmp_path)
-        monkeypatch.setattr("cw.doctor.core._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.core.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
 
         sess = self._make_session("grace-sess-1", surface_ref="s:grace.1", old=False)
         save_state(CwState(sessions=[sess]))
@@ -5327,11 +5338,12 @@ class TestWedgeActiveNoDaemonEntry:
 
         roster_path = tmp_path / "roster.json"
         self._write_roster(tmp_path)
-        monkeypatch.setattr("cw.doctor.core._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
 
         daemon = FakeNativeDaemonClient()
         daemon._live.add("s:live.1")
-        monkeypatch.setattr("cw.doctor.core.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
 
         sess = self._make_session("live-sess-1", surface_ref="s:live.1")
         save_state(CwState(sessions=[sess]))
@@ -5358,10 +5370,11 @@ class TestWedgeActiveNoDaemonEntry:
 
         roster_path = tmp_path / "roster.json"
         self._write_roster(tmp_path)
-        monkeypatch.setattr("cw.doctor.core._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.core.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
 
         sess = self._make_session(
             "orch-sess-1", surface_ref="s:orch.1", purpose_orchestrate=True
@@ -5396,10 +5409,11 @@ class TestWedgeActiveNoDaemonEntry:
 
         roster_path = tmp_path / "roster.json"
         self._write_roster(tmp_path)
-        monkeypatch.setattr("cw.doctor.core._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.core.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
 
         sess = Session(
             id="no-ref-sess",
@@ -5437,10 +5451,14 @@ class TestWedgeActiveNoDaemonEntry:
 
         roster_path = tmp_path / "roster.json"
         self._write_roster(tmp_path)
-        monkeypatch.setattr("cw.doctor.core._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.core.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.loop_health.get_native_daemon_client", lambda: daemon
+        )
 
         sess = self._make_session("run-task-sess", surface_ref="s:run.1")
         save_state(CwState(sessions=[sess]))
@@ -5472,10 +5490,11 @@ class TestWedgeActiveNoDaemonEntry:
 
         roster_path = tmp_path / "roster.json"
         self._write_roster(tmp_path)
-        monkeypatch.setattr("cw.doctor.core._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.core.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
 
         sess = self._make_session("no-reap-sess", surface_ref="s:noreap.1")
         save_state(CwState(sessions=[sess]))
@@ -5508,10 +5527,14 @@ class TestWedgeActiveNoDaemonEntry:
 
         roster_path = tmp_path / "roster.json"
         self._write_roster(tmp_path)
-        monkeypatch.setattr("cw.doctor.core._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.core.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.loop_health.get_native_daemon_client", lambda: daemon
+        )
 
         sess = Session(
             id="no-ticket-sess",
@@ -5550,10 +5573,11 @@ class TestWedgeActiveNoDaemonEntry:
         roster_path = tmp_path / "roster.json"
         # Write roster with NO supervisorPid — daemon appears down
         roster_path.write_text(json.dumps({"workers": {}}), encoding="utf-8")
-        monkeypatch.setattr("cw.doctor.core._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.core.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
 
         sess = self._make_session("outage-sess", surface_ref="s:outage.1")
         save_state(CwState(sessions=[sess]))
@@ -5584,10 +5608,14 @@ class TestWedgeActiveNoDaemonEntry:
 
         roster_path = tmp_path / "roster.json"
         self._write_roster(tmp_path)
-        monkeypatch.setattr("cw.doctor.core._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
+        monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
 
         daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr("cw.doctor.core.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+        monkeypatch.setattr(
+            "cw.doctor.loop_health.get_native_daemon_client", lambda: daemon
+        )
 
         # Write a cw-context.json referencing the phantom session
         worktree = tmp_path / "worktree"
