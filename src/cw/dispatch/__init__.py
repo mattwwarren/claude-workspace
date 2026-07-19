@@ -14,24 +14,14 @@ from __future__ import annotations
 from cw.dispatch._legacy import (
     _APPROVAL_GATE_REASON,
     _AWAITING_OPERATOR_REASON,
-    _CW_PACKAGE_NAME,
-    _DISPATCH_CONSUMER,
     _INVALID_STAGE_REASON,
-    _LOADED_VERSION,
     _PLAN_PARKED_REASON,
     _STAGE_REACHED_TO_STAGE,
     _UNKNOWN_CLIENT_REASON,
-    TICK_STALE_SECONDS,
-    DispatchTickResult,
     _accumulate_task_cost,
-    _apply_events_to_store,
-    _build_plan_order,
     _classify_sentinel_stage_position,
-    _client_tick_snapshot,
-    _ClientTickSnapshot,
     _extract_scope_tier,
     _persist_carried_context,
-    _resolve_loaded_version,
     _resolve_scope_tier,
     _resolve_stage_walk,
     _route_scope_gated_approval,
@@ -40,14 +30,9 @@ from cw.dispatch._legacy import (
     _should_gate_for_signoff,
     _stage_advance_unchecked,
     _StagePosition,
-    _sweep_expired_diagnostics,
     _walk_stage_pointer_forward,
     apply_staged_decision,
-    consume_completed_sessions,
-    dispatch_tick,
-    persist_last_result,
     resolve_signoff,
-    run_dispatch_loop,
 )
 from cw.dispatch.claim import (
     _CODEX_CAPABILITY_GATE_TIMEOUT_SECONDS,
@@ -100,6 +85,25 @@ from cw.dispatch.lanes import (
     _reset_lane_spawn_errors,
     _resolve_dispatch_skip_reason,
     _resolve_low_precedence_skip_reason,
+)
+from cw.dispatch.loop import (
+    _CW_PACKAGE_NAME,
+    _DISPATCH_CONSUMER,
+    _LOADED_VERSION,
+    TICK_STALE_SECONDS,
+    _apply_events_to_store,
+    _resolve_loaded_version,
+    consume_completed_sessions,
+    persist_last_result,
+    run_dispatch_loop,
+)
+from cw.dispatch.tick import (
+    DispatchTickResult,
+    _build_plan_order,
+    _client_tick_snapshot,
+    _ClientTickSnapshot,
+    _sweep_expired_diagnostics,
+    dispatch_tick,
 )
 
 __all__ = [
