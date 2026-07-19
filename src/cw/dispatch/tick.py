@@ -87,7 +87,7 @@ def _sweep_expired_diagnostics(config: OrchestratorConfig) -> None:
     """
     try:
         cleanup_expired_diagnostics(retention_hours=config.diagnostics_retention_hours)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 — best-effort retention sweep must never abort the tick; see docstring
         _log.exception("diagnostics cleanup failed during dispatch_tick; continuing")
 
 

@@ -1010,7 +1010,7 @@ def _detect_post_review_clean(session: Session) -> bool:
             event_types=[OrchestratorEventType.STAGE_ENTERED],
             since_ts=session.started_at,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 — events._parse_lines deliberately re-raises on interior corruption "so callers see real corruption"; this liveness check is the one caller that must not propagate that, so it fails safe to False instead
         return False
     for ev in events:
         session_id = ev.payload.get("session_id")
@@ -1238,7 +1238,7 @@ def _compute_worktree_dirty(client_name: str, branch: str | None) -> bool:
     try:
         client = get_client(client_name)
         return worktree_has_unsaved_work(client, branch)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 — fail-safe on any error (client lookup or git); mirrors _cleanup_timed_out_worktree
         return False
 
 
@@ -1258,7 +1258,7 @@ def _worktree_dirty_by_path(client_name: str, worktree_path: Path | None) -> boo
             return False
         client = get_client(client_name)
         return worktree_has_unsaved_work(client, branch)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 — fail-safe on any error; mirrors _compute_worktree_dirty
         return False
 
 

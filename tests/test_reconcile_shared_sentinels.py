@@ -2296,6 +2296,25 @@ class TestDetectPostReviewClean:
         assert _detect_post_review_clean(sess) is False
 
 
+class TestWorktreeDirtyByPath:
+    """Unit tests for _worktree_dirty_by_path."""
+
+    def test_returns_false_when_checked_out_branch_raises(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """_worktree_dirty_by_path returns False when the internal call raises."""
+        from cw.reconcile import _worktree_dirty_by_path
+
+        monkeypatch.setattr(
+            "cw.reconcile._deps.checked_out_branch",
+            lambda _p: (_ for _ in ()).throw(RuntimeError("git failure")),
+        )
+        assert _worktree_dirty_by_path("client-a", tmp_path / "wt") is False
+
+
 # ---------------------------------------------------------------------------
 # _locate_session_transcript tests (GitHub #541)
 # ---------------------------------------------------------------------------
