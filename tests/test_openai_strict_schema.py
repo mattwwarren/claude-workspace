@@ -60,7 +60,11 @@ class TestTopLevelAndDefsShape:
 
     def test_required_equals_all_properties_keys_at_every_object_node(self) -> None:
         result = to_openai_strict_schema(_schema())
-        nodes = [result, result["$defs"]["Finding"], result["$defs"]["EscalationMetadata"]]
+        nodes = [
+            result,
+            result["$defs"]["Finding"],
+            result["$defs"]["EscalationMetadata"],
+        ]
         for node in nodes:
             assert set(node["required"]) == set(node["properties"].keys())
 
@@ -81,7 +85,11 @@ class TestNullableWrapping:
         result = to_openai_strict_schema(_schema())
         assert result["properties"]["findings"] == {
             "anyOf": [
-                {"items": {"$ref": "#/$defs/Finding"}, "title": "Findings", "type": "array"},
+                {
+                    "items": {"$ref": "#/$defs/Finding"},
+                    "title": "Findings",
+                    "type": "array",
+                },
                 {"type": "null"},
             ]
         }
