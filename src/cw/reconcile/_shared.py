@@ -147,6 +147,12 @@ _TIMED_OUT_MERGED_REASON = "timed_out_merged"
 # worktree has unsaved work and the task is routed to BLOCKED_ON_USER instead
 # of being retried automatically (GitHub issue #421).
 _DIRTY_WORKTREE_REASON = "dirty_worktree"
+# paused_status written to SESSION_NEEDS_ATTENTION events when
+# complete_timed_out_merged_tasks refuses a COMPLETED transition for a
+# PENDING row with no claim history (attempts == 0, session_id is None) --
+# a reconciler false-match rather than a genuine completion (GitHub #1385,
+# #1387 belt-and-braces guard).
+_NEVER_CLAIMED_COMPLETION_REASON = "never_claimed_completion_refused"
 # Reason tag written to SESSION_COMPLETED events when a phantom/stalled/idle
 # session's PR was found MERGED before its task was reverted to PENDING.
 # Prevents re-dispatch of already-shipped tickets (GitHub issue #637).

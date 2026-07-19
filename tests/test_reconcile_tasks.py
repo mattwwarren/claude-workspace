@@ -500,7 +500,11 @@ class TestCompleteTimedOutMergedTasks:
         self, ticket_id: str, *, lane: str = "batch-2"
     ) -> TicketTask:
         return _make_ticket_task(
-            ticket_id=ticket_id, client="client-a", attempts=0, session_id=None, lane=lane
+            ticket_id=ticket_id,
+            client="client-a",
+            attempts=0,
+            session_id=None,
+            lane=lane,
         )
 
     def test_never_claimed_row_refused_stays_pending_and_emits_needs_attention(
@@ -522,7 +526,8 @@ class TestCompleteTimedOutMergedTasks:
             DevQueueStore(tasks=[self._never_claimed_task(ticket_id, lane="batch-2")])
         )
         monkeypatch.setattr(
-            "cw.reconcile._deps.pr_is_merged_for_ticket", lambda _tid, **_kw: (True, True)
+            "cw.reconcile._deps.pr_is_merged_for_ticket",
+            lambda _tid, **_kw: (True, True),
         )
 
         completed = complete_timed_out_merged_tasks()

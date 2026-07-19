@@ -33,6 +33,7 @@ from cw.models import (
 from cw.reconcile import _deps, _shared
 from cw.reconcile._shared import (
     _DIRTY_WORKTREE_REASON,
+    _NEVER_CLAIMED_COMPLETION_REASON,
     _TIMED_OUT_MERGED_REASON,
     feature_branch_key,
     ticket_id_for_session,
@@ -165,6 +166,49 @@ def _collect_timed_out_merged_candidates(
     return candidates
 
 
+def _is_never_claimed(task: TicketTask) -> bool:
+    """True when *task* shows no claim history (#1387 belt-and-braces guard).
+
+    No legitimate completion has attempts == 0 and session_id is None --
+    attempts increments only at claim time (dispatch/claim.py:216-217,
+    243-244) and session_id is stamped only on spawn. A task in this
+    shape reaching this call site is definitionally a reconciler
+    false-match (GitHub #1385), not a genuine completion.
+    """
+    return task.attempts == 0 and task.session_id is None
+
+
+def _emit_never_claimed_refusals(refused: list[tuple[str, Session, str]]) -> None:
+    """Emit SESSION_NEEDS_ATTENTION for each refused false-completion.
+
+    Called after dev_queue_lock releases, mirroring this module's existing
+    SESSION_COMPLETED emission (Phase 4) -- record_event acquires the
+    events-inbox lock and this function's caller must not hold
+    dev_queue_lock while doing so (see _revert_running_tasks_for_sessions
+    for the same ordering rationale, #765).
+    """
+    for ticket_id, session, lane in refused:
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": "",
+                "session_name": "",
+                "client": session.client,
+                "ticket_id": ticket_id,
+                "claude_session_id": None,
+                "paused_status": _NEVER_CLAIMED_COMPLETION_REASON,
+                "breadcrumbs": (
+                    f"matched timed-out session {session.id!r} but the "
+                    "dev-queue task was never claimed (attempts=0, "
+                    "session_id=None) -- refusing false completion"
+                ),
+                "crashed": False,
+                "lane": lane,
+            },
+            correlation_id=ticket_id,
+        )
+
+
 def _client_cwd(client_name: str, clients: dict[str, ClientConfig]) -> Path | None:
     """Resolve the gh cwd for *client_name*, or None if no config is found.
 
@@ -238,6 +282,13 @@ def complete_timed_out_merged_tasks() -> list[str]:
     issue-linkage), upgrades the task to COMPLETED and emits SESSION_COMPLETED
     with reason="timed_out_merged".
 
+    A matching PENDING row with no claim history (attempts == 0, session_id
+    is None) is refused rather than completed — such a row was never
+    dispatched and its match is a reconciler false-match (GitHub #1385), not
+    a genuine completion. It is left PENDING and a SESSION_NEEDS_ATTENTION
+    event is emitted with paused_status=_NEVER_CLAIMED_COMPLETION_REASON
+    (#1387 belt-and-braces guard).
+
     Called from reconcile() AFTER sessions_lock is released — no gh subprocess
     runs under the session lock (liveness requirement, #485 SHOULD_FIX 4).
 
@@ -272,6 +323,7 @@ def complete_timed_out_merged_tasks() -> list[str]:
 
     # Phase 3: Acquire only dev_queue_lock for the PENDING→COMPLETED write.
     completed_ids: list[str] = []
+    refused: list[tuple[str, Session, str]] = []
     with dev_queue_lock():
         store = load_dev_queue()
         changed = False
@@ -282,6 +334,9 @@ def complete_timed_out_merged_tasks() -> list[str]:
                     and task.client == session.client
                     and task.status == QueueItemStatus.PENDING
                 ):
+                    if _is_never_claimed(task):
+                        refused.append((ticket_id, session, task.lane))
+                        break
                     # Why: PR URL is not retrieved here — a second gh call is
                     # disproportionate for this recovery path; disposition alone
                     # is enough for the operator to identify these as shipped.
@@ -311,6 +366,7 @@ def complete_timed_out_merged_tasks() -> list[str]:
                 },
                 correlation_id=ticket_id,
             )
+    _emit_never_claimed_refusals(refused)
 
     return completed_ids
 
