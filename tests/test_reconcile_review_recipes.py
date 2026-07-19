@@ -1438,7 +1438,7 @@ def test_detect_request_reviewer_fires_on_no_reviewer() -> None:
 
 def _stub_strategy(monkeypatch: pytest.MonkeyPatch, strategy: ReviewStrategy) -> None:
     monkeypatch.setattr(
-        "cw.reconcile.review_recipes.resolve_review_strategy",
+        "cw.reconcile.review_recipes._remaining.resolve_review_strategy",
         lambda _root: strategy,
     )
 
@@ -2118,7 +2118,7 @@ class TestDetectRepeatFireCounts:
             msg = "inbox unreadable"
             raise OSError(msg)
 
-        monkeypatch.setattr("cw.reconcile.review_recipes.read_events", _boom)
+        monkeypatch.setattr("cw.reconcile.review_recipes._remaining.read_events", _boom)
         assert _detect_repeat_fire_counts(config=_config()) == {}
 
     def test_malformed_payload_missing_keys_skipped(self, tmp_config_dir: Path) -> None:
@@ -2418,7 +2418,7 @@ class TestRunReviewRecipesRepeatFire:
             return _real_detect_repeat_fire_counts(**kwargs)
 
         monkeypatch.setattr(
-            "cw.reconcile.review_recipes._detect_repeat_fire_counts", _spy
+            "cw.reconcile.review_recipes._remaining._detect_repeat_fire_counts", _spy
         )
         run_review_recipes(config=_config())
         # One detector call per tick — NOT once per recipe (four recipes run).
