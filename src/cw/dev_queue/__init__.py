@@ -1,29 +1,44 @@
-"""Dev-queue management for orchestrator ticket dispatch."""
+"""Dev-queue management for orchestrator ticket dispatch.
+
+Package split (#1317, part 1 of 2). The historical flat ``cw.dev_queue`` module
+is being converted into a package of focused submodules. This part extracts the
+two low-coupling concerns; the remaining CRUD / lifecycle / approval / requeue
+concerns still live in this ``__init__`` shim and move out in part 2.
+
+* ``migrate`` — the pure dict-in / dict-out schema-normalisation layer: the
+  per-task ``_fill_*_default`` helpers, ``_fill_watched_prs_default``, and the
+  ``migrate_dev_queue`` entry point.
+* ``storage`` — the on-disk persistence layer: the ``_lock`` / ``_plan_lock``
+  file-lock context managers (plus the ``dev_queue_lock`` alias),
+  ``plan_path`` / ``save_plan`` / ``load_plan``, and ``load_dev_queue`` /
+  ``save_dev_queue``.
+
+This ``__init__`` re-exports the full historical public + private surface (see
+``__all__``) so every ``from cw.dev_queue import X`` import site keeps working
+unchanged.
+"""
 
 from __future__ import annotations
 
-import contextlib
-import fcntl
-import json
 import time
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Literal
 
-from cw.atomic import atomic_write_text, rotate_backup
 from cw.auto_dev_result import (
     PAUSED_FOR_USER_INPUT_STATUSES,
     STAGE_FAILURE_STATUSES,
     STAGE_SUCCESS_STATUSES,
 )
-from cw.config import (
-    dev_plan_file,
-    dev_plan_lock,
-    dev_queue_file,
-    get_client,
-    refuse_real_state_write,
-)
-from cw.config import (
-    dev_queue_lock as _dev_queue_lock_file,
+from cw.config import get_client
+from cw.dev_queue.migrate import migrate_dev_queue
+from cw.dev_queue.storage import (
+    _lock,
+    dev_queue_lock,
+    load_dev_queue,
+    load_plan,
+    plan_path,
+    save_dev_queue,
+    save_plan,
 )
 from cw.events import record_event
 from cw.exceptions import (
@@ -37,11 +52,7 @@ from cw.exceptions import (
 )
 from cw.gh import fetch_approved_plan_comment
 from cw.models import (
-    DEFAULT_LANE,
-    DEFAULT_STAGE,
-    DEV_QUEUE_SCHEMA_VERSION,
     DevQueueStore,
-    DispatchPlan,
     OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
@@ -49,10 +60,6 @@ from cw.models import (
     TicketTask,
     WatchedPr,
 )
-
-if TYPE_CHECKING:
-    from collections.abc import Iterator
-    from pathlib import Path
 
 _WAIT_POLL_INTERVAL: int = 5
 
@@ -196,282 +203,6 @@ def _extract_pr_url(last_result: dict[str, object] | None) -> str | None:
         url = pr.get("url")
         return str(url) if url is not None else None
     return None
-
-
-@contextlib.contextmanager
-def _lock() -> Iterator[None]:
-    """Acquire an exclusive file lock for the dev queue."""
-    dev_queue_file().parent.mkdir(parents=True, exist_ok=True)
-    fd = _dev_queue_lock_file().open("w")
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        fd.close()
-
-
-# Public alias for callers that need the dev-queue lock directly (e.g. the
-# reconciler, which needs load → mutate → save around a RUNNING→PENDING
-# revert). Prefer higher-level helpers like ``add_ticket`` when available.
-dev_queue_lock = _lock
-
-
-@contextlib.contextmanager
-def _plan_lock() -> Iterator[None]:
-    """Acquire an exclusive file lock for the dispatch plan."""
-    dev_plan_file().parent.mkdir(parents=True, exist_ok=True)
-    fd = dev_plan_lock().open("w")
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        fd.close()
-
-
-def plan_path() -> Path:
-    """Return the path to the persisted dispatch plan file."""
-    return dev_plan_file()
-
-
-def save_plan(plan: DispatchPlan) -> Path:
-    """Persist a DispatchPlan to disk under the plan file lock.
-
-    Returns the path the plan was written to.
-    """
-    with _plan_lock():
-        path = dev_plan_file()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(path, plan.model_dump_json(indent=2))
-    return path
-
-
-def load_plan() -> DispatchPlan | None:
-    """Load the persisted DispatchPlan, returning None if missing.
-
-    Returns None if the plan file does not exist or fails validation.
-    Does not raise on validation errors — callers should fall back to
-    enqueue order when None is returned.
-    """
-    path = dev_plan_file()
-    if not path.exists():
-        return None
-    try:
-        return DispatchPlan.model_validate_json(path.read_text())
-    except (ValueError, OSError):
-        return None
-
-
-def _fill_task_cost_default(task_raw: dict[str, Any]) -> None:
-    """Fill total_cost_usd introduced in dev-queue schema v2."""
-    if "total_cost_usd" not in task_raw:
-        task_raw["total_cost_usd"] = None
-
-
-def _fill_lane_default(task_raw: dict[str, Any]) -> None:
-    """Fill lane introduced in dev-queue schema v3."""
-    if "lane" not in task_raw:
-        task_raw["lane"] = DEFAULT_LANE
-
-
-def _fill_task_stage_default(task_raw: dict[str, Any]) -> None:
-    """Fill stage introduced in dev-queue schema v4 (GitHub #612). Idempotent."""
-    if "stage" not in task_raw:
-        task_raw["stage"] = DEFAULT_STAGE.value
-
-
-def _fill_task_stage_base_ref_default(task_raw: dict[str, Any]) -> None:
-    """Fill stage_base_ref from dev-queue schema v4 (GitHub #612). Idempotent."""
-    if "stage_base_ref" not in task_raw:
-        task_raw["stage_base_ref"] = None
-
-
-def _fill_disposition_default(task_raw: dict[str, Any]) -> None:
-    """Fill disposition introduced in dev-queue schema v5 (GitHub #310). Idempotent."""
-    if "disposition" not in task_raw:
-        task_raw["disposition"] = None
-
-
-def _fill_pr_url_default(task_raw: dict[str, Any]) -> None:
-    """Fill pr_url introduced in dev-queue schema v5 (GitHub #310). Idempotent."""
-    if "pr_url" not in task_raw:
-        task_raw["pr_url"] = None
-
-
-def _fill_task_completed_at_default(task_raw: dict[str, Any]) -> None:
-    """Fill completed_at introduced in dev-queue schema v5 (GitHub #310). Idempotent."""
-    if "completed_at" not in task_raw:
-        task_raw["completed_at"] = None
-
-
-def _fill_regress_attempts_default(task_raw: dict[str, Any]) -> None:
-    """Fill regress_attempts introduced in schema v6 (GitHub #770). Idempotent."""
-    if "regress_attempts" not in task_raw:
-        task_raw["regress_attempts"] = 0
-
-
-def _fill_spawn_error_backoff_default(task_raw: dict[str, Any]) -> None:
-    """Fill spawn_error_count/next_eligible_at introduced in schema v7 (GitHub #868).
-
-    Idempotent."""
-    if "spawn_error_count" not in task_raw:
-        task_raw["spawn_error_count"] = 0
-    if "next_eligible_at" not in task_raw:
-        task_raw["next_eligible_at"] = None
-
-
-def _fill_pr_state_default(task_raw: dict[str, Any]) -> None:
-    """Fill pr_state introduced in dev-queue schema v8 (GitHub #929). Idempotent."""
-    if "pr_state" not in task_raw:
-        task_raw["pr_state"] = None
-
-
-def _fill_signoff_default(task_raw: dict[str, Any]) -> None:
-    """Fill signoff introduced in dev-queue schema v9 (GitHub #990). Idempotent."""
-    if "signoff" not in task_raw:
-        task_raw["signoff"] = None
-
-
-def _fill_escalation_defaults(task_raw: dict[str, Any]) -> None:
-    """Fill escalation_parked_at/escalation_fired_at introduced in dev-queue
-    schema v10 (GitHub #1015, RFC 0008 capstone). Idempotent."""
-    if "escalation_parked_at" not in task_raw:
-        task_raw["escalation_parked_at"] = None
-    if "escalation_fired_at" not in task_raw:
-        task_raw["escalation_fired_at"] = None
-
-
-def _fill_false_park_recovery_backoff_default(task_raw: dict[str, Any]) -> None:
-    """Fill false_park_recovery_count/false_park_recovery_next_eligible_at
-    introduced in dev-queue schema v11 (GitHub #1030). Idempotent."""
-    if "false_park_recovery_count" not in task_raw:
-        task_raw["false_park_recovery_count"] = 0
-    if "false_park_recovery_next_eligible_at" not in task_raw:
-        task_raw["false_park_recovery_next_eligible_at"] = None
-
-
-def _fill_gate_recipe_failed_default(task_raw: dict[str, Any]) -> None:
-    """Fill gate_recipe_failed_at introduced in dev-queue schema v12
-    (GitHub #1065, RFC 0009). Idempotent."""
-    if "gate_recipe_failed_at" not in task_raw:
-        task_raw["gate_recipe_failed_at"] = None
-
-
-def _fill_escalate_merge_block_default(task_raw: dict[str, Any]) -> None:
-    """Fill escalate_merge_block_fired_at introduced in dev-queue schema v14
-    (GitHub #1099, RFC 0010 P4). Idempotent."""
-    if "escalate_merge_block_fired_at" not in task_raw:
-        task_raw["escalate_merge_block_fired_at"] = None
-
-
-def _fill_request_reviewer_fired_default(task_raw: dict[str, Any]) -> None:
-    """Fill request_reviewer_fired_at introduced in dev-queue schema v16
-    (GitHub #1197). Idempotent."""
-    if "request_reviewer_fired_at" not in task_raw:
-        task_raw["request_reviewer_fired_at"] = None
-
-
-def _fill_auto_fix_ci_fired_default(task_raw: dict[str, Any]) -> None:
-    """Fill auto_fix_ci_fired_at introduced in dev-queue schema v17
-    (GitHub #1205). Idempotent."""
-    if "auto_fix_ci_fired_at" not in task_raw:
-        task_raw["auto_fix_ci_fired_at"] = None
-
-
-def _fill_address_review_fired_default(task_raw: dict[str, Any]) -> None:
-    """Fill address_review_fired_at introduced in dev-queue schema v18
-    (GitHub #1206). Idempotent."""
-    if "address_review_fired_at" not in task_raw:
-        task_raw["address_review_fired_at"] = None
-
-
-def _fill_last_blocked_result_default(task_raw: dict[str, Any]) -> None:
-    """Fill last_blocked_result introduced in dev-queue schema v19
-    (GitHub #1266). Idempotent."""
-    if "last_blocked_result" not in task_raw:
-        task_raw["last_blocked_result"] = None
-
-
-def _fill_cross_repo_override_default(task_raw: dict[str, Any]) -> None:
-    """Fill cross_repo_override introduced in dev-queue schema v20
-    (GitHub #1198). Idempotent."""
-    if "cross_repo_override" not in task_raw:
-        task_raw["cross_repo_override"] = False
-
-
-def _fill_stage_high_water_default(task_raw: dict[str, Any]) -> None:
-    """Fill stage_high_water introduced in dev-queue schema v21
-    (GitHub #1361), seeded from the task's current stage. Idempotent."""
-    if "stage_high_water" not in task_raw:
-        task_raw["stage_high_water"] = task_raw.get("stage", DEFAULT_STAGE.value)
-
-
-def _fill_watched_prs_default(raw: dict[str, Any]) -> None:
-    """Fill the top-level watched_prs list introduced in schema v15 (#1154).
-
-    Store-level (not per-task), so this takes the raw store dict rather than a
-    task dict and is called once outside migrate_dev_queue's per-task loop.
-    Idempotent."""
-    if "watched_prs" not in raw:
-        raw["watched_prs"] = []
-
-
-def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
-    """Normalise a raw dev_queue.json payload into a currently-valid shape."""
-    tasks = raw.get("tasks")
-    if isinstance(tasks, list):
-        for task_raw in tasks:
-            if isinstance(task_raw, dict):
-                _fill_task_cost_default(task_raw)
-                _fill_lane_default(task_raw)
-                _fill_task_stage_default(task_raw)
-                _fill_task_stage_base_ref_default(task_raw)
-                _fill_disposition_default(task_raw)
-                _fill_pr_url_default(task_raw)
-                _fill_task_completed_at_default(task_raw)
-                _fill_regress_attempts_default(task_raw)
-                _fill_spawn_error_backoff_default(task_raw)
-                _fill_pr_state_default(task_raw)
-                _fill_signoff_default(task_raw)
-                _fill_escalation_defaults(task_raw)
-                _fill_false_park_recovery_backoff_default(task_raw)
-                _fill_gate_recipe_failed_default(task_raw)
-                _fill_escalate_merge_block_default(task_raw)
-                _fill_request_reviewer_fired_default(task_raw)
-                _fill_auto_fix_ci_fired_default(task_raw)
-                _fill_address_review_fired_default(task_raw)
-                _fill_last_blocked_result_default(task_raw)
-                _fill_cross_repo_override_default(task_raw)
-                _fill_stage_high_water_default(task_raw)
-    _fill_watched_prs_default(raw)
-    raw["schema_version"] = DEV_QUEUE_SCHEMA_VERSION
-    return raw
-
-
-def load_dev_queue() -> DevQueueStore:
-    """Load the dev queue from disk, returning an empty store if missing."""
-    path = dev_queue_file()
-    if not path.exists():
-        return DevQueueStore()
-    raw = json.loads(path.read_text())
-    return DevQueueStore.model_validate(migrate_dev_queue(raw))
-
-
-def save_dev_queue(store: DevQueueStore) -> None:
-    """Persist the dev queue to disk atomically.
-
-    Write-ahead backs up the previous on-disk payload before overwriting,
-    rotating out anything past the last _DEFAULT_BACKUP_KEEP snapshots
-    (GitHub #1017) — the only reason the Jul 2026 GEN-A/GEN-B clobber
-    incident was recoverable was a manually-made backup; this makes that
-    protection automatic.
-    """
-    path = dev_queue_file()
-    refuse_real_state_write(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    rotate_backup(path)
-    atomic_write_text(path, store.model_dump_json(indent=2))
 
 
 def add_ticket(task: TicketTask) -> bool:
@@ -1549,3 +1280,42 @@ def unblock_ticket(ticket_id: str, client_name: str) -> dict[str, str]:
         save_state(state)
 
     return {"ticket_id": ticket_id, "client": client_name}
+
+
+__all__ = [
+    "SIGNOFF_GATE_DISPOSITION",
+    "_PLAN_SOUNDNESS_MARKER",
+    "_PLAN_SPEC_MARKER",
+    "LaneNotFoundError",
+    "_advance_task_pointer",
+    "_apply_requeue_stage",
+    "_approve_ticket_locked",
+    "_derive_disposition",
+    "_extract_pr_url",
+    "_find_ticket",
+    "_lock",
+    "_newest_by_created_at",
+    "_stage_regress",
+    "add_ticket",
+    "approve_ticket",
+    "cancel_task_for_session",
+    "cancel_ticket",
+    "clear_tickets",
+    "consume_completed_sessions",
+    "dev_queue_lock",
+    "list_tickets",
+    "load_dev_queue",
+    "load_plan",
+    "migrate_dev_queue",
+    "move_ticket",
+    "plan_path",
+    "register_watched_pr",
+    "remove_ticket",
+    "requeue_ticket",
+    "resolve_client",
+    "save_dev_queue",
+    "save_plan",
+    "transition_task_status",
+    "unblock_ticket",
+    "wait_for_terminal",
+]
