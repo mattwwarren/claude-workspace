@@ -60,7 +60,7 @@ if TYPE_CHECKING:
         OrchestratorEvent,
     )
     from cw.native_daemon import NativeDaemonClient
-from cw.dispatch._legacy import _accumulate_task_cost, apply_staged_decision
+from cw.dispatch.routing import _accumulate_task_cost, apply_staged_decision
 from cw.dispatch.tick import dispatch_tick
 
 _log = logging.getLogger("cw.dispatch")

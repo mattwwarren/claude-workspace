@@ -6419,7 +6419,7 @@ class TestApplyStagedDecision:
                 captured.append((event_type, payload or {}))
             return None
 
-        monkeypatch.setattr("cw.dispatch._legacy.record_event", capture_event)
+        monkeypatch.setattr("cw.dispatch.routing.record_event", capture_event)
 
         task = self._make_running_task("EVT-1", stage=Stage.FINALIZE)
         last_result: dict[str, object] = {
@@ -6453,7 +6453,7 @@ class TestApplyStagedDecision:
         from cw.dispatch import apply_staged_decision
 
         requeued = capture_events(
-            "cw.dispatch._legacy", OrchestratorEventType.TICKET_REQUEUED
+            "cw.dispatch.routing", OrchestratorEventType.TICKET_REQUEUED
         )
         stage_changed = capture_events(
             "cw.dev_queue", OrchestratorEventType.TASK_STAGE_CHANGED
@@ -6528,7 +6528,7 @@ class TestApplyStagedDecision:
                 captured.append((event_type, payload or {}))
             return None
 
-        monkeypatch.setattr("cw.dispatch._legacy.record_event", capture_event)
+        monkeypatch.setattr("cw.dispatch.routing.record_event", capture_event)
 
         task = self._make_running_task("PK-1", stage=Stage.IMPL)
         task.session_id = "sess-pk1"
@@ -6579,7 +6579,7 @@ class TestApplyStagedDecision:
                 attention_events.append(event_type)
             return None
 
-        monkeypatch.setattr("cw.dispatch._legacy.record_event", capture_event)
+        monkeypatch.setattr("cw.dispatch.routing.record_event", capture_event)
 
         last_result: dict[str, object] = {"status": non_v4_status}
         task = self._make_running_task("NPK-1", stage=Stage.FINALIZE)
@@ -6623,7 +6623,7 @@ class TestApplyStagedDecision:
                 captured.append((event_type, payload or {}))
             return None
 
-        monkeypatch.setattr("cw.dispatch._legacy.record_event", capture_event)
+        monkeypatch.setattr("cw.dispatch.routing.record_event", capture_event)
 
         task = self._make_running_task("SF-1", stage=Stage.IMPL)
         task.session_id = "sess-sf1"
@@ -6712,7 +6712,7 @@ class TestApplyStagedDecision:
                 captured.append((event_type, payload or {}))
             return None
 
-        monkeypatch.setattr("cw.dispatch._legacy.record_event", capture_event)
+        monkeypatch.setattr("cw.dispatch.routing.record_event", capture_event)
 
         task = self._make_running_task("SF-BC-1", stage=Stage.IMPL)
         last_result: dict[str, object] = {"status": status, "blocker": blocker}
@@ -6741,7 +6741,7 @@ class TestApplyStagedDecision:
         from cw.dispatch import apply_staged_decision
 
         attention = capture_events(
-            "cw.dispatch._legacy", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
         )
 
         task = self._make_running_task("REGRESS-ATTN-1", stage=Stage.FINALIZE)
@@ -6782,7 +6782,7 @@ class TestApplyStagedDecision:
                 captured.append((event_type, payload or {}))
             return None
 
-        monkeypatch.setattr("cw.dispatch._legacy.record_event", capture_event)
+        monkeypatch.setattr("cw.dispatch.routing.record_event", capture_event)
 
         task = self._make_running_task("MP-ATTN-1", stage=Stage.FINALIZE)
         last_result: dict[str, object] = {
@@ -6827,7 +6827,7 @@ class TestApplyStagedDecision:
                 captured.append((event_type, payload or {}))
             return None
 
-        monkeypatch.setattr("cw.dispatch._legacy.record_event", capture_event)
+        monkeypatch.setattr("cw.dispatch.routing.record_event", capture_event)
 
         task = self._make_running_task("UNPARSE-1", stage=Stage.IMPL)
         apply_staged_decision(task, None, None, self._clients(tmp_path))
@@ -6863,7 +6863,7 @@ class TestApplyStagedDecision:
         from cw.dispatch import apply_staged_decision
 
         attention = capture_events(
-            "cw.dispatch._legacy", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
         )
 
         task = self._make_running_task("SG-ATTN-1", stage=Stage.PLAN)
@@ -6907,7 +6907,7 @@ class TestApplyStagedDecision:
         from cw.dispatch import apply_staged_decision
 
         attention = capture_events(
-            "cw.dispatch._legacy", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
         )
 
         plan_task = self._make_running_task("SG-SMALL-ATTN-1", stage=Stage.PLAN)
@@ -7431,7 +7431,7 @@ class TestApplyStagedDecision:
         from cw.dispatch import apply_staged_decision
 
         captured = capture_events(
-            "cw.dispatch._legacy", OrchestratorEventType.SENTINEL_STAGE_MISMATCH
+            "cw.dispatch.routing", OrchestratorEventType.SENTINEL_STAGE_MISMATCH
         )
 
         task = self._make_running_task("MISMATCH-EVT-1", stage=Stage.REVIEW)
@@ -7590,7 +7590,7 @@ class TestApplyStagedDecision:
         from cw.dispatch import apply_staged_decision
 
         attention = capture_events(
-            "cw.dispatch._legacy", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
         )
         stage_changed = capture_events(
             "cw.dev_queue", OrchestratorEventType.TASK_STAGE_CHANGED
@@ -7839,7 +7839,7 @@ class TestApplyStagedDecision:
         REVIEW->FINALIZE, regress FINALIZE->IMPL]. session_id must still be the
         real value at the moment Rule 5a's regress condition is evaluated.
         """
-        import cw.dispatch._legacy as dispatch_legacy
+        import cw.dispatch.routing as dispatch_legacy
         from cw.dispatch import apply_staged_decision
 
         stage_changed = capture_events(
@@ -7853,7 +7853,7 @@ class TestApplyStagedDecision:
             captured_session_id.append(task.session_id)
             real_stage_regress(task, target_stage)
 
-        monkeypatch.setattr("cw.dispatch._legacy._stage_regress", _spy_stage_regress)
+        monkeypatch.setattr("cw.dispatch.routing._stage_regress", _spy_stage_regress)
 
         task = self._make_running_task("WALK-REGRESS-1", stage=Stage.IMPL)
         task.session_id = "sess-walk-regress-1"
@@ -7961,7 +7961,7 @@ class TestApplyStagedDecision:
                 captured.append((event_type, payload or {}))
             return None
 
-        monkeypatch.setattr("cw.dispatch._legacy.record_event", capture_event)
+        monkeypatch.setattr("cw.dispatch.routing.record_event", capture_event)
 
         task = self._make_running_task("AO-1", stage=Stage.IMPL)
         last_result: dict[str, object] = {
@@ -8198,7 +8198,7 @@ class TestPersistCarriedContext:
             calls.append(task)
 
         monkeypatch.setattr(
-            "cw.dispatch._legacy._stage_advance_unchecked", _advance_spy
+            "cw.dispatch.routing._stage_advance_unchecked", _advance_spy
         )
 
         task = self._make_running_task("RS-1091", stage=Stage.PLAN)
