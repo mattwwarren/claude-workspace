@@ -49,7 +49,9 @@ from cw.models.events import PrState, WatchedPr
 #      sentinel yet" from "a rejected sentinel landed this FAILED."
 # v20: added TicketTask.cross_repo_override (GitHub #1198) — operator escape
 #      hatch that bypasses the cross-repo dispatch guard for one row.
-DEV_QUEUE_SCHEMA_VERSION = 20
+# v21: added TicketTask.stage_high_water (GitHub #1361) — furthest pipeline
+#      stage reached across all attempts; monotonic.
+DEV_QUEUE_SCHEMA_VERSION = 21
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -320,6 +322,18 @@ class TicketTask(BaseModel):
     # PR_ACTION_FAILED). A plain always-on bool, distinct from the Optional
     # tiered-policy overrides above — an explicit, logged, incident-response flag.
     cross_repo_override: bool = False
+    # GitHub #1361 — furthest pipeline stage this ticket has ever reached,
+    # across all attempts/regressions. Distinct from `stage` (the *current*
+    # pointer, which can move backward on self-heal/requeue): this field is
+    # monotonic non-decreasing in pipeline order. Seeded from the task's
+    # current stage on migration (v21). Raised via max()-by-pipeline-order
+    # (never lowered) on every forward stage move in `_advance_task_pointer`
+    # and `_apply_requeue_stage`'s forward/same-stage tail; deliberately left
+    # untouched by `_stage_regress` and backward requeues. Lets a consumer
+    # (queue_peek's attempt-count STOP gate) distinguish a ticket that is
+    # thrashing (never got past IMPL) from one that is legitimately grinding
+    # through repeated review/finalize cycles.
+    stage_high_water: Stage | None = None
 
     @field_validator("gate_recipes")
     @classmethod

@@ -400,6 +400,13 @@ def _fill_cross_repo_override_default(task_raw: dict[str, Any]) -> None:
         task_raw["cross_repo_override"] = False
 
 
+def _fill_stage_high_water_default(task_raw: dict[str, Any]) -> None:
+    """Fill stage_high_water introduced in dev-queue schema v21
+    (GitHub #1361), seeded from the task's current stage. Idempotent."""
+    if "stage_high_water" not in task_raw:
+        task_raw["stage_high_water"] = task_raw.get("stage", DEFAULT_STAGE.value)
+
+
 def _fill_watched_prs_default(raw: dict[str, Any]) -> None:
     """Fill the top-level watched_prs list introduced in schema v15 (#1154).
 
@@ -436,6 +443,7 @@ def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
                 _fill_address_review_fired_default(task_raw)
                 _fill_last_blocked_result_default(task_raw)
                 _fill_cross_repo_override_default(task_raw)
+                _fill_stage_high_water_default(task_raw)
     _fill_watched_prs_default(raw)
     raw["schema_version"] = DEV_QUEUE_SCHEMA_VERSION
     return raw
@@ -929,6 +937,26 @@ def _emit_stage_change(
     )
 
 
+def _raise_stage_high_water(
+    task: TicketTask, stages: list[Stage], new_stage: Stage
+) -> None:
+    """Raise ``task.stage_high_water`` to ``new_stage`` iff that's further along
+    the pipeline than the current value (GitHub #1361).
+
+    Compares via ``stages.index()`` -- pipeline order -- never StrEnum ``<``/
+    ``>``, whose lexicographic string-value ordering does NOT match pipeline
+    order (e.g. "finalize" < "harden" lexicographically). Degrades gracefully
+    (stamps ``new_stage`` outright) if the existing ``stage_high_water`` value
+    is not a member of the current ``stages`` list -- e.g. seeded from a stage
+    a since-reconfigured client pipeline no longer includes -- rather than
+    raising on a bare ``.index()`` call.
+    """
+    current = task.stage_high_water
+    current_idx = stages.index(current) if current in stages else -1
+    if stages.index(new_stage) > current_idx:
+        task.stage_high_water = new_stage
+
+
 def _advance_task_pointer(task: TicketTask, stages: list[Stage]) -> None:
     """Advance task to the next pipeline stage (no status precondition check).
 
@@ -939,6 +967,7 @@ def _advance_task_pointer(task: TicketTask, stages: list[Stage]) -> None:
     old_stage = task.stage
     idx = stages.index(task.stage)
     task.stage = stages[idx + 1]
+    _raise_stage_high_water(task, stages, task.stage)
     transition_task_status(task, QueueItemStatus.PENDING)
     task.session_id = None  # R6: clear session_id on advance
     task.stage_base_ref = None  # cleared so next spawn stamps fresh ref
@@ -952,7 +981,8 @@ def _stage_regress(task: TicketTask, target_stage: Stage) -> None:
     regress_attempts, reverts status to PENDING, and clears session anchors.
     worktree_path is preserved so the next impl session resumes the branch.
     Caller is responsible for stage selection and regress-cap enforcement.
-    See GitHub #770.
+    See GitHub #770. stage_high_water is deliberately NOT touched here --
+    it is monotonic and must never be lowered by a regress (GitHub #1361).
     """
     old_stage = task.stage
     task.stage = target_stage
@@ -1315,6 +1345,7 @@ def _apply_requeue_stage(
     # Forward or same-stage: caller enforces the BLOCKED_ON_USER precondition.
     old_stage = task.stage
     task.stage = target_stage
+    _raise_stage_high_water(task, stages, target_stage)
     # Forward stage move → direction="advance"; the same-stage case is naturally
     # guarded silent by _emit_stage_change's old==new check. RFC 0008 W1.
     _emit_stage_change(task, old_stage, target_stage, "advance")
