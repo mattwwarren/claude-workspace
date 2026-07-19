@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
-import logging
 import os
 import re
 import shutil
@@ -38,8 +37,6 @@ from cw.models import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
-
-logger = logging.getLogger(__name__)
 
 # Client names appear unquoted in shell commands (env var prefixes),
 # filesystem paths (queue dirs, history dirs), and multiplexer workspace

@@ -26,6 +26,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Why: config.py's own convention (see its "Path accessors" comment) is
+# "never `from cw.config import STATE_DIR` in a consumer; always call the
+# accessor" so a monkeypatch of `cw.config.STATE_DIR` reaches every consumer.
+# These two constants are the deliberate, precedented exception: they are
+# also the direct monkeypatch targets tests patch on this module
+# (`cw.dispatch_state.DISPATCH_STATE_FILE`/`DISPATCH_STATE_LOCK`), so a
+# frozen import-time snapshot of STATE_DIR is safe today. It would silently
+# stop tracking a later `cw.config.STATE_DIR` reassignment, unlike an
+# accessor call.
 DISPATCH_STATE_FILE = STATE_DIR / "dispatch_state.json"
 DISPATCH_STATE_LOCK = STATE_DIR / ".dispatch_state.lock"
 
