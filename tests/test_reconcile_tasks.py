@@ -34,6 +34,7 @@ from cw.models import (
 )
 from cw.reconcile import (
     _DIRTY_WORKTREE_REASON,
+    _NEVER_CLAIMED_COMPLETION_REASON,
     complete_timed_out_merged_tasks,
     reconcile,
     revert_completed_silent_tasks,
@@ -490,7 +491,71 @@ class TestCompleteTimedOutMergedTasks:
     """complete_timed_out_merged_tasks() auto-completes PENDING tasks on merged PR."""
 
     def _pending_task(self, ticket_id: str) -> TicketTask:
-        return _make_ticket_task(ticket_id=ticket_id, client="client-a")
+        """PENDING task with a real claim history (attempts=1, session_id
+        already cleared) -- the legitimate shape this backstop targets.
+        Distinct from _never_claimed_task (#1387)."""
+        return _make_ticket_task(ticket_id=ticket_id, client="client-a", attempts=1)
+
+    def _never_claimed_task(
+        self, ticket_id: str, *, lane: str = "batch-2"
+    ) -> TicketTask:
+        return _make_ticket_task(
+            ticket_id=ticket_id,
+            client="client-a",
+            attempts=0,
+            session_id=None,
+            lane=lane,
+        )
+
+    def test_never_claimed_row_refused_stays_pending_and_emits_needs_attention(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """attempts=0, session_id=None row matching a timed-out-merged
+        candidate is refused (#1387 belt-and-braces guard): stays PENDING,
+        is NOT in the return value, no SESSION_COMPLETED fires, and exactly
+        one SESSION_NEEDS_ATTENTION fires with client/ticket_id/lane/paused_status."""
+        now = datetime.now(UTC)
+        ticket_id = "TKT-NEVER-CLAIMED"
+        session = _mk_timed_out_daemon_session(
+            "sess-never-claimed", ticket_id, completed_at=now - timedelta(days=1)
+        )
+        save_state(CwState(sessions=[session]))
+        save_dev_queue(
+            DevQueueStore(tasks=[self._never_claimed_task(ticket_id, lane="batch-2")])
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.pr_is_merged_for_ticket",
+            lambda _tid, **_kw: (True, True),
+        )
+
+        completed = complete_timed_out_merged_tasks()
+
+        assert completed == []
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.PENDING
+        assert task.attempts == 0
+        assert task.session_id is None
+
+        completed_events = read_events(
+            consumer="test-never-claimed-completed",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert len(completed_events) == 0
+
+        attention_events = read_events(
+            consumer="test-never-claimed-attention",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert len(attention_events) == 1
+        p = attention_events[0].payload
+        assert p["client"] == "client-a"
+        assert p["ticket_id"] == ticket_id
+        assert p["lane"] == "batch-2"
+        assert p["paused_status"] == _NEVER_CLAIMED_COMPLETION_REASON
+        assert attention_events[0].correlation_id == ticket_id
 
     def test_happy_path(
         self,
