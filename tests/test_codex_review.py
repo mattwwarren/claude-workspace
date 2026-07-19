@@ -7,11 +7,12 @@ import logging
 import os
 import subprocess
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args
 
 import pytest
 
 from cw.codex_review import (
+    _CATEGORY_TO_REASON,
     CODEX_BUDGET_EXHAUSTED,
     CODEX_ERROR,
     CODEX_MUST_FIX_FINDINGS,
@@ -41,7 +42,11 @@ from cw.codex_review import (
 )
 from cw.codex_runner import CodexRunResult
 from cw.config import state_dir
-from cw.executor_diagnostics import ExecutorFailure, diagnostics_bundle_dir
+from cw.executor_diagnostics import (
+    ExecutorFailure,
+    ExecutorFailureCategory,
+    diagnostics_bundle_dir,
+)
 from cw.models import Stage, TicketTask
 from cw.review_findings import ReviewerRunFailure, consolidate_verdict
 from tests.conftest import (
@@ -66,6 +71,26 @@ def _ok_result(role: str = "Code Quality Reviewer") -> CodexRunResult:
     return CodexRunResult(
         returncode=0, stdout="", stderr="", output_file_content=_doc_json(role=role)
     )
+
+
+def _bundle_file(session_id: str, role_slug: str, category: str) -> Path:
+    """Return the single bundle JSON matching *role_slug*/*category* (#1330).
+
+    Filenames now carry an ``occurred_at`` timestamp suffix (item 7), so exact
+    filenames are no longer stable across a test run — glob on the stable
+    prefix instead.
+    """
+    bundle = diagnostics_bundle_dir(session_id)
+    matches = [
+        p
+        for p in bundle.glob(f"{role_slug}-{category}-*.json")
+        if not p.name.endswith(("-schema.json", "-output.json"))
+    ]
+    assert len(matches) == 1, (
+        f"expected exactly one {role_slug}-{category}-*.json bundle file, "
+        f"found {matches}"
+    )
+    return matches[0]
 
 
 class _SequencedRunner:
@@ -1121,6 +1146,31 @@ class TestClassifyCodexFailure:
         assert _classify_codex_failure(result) == "schema_mismatch"
 
 
+def test_category_to_reason_mapping_is_total() -> None:
+    """Every ExecutorFailureCategory member is a key in _CATEGORY_TO_REASON —
+    guards the total-dict design decision against a future silent KeyError
+    (item 5, #1330)."""
+    for category in get_args(ExecutorFailureCategory):
+        assert category in _CATEGORY_TO_REASON
+
+
+def test_run_codex_role_spawn_error_surfaces_codex_error_reason(
+    tmp_path: Path,
+) -> None:
+    """A spawn_error-shaped CodexRunResult (codex binary missing) surfaces as
+    ReviewerRunFailure.reason == CODEX_ERROR through _CATEGORY_TO_REASON, while
+    the persisted bundle's category stays the fine-grained 'spawn_error'."""
+    runner = _SequencedRunner(
+        [CodexRunResult(returncode=127, stdout="", stderr="codex: command not found")]
+    )
+    _doc, failure = _run_one_role(runner, tmp_path, session_id="sess-spawn")
+    assert failure is not None
+    assert failure.reason == CODEX_ERROR
+    path = _bundle_file("sess-spawn", "code-quality-reviewer", "spawn_error")
+    persisted = ExecutorFailure.model_validate_json(path.read_text())
+    assert persisted.category == "spawn_error"
+
+
 # ---------------------------------------------------------------------------
 # _run_codex_role — diagnostics persistence on failure (#1239)
 # ---------------------------------------------------------------------------
@@ -1153,8 +1203,7 @@ class TestRunCodexRolePersistsDiagnostics:
             [CodexRunResult(returncode=-1, stdout="", stderr="", timed_out=True)]
         )
         _run_one_role(runner, tmp_path)
-        bundle = diagnostics_bundle_dir("sess-diag")
-        path = bundle / "code-quality-reviewer-timeout.json"
+        path = _bundle_file("sess-diag", "code-quality-reviewer", "timeout")
         assert path.exists()
         failure = ExecutorFailure.model_validate_json(path.read_text())
         assert failure.category == "timeout"
@@ -1167,9 +1216,7 @@ class TestRunCodexRolePersistsDiagnostics:
             [CodexRunResult(returncode=1, stdout="", stderr="boom")]
         )
         _run_one_role(runner, tmp_path)
-        path = diagnostics_bundle_dir("sess-diag") / (
-            "code-quality-reviewer-nonzero_exit.json"
-        )
+        path = _bundle_file("sess-diag", "code-quality-reviewer", "nonzero_exit")
         assert path.exists()
         assert (
             ExecutorFailure.model_validate_json(path.read_text()).category
@@ -1199,9 +1246,7 @@ class TestRunCodexRolePersistsDiagnostics:
             ]
         )
         _run_one_role(runner, tmp_path)
-        path = diagnostics_bundle_dir("sess-diag") / (
-            f"code-quality-reviewer-{category}.json"
-        )
+        path = _bundle_file("sess-diag", "code-quality-reviewer", category)
         assert path.exists()
         assert (
             ExecutorFailure.model_validate_json(path.read_text()).category == category
@@ -1227,9 +1272,7 @@ class TestRunCodexRolePersistsDiagnostics:
             [CodexRunResult(returncode=1, stdout="", stderr=f"boom: {secret}")]
         )
         _run_one_role(runner, tmp_path)
-        path = diagnostics_bundle_dir("sess-diag") / (
-            "code-quality-reviewer-nonzero_exit.json"
-        )
+        path = _bundle_file("sess-diag", "code-quality-reviewer", "nonzero_exit")
         failure = ExecutorFailure.model_validate_json(path.read_text())
         assert secret not in failure.stderr_excerpt
         assert "<redacted>" in failure.stderr_excerpt
@@ -1290,9 +1333,8 @@ def test_run_codex_roles_scratch_dir_still_removed_after_persist(
         session_id="sess-scratch",
     )
     assert not (state_dir() / "codex-review" / fixed_uuid.hex).exists()
-    assert (
-        diagnostics_bundle_dir("sess-scratch")
-        / "code-quality-reviewer-nonzero_exit.json"
+    assert _bundle_file(
+        "sess-scratch", "code-quality-reviewer", "nonzero_exit"
     ).exists()
 
 
@@ -1340,8 +1382,6 @@ def test_duration_captured_without_extending_codex_run_result(
     _run_one_role(runner, tmp_path, session_id="sess-dur")
     result = runner._results[0]
     assert not hasattr(result, "duration")
-    path = (
-        diagnostics_bundle_dir("sess-dur") / "code-quality-reviewer-nonzero_exit.json"
-    )
+    path = _bundle_file("sess-dur", "code-quality-reviewer", "nonzero_exit")
     failure = ExecutorFailure.model_validate_json(path.read_text())
     assert failure.duration_seconds == pytest.approx(5.5)

@@ -6,7 +6,6 @@ import contextlib
 import re
 import shutil
 import subprocess
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 
 from cw.auto_dev_result import AutoDevResult
@@ -19,10 +18,9 @@ from cw.codex_runner import CodexRunner, RealCodexRunner
 from cw.config import load_state, save_state, sessions_lock
 from cw.events import record_event as _record_orchestrator_event
 from cw.executor_diagnostics import (
-    ExecutorFailure,
     append_diagnostics_pointer,
+    build_executor_failure,
     persist_diagnostics_bundle,
-    redact_argv,
 )
 from cw.gh import post_issue_comment
 from cw.local_runner import (
@@ -507,29 +505,22 @@ def _persist_aider_runtime_error_diagnostics(
     """Write a ``runtime_error`` diagnostics bundle for a LocalExecutor failure.
 
     Covers both post-spawn LocalExecutor.spawn failure branches
-    (LIVENESS_UNAVAILABLE and the generic ``except``). Aider's argv embeds the
-    full ticket+plan text via ``--message``, so it is redacted wholesale before
-    persisting. Never raises (persist swallows OSError).
+    (LIVENESS_UNAVAILABLE and the generic ``except``). *argv* is passed
+    through raw — ``ExecutorFailure``'s own ``argv_sanitized`` field_validator
+    redacts aider's ``--message`` value (full ticket+plan text) wholesale
+    (#1330 item 4). Never raises (persist swallows OSError).
     """
-    failure = ExecutorFailure(
+    failure = build_executor_failure(
         category="runtime_error",
         executor_name="aider",
-        executor_version=None,
-        reviewer_role=None,
-        argv_sanitized=redact_argv(argv, executor_name="aider"),
-        duration_seconds=None,
-        exit_code=None,
         session_id=session_id,
-        run_id=None,
+        argv=argv,
         stdout_excerpt="",
         stderr_excerpt=details,
-        structured_output_excerpt=None,
-        occurred_at=datetime.now(UTC),
     )
     persist_diagnostics_bundle(
         session_id=session_id,
         role_slug="aider",
-        reason="runtime_error",
         failure=failure,
     )
 

@@ -13,7 +13,6 @@ import json
 import os
 import shutil
 import subprocess
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, TypedDict, runtime_checkable
 
@@ -30,8 +29,8 @@ from cw.auto_dev_result import (
     StageReached,
 )
 from cw.executor_diagnostics import (
-    ExecutorFailure,
     append_diagnostics_pointer,
+    build_executor_failure,
     persist_diagnostics_bundle,
 )
 from cw.gh import fetch_approved_plan_comment
@@ -419,25 +418,17 @@ def _persist_aider_no_output_diagnostics(*, session_id: str, log_tail: str) -> N
     are left None/empty; the .cw/aider.log tail (already bounded upstream) is
     reused as the stdout excerpt. Never raises (persist swallows OSError).
     """
-    failure = ExecutorFailure(
+    failure = build_executor_failure(
         category="missing_output",
         executor_name="aider",
-        executor_version=None,
-        reviewer_role=None,
-        argv_sanitized=[],
-        duration_seconds=None,
-        exit_code=None,
         session_id=session_id,
-        run_id=None,
+        argv=[],
         stdout_excerpt=log_tail,
         stderr_excerpt="",
-        structured_output_excerpt=None,
-        occurred_at=datetime.now(UTC),
     )
     persist_diagnostics_bundle(
         session_id=session_id,
         role_slug="aider",
-        reason="missing_output",
         failure=failure,
     )
 

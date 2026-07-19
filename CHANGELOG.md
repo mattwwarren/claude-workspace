@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Diagnostics bundle filenames no longer overwrite on repeat failures**
+  (#1330): a diagnostics bundle filename used to be
+  `<role-slug>-<reason>[.json|-schema.json|-output.json]` with no
+  disambiguator, so a second same-role/same-category failure within one
+  session silently clobbered the first's bundle files. Filenames now include
+  the failure's `occurred_at` microsecond timestamp
+  (`<role-slug>-<category>-<timestamp>...`), so every failure gets its own
+  set of files.
+- **`cleanup_expired_diagnostics` no longer walks the filesystem on every
+  dispatch tick** (#1330): the sweep is now internally throttled to at most
+  once per hour via a sentinel file under `state_dir()`, independent of the
+  configured retention window.
+
 ### Documentation
 
 - **Aider `edit-format` guidance for the local backend** (#1204): documents

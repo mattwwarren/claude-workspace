@@ -494,7 +494,8 @@ def test_synthesize_git_result_no_output_persists_diagnostics(
         "aider: some diagnostic output\n"
         f" [diagnostics: {render_bundle_path('s-noout')}]"
     )
-    path = diagnostics_bundle_dir("s-noout") / "aider-missing_output.json"
+    # Filename now carries an occurred_at timestamp suffix (#1330 item 7).
+    [path] = list(diagnostics_bundle_dir("s-noout").glob("aider-missing_output-*.json"))
     assert path.exists()
     failure = ExecutorFailure.model_validate_json(path.read_text())
     assert failure.category == "missing_output"
