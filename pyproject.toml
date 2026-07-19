@@ -246,15 +246,18 @@ ignore = [
 # ``from cw.watchdog import run_tick`` would bind a stale reference at import
 # time. Inline import at function level is the sanctioned mechanism.
 "src/cw/cli/watchdog.py" = ["PLC0415"]
-# cli/review defers imports for two sanctioned reasons: (1) reuse without
+# cli/review defers imports for three sanctioned reasons: (1) reuse without
 # duplication — _build_captured_diff imports cw.codex_review._parse_unified_diff
 # function-locally rather than duplicate the ~60-line parser (documented in that
 # function's docstring); (2) monkeypatch timing — review_register defers
 # cw.gh.fetch_pr_view / cw.operator_identity.cached_gh_login / cw.pr_hydrate so
 # test-time patches take effect (tests/test_cli_review.py:78,85 do
 # monkeypatch.setattr on cw.operator_identity.cached_gh_login and
-# cw.gh.fetch_pr_view). Inline imports at function level are the sanctioned
-# mechanism, not a workaround.
+# cw.gh.fetch_pr_view); (3) startup cost — review_consolidate defers
+# cw.result's _format_errors/_read_json_payload, since cw.result pulls in
+# cw.config's session-state chain and cli/review.py is eagerly imported by
+# cli/__init__.py on every ``cw`` invocation. Inline imports at function level
+# are the sanctioned mechanism, not a workaround.
 "src/cw/cli/review.py" = ["PLC0415"]
 # Channel test files guard imports behind pytest.importorskip("starlette"/"mcp"),
 # so module-level imports legitimately follow executable code (E402).
