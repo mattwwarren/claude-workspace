@@ -27,6 +27,7 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
     Session,
+    SessionOrigin,
     SessionPurpose,
     SessionStatus,
     TicketTask,
@@ -48,6 +49,7 @@ from cw.orchestrate import (
     save_dispatch_record,
 )
 from cw.reconcile import ProposedAction
+from tests.conftest import _make_daemon_session
 
 _RunnerFn = Callable[[list[str]], subprocess.CompletedProcess[str]]
 
@@ -118,14 +120,15 @@ def _make_session(
     surface_ref: str | None = "fake-pane-1",
     status: SessionStatus = SessionStatus.ACTIVE,
 ) -> Session:
-    return Session(
+    return _make_daemon_session(
         id=session_id,
         name=f"test-client/fix-ci/{session_id}",
         client="test-client",
-        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.USER,
         status=status,
         workspace_path=workspace,
         surface_ref=surface_ref,
+        worktree_path=None,
         started_at=datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC),
     )
 
@@ -2183,15 +2186,16 @@ def _mk_orchestrate_session(
     status: SessionStatus = SessionStatus.COMPLETED,
 ) -> Session:
     """Create an ORCHESTRATE-purpose binding session for test setup."""
-    return Session(
+    return _make_daemon_session(
         id=sid,
         name=f"{client}/orchestrate/{lane}",
         client=client,
         purpose=SessionPurpose.ORCHESTRATE,
+        origin=SessionOrigin.USER,
         status=status,
         lane=lane,
-        workspace_path=Path("/tmp/ws"),
         surface_ref=None,
+        worktree_path=None,
         started_at=datetime(2026, 4, 19, tzinfo=UTC),
     )
 
@@ -2203,15 +2207,15 @@ def _mk_impl_session(
     status: SessionStatus = SessionStatus.ACTIVE,
 ) -> Session:
     """Create an IMPL-purpose active session for reap candidate tests."""
-    return Session(
+    return _make_daemon_session(
         id=sid,
         name=f"{client}/impl/{sid}",
         client=client,
-        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.USER,
         status=status,
         lane=lane,
-        workspace_path=Path("/tmp/ws"),
         surface_ref=f"surf-{sid}",
+        worktree_path=None,
         started_at=datetime(2026, 4, 19, tzinfo=UTC),
     )
 

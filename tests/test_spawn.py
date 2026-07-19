@@ -27,7 +27,7 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.spawn import build_disallowed_tools_arg
-from tests.conftest import _seed_daemon_session
+from tests.conftest import _make_ticket_task, _seed_daemon_session
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -65,7 +65,7 @@ def _seed_running_task(
     from cw.dev_queue import save_dev_queue
     from cw.models import DevQueueStore, QueueItemStatus
 
-    task = TicketTask(
+    task = _make_ticket_task(
         ticket_id=ticket_id,
         client=client,
         status=QueueItemStatus.RUNNING,
@@ -1941,7 +1941,7 @@ def _make_pending_task(
 ) -> TicketTask:
     from cw.models import QueueItemStatus
 
-    return TicketTask(
+    return _make_ticket_task(
         ticket_id=ticket_id,
         client=client,
         status=QueueItemStatus.PENDING,

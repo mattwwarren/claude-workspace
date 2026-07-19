@@ -11,6 +11,7 @@ import pytest
 from cw.collision import _git_changed_files, detect_wave_collisions
 from cw.events import read_events
 from cw.models import OrchestratorEventType, QueueItemStatus, TicketTask
+from tests.conftest import _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -110,7 +111,7 @@ class TestDetectWaveCollisions:
         worktree: Path | None = None,
         stage_base_ref: str | None = "abc123",
     ) -> TicketTask:
-        return TicketTask(
+        return _make_ticket_task(
             ticket_id=ticket_id,
             client=client,
             status=QueueItemStatus.RUNNING,
