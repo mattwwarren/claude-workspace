@@ -13,16 +13,12 @@ import pytest
 import yaml
 
 from cw.config import (
-    AvailabilityProbeCache,
     _load_concurrency_overrides,
     _save_concurrency_overrides,
-    load_availability_probe_cache,
     load_effective_config,
     load_state,
     orchestrator_config_file,
-    save_availability_probe_cache,
     save_state,
-    save_usage_limited_until,
 )
 from cw.dev_queue import (
     add_ticket,
@@ -50,6 +46,12 @@ from cw.dispatch import (
     dispatch_tick,
     persist_last_result,
     run_dispatch_loop,
+)
+from cw.dispatch_state import (
+    AvailabilityProbeCache,
+    load_availability_probe_cache,
+    save_availability_probe_cache,
+    save_usage_limited_until,
 )
 from cw.events import read_events, record_event
 from cw.exceptions import (
@@ -3831,7 +3833,7 @@ class TestDispatchUsageLimitBackoff:
         active, spawning is suppressed without requiring a fresh detection (#804)."""
         from datetime import timedelta
 
-        from cw.config import save_usage_limited_until
+        from cw.dispatch_state import save_usage_limited_until
 
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-UL-LOAD", client="test-client"))
@@ -3921,8 +3923,8 @@ class TestDispatchUsageLimitBackoff:
         tick 3 -- so this only passes when the merge's None-check actually
         preserves a value it previously merged in, not merely "the value
         never changes because nothing re-reads at all"."""
-        import cw.config
         import cw.dispatch
+        import cw.dispatch_state
 
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-1346-CORRUPT", client="test-client"))
@@ -3950,7 +3952,7 @@ class TestDispatchUsageLimitBackoff:
                 # test_config.py's test_load_returns_none_on_corrupt_json
                 # input, which proves load_usage_limited_until() returns
                 # None on it.
-                cw.config.DISPATCH_STATE_FILE.write_text("not-json")
+                cw.dispatch_state.DISPATCH_STATE_FILE.write_text("not-json")
             return result
 
         monkeypatch.setattr("cw.dispatch.loop.dispatch_tick", corrupting_tick)

@@ -338,10 +338,10 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr("cw.config.SESSIONS_LOCK", state_dir / ".sessions.lock")
     monkeypatch.setattr("cw.config.CLIENTS_LOCK", config_dir / ".clients.yaml.lock")
     monkeypatch.setattr(
-        "cw.config.DISPATCH_STATE_FILE", state_dir / "dispatch_state.json"
+        "cw.dispatch_state.DISPATCH_STATE_FILE", state_dir / "dispatch_state.json"
     )
     monkeypatch.setattr(
-        "cw.config.DISPATCH_STATE_LOCK", state_dir / ".dispatch_state.lock"
+        "cw.dispatch_state.DISPATCH_STATE_LOCK", state_dir / ".dispatch_state.lock"
     )
     monkeypatch.setattr(
         "cw.config.CONCURRENCY_OVERRIDE_FILE",
