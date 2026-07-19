@@ -141,6 +141,7 @@ def _claim_next_pending(
     lane: str,
     config: OrchestratorConfig,
     priority_ticket_ids: list[str] | None = None,
+    usage_limited_until: datetime | None = None,
 ) -> tuple[TicketTask | None, bool]:
     """Atomically claim the next PENDING task for a client in a specific lane.
 
@@ -161,11 +162,29 @@ def _claim_next_pending(
     event with skip_reason=ATTEMPT_CAP_BLOCKED is emitted per parked task for
     observability. See GitHub #786.
 
+    *usage_limited_until*: when set and still in the future, returns
+    ``(None, False)`` immediately without claiming anything (#1346
+    defense-in-depth — see the gate below for why this is a parameter, not a
+    fresh read).
+
     Returns a tuple (task, spawn_backoff_skipped) where spawn_backoff_skipped
     is True when at least one PENDING task was skipped due to active
     spawn_error backoff (next_eligible_at in the future). See GitHub #868.
     """
     now = datetime.now(UTC)
+    # Defense-in-depth (#1346): the caller (dispatch_tick, via
+    # _dispatch_client_lanes) already gates the whole tick on this same
+    # value at tick.py's top-of-tick early return -- this second check
+    # protects any OTHER caller of this claim primitive (this function is
+    # re-exported as part of cw.dispatch's private test surface and is not
+    # guaranteed to always be reached only through dispatch_tick's gate).
+    # Deliberately takes the value as a parameter rather than calling
+    # load_usage_limited_until() here: this function is invoked per-client
+    # per-tick (an in-function read would be N reads/tick instead of one),
+    # and claim.py is pure state-transition logic under dev_queue_lock with
+    # no I/O -- reading the file here would break that invariant.
+    if usage_limited_until is not None and now < usage_limited_until:
+        return None, False
     with dev_queue_lock():
         store = load_dev_queue()
         spawn_backoff_skipped = False

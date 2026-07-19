@@ -227,6 +227,11 @@ def _apply_phantom_salvage_mutations(
         if candidate.ticket_id:
             salvaged_ticket_ids.append(candidate.ticket_id)
             salvaged_result_by_ticket[candidate.ticket_id] = candidate.salvage_result
+        # Why: claude_session_id is intentionally omitted here, unlike the
+        # 8-field payload shape idle.py/stalled.py build via
+        # cw.reconcile.dispositions.build_salvage_completion_payload (#1306) —
+        # this loop's payload predates that shared helper and was not
+        # widened to match it as part of this extraction.
         salvaged_payload: dict[str, object] = {
             "session_id": session.id,
             "session_name": session.name,
@@ -579,6 +584,11 @@ def _emit_phantom_routed_events(
         if candidate.routed_sentinel is None:
             continue
         session = session_by_id[candidate.session_id]
+        # Why: phantom's stop-before-emit order is a deliberate inversion of
+        # idle/stalled's emit-then-stop order (see
+        # cw.reconcile.dispositions.emit_routed_sentinel_completion, #1306) —
+        # a phantom's surface is already dead (absent from the daemon
+        # roster), so there is no live surface for a late emit to race.
         if session.surface_ref is not None:
             _deps.get_native_daemon_client().stop(session.surface_ref)
         record_event(
