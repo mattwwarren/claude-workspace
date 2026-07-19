@@ -56,7 +56,7 @@ def _build_captured_diff(diff_text: str) -> CapturedDiff:
     exactly: ``files`` is derived from ``file_line_text`` so it can never
     drift from the per-line content.
     """
-    from cw.codex_review import _parse_unified_diff  # noqa: PLC0415
+    from cw.codex_review import _parse_unified_diff
 
     file_diffs, file_line_text, _changed_files = _parse_unified_diff(diff_text)
     files = {f: sorted(lines) for f, lines in file_line_text.items()}
@@ -90,9 +90,9 @@ def review_register(pr_url: str) -> None:
     ``clients.yaml`` ``operator_github_login`` override is NOT honored here
     because a PR-scoped entry point has no client context (follow-up #1171).
     """
-    from cw.gh import fetch_pr_view  # noqa: PLC0415
-    from cw.operator_identity import cached_gh_login  # noqa: PLC0415
-    from cw.pr_hydrate import (  # noqa: PLC0415
+    from cw.gh import fetch_pr_view
+    from cw.operator_identity import cached_gh_login
+    from cw.pr_hydrate import (
         _parse_pr_url,
         resolve_and_register_review_request,
     )
@@ -150,7 +150,7 @@ def review_consolidate(path: str) -> None:
     On success: exits 0, prints the ReviewVerdict as JSON to stdout.
     On failure: exits 1, prints 'field.path: message' lines to stderr.
     """
-    from cw.result import _format_errors, _read_json_payload  # noqa: PLC0415
+    from cw.result import _format_errors, _read_json_payload
 
     payload = _read_json_payload(path)
     try:
