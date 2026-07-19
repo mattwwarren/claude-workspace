@@ -255,8 +255,8 @@ class TestLoadSaveDevQueue:
         monkeypatch.setattr("cw.config.DEV_QUEUE_FILE", real_dev_queue_file)
         mock_write = MagicMock()
         mock_rotate = MagicMock()
-        monkeypatch.setattr("cw.dev_queue.atomic_write_text", mock_write)
-        monkeypatch.setattr("cw.dev_queue.rotate_backup", mock_rotate)
+        monkeypatch.setattr("cw.dev_queue.storage.atomic_write_text", mock_write)
+        monkeypatch.setattr("cw.dev_queue.storage.rotate_backup", mock_rotate)
 
         with pytest.raises(CwError, match="refusing real-state write"):
             save_dev_queue(DevQueueStore())

@@ -182,7 +182,7 @@ ignore = [
 # dev_queue defers the dispatch import to break the dev_queue ↔ dispatch
 # circular dependency. consume_completed_sessions() is a thin wrapper whose
 # deferred body import is the sanctioned mechanism, not a workaround.
-"src/cw/dev_queue.py" = ["PLC0415"]
+"src/cw/dev_queue/__init__.py" = ["PLC0415"]
 # result defers the cli._hook_io import to break the cli <-> result circular
 # dependency; inline import is the sanctioned mechanism, not a workaround.
 "src/cw/result.py" = ["PLC0415"]
