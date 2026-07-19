@@ -3712,7 +3712,7 @@ class TestApproveTicket:
             session_id="sess0001",
             last_result={"status": "plan_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         result = approve_ticket("GEN-500", "genhealth")
 
@@ -3752,7 +3752,7 @@ class TestApproveTicket:
             session_id="sess0001",
             last_result={"status": "plan_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         approve_ticket("GEN-500", "genhealth")
 
@@ -3785,7 +3785,7 @@ class TestApproveTicket:
             session_id="sess0002",
             last_result={"status": "review_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         result = approve_ticket("GEN-500", "genhealth")
 
@@ -3811,7 +3811,7 @@ class TestApproveTicket:
             session_id="sess0003",
             last_result={"status": "ambiguities_pending_resolution"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         with pytest.raises(ApproveGateError, match="not at an approval gate"):
             approve_ticket("GEN-500", "genhealth")
@@ -3865,7 +3865,7 @@ class TestApproveTicket:
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess0004")
         save_dev_queue(DevQueueStore(tasks=[task]))
         session = _make_session(session_id="sess0004", last_result=None)
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         with pytest.raises(ApproveGateError, match="not at an approval gate"):
             approve_ticket("GEN-500", "genhealth")
@@ -3886,7 +3886,7 @@ class TestApproveTicket:
             session_id="sess0005",
             last_result={"status": "review_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         with pytest.raises(ApproveGateError, match="terminal stage"):
             approve_ticket("GEN-500", "genhealth")
@@ -3913,7 +3913,7 @@ class TestApproveTicket:
             session_id="sess-plain-1",
             last_result={"status": "plan_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         result = approve_ticket("GEN-500", "genhealth")
 
@@ -3996,7 +3996,7 @@ class TestApproveTicket:
             session_id="sess-signoff-1",
             last_result={"status": "review_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         result = approve_ticket("GEN-500", "genhealth")
 
@@ -4025,7 +4025,7 @@ class TestApproveTicket:
             session_id="sess-signoff-2",
             last_result={"status": "review_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         first = approve_ticket("GEN-500", "genhealth")
         assert first["awaiting_signoff"] is True
@@ -4117,7 +4117,7 @@ class TestApproveTicket:
             session_id="sess-adv1",
             last_result={"status": "plan_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         result = approve_ticket("GEN-500", "genhealth")
 
@@ -4158,7 +4158,7 @@ class TestApproveTicket:
             session_id="sess-adv2",
             last_result={"status": "plan_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         result = approve_ticket("GEN-500", "genhealth")
 
@@ -4187,7 +4187,7 @@ class TestApproveTicket:
             session_id="sess-unrev1",
             last_result={"status": "plan_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         result = approve_ticket("GEN-500", "genhealth")
 
@@ -4227,7 +4227,7 @@ class TestApproveTicket:
             session_id="sess-fallback1",
             last_result={"status": "plan_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         result = approve_ticket("GEN-500", "genhealth")
 
@@ -4258,7 +4258,7 @@ class TestApproveTicket:
             session_id="sess-noplanmd",
             last_result={"status": "plan_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         result = approve_ticket("GEN-500", "genhealth")
 
@@ -4290,7 +4290,7 @@ class TestApproveTicket:
             session_id="sess-planmderr",
             last_result={"status": "plan_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         result = approve_ticket("GEN-500", "genhealth")
 
@@ -4352,7 +4352,7 @@ class TestApproveTicketLockedResolved:
             session_id="sess0001",
             last_result={"status": "plan_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         with dev_queue_lock():
             result = _approve_ticket_locked("GEN-500", "genhealth", resolved_task=row_a)
@@ -5047,7 +5047,7 @@ class TestUnblockTicket:
             last_result={"status": "salvage_parked"},
             reap_reason=ReapReason.SALVAGE_PARKED,
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         unblock_ticket("GEN-500", "genhealth")
 
@@ -5083,7 +5083,7 @@ class TestUnblockTicket:
             last_result={"status": "salvage_parked"},
             reap_reason=ReapReason.SALVAGE_PARKED,
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         unblock_ticket("GEN-500", "genhealth")
 
@@ -5109,7 +5109,7 @@ class TestUnblockTicket:
             last_result=None,
             reap_reason=None,
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         with pytest.raises(UnblockStateError, match="not park-marked"):
             unblock_ticket("GEN-500", "genhealth")
@@ -5178,7 +5178,7 @@ class TestCLIApprove:
             session_id="sess7001",
             last_result={"status": "plan_pending_approval"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         runner = CliRunner()
         result = runner.invoke(
@@ -5202,7 +5202,7 @@ class TestCLIApprove:
             session_id="sess7002",
             last_result={"status": "ambiguities_pending_resolution"},
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         runner = CliRunner()
         result = runner.invoke(
@@ -5245,7 +5245,7 @@ class TestCLIApprove:
                         last_result={"status": "plan_pending_approval"},
                     )
                 ]
-            )  # type: ignore[list-item]
+            )
         )
 
         result = runner.invoke(
@@ -5279,7 +5279,7 @@ class TestCLIApprove:
                         last_result={"status": "plan_pending_approval"},
                     )
                 ]
-            )  # type: ignore[list-item]
+            )
         )
 
         result2 = runner.invoke(
@@ -5810,7 +5810,7 @@ class TestCLIUnblock:
             last_result={"status": "salvage_parked"},
             reap_reason=ReapReason.SALVAGE_PARKED,
         )
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         runner = CliRunner()
         result = runner.invoke(
@@ -5831,7 +5831,7 @@ class TestCLIUnblock:
         task = _make_blocked_task(stage=Stage.IMPL, session_id="sess5002")
         save_dev_queue(DevQueueStore(tasks=[task]))
         session = _make_session(session_id="sess5002", reap_reason=None)
-        save_state(CwState(sessions=[session]))  # type: ignore[list-item]
+        save_state(CwState(sessions=[session]))
 
         runner = CliRunner()
         result = runner.invoke(
