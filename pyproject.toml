@@ -195,6 +195,12 @@ ignore = [
 # top, so claim's own reach back into gating must be function-level. Inline
 # import is the sanctioned mechanism, not a workaround.
 "src/cw/dispatch/claim.py" = ["PLC0415"]
+# loop_health defers the cw.doctor.wedge._collapse_blocked_on_user_tasks import
+# inside _reap_session_by_selector to break the wedge ↔ loop_health circular
+# dependency (#1314): wedge imports _gh_pr_states/_reap_session_by_selector from
+# loop_health at module top, so loop_health's reach back into wedge must be
+# function-level. Inline import is the sanctioned mechanism, not a workaround.
+"src/cw/doctor/loop_health.py" = ["PLC0415"]
 # review_recipes defers the cw.spawn import inside _dispatch_address_review to
 # break the cw.spawn ↔ cw.reconcile circular dependency (spawn.py imports
 # cw.reconcile at module top). Inline import at function level is the

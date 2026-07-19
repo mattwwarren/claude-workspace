@@ -18,9 +18,12 @@ re-exports. Submodules:
   monkeypatch at ``cw.doctor._deps.NAME`` intercepts every caller.
 - ``config_checks`` — config-file / project-config / review-recipe checks.
 - ``linkage`` — session-state linkage, workspace, worktree, reconcile checks.
-- ``core`` — deliberately-oversized interim shim: wedge detection + reap, loop
-  health/liveness, versions, daemon reachability, and ``run_doctor``. Part 2
-  will split this further.
+- ``wedge`` — wedge-condition detection and reap.
+- ``loop_health`` — dispatch loop health/liveness, TIMED_OUT-merged detection,
+  and targeted single-session reap.
+- ``versions`` — claude/cw version + dependency checks, bypass disclaimer,
+  daemon reachability.
+- ``core`` — the ``run_doctor`` orchestrator that assembles the full report.
 - ``report`` — human-readable and JSON rendering.
 """
 
@@ -39,7 +42,22 @@ from cw.doctor.config_checks import (
     _gh_on_path,
     _tracker_system,
 )
-from cw.doctor.core import (
+from cw.doctor.core import run_doctor
+from cw.doctor.linkage import (
+    _check_cross_repo_rows,
+    _check_dispatch_repo_head,
+    _check_linkage,
+    _check_workspace_paths,
+    _check_worktree_paths_sessions,
+)
+from cw.doctor.loop_health import (
+    _check_loop_health,
+    _check_loop_liveness,
+    _check_timed_out_merged,
+    _reap_session_by_selector,
+)
+from cw.doctor.report import format_report, format_report_json
+from cw.doctor.versions import (
     _CW_DEPS_CHECK_NAME,
     _CW_PACKAGE_NAME,
     _CW_REINSTALL_CMD,
@@ -48,25 +66,14 @@ from cw.doctor.core import (
     _check_codex_capability,
     _check_cw_deps,
     _check_cw_version,
-    _check_loop_health,
-    _check_loop_liveness,
-    _check_timed_out_merged,
+    _dep_distribution_name,
+)
+from cw.doctor.wedge import (
     _check_wedge_repo_ahead,
     _check_wedge_task_running_completed_session,
     _check_wedge_task_running_no_session,
-    _dep_distribution_name,
-    _reap_session_by_selector,
     _reap_wedge_findings,
-    run_doctor,
 )
-from cw.doctor.linkage import (
-    _check_cross_repo_rows,
-    _check_dispatch_repo_head,
-    _check_linkage,
-    _check_workspace_paths,
-    _check_worktree_paths_sessions,
-)
-from cw.doctor.report import format_report, format_report_json
 
 __all__ = [
     "_CW_DEPS_CHECK_NAME",
