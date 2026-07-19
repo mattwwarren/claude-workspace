@@ -12,7 +12,7 @@ from cw.models.enums import SessionStatus
 from cw.models.session import Session
 
 # Schema versions for persisted state. Bump when making a breaking change
-# to the on-disk layout; add a migration in `cw.config.migrate_cw_state`
+# to the on-disk layout; add a migration in `cw._config_migrate.migrate_cw_state`
 # or `cw.dev_queue.migrate_dev_queue` to handle older versions.
 # v6: added Session.idle_observation_count (GitHub #545).
 # v7: added Session.reap_reason (GitHub #380).

@@ -7,7 +7,7 @@ diverged). Emits an advisory ``SESSION_NEEDS_ATTENTION`` so the operator inspect
 before the stray state freezes dispatch via the freshness gate.
 
 This is a *per-client* check, edge-triggered via a persisted latch
-(``cw.config.load_main_drift_latches`` / ``save_main_drift_latches``): the
+(``cw.dispatch_state.load_main_drift_latches`` / ``save_main_drift_latches``): the
 attention event fires once when drift starts and stays silent on every
 subsequent tick while the drift holds, resetting silently the moment the
 client's main checkout goes clean again. This mirrors dispatch.py's
@@ -24,7 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from cw.config import load_main_drift_latches, save_main_drift_latches
+from cw.dispatch_state import load_main_drift_latches, save_main_drift_latches
 from cw.events import record_event
 from cw.exceptions import WorktreeError
 from cw.models import OrchestratorEventType, SessionOrigin

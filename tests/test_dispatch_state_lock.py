@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cw.config import (
+from cw.dispatch_state import (
     AvailabilityProbeCache,
     load_availability_probe_cache,
     load_usage_limited_until,
@@ -143,9 +143,9 @@ class TestDispatchStateLockConcurrency:
         assert loaded_cache.available is False
         assert loaded_cache.latched is True
 
-        import cw.config
+        import cw.dispatch_state
 
-        raw = json.loads(cw.config.DISPATCH_STATE_FILE.read_text())
+        raw = json.loads(cw.dispatch_state.DISPATCH_STATE_FILE.read_text())
         assert raw["main_drift_latches"] == latches
 
     @pytest.mark.parametrize("n_threads", [5, 10])
@@ -189,9 +189,9 @@ class TestDispatchStateLockConcurrency:
 
         assert not errors, f"Some threads raised: {errors}"
 
-        import cw.config
+        import cw.dispatch_state
 
-        raw_text = cw.config.DISPATCH_STATE_FILE.read_text()
+        raw_text = cw.dispatch_state.DISPATCH_STATE_FILE.read_text()
         raw = json.loads(raw_text)  # proves no torn/truncated write
         assert "usage_limited_until" in raw
         assert "availability_probe" in raw
