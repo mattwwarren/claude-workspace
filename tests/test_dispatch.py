@@ -7844,7 +7844,7 @@ class TestApplyStagedDecision:
         REVIEW->FINALIZE, regress FINALIZE->IMPL]. session_id must still be the
         real value at the moment Rule 5a's regress condition is evaluated.
         """
-        import cw.dispatch.routing as dispatch_legacy
+        import cw.dispatch
         from cw.dispatch import apply_staged_decision
 
         stage_changed = capture_events(
@@ -7852,7 +7852,7 @@ class TestApplyStagedDecision:
         )
 
         captured_session_id: list[str | None] = []
-        real_stage_regress = dispatch_legacy._stage_regress
+        real_stage_regress = cw.dispatch.routing._stage_regress
 
         def _spy_stage_regress(task: TicketTask, target_stage: Stage) -> None:
             captured_session_id.append(task.session_id)
