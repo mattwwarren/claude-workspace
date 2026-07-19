@@ -398,6 +398,7 @@ def dispatch_tick(
             resolved_native_daemon=resolved_native_daemon,
             parent=parent,
             emit=emit,
+            usage_limited_until=usage_limited_until,
         )
         spawned += client_result.spawned
         if client_result.usage_limit_detected:

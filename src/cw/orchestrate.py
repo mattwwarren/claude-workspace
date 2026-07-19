@@ -611,7 +611,14 @@ def _extract_lane_occupants(raw: object) -> dict[str, list[dict[str, str]]]:
 def _latest_tick_by_client(
     events: list[OrchestratorEvent],
 ) -> dict[str, TickSummary]:
-    """Derive the most recent dispatch.tick per client from an event list."""
+    """Derive the most recent dispatch.tick per client from an event list.
+
+    Each client's "most recent" tick is resolved independently (#1346): a
+    client's dispatch.tick cadence is its own, so two clients can legitimately
+    show a ``skip_reason`` sourced from two different ticks (even different
+    ticks of the SAME dispatch loop run) at the same point in wall-clock time.
+    That skew is expected per-client cadence, not a bug.
+    """
     result: dict[str, TickSummary] = {}
     for ev in events:
         if ev.type is not OrchestratorEventType.DISPATCH_TICK:
@@ -694,6 +701,12 @@ def latest_tick_summary_by_client() -> dict[str, TickSummary]:
     """Return the most recent dispatch.tick summary per client.
 
     Uses only DISPATCH_TICK events — no full orchestrator_status() overhead.
+
+    Per-client independence is intentional (#1346, see
+    :func:`_latest_tick_by_client`): an operator viewing ``cw dev-queue
+    status --json`` may legitimately see different ``skip_reason`` values
+    across clients even though they were captured at the same instant — each
+    client's tick cadence is independent, this is not a synchronization bug.
     """
     events = read_events(event_types=[OrchestratorEventType.DISPATCH_TICK])
     return _latest_tick_by_client(events)
