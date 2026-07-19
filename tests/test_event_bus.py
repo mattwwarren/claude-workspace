@@ -7,10 +7,12 @@ EventBus so there is no module-level shared state to reset between tests.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import queue
 import threading
+import time
 from typing import TYPE_CHECKING, Any
 
 from cw.config import state_dir
@@ -208,36 +210,28 @@ class TestEventBusSubscribeWithCursor:
         # Pre-append one event at offset 0; cursor starts at 0 (full replay).
         bus.append_event({"message": "pre", "title": "pre"})
 
-        results: list[list[dict[str, Any]]] = []
-        errors: list[Exception] = []
+        def _subscriber() -> list[dict[str, Any]]:
+            q = bus.subscribe_with_cursor("toctou-queue-sub")
+            items: list[dict[str, Any]] = []
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                try:
+                    items.append(q.get_nowait())
+                except queue.Empty:
+                    time.sleep(0.01)
+            bus.unsubscribe(q)
+            return items
 
-        def _subscriber() -> None:
-            import time
+        # ThreadPoolExecutor + future.result() lets any subscriber-thread
+        # exception propagate to the test naturally, so no exception handling
+        # is needed here at all (R10: zero suppressions).
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_subscriber)
+            bus.broadcast({"message": "concurrent", "title": "c"})
+            items = future.result(timeout=5)
 
-            try:
-                q = bus.subscribe_with_cursor("toctou-queue-sub")
-                items = []
-                deadline = time.monotonic() + 1.0
-                while time.monotonic() < deadline:
-                    try:
-                        items.append(q.get_nowait())
-                    except Exception:  # noqa: BLE001
-                        time.sleep(0.01)
-                results.append(items)
-                bus.unsubscribe(q)
-            except Exception as exc:  # noqa: BLE001
-                errors.append(exc)
+        assert items, "Subscriber produced no results"
 
-        sub_thread = threading.Thread(target=_subscriber)
-        sub_thread.start()
-
-        bus.broadcast({"message": "concurrent", "title": "c"})
-
-        sub_thread.join(timeout=5)
-        assert not errors, f"Subscriber thread errored: {errors}"
-        assert results, "Subscriber produced no results"
-
-        items = results[0]
         offsets = [item.get("offset") for item in items]
         assert len(offsets) == len(set(offsets)), (
             f"Duplicate delivery detected: offsets={offsets}"
