@@ -9,14 +9,14 @@ import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from cw.config import (
-    AvailabilityProbeCache,
-    load_availability_probe_cache,
-    save_availability_probe_cache,
-)
 from cw.dev_queue import (
     dev_queue_lock,
     load_dev_queue,
+)
+from cw.dispatch_state import (
+    AvailabilityProbeCache,
+    load_availability_probe_cache,
+    save_availability_probe_cache,
 )
 from cw.events import record_event
 from cw.exceptions import (
@@ -152,8 +152,8 @@ def _resolve_availability() -> bool:
     """Fleet-wide TTL-cached gh-availability probe (RFC 0011 A5).
 
     Mirrors :func:`_resolve_freshness`'s check-and-cache shape but fleet-wide,
-    not per-client: state lives in config.py's DISPATCH_STATE_FILE sidecar
-    (:class:`~cw.config.AvailabilityProbeCache`), not a ConcurrencyOverrides
+    not per-client: state lives in dispatch_state.py's DISPATCH_STATE_FILE sidecar
+    (:class:`~cw.dispatch_state.AvailabilityProbeCache`), not a ConcurrencyOverrides
     client entry. On a cache hit (probed within
     ``_AVAILABILITY_PROBE_TTL_SECONDS``) returns the cached verdict without
     calling gh or touching the latch. On a cache miss, calls

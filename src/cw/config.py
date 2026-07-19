@@ -12,10 +12,9 @@ import shutil
 import subprocess
 import sys
 import threading
-from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any
 
 import click
 import yaml
@@ -23,6 +22,7 @@ from pydantic import ValidationError
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 
+from cw import _config_migrate
 from cw.atomic import atomic_write_text
 from cw.exceptions import ConfigValidationError, CwError, SessionsLockReentryError
 from cw.models import (
@@ -33,10 +33,8 @@ from cw.models import (
     CwState,
     LaneConfig,
     OrchestratorConfig,
-    SessionOrigin,
     SessionPurpose,
 )
-from cw.native_daemon import SHORT_SESSION_ID_RE
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -84,8 +82,6 @@ DEV_PLAN_LOCK = STATE_DIR / ".dev_plan.lock"
 DEV_PLAN_OUTPUT_DIR = STATE_DIR / "plan_output"
 SESSIONS_LOCK = STATE_DIR / ".sessions.lock"
 CLIENTS_LOCK = CONFIG_DIR / ".clients.yaml.lock"
-DISPATCH_STATE_FILE = STATE_DIR / "dispatch_state.json"
-DISPATCH_STATE_LOCK = STATE_DIR / ".dispatch_state.lock"
 CONCURRENCY_OVERRIDE_FILE = STATE_DIR / "concurrency_overrides.json"
 CONCURRENCY_OVERRIDE_LOCK = STATE_DIR / ".concurrency_overrides.lock"
 
@@ -191,10 +187,6 @@ def concurrency_override_file() -> Path:
 
 def concurrency_override_lock_file() -> Path:
     return CONCURRENCY_OVERRIDE_LOCK
-
-
-def dispatch_state_lock_file() -> Path:
-    return DISPATCH_STATE_LOCK
 
 
 def _under_pytest() -> bool:
@@ -403,209 +395,7 @@ def load_state() -> CwState:
         return CwState()
     raw = json.loads(path.read_text())
     _backup_state_file(raw)
-    return CwState.model_validate(migrate_cw_state(raw))
-
-
-_VALID_SESSION_ORIGINS = frozenset(v.value for v in SessionOrigin)
-
-# Schema version at which surface_ref became hex-only; legacy multiplexer
-# surface_refs are cleared only during the upgrade pass from below this version.
-_HEX_SURFACE_REF_SCHEMA_VERSION = 5
-
-# Schema version at which local_liveness.start_time_ns switched reference
-# points (boot-relative /proc -> epoch-relative psutil.create_time, #921).
-# A handle written below this version is in the old format and will never
-# compare equal to a freshly-read epoch-relative value for the same live
-# process, so it is cleared only during the upgrade pass from below this
-# version -- otherwise reconcile would misread a live aider process as dead
-# and harvest it out from under an in-flight session.
-_EPOCH_LIVENESS_SCHEMA_VERSION = 14
-
-
-def migrate_cw_state(raw: dict[str, Any]) -> dict[str, Any]:
-    """Normalise a raw sessions.json payload into a currently-valid shape.
-
-    The goal is to never brick the tool on a state file that was written by
-    an older (or briefly-diverged) version of cw. Unknown or renamed fields
-    are coerced; unknown enum values are reset to a safe default with a
-    warning rather than raising a validation error.
-    """
-    sessions = raw.get("sessions")
-    if "sessions" in raw and not isinstance(sessions, list):
-        # Malformed payload — leave schema_version untouched so the
-        # corruption surfaces downstream rather than getting a false
-        # "fully migrated" stamp.
-        return raw
-    # Capture the on-disk version before we bump it so per-step guards
-    # can condition on "is this an upgrade from version X?".
-    on_disk_version = int(raw.get("schema_version") or 0)
-    if isinstance(sessions, list):
-        for session_raw in sessions:
-            if not isinstance(session_raw, dict):
-                continue
-            _migrate_zellij_fields(session_raw)
-            # Only clear legacy multiplexer surface_refs during the v4→v5
-            # upgrade pass.  After migration the field may legally hold any
-            # string set by the live daemon path; re-clearing it on every
-            # load would wipe valid programmatic writes (e.g. test fixtures,
-            # daemon-spawn short ids that happen to look like plain strings).
-            if on_disk_version < _HEX_SURFACE_REF_SCHEMA_VERSION:
-                _clear_non_hex_surface_refs(session_raw)
-            if on_disk_version < _EPOCH_LIVENESS_SCHEMA_VERSION:
-                _clear_stale_local_liveness(session_raw)
-            _coerce_session_origin(session_raw)
-            _fill_linkage_field_defaults(session_raw)
-            _fill_last_result_default(session_raw)
-            _fill_cost_fields_default(session_raw)
-            _fill_session_lane_default(session_raw)
-            _fill_session_stage_default(session_raw)
-            _fill_session_consecutive_salvage_skips_default(session_raw)
-            _fill_session_liveness_bucket_default(session_raw)
-    # Bump persisted schema_version to current after all migration steps.
-    raw["schema_version"] = CW_STATE_SCHEMA_VERSION
-    return raw
-
-
-def _migrate_zellij_fields(session_raw: dict[str, Any]) -> None:
-    """Rename the pre-0.4 zellij_pane field and drop zellij_tab.
-
-    Migration armor — do not delete. Users in the wild still have
-    `sessions.json` files from the Zellij era; the rename runs every load
-    so upgrades stay transparent.
-    """
-    if "zellij_pane" in session_raw and "surface_ref" not in session_raw:
-        session_raw["surface_ref"] = session_raw.pop("zellij_pane")
-    else:
-        session_raw.pop("zellij_pane", None)
-    session_raw.pop("zellij_tab", None)
-
-
-def _coerce_session_origin(session_raw: dict[str, Any]) -> None:
-    """Reset unknown SessionOrigin values to 'user' with a warning.
-
-    A stale sessions.json containing, for example, `origin: "delegate"`
-    (a value that briefly existed in a branch but never landed) used to
-    crash every cw command at Pydantic validation. Coerce instead, so
-    users aren't locked out of their own state.
-    """
-    origin = session_raw.get("origin")
-    if origin is not None and origin not in _VALID_SESSION_ORIGINS:
-        logger.warning(
-            "session %s has unknown origin %r; coercing to 'user'",
-            session_raw.get("id", "<unknown>"),
-            origin,
-        )
-        session_raw["origin"] = SessionOrigin.USER.value
-
-
-def _fill_linkage_field_defaults(session_raw: dict[str, Any]) -> None:
-    """Fill parent_session_id and worker_session_ids introduced in schema v2.
-
-    Runs unconditionally and is idempotent: if the fields are already present
-    they are left untouched, so a v2 file round-trips without modification.
-    The canonical source of truth for these defaults is the Session Pydantic
-    model; this helper exists only to ensure the on-disk file gets the keys
-    explicitly so re-saves don't lose them.
-    """
-    if "parent_session_id" not in session_raw:
-        session_raw["parent_session_id"] = None
-    if "worker_session_ids" not in session_raw:
-        session_raw["worker_session_ids"] = []
-
-
-def _fill_last_result_default(session_raw: dict[str, Any]) -> None:
-    """Fill last_result introduced in schema v3.
-
-    Idempotent like the linkage defaults helper. Sessions that pre-date the
-    headless auto-dev parser have no last_result on disk; setting None
-    explicitly keeps the on-disk shape stable across re-saves.
-    """
-    if "last_result" not in session_raw:
-        session_raw["last_result"] = None
-
-
-def _fill_cost_fields_default(session_raw: dict[str, Any]) -> None:
-    """Fill cost_usd and cost_breakdown introduced in schema v4.
-
-    Idempotent: existing values are preserved.
-    """
-    if "cost_usd" not in session_raw:
-        session_raw["cost_usd"] = None
-    if "cost_breakdown" not in session_raw:
-        session_raw["cost_breakdown"] = None
-
-
-def _fill_session_lane_default(session_raw: dict[str, Any]) -> None:
-    """Fill Session.lane introduced in schema v9 (GitHub #594). Idempotent."""
-    if "lane" not in session_raw:
-        session_raw["lane"] = None
-
-
-def _fill_session_stage_default(session_raw: dict[str, Any]) -> None:
-    """Fill Session.stage introduced in schema v10 (GitHub #612). Idempotent."""
-    if "stage" not in session_raw:
-        session_raw["stage"] = None
-
-
-def _fill_session_consecutive_salvage_skips_default(
-    session_raw: dict[str, Any],
-) -> None:
-    """Fill Session.consecutive_salvage_skips introduced in schema v12 (#974).
-
-    Idempotent.
-    """
-    if "consecutive_salvage_skips" not in session_raw:
-        session_raw["consecutive_salvage_skips"] = 0
-
-
-def _fill_session_liveness_bucket_default(session_raw: dict[str, Any]) -> None:
-    """Fill Session.liveness_bucket introduced in schema v13 (GitHub #1001).
-
-    Idempotent.
-    """
-    if "liveness_bucket" not in session_raw:
-        session_raw["liveness_bucket"] = "live"
-
-
-def _clear_non_hex_surface_refs(session_raw: dict[str, Any]) -> None:
-    """Clear non-native surface_ref values (legacy cmux/tmux pane IDs).
-
-    Native daemon workers store an 8-char hex short-id as surface_ref.
-    Legacy cmux/tmux backends stored pane references like "ws:0.1" or
-    "tmux-pane-3". Clear any value that doesn't match the native hex
-    pattern so stale references don't confuse reconcile.
-    """
-    surface_ref = session_raw.get("surface_ref")
-    if surface_ref is None:
-        return
-    if not SHORT_SESSION_ID_RE.fullmatch(surface_ref):
-        session_raw["surface_ref"] = None
-
-
-def _clear_stale_local_liveness(session_raw: dict[str, Any]) -> None:
-    """Clear a pre-v14 local_liveness handle (boot-relative start_time_ns).
-
-    A handle captured before the #921 psutil switch stores start_time_ns in
-    the old boot-relative /proc format, which will never equal a freshly-read
-    epoch-relative value for the same still-live process -- so leaving it in
-    place would cause reconcile to misclassify a live aider session as dead
-    on the first pass after upgrade. Clearing it drops the fast process-exit
-    harvest path for that session; recovery falls back to stalled.py's
-    headless wall-clock sweep (gated on _is_headless, not surface_ref/
-    local_liveness -- LOCAL sessions never carry a surface_ref, so idle.py
-    and the phantom detector in _shared.py both skip them) once
-    resolve_headless_budget() elapses, or a fresh LocalExecutor spawn
-    re-establishes an epoch-relative handle.
-    """
-    if session_raw.get("local_liveness") is not None:
-        logger.info(
-            "session %s: clearing pre-v%d local_liveness handle "
-            "(boot-relative start_time_ns incompatible with epoch-relative "
-            "format, GitHub #921)",
-            session_raw.get("id", "<unknown>"),
-            _EPOCH_LIVENESS_SCHEMA_VERSION,
-        )
-        session_raw["local_liveness"] = None
+    return CwState.model_validate(_config_migrate.migrate_cw_state(raw))
 
 
 def _backup_state_file(raw: dict[str, Any]) -> None:
@@ -631,236 +421,6 @@ def save_state(state: CwState) -> None:
     refuse_real_state_write(state_file())
     state_dir().mkdir(parents=True, exist_ok=True)
     atomic_write_text(state_file(), state.model_dump_json(indent=2))
-
-
-class AvailabilityProbeCache(NamedTuple):
-    """Fleet-wide TTL-cached gh-availability probe result + outage latch.
-
-    Persisted in DISPATCH_STATE_FILE under the ``"availability_probe"`` key
-    (RFC 0011 A5). A NamedTuple, not a pydantic BaseModel: transient,
-    TTL-bounded runtime state with no durability/migration contract — the
-    dispatch loop re-probes on every TTL expiry, so a shape drift self-heals
-    within one TTL window rather than needing a schema version.
-    """
-
-    probed_at: datetime
-    available: bool
-    latched: bool  # True once SESSION_NEEDS_ATTENTION has fired for the
-    # current unbroken run of failures; False once a subsequent fresh probe
-    # succeeds (edge-triggered reset).
-
-
-@contextlib.contextmanager
-def dispatch_state_lock() -> Iterator[None]:
-    """Acquire an exclusive file lock over the DISPATCH_STATE_FILE write window.
-
-    Mirror of ``concurrency_override_lock()``/``clients_lock()``. Hold this
-    across every load→mutate→write sequence in ``save_usage_limited_until``,
-    ``save_availability_probe_cache``, and ``save_main_drift_latches`` so
-    concurrent ``cw`` processes cannot clobber each other's edits (lost
-    update, #1256). The lock is advisory (``fcntl.flock``) and per-open-fd,
-    so sequential re-acquisitions in the same process are safe.
-    Do NOT nest: acquiring while already holding will deadlock.
-
-    Lock ordering: ``sessions_lock()`` → ``dispatch_state_lock()`` is
-    permitted and occurs today, via ``save_main_drift_latches`` called from
-    inside ``reconcile/core.py``'s ``with sessions_lock():`` block through
-    ``_act_on_main_drift_candidates`` (``main_drift.py:162``). The reverse
-    ordering is forbidden and never occurs in the current call graph. The one
-    pathological cross-lock path (#1228, the RFC 0010 P4 review-recipe act
-    phase re-entering ``reconcile()`` from inside ``sessions_lock()``) fails
-    first at its own ``reconcile()`` call (``dispatch.py:1491``) with
-    ``SessionsLockReentryError``, before it can reach any
-    ``dispatch_state_lock()`` acquisition.
-    """
-    state_dir().mkdir(parents=True, exist_ok=True)
-    lock_path = dispatch_state_lock_file()
-    fd = lock_path.open("w")
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        fd.close()
-
-
-def _load_dispatch_state_raw() -> dict[str, Any]:
-    """Read DISPATCH_STATE_FILE as a dict, or ``{}`` if absent/corrupt/unreadable.
-
-    Shared read-side of the read-merge-write save helpers
-    (``save_usage_limited_until`` / ``save_availability_probe_cache``) so that
-    neither clobbers the other's key in the shared sidecar (#1157). A corrupt
-    or non-object existing file is treated as empty rather than raising.
-    """
-    path = DISPATCH_STATE_FILE
-    if not path.exists():
-        return {}
-    try:
-        raw = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError, ValueError, TypeError):
-        return {}
-    return raw if isinstance(raw, dict) else {}
-
-
-def load_usage_limited_until() -> datetime | None:
-    """Load the persisted usage-limit backoff expiry from DISPATCH_STATE_FILE.
-
-    Returns None when the file is absent, unreadable, malformed, or the stored
-    timestamp is already in the past (so a stale backoff from a previous loop
-    run never silently re-blocks a fresh loop start).
-    """
-    path = DISPATCH_STATE_FILE
-    if not path.exists():
-        return None
-    try:
-        raw = json.loads(path.read_text())
-        ts = raw.get("usage_limited_until")
-        if not isinstance(ts, str):
-            return None
-        dt = datetime.fromisoformat(ts)
-        return dt if dt > datetime.now(UTC) else None
-    except (OSError, json.JSONDecodeError, ValueError, TypeError):
-        return None
-
-
-def save_usage_limited_until(dt: datetime | None) -> None:
-    """Persist (or clear) the usage-limit backoff expiry to DISPATCH_STATE_FILE.
-
-    Writes ``{"usage_limited_until": "<iso>"}`` when *dt* is set; writes
-    ``{"usage_limited_until": null}`` to clear it.  Read-merge-writes the
-    shared sidecar so the ``availability_probe`` key (RFC 0011 A5) is
-    preserved rather than clobbered (#1157).  Creates STATE_DIR if needed.
-    Silently swallows write errors — a failed persist just means the next loop
-    start won't honour the backoff (acceptable degradation).
-    """
-    try:
-        refuse_real_state_write(DISPATCH_STATE_FILE)
-        DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with dispatch_state_lock():
-            payload = _load_dispatch_state_raw()
-            payload["usage_limited_until"] = dt.isoformat() if dt is not None else None
-            atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
-    except OSError:
-        logger.warning("dispatch_state: failed to persist usage_limited_until")
-
-
-def load_availability_probe_cache() -> AvailabilityProbeCache | None:
-    """Load the fleet-wide gh-availability probe cache from DISPATCH_STATE_FILE.
-
-    Returns None when the file is absent, unreadable, malformed, missing the
-    ``"availability_probe"`` key, or storing a malformed entry shape (RFC 0011
-    A5). Tolerates other keys (e.g. ``usage_limited_until``) sharing the file.
-    """
-    path = DISPATCH_STATE_FILE
-    if not path.exists():
-        return None
-    try:
-        raw = json.loads(path.read_text())
-        entry = raw.get("availability_probe")
-        if not isinstance(entry, dict):
-            return None
-        probed_at = entry.get("probed_at")
-        available = entry.get("available")
-        latched = entry.get("latched")
-        if (
-            not isinstance(probed_at, str)
-            or not isinstance(available, bool)
-            or not isinstance(latched, bool)
-        ):
-            return None
-        return AvailabilityProbeCache(
-            probed_at=datetime.fromisoformat(probed_at),
-            available=available,
-            latched=latched,
-        )
-    except (OSError, json.JSONDecodeError, ValueError, TypeError):
-        return None
-
-
-def save_availability_probe_cache(cache: AvailabilityProbeCache) -> None:
-    """Persist the fleet-wide gh-availability probe cache to DISPATCH_STATE_FILE.
-
-    Read-merge-writes the shared sidecar so the ``usage_limited_until`` key is
-    preserved rather than clobbered (#1157).  Creates STATE_DIR if needed.
-    Silently swallows write errors — a failed persist just means the next tick
-    re-probes rather than reading the cache (acceptable degradation).
-    """
-    try:
-        refuse_real_state_write(DISPATCH_STATE_FILE)
-        DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with dispatch_state_lock():
-            payload = _load_dispatch_state_raw()
-            payload["availability_probe"] = {
-                "probed_at": cache.probed_at.isoformat(),
-                "available": cache.available,
-                "latched": cache.latched,
-            }
-            atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
-    except OSError:
-        logger.warning("dispatch_state: failed to persist availability_probe")
-
-
-def load_main_drift_latches() -> dict[str, bool]:
-    """Load the per-client main-checkout-drift attention latches (#1258).
-
-    Returns ``{}`` when the file is absent, unreadable, malformed, missing
-    the ``"main_drift_latches"`` key, or storing a non-dict / wrong-value-type
-    entry. Mirrors :func:`load_availability_probe_cache`'s fail-safe shape;
-    tolerates other keys (e.g. ``availability_probe``) sharing the file.
-    """
-    path = DISPATCH_STATE_FILE
-    if not path.exists():
-        return {}
-    try:
-        raw = json.loads(path.read_text())
-        entry = raw.get("main_drift_latches")
-        if not isinstance(entry, dict):
-            return {}
-        if not all(
-            isinstance(key, str) and isinstance(value, bool)
-            for key, value in entry.items()
-        ):
-            return {}
-    except (OSError, json.JSONDecodeError, ValueError, TypeError):
-        return {}
-    else:
-        return entry
-
-
-def save_main_drift_latches(latches: dict[str, bool]) -> None:
-    """Persist the per-client main-checkout-drift attention latches (#1258).
-
-    Read-merge-writes the shared sidecar so ``usage_limited_until`` and
-    ``availability_probe`` are preserved rather than clobbered.  Creates
-    STATE_DIR if needed.  Silently swallows write errors, same posture as
-    ``save_availability_probe_cache`` — acceptable degradation: a failed
-    persist on a *set* just risks one extra re-fire next tick, but a failed
-    persist on a *reset* leaves the on-disk latch stale (still ``True``),
-    which can suppress one genuine future re-arm until a later tick's write
-    succeeds. Bounded and self-healing, not silent data loss: the merge is
-    per-tick (this function is called at most once per ``reconcile()``, with
-    the full latch dict), so a lost update only ever costs one client's one
-    flip, never another client's state.
-    """
-    try:
-        refuse_real_state_write(DISPATCH_STATE_FILE)
-        DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        # Why: file-locked (dispatch_state_lock, #1256) — reconcile() runs
-        # from independent, short-lived processes (cw status/list/start,
-        # every dispatch_tick), so concurrent read-merge-writes for
-        # different clients previously could race and lose one flip. The
-        # lock serializes this critical section against the other two
-        # DISPATCH_STATE_FILE writers, closing that race.
-        with dispatch_state_lock():
-            payload = _load_dispatch_state_raw()
-            payload["main_drift_latches"] = latches
-            atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
-    except OSError:
-        logger.warning(
-            "dispatch_state: failed to persist main_drift_latches (clients=%s)",
-            sorted(latches),
-            exc_info=True,
-        )
 
 
 def load_orchestrator_config() -> OrchestratorConfig:
