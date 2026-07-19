@@ -20,17 +20,12 @@ from typing import Any
 def to_openai_strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """Return an OpenAI strict-mode-compatible copy of *schema*.
 
-    Does not mutate *schema*. Applies :func:`_process` to the top-level node
-    and to each ``$defs`` entry (object nodes elsewhere in the tree are also
-    reached via ``_process``'s own recursion).
+    Does not mutate *schema*. ``_process(result)``'s own recursion (via
+    :func:`_walk`) already reaches every ``$defs`` entry, since ``$defs`` is
+    itself a value of the top-level node.
     """
     result = copy.deepcopy(schema)
     _process(result)
-    defs = result.get("$defs")
-    if isinstance(defs, dict):
-        for def_schema in defs.values():
-            if isinstance(def_schema, dict):
-                _process(def_schema)
     return result
 
 
