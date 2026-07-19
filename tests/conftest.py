@@ -510,7 +510,7 @@ def capture_events(
     ``monkeypatch.setattr`` patches a name by the *calling* module's binding,
     so a test that needs to observe events emitted from ``cw.dev_queue`` must
     patch ``cw.dev_queue.record_event`` — the ``capture_event`` closures in
-    ``test_dispatch.py`` that patch ``cw.dispatch._legacy.record_event`` will
+    ``test_dispatch.py`` that patch ``cw.dispatch.routing.record_event`` will
     NOT see events emitted from ``cw.dev_queue``. This factory patches
     ``<module_path>.record_event`` and returns a list that accumulates
     ``(event_type, payload, correlation_id)`` tuples for each emit, optionally
@@ -518,7 +518,7 @@ def capture_events(
 
     Call it once per module you want to observe; a test that spans two producer
     modules (e.g. the dispatch finalize-regress path, which emits from both
-    ``cw.dispatch._legacy`` and ``cw.dev_queue``) calls it twice with distinct
+    ``cw.dispatch.routing`` and ``cw.dev_queue``) calls it twice with distinct
     lists.
     """
 

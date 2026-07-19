@@ -1,39 +1,17 @@
 """Tick-based dispatch loop: claim pending TicketTasks and spawn Claude sessions.
 
-Package split (#1310, part 1). The historical flat ``cw.dispatch`` module is now
-a package: ``gating`` (availability/freshness/usage-limit gates), ``claim``
-(claim + spawn), ``lanes`` (lane circuit breaker / per-client dispatch), and
-``_legacy`` (tick orchestration, sentinel/stage routing, event loop — the
-leftover targeted by parts 2-3). This ``__init__`` re-exports the full historical
-public + private surface so every ``from cw.dispatch import X`` import site and
-downstream call path keeps working unchanged.
+Package split (#1310-#1312, complete). The historical flat ``cw.dispatch``
+module is now a package: ``gating`` (availability/freshness/usage-limit gates),
+``claim`` (claim + spawn), ``lanes`` (lane circuit breaker / per-client
+dispatch), ``tick``/``loop`` (tick orchestration and the event loop), and
+``routing`` (sentinel interpretation and staged stage-routing). This
+``__init__`` re-exports the full historical public + private surface so every
+``from cw.dispatch import X`` import site and downstream call path keeps working
+unchanged.
 """
 
 from __future__ import annotations
 
-from cw.dispatch._legacy import (
-    _APPROVAL_GATE_REASON,
-    _AWAITING_OPERATOR_REASON,
-    _INVALID_STAGE_REASON,
-    _PLAN_PARKED_REASON,
-    _STAGE_REACHED_TO_STAGE,
-    _UNKNOWN_CLIENT_REASON,
-    _accumulate_task_cost,
-    _classify_sentinel_stage_position,
-    _extract_scope_tier,
-    _persist_carried_context,
-    _resolve_scope_tier,
-    _resolve_stage_walk,
-    _route_scope_gated_approval,
-    _route_stage_success,
-    _route_staged_decision,
-    _should_gate_for_signoff,
-    _stage_advance_unchecked,
-    _StagePosition,
-    _walk_stage_pointer_forward,
-    apply_staged_decision,
-    resolve_signoff,
-)
 from cw.dispatch.claim import (
     _CODEX_CAPABILITY_GATE_TIMEOUT_SECONDS,
     _CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD,
@@ -96,6 +74,29 @@ from cw.dispatch.loop import (
     consume_completed_sessions,
     persist_last_result,
     run_dispatch_loop,
+)
+from cw.dispatch.routing import (
+    _APPROVAL_GATE_REASON,
+    _AWAITING_OPERATOR_REASON,
+    _INVALID_STAGE_REASON,
+    _PLAN_PARKED_REASON,
+    _STAGE_REACHED_TO_STAGE,
+    _UNKNOWN_CLIENT_REASON,
+    _accumulate_task_cost,
+    _classify_sentinel_stage_position,
+    _extract_scope_tier,
+    _persist_carried_context,
+    _resolve_scope_tier,
+    _resolve_stage_walk,
+    _route_scope_gated_approval,
+    _route_stage_success,
+    _route_staged_decision,
+    _should_gate_for_signoff,
+    _stage_advance_unchecked,
+    _StagePosition,
+    _walk_stage_pointer_forward,
+    apply_staged_decision,
+    resolve_signoff,
 )
 from cw.dispatch.tick import (
     DispatchTickResult,
