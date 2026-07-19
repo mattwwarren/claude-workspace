@@ -1230,6 +1230,42 @@ class TestRunCodexRolePersistsDiagnostics:
         assert "<redacted>" in failure.stderr_excerpt
 
 
+# ---------------------------------------------------------------------------
+# _run_codex_role — writes an OpenAI strict-mode schema file (#1364)
+# ---------------------------------------------------------------------------
+
+
+class TestRunCodexRoleWritesStrictSchema:
+    def test_schema_file_content_is_strict(self, tmp_path: Path) -> None:
+        runner = _SequencedRunner([_ok_result()])
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        _run_codex_role(
+            runner=runner,
+            worktree=tmp_path,
+            role="Code Quality Reviewer",
+            prompt="p",
+            model=None,
+            timeout_seconds=None,
+            scratch_dir=scratch,
+            session_id="sess-strict",
+        )
+        schema_path = scratch / "code-quality-reviewer-schema.json"
+        schema = json.loads(schema_path.read_text())
+
+        assert schema["additionalProperties"] is False
+        assert schema["$defs"]["Finding"]["additionalProperties"] is False
+        assert schema["$defs"]["EscalationMetadata"]["additionalProperties"] is False
+
+        nodes = [
+            schema,
+            schema["$defs"]["Finding"],
+            schema["$defs"]["EscalationMetadata"],
+        ]
+        for node in nodes:
+            assert set(node["required"]) == set(node["properties"].keys())
+
+
 def test_run_codex_roles_scratch_dir_still_removed_after_persist(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

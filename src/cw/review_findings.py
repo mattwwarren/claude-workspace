@@ -157,6 +157,21 @@ class ReviewerFindingsDocument(BaseModel):
     detail: str = ""
     findings: list[Finding] = Field(default_factory=list)
 
+    @field_validator("detail", mode="before")
+    @classmethod
+    def _null_detail_to_default(cls, v: str | None) -> str:
+        # Why: an OpenAI strict-mode schema (#1364) wraps every previously-
+        # optional field as nullable rather than omittable, so codex may send
+        # an explicit `null` for a field it left at its default. Normalize
+        # before pydantic's type coercion instead of widening `detail`'s
+        # Python-level type to `str | None`.
+        return "" if v is None else v
+
+    @field_validator("findings", mode="before")
+    @classmethod
+    def _null_findings_to_default(cls, v: list[Any] | None) -> list[Any]:
+        return [] if v is None else v
+
     @model_validator(mode="after")
     def _check_failed_has_no_findings(self) -> ReviewerFindingsDocument:
         if self.status == "failed" and self.findings:

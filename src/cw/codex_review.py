@@ -39,6 +39,7 @@ from cw.executor_diagnostics import (
 )
 from cw.local_runner import _SCHEMA_VERSION, make_blocked, resolve_tier
 from cw.models import CONTEXT_JSON_RELATIVE_PATH
+from cw.openai_strict_schema import to_openai_strict_schema
 from cw.review_findings import (
     CapturedDiff,
     ReviewerFindingsDocument,
@@ -678,7 +679,10 @@ def _run_codex_role(
     schema_path = scratch_dir / f"{slug}-schema.json"
     output_path = scratch_dir / f"{slug}-output.json"
     schema_path.write_text(
-        json.dumps(ReviewerFindingsDocument.model_json_schema()), encoding="utf-8"
+        json.dumps(
+            to_openai_strict_schema(ReviewerFindingsDocument.model_json_schema())
+        ),
+        encoding="utf-8",
     )
     argv = _build_generic_codex_argv(
         model=model, schema_path=schema_path, output_path=output_path
