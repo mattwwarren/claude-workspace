@@ -1,8 +1,13 @@
-"""Dispatch tick orchestration, sentinel/stage routing, and the event loop.
+"""Sentinel interpretation and staged stage-routing for the dispatch pipeline.
 
-The ``core.py``-equivalent leftover of the ``cw.dispatch`` package split
-(#1310): everything not yet carved into gating/claim/lanes (targets of parts
-2-3)."""
+Owns the B2 staged-advance decision table: it reads a session's sentinel
+(``AutoDevResult``-derived ``last_result``), classifies its ``stage_reached``
+against the task's current stage, walks the stage pointer forward for a
+legitimate self-escalation, and applies the Rule 1-6 status routing (scope-gated
+approval, pauses, stage success/advance, no-op, failure/regress, and the
+conservative fallback). Also resolves the effective scope tier and the
+operator-signoff policy, and accumulates per-session cost onto the task.
+"""
 
 from __future__ import annotations
 
