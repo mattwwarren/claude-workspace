@@ -12,13 +12,13 @@ from typing import TYPE_CHECKING, get_args
 import pytest
 
 from cw.codex_review import (
+    _CATEGORY_TO_REASON,
     CODEX_BUDGET_EXHAUSTED,
     CODEX_ERROR,
     CODEX_MUST_FIX_FINDINGS,
     CODEX_REVIEW_PARTIAL,
     CODEX_REVIEW_UNPARSEABLE,
     CODEX_TIMEOUT,
-    _CATEGORY_TO_REASON,
     _build_generic_codex_argv,
     _build_reviewer_prompt,
     _capture_diff,
@@ -80,9 +80,10 @@ def _bundle_file(session_id: str, role_slug: str, category: str) -> Path:
     filenames are no longer stable across a test run — glob on the stable
     prefix instead.
     """
+    bundle = diagnostics_bundle_dir(session_id)
     matches = [
         p
-        for p in diagnostics_bundle_dir(session_id).glob(f"{role_slug}-{category}-*.json")
+        for p in bundle.glob(f"{role_slug}-{category}-*.json")
         if not p.name.endswith(("-schema.json", "-output.json"))
     ]
     assert len(matches) == 1, (

@@ -881,9 +881,7 @@ def test_local_executor_unexpected_error_persists_diagnostics(
     # spawn raised, so recover sid from the created session in state.
     session = next(s for s in load_state().sessions if s.last_result is not None)
     # Filename now carries an occurred_at timestamp suffix (#1330 item 7).
-    [path] = list(
-        diagnostics_bundle_dir(session.id).glob("aider-runtime_error-*.json")
-    )
+    [path] = list(diagnostics_bundle_dir(session.id).glob("aider-runtime_error-*.json"))
     assert path.exists()
     failure = ExecutorFailure.model_validate_json(path.read_text())
     assert failure.category == "runtime_error"

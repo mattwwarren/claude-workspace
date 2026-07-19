@@ -272,7 +272,9 @@ def test_persist_diagnostics_bundle_writes_expected_files(
     assert (bundle / f"{stem}-schema.json").read_text() == '{"schema": true}'
     assert (bundle / f"{stem}-output.json").read_text() == '{"out": true}'
     # The failure JSON round-trips.
-    restored = ExecutorFailure.model_validate_json((bundle / f"{stem}.json").read_text())
+    restored = ExecutorFailure.model_validate_json(
+        (bundle / f"{stem}.json").read_text()
+    )
     assert restored.category == "timeout"
 
 
@@ -291,7 +293,7 @@ def test_persist_diagnostics_bundle_filename_derives_from_category_and_timestamp
     stem = _stem("aider", failure)
     assert (bundle / f"{stem}.json").exists()
     with pytest.raises(TypeError):
-        persist_diagnostics_bundle(  # type: ignore[call-arg]
+        persist_diagnostics_bundle(
             session_id="sess-stem",
             role_slug="aider",
             reason="nonzero_exit",
@@ -313,7 +315,9 @@ def test_persist_diagnostics_bundle_does_not_overwrite_same_role_category_repeat
     bundle = persist_diagnostics_bundle(
         session_id="sess-repeat", role_slug="aider", failure=first
     )
-    persist_diagnostics_bundle(session_id="sess-repeat", role_slug="aider", failure=second)
+    persist_diagnostics_bundle(
+        session_id="sess-repeat", role_slug="aider", failure=second
+    )
     files = sorted(p.name for p in bundle.glob("aider-nonzero_exit-*.json"))
     assert len(files) == 2
     assert files[0] != files[1]
