@@ -16,7 +16,7 @@ def pr_channel() -> None:
 @click.option("--client-id", default=None, help="Unique client ID for cursor tracking.")
 def pr_channel_proxy(client_id: str | None) -> None:
     """Start the MCP stdio proxy for cw-pr-events (add to .mcp.json)."""
-    from cw.cw_pr_events_channel import run_proxy  # noqa: PLC0415
+    from cw.cw_pr_events_channel import run_proxy
 
     run_proxy(client_id=client_id)
 
@@ -43,7 +43,7 @@ def pr_channel_serve(port: int, host: str, allow_unsigned: bool) -> None:
     kept inline here so the click decorators don't trigger an eager import of
     ``starlette`` (lives in the ``[mcp]`` optional-deps extra).
     """
-    from cw.cw_pr_events_server import serve as _serve  # noqa: PLC0415
+    from cw.cw_pr_events_server import serve as _serve
 
     _serve(host=host, port=port, allow_unsigned=allow_unsigned)
 
@@ -57,7 +57,7 @@ def queue_channel() -> None:
 @click.option("--client-id", default=None, help="Unique client ID for cursor tracking.")
 def queue_channel_proxy(client_id: str | None) -> None:
     """Start the MCP stdio proxy for cw-queue-events (add to .mcp.json)."""
-    from cw.cw_queue_events_channel import run_proxy  # noqa: PLC0415
+    from cw.cw_queue_events_channel import run_proxy
 
     run_proxy(client_id=client_id)
 
@@ -72,7 +72,7 @@ def queue_channel_serve(port: int, host: str) -> None:
     kept inline here so the click decorators don't trigger an eager import of
     ``starlette`` (lives in the ``[mcp]`` optional-deps extra).
     """
-    from cw.cw_queue_events_server import serve as _serve  # noqa: PLC0415
+    from cw.cw_queue_events_server import serve as _serve
 
     _serve(host=host, port=port)
 
@@ -86,6 +86,6 @@ def operator_channel() -> None:
 @click.option("--client-id", default=None, help="Unique client ID for cursor tracking.")
 def operator_channel_proxy(client_id: str | None) -> None:
     """Start the MCP stdio proxy for cw-operator (add to .mcp.json)."""
-    from cw.cw_operator_events_channel import run_proxy  # noqa: PLC0415
+    from cw.cw_operator_events_channel import run_proxy
 
     run_proxy(client_id=client_id)

@@ -154,7 +154,7 @@ def _check_workspace_paths() -> list[CheckResult]:
     """Verify each client's effective git directory exists."""
     try:
         clients = _deps.load_clients()
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 — any load_clients() error yields []; _check_config_file already surfaces the parse failure as its own CheckResult, so this check must not also crash or double-report
         return []  # _check_config_file() already surfaces parse errors
     results = []
     for name, client in clients.items():
