@@ -317,6 +317,24 @@ def run_dispatch_loop(
             except (yaml.YAMLError, ConfigValidationError):
                 _log.warning("dispatch: config reload failed; using last-good config")
 
+            # Re-read the shared back-off sidecar every tick (#1346): the pre-loop
+            # load above (line ~305) only protects a fresh restart (#804) -- it is
+            # never revisited, so this process's in-memory window silently
+            # diverges from what any OTHER dispatch process (or this same process's
+            # own earlier tick) has persisted. Merge rather than overwrite: take
+            # the later of {in-memory, on-disk}, treating None as "no window".
+            # load_usage_limited_until() returns None for a file that is absent,
+            # unreadable, malformed, OR merely expired (config.py) -- a bare
+            # assignment would let a transient disk-read failure silently reopen
+            # the spawn gate mid-backoff. A read must never shorten an active
+            # window.
+            persisted_usage_limited_until = load_usage_limited_until()
+            if persisted_usage_limited_until is not None and (
+                usage_limited_until is None
+                or persisted_usage_limited_until > usage_limited_until
+            ):
+                usage_limited_until = persisted_usage_limited_until
+
             consume_completed_sessions()
             try:
                 hydrate_pr_states(config)
