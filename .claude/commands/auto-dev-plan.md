@@ -304,10 +304,12 @@ Gate each station independently; the plan proceeds to Step 1g only when **both**
 
 *Plan Reviewer verdicts:*
 - **NO_ISSUES / SHOULD_FIX only / PRINCIPLE only** (any scope, any mode) → log findings (do NOT re-argue PRINCIPLE), append the `plan-spec-reviewed` marker.
+- **MUST_FIX where every persisting finding's category is exactly `Format-Only`, format-only cycle not yet used (any scope, any mode)** → spawn plan-revision agent (Step 1f.4) in **format-only mode**, scoped to just the format-only findings; does not require or consume the standard revision-cycle budget. Re-review only Plan Reviewer.
 - **MUST_FIX, 1st cycle, Small or interactive** → spawn plan-revision agent (Step 1f.4), re-review once.
 - **MUST_FIX, 1st cycle, Large + interactive** → AskUserQuestion: revise / surface to human / skip ticket. On "revise" → Step 1f.4.
 - **MUST_FIX persists after 1 revision cycle, interactive** → AskUserQuestion: post stale plan to Linear anyway / abandon ticket.
 - **MUST_FIX persists after 1 revision cycle, headless** → EXIT `blocked` with `blocker.reason: "plan_unreviewable"`. Do NOT post the stale plan to Linear.
+- **MUST_FIX persists after the format-only cycle (still all `Format-Only`)** → falls through to the standard "persists after 1 revision cycle" branches above (same AskUserQuestion / `blocked` `plan_unreviewable` EXIT, including the existing `stage.errored` emission) — the format-only path is a one-shot, not a second standard cycle.
 
 *Plan Soundness Reviewer verdicts:*
 - **NO_ISSUES** (any scope, any mode) → append the `plan-soundness-reviewed` marker.
@@ -325,6 +327,8 @@ If revision was performed, a marker reflects the revised plan, not the original.
 **Step 1f.4 — Plan revision (when MUST_FIX from either station):**
 
 Re-spawn the **Plan** agent (`model: "sonnet"`) — same agent type as Step 1b, but Sonnet suffices here since this is structured feedback application rather than original design — with the current plan, the verbatim findings from *every* station that returned MUST_FIX (and any RISK the user chose to "treat as MUST_FIX"), and an instruction to revise addressing each one. The revision agent returns a new plan text; route back to Step 1f.2, re-running **only the stations that triggered the revision** (a clean station's marker stays valid). Maximum **1 revision cycle** — if a revised plan still has MUST_FIX, exit per the gating rules above. Don't loop; a second failure needs human judgment.
+
+**Format-only revision (defense-in-depth).** Fires only when Step 1f.3 routes here because every persisting Plan Reviewer MUST_FIX carries the `Format-Only` category (should rarely fire, since a compliant reviewer raises such findings as SHOULD_FIX per plan-reviewer.md's severity floor). Spawns the same Plan agent, scoped to just the format-only findings, with instruction to re-emit the affected section(s) in the required schema and make no other content changes. Tracked on an **independent axis** from, and does **not** decrement, the standard 1-cycle budget above — it may run even when that budget is already spent. This format-only cycle is itself capped at **1 attempt**; if it is exhausted and MUST_FIX (still all `Format-Only`) persists, fall through to the standard "persists after 1 revision cycle" exit branches (Step 1f.3, unchanged).
 
 **Headless only — if the 1 revision cycle is exhausted and MUST_FIX persists, emit `stage.errored` before exiting:**
 ```bash

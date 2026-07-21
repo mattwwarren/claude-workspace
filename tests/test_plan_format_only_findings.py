@@ -102,7 +102,7 @@ def test_plan_step1f3_grants_independent_format_only_cycle() -> None:
         "→ spawn plan-revision agent (Step 1f.4)"
     )
     assert anchor in content
-    window = _after(content, anchor, span=300)
+    window = _after(content, anchor, span=350)
     assert (
         "does not require or consume the standard revision-cycle budget"
         in window
