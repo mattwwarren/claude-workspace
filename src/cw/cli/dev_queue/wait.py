@@ -373,6 +373,10 @@ def dev_queue_wait(
     # legitimate spawn window (session_id never set yet) from a post-reap
     # revert (session_id was set, then cleared by reconcile — #542).
     observed_session_id: str | None = None
+    # Caller-owned dedup set (issue #1247): created once, outside the poll
+    # loop, so an unresolved malformed sentinel's WARNING re-logs at most
+    # once across the entire wait's lifetime rather than every 5s poll.
+    warned_blocks: set[str] = set()
 
     while True:
         # --- Step 1: fast path — task already terminal in the queue ---
@@ -436,7 +440,9 @@ def dev_queue_wait(
         # --- Step 4: parse sentinel from transcript ---
         sentinel: AutoDevResult | BlockedResult | None = None
         if session.worktree_path is not None and csid is not None:
-            sentinel = _parse_sentinel_from_transcript(str(session.worktree_path), csid)
+            sentinel = _parse_sentinel_from_transcript(
+                str(session.worktree_path), csid, warned_blocks=warned_blocks
+            )
 
         # BlockedResult means framing present but payload unusable — treat as
         # not-yet-terminal (could be a partial write); keep polling.
