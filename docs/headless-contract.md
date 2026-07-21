@@ -56,6 +56,7 @@ All interactive gates in the pipeline collapse to one of: AUTO-SKIP, AUTO-CONTIN
 | Project `ship-it.md` interactive steps (e.g. tag-confirmation prompts) | EXIT `blocked` with `blocker.reason: "agent_block"` (collapses under the "Any other agent BLOCK" row above — never silently skipped) |
 | S4a merge gate (small only — large already exited) | EXIT `merge_gate_blocked` if prior pipeline PR open |
 | S4b PR creation, small | AUTO-CREATE with auto-merge |
+| S4c/S4d post-arm auto-merge verification (#1140) | `gh pr merge --auto` can report success while `autoMergeRequest` reads back null; both Step 4c's main-session re-verification and Step 4d's reuse-path "Enable auto-merge" sub-step re-verify via `prep_pr_finalize.py verify --require-automerge` and EXIT `blocked` with `blocker.reason: "automerge_not_armed"` on failure |
 | S5 CI wait | AUTO-SKIP — return immediately after auto-merge enabled. CI watching = orchestrator concern |
 | Trailing /schedule asks | suppress |
 
@@ -237,6 +238,7 @@ Full v3 shape with Phase B and Phase E fields (issue #174):
 | `review_blocked` | MUST_FIX findings persisted after 5 fix-loop cycles (the hard cap). |
 | `plan_deviation` | A non-deferrable Stage-3 finding (impl deviates from an explicit plan requirement/prohibition) survived the fix loop or was judged beyond fix-loop scope. The pipeline does not assign plan-vs-impl blame — it exits `blocked`; the operator uses `cw dev-queue requeue --regress` to send it back to impl, or revisits the plan. |
 | `agent_block` | Any other agent returned friction level BLOCK that the pipeline could not auto-resolve. |
+| `automerge_not_armed` | `gh pr merge --auto` reported success but the read-back (`autoMergeRequest`) came back null — auto-merge was never actually armed. Fires from `auto-dev-finalize.md` Step 4c's re-verification or Step 4d's reuse-path arm+verify (#1140). |
 | `operator_unavailable` | Operator/dependency currently unreachable (e.g. locked push key, network/GitHub outage) — not a broken implementation leg. cw classifies this via `OPERATOR_UNAVAILABLE_BLOCKER_REASONS` and tags the park distinctly (RFC 0011 A1). |
 
 `blocker.reason` is an **open enum** — the producer may add new reasons without a `schema_version` bump. Consumers MUST treat unknown reasons as opaque strings and surface verbatim. (Unlike `status`, which is closed: see §4 and §8.)
