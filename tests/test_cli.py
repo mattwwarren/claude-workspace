@@ -3932,6 +3932,7 @@ class TestParseSentinelFromTranscript:
         """
         import logging
 
+        from cw.auto_dev_result import BlockedResult
         from cw.cli import _parse_sentinel_from_transcript
 
         fake_home = tmp_path / "fake-home"
@@ -3952,7 +3953,9 @@ class TestParseSentinelFromTranscript:
             )
         assert isinstance(parsed1, BlockedResult)
         assert isinstance(parsed2, BlockedResult)
-        matching = [rec for rec in caplog.records if "did not parse as JSON" in rec.message]
+        matching = [
+            rec for rec in caplog.records if "did not parse as JSON" in rec.message
+        ]
         assert len(matching) == 1
 
     def test_returns_none_when_no_sentinel(

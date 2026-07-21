@@ -904,7 +904,9 @@ def _normalize_payload(
         )
     if raw_status == "blocked":
         # may change status to merge_pending
-        _coerce_blocked_with_pr(payload, warned_blocks=warned_blocks, block_key=block_key)
+        _coerce_blocked_with_pr(
+            payload, warned_blocks=warned_blocks, block_key=block_key
+        )
         if payload.get("status") == "blocked":
             _coerce_blocked_next_actions(
                 payload, warned_blocks=warned_blocks, block_key=block_key
@@ -943,9 +945,7 @@ def parse_stdout(
     if isinstance(located, BlockedResult):
         return located
 
-    decoded = _decode_payload(
-        located, warned_blocks=warned_blocks, block_key=block_key
-    )
+    decoded = _decode_payload(located, warned_blocks=warned_blocks, block_key=block_key)
     if isinstance(decoded, BlockedResult):
         return decoded
 

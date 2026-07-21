@@ -3743,7 +3743,9 @@ class TestWarnedBlocksDedup:
             result2 = parse_stdout(text, warned_blocks=warned_blocks)
         assert isinstance(result1, BlockedResult)
         assert isinstance(result2, BlockedResult)
-        matching = [rec for rec in caplog.records if "did not parse as JSON" in rec.message]
+        matching = [
+            rec for rec in caplog.records if "did not parse as JSON" in rec.message
+        ]
         assert len(matching) == 1
 
     def test_malformed_json_no_dedup_by_default(
@@ -3753,7 +3755,9 @@ class TestWarnedBlocksDedup:
         with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
             parse_stdout(text)
             parse_stdout(text)
-        matching = [rec for rec in caplog.records if "did not parse as JSON" in rec.message]
+        matching = [
+            rec for rec in caplog.records if "did not parse as JSON" in rec.message
+        ]
         assert len(matching) == 2
 
     def test_dedup_distinguishes_different_block_content(
@@ -3765,7 +3769,9 @@ class TestWarnedBlocksDedup:
         with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
             parse_stdout(text_a, warned_blocks=warned_blocks)
             parse_stdout(text_b, warned_blocks=warned_blocks)
-        matching = [rec for rec in caplog.records if "did not parse as JSON" in rec.message]
+        matching = [
+            rec for rec in caplog.records if "did not parse as JSON" in rec.message
+        ]
         assert len(matching) == 2
 
     def test_schema_version_unsupported_dedup(
