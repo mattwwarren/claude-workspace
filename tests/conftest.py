@@ -416,6 +416,26 @@ def _mock_gh_availability(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("cw.dispatch.gating.check_gh_availability", lambda **_kw: True)
 
 
+@pytest.fixture(autouse=True)
+def _mock_ssh_key_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default the SSH-agent-key preflight probe to 'available' (#927).
+
+    Sibling of ``_mock_gh_availability``: ``dispatch_tick``'s SSH-key gate
+    calls ``check_ssh_key_available``, which shells out to a real ``ssh-add
+    -l`` subprocess. Without a default, every existing dispatch test would
+    depend on the host machine's live ssh-agent state. Patching the
+    ``cw.dispatch.gating`` binding autouse guarantees no dispatch test probes
+    for real; the key reads as available unless a test overrides this seam.
+    ``TestSshKeyPreflightGate`` re-patches the same name via
+    ``_force_ssh_key_unavailable`` and pytest's patch stacking lets the
+    test-level patch win. ``test_ssh.py`` exercises the real helper via
+    ``cw.ssh`` directly and is unaffected.
+    """
+    monkeypatch.setattr(
+        "cw.dispatch.gating.check_ssh_key_available", lambda **_kw: True
+    )
+
+
 @pytest.fixture
 def tmp_state_dir(tmp_config_dir: Path) -> Path:
     """Return the state directory within tmp_config_dir."""

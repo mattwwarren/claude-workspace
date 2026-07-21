@@ -10072,6 +10072,191 @@ class TestAvailabilityPreflightGate:
 
 
 # ---------------------------------------------------------------------------
+# TestSshKeyPreflightGate (#927)
+# ---------------------------------------------------------------------------
+
+
+def _force_ssh_key_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force the SSH-agent-key preflight probe to report unavailable.
+
+    Overrides the autouse ``_mock_ssh_key_available`` default (which returns
+    True) on the same ``cw.dispatch.gating.check_ssh_key_available`` seam.
+    """
+    monkeypatch.setattr(
+        "cw.dispatch.gating.check_ssh_key_available", lambda **_kw: False
+    )
+
+
+class TestSshKeyPreflightGate:
+    """SSH-agent-key preflight gate (#927).
+
+    A per-tick-memoized ``ssh-add -l`` probe runs as the second-highest-
+    precedence per-client pre-claim gate in ``dispatch_tick``'s client loop,
+    immediately after the fleet-wide gh-availability gate and before the
+    per-client freshness gate. On probe failure every client stays PENDING
+    (no claim, no ``attempts`` consumed) and an operator error line is
+    emitted once per dispatch-loop run.
+    """
+
+    def test_available_spawns_normally(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """When the probe reports available, dispatch proceeds as usual."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-S1A", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        assert result.spawned == 1
+
+    def test_unavailable_holds_task_pending_no_attempt_consumed(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The core binding requirement: a gated PENDING task keeps attempts=0."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-S1B", client="test-client", attempts=0))
+        _force_ssh_key_unavailable(monkeypatch)
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        assert result.spawned == 0
+        assert daemon.spawn_calls == []
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == "GEN-S1B")
+        assert task.status == QueueItemStatus.PENDING
+        assert task.attempts == 0
+
+    def test_unavailable_emits_dispatch_tick_ssh_key_gate(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A gated client emits dispatch.tick with skip_reason=ssh_key_gate."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-S1C", client="test-client"))
+        _force_ssh_key_unavailable(monkeypatch)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        events = read_events(
+            consumer="test-s1-tick",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        ticks = [
+            e
+            for e in events
+            if e.payload.get("skip_reason") == DispatchSkipReason.SSH_KEY_GATE
+        ]
+        assert len(ticks) == 1
+        payload = ticks[0].payload
+        assert payload["client"] == "test-client"
+        assert payload["claimed"] == 0
+        assert payload["pending"] == 1
+
+    def test_unavailable_emits_operator_error_line_once(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The operator error line is deduplicated across ticks in one run."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-S1D", client="test-client"))
+        _force_ssh_key_unavailable(monkeypatch)
+
+        lines: list[str] = []
+        warned_ssh_key: set[str] = set()
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(
+            simple_config,
+            native_daemon=daemon,
+            auto_ff=False,
+            emit=lines.append,
+            warned_ssh_key=warned_ssh_key,
+        )
+        dispatch_tick(
+            simple_config,
+            native_daemon=daemon,
+            auto_ff=False,
+            emit=lines.append,
+            warned_ssh_key=warned_ssh_key,
+        )
+
+        expected = (
+            "Error: SSH key not available in agent."
+            " Run 'ssh-add' to unlock before dispatching."
+        )
+        matches = [ln for ln in lines if ln == expected]
+        assert len(matches) == 1
+
+    def test_availability_gate_takes_precedence_over_ssh_key_gate(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Both probes forced unavailable: AVAILABILITY_GATE wins, not SSH_KEY_GATE."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-S1E", client="test-client"))
+        _force_gh_unavailable(monkeypatch)
+        _force_ssh_key_unavailable(monkeypatch)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        events = read_events(
+            consumer="test-s1-precedence-avail",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        assert events[0].payload["skip_reason"] == DispatchSkipReason.AVAILABILITY_GATE
+
+    def test_ssh_key_gate_takes_precedence_over_freshness_gate(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """SSH forced unavailable + repo stale: SSH_KEY_GATE wins, not FRESHNESS_GATE."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-S1F", client="test-client"))
+        _force_ssh_key_unavailable(monkeypatch)
+        monkeypatch.setattr(
+            "cw.dispatch.gating.is_main_behind_origin",
+            lambda _client, **_kw: (True, "aaa", "bbb", 3),
+        )
+        monkeypatch.setattr(
+            "cw.dispatch.gating.check_main_ff_safety",
+            lambda _client, **_kw: "behind",
+        )
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        events = read_events(
+            consumer="test-s1-precedence-fresh",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        assert len(events) == 1
+        assert events[0].payload["skip_reason"] == DispatchSkipReason.SSH_KEY_GATE
+
+
+# ---------------------------------------------------------------------------
 # TestSpawnInvalidatesStaleContextJson (#1046)
 # ---------------------------------------------------------------------------
 
