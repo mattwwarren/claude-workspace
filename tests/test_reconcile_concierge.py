@@ -8,9 +8,11 @@ from typing import Any
 
 import pytest
 
+from cw.auto_dev_result import AutoDevResult
 from cw.config import save_state
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.models import (
+    CompletionReason,
     CwState,
     DevQueueStore,
     OrchestratorConfig,
@@ -19,6 +21,7 @@ from cw.models import (
     ReapPolicy,
     ReapReason,
     Session,
+    SessionOrigin,
     SessionStatus,
     Stage,
     TicketTask,
@@ -31,6 +34,7 @@ from cw.reconcile.concierge import (
     resolve_concierge_recipe_enabled,
     run_concierge_recoveries,
 )
+from tests._reconcile_helpers import _make_terminal_payload, _shipped_salvage_payload
 from tests.conftest import _make_daemon_session, _make_ticket_task
 
 _NOW = datetime(2026, 7, 6, 12, 0, 0, tzinfo=UTC)
@@ -74,6 +78,7 @@ def _make_session(
     last_result: dict[str, Any] | None = None,
     consecutive_salvage_skips: int = 0,
     started_at: datetime = _NOW,
+    **kwargs: Any,
 ) -> Session:
     return _make_daemon_session(
         id=session_id,
@@ -84,6 +89,7 @@ def _make_session(
         last_result=last_result,
         consecutive_salvage_skips=consecutive_salvage_skips,
         started_at=started_at,
+        **kwargs,
     )
 
 
@@ -777,6 +783,175 @@ class TestRecipeParkMarkerPoisonClear:
         assert recovered == []
         store = load_dev_queue()
         assert store.tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_salvages_terminal_sentinel_instead_of_crashing_blocked_on_user_status(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """GitHub #1353 defect (b): recipe 2 must attempt salvage before
+        stamping CRASHED, mirroring idle.py/stalled.py/phantom.py's own
+        pre-close salvage check. A recovered review_pending_approval sentinel
+        routes the task to BLOCKED_ON_USER (not PENDING) and the session to
+        COMPLETED/NORMAL (not CRASHED)."""
+        self._stale_45m(monkeypatch)
+        task = _make_task(disposition=None, attempts=1, session_id="sess-1")
+        session = _make_session(
+            last_result={"paused_status": "silently_idle"},
+            consecutive_salvage_skips=1,
+            surface_ref="surf-dead",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[session]))
+
+        fake_result = AutoDevResult.model_validate(
+            _make_terminal_payload("review_pending_approval", "GEN-1")
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.concierge.salvage_terminal_result",
+            lambda *_a, **_kw: (fake_result, "fake-claude-id"),
+        )
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config()
+        )
+
+        assert recovered == ["GEN-1"]
+        store = load_dev_queue()
+        requeued = store.tasks[0]
+        assert requeued.status == QueueItemStatus.BLOCKED_ON_USER
+        assert requeued.disposition == "review_pending_approval"
+        state = CwState.model_validate_json(
+            (tmp_config_dir / ".local" / "share" / "cw" / "sessions.json").read_text()
+        )
+        closed = state.find_by_name_or_id("sess-1")
+        assert closed is not None
+        assert closed.status == SessionStatus.COMPLETED
+        assert closed.completed_reason == CompletionReason.NORMAL
+        assert closed.last_result is not None
+        assert closed.last_result["status"] == "review_pending_approval"
+
+    def test_salvages_terminal_sentinel_instead_of_crashing_completed_status(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Same shape as above but with a 'shipped' salvage result — task lands
+        COMPLETED with disposition 'shipped', session completed_reason NORMAL."""
+        self._stale_45m(monkeypatch)
+        task = _make_task(disposition=None, attempts=1, session_id="sess-1")
+        session = _make_session(
+            last_result={"paused_status": "silently_idle"},
+            consecutive_salvage_skips=1,
+            surface_ref="surf-dead",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[session]))
+
+        fake_result = AutoDevResult.model_validate(_shipped_salvage_payload())
+        monkeypatch.setattr(
+            "cw.reconcile.concierge.salvage_terminal_result",
+            lambda *_a, **_kw: (fake_result, "fake-claude-id"),
+        )
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config()
+        )
+
+        assert recovered == ["GEN-1"]
+        store = load_dev_queue()
+        requeued = store.tasks[0]
+        assert requeued.status == QueueItemStatus.COMPLETED
+        assert requeued.disposition == "shipped"
+        state = CwState.model_validate_json(
+            (tmp_config_dir / ".local" / "share" / "cw" / "sessions.json").read_text()
+        )
+        closed = state.find_by_name_or_id("sess-1")
+        assert closed is not None
+        assert closed.completed_reason == CompletionReason.NORMAL
+
+    def test_no_salvage_result_preserves_existing_crash_behavior(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression guard: when salvage finds nothing, the pre-existing
+        crash-stamp path is untouched — matches
+        test_clears_park_marker_when_dead_and_stale's assertions exactly."""
+        self._stale_45m(monkeypatch)
+        task = _make_task(disposition=None, attempts=1, session_id="sess-1")
+        session = _make_session(
+            last_result={"paused_status": "silently_idle"},
+            consecutive_salvage_skips=1,
+            surface_ref="surf-dead",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[session]))
+
+        monkeypatch.setattr(
+            "cw.reconcile.concierge.salvage_terminal_result",
+            lambda *_a, **_kw: None,
+        )
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config()
+        )
+
+        assert recovered == ["GEN-1"]
+        store = load_dev_queue()
+        requeued = store.tasks[0]
+        assert requeued.status == QueueItemStatus.PENDING
+        assert requeued.session_id is None
+        state = CwState.model_validate_json(
+            (tmp_config_dir / ".local" / "share" / "cw" / "sessions.json").read_text()
+        )
+        closed = state.find_by_name_or_id("sess-1")
+        assert closed is not None
+        assert closed.status == SessionStatus.COMPLETED
+        assert closed.completed_reason == CompletionReason.CRASHED
+
+    def test_salvage_check_skipped_for_non_daemon_session_origin(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The salvage gate checks session.origin is SessionOrigin.DAEMON before
+        ever calling salvage_terminal_result — a USER-origin session is still
+        crash-stamped even when the (mocked) salvage lookup would hit,
+        mirroring phantom.py's own DAEMON-only salvage gate."""
+        self._stale_45m(monkeypatch)
+        task = _make_task(disposition=None, attempts=1, session_id="sess-1")
+        session = _make_session(
+            last_result={"paused_status": "silently_idle"},
+            consecutive_salvage_skips=1,
+            surface_ref="surf-dead",
+            origin=SessionOrigin.USER,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[session]))
+
+        fake_result = AutoDevResult.model_validate(
+            _make_terminal_payload("review_pending_approval", "GEN-1")
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.concierge.salvage_terminal_result",
+            lambda *_a, **_kw: (fake_result, "fake-claude-id"),
+        )
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config()
+        )
+
+        assert recovered == ["GEN-1"]
+        store = load_dev_queue()
+        requeued = store.tasks[0]
+        assert requeued.status == QueueItemStatus.PENDING
+        state = CwState.model_validate_json(
+            (tmp_config_dir / ".local" / "share" / "cw" / "sessions.json").read_text()
+        )
+        closed = state.find_by_name_or_id("sess-1")
+        assert closed is not None
+        assert closed.completed_reason == CompletionReason.CRASHED
 
 
 class TestRecipeCancelledRowRestore:

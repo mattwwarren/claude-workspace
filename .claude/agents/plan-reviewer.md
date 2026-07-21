@@ -66,6 +66,8 @@ These are the only checks. Keep the surface small so MUST_FIX stays meaningful.
 - The prompt supplied a `## Binding Pre-flight Resolutions` section but the plan omits `## Pre-flight Resolution Conformance`.
 - A binding resolution item has no conformance line (MISSING).
 
+**Format-only carve-out (severity floor).** A regression in the *presentation shape only* of a Check 1 required section — `## Patterns Found`, `## Touch-point Contract`, or `## Pre-flight Resolution Conformance` — is not automatically MUST_FIX, even when it trips one of the Reject bullets above (e.g., trading the mandated verbatim-quote fields for a different table or prose shape). Downgrade to SHOULD_FIX only when **both** hold: (a) each affected entry still names enough (a file and line, or equivalent) to locate the underlying claim, and (b) the reviewer independently re-reads the cited touch-points in *this* review pass and confirms every claim is still accurate — reusing a prior pass's verdict without re-reading does not qualify. This carve-out does **not** apply when the regression also destroys verifiability — file:line or quote absent, claim unconfirmable — those cases remain MUST_FIX per the Reject bullets above. Scoped strictly to Check 1's three required sections named above; it does not extend to Checks 2-4.
+
 **Example failure (real):** plan said `count` was an output. The implementation returned `len(items[:5])` because the underlying query was capped at 5. Reviewer flagged: "this is a slice length, not a true count, but the action description doesn't disclose that."
 
 **Example failure (real, v2-class):** plan asserted `process_record` returned `was_created: bool`, `record.parsed.full_text` was a readable attribute, the prompt template used Python `{content}` substitution, and `RequestContext` had a `path_taken` field. None of the four were true. The plan had no Touch-point Contract section to anchor the claims against, so the fabrications were invisible until the spec reviewer ran four reads to disconfirm them. With v2 enforcement, the plan is BLOCK at production time.
@@ -125,7 +127,7 @@ Output the verdict at the top, then findings grouped by category. Match the exis
 
 ### Verdict Tiers
 
-- **MUST_FIX** — plan has a gap in one of the 4 checks above. Implementation will drift. Plan must be revised before code starts.
+- **MUST_FIX** — plan has a gap in one of the 4 checks above. Implementation will drift. Plan must be revised before code starts. (See Check 1's format-only severity-floor carve-out above for the one documented exception.)
 - **SHOULD_FIX** — plan is implementable but has informational gaps (e.g., didn't name a sibling helper but the helper would be obvious to a careful implementer). Logged, doesn't gate.
 - **PRINCIPLE** — a stance-staking finding, explicitly non-blocking. Use for genuine cultural / discipline preferences worth flagging without re-arguing every PR. Reserve for principles, not nits. Do not emit one on every plan. Logged, doesn't gate, does NOT block marker append. (See the Code Review Culture section in `~/.claude/CLAUDE.md` for the PRINCIPLE category contract.)
 - **NO_ISSUES** — plan passes all 4 checks. Marker can be appended.
@@ -156,6 +158,8 @@ Output the verdict at the top, then findings grouped by category. Match the exis
 
 (repeat per finding)
 
+**Reserved category:** `Format-Only` — use this exact `<category>` value whenever a finding's defect is purely the format/shape of a required section, regardless of severity. This lets Step 1f's gating recognize and route format-only findings distinctly.
+
 ### Friction Report
 - **Level**: NONE | WARN | BLOCK
 - **Notes**: [anything about the plan-review process itself — e.g., couldn't access target repo, plan was malformed, ticket ID didn't resolve]
@@ -183,6 +187,7 @@ The 4 checks are deliberately narrow. The point is to keep MUST_FIX rare enough 
 - "The plan didn't mention error handling for case X" → if X is a peripheral edge case, it's SHOULD_FIX at most. The plan can leave standard error handling implicit.
 - "The plan didn't list every internal helper function" → only check 2 (user-visible files) and check 3 (test helpers) gate; private implementation helpers don't.
 - "The plan didn't specify exact variable names" → not in scope. Names are an implementation detail.
+- "The plan reformatted a required section into a different shape" → if the underlying claims are independently re-verified accurate and still locatable (file:line or equivalent), this is SHOULD_FIX at most per the format-only severity floor above — the severity floor exists precisely so a schema regression alone doesn't drive MUST_FIX when the substance checks out.
 
 If you find yourself drafting a finding that doesn't map cleanly to one of the 4 checks, drop it.
 
