@@ -8,6 +8,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`cw worktree gc`'s default all-clients run no longer silently truncates
+  on a per-client failure** (#1389): the per-client loop had no failure
+  isolation — an exception while processing one client aborted the whole
+  sweep, silently skipping every client ordered after it (e.g. 16
+  git-registered worktrees on one client going completely unexamined with no
+  error, skip line, or summary). Each client's GC pass is now wrapped so a
+  failure prints `[<client>] ERROR — <reason>` and the sweep continues to the
+  next client; a `[<client>] N examined / M skipped` summary line makes a
+  short/incomplete per-client pass visible instead of reading as a complete
+  sweep. The same isolation applies uniformly to an explicit `--client X`
+  invocation — a single-client run that fails now prints `[X] ERROR — ...`
+  and exits 0 instead of raising an unhandled traceback. Exit code
+  intentionally stays 0 on partial failure this round (see #1399 for the
+  deferred exit-code-contract decision).
 - **`_claim_next_pending` no longer starves younger pending tasks behind an
   attempt-capped task** (#1248): the plain pending-scan used to `return None`
   the instant it hit a task at the global attempt ceiling, abandoning the
