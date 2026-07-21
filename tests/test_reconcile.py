@@ -741,10 +741,6 @@ class TestWorldStateCheckBeforeRevert:
             "cw.reconcile.core._claude_agents_json",
             lambda: [{"sessionId": "live-ref"}],
         )
-        monkeypatch.setattr("cw.reconcile.core.complete_timed_out_merged_tasks", list)
-        monkeypatch.setattr(
-            "cw.reconcile.core.salvage_committed_no_pr_sessions", lambda _c, **_kw: []
-        )
 
         with freezegun.freeze_time(now):
             report = reconcile()
