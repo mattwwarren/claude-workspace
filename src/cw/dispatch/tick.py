@@ -43,11 +43,13 @@ if TYPE_CHECKING:
     from cw.native_daemon import NativeDaemonClient
 from cw.dispatch.gating import (
     _emit_availability_skip,
+    _emit_ssh_key_skip,
     _emit_stale_skip,
     _emit_usage_limit_skip_events,
     _reconcile_usage_limited,
     _resolve_availability_once,
     _resolve_freshness,
+    _resolve_ssh_key_once,
 )
 from cw.dispatch.lanes import (
     _dispatch_client_lanes,
@@ -161,6 +163,59 @@ def _client_tick_snapshot(
     )
 
 
+def _run_preflight_gates(
+    client: ClientConfig,
+    queue_snapshot: DevQueueStore,
+    *,
+    available: bool | None,
+    ssh_key_available: bool | None,
+    pending_count: int,
+    running_count: int,
+    cap: int,
+    emit: Callable[[str], None] | None,
+    warned_ssh_key: set[str] | None,
+) -> tuple[bool, bool, bool]:
+    """Resolve + apply the availability and SSH-key preflight gates, in order.
+
+    Combines both independent per-client pre-claim gates (fleet-wide
+    gh-availability, then SSH-agent-key (#927)) behind a single caller-side
+    branch: :func:`dispatch_tick`'s client loop keeps one `if gated: continue`
+    for both instead of one per gate, keeping ``dispatch_tick`` under the
+    PLR0912/PLR0915 ceilings (CLAUDE.md) as this second gate is added.
+
+    Returns ``(available, ssh_key_available, gated)`` -- the resolved
+    (memoized) verdicts to thread back into the caller's loop-scoped
+    variables, and whether the client should be skipped this tick (its own
+    dispatch.tick skip event has already been emitted when ``gated`` is
+    True).
+    """
+    resolved_available = _resolve_availability_once(available)
+    if not resolved_available:
+        _emit_availability_skip(
+            client,
+            queue_snapshot,
+            pending_count=pending_count,
+            running_count=running_count,
+            cap=cap,
+        )
+        return resolved_available, ssh_key_available, True
+
+    resolved_ssh_key_available = _resolve_ssh_key_once(ssh_key_available)
+    if not resolved_ssh_key_available:
+        _emit_ssh_key_skip(
+            client,
+            queue_snapshot,
+            pending_count=pending_count,
+            running_count=running_count,
+            cap=cap,
+            emit=emit,
+            warned_ssh_key=warned_ssh_key,
+        )
+        return resolved_available, resolved_ssh_key_available, True
+
+    return resolved_available, resolved_ssh_key_available, False
+
+
 def dispatch_tick(
     config: OrchestratorConfig,
     *,
@@ -171,6 +226,7 @@ def dispatch_tick(
     warned_stale: set[tuple[str, str]] | None = None,
     warned_fetch_fail: set[str] | None = None,
     warned_collision: set[frozenset[str]] | None = None,
+    warned_ssh_key: set[str] | None = None,
     usage_limited_until: datetime | None = None,
     auto_ff: bool = True,
     client_filter: str | None = None,
@@ -206,6 +262,11 @@ def dispatch_tick(
             duplicate WAVE_COLLISION events for persistent in-flight
             collisions across ticks. Caller owns the set; mutated
             in-place. When None, dedup is skipped (every tick fires).
+        warned_ssh_key: Mutable set used to deduplicate the SSH-key-gate
+            operator error line across ticks within this dispatcher run
+            (fleet-wide, keyed on a single sentinel -- see
+            ``_SSH_KEY_WARN_SENTINEL``). Caller owns the set; mutated
+            in-place.
         usage_limited_until: When set and in the future, all clients are
             skipped with ``skip_reason=USAGE_LIMITED`` and the function
             returns immediately. The back-off window is set by the
@@ -271,6 +332,9 @@ def dispatch_tick(
     # Fleet-wide availability verdict, memoized across loop iterations (see
     # gate below). ``None`` means "not yet resolved this tick".
     available: bool | None = None
+    # SSH-agent-key preflight verdict (#927), memoized the same way as
+    # ``available`` -- see the SSH-key gate below.
+    ssh_key_available: bool | None = None
     for client in clients.values():
         if (
             config.max_parallel_clients is not None
@@ -278,46 +342,54 @@ def dispatch_tick(
         ):
             break
 
-        # --- Availability preflight gate (RFC 0011 A5) --- highest
-        # precedence. Fleet-wide TTL-cached `gh auth status` probe: resolved
-        # at most ONCE per tick, not once per client — the cached verdict is
-        # identical for every client in this loop, so a per-client call
-        # would re-read the shared sidecar file N times for the same
-        # answer. Memoized (not hoisted above the loop) via
-        # _resolve_availability_once so it's only called once the loop body
-        # actually runs for at least one client — an empty ``clients`` dict
-        # or a fully-paused fleet (``max_parallel_clients=0``, which breaks
-        # on the first iteration above) never probes or pages, matching the
-        # pre-#1157 invariant that this check only fires when there's
-        # dispatch work it could gate. Checked before the per-client
-        # freshness gate so that during a real GitHub outage no client pays
-        # the freshness git-fetch cost for a verdict that gets discarded
-        # anyway. Fails open on any resolution error, same posture as
-        # _resolve_freshness.
-        available = _resolve_availability_once(available)
-
         # Numeric fields (running, cap, queue snapshot, pending) hoisted above
-        # both gates so a dispatch.tick skip event for either gate carries all
-        # four. See _client_tick_snapshot.
+        # both preflight gates so a dispatch.tick skip event for any of them
+        # carries all four. See _client_tick_snapshot.
         running_count, client_ceiling, queue_snapshot, pending_count = (
             _client_tick_snapshot(client, state=state, config=config)
         )
         # Keep legacy cap alias for skip-event and back-off event payloads.
         cap = client_ceiling
 
-        # Fleet-wide availability outage: hold every client PENDING (no claim,
-        # no attempts consumed). Composition pin (RFC 0011 A5): on this gated
-        # path NEITHER _record_client_freshness_block NOR
+        # --- Preflight gates --- highest precedence, run in order:
+        # (1) fleet-wide gh-availability (RFC 0011 A5): a TTL-cached `gh auth
+        # status` probe, resolved at most ONCE per tick, not once per client
+        # — the cached verdict is identical for every client in this loop,
+        # so a per-client call would re-read the shared sidecar file N times
+        # for the same answer. (2) SSH-agent-key (#927): a session spawned
+        # without an unlocked SSH key cannot push, so this holds every
+        # client PENDING rather than burn a slot on a guaranteed failure.
+        # Both are memoized (not hoisted above the loop) so they're only
+        # resolved once the loop body actually runs for at least one client
+        # — an empty ``clients`` dict or a fully-paused fleet
+        # (``max_parallel_clients=0``, which breaks on the first iteration
+        # above) never probes or pages, matching the pre-#1157 invariant
+        # that these checks only fire when there's dispatch work they could
+        # gate. Checked before the per-client freshness gate so that during
+        # a real outage no client pays the freshness git-fetch cost for a
+        # verdict that gets discarded anyway. Both fail open on any
+        # resolution error, same posture as _resolve_freshness. Combined
+        # into one helper (see _run_preflight_gates) so this loop keeps a
+        # single branch for both gates (PLR0912/PLR0915).
+        #
+        # Fleet-wide availability outage: hold every client PENDING (no
+        # claim, no attempts consumed). Composition pin (RFC 0011 A5): on
+        # this gated path NEITHER _record_client_freshness_block NOR
         # _reset_client_freshness_blocks runs — the freshness counter stays
-        # frozen during an outage, it must not reset.
-        if not available:
-            _emit_availability_skip(
-                client,
-                queue_snapshot,
-                pending_count=pending_count,
-                running_count=running_count,
-                cap=cap,
-            )
+        # frozen during an outage, it must not reset. Same posture applies
+        # to the SSH-key gate.
+        available, ssh_key_available, gated = _run_preflight_gates(
+            client,
+            queue_snapshot,
+            available=available,
+            ssh_key_available=ssh_key_available,
+            pending_count=pending_count,
+            running_count=running_count,
+            cap=cap,
+            emit=emit,
+            warned_ssh_key=warned_ssh_key,
+        )
+        if gated:
             continue
 
         # --- Freshness gate --- (only reached when the fleet is available)

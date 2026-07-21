@@ -323,6 +323,9 @@ def run_dispatch_loop(
     # Track wave-collision pairs already warned; prevents duplicate events
     # for long-running in-flight task pairs across multiple ticks (#784).
     warned_collision: set[frozenset[str]] = set()
+    # Track the SSH-key-gate operator error line dedup (#927); fleet-wide
+    # sentinel, not per-client (see _SSH_KEY_WARN_SENTINEL).
+    warned_ssh_key: set[str] = set()
     # Back-off window: loaded from the persisted sidecar so a loop restart after
     # a code merge honours an active backoff rather than re-opening the spawn gate
     # immediately (#804).
@@ -383,6 +386,7 @@ def run_dispatch_loop(
                 warned_stale=warned_stale,
                 warned_fetch_fail=warned_fetch_fail,
                 warned_collision=warned_collision,
+                warned_ssh_key=warned_ssh_key,
                 usage_limited_until=usage_limited_until,
                 auto_ff=auto_ff,
                 client_filter=client,
