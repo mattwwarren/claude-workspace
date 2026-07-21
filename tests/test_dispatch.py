@@ -3319,6 +3319,7 @@ class TestRunDispatchLoopVerbose:
             warned_stale: set[tuple[str, str]] | None = None,
             warned_fetch_fail: set[str] | None = None,
             warned_collision: set[frozenset[str]] | None = None,
+            warned_ssh_key: set[str] | None = None,
             usage_limited_until: datetime | None = None,
             auto_ff: bool = True,
             client_filter: str | None = None,
@@ -3334,6 +3335,7 @@ class TestRunDispatchLoopVerbose:
                 warned_stale=warned_stale,
                 warned_fetch_fail=warned_fetch_fail,
                 warned_collision=warned_collision,
+                warned_ssh_key=warned_ssh_key,
                 usage_limited_until=usage_limited_until,
                 auto_ff=auto_ff,
                 client_filter=client_filter,
@@ -8387,6 +8389,7 @@ class TestWaveCollisionDetection:
             warned_stale: set[tuple[str, str]] | None = None,
             warned_fetch_fail: set[str] | None = None,
             warned_collision: set[frozenset[str]] | None = None,
+            warned_ssh_key: set[str] | None = None,
             usage_limited_until: datetime | None = None,
             auto_ff: bool = True,
             client_filter: str | None = None,
@@ -8401,6 +8404,7 @@ class TestWaveCollisionDetection:
                 warned_stale=warned_stale,
                 warned_fetch_fail=warned_fetch_fail,
                 warned_collision=warned_collision,
+                warned_ssh_key=warned_ssh_key,
                 usage_limited_until=usage_limited_until,
                 auto_ff=auto_ff,
                 client_filter=client_filter,
@@ -10232,7 +10236,7 @@ class TestSshKeyPreflightGate:
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """SSH forced unavailable + repo stale: SSH_KEY_GATE wins, not FRESHNESS_GATE."""
+        """SSH unavailable + stale repo: SSH_KEY_GATE wins over FRESHNESS_GATE."""
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         add_ticket(TicketTask(ticket_id="GEN-S1F", client="test-client"))
         _force_ssh_key_unavailable(monkeypatch)

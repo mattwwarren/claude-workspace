@@ -42,20 +42,14 @@ class TestCheckSshKeyAvailable:
     def test_rsa_identity_returns_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             "cw.ssh._sp.run",
-            lambda *_a, **_kw: _make_run_result(
-                0, "2048 SHA256:def user@host (RSA)\n"
-            ),
+            lambda *_a, **_kw: _make_run_result(0, "2048 SHA256:def user@host (RSA)\n"),
         )
         assert check_ssh_key_available() is True
 
-    def test_no_identities_returns_false(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_no_identities_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             "cw.ssh._sp.run",
-            lambda *_a, **_kw: _make_run_result(
-                1, "The agent has no identities.\n"
-            ),
+            lambda *_a, **_kw: _make_run_result(1, "The agent has no identities.\n"),
         )
         assert check_ssh_key_available() is False
 
