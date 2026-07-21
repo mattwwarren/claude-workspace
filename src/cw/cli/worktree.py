@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import click
 
 from cw.cli._base import _complete_client, handle_errors, main
@@ -16,6 +18,8 @@ from cw.worktree_gc import (
     WorktreeGcResult,
     run_worktree_gc,
 )
+
+_log = logging.getLogger(__name__)
 
 _GC_VERDICT_LABEL: dict[GcVerdict, str] = {
     GcVerdict.REMOVE_MERGED: "REMOVE",
@@ -176,20 +180,34 @@ def worktree_gc(
             click.echo(f"[{name}] skipped — not a GitHub-tracked client")
             continue
 
-        git_cwd = _git_dir(client)
-        wt_bases = effective_worktree_bases(client)
-        report = run_worktree_gc(
-            git_cwd,
-            apply=apply,
-            timeout=timeout,
-            include_closed=include_closed,
-            worktree_bases=wt_bases,
-            limit=limit,
-        )
-
         if len(selected) > 1:
             click.echo(f"[{name}]")
+
+        try:
+            git_cwd = _git_dir(client)
+            wt_bases = effective_worktree_bases(client)
+            report = run_worktree_gc(
+                git_cwd,
+                apply=apply,
+                timeout=timeout,
+                include_closed=include_closed,
+                worktree_bases=wt_bases,
+                limit=limit,
+            )
+        except Exception as exc:  # noqa: BLE001 — per-client isolation: one client's
+            # GC failure (of any kind) must not silently truncate the multi-client
+            # sweep and hide every client ordered after it (#1389). Non-critical:
+            # the operator sees exactly which client failed and can re-run
+            # --client <name> to retry it; other clients are unaffected.
+            _log.warning("worktree gc: %s failed: %s", name, exc, exc_info=True)
+            click.echo(f"[{name}] ERROR — {exc}", err=True)
+            any_output = True
+            continue
+
         click.echo(_format_gc_report(report, apply=apply))
+        click.echo(
+            f"[{name}] {len(report.results)} examined / {len(report.skipped)} skipped"
+        )
         any_output = True
 
     if not any_output:
