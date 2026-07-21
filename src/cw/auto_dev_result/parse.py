@@ -119,7 +119,7 @@ def _warn_once(
     warned_blocks: set[str] | None,
     block_key: str | None,
 ) -> None:
-    """Log *message* at WARNING, deduped per (block_key, message) pair.
+    """Log *message* at WARNING, deduped per (block_key, rendered message) pair.
 
     Issue #1247: ``cw dev-queue wait``'s poll loop re-parses the full
     transcript every 5s, so an unresolved malformed sentinel re-triggers the
@@ -128,16 +128,18 @@ def _warn_once(
     keyed on the sentinel text via ``block_key``) get each distinct warning
     logged exactly once per block; every other caller (``warned_blocks`` or
     ``block_key`` left ``None``, the default) gets today's un-deduped
-    behavior. Keyed on ``(block_key, message)`` rather than ``block_key``
-    alone so two independent warnings about the same block (e.g. the
-    string-filter warning and a status-gated coercion warning, which are not
-    mutually exclusive) each still surface once rather than the first
-    suppressing the second.
+    behavior. Keyed on ``(block_key, rendered message)`` — the message
+    formatted with its args, not the bare template — so two independent
+    warnings about the same block that happen to share a log template but
+    carry different args (e.g. ``_filter_empty_string_items`` called for
+    both ``commits`` and ``friction_highlights`` on the same payload) each
+    still surface once rather than the first suppressing the second.
     """
     if warned_blocks is None or block_key is None:
         _log.warning(message, *args)
         return
-    entry_key = f"{block_key}:{message}"
+    rendered = message % args if args else message
+    entry_key = f"{block_key}:{rendered}"
     if entry_key not in warned_blocks:
         _log.warning(message, *args)
         warned_blocks.add(entry_key)

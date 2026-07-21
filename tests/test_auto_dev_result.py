@@ -3855,3 +3855,28 @@ class TestWarnedBlocksDedup:
         assert isinstance(result2, AutoDevResult)
         matching = [rec for rec in caplog.records if "loose fallback" in rec.message]
         assert len(matching) == 1
+
+    def test_distinct_fields_sharing_a_template_both_warn_on_same_block(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Two distinct ``_filter_empty_string_items`` calls (``commits`` and
+        ``friction_highlights``) share one log message template. Both must
+        still surface on the very first parse of a single block — the dedup
+        key must not collide across different args for the same template.
+        """
+        payload = _shipped_payload()
+        payload["commits"] = ["sha1", ""]
+        payload["friction_highlights"] = ["", "real note"]
+        text = _wrap_sentinel(payload)
+        warned_blocks: set[str] = set()
+        with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+            result = parse_stdout(text, warned_blocks=warned_blocks)
+        assert isinstance(result, AutoDevResult)
+        matching = [
+            rec
+            for rec in caplog.records
+            if "empty/whitespace-only string" in rec.message
+        ]
+        assert len(matching) == 2
+        assert any("commits" in rec.message for rec in matching)
+        assert any("friction_highlights" in rec.message for rec in matching)
