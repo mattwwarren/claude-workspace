@@ -954,6 +954,37 @@ from the ordinary wall-clock-budget fallthrough.
 
 `correlation_id` is the `ticket_id`.
 
+### `session.sentinel_stage_mismatch_vetoed`
+
+**Emitter:** `_act_on_phantom_candidates` in `cw.reconcile.phantom`
+**Payload:**
+```json
+{
+  "ticket_id": "<str | null>",
+  "client": "<str | null>",
+  "session_id": "<str>",
+  "stale_minutes": "<float>"
+}
+```
+**Semantics:** GitHub #1281. Emitted instead of the phantom sweep's
+already_refused → `CRASH_COMPLETE` fall-through (GitHub #1149's
+`already_refused` latch: a session whose most recent tick refused a
+stage-mismatched sentinel) when the session's transcript is still actively
+advancing — `_transcript_age_seconds` reports a staleness below
+`TRANSCRIPT_LIVENESS_WINDOW_SECONDS`. The #1281 incident: a session was
+crash-completed 56 seconds before its valid `AUTO_DEV_RESULT` sentinel
+landed, burning the task's final retry attempt on a session that was in fact
+still making progress. **Zero queue or session-state mutation** accompanies
+this event — the task stays `RUNNING` and the session stays `ACTIVE`/`IDLE`.
+
+Unlike `session.park_vetoed`, this veto has exactly one trigger path (the
+already_refused latch), so its payload carries no `reason` field — there is
+only one reason it can fire. A session whose transcript cannot be located
+falls through to `CRASH_COMPLETE` unchanged (fail-toward-crash), as does a
+transcript that has since gone stale beyond the liveness window.
+
+`correlation_id` is the `ticket_id`.
+
 ### `gate.auto_approved`
 
 **Emitter:** `_act_auto_approve_review` / `_act_auto_adopt_plan` (`cw.reconcile.gate_recipes`, both dispatched by `run_gate_recipes`)

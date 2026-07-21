@@ -1129,7 +1129,9 @@ def test_detect_phantom_candidates_usage_limit_detected_true(
     save_state(state)
     save_dev_queue(DevQueueStore(tasks=[]))
 
-    candidates = _detect_phantom_candidates(state, phantom_set={sess.id}, now=started_at)
+    candidates = _detect_phantom_candidates(
+        state, phantom_set={sess.id}, now=started_at
+    )
 
     assert len(candidates) == 1
     c = candidates[0]
@@ -1149,7 +1151,9 @@ def test_detect_phantom_candidates_usage_limit_false_when_no_transcript(
     save_state(state)
     save_dev_queue(DevQueueStore(tasks=[]))
 
-    candidates = _detect_phantom_candidates(state, phantom_set={sess.id}, now=started_at)
+    candidates = _detect_phantom_candidates(
+        state, phantom_set={sess.id}, now=started_at
+    )
 
     assert len(candidates) == 1
     c = candidates[0]
@@ -1876,8 +1880,11 @@ def test_act_on_phantom_salvage_completion_routes_queue_and_emits_event(
 def test_act_on_phantom_sentinel_mismatch_veto_emits_event_no_mutation(
     tmp_config_dir: Path,
 ) -> None:
-    """SENTINEL_STAGE_MISMATCH_VETOED candidate -> session.sentinel_stage_mismatch_vetoed
-    emitted; zero queue/session mutation (GitHub #1281)."""
+    """SENTINEL_STAGE_MISMATCH_VETOED candidate emits the vetoed event only.
+
+    session.sentinel_stage_mismatch_vetoed fires; zero queue/session mutation
+    accompanies it (GitHub #1281).
+    """
     from cw.reconcile import ProposedAction, ReapCandidate, _act_on_phantom_candidates
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
