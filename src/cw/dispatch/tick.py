@@ -163,6 +163,22 @@ def _client_tick_snapshot(
     )
 
 
+class _PreflightGateResult(NamedTuple):
+    """Resolved verdicts from :func:`_run_preflight_gates`.
+
+    ``available`` and ``gated`` are both plain ``bool``s naming distinct
+    concepts (gh-availability verdict, whether to skip this client) — named
+    fields (vs. a bare positional tuple) prevent a transposition mypy can't
+    catch (e.g. swapping ``gated`` and ``available``) while still unpacking
+    positionally at the call site like a plain tuple, same rationale as
+    :class:`_ClientTickSnapshot`.
+    """
+
+    available: bool
+    ssh_key_available: bool | None
+    gated: bool
+
+
 def _run_preflight_gates(
     client: ClientConfig,
     queue_snapshot: DevQueueStore,
@@ -174,7 +190,7 @@ def _run_preflight_gates(
     cap: int,
     emit: Callable[[str], None] | None,
     warned_ssh_key: set[str] | None,
-) -> tuple[bool, bool | None, bool]:
+) -> _PreflightGateResult:
     """Resolve + apply the availability and SSH-key preflight gates, in order.
 
     Combines both independent per-client pre-claim gates (fleet-wide
@@ -183,13 +199,13 @@ def _run_preflight_gates(
     for both instead of one per gate, keeping ``dispatch_tick`` under the
     PLR0912/PLR0915 ceilings (CLAUDE.md) as this second gate is added.
 
-    Returns ``(available, ssh_key_available, gated)`` -- the resolved
-    (memoized) verdicts to thread back into the caller's loop-scoped
-    variables, and whether the client should be skipped this tick (its own
-    dispatch.tick skip event has already been emitted when ``gated`` is
-    True). ``ssh_key_available`` is returned unresolved (possibly still
-    ``None``) when gated on the availability check first, since the
-    SSH-key probe short-circuits and is never reached in that case.
+    Returns the resolved (memoized) verdicts to thread back into the caller's
+    loop-scoped variables, and whether the client should be skipped this tick
+    (its own dispatch.tick skip event has already been emitted when
+    ``gated`` is True). ``ssh_key_available`` is returned unresolved
+    (possibly still ``None``) when gated on the availability check first,
+    since the SSH-key probe short-circuits and is never reached in that
+    case.
     """
     resolved_available = _resolve_availability_once(available)
     if not resolved_available:
@@ -200,7 +216,7 @@ def _run_preflight_gates(
             running_count=running_count,
             cap=cap,
         )
-        return resolved_available, ssh_key_available, True
+        return _PreflightGateResult(resolved_available, ssh_key_available, True)
 
     resolved_ssh_key_available = _resolve_ssh_key_once(ssh_key_available)
     if not resolved_ssh_key_available:
@@ -213,9 +229,11 @@ def _run_preflight_gates(
             emit=emit,
             warned_ssh_key=warned_ssh_key,
         )
-        return resolved_available, resolved_ssh_key_available, True
+        return _PreflightGateResult(
+            resolved_available, resolved_ssh_key_available, True
+        )
 
-    return resolved_available, resolved_ssh_key_available, False
+    return _PreflightGateResult(resolved_available, resolved_ssh_key_available, False)
 
 
 def dispatch_tick(
@@ -369,10 +387,13 @@ def dispatch_tick(
         # that these checks only fire when there's dispatch work they could
         # gate. Checked before the per-client freshness gate so that during
         # a real outage no client pays the freshness git-fetch cost for a
-        # verdict that gets discarded anyway. Both fail open on any
-        # resolution error, same posture as _resolve_freshness. Combined
-        # into one helper (see _run_preflight_gates) so this loop keeps a
-        # single branch for both gates (PLR0912/PLR0915).
+        # verdict that gets discarded anyway. The availability gate fails
+        # open on any resolution error (same posture as _resolve_freshness);
+        # the SSH-key gate fails CLOSED on any probe error (missing
+        # ssh-add binary, OSError, timeout -- see check_ssh_key_available),
+        # holding the fleet PENDING rather than risking a guaranteed-failing
+        # spawn. Combined into one helper (see _run_preflight_gates) so this
+        # loop keeps a single branch for both gates (PLR0912/PLR0915).
         #
         # Fleet-wide availability outage: hold every client PENDING (no
         # claim, no attempts consumed). Composition pin (RFC 0011 A5): on
