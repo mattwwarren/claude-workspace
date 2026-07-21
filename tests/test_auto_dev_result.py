@@ -401,6 +401,22 @@ def _premises_pending_payload() -> dict[str, Any]:
     }
 
 
+def _premise_item(
+    *,
+    claim: str = "some claim",
+    verified: Any = None,
+    resolution: Any = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    item: dict[str, Any] = {"claim": claim}
+    if verified is not None:
+        item["verified"] = verified
+    if resolution is not None:
+        item["resolution"] = resolution
+    item.update(extra)
+    return item
+
+
 def _wrap_sentinel(payload: dict[str, Any]) -> str:
     body = json.dumps(payload)
     return f"some narrative\n<<<AUTO_DEV_RESULT\n{body}\nAUTO_DEV_RESULT>>>\n"
@@ -2548,6 +2564,182 @@ class TestCase962EmptyClaimPremisesRejected:
         p["premises"] = [{"premise": "the premise text"}]
         result = AutoDevResult.model_validate(p)
         assert len(result.premises) == 1
+
+
+# ---------------------------------------------------------------------------
+# Issue #1325 — a premises_pending_verification sentinel whose every item is
+# fully resolved (verified: true + a non-empty `resolution` string) is
+# downgraded to stage_complete at the parse boundary instead of parking.
+# Partially-resolved arrays keep only the still-open items and stay pending.
+# Strict model_validate (bypassing parse_stdout) is untouched by this
+# coercion — it remains parse-boundary-only, mirroring the #953/#962
+# negative-test pattern above.
+# ---------------------------------------------------------------------------
+
+
+class TestCase1325ResolvedPremisesDowngrade:
+    """Fully-resolved premises downgrade status to stage_complete (#1325)."""
+
+    def test_all_resolved_premises_downgrade_to_stage_complete(self) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = [
+            _premise_item(claim="claim one", verified=True, resolution="Resolution 11"),
+            _premise_item(claim="claim two", verified=True, resolution="Resolution 12"),
+        ]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "stage_complete"
+        assert result.premises == []
+        assert len(result.friction_highlights) == 2
+
+    def test_mixed_resolved_and_unresolved_keeps_pending_with_only_unresolved(
+        self,
+    ) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = [
+            _premise_item(claim="resolved one", verified=True, resolution="Res 1"),
+            _premise_item(claim="still open"),
+        ]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "premises_pending_verification"
+        assert len(result.premises) == 1
+        assert result.premises[0]["claim"] == "still open"
+        assert len(result.friction_highlights) == 1
+
+    def test_verified_string_true_not_treated_as_resolved(self) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = [_premise_item(verified="true", resolution="x")]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "premises_pending_verification"
+        assert len(result.premises) == 1
+
+    def test_verified_integer_one_not_treated_as_resolved(self) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = [_premise_item(verified=1, resolution="x")]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "premises_pending_verification"
+        assert len(result.premises) == 1
+
+    def test_resolves_key_alias_not_honored(self) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = [
+            _premise_item(verified=True, resolves="comment 1 Resolution 11")
+        ]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "premises_pending_verification"
+        assert len(result.premises) == 1
+
+    def test_verified_true_without_resolution_stays_pending(self) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = [_premise_item(verified=True)]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "premises_pending_verification"
+        assert len(result.premises) == 1
+
+    def test_resolution_without_verified_stays_pending(self) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = [_premise_item(resolution="x")]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "premises_pending_verification"
+        assert len(result.premises) == 1
+
+    def test_resolution_false_verified_stays_pending(self) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = [_premise_item(verified=False, resolution="x")]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "premises_pending_verification"
+        assert len(result.premises) == 1
+
+    def test_non_string_resolution_value_not_treated_as_resolved(self) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = [_premise_item(verified=True, resolution={"nested": "dict"})]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "premises_pending_verification"
+        assert len(result.premises) == 1
+
+    def test_blank_resolution_string_not_treated_as_resolved(self) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = [_premise_item(verified=True, resolution="   ")]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "premises_pending_verification"
+        assert len(result.premises) == 1
+
+    def test_empty_premises_array_producer_glitch_still_placeholder(self) -> None:
+        """Regression guard: the #962/#430 glitch-placeholder park is untouched."""
+        p = _premises_pending_payload()
+        p["premises"] = [{}]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "premises_pending_verification"
+        assert result.premises[0]["claim"] == _PREMISE_GLITCH_PLACEHOLDER_CLAIM
+
+    def test_next_actions_user_verify_premises_dropped_other_actions_preserved(
+        self,
+    ) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = [
+            _premise_item(verified=True, resolution="Resolution 11"),
+        ]
+        p["next_actions"] = ["user_verify_premises", "some_other_action"]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "stage_complete"
+        assert result.next_actions == ["some_other_action"]
+
+    def test_friction_highlights_cite_claim_and_resolution(self) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = [
+            _premise_item(claim="the claim text", verified=True, resolution="Res 11")
+        ]
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.friction_highlights == [
+            "premise resolved (issue #1325): the claim text — resolution: Res 11"
+        ]
+
+    def test_model_validate_direct_leaves_status_and_premises_unchanged(self) -> None:
+        """The coercion is parse-boundary-only (mirrors the strict-rejects test)."""
+        p = _premises_pending_payload()
+        p["premises"] = [
+            _premise_item(verified=True, resolution="Resolution 11"),
+        ]
+        result = AutoDevResult.model_validate(p)
+        assert result.status == "premises_pending_verification"
+        assert len(result.premises) == 1
+
+    def test_warning_logged_once_via_warned_blocks_dedup(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        p = _premises_pending_payload()
+        p["premises"] = [
+            _premise_item(verified=True, resolution="Resolution 11"),
+        ]
+        text = _wrap_sentinel(p)
+        warned_blocks: set[str] = set()
+        with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+            result1 = parse_stdout(text, warned_blocks=warned_blocks)
+            result2 = parse_stdout(text, warned_blocks=warned_blocks)
+        assert isinstance(result1, AutoDevResult)
+        assert isinstance(result2, AutoDevResult)
+        matching = [
+            rec for rec in caplog.records if "resolved premises item" in rec.message
+        ]
+        assert len(matching) == 1
+
+    def test_new_submodules_import_without_cycle(self) -> None:
+        from cw.auto_dev_result import _premises_resolution, _warn
+
+        assert _warn is not None
+        assert _premises_resolution is not None
 
 
 # ---------------------------------------------------------------------------
