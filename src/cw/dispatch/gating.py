@@ -38,6 +38,7 @@ from cw.models import (
 from cw.reconcile import (
     reconcile,
 )
+from cw.ssh import check_ssh_key_available
 from cw.worktree import (
     check_main_ff_safety,
     fast_forward_main,
@@ -201,6 +202,72 @@ def _resolve_availability_once(available: bool | None) -> bool:
     (PLR0912).
     """
     return _resolve_availability() if available is None else available
+
+
+# Sentinel key for the fleet-wide (not per-client) warned_ssh_key dedup set:
+# the SSH-key preflight probe has no per-client dimension (a single local
+# ssh-agent serves the whole fleet), so the operator error line is
+# deduplicated on one shared sentinel rather than per-client.
+_SSH_KEY_WARN_SENTINEL = "fleet"
+
+
+def _resolve_ssh_key_once(ssh_key_available: bool | None) -> bool:
+    """Return *ssh_key_available* unchanged, or resolve via ``check_ssh_key_available``.
+
+    Per-tick memoization sibling of :func:`_resolve_availability_once`. No TTL
+    cache, no persisted latch: ``check_ssh_key_available`` is instant and
+    local (R1), so re-probing every tick this gate actually runs costs
+    nothing -- the only reason to memoize at all is to avoid re-shelling out
+    N times in the same tick for N clients, same rationale as the
+    availability gate's per-tick memoization.
+    """
+    return check_ssh_key_available() if ssh_key_available is None else ssh_key_available
+
+
+def _emit_ssh_key_skip(
+    client: ClientConfig,
+    queue_snapshot: DevQueueStore,
+    *,
+    pending_count: int,
+    running_count: int,
+    cap: int,
+    emit: Callable[[str], None] | None,
+    warned_ssh_key: set[str] | None,
+) -> None:
+    """Emit the operator error line (once per run) + dispatch.tick skip event.
+
+    Mirrors :func:`_emit_availability_skip`'s dispatch.tick shape
+    (``skip_reason=SSH_KEY_GATE``) but additionally prints the ticket's
+    literal operator message exactly once per dispatch-loop run via ``emit``,
+    deduplicated through ``warned_ssh_key`` (fleet-wide, not per-client --
+    keyed on a single sentinel since this check has no per-client dimension).
+    """
+    if emit is not None and (
+        warned_ssh_key is None or _SSH_KEY_WARN_SENTINEL not in warned_ssh_key
+    ):
+        emit(
+            "Error: SSH key not available in agent."
+            " Run 'ssh-add' to unlock before dispatching."
+        )
+        if warned_ssh_key is not None:
+            warned_ssh_key.add(_SSH_KEY_WARN_SENTINEL)
+    lane_occupants = _lane_occupants_for_client(client, queue_snapshot)
+    record_event(
+        OrchestratorEventType.DISPATCH_TICK,
+        {
+            "client": client.name,
+            "claimed": 0,
+            "pending": pending_count,
+            "running": running_count,
+            "cap": cap,
+            "skip_reason": DispatchSkipReason.SSH_KEY_GATE,
+            "lanes": _lane_stats_for_client(
+                client, queue_snapshot, occupants=lane_occupants
+            ),
+            "lane_occupants": lane_occupants,
+            "occupied": sum(len(v) for v in lane_occupants.values()),
+        },
+    )
 
 
 def _record_availability_block(*, now: datetime, was_latched: bool) -> None:
