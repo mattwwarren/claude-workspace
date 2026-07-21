@@ -174,7 +174,7 @@ def _run_preflight_gates(
     cap: int,
     emit: Callable[[str], None] | None,
     warned_ssh_key: set[str] | None,
-) -> tuple[bool, bool, bool]:
+) -> tuple[bool, bool | None, bool]:
     """Resolve + apply the availability and SSH-key preflight gates, in order.
 
     Combines both independent per-client pre-claim gates (fleet-wide
@@ -187,7 +187,9 @@ def _run_preflight_gates(
     (memoized) verdicts to thread back into the caller's loop-scoped
     variables, and whether the client should be skipped this tick (its own
     dispatch.tick skip event has already been emitted when ``gated`` is
-    True).
+    True). ``ssh_key_available`` is returned unresolved (possibly still
+    ``None``) when gated on the availability check first, since the
+    SSH-key probe short-circuits and is never reached in that case.
     """
     resolved_available = _resolve_availability_once(available)
     if not resolved_available:
