@@ -560,6 +560,30 @@ After `/prep-pr` returns with a PR number:
    One block per PR; list every deferred finding inside the single `DEFERRED-REVIEW-FINDINGS` comment (open/close sentinels exact — Step H3 greps them verbatim). Omit the whole section when `.cw/deferred-findings.md` is absent or empty (every finding was fixed — no rejections, no deferrals). For pipeline exits that never create a PR (large-scope `review_pending_approval`, or a BLOCK), there is no body to write — rejections/deferrals stay in `friction_highlights` and surface to the human in the structured output instead.
 
 3. **Enable auto-merge:** `gh pr merge <pr-number> --auto --squash`. GitHub allows enabling auto-merge on a draft PR — the merge won't trigger until the PR is marked ready (which `/review-monitor` does when the parent in the stack merges) AND CI passes. Enable unconditionally here, EXCEPT when the UI Evidence Gate above resolved to "Hold" (interactive) or fired in headless — in those cases this step is skipped and `pr.auto_merge` is set to `false`.
+
+   **Verify after arming (#1140 — do not skip):** Skip this sub-step entirely if the arm above itself was skipped (Hold / headless UI-evidence-missing branch) — there is nothing to verify. Otherwise, immediately after the `gh pr merge --auto` call, read back whether it actually took:
+
+   ```bash
+   ~/.claude/scripts/prep_pr_finalize.py verify --require-automerge --json
+   ```
+
+   This is the **sole** auto-merge verification on the Pre-Stage Detector Guard reuse path (Step 4a's "If open PR found from this pipeline" branch skips Step 4c — and therefore Step 4c's own re-verification — entirely when reusing an existing open PR). Parse the JSON; if the `automerge-enabled` check fails:
+
+   **Interactive:** AskUserQuestion:
+   ```
+   Auto-merge did not take on PR #<N> — gh pr merge --auto reported success
+   but autoMergeRequest read back null.
+
+   Options:
+   1. Retry — run gh pr merge <pr-number> --auto --squash again and re-verify
+   2. Leave open — do not enable auto-merge; human merges manually
+   3. Abort — stop pipeline
+   ```
+   - **Retry** → re-run the arm command once, then re-run this verify. If it still fails, fall through to **Leave open**.
+   - **Leave open** → set `pr.auto_merge: false`; continue to step 4.
+   - **Abort** → stop the pipeline.
+
+   **Headless:** emit the `automerge_not_armed` sentinel — same shape as the Step 4c template above — with `blocker.stage`/`stage_reached` set to `"stage5_post_create"` and `blocker.details` naming this site, e.g. `"Step 4d auto-merge enable (reuse path): automerge-enabled check failed for PR #<N>"`. Stop — do not proceed to step 4.
 4. **Post to Linear:** Comment on the issue with PR link (skip for free-text tickets). For drafts, note in the comment: "Created as draft — stacked behind PR #<parent>; will auto-promote to ready when parent merges."
 5. **Store pipeline state:** Record PR number, branch, ticket ID for the merge gate check in Step 4a of the next ticket
 6. **Headless only — emit `stage.entered` (`s4_pr_created`) then proceed to Stage 5:**
