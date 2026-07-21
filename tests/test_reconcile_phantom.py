@@ -44,6 +44,7 @@ from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import (
     _SILENTLY_IDLE_REASON,
     SPAWN_GRACE_SECONDS,
+    TRANSCRIPT_LIVENESS_WINDOW_SECONDS,
     _has_terminal_sentinel,
     reconcile,
 )
@@ -939,6 +940,7 @@ def test_detect_phantom_candidates_crash_complete(
     candidates = _detect_phantom_candidates(
         state,
         phantom_set={sess.id},
+        now=started_at,
     )
 
     assert len(candidates) == 1
@@ -973,6 +975,7 @@ def test_detect_phantom_candidates_skips_emitted_terminal_result(
     candidates = _detect_phantom_candidates(
         state,
         phantom_set={gated.id, ungated.id},
+        now=started_at,
     )
 
     # The emitted-terminal session is skipped entirely (no candidate of any kind).
@@ -1016,6 +1019,7 @@ def test_detect_phantom_candidates_salvage_on_terminal_sentinel(
     candidates = _detect_phantom_candidates(
         state,
         phantom_set={sess.id},
+        now=started_at,
     )
 
     assert len(candidates) == 1
@@ -1049,6 +1053,7 @@ def test_detect_phantom_candidates_user_origin_crash_no_ticket(
     candidates = _detect_phantom_candidates(
         state,
         phantom_set={sess.id},
+        now=started_at,
     )
 
     assert len(candidates) == 1
@@ -1082,6 +1087,7 @@ def test_detect_phantom_candidates_worktree_dirty_on_candidate(
     candidates = _detect_phantom_candidates(
         state,
         phantom_set={sess.id},
+        now=started_at,
     )
 
     assert len(candidates) == 1
@@ -1123,7 +1129,7 @@ def test_detect_phantom_candidates_usage_limit_detected_true(
     save_state(state)
     save_dev_queue(DevQueueStore(tasks=[]))
 
-    candidates = _detect_phantom_candidates(state, phantom_set={sess.id})
+    candidates = _detect_phantom_candidates(state, phantom_set={sess.id}, now=started_at)
 
     assert len(candidates) == 1
     c = candidates[0]
@@ -1143,12 +1149,130 @@ def test_detect_phantom_candidates_usage_limit_false_when_no_transcript(
     save_state(state)
     save_dev_queue(DevQueueStore(tasks=[]))
 
-    candidates = _detect_phantom_candidates(state, phantom_set={sess.id})
+    candidates = _detect_phantom_candidates(state, phantom_set={sess.id}, now=started_at)
 
     assert len(candidates) == 1
     c = candidates[0]
     assert c.proposed_action == ProposedAction.CRASH_COMPLETE
     assert c.usage_limit_detected is False
+
+
+def test_phantom_sentinel_mismatch_veto_when_transcript_live(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GitHub #1281: an already_refused phantom whose transcript is still
+    actively advancing is vetoed instead of falling straight through to
+    CRASH_COMPLETE -- the #1281 incident killed a session 56 seconds before
+    its valid AUTO_DEV_RESULT landed.
+    """
+    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-sentinel-veto-live"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(minutes=5)
+
+    sess = _mk_phantom_daemon_session(
+        "phantom-veto-live-1",
+        started_at,
+        surface_ref="fake-short-id",
+        worktree_path=worktree,
+    )
+    sess.last_result = {"paused_status": _SENTINEL_STAGE_MISMATCH_REFUSED_REASON}
+    payload = _stage_complete_payload()
+    payload["ticket_id"] = "phantom-veto-live-1"
+    transcript = _write_salvage_transcript(
+        home, worktree, "csid-phantom-veto-live", payload
+    )
+    # 30 seconds stale -- well under TRANSCRIPT_LIVENESS_WINDOW_SECONDS (300s).
+    fresh_ts = (now - timedelta(seconds=30)).timestamp()
+    os.utime(str(transcript), (fresh_ts, fresh_ts))
+
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+
+    candidates = _detect_phantom_candidates(state, phantom_set={sess.id}, now=now)
+
+    assert len(candidates) == 1
+    c = candidates[0]
+    assert c.proposed_action == ProposedAction.SENTINEL_STAGE_MISMATCH_VETOED
+    assert c.stale_minutes is not None
+    assert c.stale_minutes < 5
+    assert not any(
+        cand.proposed_action == ProposedAction.CRASH_COMPLETE for cand in candidates
+    )
+
+
+def test_phantom_sentinel_mismatch_veto_falls_through_when_transcript_stale(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transcript stale beyond TRANSCRIPT_LIVENESS_WINDOW_SECONDS does not
+    veto the crash -- preserves the pre-#1281 CRASH_COMPLETE fall-through
+    once the grace window has elapsed (GitHub #1281).
+    """
+    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-sentinel-veto-stale"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+    sess = _mk_phantom_daemon_session(
+        "phantom-veto-stale-1",
+        started_at,
+        surface_ref="fake-short-id",
+        worktree_path=worktree,
+    )
+    sess.last_result = {"paused_status": _SENTINEL_STAGE_MISMATCH_REFUSED_REASON}
+    payload = _stage_complete_payload()
+    payload["ticket_id"] = "phantom-veto-stale-1"
+    transcript = _write_salvage_transcript(
+        home, worktree, "csid-phantom-veto-stale", payload
+    )
+    stale_ts = (started_at + timedelta(minutes=1)).timestamp()
+    os.utime(str(transcript), (stale_ts, stale_ts))
+    now = started_at + timedelta(seconds=TRANSCRIPT_LIVENESS_WINDOW_SECONDS + 3600)
+
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+
+    candidates = _detect_phantom_candidates(state, phantom_set={sess.id}, now=now)
+
+    assert len(candidates) == 1
+    assert candidates[0].proposed_action == ProposedAction.CRASH_COMPLETE
+
+
+def test_phantom_sentinel_mismatch_veto_falls_through_when_no_transcript(
+    tmp_config_dir: Path,
+) -> None:
+    """An already_refused phantom with no locatable transcript falls through
+    to CRASH_COMPLETE (fail-toward-crash), mirroring
+    ``_liveness_veto_candidate``'s unlocatable-transcript contract (GitHub #1281).
+    """
+    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    sess = _mk_phantom_daemon_session("phantom-veto-notranscript-1", started_at)
+    sess.last_result = {"paused_status": _SENTINEL_STAGE_MISMATCH_REFUSED_REASON}
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+
+    candidates = _detect_phantom_candidates(
+        state, phantom_set={sess.id}, now=started_at
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].proposed_action == ProposedAction.CRASH_COMPLETE
 
 
 def test_phantom_route_emitted_sentinel_refusal_stops_refiring(
@@ -1178,7 +1302,9 @@ def test_phantom_route_emitted_sentinel_refusal_stops_refiring(
     )
     payload = _stage_complete_payload()  # stage_reached="stage2_impl" (IMPL)
     payload["ticket_id"] = "phantom-refusal-1"
-    _write_salvage_transcript(home, worktree, "csid-phantom-refusal", payload)
+    transcript = _write_salvage_transcript(
+        home, worktree, "csid-phantom-refusal", payload
+    )
     state = CwState(sessions=[sess])
     save_state(state)
     _write_staged_clients_yaml(tmp_config_dir, "client-a")
@@ -1194,7 +1320,10 @@ def test_phantom_route_emitted_sentinel_refusal_stops_refiring(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     candidates = _detect_phantom_candidates(
-        state, phantom_set={sess.id}, task_by_ticket={"phantom-refusal-1": task}
+        state,
+        phantom_set={sess.id},
+        task_by_ticket={"phantom-refusal-1": task},
+        now=started_at,
     )
     assert len(candidates) == 1
     assert candidates[0].proposed_action == ProposedAction.ROUTE_EMITTED_SENTINEL
@@ -1216,11 +1345,23 @@ def test_phantom_route_emitted_sentinel_refusal_stops_refiring(
     assert task_after.stage == Stage.REVIEW
     assert task_after.status == QueueItemStatus.RUNNING
 
+    # #1281: the already_refused fall-through is now gated on transcript
+    # liveness -- backdate the transcript beyond the liveness window so this
+    # second pass exercises the pre-#1281 CRASH_COMPLETE fall-through (the
+    # "eventually crashes once the transcript goes quiet" branch), not the
+    # new veto.
+    stale_ts = (started_at + timedelta(minutes=1)).timestamp()
+    os.utime(str(transcript), (stale_ts, stale_ts))
+    now_2 = started_at + timedelta(hours=1)
+
     # Second detect pass over the now-marked session: the already_refused
     # skip check stops offering the same doomed advance candidate -- it
     # falls through to CRASH_COMPLETE instead.
     candidates_2 = _detect_phantom_candidates(
-        state, phantom_set={sess.id}, task_by_ticket={"phantom-refusal-1": task_after}
+        state,
+        phantom_set={sess.id},
+        task_by_ticket={"phantom-refusal-1": task_after},
+        now=now_2,
     )
     assert len(candidates_2) == 1
     assert candidates_2[0].proposed_action == ProposedAction.CRASH_COMPLETE
@@ -1264,7 +1405,10 @@ def test_phantom_route_emitted_sentinel_refusal_marker_is_not_terminal_sentinel(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     candidates = _detect_phantom_candidates(
-        state, phantom_set={sess.id}, task_by_ticket={"phantom-nt-1": task}
+        state,
+        phantom_set={sess.id},
+        task_by_ticket={"phantom-nt-1": task},
+        now=started_at,
     )
     session_by_id = {s.id: s for s in state.sessions}
     _apply_phantom_routed_mutations(
@@ -1320,7 +1464,9 @@ def test_phantom_route_emitted_sentinel_refusal_preserves_existing_park_marker(
     sess.last_result = {"paused_status": _SILENTLY_IDLE_REASON}
     payload = _stage_complete_payload()  # stage_reached="stage2_impl" (IMPL)
     payload["ticket_id"] = "phantom-preserve-1"
-    _write_salvage_transcript(home, worktree, "csid-phantom-preserve", payload)
+    transcript = _write_salvage_transcript(
+        home, worktree, "csid-phantom-preserve", payload
+    )
     state = CwState(sessions=[sess])
     save_state(state)
     _write_staged_clients_yaml(tmp_config_dir, "client-a")
@@ -1336,7 +1482,10 @@ def test_phantom_route_emitted_sentinel_refusal_preserves_existing_park_marker(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     candidates = _detect_phantom_candidates(
-        state, phantom_set={sess.id}, task_by_ticket={"phantom-preserve-1": task}
+        state,
+        phantom_set={sess.id},
+        task_by_ticket={"phantom-preserve-1": task},
+        now=started_at,
     )
     assert len(candidates) == 1
     assert candidates[0].proposed_action == ProposedAction.ROUTE_EMITTED_SENTINEL
@@ -1356,12 +1505,22 @@ def test_phantom_route_emitted_sentinel_refusal_preserves_existing_park_marker(
     }
     assert _has_terminal_sentinel(reloaded) is False
 
+    # #1281: backdate the transcript beyond the liveness window so this
+    # second pass exercises the pre-#1281 CRASH_COMPLETE fall-through, not
+    # the new veto.
+    stale_ts = (started_at + timedelta(minutes=1)).timestamp()
+    os.utime(str(transcript), (stale_ts, stale_ts))
+    now_2 = started_at + timedelta(hours=1)
+
     # Second detect pass over the now-marked session: already_refused must
     # still stop offering the same doomed advance candidate even though the
     # marker's paused_status value is idle.py's, not the #1149 refusal
     # reason -- it falls through to CRASH_COMPLETE instead.
     candidates_2 = _detect_phantom_candidates(
-        state, phantom_set={sess.id}, task_by_ticket={"phantom-preserve-1": task}
+        state,
+        phantom_set={sess.id},
+        task_by_ticket={"phantom-preserve-1": task},
+        now=now_2,
     )
     assert len(candidates_2) == 1
     assert candidates_2[0].proposed_action == ProposedAction.CRASH_COMPLETE
@@ -1410,7 +1569,10 @@ def test_phantom_later_stage_sentinel_routes_forward_instead_of_looping(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     candidates = _detect_phantom_candidates(
-        state, phantom_set={sess.id}, task_by_ticket={"phantom-later-1": task}
+        state,
+        phantom_set={sess.id},
+        task_by_ticket={"phantom-later-1": task},
+        now=started_at,
     )
     assert len(candidates) == 1
     assert candidates[0].proposed_action == ProposedAction.ROUTE_EMITTED_SENTINEL
@@ -1709,6 +1871,56 @@ def test_act_on_phantom_salvage_completion_routes_queue_and_emits_event(
     assert len(events) == 1
     assert events[0].payload["salvaged"] is True
     assert events[0].payload["crashed"] is False
+
+
+def test_act_on_phantom_sentinel_mismatch_veto_emits_event_no_mutation(
+    tmp_config_dir: Path,
+) -> None:
+    """SENTINEL_STAGE_MISMATCH_VETOED candidate -> session.sentinel_stage_mismatch_vetoed
+    emitted; zero queue/session mutation (GitHub #1281)."""
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_phantom_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+    sess = _mk_phantom_daemon_session("phantom-veto-act-1", started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="phantom-veto-act-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="phantom-veto-act-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidate = ReapCandidate(
+        session_id="phantom-veto-act-1",
+        proposed_action=ProposedAction.SENTINEL_STAGE_MISMATCH_VETOED,
+        ticket_id="phantom-veto-act-1",
+        client="client-a",
+        stale_minutes=4.2,
+    )
+
+    _act_on_phantom_candidates(state, [candidate], now=now)
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "phantom-veto-act-1")
+    assert t.status == QueueItemStatus.RUNNING
+    assert t.disposition is None
+
+    s = next(s for s in state.sessions if s.id == "phantom-veto-act-1")
+    assert s.status == SessionStatus.ACTIVE
+
+    events = read_events(
+        consumer="test-phantom-veto-act-1",
+        event_types=[OrchestratorEventType.SESSION_SENTINEL_STAGE_MISMATCH_VETOED],
+    )
+    assert len(events) == 1
+    payload = events[0].payload
+    assert payload["ticket_id"] == "phantom-veto-act-1"
+    assert payload["client"] == "client-a"
+    assert payload["session_id"] == "phantom-veto-act-1"
+    assert payload["stale_minutes"] == 4.2
 
 
 class TestActOnPhantomCandidatesSignalOnly:
