@@ -3920,6 +3920,44 @@ class TestParseSentinelFromTranscript:
         assert isinstance(parsed, BlockedResult)
         assert parsed.status == "blocked"
 
+    def test_warned_blocks_dedups_repeated_malformed_block_across_calls(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A shared ``warned_blocks`` set dedups the same malformed block's
+        WARNING across repeated ``_parse_sentinel_from_transcript`` calls
+        against an unchanged transcript (issue #1247).
+        """
+        import logging
+
+        from cw.auto_dev_result import BlockedResult
+        from cw.cli import _parse_sentinel_from_transcript
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "auto-dev-warn-dedup"
+        worktree.mkdir(parents=True)
+        bad_sentinel = "<<<AUTO_DEV_RESULT\n{this is not valid JSON\nAUTO_DEV_RESULT>>>"
+        self._write_transcript(worktree, "uuid-warn-dedup", bad_sentinel, fake_home)
+
+        warned_blocks: set[str] = set()
+        with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+            parsed1 = _parse_sentinel_from_transcript(
+                str(worktree), "uuid-warn-dedup", warned_blocks=warned_blocks
+            )
+            parsed2 = _parse_sentinel_from_transcript(
+                str(worktree), "uuid-warn-dedup", warned_blocks=warned_blocks
+            )
+        assert isinstance(parsed1, BlockedResult)
+        assert isinstance(parsed2, BlockedResult)
+        matching = [
+            rec for rec in caplog.records if "did not parse as JSON" in rec.message
+        ]
+        assert len(matching) == 1
+
     def test_returns_none_when_no_sentinel(
         self,
         tmp_path: Path,
@@ -7643,7 +7681,9 @@ class TestDevQueueWaitSentinelAware:
 
         call_count = [0]
 
-        def _fake_sentinel(cwd: str, claude_session_id: str | None) -> object:
+        def _fake_sentinel(
+            cwd: str, claude_session_id: str | None, **_kwargs: object
+        ) -> object:
             """Return None on first call, AutoDevResult on second."""
             from cw.auto_dev_result import parse_stdout
 
@@ -7690,6 +7730,95 @@ class TestDevQueueWaitSentinelAware:
         assert payload["state"] == "terminal"
         assert payload["sentinel_status"] == "shipped"
         assert call_count[0] == 2
+
+    def test_dev_queue_wait_reuses_warned_blocks_set_across_polls(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """``dev_queue_wait`` creates ``warned_blocks`` once outside the poll
+        loop and threads the SAME set object into every poll (issue #1247) —
+        not a fresh set per iteration, which would defeat the dedup.
+        """
+        import json as _json
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw._util.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "auto-dev-535i"
+        worktree.mkdir(parents=True)
+
+        session_id = "sess535i"
+        csid = "uuid-535i"
+        self._seed_running_task("GEN-535I", session_id)
+
+        started = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        session = self._make_running_session(
+            session_id, worktree, claude_session_id=csid, started_at=started
+        )
+        state = CwState(sessions=[session])
+        from cw.config import save_state as _save_state
+
+        _save_state(state)
+
+        encoded = str(worktree).replace("/", "-").replace(".", "-")
+        project_dir = fake_home / ".claude" / "projects" / encoded
+        project_dir.mkdir(parents=True, exist_ok=True)
+        transcript = project_dir / f"{csid}.jsonl"
+
+        call_count = [0]
+        seen_warned_blocks: list[object] = []
+
+        def _fake_sentinel(
+            cwd: str, claude_session_id: str | None, **kwargs: object
+        ) -> object:
+            """Record identity of the warned_blocks kwarg across calls."""
+            from cw.auto_dev_result import parse_stdout
+
+            seen_warned_blocks.append(kwargs.get("warned_blocks"))
+            call_count[0] += 1
+            if call_count[0] == 1:
+                transcript.write_text(json.dumps({"type": "user"}) + "\n")
+                return None
+            transcript.write_text(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "content": [
+                                {"type": "text", "text": self._SHIPPED_SENTINEL}
+                            ]
+                        },
+                    }
+                )
+                + "\n"
+            )
+            return parse_stdout(self._SHIPPED_SENTINEL)
+
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.wait._parse_sentinel_from_transcript", _fake_sentinel
+        )
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
+
+        monotonic_values = iter([0.0, 0.0, 10.0, 10.0])
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.wait.time.monotonic", lambda: next(monotonic_values, 10.0)
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "wait", "GEN-535I", "--client", "genhealth", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        payload = _json.loads(result.output.strip())
+        assert payload["state"] == "terminal"
+        assert call_count[0] == 2
+        assert len(seen_warned_blocks) == 2
+        assert seen_warned_blocks[0] is not None
+        assert seen_warned_blocks[0] is seen_warned_blocks[1]
 
     def test_attention_stale_not_in_roster(
         self,

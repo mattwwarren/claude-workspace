@@ -3758,3 +3758,125 @@ class TestSchemaVersionV5:
         result = parse_stdout(_wrap_sentinel(payload))
         assert isinstance(result, AutoDevResult)
         assert result.schema_version == 5
+
+
+# ---------------------------------------------------------------------------
+# warned_blocks dedup (issue #1247) — repeated polls of an unresolved
+# malformed sentinel must not re-log the identical WARNING every poll.
+# ---------------------------------------------------------------------------
+
+
+class TestWarnedBlocksDedup:
+    """A caller-owned ``warned_blocks`` set dedups repeated ``_log.warning``
+    calls for the same (unchanging) transcript text across repeated
+    ``parse_stdout`` invocations (issue #1247).
+    """
+
+    def test_malformed_json_dedup_warns_once_with_shared_set(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        text = "<<<AUTO_DEV_RESULT\n{not json,,,}\nAUTO_DEV_RESULT>>>\n"
+        warned_blocks: set[str] = set()
+        with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+            result1 = parse_stdout(text, warned_blocks=warned_blocks)
+            result2 = parse_stdout(text, warned_blocks=warned_blocks)
+        assert isinstance(result1, BlockedResult)
+        assert isinstance(result2, BlockedResult)
+        matching = [
+            rec for rec in caplog.records if "did not parse as JSON" in rec.message
+        ]
+        assert len(matching) == 1
+
+    def test_malformed_json_no_dedup_by_default(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        text = "<<<AUTO_DEV_RESULT\n{not json,,,}\nAUTO_DEV_RESULT>>>\n"
+        with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+            parse_stdout(text)
+            parse_stdout(text)
+        matching = [
+            rec for rec in caplog.records if "did not parse as JSON" in rec.message
+        ]
+        assert len(matching) == 2
+
+    def test_dedup_distinguishes_different_block_content(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        text_a = "<<<AUTO_DEV_RESULT\n{not json,,,}\nAUTO_DEV_RESULT>>>\n"
+        text_b = "<<<AUTO_DEV_RESULT\n{also not json!!!}\nAUTO_DEV_RESULT>>>\n"
+        warned_blocks: set[str] = set()
+        with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+            parse_stdout(text_a, warned_blocks=warned_blocks)
+            parse_stdout(text_b, warned_blocks=warned_blocks)
+        matching = [
+            rec for rec in caplog.records if "did not parse as JSON" in rec.message
+        ]
+        assert len(matching) == 2
+
+    def test_schema_version_unsupported_dedup(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        payload = _shipped_payload()
+        payload["schema_version"] = 99
+        text = _wrap_sentinel(payload)
+        warned_blocks: set[str] = set()
+        with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+            result1 = parse_stdout(text, warned_blocks=warned_blocks)
+            result2 = parse_stdout(text, warned_blocks=warned_blocks)
+        assert isinstance(result1, BlockedResult)
+        assert isinstance(result2, BlockedResult)
+        matching = [rec for rec in caplog.records if "unsupported" in rec.message]
+        assert len(matching) == 1
+
+    def test_validation_failed_dedup(self, caplog: pytest.LogCaptureFixture) -> None:
+        payload = _shipped_payload()
+        payload["pr"] = None  # shipped requires pr -> ValidationError
+        text = _wrap_sentinel(payload)
+        warned_blocks: set[str] = set()
+        with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+            result1 = parse_stdout(text, warned_blocks=warned_blocks)
+            result2 = parse_stdout(text, warned_blocks=warned_blocks)
+        assert isinstance(result1, BlockedResult)
+        assert isinstance(result2, BlockedResult)
+        matching = [
+            rec for rec in caplog.records if "failed model validation" in rec.message
+        ]
+        assert len(matching) == 1
+
+    def test_loose_fallback_dedup(self, caplog: pytest.LogCaptureFixture) -> None:
+        payload = _shipped_payload()
+        body = json.dumps(payload)
+        text = f"narrative\n\n```json\n{body}\n```\n"
+        warned_blocks: set[str] = set()
+        with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+            result1 = parse_stdout(text, warned_blocks=warned_blocks)
+            result2 = parse_stdout(text, warned_blocks=warned_blocks)
+        assert isinstance(result1, AutoDevResult)
+        assert isinstance(result2, AutoDevResult)
+        matching = [rec for rec in caplog.records if "loose fallback" in rec.message]
+        assert len(matching) == 1
+
+    def test_distinct_fields_sharing_a_template_both_warn_on_same_block(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Two distinct ``_filter_empty_string_items`` calls (``commits`` and
+        ``friction_highlights``) share one log message template. Both must
+        still surface on the very first parse of a single block — the dedup
+        key must not collide across different args for the same template.
+        """
+        payload = _shipped_payload()
+        payload["commits"] = ["sha1", ""]
+        payload["friction_highlights"] = ["", "real note"]
+        text = _wrap_sentinel(payload)
+        warned_blocks: set[str] = set()
+        with caplog.at_level(logging.WARNING, logger="cw.auto_dev_result"):
+            result = parse_stdout(text, warned_blocks=warned_blocks)
+        assert isinstance(result, AutoDevResult)
+        matching = [
+            rec
+            for rec in caplog.records
+            if "empty/whitespace-only string" in rec.message
+        ]
+        assert len(matching) == 2
+        assert any("commits" in rec.message for rec in matching)
+        assert any("friction_highlights" in rec.message for rec in matching)

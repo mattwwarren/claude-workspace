@@ -22,6 +22,8 @@ from cw.auto_dev_result import (
 def _parse_sentinel_from_transcript(
     cwd: str,
     claude_session_id: str | None,
+    *,
+    warned_blocks: set[str] | None = None,
 ) -> AutoDevResult | BlockedResult | None:
     """Return the parsed sentinel from the transcript, or None if absent.
 
@@ -43,6 +45,13 @@ def _parse_sentinel_from_transcript(
     Used by ``signal_stop`` for headless DAEMON sessions, whose result must
     be captured here because they bypass session lifecycle tracking entirely.
     See GitHub issue #225 (capture gap) and issue #176 Layer 1 (transcript-walk origin).
+
+    ``warned_blocks`` (issue #1247) is an optional caller-owned set forwarded
+    unchanged into every ``parse_stdout`` call below, deduping repeated
+    ``_log.warning`` calls for the same malformed block both across repeated
+    calls to this function (e.g. a poll loop rescanning an unresolved
+    transcript) and across multiple candidate blocks within one call. Left
+    ``None`` (the default), every warning logs independently as before.
     """
     if not claude_session_id:
         return None
@@ -53,7 +62,7 @@ def _parse_sentinel_from_transcript(
         if block is not None:
             if _is_placeholder_sentinel_text(block):
                 continue
-            result = parse_stdout(text)
+            result = parse_stdout(text, warned_blocks=warned_blocks)
             if isinstance(result, AutoDevResult) and is_documented_example(result):
                 continue
             last_result = result
