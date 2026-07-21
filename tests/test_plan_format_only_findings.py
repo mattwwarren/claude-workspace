@@ -34,18 +34,13 @@ def _agent(name: str) -> str:
     return (AGENTS / name).read_text()
 
 
-def _nearby(content: str, anchor: str, span: int = 400) -> str:
-    idx = content.index(anchor)
-    return content[max(0, idx - span) : idx + len(anchor)]
-
-
 def _after(content: str, anchor: str, span: int = 400) -> str:
     idx = content.index(anchor)
     return content[idx : idx + span]
 
 
 def test_reviewer_documents_severity_floor() -> None:
-    """A pure format/shape regression, independently re-verified accurate, is SHOULD_FIX."""
+    """A verified format/shape regression is SHOULD_FIX, not MUST_FIX."""
     content = _agent("plan-reviewer.md")
     window = _after(content, CARVEOUT_ANCHOR, span=1200)
     assert "not automatically MUST_FIX" in window
@@ -53,7 +48,7 @@ def test_reviewer_documents_severity_floor() -> None:
 
 
 def test_reviewer_severity_floor_requires_independent_reverification() -> None:
-    """The carve-out requires re-reading/confirming claims in *this* pass, not rubber-stamping."""
+    """The carve-out requires re-reading/confirming claims in *this* pass."""
     content = _agent("plan-reviewer.md")
     window = _after(content, CARVEOUT_ANCHOR, span=1200)
     assert (
@@ -61,8 +56,7 @@ def test_reviewer_severity_floor_requires_independent_reverification() -> None:
         "*this* review pass and confirms every claim is still accurate" in window
     )
     assert (
-        "reusing a prior pass's verdict without re-reading does not qualify"
-        in window
+        "reusing a prior pass's verdict without re-reading does not qualify" in window
     )
 
 
@@ -71,8 +65,7 @@ def test_reviewer_severity_floor_excludes_unverifiable_regressions() -> None:
     content = _agent("plan-reviewer.md")
     window = _after(content, CARVEOUT_ANCHOR, span=1200)
     assert (
-        "does **not** apply when the regression also destroys verifiability"
-        in window
+        "does **not** apply when the regression also destroys verifiability" in window
     )
     assert "those cases remain MUST_FIX per the Reject bullets above" in window
 
@@ -103,10 +96,7 @@ def test_plan_step1f3_grants_independent_format_only_cycle() -> None:
     )
     assert anchor in content
     window = _after(content, anchor, span=350)
-    assert (
-        "does not require or consume the standard revision-cycle budget"
-        in window
-    )
+    assert "does not require or consume the standard revision-cycle budget" in window
 
 
 def test_plan_step1f4_format_only_cycle_does_not_decrement_standard_budget() -> None:
@@ -118,7 +108,7 @@ def test_plan_step1f4_format_only_cycle_does_not_decrement_standard_budget() -> 
 
 
 def test_plan_step1f4_format_only_cycle_capped_at_one() -> None:
-    """The format-only cycle is itself capped at 1 attempt, falling through if exhausted."""
+    """The format-only cycle is capped at 1 attempt, falling through if exhausted."""
     content = _cmd("auto-dev-plan.md")
     window = _after(content, FORMAT_ONLY_REVISION_ANCHOR, span=1000)
     assert "capped at **1 attempt**" in window
@@ -126,7 +116,7 @@ def test_plan_step1f4_format_only_cycle_capped_at_one() -> None:
 
 
 def test_plan_step1f4_sonnet_pin_preserved() -> None:
-    """Regression guard: the sonnet pin substring pinned by test_auto_dev_model_pins.py."""
+    """Regression guard: the sonnet pin substring test_auto_dev_model_pins.py checks."""
     content = _cmd("auto-dev-plan.md")
     assert 'Re-spawn the **Plan** agent (`model: "sonnet"`)' in content
 
@@ -139,7 +129,7 @@ def test_plan_substantive_must_fix_branches_unchanged() -> None:
         "agent (Step 1f.4), re-review once."
     ) in content
     assert (
-        '**MUST_FIX persists after 1 revision cycle, headless** → EXIT '
+        "**MUST_FIX persists after 1 revision cycle, headless** → EXIT "
         '`blocked` with `blocker.reason: "plan_unreviewable"`. Do NOT post '
         "the stale plan to Linear."
     ) in content
