@@ -331,13 +331,69 @@ If any signature is present, emit the structured `blocked` sentinel below and st
 
 **Producer note:** `push_auth_failed` is an open-enum addition to `blocker.reason` (per headless-contract.md §4.2 — `reason` is open by design, same precedent as `merge_conflict_post_push` below). Consumers surface it verbatim; no parser change needed.
 
-**Main-session re-verification (do not skip):** After the subagent returns, re-run finalize from the impl worktree (using the worktree's git context — either `cd <worktree>` or `git -C <worktree>`):
+**Main-session re-verification (do not skip):** After the subagent returns, re-run finalize from the impl worktree (using the worktree's git context — either `cd <worktree>` or `git -C <worktree>`). This is the load-bearing check for #1140: `gh pr merge --auto` inside the subagent can report success while the read-back (`autoMergeRequest`) stays null, so this re-verification is what actually confirms auto-merge was armed.
 
 ```bash
 ~/.claude/scripts/prep_pr_finalize.py verify --require-automerge --require-monitor --json
 ```
 
-Required: parse the JSON. `status` must be `"ok"` and `pr_number` must be non-null before proceeding to Step 4c.5. If either fails, treat the subagent return as a lie — report the failed checks to the user via AskUserQuestion: "Subagent claimed ship complete but finalize failed (<failed-checks>). Re-run /prep-pr in the worktree, skip ticket, or abort pipeline?"
+Required: parse the JSON. `status` must be `"ok"` and `pr_number` must be non-null before proceeding to Step 4c.5. If either fails:
+
+**Interactive:** report the failed checks to the user via AskUserQuestion: "Subagent claimed ship complete but finalize failed (<failed-checks>). Re-run /prep-pr in the worktree, skip ticket, or abort pipeline?"
+
+**Headless:** inspect the parsed JSON's `checks` array. If the `automerge-enabled` check specifically is the (or one of the) failed checks, emit the `automerge_not_armed` sentinel below and stop — do NOT proceed to Step 4c.5. If failure is on any *other* check (PR existence, SHA match, monitor registration, etc.), this collapses under the existing "Any other agent BLOCK" gate-collapse row — emit `blocked` with `blocker.reason: "agent_block"` as already specified; do not invent a new reason for that branch.
+
+**Sentinel template — `automerge_not_armed` blocker:**
+
+```json
+{
+  "schema_version": 4,
+  "ticket_id": "<ticket-id>",
+  "status": "blocked",
+  "stage_reached": "stage5_post_create",
+  "scope": {
+    "tier": "<resolved scope.tier — see 'Resolve carried-through context' above>",
+    "files": <count>,
+    "lines_estimate": <count>,
+    "lines_actual": <count>,
+    "forbidden_touched": false
+  },
+  "plan_source": "<resolved plan_source — see 'Resolve carried-through context' above>",
+  "branch": "<branch-name>",
+  "worktree_path": "<session worktree path — ~/.cw/wt/<hash>/auto-dev-<ticket>>",
+  "pr": null,
+  "pr_info": {
+    "number": <pr_number>,
+    "url": "<pr_url>",
+    "auto_merge": false,
+    "base": "main"
+  },
+  "review": {"must_fix_initial": <count>, "should_fix": <count>, "fix_cycles_used": <count>, "deferred": <count>},
+  "health": {
+    "lowest_agent_confidence": "<HIGH | MEDIUM | LOW from health check>",
+    "any_incomplete_risk": false,
+    "shortcuts": [],
+    "recommendation": "PROCEED",
+    "downgrade_applied": false,
+    "fix_loop_escalated": false
+  },
+  "blocker": {
+    "stage": "stage5_post_create",
+    "reason": "automerge_not_armed",
+    "details": "Step 4c re-verification: prep_pr_finalize.py verify --require-automerge reported automerge-enabled check failed (autoMergeRequest read back null) for PR #<N>",
+    "exception_type": null,
+    "message": "gh pr merge --auto reported success but auto-merge was never actually armed",
+    "recovery_hint": "Run `gh pr merge <pr-number> --auto --squash` manually and re-verify, or merge the PR directly",
+    "retry_eligible": true,
+    "retry_delay_seconds": null
+  },
+  "next_actions": ["manual_intervention"]
+}
+```
+
+**Do not add `automerge_not_armed` to `FINALIZE_REGRESS_BLOCKER_REASONS`** (`auto_dev_result.py:126`, currently `{"agent_block"}`). A failed auto-merge arm is not fixed by re-running implementation — adding this reason to the regress set would auto-regress FINALIZE→IMPL and burn `FINALIZE_REGRESS_CAP` attempts against a PR that already exists and just needs auto-merge re-armed. Park for the operator instead via the sentinel above.
+
+**Producer note:** `automerge_not_armed` is an open-enum addition to `blocker.reason` (per headless-contract.md §4.2 — `reason` is open by design, same precedent as `merge_conflict_post_push` below). Consumers surface it verbatim; no parser change needed.
 
 **If the agent returns BLOCK due to "no project `/ship-it`":** The project hasn't been set up for automated PR creation. AskUserQuestion: "Project has no `.claude/commands/ship-it.md`. Create one manually and resume, skip this ticket (leave branch pushed), or abort pipeline?"
 
