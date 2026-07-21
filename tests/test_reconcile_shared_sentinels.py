@@ -2920,7 +2920,9 @@ _TWO_LAYER_SURFACE_REF = "surf1234"
 _TWO_LAYER_STARTED_AT = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
 
 
-def _write_two_layer_sentinel_transcript(path: Path, status: str, ticket_id: str) -> None:
+def _write_two_layer_sentinel_transcript(
+    path: Path, status: str, ticket_id: str
+) -> None:
     """Write a minimal sentinel-bearing JSONL to path."""
     payload = _make_terminal_payload(status, ticket_id)
     body = json.dumps(payload)
@@ -3055,7 +3057,9 @@ class TestParseAnySentinelFromTranscript:
         # csid transcript has sentinel (plan_pending_approval)
         v2_csid = "v2-has-sentinel-892"
         v2_path = project_dir / f"{v2_csid}.jsonl"
-        _write_two_layer_sentinel_transcript(v2_path, "plan_pending_approval", "892-plan")
+        _write_two_layer_sentinel_transcript(
+            v2_path, "plan_pending_approval", "892-plan"
+        )
 
         # surface_ref transcript also has a sentinel (review_pending) — should NOT win
         v1_path = project_dir / f"{_TWO_LAYER_SURFACE_REF}-v1-review.jsonl"
@@ -3087,7 +3091,9 @@ class TestParseAnySentinelFromTranscript:
         project_dir.mkdir(parents=True)
 
         v1_path = project_dir / f"{_TWO_LAYER_SURFACE_REF}-original.jsonl"
-        _write_two_layer_sentinel_transcript(v1_path, "plan_pending_approval", "892-plan")
+        _write_two_layer_sentinel_transcript(
+            v1_path, "plan_pending_approval", "892-plan"
+        )
 
         sess = _mk_two_layer_fallback_session(worktree, csid=None)
         result = _parse_any_sentinel_from_transcript(sess)

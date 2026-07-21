@@ -666,22 +666,25 @@ def _salvage_terminal_result(
     sitting in ``wait_for_ci``) or crashed before session lifecycle completion
     may have its disposition lost. This recovers it directly from the transcript.
 
-    Returns ``(result, claude_session_id)`` only when the transcript located
-    by :func:`_locate_session_transcript` (surface_ref-prefix glob, #541) —
-    which enforces mtime > started_at, guarding the reused-worktree
-    stale-transcript case (#358) — parses to an :class:`AutoDevResult` whose
-    status is in :data:`_SALVAGE_TERMINAL_STATUSES`. Returns ``None``
-    otherwise.
+    Uses the same two-layer transcript search as
+    :func:`_parse_any_sentinel_from_transcript` (csid-exact, then surface_ref-
+    newest fallback when the csid transcript is absent or has no sentinel) so a
+    terminal sentinel written before a resume/backfill is never missed
+    (GitHub #1353; mirrors the #892 fix already applied to that sibling).
+
+    Returns ``(result, claude_session_id)`` only when the parsed result is an
+    :class:`AutoDevResult` whose status is in :data:`_SALVAGE_TERMINAL_STATUSES`.
+    Returns ``None`` otherwise.
     """
-    transcript = _locate_session_transcript(session)
-    if transcript is None:
+    parsed = _parse_any_sentinel_from_transcript(session)
+    if parsed is None:
         return None
-    result = _parse_sentinel_from_blocks(transcript)
+    result, csid = parsed
     if (
         isinstance(result, AutoDevResult)
         and result.status in _SALVAGE_TERMINAL_STATUSES
     ):
-        return result, transcript.stem
+        return result, csid
     return None
 
 

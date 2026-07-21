@@ -49,6 +49,8 @@ from typing import TYPE_CHECKING
 
 from cw.config import get_client, load_state, save_state
 from cw.dev_queue import (
+    _derive_disposition,
+    _extract_pr_url,
     dev_queue_lock,
     load_dev_queue,
     save_dev_queue,
@@ -62,6 +64,7 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
     ReapReason,
+    SessionOrigin,
     SessionStatus,
 )
 from cw.reconcile._shared import (
@@ -70,7 +73,10 @@ from cw.reconcile._shared import (
     _SILENTLY_IDLE_REASON,
     _STALLED_CAP_PARKED_REASON,
     TRANSCRIPT_LIVENESS_WINDOW_SECONDS,
+    _apply_salvaged_completion,
+    _queue_status_for_salvaged,
     _transcript_age_seconds,
+    salvage_terminal_result,
     ticket_id_for_session,
 )
 from cw.reconcile.liveness import _classify_liveness_bucket
@@ -79,6 +85,7 @@ from cw.worktree import _has_commits_beyond_base
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from cw.auto_dev_result import AutoDevResult
     from cw.models import CwState, OrchestratorConfig, Session, TicketTask
 
 # Recipe name constants — the recognised keys of
@@ -520,8 +527,18 @@ def _detect_park_marker_poison_candidates(
     return candidates
 
 
-def _close_confirmed_dead_session(session_id: str, now: datetime) -> bool:
-    """Flip a confirmed-dead session to COMPLETED/CRASHED. Returns True if changed.
+def _close_confirmed_dead_session(
+    session_id: str, now: datetime
+) -> tuple[bool, AutoDevResult | None]:
+    """Flip a confirmed-dead session to COMPLETED. Returns (changed, salvage_result).
+
+    GitHub #1353: attempts terminal-sentinel salvage before stamping CRASHED —
+    mirrors idle.py/stalled.py/phantom.py's own pre-close salvage check
+    (_shared.salvage_terminal_result). salvage_result is the recovered
+    AutoDevResult when the session's transcript carried a valid terminal
+    sentinel (the caller routes the owning task to completion/blocked-on-user
+    instead of PENDING); None means the session is genuinely unrecoverable and
+    the pre-existing CRASHED stamp applies unchanged.
 
     Fresh load_state()/save_state() pair — safe under the sessions_lock the
     reconcile-tick caller already holds (mirrors revert_timed_out_tasks's own
@@ -529,18 +546,29 @@ def _close_confirmed_dead_session(session_id: str, now: datetime) -> bool:
     """
     state = load_state()
     changed = False
+    salvage_result: AutoDevResult | None = None
     for session in state.sessions:
         if session.id != session_id:
             continue
         if session.status in _LIVE_STATUSES:
-            session.status = SessionStatus.COMPLETED
-            session.completed_at = now
-            session.completed_reason = CompletionReason.CRASHED
+            salvage = (
+                salvage_terminal_result(session)
+                if session.origin is SessionOrigin.DAEMON
+                else None
+            )
+            if salvage is not None:
+                result, claude_session_id = salvage
+                _apply_salvaged_completion(session, result, claude_session_id, now=now)
+                salvage_result = result
+            else:
+                session.status = SessionStatus.COMPLETED
+                session.completed_at = now
+                session.completed_reason = CompletionReason.CRASHED
             changed = True
         break
     if changed:
         save_state(state)
-    return changed
+    return changed, salvage_result
 
 
 def _act_on_park_marker_poison_candidates(
@@ -582,11 +610,26 @@ def _act_on_park_marker_poison_candidates(
                 },
                 correlation_id=task.ticket_id,
             )
+            salvage_result: AutoDevResult | None = None
             if candidate.session_id is not None:
-                _close_confirmed_dead_session(candidate.session_id, now)
-            transition_task_status(task, QueueItemStatus.PENDING)
-            task.session_id = None
-            task.stage_base_ref = None
+                _, salvage_result = _close_confirmed_dead_session(
+                    candidate.session_id, now
+                )
+            if salvage_result is not None:
+                last_result = salvage_result.model_dump(mode="json")
+                transition_task_status(
+                    task,
+                    _queue_status_for_salvaged(salvage_result),
+                    disposition=_derive_disposition(salvage_result.status),
+                    pr_url=_extract_pr_url(last_result),
+                )
+                # session_id intentionally NOT cleared — a BLOCKED_ON_USER-routed
+                # task retains it so a later rescue can re-find the session
+                # (mirrors _apply_sentinel_to_task's #918 rescue contract).
+            else:
+                transition_task_status(task, QueueItemStatus.PENDING)
+                task.session_id = None
+                task.stage_base_ref = None
             recovered.append(task.ticket_id)
             changed = True
         if changed:
