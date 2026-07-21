@@ -429,6 +429,26 @@ def _has_usable_premise_text(item: dict[str, Any]) -> bool:
     return False
 
 
+def _is_resolved_premise(item: dict[str, Any]) -> bool:
+    """Return True iff *item* is fully resolved (issue #1325).
+
+    Resolved means BOTH: `verified` is the JSON boolean `True` -- strict, no
+    truthy-string/int tolerance ("true", 1, etc. do NOT count; asymmetric
+    risk favors under-matching over silently skipping a real human
+    checkpoint) -- AND `resolution` is present as a non-empty, non-whitespace
+    string naming the adopted/binding resolution the premise maps onto. The
+    producer's own `resolves` key (quoted verbatim in issue #1325's evidence)
+    is deliberately NOT accepted as an alias -- narrower is safer for a gate
+    that removes a human checkpoint; only the documented `resolution` key
+    (docs/headless-contract.md §4.4) counts. Both conditions independently
+    gate: verified-only or resolution-only leaves the premise parked.
+    """
+    if item.get("verified") is not True:
+        return False
+    resolution = item.get("resolution")
+    return isinstance(resolution, str) and bool(resolution.strip())
+
+
 def _is_blank(s: str) -> bool:
     """Return True iff *s* is empty or whitespace-only."""
     return not s.strip()

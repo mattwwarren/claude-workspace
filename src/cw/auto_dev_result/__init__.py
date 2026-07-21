@@ -14,6 +14,9 @@ failure modes).
 
 from __future__ import annotations
 
+from cw.auto_dev_result._premises_resolution import (
+    _downgrade_resolved_premises,
+)
 from cw.auto_dev_result.parse import (
     _AMBIGUITY_GLITCH_PLACEHOLDER_QUESTION,
     _BLOCK_RE,
@@ -103,6 +106,7 @@ from cw.auto_dev_result.schema import (
     _has_usable_premise_text,
     _has_usable_question,
     _is_blank,
+    _is_resolved_premise,
     _reject_empty_string_items,
 )
 
@@ -172,6 +176,7 @@ __all__ = [
     "_coerce_shipped_wait_for_ci",
     "_coerce_terminal_strays",
     "_decode_payload",
+    "_downgrade_resolved_premises",
     "_effective_stage",
     "_extract_loose_sentinel_json",
     "_filter_empty_agent_health_summary",
@@ -186,6 +191,7 @@ __all__ = [
     "_has_usable_question",
     "_is_blank",
     "_is_placeholder_sentinel_text",
+    "_is_resolved_premise",
     "_locate_raw_block",
     "_normalize_payload",
     "_reject_empty_string_items",
