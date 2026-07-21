@@ -391,7 +391,7 @@ Required: parse the JSON. `status` must be `"ok"` and `pr_number` must be non-nu
 }
 ```
 
-**Do not add `automerge_not_armed` to `FINALIZE_REGRESS_BLOCKER_REASONS`** (`auto_dev_result.py:126`, currently `{"agent_block"}`). A failed auto-merge arm is not fixed by re-running implementation — adding this reason to the regress set would auto-regress FINALIZE→IMPL and burn `FINALIZE_REGRESS_CAP` attempts against a PR that already exists and just needs auto-merge re-armed. Park for the operator instead via the sentinel above.
+**Do not add `automerge_not_armed` to `FINALIZE_REGRESS_BLOCKER_REASONS`** (`src/cw/auto_dev_result/schema.py:83`, currently `{"agent_block"}`). A failed auto-merge arm is not fixed by re-running implementation — adding this reason to the regress set would auto-regress FINALIZE→IMPL and burn `FINALIZE_REGRESS_CAP` attempts against a PR that already exists and just needs auto-merge re-armed. Park for the operator instead via the sentinel above.
 
 **Producer note:** `automerge_not_armed` is an open-enum addition to `blocker.reason` (per headless-contract.md §4.2 — `reason` is open by design, same precedent as `merge_conflict_post_push` below). Consumers surface it verbatim; no parser change needed.
 
