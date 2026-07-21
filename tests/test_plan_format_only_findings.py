@@ -2,9 +2,11 @@
 
 Pure-markdown assertions over the auto-dev pipeline instruction files. Mirrors the
 ``read_text()`` + literal-substring/window convention of
-``test_auto_dev_preflight_resolutions.py`` / ``test_auto_dev_model_pins.py`` — no
-shared import module exists in this repo, so the helpers are duplicated locally
-per the established convention.
+``test_auto_dev_preflight_resolutions.py`` / ``test_auto_dev_model_pins.py``.
+``_cmd``/``_agent`` are duplicated locally per the established convention (no
+shared module for those); ``_after`` is imported from
+``test_auto_dev_preflight_resolutions`` rather than duplicated, since that file
+already defines it.
 
 Background: a Plan Reviewer finding that is purely a format/shape regression of an
 already-content-verified section was unconditionally MUST_FIX, even when the
@@ -17,6 +19,8 @@ where every persisting MUST_FIX finding is category ``Format-Only``.
 """
 
 from pathlib import Path
+
+from tests.test_auto_dev_preflight_resolutions import _after
 
 ROOT = Path(__file__).parent.parent
 COMMANDS = ROOT / ".claude" / "commands"
@@ -32,11 +36,6 @@ def _cmd(name: str) -> str:
 
 def _agent(name: str) -> str:
     return (AGENTS / name).read_text()
-
-
-def _after(content: str, anchor: str, span: int = 400) -> str:
-    idx = content.index(anchor)
-    return content[idx : idx + span]
 
 
 def test_reviewer_documents_severity_floor() -> None:

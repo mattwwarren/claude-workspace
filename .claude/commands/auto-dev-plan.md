@@ -304,7 +304,7 @@ Gate each station independently; the plan proceeds to Step 1g only when **both**
 
 *Plan Reviewer verdicts:*
 - **NO_ISSUES / SHOULD_FIX only / PRINCIPLE only** (any scope, any mode) → log findings (do NOT re-argue PRINCIPLE), append the `plan-spec-reviewed` marker.
-- **MUST_FIX where every persisting finding's category is exactly `Format-Only`, format-only cycle not yet used (any scope, any mode)** → spawn plan-revision agent (Step 1f.4) in **format-only mode**, scoped to just the format-only findings; does not require or consume the standard revision-cycle budget. Re-review only Plan Reviewer.
+- **MUST_FIX where every persisting finding's category is exactly `Format-Only`, format-only cycle not yet used (any scope, any mode)** → spawn plan-revision agent (Step 1f.4) in **format-only mode**, scoped to just the format-only findings; does not require or consume the standard revision-cycle budget. Re-review only Plan Reviewer. Skips the Large-scope AskUserQuestion gate deliberately: this branch only fires for a finding whose regression made it unverifiable (a verified format regression never reaches MUST_FIX at all, per the severity floor), the fix is a deterministic schema re-emit capped at 1 attempt, and a failure falls through to the same Large-scope AskUserQuestion gate below rather than skipping it permanently.
 - **MUST_FIX, 1st cycle, Small or interactive** → spawn plan-revision agent (Step 1f.4), re-review once.
 - **MUST_FIX, 1st cycle, Large + interactive** → AskUserQuestion: revise / surface to human / skip ticket. On "revise" → Step 1f.4.
 - **MUST_FIX persists after 1 revision cycle, interactive** → AskUserQuestion: post stale plan to Linear anyway / abandon ticket.
