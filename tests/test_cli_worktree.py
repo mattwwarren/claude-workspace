@@ -77,6 +77,7 @@ class TestWorktreeGcMultiClient:
         monkeypatch.setattr("cw.cli.worktree.run_worktree_gc", _mock_gc)
 
         result = CliRunner().invoke(main, ["worktree", "gc"])
+        assert result.exit_code == 0, result.output
         assert str(ws_a) in called
         assert str(ws_b) in called  # <-- would fail today: client-b never reached
 
@@ -145,8 +146,12 @@ class TestWorktreeGcMultiClient:
         entry = WorktreeEntry(path=tmp_path / "wt1", branch="dev/1", locked=False)
         report = WorktreeGcReport(
             results=[
-                WorktreeGcResult(entry=entry, verdict=GcVerdict.KEEP_NO_PR, pr_number=None),
-                WorktreeGcResult(entry=entry, verdict=GcVerdict.SKIP_DIRTY, pr_number=None),
+                WorktreeGcResult(
+                    entry=entry, verdict=GcVerdict.KEEP_NO_PR, pr_number=None
+                ),
+                WorktreeGcResult(
+                    entry=entry, verdict=GcVerdict.SKIP_DIRTY, pr_number=None
+                ),
             ]
         )
         monkeypatch.setattr("cw.cli.worktree.run_worktree_gc", lambda _c, **_k: report)
