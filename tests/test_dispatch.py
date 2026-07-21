@@ -2727,6 +2727,62 @@ class TestGlobalAttemptCeiling:
         assert parked.disposition == "attempt_cap_blocked"
         assert parked.attempts == 3
 
+    def test_at_ceiling_head_of_line_does_not_starve_younger_pending_task(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """Older at-ceiling task must not block a younger claimable task (#1248).
+
+        Regression for GitHub #1248: _claim_next_pending's plain pending-scan
+        used to `return None` the instant it hit an attempt-capped task,
+        abandoning the rest of the sorted pending list for that tick. On a
+        max_parallel=1 lane this is indefinite head-of-line starvation -- the
+        capped task parks BLOCKED_ON_USER (which occupies the lane's only
+        slot) and a claimable task sorted behind it is never reached.
+
+        Mirrors the real repro: two PENDING tasks, equal priority, the older
+        one at the global attempt ceiling, the younger one never attempted.
+        A single dispatch_tick must park the older AND claim the younger in
+        the same tick.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        older_capped = TicketTask(
+            ticket_id="GEN-1248-old",
+            client="test-client",
+            status=QueueItemStatus.PENDING,
+            attempts=3,
+            created_at=datetime.fromisoformat("2026-07-07T00:00:00+00:00"),
+        )
+        younger_claimable = TicketTask(
+            ticket_id="GEN-1248-young",
+            client="test-client",
+            status=QueueItemStatus.PENDING,
+            attempts=0,
+            created_at=datetime.fromisoformat("2026-07-15T00:00:00+00:00"),
+        )
+        store = DevQueueStore(tasks=[older_capped, younger_claimable])
+        save_dev_queue(store)
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(self._ceiling_config(ceiling=3), native_daemon=daemon)
+
+        # The younger, claimable task must be claimed in this same tick --
+        # not left PENDING behind the parked older task.
+        assert result.spawned == 1
+
+        queue = load_dev_queue()
+        old_task = next(t for t in queue.tasks if t.ticket_id == "GEN-1248-old")
+        young_task = next(t for t in queue.tasks if t.ticket_id == "GEN-1248-young")
+
+        assert old_task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert old_task.disposition == "attempt_cap_blocked"
+        assert old_task.attempts == 3  # unchanged -- not reclaimed
+
+        assert young_task.status == QueueItemStatus.RUNNING
+        assert young_task.attempts == 1
+        assert len(daemon.spawn_calls) == 1
+
     def test_default_ceiling_is_ten(self) -> None:
         """DEFAULT_GLOBAL_ATTEMPT_CEILING constant value and model default match."""
         assert DEFAULT_GLOBAL_ATTEMPT_CEILING == 10
