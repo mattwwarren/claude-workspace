@@ -538,7 +538,7 @@ def _reconcile_locked(
 
     phantom_set = set(drift.phantom_session_ids)
     phantom_candidates = _detect_phantom_candidates(
-        state, phantom_set, task_by_ticket=shared_task_by_ticket
+        state, phantom_set, task_by_ticket=shared_task_by_ticket, now=now
     )
     _emit_reap_proposed(state, phantom_candidates, native_live=native_live, now=now)
     (

@@ -290,6 +290,11 @@ class ProposedAction(StrEnum):
     # exemption) that reaches the confirmed-idle threshold is escalated, not
     # reaped/parked. Closes #1158, RFC 0011 B1.
     ESCALATE_EXTERNAL_IDLE = "escalate_external_idle"
+    # Side-effect-only candidate — emits `session.sentinel_stage_mismatch_vetoed`,
+    # mutates nothing. The phantom sweep's already_refused -> CRASH_COMPLETE
+    # fall-through is suppressed while the session's transcript is still
+    # actively advancing. Closes #1281.
+    SENTINEL_STAGE_MISMATCH_VETOED = "sentinel_stage_mismatch_vetoed"
 
 
 @dataclass(frozen=True)
@@ -328,9 +333,10 @@ class ReapCandidate:
     # SESSION_STAGE_TIMED_OUT_RETRIED payload. See GitHub #724.
     stage: Stage = DEFAULT_STAGE
     attempts: int = 0
-    # PARK_VETOED only: the freshly-computed transcript-staleness minutes that
-    # produced the LIVE classification, carried into the session.park_vetoed
-    # event payload so the act phase does not need to recompute it. See #976.
+    # PARK_VETOED / SENTINEL_STAGE_MISMATCH_VETOED only: the freshly-computed
+    # transcript-staleness minutes that produced the LIVE classification,
+    # carried into the session.park_vetoed / session.sentinel_stage_mismatch_vetoed
+    # event payload so the act phase does not need to recompute it. See #976, #1281.
     stale_minutes: float | None = None
 
 

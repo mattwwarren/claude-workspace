@@ -37,6 +37,7 @@ from cw.reconcile._shared import (
     _PHANTOM_REAP_MERGED_REASON,
     _SENTINEL_ADVANCE_REFUSED_KEY,
     _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
+    TRANSCRIPT_LIVENESS_WINDOW_SECONDS,
     ProposedAction,
     ReapCandidate,
     _apply_queue_mutations,
@@ -45,6 +46,7 @@ from cw.reconcile._shared import (
     _has_terminal_sentinel,
     _parse_any_sentinel_from_transcript,
     _queue_status_for_salvaged,
+    _transcript_age_seconds,
     resolve_reap_policy,
     ticket_id_for_session,
 )
@@ -93,10 +95,54 @@ def _phantom_advance_sentinel_candidate(
     )
 
 
+def _sentinel_mismatch_veto_candidate(
+    session: Session,
+    ticket_id: str | None,
+    lane: str,
+    *,
+    now: datetime,
+) -> ReapCandidate | None:
+    """Return a SENTINEL_STAGE_MISMATCH_VETOED candidate, or None (#1281).
+
+    Guards the already_refused latch's fall-through to CRASH_COMPLETE in
+    _detect_phantom_candidates: a session whose most recent tick refused a
+    stage-mismatched sentinel (#1149) must not be crash-completed while
+    its transcript is still advancing -- the #1281 incident killed a
+    session 56 seconds before its valid sentinel landed. Mirrors
+    stalled.py's _liveness_veto_candidate (#976) architecture (a
+    side-effect-only ReapCandidate consumed identically by the act
+    phase), but checks the plain _transcript_age_seconds <
+    TRANSCRIPT_LIVENESS_WINDOW_SECONDS window instead of the per-stage
+    liveness-bucket ladder: this only ever fires once per
+    already-refused phantom (not repeatedly across a wall-clock budget),
+    so the coarser check needs no Stage/OrchestratorConfig threading into
+    the phantom detect phase.
+
+    Fail-toward-crash: a session whose transcript cannot be located
+    (_transcript_age_seconds returns None) returns None so the caller
+    falls through to its pre-existing CRASH_COMPLETE construction --
+    unchanged behavior when no positive liveness evidence exists.
+    """
+    stale_seconds = _transcript_age_seconds(session, now)
+    if stale_seconds is None or stale_seconds >= TRANSCRIPT_LIVENESS_WINDOW_SECONDS:
+        return None
+    return ReapCandidate(
+        session_id=session.id,
+        proposed_action=ProposedAction.SENTINEL_STAGE_MISMATCH_VETOED,
+        ticket_id=ticket_id,
+        lane=lane,
+        client=session.client,
+        worktree_path=session.worktree_path,
+        stale_minutes=stale_seconds / 60.0,
+    )
+
+
 def _detect_phantom_candidates(
     state: CwState,
     phantom_set: set[str],
     task_by_ticket: dict[str, TicketTask] | None = None,
+    *,
+    now: datetime,
 ) -> list[ReapCandidate]:
     """Pure classification phase for phantom sessions.
 
@@ -106,6 +152,9 @@ def _detect_phantom_candidates(
 
     task_by_ticket is used to stamp candidate.lane from the owning task's lane
     (GitHub #560). When None or the ticket has no task, lane defaults to DEFAULT_LANE.
+
+    now is used by the already_refused liveness veto (#1281) — see
+    _sentinel_mismatch_veto_candidate.
     """
     _task_by_ticket = task_by_ticket or {}
     candidates: list[ReapCandidate] = []
@@ -164,6 +213,19 @@ def _detect_phantom_candidates(
             advance = _phantom_advance_sentinel_candidate(session, ticket_id, lane)
             if advance is not None:
                 candidates.append(advance)
+                continue
+        elif session.origin is SessionOrigin.DAEMON and already_refused:
+            # GitHub #1281: this session was already refused on a prior tick
+            # (#1149's already_refused latch above) -- without this check it
+            # falls straight into the CRASH_COMPLETE construction below with
+            # zero liveness check, even when the transcript is still actively
+            # advancing (the #1281 incident: a valid AUTO_DEV_RESULT landed 56s
+            # after the refusal that burned the task's final attempt). Veto the
+            # crash while the transcript is fresh -- see
+            # _sentinel_mismatch_veto_candidate.
+            veto = _sentinel_mismatch_veto_candidate(session, ticket_id, lane, now=now)
+            if veto is not None:
+                candidates.append(veto)
                 continue
         # Dirty-check for DAEMON sessions only; USER sessions have no worktree.
         # Why: this check runs inside sessions_lock before the queue mutation, but
@@ -657,6 +719,11 @@ def _act_on_phantom_candidates(
         for c in candidates
         if c.proposed_action == ProposedAction.ROUTE_EMITTED_SENTINEL
     ]
+    veto_candidates = [
+        c
+        for c in candidates
+        if c.proposed_action == ProposedAction.SENTINEL_STAGE_MISMATCH_VETOED
+    ]
     crash_candidates, merged_crash_candidates, gh_blocked_crash_candidates = (
         _split_crash_candidates(candidates, merged_ticket_ids, gh_blocked_ticket_ids)
     )
@@ -668,6 +735,21 @@ def _act_on_phantom_candidates(
     salvaged_ticket_ids: list[str] = []
     salvaged_result_by_ticket: dict[str, AutoDevResult] = {}
     pending_events: list[dict[str, object]] = []
+
+    # SENTINEL_STAGE_MISMATCH_VETOED: side-effect-only -- emit
+    # session.sentinel_stage_mismatch_vetoed, mutate nothing (#1281). Mirrors
+    # stalled.py's PARK_VETOED loop (#976).
+    for candidate in veto_candidates:
+        record_event(
+            OrchestratorEventType.SESSION_SENTINEL_STAGE_MISMATCH_VETOED,
+            {
+                "ticket_id": candidate.ticket_id,
+                "client": candidate.client,
+                "session_id": candidate.session_id,
+                "stale_minutes": candidate.stale_minutes,
+            },
+            correlation_id=candidate.ticket_id,
+        )
 
     _apply_phantom_salvage_mutations(
         session_by_id,
