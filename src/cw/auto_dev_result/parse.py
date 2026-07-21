@@ -22,6 +22,7 @@ Public surface:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -110,6 +111,36 @@ _AMBIGUITY_GLITCH_PLACEHOLDER_QUESTION = (
 _PREMISE_GLITCH_PLACEHOLDER_CLAIM = (
     "(producer emitted no usable premise — operator: requeue or investigate; see #962)"
 )
+
+
+def _warn_once(
+    message: str,
+    *args: object,
+    warned_blocks: set[str] | None,
+    block_key: str | None,
+) -> None:
+    """Log *message* at WARNING, deduped per (block_key, message) pair.
+
+    Issue #1247: ``cw dev-queue wait``'s poll loop re-parses the full
+    transcript every 5s, so an unresolved malformed sentinel re-triggers the
+    identical warning on every poll for the life of the wait. Callers that
+    opt in by passing a caller-owned ``warned_blocks`` set (content-hash
+    keyed on the sentinel text via ``block_key``) get each distinct warning
+    logged exactly once per block; every other caller (``warned_blocks`` or
+    ``block_key`` left ``None``, the default) gets today's un-deduped
+    behavior. Keyed on ``(block_key, message)`` rather than ``block_key``
+    alone so two independent warnings about the same block (e.g. the
+    string-filter warning and a status-gated coercion warning, which are not
+    mutually exclusive) each still surface once rather than the first
+    suppressing the second.
+    """
+    if warned_blocks is None or block_key is None:
+        _log.warning(message, *args)
+        return
+    entry_key = f"{block_key}:{message}"
+    if entry_key not in warned_blocks:
+        _log.warning(message, *args)
+        warned_blocks.add(entry_key)
 
 
 def is_documented_example(result: AutoDevResult) -> bool:
@@ -230,7 +261,12 @@ def _effective_stage(payload: dict[str, Any]) -> object:
     return raw_stage
 
 
-def _locate_raw_block(text: str) -> str | BlockedResult:
+def _locate_raw_block(
+    text: str,
+    *,
+    warned_blocks: set[str] | None = None,
+    block_key: str | None = None,
+) -> str | BlockedResult:
     """Locate the single sentinel payload in *text* or describe why it's unusable.
 
     Returns the inner JSON text (sentinel-framed or loose code-fenced fallback)
@@ -277,14 +313,21 @@ def _locate_raw_block(text: str) -> str | BlockedResult:
                 details=f"no sentinel block in stdout; tail:\n{_tail(text)}",
             ),
         )
-    _log.warning(
+    _warn_once(
         "auto-dev: sentinel emitted as bare code-fenced JSON without "
-        "AUTO_DEV_RESULT markers; using loose fallback (GitHub #337)"
+        "AUTO_DEV_RESULT markers; using loose fallback (GitHub #337)",
+        warned_blocks=warned_blocks,
+        block_key=block_key,
     )
     return loose_json
 
 
-def _decode_payload(raw_block: str) -> dict[str, Any] | BlockedResult:
+def _decode_payload(
+    raw_block: str,
+    *,
+    warned_blocks: set[str] | None = None,
+    block_key: str | None = None,
+) -> dict[str, Any] | BlockedResult:
     """Decode the sentinel JSON and pre-validate version/status (§6 (3)-(5)).
 
     Returns the payload dict on success or a :class:`BlockedResult` for the
@@ -294,7 +337,12 @@ def _decode_payload(raw_block: str) -> dict[str, Any] | BlockedResult:
     try:
         payload: Any = json.loads(raw_block)
     except json.JSONDecodeError as exc:
-        _log.warning("auto-dev sentinel block did not parse as JSON: %s", exc)
+        _warn_once(
+            "auto-dev sentinel block did not parse as JSON: %s",
+            exc,
+            warned_blocks=warned_blocks,
+            block_key=block_key,
+        )
         return BlockedResult(
             blocker=Blocker(
                 stage="unknown",
@@ -326,22 +374,26 @@ def _decode_payload(raw_block: str) -> dict[str, Any] | BlockedResult:
         # parser is still at N. Best-effort parse with the current max schema so
         # the shipped result is recognised rather than mis-flagged as a failure.
         # (issue #395 / headless-contract.md §6(4))
-        _log.warning(
+        _warn_once(
             "auto-dev sentinel schema_version=%r is one ahead of parser max=%r; "
             "best-effort parse using schema %r (schema-bump skew tolerance)",
             raw_version,
             AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION,
             AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION,
+            warned_blocks=warned_blocks,
+            block_key=block_key,
         )
         payload["schema_version"] = AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION
 
     elif (
         not isinstance(raw_version, int) or raw_version not in SUPPORTED_SCHEMA_VERSIONS
     ):
-        _log.warning(
+        _warn_once(
             "auto-dev sentinel schema_version=%r unsupported (parser supports %s)",
             raw_version,
             sorted(SUPPORTED_SCHEMA_VERSIONS),
+            warned_blocks=warned_blocks,
+            block_key=block_key,
         )
         return BlockedResult(
             blocker=Blocker(
@@ -377,7 +429,12 @@ def _has_usable_agent_id(item: dict[str, Any]) -> bool:
     return isinstance(agent_id, str) and not _is_blank(agent_id)
 
 
-def _coerce_no_op_strays(payload: dict[str, Any]) -> None:
+def _coerce_no_op_strays(
+    payload: dict[str, Any],
+    *,
+    warned_blocks: set[str] | None = None,
+    block_key: str | None = None,
+) -> None:
     """Drop stray pr/branch/commits/lines_actual on a no_op payload (issue #367)."""
     stray: list[str] = []
     if payload.get("pr") is not None:
@@ -403,16 +460,24 @@ def _coerce_no_op_strays(payload: dict[str, Any]) -> None:
         stray.append("scope.lines_actual")
         scope_dict["lines_actual"] = None
     if stray:
-        _log.warning(
+        _warn_once(
             "auto-dev: no_op sentinel carried non-null %s; coercing to clean "
             "no_op (ticket=%s, schema_version=%s)",
             stray,
             payload.get("ticket_id", "unknown"),
             payload.get("schema_version"),
+            warned_blocks=warned_blocks,
+            block_key=block_key,
         )
 
 
-def _coerce_terminal_strays(payload: dict[str, Any], raw_status: str) -> None:
+def _coerce_terminal_strays(
+    payload: dict[str, Any],
+    raw_status: str,
+    *,
+    warned_blocks: set[str] | None = None,
+    block_key: str | None = None,
+) -> None:
     """Drop stray branch/commits/lines_actual on scope_exceeded/forbidden_area.
 
     Issue #430 case 4. Post-impl stages require non-null lines_actual per §3.3;
@@ -434,7 +499,7 @@ def _coerce_terminal_strays(payload: dict[str, Any], raw_status: str) -> None:
         stray_term.append("scope.lines_actual")
         scope_dict_term["lines_actual"] = None
     if stray_term:
-        _log.warning(
+        _warn_once(
             "auto-dev: %s sentinel carried non-null %s; coercing to clean "
             "%s (ticket=%s, schema_version=%s)",
             raw_status,
@@ -442,6 +507,8 @@ def _coerce_terminal_strays(payload: dict[str, Any], raw_status: str) -> None:
             raw_status,
             payload.get("ticket_id", "unknown"),
             payload.get("schema_version"),
+            warned_blocks=warned_blocks,
+            block_key=block_key,
         )
 
 
@@ -450,6 +517,9 @@ def _coerce_empty_pending_array(
     key: str,
     raw_status: str,
     placeholder: list[dict[str, Any]] | None = None,
+    *,
+    warned_blocks: set[str] | None = None,
+    block_key: str | None = None,
 ) -> None:
     """Inject a minimal placeholder for an empty ambiguities/premises array.
 
@@ -460,13 +530,15 @@ def _coerce_empty_pending_array(
     clearly-labeled item rather than a silent ``[{}]`` default.
     """
     if not payload.get(key):  # None or [] both need coercing
-        _log.warning(
+        _warn_once(
             "auto-dev: %s sentinel has empty %s; coercing to minimal "
             "placeholder (ticket=%s, schema_version=%s)",
             raw_status,
             key,
             payload.get("ticket_id", "unknown"),
             payload.get("schema_version"),
+            warned_blocks=warned_blocks,
+            block_key=block_key,
         )
         payload[key] = placeholder if placeholder is not None else [{}]
 
@@ -478,6 +550,9 @@ def _filter_empty_pending_items(
     empty_desc: str,
     issue_ref: str,
     log_context: dict[str, Any] | None = None,
+    *,
+    warned_blocks: set[str] | None = None,
+    block_key: str | None = None,
 ) -> None:
     """Drop *key* items failing *predicate*, generalized across #953/#962.
 
@@ -495,7 +570,7 @@ def _filter_empty_pending_items(
     filtered = [item for item in raw if not isinstance(item, dict) or predicate(item)]
     if len(filtered) != len(raw):
         ctx = log_context if log_context is not None else payload
-        _log.warning(
+        _warn_once(
             "auto-dev: dropped %d %s item(s) with %s at parse boundary "
             "(ticket=%s, schema_version=%s); see %s",
             len(raw) - len(filtered),
@@ -504,11 +579,18 @@ def _filter_empty_pending_items(
             ctx.get("ticket_id", "unknown"),
             ctx.get("schema_version"),
             issue_ref,
+            warned_blocks=warned_blocks,
+            block_key=block_key,
         )
     payload[key] = filtered
 
 
-def _filter_empty_question_ambiguities(payload: dict[str, Any]) -> None:
+def _filter_empty_question_ambiguities(
+    payload: dict[str, Any],
+    *,
+    warned_blocks: set[str] | None = None,
+    block_key: str | None = None,
+) -> None:
     """Drop ambiguity items with an empty/missing question (issue #953)."""
     _filter_empty_pending_items(
         payload,
@@ -516,10 +598,17 @@ def _filter_empty_question_ambiguities(payload: dict[str, Any]) -> None:
         _has_usable_question,
         "empty/missing 'question'",
         "#953",
+        warned_blocks=warned_blocks,
+        block_key=block_key,
     )
 
 
-def _filter_empty_claim_premises(payload: dict[str, Any]) -> None:
+def _filter_empty_claim_premises(
+    payload: dict[str, Any],
+    *,
+    warned_blocks: set[str] | None = None,
+    block_key: str | None = None,
+) -> None:
     """Drop premise items with no usable claim/premise text (issue #962)."""
     _filter_empty_pending_items(
         payload,
@@ -527,6 +616,8 @@ def _filter_empty_claim_premises(payload: dict[str, Any]) -> None:
         _has_usable_premise_text,
         "no usable 'claim'/'premise' text",
         "#962",
+        warned_blocks=warned_blocks,
+        block_key=block_key,
     )
 
 
@@ -535,6 +626,9 @@ def _filter_empty_string_items(
     key: str,
     issue_ref: str,
     log_context: dict[str, Any] | None = None,
+    *,
+    warned_blocks: set[str] | None = None,
+    block_key: str | None = None,
 ) -> None:
     """Drop blank/whitespace-only string items from *key*, sibling of
     _filter_empty_pending_items but for bare string items rather than dict
@@ -549,7 +643,7 @@ def _filter_empty_string_items(
     filtered = [item for item in raw if not isinstance(item, str) or bool(item.strip())]
     if len(filtered) != len(raw):
         ctx = log_context if log_context is not None else payload
-        _log.warning(
+        _warn_once(
             "auto-dev: dropped %d %s item(s) with empty/whitespace-only string "
             "at parse boundary (ticket=%s, schema_version=%s); see %s",
             len(raw) - len(filtered),
@@ -557,6 +651,8 @@ def _filter_empty_string_items(
             ctx.get("ticket_id", "unknown"),
             ctx.get("schema_version"),
             issue_ref,
+            warned_blocks=warned_blocks,
+            block_key=block_key,
         )
     payload[key] = filtered
 
@@ -571,7 +667,12 @@ def _get_health_dict(payload: dict[str, Any]) -> dict[str, Any] | None:
     return health if isinstance(health, dict) else None
 
 
-def _filter_empty_agent_health_summary(payload: dict[str, Any]) -> None:
+def _filter_empty_agent_health_summary(
+    payload: dict[str, Any],
+    *,
+    warned_blocks: set[str] | None = None,
+    block_key: str | None = None,
+) -> None:
     """Drop agent_health_summary entries with a blank agent_id (issue #1130)."""
     health = _get_health_dict(payload)
     if health is None:
@@ -583,18 +684,37 @@ def _filter_empty_agent_health_summary(payload: dict[str, Any]) -> None:
         "empty/missing 'agent_id'",
         "#1130",
         log_context=payload,
+        warned_blocks=warned_blocks,
+        block_key=block_key,
     )
 
 
-def _filter_empty_health_shortcuts(payload: dict[str, Any]) -> None:
+def _filter_empty_health_shortcuts(
+    payload: dict[str, Any],
+    *,
+    warned_blocks: set[str] | None = None,
+    block_key: str | None = None,
+) -> None:
     """Drop blank/whitespace-only health.shortcuts items (issue #1130)."""
     health = _get_health_dict(payload)
     if health is None:
         return
-    _filter_empty_string_items(health, "shortcuts", "#1130", log_context=payload)
+    _filter_empty_string_items(
+        health,
+        "shortcuts",
+        "#1130",
+        log_context=payload,
+        warned_blocks=warned_blocks,
+        block_key=block_key,
+    )
 
 
-def _coerce_blocked_next_actions(payload: dict[str, Any]) -> None:
+def _coerce_blocked_next_actions(
+    payload: dict[str, Any],
+    *,
+    warned_blocks: set[str] | None = None,
+    block_key: str | None = None,
+) -> None:
     """Drop stray next_actions on a blocked payload, preserving the blocker.
 
     Issue #371. Two legitimate shapes carry next_actions on blocked and MUST
@@ -610,18 +730,25 @@ def _coerce_blocked_next_actions(payload: dict[str, Any]) -> None:
         for a in raw_next_actions
     )
     if not is_pre_flight and not is_user_directed:
-        _log.warning(
+        _warn_once(
             "auto-dev: blocked sentinel carried stray next_actions=%r; "
             "dropping next_actions, preserving blocker "
             "(ticket=%s, schema_version=%s)",
             raw_next_actions,
             payload.get("ticket_id", "unknown"),
             payload.get("schema_version"),
+            warned_blocks=warned_blocks,
+            block_key=block_key,
         )
         payload["next_actions"] = []
 
 
-def _coerce_blocked_with_pr(payload: dict[str, Any]) -> None:
+def _coerce_blocked_with_pr(
+    payload: dict[str, Any],
+    *,
+    warned_blocks: set[str] | None = None,
+    block_key: str | None = None,
+) -> None:
     """Coerce status=blocked+non-null pr to merge_pending (issue #899).
 
     FINALIZE creates a PR then can't merge (CI pending). The producer emits
@@ -636,23 +763,32 @@ def _coerce_blocked_with_pr(payload: dict[str, Any]) -> None:
     # Coercing to merge_pending would swap one validation failure for another.
     health = payload.get("health")
     if isinstance(health, dict) and health.get("downgrade_applied"):
-        _log.warning(
+        _warn_once(
             "auto-dev: blocked+pr with downgrade_applied=True (ticket=%s); "
             "skipping merge_pending coerce — §5.1 constraint applies",
             payload.get("ticket_id", "unknown"),
+            warned_blocks=warned_blocks,
+            block_key=block_key,
         )
         return
-    _log.warning(
+    _warn_once(
         "auto-dev: blocked sentinel has non-null pr; coercing to "
         "merge_pending to preserve PR url (issue #899, ticket=%s)",
         payload.get("ticket_id", "unknown"),
+        warned_blocks=warned_blocks,
+        block_key=block_key,
     )
     payload["status"] = "merge_pending"
     payload["blocker"] = None
     payload["next_actions"] = []
 
 
-def _coerce_pre_impl_zero_lines(payload: dict[str, Any]) -> None:
+def _coerce_pre_impl_zero_lines(
+    payload: dict[str, Any],
+    *,
+    warned_blocks: set[str] | None = None,
+    block_key: str | None = None,
+) -> None:
     """Coerce lines_actual=0 to null on pre-impl stages (issue #416).
 
     Only integer 0 is coerced; any other non-null value stays intact (hard
@@ -664,29 +800,44 @@ def _coerce_pre_impl_zero_lines(payload: dict[str, Any]) -> None:
         and _effective_stage(payload) in _PRE_IMPL_STAGES
         and scope_gen.get("lines_actual") == 0
     ):
-        _log.warning(
+        _warn_once(
             "auto-dev: pre-impl sentinel had lines_actual=0; coercing to null "
             "(ticket=%s, schema_version=%s)",
             payload.get("ticket_id", "unknown"),
             payload.get("schema_version"),
+            warned_blocks=warned_blocks,
+            block_key=block_key,
         )
         scope_gen["lines_actual"] = None
 
 
-def _coerce_shipped_wait_for_ci(payload: dict[str, Any]) -> None:
+def _coerce_shipped_wait_for_ci(
+    payload: dict[str, Any],
+    *,
+    warned_blocks: set[str] | None = None,
+    block_key: str | None = None,
+) -> None:
     """Inject wait_for_ci on a shipped payload that omits it (issue #417)."""
     na = payload.get("next_actions")
     if isinstance(na, list) and "wait_for_ci" not in na:
-        _log.warning(
+        _warn_once(
             "auto-dev: shipped sentinel missing wait_for_ci; injecting "
             "(ticket=%s, schema_version=%s)",
             payload.get("ticket_id", "unknown"),
             payload.get("schema_version"),
+            warned_blocks=warned_blocks,
+            block_key=block_key,
         )
         payload["next_actions"] = [*na, "wait_for_ci"]
 
 
-def _normalize_payload(payload: dict[str, Any], raw_status: str) -> None:
+def _normalize_payload(
+    payload: dict[str, Any],
+    raw_status: str,
+    *,
+    warned_blocks: set[str] | None = None,
+    block_key: str | None = None,
+) -> None:
     """Apply all parse-boundary leniency coercions in place (producer drift).
 
     Each coercion is a documented, status-gated relaxation of a §3/§4 invariant
@@ -698,64 +849,121 @@ def _normalize_payload(payload: dict[str, Any], raw_status: str) -> None:
     # reads next_actions to classify is_user_directed, and must see the
     # already-filtered list or a blank item could cause a wrong coercion
     # decision.
-    _filter_empty_string_items(payload, "commits", "#1130")
-    _filter_empty_string_items(payload, "friction_highlights", "#1130")
-    _filter_empty_string_items(payload, "next_actions", "#1130")
-    _filter_empty_health_shortcuts(payload)
-    _filter_empty_agent_health_summary(payload)
+    _filter_empty_string_items(
+        payload, "commits", "#1130", warned_blocks=warned_blocks, block_key=block_key
+    )
+    _filter_empty_string_items(
+        payload,
+        "friction_highlights",
+        "#1130",
+        warned_blocks=warned_blocks,
+        block_key=block_key,
+    )
+    _filter_empty_string_items(
+        payload,
+        "next_actions",
+        "#1130",
+        warned_blocks=warned_blocks,
+        block_key=block_key,
+    )
+    _filter_empty_health_shortcuts(
+        payload, warned_blocks=warned_blocks, block_key=block_key
+    )
+    _filter_empty_agent_health_summary(
+        payload, warned_blocks=warned_blocks, block_key=block_key
+    )
     if raw_status == "no_op":
-        _coerce_no_op_strays(payload)
+        _coerce_no_op_strays(payload, warned_blocks=warned_blocks, block_key=block_key)
     if raw_status in ("scope_exceeded", "forbidden_area"):
-        _coerce_terminal_strays(payload, raw_status)
+        _coerce_terminal_strays(
+            payload, raw_status, warned_blocks=warned_blocks, block_key=block_key
+        )
     if raw_status == "ambiguities_pending_resolution":
-        _filter_empty_question_ambiguities(payload)
+        _filter_empty_question_ambiguities(
+            payload, warned_blocks=warned_blocks, block_key=block_key
+        )
         _coerce_empty_pending_array(
             payload,
             "ambiguities",
             raw_status,
             placeholder=[{"question": _AMBIGUITY_GLITCH_PLACEHOLDER_QUESTION}],
+            warned_blocks=warned_blocks,
+            block_key=block_key,
         )
     if raw_status == "premises_pending_verification":
-        _filter_empty_claim_premises(payload)
+        _filter_empty_claim_premises(
+            payload, warned_blocks=warned_blocks, block_key=block_key
+        )
         _coerce_empty_pending_array(
             payload,
             "premises",
             raw_status,
             placeholder=[{"claim": _PREMISE_GLITCH_PLACEHOLDER_CLAIM}],
+            warned_blocks=warned_blocks,
+            block_key=block_key,
         )
     if raw_status == "blocked":
-        _coerce_blocked_with_pr(payload)  # may change status to merge_pending
+        # may change status to merge_pending
+        _coerce_blocked_with_pr(payload, warned_blocks=warned_blocks, block_key=block_key)
         if payload.get("status") == "blocked":
-            _coerce_blocked_next_actions(payload)
+            _coerce_blocked_next_actions(
+                payload, warned_blocks=warned_blocks, block_key=block_key
+            )
     # Status-agnostic: applies regardless of raw_status (distinct from above).
-    _coerce_pre_impl_zero_lines(payload)
+    _coerce_pre_impl_zero_lines(
+        payload, warned_blocks=warned_blocks, block_key=block_key
+    )
     if raw_status == "shipped":
-        _coerce_shipped_wait_for_ci(payload)
+        _coerce_shipped_wait_for_ci(
+            payload, warned_blocks=warned_blocks, block_key=block_key
+        )
 
 
-def parse_stdout(text: str) -> AutoDevResult | BlockedResult:
+def parse_stdout(
+    text: str,
+    *,
+    warned_blocks: set[str] | None = None,
+) -> AutoDevResult | BlockedResult:
     """Parse a worker's stdout and return either the result or a synthetic blocker.
 
     Handles all six §6 failure modes by returning a :class:`BlockedResult`
     rather than raising. Callers can branch on ``isinstance(result,
     AutoDevResult)`` or check ``result.status``.
+
+    ``warned_blocks`` is an optional caller-owned set (issue #1247) that dedups
+    the ``_log.warning`` calls this parse triggers, keyed on a content hash of
+    *text*. Pass the same set across repeated calls against an unchanging
+    transcript (e.g. a poll loop re-scanning the same malformed sentinel) to
+    suppress duplicate identical warnings. Left ``None`` (the default), every
+    call logs independently — today's behavior, preserved for every caller
+    that hasn't opted in.
     """
-    located = _locate_raw_block(text)
+    block_key = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    located = _locate_raw_block(text, warned_blocks=warned_blocks, block_key=block_key)
     if isinstance(located, BlockedResult):
         return located
 
-    decoded = _decode_payload(located)
+    decoded = _decode_payload(
+        located, warned_blocks=warned_blocks, block_key=block_key
+    )
     if isinstance(decoded, BlockedResult):
         return decoded
 
     payload = decoded
     raw_status = payload["status"]
-    _normalize_payload(payload, raw_status)
+    _normalize_payload(
+        payload, raw_status, warned_blocks=warned_blocks, block_key=block_key
+    )
 
     try:
         return AutoDevResult.model_validate(payload)
     except ValidationError as exc:
-        _log.warning("auto-dev sentinel failed model validation: %s", exc)
+        _warn_once(
+            "auto-dev sentinel failed model validation: %s",
+            exc,
+            warned_blocks=warned_blocks,
+            block_key=block_key,
+        )
         return BlockedResult(
             blocker=Blocker(
                 stage="unknown",

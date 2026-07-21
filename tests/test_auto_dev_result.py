@@ -3718,6 +3718,7 @@ class TestSchemaVersionV5:
         payload["schema_version"] = 5
         result = parse_stdout(_wrap_sentinel(payload))
         assert isinstance(result, AutoDevResult)
+        assert result.schema_version == 5
 
 
 # ---------------------------------------------------------------------------
@@ -3809,4 +3810,3 @@ class TestWarnedBlocksDedup:
         assert isinstance(result2, AutoDevResult)
         matching = [rec for rec in caplog.records if "loose fallback" in rec.message]
         assert len(matching) == 1
-        assert result.schema_version == 5
