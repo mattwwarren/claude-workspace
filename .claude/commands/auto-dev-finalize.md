@@ -331,13 +331,69 @@ If any signature is present, emit the structured `blocked` sentinel below and st
 
 **Producer note:** `push_auth_failed` is an open-enum addition to `blocker.reason` (per headless-contract.md §4.2 — `reason` is open by design, same precedent as `merge_conflict_post_push` below). Consumers surface it verbatim; no parser change needed.
 
-**Main-session re-verification (do not skip):** After the subagent returns, re-run finalize from the impl worktree (using the worktree's git context — either `cd <worktree>` or `git -C <worktree>`):
+**Main-session re-verification (do not skip):** After the subagent returns, re-run finalize from the impl worktree (using the worktree's git context — either `cd <worktree>` or `git -C <worktree>`). This is the load-bearing check for #1140: `gh pr merge --auto` inside the subagent can report success while the read-back (`autoMergeRequest`) stays null, so this re-verification is what actually confirms auto-merge was armed.
 
 ```bash
 ~/.claude/scripts/prep_pr_finalize.py verify --require-automerge --require-monitor --json
 ```
 
-Required: parse the JSON. `status` must be `"ok"` and `pr_number` must be non-null before proceeding to Step 4c.5. If either fails, treat the subagent return as a lie — report the failed checks to the user via AskUserQuestion: "Subagent claimed ship complete but finalize failed (<failed-checks>). Re-run /prep-pr in the worktree, skip ticket, or abort pipeline?"
+Required: parse the JSON. `status` must be `"ok"` and `pr_number` must be non-null before proceeding to Step 4c.5. If either fails:
+
+**Interactive:** report the failed checks to the user via AskUserQuestion: "Subagent claimed ship complete but finalize failed (<failed-checks>). Re-run /prep-pr in the worktree, skip ticket, or abort pipeline?"
+
+**Headless:** inspect the parsed JSON's `checks` array. If the `automerge-enabled` check specifically is the (or one of the) failed checks, emit the `automerge_not_armed` sentinel below and stop — do NOT proceed to Step 4c.5. If failure is on any *other* check (PR existence, SHA match, monitor registration, etc.), this collapses under the existing "Any other agent BLOCK" gate-collapse row — emit `blocked` with `blocker.reason: "agent_block"` as already specified; do not invent a new reason for that branch.
+
+**Sentinel template — `automerge_not_armed` blocker:**
+
+```json
+{
+  "schema_version": 4,
+  "ticket_id": "<ticket-id>",
+  "status": "blocked",
+  "stage_reached": "stage5_post_create",
+  "scope": {
+    "tier": "<resolved scope.tier — see 'Resolve carried-through context' above>",
+    "files": <count>,
+    "lines_estimate": <count>,
+    "lines_actual": <count>,
+    "forbidden_touched": false
+  },
+  "plan_source": "<resolved plan_source — see 'Resolve carried-through context' above>",
+  "branch": "<branch-name>",
+  "worktree_path": "<session worktree path — ~/.cw/wt/<hash>/auto-dev-<ticket>>",
+  "pr": null,
+  "pr_info": {
+    "number": <pr_number>,
+    "url": "<pr_url>",
+    "auto_merge": false,
+    "base": "main"
+  },
+  "review": {"must_fix_initial": <count>, "should_fix": <count>, "fix_cycles_used": <count>, "deferred": <count>},
+  "health": {
+    "lowest_agent_confidence": "<HIGH | MEDIUM | LOW from health check>",
+    "any_incomplete_risk": false,
+    "shortcuts": [],
+    "recommendation": "PROCEED",
+    "downgrade_applied": false,
+    "fix_loop_escalated": false
+  },
+  "blocker": {
+    "stage": "stage5_post_create",
+    "reason": "automerge_not_armed",
+    "details": "Step 4c re-verification: prep_pr_finalize.py verify --require-automerge reported automerge-enabled check failed (autoMergeRequest read back null) for PR #<N>",
+    "exception_type": null,
+    "message": "gh pr merge --auto reported success but auto-merge was never actually armed",
+    "recovery_hint": "Run `gh pr merge <pr-number> --auto --squash` manually and re-verify, or merge the PR directly",
+    "retry_eligible": true,
+    "retry_delay_seconds": null
+  },
+  "next_actions": ["manual_intervention"]
+}
+```
+
+**Do not add `automerge_not_armed` to `FINALIZE_REGRESS_BLOCKER_REASONS`** (`src/cw/auto_dev_result/schema.py:83`, currently `{"agent_block"}`). A failed auto-merge arm is not fixed by re-running implementation — adding this reason to the regress set would auto-regress FINALIZE→IMPL and burn `FINALIZE_REGRESS_CAP` attempts against a PR that already exists and just needs auto-merge re-armed. Park for the operator instead via the sentinel above.
+
+**Producer note:** `automerge_not_armed` is an open-enum addition to `blocker.reason` (per headless-contract.md §4.2 — `reason` is open by design, same precedent as `merge_conflict_post_push` below). Consumers surface it verbatim; no parser change needed.
 
 **If the agent returns BLOCK due to "no project `/ship-it`":** The project hasn't been set up for automated PR creation. AskUserQuestion: "Project has no `.claude/commands/ship-it.md`. Create one manually and resume, skip this ticket (leave branch pushed), or abort pipeline?"
 
@@ -504,6 +560,30 @@ After `/prep-pr` returns with a PR number:
    One block per PR; list every deferred finding inside the single `DEFERRED-REVIEW-FINDINGS` comment (open/close sentinels exact — Step H3 greps them verbatim). Omit the whole section when `.cw/deferred-findings.md` is absent or empty (every finding was fixed — no rejections, no deferrals). For pipeline exits that never create a PR (large-scope `review_pending_approval`, or a BLOCK), there is no body to write — rejections/deferrals stay in `friction_highlights` and surface to the human in the structured output instead.
 
 3. **Enable auto-merge:** `gh pr merge <pr-number> --auto --squash`. GitHub allows enabling auto-merge on a draft PR — the merge won't trigger until the PR is marked ready (which `/review-monitor` does when the parent in the stack merges) AND CI passes. Enable unconditionally here, EXCEPT when the UI Evidence Gate above resolved to "Hold" (interactive) or fired in headless — in those cases this step is skipped and `pr.auto_merge` is set to `false`.
+
+   **Verify after arming (#1140 — do not skip):** Skip this sub-step entirely if the arm above itself was skipped (Hold / headless UI-evidence-missing branch) — there is nothing to verify. Otherwise, immediately after the `gh pr merge --auto` call, read back whether it actually took:
+
+   ```bash
+   ~/.claude/scripts/prep_pr_finalize.py verify --require-automerge --json
+   ```
+
+   This is the **sole** auto-merge verification on the Pre-Stage Detector Guard reuse path (Step 4a's "If open PR found from this pipeline" branch skips Step 4c — and therefore Step 4c's own re-verification — entirely when reusing an existing open PR). Parse the JSON; if the `automerge-enabled` check fails:
+
+   **Interactive:** AskUserQuestion:
+   ```
+   Auto-merge did not take on PR #<N> — gh pr merge --auto reported success
+   but autoMergeRequest read back null.
+
+   Options:
+   1. Retry — run gh pr merge <pr-number> --auto --squash again and re-verify
+   2. Leave open — do not enable auto-merge; human merges manually
+   3. Abort — stop pipeline
+   ```
+   - **Retry** → re-run the arm command once, then re-run this verify. If it still fails, fall through to **Leave open**.
+   - **Leave open** → set `pr.auto_merge: false`; continue to step 4.
+   - **Abort** → stop the pipeline.
+
+   **Headless:** emit the `automerge_not_armed` sentinel — same shape as the Step 4c template above — with `blocker.stage`/`stage_reached` set to `"stage5_post_create"` and `blocker.details` naming this site, e.g. `"Step 4d auto-merge enable (reuse path): automerge-enabled check failed for PR #<N>"`. Stop — do not proceed to step 4.
 4. **Post to Linear:** Comment on the issue with PR link (skip for free-text tickets). For drafts, note in the comment: "Created as draft — stacked behind PR #<parent>; will auto-promote to ready when parent merges."
 5. **Store pipeline state:** Record PR number, branch, ticket ID for the merge gate check in Step 4a of the next ticket
 6. **Headless only — emit `stage.entered` (`s4_pr_created`) then proceed to Stage 5:**
