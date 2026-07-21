@@ -239,7 +239,7 @@ def _claim_next_pending(
                 )
                 save_dev_queue(store)
                 _emit_attempt_cap_blocked_event(client_name, task.ticket_id)
-                return None, spawn_backoff_skipped
+                continue
             transition_task_status(task, QueueItemStatus.RUNNING)
             task.attempts += 1
             save_dev_queue(store)

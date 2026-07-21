@@ -3688,6 +3688,45 @@ class TestOperatorUnavailableBlockerReasons:
         assert result.schema_version == p["schema_version"]
 
 
+class TestAutomergeNotArmedBlockerReason:
+    """#1140 — `automerge_not_armed` is a bare open-enum blocker.reason.
+
+    No cw-side routing: not in FINALIZE_REGRESS_BLOCKER_REASONS (a locked
+    push key or a failed automerge arm isn't fixed by re-running impl), and
+    not in OPERATOR_UNAVAILABLE_BLOCKER_REASONS (this is a producer-side
+    verification gap, not operator/dependency unavailability). It must also
+    round-trip as `status: "blocked"` even with a populated `pr_info` key,
+    because the sentinel deliberately omits the canonical `pr` key (sets it
+    to null) to dodge `_coerce_blocked_with_pr`'s merge_pending rewrite.
+    """
+
+    def test_automerge_not_armed_excluded_from_finalize_regress(self) -> None:
+        assert "automerge_not_armed" not in FINALIZE_REGRESS_BLOCKER_REASONS
+
+    def test_automerge_not_armed_excluded_from_operator_unavailable(self) -> None:
+        assert "automerge_not_armed" not in OPERATOR_UNAVAILABLE_BLOCKER_REASONS
+
+    def test_blocked_automerge_not_armed_round_trips_with_pr_info_not_coerced(
+        self,
+    ) -> None:
+        p = _blocked_payload()
+        p["stage_reached"] = "stage5_post_create"
+        p["pr"] = None
+        p["pr_info"] = {
+            "number": 42,
+            "url": "https://github.com/example/example/pull/42",
+            "auto_merge": False,
+            "base": "main",
+        }
+        p["blocker"]["stage"] = "stage5_post_create"
+        p["blocker"]["reason"] = "automerge_not_armed"
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "blocked"
+        assert result.blocker is not None
+        assert result.blocker.reason == "automerge_not_armed"
+
+
 class TestReviewAgentsRun:
     """#1237 — Review.agents_run field (count of reviewer agents that ran)."""
 

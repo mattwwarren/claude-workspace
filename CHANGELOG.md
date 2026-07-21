@@ -8,6 +8,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`_claim_next_pending` no longer starves younger pending tasks behind an
+  attempt-capped task** (#1248): the plain pending-scan used to `return None`
+  the instant it hit a task at the global attempt ceiling, abandoning the
+  rest of the sorted pending list for that tick. On a `max_parallel: 1` lane
+  this was indefinite head-of-line starvation — the capped task parks
+  `BLOCKED_ON_USER` (occupying the lane's only slot) while a claimable task
+  sorted behind it is never reached. The attempt-cap branch now `continue`s
+  the scan instead of returning, matching the backoff branch immediately
+  above it.
 - **Diagnostics bundle filenames no longer overwrite on repeat failures**
   (#1330): a diagnostics bundle filename used to be
   `<role-slug>-<reason>[.json|-schema.json|-output.json]` with no
