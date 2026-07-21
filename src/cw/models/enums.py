@@ -228,6 +228,13 @@ class OrchestratorEventType(StrEnum):
     # carries a correction, not just a non-durable log line. Forwarded by
     # default alongside PR_ACTION_TAKEN for the same reason.
     PR_ACTION_FAILED = "pr.action_failed"
+    # GitHub #1281 -- stage-mismatch-refusal liveness veto. Emitted by the
+    # phantom sweep instead of proceeding with a CRASH_COMPLETE when a session
+    # already latched `already_refused` (a prior tick's #1149 stage-mismatch
+    # refusal) still has a transcript actively advancing within
+    # TRANSCRIPT_LIVENESS_WINDOW_SECONDS. Side-effect-only, mirrors
+    # SESSION_PARK_VETOED above: no queue or session mutation accompanies it.
+    SESSION_SENTINEL_STAGE_MISMATCH_VETOED = "session.sentinel_stage_mismatch_vetoed"
 
 
 class DispatchSkipReason(StrEnum):
