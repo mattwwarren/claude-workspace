@@ -626,6 +626,11 @@ def _act_on_park_marker_poison_candidates(
                 # session_id intentionally NOT cleared — a BLOCKED_ON_USER-routed
                 # task retains it so a later rescue can re-find the session
                 # (mirrors _apply_sentinel_to_task's #918 rescue contract).
+                # stage_base_ref is likewise left untouched: it's only ever
+                # reset on the PENDING-requeue arm below (a fresh restart from
+                # scratch); a salvaged task is resuming from its recovered
+                # sentinel, not restarting, so the existing base ref still
+                # applies.
             else:
                 transition_task_status(task, QueueItemStatus.PENDING)
                 task.session_id = None
