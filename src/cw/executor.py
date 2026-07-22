@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import re
 import shutil
 import subprocess
@@ -65,6 +66,8 @@ if TYPE_CHECKING:
 
     from cw.native_daemon import NativeDaemonClient
     from cw.review_findings import ReviewVerdict
+
+_log = logging.getLogger(__name__)
 
 # Session-level CodexExecutor pre-flight blocker reason codes (RFC 0005 F1).
 # Per-role failure reason codes (CODEX_TIMEOUT/CODEX_ERROR/
@@ -669,12 +672,23 @@ class CodexExecutor:
 def _post_review_comment(
     ticket_id: str, review_text: str, *, cwd: Path | None = None
 ) -> None:
-    """Post codex review findings as a GitHub issue comment (best-effort).
+    """Post codex review findings as a GitHub issue comment (best-effort, logged).
 
-    Delegates to the shared ``cw.gh.post_issue_comment`` primitive and discards
-    the result — this call site silently swallows every gh failure (missing
-    binary, timeout, non-zero exit) exactly as before.
+    Delegates to the shared ``cw.gh.post_issue_comment`` primitive. A failed
+    post is logged at warning (ticket_id, returncode, stderr) rather than
+    swallowed silently — for the CODEX_MUST_FIX_FINDINGS path this comment is
+    the only destination for the finding text (GitHub #1391).
 
     *cwd* scopes the gh call to the client's repo (GitHub #1269/#1279).
     """
-    post_issue_comment(ticket_id, review_text, cwd=cwd)
+    result = post_issue_comment(ticket_id, review_text, cwd=cwd)
+    if result is None:
+        _log.warning("review_comment_post_failed ticket=%s: gh call failed", ticket_id)
+        return
+    if result.returncode != 0:
+        _log.warning(
+            "review_comment_post_failed ticket=%s rc=%s: %s",
+            ticket_id,
+            result.returncode,
+            result.stderr.decode(errors="replace").strip(),
+        )

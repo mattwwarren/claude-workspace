@@ -461,9 +461,11 @@ def test_post_review_comment_logs_on_none_result(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """gh call couldn't run at all (missing binary / timeout) -> warning, not silent."""
-    with patch("cw.executor.post_issue_comment", return_value=None):
-        with caplog.at_level("WARNING"):
-            _post_review_comment("T-1", "findings", cwd=None)
+    with (
+        patch("cw.executor.post_issue_comment", return_value=None),
+        caplog.at_level("WARNING"),
+    ):
+        _post_review_comment("T-1", "findings", cwd=None)
     assert any(
         "T-1" in r.message and "gh call failed" in r.message for r in caplog.records
     )
@@ -476,13 +478,13 @@ def test_post_review_comment_logs_on_nonzero_returncode(
     fake_result = subprocess.CompletedProcess(
         args=["gh"], returncode=1, stdout=b"", stderr=b"invalid issue format"
     )
-    with patch("cw.executor.post_issue_comment", return_value=fake_result):
-        with caplog.at_level("WARNING"):
-            _post_review_comment("T-1", "findings", cwd=None)
+    with (
+        patch("cw.executor.post_issue_comment", return_value=fake_result),
+        caplog.at_level("WARNING"),
+    ):
+        _post_review_comment("T-1", "findings", cwd=None)
     assert any(
-        "T-1" in r.message
-        and "1" in r.message
-        and "invalid issue format" in r.message
+        "T-1" in r.message and "1" in r.message and "invalid issue format" in r.message
         for r in caplog.records
     )
 
