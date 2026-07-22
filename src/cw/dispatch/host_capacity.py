@@ -28,7 +28,7 @@ RUNNING, still counts normally.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from cw.models import QueueItemStatus, SessionOrigin, SessionStatus
 
@@ -78,3 +78,40 @@ def resolve_host_capacity(
         and session.id not in parked_session_ids
     )
     return host_running, config.host_session_budget
+
+
+class HostCapacityContext(NamedTuple):
+    """Fleet-wide host-capacity values threaded through a dispatch tick's client loop.
+
+    Bundles what would otherwise be four separate keyword params on
+    :func:`cw.dispatch.lanes._dispatch_client_lanes` (and its caller,
+    :func:`cw.dispatch.tick._dispatch_client_with_host_budget`) into one
+    value, the same pattern ``tick.py`` already uses for
+    ``_ClientTickSnapshot``/``_PreflightGateResult``.
+
+    *running*/*budget* are the tick-start snapshot -- computed once, constant
+    across every client's turn this tick (DISPATCH_TICK payload
+    observability, R7). *remaining* is the live, per-client-turn value:
+    ``None`` when the feature is off (:meth:`gated` is then always ``False``
+    and :func:`cw.dispatch.lanes._apply_host_capacity_budget` is a no-op),
+    otherwise decremented by each client's spawn count as the loop proceeds
+    via :meth:`decremented` (R3/R5: fleet-wide, declaration order preserved).
+    """
+
+    running: int = 0
+    budget: int | None = None
+    remaining: int | None = None
+
+    @property
+    def gated(self) -> bool:
+        """Whether the fleet-wide budget is exhausted as of this client's turn."""
+        return self.remaining is not None and self.remaining <= 0
+
+    def decremented(self, spawned: int) -> HostCapacityContext:
+        """Return a copy with *remaining* reduced by *spawned* claims this turn.
+
+        A no-op when the feature is off (``remaining is None``).
+        """
+        if self.remaining is None:
+            return self
+        return self._replace(remaining=self.remaining - spawned)

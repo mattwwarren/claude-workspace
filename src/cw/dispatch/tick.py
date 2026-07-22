@@ -53,7 +53,7 @@ from cw.dispatch.gating import (
     _resolve_freshness,
     _resolve_ssh_key_once,
 )
-from cw.dispatch.host_capacity import resolve_host_capacity
+from cw.dispatch.host_capacity import HostCapacityContext, resolve_host_capacity
 from cw.dispatch.lanes import (
     _dispatch_client_lanes,
     _record_client_freshness_block,
@@ -168,32 +168,20 @@ def _client_tick_snapshot(
 
 def _resolve_host_budget_snapshot(
     state: CwState, queue: DevQueueStore, config: OrchestratorConfig
-) -> tuple[int, int | None, int | None]:
+) -> HostCapacityContext:
     """Resolve this tick's host-capacity numbers, once, before the client loop (#1444).
 
-    Returns ``(host_running, host_budget, host_slots_remaining)``.
-    ``host_slots_remaining`` is ``None`` (feature off, no-op fold downstream)
-    when ``config.host_session_budget`` is unset; otherwise
-    ``host_budget - host_running``, floor unclamped (a negative value simply
-    means every client is host-capacity-gated this tick). Extracted from
-    :func:`dispatch_tick` to keep it within the PLR0912/PLR0915 ceilings
-    (CLAUDE.md).
+    ``.remaining`` is ``None`` (feature off, no-op fold downstream) when
+    ``config.host_session_budget`` is unset; otherwise ``budget - running``,
+    floor unclamped (a negative value simply means every client is
+    host-capacity-gated this tick). Extracted from :func:`dispatch_tick` to
+    keep it within the PLR0912/PLR0915 ceilings (CLAUDE.md).
     """
     host_running, host_budget = resolve_host_capacity(state, queue, config)
     host_slots_remaining = None if host_budget is None else host_budget - host_running
-    return host_running, host_budget, host_slots_remaining
-
-
-def _decrement_host_slots(host_slots_remaining: int | None, spawned: int) -> int | None:
-    """Decrement the host-capacity budget by a client's spawn count this tick.
-
-    A no-op when the feature is off (``host_slots_remaining is None``).
-    Extracted from :func:`_dispatch_client_with_host_budget` to keep both it
-    and :func:`dispatch_tick` within the PLR0912/PLR0915 ceilings (CLAUDE.md).
-    """
-    if host_slots_remaining is None:
-        return None
-    return host_slots_remaining - spawned
+    return HostCapacityContext(
+        running=host_running, budget=host_budget, remaining=host_slots_remaining
+    )
 
 
 def _dispatch_client_with_host_budget(
@@ -213,19 +201,15 @@ def _dispatch_client_with_host_budget(
     parent: str | None,
     emit: Callable[[str], None] | None,
     usage_limited_until: datetime | None,
-    host_slots_remaining: int | None,
-    host_running: int,
-    host_budget: int | None,
-) -> tuple[_ClientDispatchResult, int | None]:
+    host_capacity: HostCapacityContext,
+) -> tuple[_ClientDispatchResult, HostCapacityContext]:
     """Wrap :func:`_dispatch_client_lanes` with the host-capacity gate (#1444).
 
-    Computes ``host_capacity_gated`` from ``host_slots_remaining``, delegates
-    to :func:`_dispatch_client_lanes`, then decrements the remaining host
-    budget by this client's spawn count -- extracted to keep
-    :func:`dispatch_tick`'s client loop within the PLR0912/PLR0915 ceilings
-    (CLAUDE.md).
+    Delegates to :func:`_dispatch_client_lanes` with the given *host_capacity*
+    snapshot, then returns its own remaining budget decremented by this
+    client's spawn count -- extracted to keep :func:`dispatch_tick`'s client
+    loop within the PLR0912/PLR0915 ceilings (CLAUDE.md).
     """
-    host_capacity_gated = host_slots_remaining is not None and host_slots_remaining <= 0
     client_result = _dispatch_client_lanes(
         client,
         effective_lanes,
@@ -242,15 +226,9 @@ def _dispatch_client_with_host_budget(
         parent=parent,
         emit=emit,
         usage_limited_until=usage_limited_until,
-        host_slots_remaining=host_slots_remaining,
-        host_capacity_gated=host_capacity_gated,
-        host_running=host_running,
-        host_budget=host_budget,
+        host_capacity=host_capacity,
     )
-    return (
-        client_result,
-        _decrement_host_slots(host_slots_remaining, client_result.spawned),
-    )
+    return client_result, host_capacity.decremented(client_result.spawned)
 
 
 def _resolve_client_lane_context(
@@ -484,13 +462,11 @@ def dispatch_tick(
     # client-filter-independent, against the fleet-wide state/queue snapshots
     # already loaded above (``collision_snapshot`` is an unfiltered
     # DevQueueStore load taken before this loop -- reused here rather than a
-    # second dev-queue load). host_slots_remaining is decremented by each
+    # second dev-queue load). host_capacity.remaining is decremented by each
     # client's spawn count as the loop proceeds so a later-declared client
     # sees the budget already consumed by an earlier-declared one this same
     # tick (R3/R5: fleet-wide, declaration order preserved).
-    host_running, host_budget, host_slots_remaining = _resolve_host_budget_snapshot(
-        state, collision_snapshot, config
-    )
+    host_capacity = _resolve_host_budget_snapshot(state, collision_snapshot, config)
     for client in clients.values():
         if (
             config.max_parallel_clients is not None
@@ -593,7 +569,7 @@ def dispatch_tick(
             client, queue_snapshot, client_ceiling
         )
 
-        client_result, host_slots_remaining = _dispatch_client_with_host_budget(
+        client_result, host_capacity = _dispatch_client_with_host_budget(
             client,
             effective_lanes,
             queue_snapshot,
@@ -609,9 +585,7 @@ def dispatch_tick(
             parent=parent,
             emit=emit,
             usage_limited_until=usage_limited_until,
-            host_slots_remaining=host_slots_remaining,
-            host_running=host_running,
-            host_budget=host_budget,
+            host_capacity=host_capacity,
         )
         spawned += client_result.spawned
         if client_result.usage_limit_detected:

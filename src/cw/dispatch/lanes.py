@@ -14,6 +14,7 @@ from cw.config import (
     _save_concurrency_overrides,
     concurrency_override_lock,
 )
+from cw.dispatch.host_capacity import HostCapacityContext
 from cw.events import record_event
 from cw.models import (
     ClientConcurrencyOverride,
@@ -235,6 +236,9 @@ def _apply_host_capacity_budget(
     return min(available_client_slots, host_slots_remaining)
 
 
+_DEFAULT_HOST_CAPACITY = HostCapacityContext()
+
+
 def _dispatch_client_lanes(
     client: ClientConfig,
     effective_lanes: list[LaneConfig],
@@ -252,10 +256,7 @@ def _dispatch_client_lanes(
     parent: str | None,
     emit: Callable[[str], None] | None,
     usage_limited_until: datetime | None = None,
-    host_slots_remaining: int | None = None,
-    host_capacity_gated: bool = False,
-    host_running: int = 0,
-    host_budget: int | None = None,
+    host_capacity: HostCapacityContext = _DEFAULT_HOST_CAPACITY,
 ) -> _ClientDispatchResult:
     """Claim + spawn across a client's lanes, then emit its dispatch.tick.
 
@@ -268,15 +269,14 @@ def _dispatch_client_lanes(
     :func:`_claim_next_pending` as defense-in-depth (#1346) — the caller
     (dispatch_tick) already gates the whole tick on this same value.
 
-    *host_slots_remaining* (#1444) is the fleet-wide host-capacity budget
-    remaining as of this client's turn in the loop (``None`` when
-    ``OrchestratorConfig.host_session_budget`` is unset — feature off, folded
-    into ``available_client_slots`` as a no-op). *host_capacity_gated* is
-    precomputed by the caller (``host_slots_remaining is not None and
-    host_slots_remaining <= 0``) and drives the ``HOST_CAPACITY_GATED``
-    skip_reason. *host_running*/*host_budget* are carried through purely for
-    the DISPATCH_TICK event payload (observability, R7) — they do not affect
-    admission math here (that's ``host_slots_remaining``).
+    *host_capacity* (#1444) bundles the fleet-wide host-capacity budget as of
+    this client's turn in the loop (defaults to the feature-off state, when
+    ``OrchestratorConfig.host_session_budget`` is unset). ``host_capacity.remaining``
+    folds into ``available_client_slots`` as a no-op when ``None``.
+    ``host_capacity.gated`` drives the ``HOST_CAPACITY_GATED`` skip_reason.
+    ``host_capacity.running``/``host_capacity.budget`` are carried through
+    purely for the DISPATCH_TICK event payload (observability, R7) — they do
+    not affect admission math here (that's ``host_capacity.remaining``).
     """
     client_spawned = 0
     spawn_error = False
@@ -300,7 +300,7 @@ def _dispatch_client_lanes(
     # a corresponding task still occupy slots (backward compat). The per-
     # lane running_by_lane counts govern per-lane grants within this budget.
     available_client_slots = _apply_host_capacity_budget(
-        client_ceiling - running_count, host_slots_remaining
+        client_ceiling - running_count, host_capacity.remaining
     )
     lane_stats: dict[str, dict[str, int]] = {}
     # Per-lane occupant {ticket_id, status} lists for the dispatch.tick payload
@@ -424,7 +424,7 @@ def _dispatch_client_lanes(
         spawn_backoff_skipped=spawn_backoff_skipped,
         lane_circuit_paused=lane_circuit_paused,
         client_spawned=client_spawned,
-        host_capacity_gated=host_capacity_gated,
+        host_capacity_gated=host_capacity.gated,
     )
 
     record_event(
@@ -439,8 +439,8 @@ def _dispatch_client_lanes(
             "lanes": lane_stats,
             "lane_occupants": occupants_by_lane,
             "occupied": sum(len(v) for v in occupants_by_lane.values()),
-            "host_running": host_running,
-            "host_budget": host_budget,
+            "host_running": host_capacity.running,
+            "host_budget": host_capacity.budget,
         },
     )
     return _ClientDispatchResult(
@@ -503,6 +503,13 @@ def _resolve_dispatch_skip_reason(
     """
     if usage_limit_detected:
         return DispatchSkipReason.USAGE_LIMITED
+    # Why: host_capacity_gated wins over cap_full even when a client's OWN
+    # ceiling is also full this tick -- a deliberate #1444 planning decision
+    # (Adopted Assumption 1), not an oversight. host_capacity_gated is
+    # computed unconditionally from the fleet-wide budget, mirroring how
+    # cap_full itself is computed unconditionally from the client's own
+    # ceiling; neither is gated on the other. Reviewed and passed by both
+    # plan-quality stations with this precedence explicit.
     if host_capacity_gated:
         return DispatchSkipReason.HOST_CAPACITY_GATED
     if cap_full:
