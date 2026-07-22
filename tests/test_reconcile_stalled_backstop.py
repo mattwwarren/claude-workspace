@@ -2147,7 +2147,12 @@ def test_liveness_veto_candidate_stamps_incrementing_veto_count(
 
     sess.consecutive_park_vetoes = 0
     cand0, exhausted0 = _liveness_veto_candidate(
-        sess, task, "veto-count-1", 3700.0, now=now, config=config,
+        sess,
+        task,
+        "veto-count-1",
+        3700.0,
+        now=now,
+        config=config,
         reap_reason=ReapReason.WALL_CLOCK_BUDGET,
     )
     assert cand0 is not None
@@ -2157,7 +2162,12 @@ def test_liveness_veto_candidate_stamps_incrementing_veto_count(
 
     sess.consecutive_park_vetoes = 1
     cand1, exhausted1 = _liveness_veto_candidate(
-        sess, task, "veto-count-1", 3700.0, now=now, config=config,
+        sess,
+        task,
+        "veto-count-1",
+        3700.0,
+        now=now,
+        config=config,
         reap_reason=ReapReason.WALL_CLOCK_BUDGET,
     )
     assert cand1 is not None
@@ -2194,7 +2204,12 @@ def test_liveness_veto_candidate_returns_none_once_cap_reached(
     sess.consecutive_park_vetoes = 2
 
     cand, exhausted = _liveness_veto_candidate(
-        sess, task, "veto-capped-1", 3700.0, now=now, config=config,
+        sess,
+        task,
+        "veto-capped-1",
+        3700.0,
+        now=now,
+        config=config,
         reap_reason=ReapReason.WALL_CLOCK_BUDGET,
     )
     assert cand is None
@@ -2234,7 +2249,12 @@ def test_liveness_veto_candidate_never_live_returns_false_not_exhausted(
     sess.consecutive_park_vetoes = 2  # at cap, but transcript is genuinely stale
 
     cand, exhausted = _liveness_veto_candidate(
-        sess, task, "veto-stale-1", 3700.0, now=now, config=config,
+        sess,
+        task,
+        "veto-stale-1",
+        3700.0,
+        now=now,
+        config=config,
         reap_reason=ReapReason.WALL_CLOCK_BUDGET,
     )
     assert cand is None
@@ -2283,9 +2303,7 @@ def test_stalled_veto_bounded_falls_through_to_revert_task(
     )
     assert revert.veto_cap_exhausted is True
     assert revert.reap_reason == ReapReason.WALL_CLOCK_BUDGET
-    assert not any(
-        c.proposed_action == ProposedAction.PARK_VETOED for c in candidates
-    )
+    assert not any(c.proposed_action == ProposedAction.PARK_VETOED for c in candidates)
 
 
 def test_stalled_veto_bounded_falls_through_to_park_blocked_on_user(
@@ -2336,9 +2354,7 @@ def test_stalled_veto_bounded_falls_through_to_park_blocked_on_user(
     )
     assert park.veto_cap_exhausted is True
     assert park.reap_reason == ReapReason.STALLED_RETRY_CAP_PARKED
-    assert not any(
-        c.proposed_action == ProposedAction.PARK_VETOED for c in candidates
-    )
+    assert not any(c.proposed_action == ProposedAction.PARK_VETOED for c in candidates)
 
 
 def test_act_on_stalled_park_vetoed_persists_consecutive_count(
@@ -2402,11 +2418,9 @@ def test_stalled_veto_cap_end_to_end_via_revert_stalled_headless_sessions(
         "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
     )
     monkeypatch.setattr(
-        "cw.reconcile._deps.fire_push_notification", lambda *a, **kw: None
+        "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
     )
-    monkeypatch.setattr(
-        "cw.reconcile._shared.remove_worktree", lambda *a, **kw: None
-    )
+    monkeypatch.setattr("cw.reconcile._shared.remove_worktree", lambda *_a, **_kw: None)
 
     from cw.reconcile import DEFAULT_STALLED_RETRY_CAP
 
@@ -2477,9 +2491,7 @@ def test_veto_cap_exhaustion_emits_immediate_needs_attention(
     )
 
     daemon = FakeNativeDaemonClient()
-    monkeypatch.setattr(
-        "cw.reconcile._deps.get_native_daemon_client", lambda: daemon
-    )
+    monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", lambda: daemon)
     push_calls: list[object] = []
     monkeypatch.setattr(
         "cw.reconcile._deps.fire_push_notification",
@@ -2520,9 +2532,7 @@ def test_veto_cap_exhaustion_emits_immediate_needs_attention(
     candidates = _detect_stalled_candidates(
         state, now=now, config=config, task_by_ticket={sid: task}
     )
-    assert not any(
-        c.proposed_action == ProposedAction.PARK_VETOED for c in candidates
-    )
+    assert not any(c.proposed_action == ProposedAction.PARK_VETOED for c in candidates)
     _act_on_stalled_candidates(state, candidates, now=now, config=config)
 
     # Task routes to BLOCKED_ON_USER via either the park path or the
@@ -2558,9 +2568,7 @@ def test_stalled_veto_falls_through_ordinary_first_park_no_escalation(
     from cw.reconcile import ProposedAction, ReapCandidate, _act_on_stalled_candidates
 
     daemon = FakeNativeDaemonClient()
-    monkeypatch.setattr(
-        "cw.reconcile._deps.get_native_daemon_client", lambda: daemon
-    )
+    monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", lambda: daemon)
     push_calls: list[object] = []
     monkeypatch.setattr(
         "cw.reconcile._deps.fire_push_notification",
@@ -2590,9 +2598,7 @@ def test_stalled_veto_falls_through_ordinary_first_park_no_escalation(
         veto_cap_exhausted=False,
     )
 
-    _act_on_stalled_candidates(
-        state, [candidate], now=now, config=OrchestratorConfig()
-    )
+    _act_on_stalled_candidates(state, [candidate], now=now, config=OrchestratorConfig())
 
     store = load_dev_queue()
     t = next(t for t in store.tasks if t.ticket_id == "ordinary-revert-1")
