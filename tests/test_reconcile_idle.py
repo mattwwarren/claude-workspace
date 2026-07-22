@@ -1214,6 +1214,103 @@ def test_resolve_idle_watchdog_budget_unknown_tier_falls_back_to_global() -> Non
     assert resolve_idle_watchdog_budget(task, config) == IDLE_WATCHDOG_SECONDS
 
 
+def test_resolve_idle_watchdog_budget_respects_per_stage() -> None:
+    """stage=REVIEW with idle_watchdog_by_stage[REVIEW] set → that budget wins."""
+    config = _auto_config(idle_watchdog_by_stage={Stage.REVIEW: 3600})
+    task = TicketTask(ticket_id="T-1", client="c", stage=Stage.REVIEW)
+    assert resolve_idle_watchdog_budget(task, config) == 3600
+
+
+def test_resolve_idle_watchdog_budget_stage_beats_tier() -> None:
+    """Per-stage budget fully overrides per-tier — no max() composition."""
+    config = _auto_config(
+        idle_watchdog_by_stage={Stage.REVIEW: 3600},
+        idle_watchdog_by_tier={"large": 600},
+    )
+    task = TicketTask(
+        ticket_id="T-1", client="c", stage=Stage.REVIEW, scope_hint="large"
+    )
+    assert resolve_idle_watchdog_budget(task, config) == 3600
+
+
+def test_resolve_idle_watchdog_budget_override_beats_stage() -> None:
+    """idle_watchdog_override still wins over the per-stage budget."""
+    config = _auto_config(idle_watchdog_by_stage={Stage.REVIEW: 3600})
+    task = TicketTask(
+        ticket_id="T-1",
+        client="c",
+        stage=Stage.REVIEW,
+        idle_watchdog_override=120,
+    )
+    assert resolve_idle_watchdog_budget(task, config) == 120
+
+
+def test_resolve_idle_watchdog_budget_empty_stage_dict_falls_through_to_tier() -> None:
+    """Default (empty) idle_watchdog_by_stage → falls through to per-tier."""
+    config = _auto_config(idle_watchdog_by_tier={"large": 600})
+    task = TicketTask(ticket_id="T-1", client="c", stage=Stage.PLAN, scope_hint="large")
+    assert resolve_idle_watchdog_budget(task, config) == 600
+
+
+def test_resolve_idle_watchdog_budget_absent_stage_falls_through_to_tier() -> None:
+    """Populated idle_watchdog_by_stage but no entry for this task's stage
+    → falls through to per-tier, same as an empty dict."""
+    config = _auto_config(
+        idle_watchdog_by_stage={Stage.REVIEW: 3600},
+        idle_watchdog_by_tier={"large": 600},
+    )
+    task = TicketTask(
+        ticket_id="T-1", client="c", stage=Stage.IMPL, scope_hint="large"
+    )
+    assert resolve_idle_watchdog_budget(task, config) == 600
+
+
+def test_flag_silently_idle_daemon_sessions_respects_review_stage_override(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """REVIEW-stage task at 1200s: > default 900s but < stage budget 3600s →
+    not flagged."""
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)  # 1200 seconds elapsed
+    elapsed = (now - started_at).total_seconds()
+    assert elapsed > IDLE_WATCHDOG_SECONDS  # 1200 > 900 — would flag without override
+    assert elapsed < 3600  # but under the review-stage override
+
+    sess = Session(
+        id="stage-silent",
+        name="client-a/auto-dev/STAGE-1",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=ClientConfig(
+            name="client-a", workspace_path=Path("/tmp/ws")
+        ).workspace_path,
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="STAGE-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="stage-silent",
+        stage=Stage.REVIEW,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    config = _auto_config(idle_watchdog_by_stage={Stage.REVIEW: 3600})
+    blocked, _salvage = flag_silently_idle_daemon_sessions(
+        state, now=now, native_live={"live-ref"}, config=config
+    )
+
+    assert blocked == []
+    assert sess.status == SessionStatus.ACTIVE
+
+
 def test_flag_silently_idle_daemon_sessions_respects_per_ticket_override(
     tmp_config_dir: Path,
     tmp_path: Path,
