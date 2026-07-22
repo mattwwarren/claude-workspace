@@ -55,11 +55,15 @@ syncs implicitly, so any later gate silently repairs a stale `uv.lock` on disk �
 leaving the drift uncommitted and CI red. Do not fold it into a `uv run …`
 invocation.
 
-Pre-commit hooks enforce gates 1–5 automatically (`uv run pre-commit install`).
+Pre-commit hooks enforce gates 1–5 automatically on `git commit`
+(`uv run pre-commit install`) — git invokes them directly, with no `uv run`
+wrapper, so gate 1 is genuine on that path. Only running gate 5 **by hand**
+via `uv run pre-commit run` masks it.
 
 **Requirements:**
-- `uv lock --check` - **ZERO drift**. A `pyproject.toml` version bump must be
-  accompanied by its regenerated `uv.lock` in the same commit.
+- `uv lock --check` - **ZERO drift**. Any `pyproject.toml` edit that moves the
+  project version or its dependencies must carry the regenerated `uv.lock` in
+  the same commit.
 - `ruff check` - **ZERO violations allowed**. Function-level complexity is gated by
   the `PLR` rules: ≤12 branches (`PLR0912`), ≤50 statements (`PLR0915`), ≤6 returns
   (`PLR0911`). When a function trips these, **extract helpers** — don't suppress.

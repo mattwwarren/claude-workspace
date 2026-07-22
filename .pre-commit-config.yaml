@@ -33,8 +33,9 @@ repos:
       # version bump would otherwise only trip in CI (see #1416).
       #
       # Why first: `uv run` locks-and-syncs implicitly, silently rewriting a
-      # stale uv.lock on disk. Any hook invoking `uv run` (pytest, below) would
-      # repair the drift before this check ever saw it. Keep this ahead of them.
+      # stale uv.lock on disk. Any hook invoking `uv run` (pytest and
+      # diff-cover, below) would repair the drift before this check ever saw
+      # it. Keep this declared ahead of them.
       #
       # Note this hook is bypassed when pre-commit is itself launched via
       # `uv run pre-commit` — that outer `uv run` has already re-locked. The
