@@ -1201,7 +1201,7 @@ def _project_transcripts_latest_timestamp(session: Session) -> datetime | None:
     if project_dir is None or not project_dir.is_dir():
         return None
     max_ts: datetime | None = None
-    for candidate in project_dir.glob("*.jsonl"):
+    for candidate in project_dir.rglob("*.jsonl"):
         # Per-candidate: a stat/read failure on one sibling (deleted/rotated
         # mid-glob) must not discard max_ts already found from other, valid
         # siblings -- only that one candidate is skipped.
