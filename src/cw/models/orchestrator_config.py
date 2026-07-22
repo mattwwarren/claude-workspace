@@ -295,6 +295,24 @@ class OrchestratorConfig(BaseModel):
     idle_watchdog_by_tier: dict[str, int] = Field(
         default_factory=lambda: {"large": 3600}
     )
+    # Per-stage idle-watchdog budgets (seconds), consulted BEFORE
+    # idle_watchdog_by_tier above. Keyed by Stage; a stage absent from this
+    # dict (default: every stage, including REVIEW) falls through to the
+    # per-tier default / global idle_watchdog_seconds / IDLE_WATCHDOG_SECONDS
+    # fallback unchanged. Default is intentionally EMPTY — unlike
+    # headless_timeout_by_stage (#1020's 739-leg empirical wall-clock
+    # baseline), no equivalent per-stage IDLE baseline exists yet; the
+    # operator populates this post-merge (e.g. review: 3600) once observed.
+    # FINALIZE deliberately has no entry here, even as an example: FINALIZE's
+    # idle disposition is owned by stalled.py (#1054), and a FINALIZE budget
+    # entry here would not be fully inert -- it would still shift the
+    # elapsed>=budget crossing at idle.py's _detect_idle_candidate_for_session
+    # gate, which runs before the FINALIZE ownership handoff in
+    # _classify_idle_threshold / _idle_advance_sentinel_candidate. Full
+    # override (no max() composition with the tier map) mirrors the
+    # deliberate choice documented on headless_timeout_by_stage above and at
+    # #1020 pre-flight §3. See GitHub issue #1061.
+    idle_watchdog_by_stage: dict[Stage, int] = Field(default_factory=dict)
     # Global idle-watchdog budget (seconds) applied when a session has no
     # per-ticket override and no resolvable per-tier budget (e.g. it stalled
     # before Stage 1 set a scope_hint). ``None`` falls back to the
