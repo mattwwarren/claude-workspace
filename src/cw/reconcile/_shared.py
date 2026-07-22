@@ -1662,6 +1662,11 @@ def _emit_reap_proposed(
     save_state is safe under sessions_lock — it is a raw file write, not a
     reentrant lock acquisition. See existing _act_on_stalled_candidates,
     _act_on_idle_candidates.
+
+    evidence.transcript_age_seconds reuses the same content-aware staleness
+    computation (_transcript_age_seconds) the liveness veto decided on (#1427);
+    evidence.transcript_mtime_age_seconds is the raw file-mtime age, retained
+    separately for diagnostics.
     """
     _now = now or datetime.now(UTC)
     session_by_id = {s.id: s for s in state.sessions}
@@ -1678,12 +1683,20 @@ def _emit_reap_proposed(
             session.surface_ref is not None and session.surface_ref in native_live
         )
 
-        transcript_age_seconds: float | None = None
+        # Content-aware staleness — same computation the liveness veto used to
+        # make its park/no-park decision (#976, #1277), so the audit evidence
+        # never diverges from what was actually decided (#1427).
+        transcript_age_seconds = _transcript_age_seconds(session, _now)
+
+        # Raw mtime age, retained separately for diagnostics only — a trailing
+        # metadata-only record (queue-operation/ai-title/mode/...) can bump
+        # this far above transcript_age_seconds; do not confuse the two (#1427).
+        transcript_mtime_age_seconds: float | None = None
         transcript_path = _locate_session_transcript(session)
         if transcript_path is not None and transcript_path.exists():
             with contextlib.suppress(OSError):
                 mtime = transcript_path.stat().st_mtime
-                transcript_age_seconds = _now.timestamp() - mtime
+                transcript_mtime_age_seconds = _now.timestamp() - mtime
 
         payload = {
             "session_id": session.id,
@@ -1697,6 +1710,7 @@ def _emit_reap_proposed(
                 "elapsed_seconds": candidate.elapsed_seconds,
                 "in_roster": in_roster,
                 "transcript_age_seconds": transcript_age_seconds,
+                "transcript_mtime_age_seconds": transcript_mtime_age_seconds,
             },
         }
         # Stamp before record_event: dedup guard fires on retry if write fails.
