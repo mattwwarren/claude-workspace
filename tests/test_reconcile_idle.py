@@ -1259,9 +1259,7 @@ def test_resolve_idle_watchdog_budget_absent_stage_falls_through_to_tier() -> No
         idle_watchdog_by_stage={Stage.REVIEW: 3600},
         idle_watchdog_by_tier={"large": 600},
     )
-    task = TicketTask(
-        ticket_id="T-1", client="c", stage=Stage.IMPL, scope_hint="large"
-    )
+    task = TicketTask(ticket_id="T-1", client="c", stage=Stage.IMPL, scope_hint="large")
     assert resolve_idle_watchdog_budget(task, config) == 600
 
 
