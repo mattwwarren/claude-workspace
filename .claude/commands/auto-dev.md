@@ -604,13 +604,20 @@ git rev-parse --verify origin/<branch-name> || { echo "IMPL_NOT_PUSHED"; exit 1;
 
 # Set up one trap-cleaned temp worktree at origin/<branch-name>
 FORK_POINT=$(git merge-base origin/main origin/<branch-name>)
+: "${CW_SESSION:?CW_SESSION must be set}"
 TMPWT="/tmp/gate-wt-$CW_SESSION"
 # Deterministic path (keyed on $CW_SESSION, not $$) — reconstructable by an
 # external reconciler even if this invocation is SIGKILLed before any trap runs.
 git worktree remove --force "$TMPWT" 2>/dev/null
 rm -rf "$TMPWT" 2>/dev/null
 git worktree prune
-trap 'git worktree remove --force "$TMPWT" 2>/dev/null; rm -rf "$TMPWT" 2>/dev/null' EXIT INT TERM
+gate_wt_cleanup() { git worktree remove --force "$TMPWT" 2>/dev/null; rm -rf "$TMPWT" 2>/dev/null; }
+trap gate_wt_cleanup EXIT
+# INT/TERM must also actually stop the script — a trap alone only runs
+# cleanup and then resumes execution; without the explicit exit here the
+# gate would keep running gate checks after the harness believed it had
+# killed this invocation.
+trap 'gate_wt_cleanup; exit 143' INT TERM
 git worktree add --detach "$TMPWT" origin/<branch-name> || { echo "IMPL_FAILED: git worktree add exited $?"; exit 1; }
 
 # 1. Diff is non-empty
