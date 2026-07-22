@@ -413,7 +413,10 @@ def _detect_stalled_candidates(
             # unlike the revert path below, which mirrors idle.py's existing
             # usage-limit precedent, this cap-park usage-limit branch is new
             # logic (GitHub #1030).
-            cap_usage_limit_detected = _shared.detect_usage_limit(session)
+            cap_usage_limit_detected = _shared.usage_limit_is_recent(
+                _shared.detect_usage_limit(session),
+                window_seconds=_shared.USAGE_LIMIT_BACKOFF_WINDOW_SECONDS,
+            )
             candidates.append(
                 ReapCandidate(
                     session_id=session.id,
@@ -530,7 +533,10 @@ def _resolve_wall_clock_candidate(
     # #1030: branch reap_reason here (not after) so the SESSION_REAP_PROPOSED
     # audit event (emitted from the candidate before the apply phase runs)
     # reports the correct cause — matching the cap-park branch's pattern below.
-    revert_usage_limit_detected = _shared.detect_usage_limit(session)
+    revert_usage_limit_detected = _shared.usage_limit_is_recent(
+        _shared.detect_usage_limit(session),
+        window_seconds=_shared.USAGE_LIMIT_BACKOFF_WINDOW_SECONDS,
+    )
     return ReapCandidate(
         session_id=session.id,
         proposed_action=ProposedAction.REVERT_TASK,

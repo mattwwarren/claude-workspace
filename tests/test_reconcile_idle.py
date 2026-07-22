@@ -44,6 +44,7 @@ from cw.reconcile import (
     _SILENTLY_IDLE_REASON,
     IDLE_WATCHDOG_SECONDS,
     TRANSCRIPT_LIVENESS_WINDOW_SECONDS,
+    UsageLimitDetection,
     flag_silently_idle_daemon_sessions,
     reconcile,
     resolve_idle_watchdog_budget,
@@ -2539,7 +2540,12 @@ def test_reap_reason_idle_stall(
     with (
         patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
         patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
-        patch("cw.reconcile._shared.detect_usage_limit", return_value=False),
+        patch(
+            "cw.reconcile._shared.detect_usage_limit",
+            return_value=UsageLimitDetection(
+                detected=False, matched_at=None, transcript_tail_at=None
+            ),
+        ),
         patch("cw.reconcile._deps.get_native_daemon_client", return_value=MagicMock()),
         patch("cw.reconcile._deps.fire_push_notification"),
     ):
@@ -2594,7 +2600,12 @@ def test_reap_reason_usage_limit_cutoff(
     with (
         patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
         patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
-        patch("cw.reconcile._shared.detect_usage_limit", return_value=True),
+        patch(
+            "cw.reconcile._shared.detect_usage_limit",
+            return_value=UsageLimitDetection(
+                detected=True, matched_at=None, transcript_tail_at=None
+            ),
+        ),
         patch("cw.reconcile._deps.get_native_daemon_client", return_value=MagicMock()),
         patch("cw.reconcile._deps.fire_push_notification"),
     ):

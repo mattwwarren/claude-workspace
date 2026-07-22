@@ -374,7 +374,17 @@ def _salvage_low_path(
     (GitHub #1336).
     """
     breadcrumbs = f"branch={branch} worktree={worktree_path_str}"
-    usage_limit_detected = _shared.detect_usage_limit(session)
+    # Fail CLOSED with a tight 60s window here (#1345): the salvage low-path
+    # stamps a terminal USAGE_LIMIT_CUTOFF disposition and (#1336) preserves the
+    # worktree, so a stale or unanchored limit message must NOT be mislabeled as
+    # a live rate-limit cutoff — that inverse-mislabel would suppress the normal
+    # auto-retry of an ordinary crash. Unlike the backoff sites, this one does
+    # not fail open.
+    usage_limit_detected = _shared.usage_limit_is_recent(
+        _shared.detect_usage_limit(session),
+        window_seconds=_shared.USAGE_LIMIT_SALVAGE_WINDOW_SECONDS,
+        fail_open=False,
+    )
     now = datetime.now(UTC)
 
     # Capture already_flagged so the early-return below can suppress

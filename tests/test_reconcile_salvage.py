@@ -41,6 +41,7 @@ from cw.reconcile import (
     _NEEDS_SALVAGE_REASON,
     _SALVAGE_KIND_GIT_STATE,
     _STAGE_REVIEW_COMPLETE,
+    UsageLimitDetection,
     flag_silently_idle_daemon_sessions,
     reconcile,
     revert_stalled_headless_sessions,
@@ -53,6 +54,15 @@ from tests._reconcile_helpers import (
     _write_staged_clients_yaml,
 )
 from tests.conftest import _make_daemon_session, _make_ticket_task
+
+# #1345: the salvage low-path gates detect_usage_limit through
+# usage_limit_is_recent(..., fail_open=False, 60s). A recent detection (match at
+# the transcript tail) survives that gate as True; a not-detected result is False.
+_UL_NOW = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+_RECENT_UL = UsageLimitDetection(
+    detected=True, matched_at=_UL_NOW, transcript_tail_at=_UL_NOW
+)
+_NO_UL = UsageLimitDetection(detected=False, matched_at=None, transcript_tail_at=None)
 
 
 def _mk_live_daemon_session_with_worktree(
@@ -366,7 +376,9 @@ class TestSalvageCommittedNoPrSessions:
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
         )
-        monkeypatch.setattr("cw.reconcile._shared.detect_usage_limit", lambda _s: True)
+        monkeypatch.setattr(
+            "cw.reconcile._shared.detect_usage_limit", lambda _s: _RECENT_UL
+        )
         mock_daemon = MagicMock()
         monkeypatch.setattr(
             "cw.reconcile._deps.get_native_daemon_client",
@@ -445,7 +457,9 @@ class TestSalvageCommittedNoPrSessions:
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
         )
-        monkeypatch.setattr("cw.reconcile._shared.detect_usage_limit", lambda _s: False)
+        monkeypatch.setattr(
+            "cw.reconcile._shared.detect_usage_limit", lambda _s: _NO_UL
+        )
         monkeypatch.setattr(
             "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
         )
@@ -517,7 +531,9 @@ class TestSalvageCommittedNoPrSessions:
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
         )
-        monkeypatch.setattr("cw.reconcile._shared.detect_usage_limit", lambda _s: True)
+        monkeypatch.setattr(
+            "cw.reconcile._shared.detect_usage_limit", lambda _s: _RECENT_UL
+        )
         monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
 
         candidates: list[tuple[str, str | None, str, str, bool]] = [
@@ -607,7 +623,9 @@ class TestSalvageCommittedNoPrSessions:
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
         )
-        monkeypatch.setattr("cw.reconcile._shared.detect_usage_limit", lambda _s: True)
+        monkeypatch.setattr(
+            "cw.reconcile._shared.detect_usage_limit", lambda _s: _RECENT_UL
+        )
         monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
 
         candidates: list[tuple[str, str | None, str, str, bool]] = [

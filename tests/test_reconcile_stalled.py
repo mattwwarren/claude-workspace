@@ -48,6 +48,7 @@ from cw.reconcile import (
     _NEEDS_SALVAGE_REASON,
     _SILENTLY_IDLE_REASON,
     HEADLESS_TIMEOUT_SECONDS,
+    UsageLimitDetection,
     reconcile,
     resolve_headless_budget,
     revert_stalled_headless_sessions,
@@ -1487,7 +1488,12 @@ def test_stalled_revert_usage_limit_detected_sets_cause(
         "cw.reconcile._deps.branch_exists_on_origin",
         lambda _branch, **_kw: (True, True),
     )
-    with patch("cw.reconcile._shared.detect_usage_limit", return_value=True):
+    with patch(
+        "cw.reconcile._shared.detect_usage_limit",
+        return_value=UsageLimitDetection(
+            detected=True, matched_at=None, transcript_tail_at=None
+        ),
+    ):
         reverted = revert_stalled_headless_sessions(
             state, now=now, config=_auto_config()
         )
@@ -1532,7 +1538,12 @@ def test_stalled_revert_no_usage_limit_keeps_wall_clock_budget_cause(
         "cw.reconcile._deps.branch_exists_on_origin",
         lambda _branch, **_kw: (True, True),
     )
-    with patch("cw.reconcile._shared.detect_usage_limit", return_value=False):
+    with patch(
+        "cw.reconcile._shared.detect_usage_limit",
+        return_value=UsageLimitDetection(
+            detected=False, matched_at=None, transcript_tail_at=None
+        ),
+    ):
         reverted = revert_stalled_headless_sessions(
             state, now=now, config=_auto_config()
         )
@@ -1580,7 +1591,12 @@ def test_stalled_cap_park_usage_limit_detected_sets_cause(
         "cw.reconcile._deps.pr_is_merged_for_ticket",
         lambda _tid, **_kw: (False, True),
     )
-    with patch("cw.reconcile._shared.detect_usage_limit", return_value=True):
+    with patch(
+        "cw.reconcile._shared.detect_usage_limit",
+        return_value=UsageLimitDetection(
+            detected=True, matched_at=None, transcript_tail_at=None
+        ),
+    ):
         reverted = revert_stalled_headless_sessions(
             state, now=now, config=_auto_config(headless_timeout_by_stage={})
         )
@@ -1629,7 +1645,12 @@ def test_stalled_cap_park_no_usage_limit_keeps_retry_cap_parked_cause(
         "cw.reconcile._deps.pr_is_merged_for_ticket",
         lambda _tid, **_kw: (False, True),
     )
-    with patch("cw.reconcile._shared.detect_usage_limit", return_value=False):
+    with patch(
+        "cw.reconcile._shared.detect_usage_limit",
+        return_value=UsageLimitDetection(
+            detected=False, matched_at=None, transcript_tail_at=None
+        ),
+    ):
         reverted = revert_stalled_headless_sessions(
             state, now=now, config=_auto_config(headless_timeout_by_stage={})
         )

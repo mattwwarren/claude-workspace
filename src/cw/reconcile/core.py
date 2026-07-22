@@ -493,7 +493,10 @@ def _reconcile_locked(
     watchdog_usage_limited = any(
         s.status == SessionStatus.TIMED_OUT
         and s.id not in pre_reap_timed_out_ids
-        and _shared.detect_usage_limit(s)
+        and _shared.usage_limit_is_recent(
+            _shared.detect_usage_limit(s),
+            window_seconds=_shared.USAGE_LIMIT_BACKOFF_WINDOW_SECONDS,
+        )
         for s in state.sessions
     )
 

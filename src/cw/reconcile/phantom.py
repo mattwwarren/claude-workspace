@@ -243,7 +243,10 @@ def _detect_phantom_candidates(
         # code bug (#804). Only meaningful for DAEMON sessions (USER sessions
         # have no auto-dev transcript path).
         usage_limit_detected = (
-            _shared.detect_usage_limit(session)
+            _shared.usage_limit_is_recent(
+                _shared.detect_usage_limit(session),
+                window_seconds=_shared.USAGE_LIMIT_BACKOFF_WINDOW_SECONDS,
+            )
             if session.origin is SessionOrigin.DAEMON
             else False
         )
