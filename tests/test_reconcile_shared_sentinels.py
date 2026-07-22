@@ -808,6 +808,62 @@ def test_usage_limit_is_recent_fails_closed_when_missing_and_no_fail_open() -> N
     )
 
 
+def test_iter_assistant_records_skips_malformed_and_parses_valid(
+    tmp_path: Path,
+) -> None:
+    """_iter_assistant_records skips every non-conforming record shape and a
+    malformed timestamp, yielding only well-formed assistant records."""
+    from cw.reconcile._shared import _iter_assistant_records
+
+    path = tmp_path / "mixed.jsonl"
+    lines = [
+        "{not valid json",  # JSONDecodeError → skip
+        json.dumps([1, 2, 3]),  # non-dict record → skip
+        json.dumps({"type": "user", "message": {"role": "user"}}),  # not assistant
+        json.dumps({"type": "assistant", "message": "oops"}),  # message not dict
+        json.dumps(
+            {"type": "assistant", "message": {"role": "assistant", "content": "x"}}
+        ),  # content not list → skip
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "not-a-timestamp",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "bad ts"}],
+                },
+            }
+        ),  # malformed timestamp → ts None, still yielded
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "2026-01-01T00:00:05+00:00",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "good"}],
+                },
+            }
+        ),
+    ]
+    path.write_text("\n".join(lines) + "\n")
+
+    results = list(_iter_assistant_records(path))
+
+    assert results == [
+        (None, "bad ts"),
+        (datetime(2026, 1, 1, 0, 0, 5, tzinfo=UTC), "good"),
+    ]
+
+
+def test_iter_assistant_records_returns_empty_on_missing_file(
+    tmp_path: Path,
+) -> None:
+    """A missing transcript file (OSError on open) yields nothing."""
+    from cw.reconcile._shared import _iter_assistant_records
+
+    assert list(_iter_assistant_records(tmp_path / "does-not-exist.jsonl")) == []
+
+
 def test_awaiting_subagent_skips_blank_lines_and_bad_json(
     tmp_config_dir: Path, tmp_path: Path
 ) -> None:
