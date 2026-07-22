@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     from cw.models import (
         ClientConfig,
         DevQueueStore,
+        OrchestratorConfig,
         OrchestratorEvent,
     )
     from cw.native_daemon import NativeDaemonClient
@@ -277,6 +278,53 @@ def _merge_persisted_usage_limited_until(
     return usage_limited_until
 
 
+def _reload_tick_config(
+    config: OrchestratorConfig, max_parallel: int | None
+) -> OrchestratorConfig:
+    """Reload effective config for one tick, applying a max_parallel override.
+
+    Extracted from ``run_dispatch_loop`` (#1343) to buy back statement
+    budget ahead of the usage-limit-cleared transition logic -- see Design
+    §2 in the plan for the statement-budget arithmetic. On a reload failure
+    (bad YAML / validation error), logs a warning and returns *config*
+    unchanged (last-good config), matching the loop's prior inline behavior.
+    """
+    try:
+        reloaded = load_effective_config()
+        if max_parallel is not None:
+            clients = load_clients()
+            overridden = dict.fromkeys(clients, max_parallel)
+            reloaded = reloaded.model_copy(update={"per_client_ceiling": overridden})
+    except (yaml.YAMLError, ConfigValidationError):
+        _log.warning("dispatch: config reload failed; using last-good config")
+        return config
+    return reloaded
+
+
+def _check_version_drift() -> None:
+    """Raise VersionDriftError if the installed package version has changed.
+
+    Extracted from ``run_dispatch_loop`` (#1343) -- see Design §2 in the
+    plan for the statement-budget arithmetic that motivated this split.
+    Compares the installed version against ``_LOADED_VERSION`` (captured at
+    import time); a mismatch means the process is running stale code after
+    an in-place upgrade, so the loop should exit for a clean reload.
+    """
+    try:
+        installed = importlib.metadata.version(_CW_PACKAGE_NAME)
+    except importlib.metadata.PackageNotFoundError:
+        installed = "0.0.0+unknown"
+    if installed != _LOADED_VERSION:
+        _log.warning(
+            "dispatch: version drift detected (loaded=%s, installed=%s)"
+            " — exiting for reload",
+            _LOADED_VERSION,
+            installed,
+        )
+        msg = "version drift detected; exiting for reload"
+        raise VersionDriftError(msg)
+
+
 def run_dispatch_loop(
     *,
     max_parallel: int | None = None,
@@ -333,16 +381,7 @@ def run_dispatch_loop(
 
     try:
         while True:
-            try:
-                config = load_effective_config()
-                if max_parallel is not None:
-                    clients = load_clients()
-                    overridden = dict.fromkeys(clients, max_parallel)
-                    config = config.model_copy(
-                        update={"per_client_ceiling": overridden}
-                    )
-            except (yaml.YAMLError, ConfigValidationError):
-                _log.warning("dispatch: config reload failed; using last-good config")
+            config = _reload_tick_config(config, max_parallel)
 
             # Re-read the shared back-off sidecar every tick (#1346) -- see
             # _merge_persisted_usage_limited_until for why this must merge
@@ -364,19 +403,7 @@ def run_dispatch_loop(
                 # 4. Paired test: tests/test_dispatch.py
                 #    TestRunDispatchLoopHydrationHook.
                 _log.exception("pr-state hydration failed during tick; continuing")
-            try:
-                _installed = importlib.metadata.version(_CW_PACKAGE_NAME)
-            except importlib.metadata.PackageNotFoundError:
-                _installed = "0.0.0+unknown"
-            if _installed != _LOADED_VERSION:
-                _log.warning(
-                    "dispatch: version drift detected (loaded=%s, installed=%s)"
-                    " — exiting for reload",
-                    _LOADED_VERSION,
-                    _installed,
-                )
-                msg = "version drift detected; exiting for reload"
-                raise VersionDriftError(msg)
+            _check_version_drift()
             result = dispatch_tick(
                 config,
                 use_plan=use_plan,
