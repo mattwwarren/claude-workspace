@@ -15,6 +15,7 @@ import yaml
 from cw.config import (
     _load_concurrency_overrides,
     _save_concurrency_overrides,
+    dispatch_loop_lock,
     load_effective_config,
     load_state,
     orchestrator_config_file,
@@ -57,6 +58,7 @@ from cw.dispatch_state import (
 from cw.events import read_events, record_event
 from cw.exceptions import (
     ConfigValidationError,
+    DispatchLoopLockedError,
     StaleWorktreeError,
     VersionDriftError,
     WorktreeError,
@@ -10614,3 +10616,47 @@ class TestSpawnInvalidatesStaleContextJson:
 
         assert context_file.exists()
         assert context_file.read_text() == '{"sentinel": "preserved"}'
+
+
+# ---------------------------------------------------------------------------
+# TestRunDispatchLoopSingletonLock — #1362 dispatch-loop singleton lock
+# ---------------------------------------------------------------------------
+
+
+class TestRunDispatchLoopSingletonLock:
+    """run_dispatch_loop acquires the global singleton lock at entry (#1362)."""
+
+    def test_run_dispatch_loop_once_raises_when_lock_already_held(
+        self, tmp_dispatch_dirs: Path
+    ) -> None:
+        """R1: ``--once`` is NOT exempt — a second launch while the lock is
+        held (e.g. by a live ``serve``) is refused, not silently allowed
+        through as a "quick" single tick."""
+        with dispatch_loop_lock(), pytest.raises(DispatchLoopLockedError):
+            run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
+
+    def test_run_dispatch_loop_once_acquires_freely_when_unheld(
+        self, tmp_dispatch_dirs: Path
+    ) -> None:
+        """R1: ``--once`` acquires and completes when no loop holds the lock."""
+        # No prior holder — must complete without raising.
+        run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
+        # And the lock was released, so a subsequent launch also succeeds.
+        run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
+
+    def test_run_dispatch_loop_force_bypasses_lock_and_warns(
+        self, tmp_dispatch_dirs: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """R3: ``force=True`` bypasses an externally-held lock and logs a WARNING."""
+        with (
+            dispatch_loop_lock(),
+            caplog.at_level(logging.WARNING, logger="cw.dispatch"),
+        ):
+            run_dispatch_loop(
+                once=True,
+                force=True,
+                native_daemon=FakeNativeDaemonClient(),
+            )
+        assert any("force" in record.message.lower() for record in caplog.records), (
+            f"expected a force WARNING but got: {[r.message for r in caplog.records]!r}"
+        )

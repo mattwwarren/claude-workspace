@@ -28,7 +28,12 @@ from freezegun import freeze_time
 from pydantic import ValidationError
 
 from cw.config import dev_queue_lock as _dev_queue_lock_path
-from cw.config import load_effective_clients, sessions_lock, sessions_lock_file
+from cw.config import (
+    dispatch_loop_lock_file,
+    load_effective_clients,
+    sessions_lock,
+    sessions_lock_file,
+)
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.events import read_events, record_event
 from cw.exceptions import CwError, SessionsLockReentryError
@@ -1130,6 +1135,63 @@ def test_act_auto_fix_ci_calls_add_ticket_and_dispatch_once(
     assert read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED]) == []
     # The latch is the ONLY mutation this act phase makes to the row.
     after_task = load_dev_queue().tasks[0]
+    assert (
+        after_task.model_copy(update={"auto_fix_ci_fired_at": None})
+        == store_before.tasks[0]
+    )
+
+
+def test_act_auto_fix_ci_dispatch_loop_locked_elsewhere_fails_open(
+    tmp_config_dir: Path,
+) -> None:
+    """A genuinely EXTERNAL dispatch-loop lock holder degrades gracefully (#1362).
+
+    Uses the REAL ``dispatch_loop_lock`` file, held via a raw fd exactly as a
+    second ``cw`` process would (fcntl.flock is per-open-file-description, so
+    this denies acquisition even from this same test process). Proves
+    ``_dispatch_auto_fix_ci`` does NOT bypass a genuinely-held external lock
+    (there is no ``force=True`` at this call site) -- it fails open via the
+    same ``except CwError`` / ``PR_ACTION_FAILED`` posture already used for
+    the analogous ``SessionsLockReentryError`` case (GitHub #1228). The ticket
+    is still re-enqueued (``add_ticket`` ran); only the "trigger a tick right
+    now" nicety is lost, deferred to whichever process holds the lock on its
+    own next regular tick.
+    """
+    _write_acme_clients_yaml(tmp_config_dir)
+    task = _make_task(
+        pr_url=_PR_URL,
+        pr_state=_pr_state(attention_state="ci_failing", failing_checks=["lint"]),
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    store_before = load_dev_queue()
+
+    lock_path = dispatch_loop_lock_file()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.touch(exist_ok=True)
+    fd = lock_path.open("r+")
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        acted = _act_auto_fix_ci(
+            [_candidate(task, RECIPE_AUTO_FIX_CI, "ci_failing")],
+            clients=load_effective_clients(),
+        )
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()
+
+    assert acted == []
+    failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
+    matching = [e for e in failed if e.correlation_id == task.ticket_id]
+    assert len(matching) == 1
+    # Pin the failure to the lock-contention path specifically -- not just
+    # "some CwError" -- mirroring test_reconcile_reentry_guard_fires_and_is_swallowed's
+    # exact-exception check for the analogous #1228 SessionsLockReentryError case.
+    assert "dispatch loop already running" in matching[0].payload["error"]
+    # Latch stays stamped even on dispatch failure (no retry storm); it is the
+    # ONLY mutation this act phase makes to the row -- same invariant as the
+    # successful-dispatch case above.
+    after_task = load_dev_queue().tasks[0]
+    assert after_task.auto_fix_ci_fired_at is not None
     assert (
         after_task.model_copy(update={"auto_fix_ci_fired_at": None})
         == store_before.tasks[0]

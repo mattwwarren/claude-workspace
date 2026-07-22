@@ -7,6 +7,7 @@ import fcntl
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -23,7 +24,12 @@ from ruamel.yaml.comments import CommentedMap
 
 from cw import _config_migrate
 from cw.atomic import atomic_write_text
-from cw.exceptions import ConfigValidationError, CwError, SessionsLockReentryError
+from cw.exceptions import (
+    ConfigValidationError,
+    CwError,
+    DispatchLoopLockedError,
+    SessionsLockReentryError,
+)
 from cw.models import (
     CW_STATE_SCHEMA_VERSION,
     DEFAULT_AUTO_PURPOSES,
@@ -81,6 +87,10 @@ SESSIONS_LOCK = STATE_DIR / ".sessions.lock"
 CLIENTS_LOCK = CONFIG_DIR / ".clients.yaml.lock"
 CONCURRENCY_OVERRIDE_FILE = STATE_DIR / "concurrency_overrides.json"
 CONCURRENCY_OVERRIDE_LOCK = STATE_DIR / ".concurrency_overrides.lock"
+# Process-lifetime singleton lock for the dispatch loop (#1362). A single
+# GLOBAL file (no --client keying): only one run_dispatch_loop may run at a
+# time against a given STATE_DIR.
+DISPATCH_LOOP_LOCK = STATE_DIR / ".dispatch_loop.lock"
 
 _DEFAULT_ORCHESTRATOR_YAML = """\
 tick_interval_seconds: 30
@@ -184,6 +194,10 @@ def concurrency_override_file() -> Path:
 
 def concurrency_override_lock_file() -> Path:
     return CONCURRENCY_OVERRIDE_LOCK
+
+
+def dispatch_loop_lock_file() -> Path:
+    return DISPATCH_LOOP_LOCK
 
 
 def _under_pytest() -> bool:
@@ -332,6 +346,96 @@ def clients_lock() -> Iterator[None]:
     fd = lock_path.open("w")
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()
+
+
+def _current_command_str() -> str:
+    """Return a normalized ``cw ...`` command string for the current process.
+
+    Normalizes ``sys.argv[0]`` to its basename (dropping any interpreter/venv
+    path) joined with the remaining argv via ``shlex.join`` -- e.g. ``cw
+    dev-queue serve --quiet``. Written into the dispatch-loop lock file as the
+    holder's self-reported identity (#1362).
+    """
+    argv0 = Path(sys.argv[0]).name if sys.argv else "cw"
+    return shlex.join([argv0, *sys.argv[1:]])
+
+
+def _dispatch_loop_holder_message(lock_path: Path) -> str:
+    """Build the "already running" error message from the holder's identity JSON.
+
+    Reads the pid+cmd JSON a live holder wrote into *lock_path*. Falls back to
+    "holder unknown" text (rather than crashing) when the file is empty,
+    unreadable, or malformed -- a losing acquisition attempt must surface a
+    clean, actionable error even if the winner's identity is unavailable.
+    """
+    try:
+        data = json.loads(lock_path.read_text())
+        pid = data["pid"]
+        cmd = data["cmd"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return (
+            "dispatch loop already running (holder unknown)"
+            " — stop it first or use --force"
+        )
+    return (
+        f"dispatch loop already running (pid {pid}: {cmd})"
+        " — stop it first or use --force"
+    )
+
+
+@contextlib.contextmanager
+def dispatch_loop_lock() -> Iterator[None]:
+    """Acquire the process-lifetime singleton lock for the dispatch loop (#1362).
+
+    Only one :func:`cw.dispatch.run_dispatch_loop` may run at a time against a
+    given ``STATE_DIR``. Unlike the sibling ``*_lock`` context managers here
+    (which block on ``LOCK_EX``), this acquires ``LOCK_EX | LOCK_NB`` so a
+    second launch fails fast with :class:`~cw.exceptions.DispatchLoopLockedError`
+    instead of blocking behind the running loop. The advisory lock is held for
+    the full lifetime of the ``with`` block and released on every exit path
+    (normal return, ``once=True`` early return, any raised exception).
+
+    Divergence from the sibling skeleton: the file is opened ``"r+"`` after
+    ``touch(exist_ok=True)`` rather than ``"w"``. ``"w"`` truncates on open
+    *before* the flock attempt, so a losing non-blocking acquisition would
+    destroy the winning holder's still-live identity JSON. On a successful
+    acquisition the file is truncated and re-populated with this process's
+    ``{"pid", "cmd"}`` identity so a later contender can name the holder.
+    """
+    state_dir().mkdir(parents=True, exist_ok=True)
+    lock_path = dispatch_loop_lock_file()
+    lock_path.touch(exist_ok=True)
+    fd = lock_path.open("r+")
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            message = _dispatch_loop_holder_message(lock_path)
+            raise DispatchLoopLockedError(message) from exc
+        # Won the lock — safe to truncate and write our identity now.
+        #
+        # Why not an atomic temp-file + os.replace() here: os.replace() would
+        # swap the underlying inode out from under this held fd's flock,
+        # leaving a fresh, unlocked inode at this path that a losing
+        # contender could then successfully flock -- breaking the mutex
+        # itself, which is strictly worse than the narrow race this would
+        # fix. There IS a real (but narrow) window between this truncate and
+        # the write below completing where a concurrent losing acquirer's
+        # unlocked read (_dispatch_loop_holder_message) could see stale or
+        # empty content; a fully correct fix requires a separate, atomically
+        # -replaced holder-info file independent of the lock file, which is
+        # more design than this narrow, cosmetic-only race (worst case: a
+        # transiently stale-but-plausible PID in an error message that
+        # already degrades gracefully to "holder unknown" on any read
+        # failure) currently warrants.
+        fd.seek(0)
+        fd.truncate()
+        fd.write(json.dumps({"pid": os.getpid(), "cmd": _current_command_str()}))
+        fd.flush()
         yield
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)

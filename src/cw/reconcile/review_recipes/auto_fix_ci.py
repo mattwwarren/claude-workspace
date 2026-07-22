@@ -185,6 +185,25 @@ def _dispatch_auto_fix_ci(job: _RedispatchJob) -> str | None:
     The ``auto_fix_ci_fired_at`` latch stays stamped even when this dispatch
     fails — same posture as ``request_reviewer``: ``PR_ACTION_FAILED`` is the
     visible signal, the latch is NOT rolled back on dispatch failure.
+
+    Why NOT ``force=True`` here (#1362): this call can run either (a) nested
+    inside a live loop's own tick (``dispatch_tick`` -> ``_reconcile_usage_limited``
+    -> ``reconcile`` -> this recipe, same process already holding
+    ``dispatch_loop_lock()``) or (b) standalone from ``cw status``/``cw
+    start``/``cw doctor``, which call ``reconcile()`` directly with no lock
+    held at all. ``force=True`` cannot distinguish these -- it would
+    unconditionally bypass the lock in case (b) too, silently permitting a
+    genuinely concurrent second dispatch tick against whatever OTHER process
+    actually holds the lock elsewhere, reintroducing the exact per-process
+    state divergence #1362 exists to prevent. Left unforced, a
+    ``DispatchLoopLockedError`` here is caught by ``except CwError`` below —
+    the SAME accepted-degradation posture already used for
+    ``SessionsLockReentryError`` on this identical call site (GitHub #1228):
+    the ticket is already durably re-enqueued (``add_ticket`` above already
+    ran), so a lock-contention failure here only costs the "trigger a tick
+    right now" nicety, not the fix itself -- whichever loop actually holds
+    the lock will pick the re-enqueued ticket up on its own next regular tick
+    (default 30s, ``tick_interval_seconds`` in ``config.py``).
     """
     from cw.dev_queue import add_ticket
     from cw.dispatch import run_dispatch_loop

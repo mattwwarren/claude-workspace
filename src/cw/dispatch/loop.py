@@ -22,6 +22,7 @@ from cw.auto_dev_result import (
     parse_stdout,
 )
 from cw.config import (
+    dispatch_loop_lock,
     load_clients,
     load_effective_clients,
     load_effective_config,
@@ -424,6 +425,7 @@ def run_dispatch_loop(
     emit: Callable[[str], None] | None = None,
     auto_ff: bool = True,
     client: str | None = None,
+    force: bool = False,
 ) -> None:
     """Run the dispatch loop, optionally overriding per-client concurrency caps.
 
@@ -449,6 +451,49 @@ def run_dispatch_loop(
             behavior (``--no-auto-ff`` CLI flag).
         client: When set, scope each tick to this single client's queue.
             Validated at the CLI boundary before this function is called.
+        force: When True, bypass the process-lifetime singleton lock (#1362)
+            via ``contextlib.nullcontext()`` and log a WARNING on every entry.
+            Escape hatch for a wedged/foreign holder; otherwise a second loop
+            launch fails fast with ``DispatchLoopLockedError``.
+    """
+    if force:
+        _log.warning(
+            "dispatch: --force set; bypassing the dispatch-loop singleton lock"
+            " (#1362) — a second concurrent loop can diverge per-process state"
+        )
+        lock_cm: contextlib.AbstractContextManager[None] = contextlib.nullcontext()
+    else:
+        lock_cm = dispatch_loop_lock()
+    with lock_cm:
+        _run_dispatch_loop_body(
+            max_parallel=max_parallel,
+            once=once,
+            use_plan=use_plan,
+            parent=parent,
+            native_daemon=native_daemon,
+            emit=emit,
+            auto_ff=auto_ff,
+            client=client,
+        )
+
+
+def _run_dispatch_loop_body(
+    *,
+    max_parallel: int | None,
+    once: bool,
+    use_plan: bool,
+    parent: str | None,
+    native_daemon: NativeDaemonClient | None,
+    emit: Callable[[str], None] | None,
+    auto_ff: bool,
+    client: str | None,
+) -> None:
+    """The dispatch loop proper, run inside the singleton lock (#1362).
+
+    Extracted from :func:`run_dispatch_loop` so the lock-acquisition wrapper
+    stays small and the loop body is not re-indented under a ``with``. The
+    caller owns lock acquisition/release; this function assumes it holds (or
+    has deliberately bypassed) the lock.
     """
     config = load_effective_config()
 

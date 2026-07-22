@@ -12,7 +12,11 @@ import time
 from typing import TYPE_CHECKING
 
 from cw.dispatch import run_dispatch_loop
-from cw.exceptions import DispatchServeError, VersionDriftError
+from cw.exceptions import (
+    DispatchLoopLockedError,
+    DispatchServeError,
+    VersionDriftError,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -46,6 +50,7 @@ def run_dispatch_serve(
     auto_ff: bool = True,
     client: str | None = None,
     max_restarts: int = -1,
+    force: bool = False,
 ) -> None:
     """Run the dispatch loop with automatic restart on crash.
 
@@ -64,6 +69,8 @@ def run_dispatch_serve(
         max_restarts: Maximum number of restarts.  -1 means unlimited.
             When the crash count hits this limit the supervisor logs a
             critical message and raises :exc:`DispatchServeGaveUp`.
+        force: Forwarded to ``run_dispatch_loop`` on every (re)start to
+            bypass the dispatch-loop singleton lock (#1362).
     """
     crash_times: list[float] = []
     restart_count: int = 0
@@ -79,12 +86,19 @@ def run_dispatch_serve(
                 emit=emit,
                 auto_ff=auto_ff,
                 client=client,
+                force=force,
             )
         except KeyboardInterrupt:
             # Ctrl-C — clean stop; do not restart.
             return
         except SystemExit:
             # Propagate clean shutdowns initiated by the loop itself.
+            raise
+        except DispatchLoopLockedError:
+            # Another loop already holds the singleton lock (#1362). This is a
+            # fail-fast condition, NOT a crash — re-raise immediately instead
+            # of retrying through the backoff loop (which would delay the
+            # blocked-launch error by up to ~300s across 5 attempts).
             raise
         except VersionDriftError:
             # Intentional reload — do NOT count toward crash_times or restart_count.

@@ -197,6 +197,23 @@ class VersionDriftError(DispatchServeError):
     __slots__ = ()
 
 
+class DispatchLoopLockedError(CwError):
+    """Raised when a dispatch loop is launched while another already holds the
+    process-lifetime singleton lock (GitHub #1362).
+
+    ``run_dispatch_loop`` acquires an advisory, non-blocking ``fcntl.flock``
+    over ``DISPATCH_LOOP_LOCK`` at entry. A second launch (via ``cw dev-queue
+    run`` or ``cw dev-queue serve``, including ``run --once``) fails fast with
+    this error, whose message names the holding process's PID and normalized
+    command so the operator can stop it or re-launch with ``--force``. A plain
+    :class:`CwError` subclass — deliberately NOT a :class:`DispatchServeError`
+    — so :func:`run_dispatch_serve` re-raises it immediately instead of
+    swallowing it into its crash-restart/backoff loop.
+    """
+
+    __slots__ = ()
+
+
 class RfcContractError(CwError):
     """An RFC does not satisfy the buildout input contract.
 
