@@ -1085,6 +1085,15 @@ class TestConsecutiveSkipLatches:
         )
         assert session.consecutive_salvage_skips == 0
 
+    def test_session_consecutive_park_vetoes_defaults_zero(self) -> None:
+        session = Session(
+            name="acme/impl",
+            client="acme",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=Path("/tmp/acme"),
+        )
+        assert session.consecutive_park_vetoes == 0
+
 
 class TestInboxPruneThresholds:
     """Issue #856: OrchestratorConfig defaults for the inbox-size doctor check."""

@@ -1106,6 +1106,55 @@ class TestMigrateCwState:
         assert session["liveness_bucket"] == "live"
         assert migrated["schema_version"] == CW_STATE_SCHEMA_VERSION
 
+    def test_v14_to_v15_fills_consecutive_park_vetoes_default(self) -> None:
+        """migrate_cw_state fills consecutive_park_vetoes=0 on v14 sessions
+        that lack the key (#1445)."""
+        raw = {
+            "schema_version": 14,
+            "sessions": [
+                {
+                    "id": "s1",
+                    "parent_session_id": None,
+                    "worker_session_ids": [],
+                    "last_result": None,
+                    "cost_usd": None,
+                    "cost_breakdown": None,
+                    "lane": None,
+                    "stage": None,
+                    "consecutive_salvage_skips": 0,
+                    "liveness_bucket": "live",
+                }
+            ],
+        }
+        migrated = migrate_cw_state(raw)
+        session = migrated["sessions"][0]
+        assert session["consecutive_park_vetoes"] == 0
+        assert migrated["schema_version"] == CW_STATE_SCHEMA_VERSION
+
+    def test_v15_consecutive_park_vetoes_preserved_idempotently(self) -> None:
+        """Existing nonzero consecutive_park_vetoes survives a migration pass."""
+        raw = {
+            "schema_version": 15,
+            "sessions": [
+                {
+                    "id": "s1",
+                    "parent_session_id": None,
+                    "worker_session_ids": [],
+                    "last_result": None,
+                    "cost_usd": None,
+                    "cost_breakdown": None,
+                    "lane": None,
+                    "stage": None,
+                    "consecutive_salvage_skips": 0,
+                    "liveness_bucket": "live",
+                    "consecutive_park_vetoes": 2,
+                }
+            ],
+        }
+        migrated = migrate_cw_state(raw)
+        session = migrated["sessions"][0]
+        assert session["consecutive_park_vetoes"] == 2
+
     def test_v13_liveness_bucket_preserved_idempotently(self) -> None:
         """Existing non-default liveness_bucket survives a migration pass."""
         raw = {
