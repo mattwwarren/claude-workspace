@@ -11,7 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from cw import queue_peek
-from cw.models import QueueItemStatus, Stage, TicketTask
+from cw.models import DEFAULT_STAGE, QueueItemStatus, Stage, TicketTask
 from tests.conftest import _make_ticket_task as _cw_make_ticket_task
 
 # ---------------------------------------------------------------------------
@@ -62,6 +62,7 @@ def _make_ticket_task(
     attempts: int = 1,
     worktree_path: Path | None = None,
     stage_high_water: Stage | None = None,
+    stage: Stage = DEFAULT_STAGE,
 ) -> TicketTask:
     return _cw_make_ticket_task(
         ticket_id=ticket_id,
@@ -71,6 +72,7 @@ def _make_ticket_task(
         attempts=attempts,
         worktree_path=worktree_path,
         stage_high_water=stage_high_water,
+        stage=stage,
     )
 
 
@@ -1178,6 +1180,7 @@ class TestFormatRow:
             "signal_source",
             "jsonl_idle_min",
             "stage_high_water",
+            "pipeline_stage",
         }
         assert required_keys == set(row.keys())
 
@@ -1218,6 +1221,41 @@ class TestFormatRow:
         }
         row = queue_peek.format_row(task, info, _NOW)
         assert row["stage_high_water"] == Stage.REVIEW
+
+    def test_pipeline_stage_present_in_row(self) -> None:
+        # TicketTask.stage is non-Optional (typed Stage, default Stage.PLAN),
+        # so pipeline_stage is never null in practice here — this exercises
+        # the queue-side value distinct from the sentinel-derived "stage" key.
+        task = _make_ticket_task(stage=Stage.FINALIZE)
+        info: dict[str, Any] = {
+            "first_user_ts": "2026-06-20T11:50:00+00:00",
+            "last_asst_ts": "2026-06-20T11:55:00+00:00",
+            "last_sentinel_status": None,
+            "last_sentinel_stage": None,
+            "last_pr_number": None,
+            "signal_source": "transcript",
+        }
+        row = queue_peek.format_row(task, info, _NOW)
+        assert row["pipeline_stage"] == Stage.FINALIZE
+        assert row["stage"] is None
+
+    def test_stage_and_stage_high_water_unchanged_by_pipeline_stage(self) -> None:
+        """Regression: adding pipeline_stage must not alter the existing
+        "stage" (sentinel-derived) or "stage_high_water" values or semantics.
+        """
+        task = _make_ticket_task(stage_high_water=Stage.REVIEW, stage=Stage.FINALIZE)
+        info: dict[str, Any] = {
+            "first_user_ts": "2026-06-20T11:50:00+00:00",
+            "last_asst_ts": "2026-06-20T11:55:00+00:00",
+            "last_sentinel_status": None,
+            "last_sentinel_stage": None,
+            "last_pr_number": None,
+            "signal_source": "transcript",
+        }
+        row = queue_peek.format_row(task, info, _NOW)
+        assert row["stage_high_water"] == Stage.REVIEW
+        assert row["stage_high_water"] == task.stage_high_water
+        assert row["stage"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -1596,6 +1634,13 @@ class TestBlindRow:
         row = queue_peek.format_row(task, _make_blind_info(), _NOW)
         assert "stage_high_water" in row
         assert row["stage_high_water"] == Stage.REVIEW
+
+    def test_blind_row_includes_pipeline_stage(self) -> None:
+        task = _make_ticket_task(stage=Stage.FINALIZE)
+        row = queue_peek.format_row(task, _make_blind_info(), _NOW)
+        assert "pipeline_stage" in row
+        assert row["pipeline_stage"] == Stage.FINALIZE
+        assert row["stage"] is None
 
     def test_non_blind_signal_source_is_transcript(self) -> None:
         task = _make_ticket_task()
