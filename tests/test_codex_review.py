@@ -963,6 +963,9 @@ class TestSynthesizeCodexReviewResult:
         assert result.review.must_fix_initial == 1
         assert verdict is not None
         assert verdict.blocking is True
+        assert result.blocker.details != ""
+        assert "Bug here" in result.blocker.details
+        assert "src/cw/foo.py:10" in result.blocker.details
 
     @pytest.mark.parametrize(
         "reason", [CODEX_BUDGET_EXHAUSTED, CODEX_TIMEOUT, CODEX_ERROR]
