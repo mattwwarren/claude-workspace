@@ -296,10 +296,12 @@ class ProposedAction(StrEnum):
     # non-SKIP_PARKED detect-phase disposition). Carries no event of its own —
     # a pure state-mutation candidate. Closes #974.
     RESET_SALVAGE_SKIP_COUNTER = "reset_salvage_skip_counter"
-    # Side-effect-only candidate — emits `session.park_vetoed`, mutates
-    # nothing. The stalled sweep's wall-clock-budget park is suppressed while
-    # the session's freshly-classified liveness bucket is still LIVE. Closes
-    # #976.
+    # Emits `session.park_vetoed` and increments the session's
+    # consecutive_park_vetoes latch. The stalled sweep's wall-clock-budget /
+    # retry-cap park is suppressed while the session's freshly-classified
+    # liveness bucket is still LIVE — but only up to OrchestratorConfig.
+    # park_veto_cap consecutive post-budget vetoes; past the cap the pending
+    # park proceeds instead (closes #976, bounded by #1445).
     PARK_VETOED = "park_vetoed"
     # Side-effect-only candidate — emits `session.needs_attention`, mutates
     # nothing. An `external`-counterparty session (teammate-review idle-reap
@@ -354,6 +356,17 @@ class ReapCandidate:
     # carried into the session.park_vetoed / session.sentinel_stage_mismatch_vetoed
     # event payload so the act phase does not need to recompute it. See #976, #1281.
     stale_minutes: float | None = None
+    # PARK_VETOED only: the session's consecutive_park_vetoes value AFTER this
+    # veto (current + 1). The act phase persists it back onto the Session and
+    # carries it into the session.park_vetoed payload. See #1445.
+    new_veto_count: int = 0
+    # Stamped True on the fallthrough PARK_BLOCKED_ON_USER / REVERT_TASK
+    # candidate when the liveness veto declined *because the veto cap was
+    # reached* (as opposed to the session being genuinely stale). Distinguishes
+    # "cap fired, escalate to the operator" from an ordinary timeout so the act
+    # phase can emit an immediate session.needs_attention at parity across both
+    # cap-fire sites. See #1445.
+    veto_cap_exhausted: bool = False
 
 
 @dataclass(frozen=True)
