@@ -296,7 +296,7 @@ class TestResolveDispatchSkipReasonHostCapacity:
 
 @pytest.fixture
 def host_budget_config() -> OrchestratorConfig:
-    """OrchestratorConfig with a generous per-client ceiling but host_session_budget=1."""
+    """OrchestratorConfig: generous per-client ceiling, host_session_budget=1."""
     return OrchestratorConfig(
         tick_interval_seconds=30,
         per_client_ceiling={"client-a": 5, "client-b": 5, "test-client": 5},
