@@ -354,9 +354,7 @@ class TestGateTimeoutSeconds:
         assert 480 <= _mod.gate_timeout_seconds("pre-commit") <= 600
 
     def test_unknown_gate_falls_back_to_default(self) -> None:
-        assert (
-            _mod.gate_timeout_seconds("ruff") == _mod.GATE_TIMEOUT_DEFAULT_SECONDS
-        )
+        assert _mod.gate_timeout_seconds("ruff") == _mod.GATE_TIMEOUT_DEFAULT_SECONDS
 
     def test_gate_timeout_cli_subcommand_json_shape(
         self, capsys: pytest.CaptureFixture[str]
@@ -403,9 +401,7 @@ class TestGateElapsedExceedsCeiling:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         started = datetime(2026, 1, 1, tzinfo=UTC).isoformat()
-        _mod.cmd_gate_elapsed(
-            argparse.Namespace(started=started, ceiling_seconds=600)
-        )
+        _mod.cmd_gate_elapsed(argparse.Namespace(started=started, ceiling_seconds=600))
         out = json.loads(capsys.readouterr().out)
         assert set(out.keys()) == {"elapsed_s", "ceiling_s", "exceeded"}
         assert out["ceiling_s"] == 600

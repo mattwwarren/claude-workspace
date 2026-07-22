@@ -209,15 +209,40 @@ Spawn parallel subagents via the Task tool, grouped by file for exclusive owners
 
 ## Step 7: Run Quality Gates
 
-Run each gate detected in Step 2, in order:
+Run each gate detected in Step 2, in order.
+
+Before running each gate, fetch its timeout ceiling:
+```bash
+~/.claude/scripts/prep_pr_state.py gate-timeout <gate-name>
+```
+This returns `foreground_ceiling_s` (when to switch this gate to background) and `poll_ceiling_s` (total wall-clock budget once backgrounded before declaring the result lost).
 
 For each gate:
-1. Run the command
-2. If it **fails** and has an autofix command (e.g., ruff, eslint):
+1. Record the start time: capture `date -u +%Y-%m-%dT%H:%M:%SZ` as `<started>`.
+2. Run the gate command via the `Bash` tool with `timeout` set to `foreground_ceiling_s * 1000` (ms; the Bash tool accepts up to 600000ms).
+   - **If it completes within the ceiling** → proceed with the existing pass/fail handling (autofix retry, or ask/HEADLESS-BLOCK below).
+   - **If the foreground call itself times out** → this is the deliberate "switch to background" trigger. Re-issue the *same* command via `Bash` with `run_in_background: true`. The tool returns immediately with a shell id and an output-file path; record `<output_file>`.
+3. Once backgrounded, the harness passively notifies this session when the command exits (success, failure, or crash) — this is the primary detection path. Do not idle-wait; continue other Step-7 work if any, and let the notification arrive.
+4. **Liveness / early-block check** (bounded re-checks, not a dedicated poll tool): at intervals (e.g. every few minutes of elapsed session time), `Read` `<output_file>` to confirm the gate is still producing output (progress = alive), and call:
+   ```bash
+   ~/.claude/scripts/prep_pr_state.py gate-elapsed --started <started> --ceiling-seconds <poll_ceiling_s>
+   ```
+   - **If a completion notification arrives before the ceiling is exceeded** → treat as authoritative: read the final output/exit code and apply the existing pass/fail handling (autofix retry, or ask/HEADLESS-BLOCK below).
+   - **If `exceeded: true` and no completion notification has arrived** → the backgrounded command's result is lost or stalled (dead backgrounding path, not merely slow). Emit the `gate_timeout` block below **immediately** — do not wait for the remaining stage budget:
+     ```
+     <<<PREP_PR_BLOCK
+     reason: gate_timeout
+     gate: <gate name, e.g. "mypy">
+     details: foreground ceiling <foreground_ceiling_s>s exceeded at <started>; backgrounded; poll ceiling <poll_ceiling_s>s elapsed with no completion notification and no output growth in <output_file> since <last-observed-timestamp>. Last captured output: <tail of output_file>
+     PREP_PR_BLOCK>>>
+     ```
+     This applies uniformly to all 8 quality gates detected by Step 2/`detect-gates` (uv lock check, ruff check, ruff format, mypy, pre-commit, pytest units, pytest integration, diff-cover), not only mypy/pytest/pre-commit.
+   - This is an **interactive-mode override too**: outside `--headless`, surface the same block content as a friction BLOCK to the user rather than silently parking — a lost gate result is never something to wait out quietly.
+5. If it **fails** (not timed out) and has an autofix command (e.g., ruff, eslint):
    - Run the autofix command
    - Re-run the original check to verify it passes
    - Commit autofix changes
-3. If it **fails** without autofix (e.g., mypy, tsc, pytest):
+6. If it **fails** (not timed out) without autofix (e.g., mypy, tsc, pytest):
    - Report the failure output
    - Ask: "Gate [name] failed. Attempt to fix, or ship anyway?"
 

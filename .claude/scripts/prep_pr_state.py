@@ -8,6 +8,8 @@ Subcommands:
   check-scope   — Compare latest vs initial snapshot, report growth
   status        — Show current cycle state
   clean         — Remove state file
+  gate-timeout  — Foreground/poll timeout ceilings for a named gate
+  gate-elapsed  — Elapsed time since a timestamp vs a ceiling
 """
 
 from __future__ import annotations
@@ -238,6 +240,56 @@ ECOSYSTEM_GATES: dict[str, list[Gate]] = {
         Gate(name="test", command="go test ./..."),
     ],
 }
+
+
+# --- Gate Timeout / Liveness (#1432) ---
+
+# Foreground ceiling (seconds) before a gate switches from synchronous
+# execution to backgrounded run_in_background + polled-Read liveness
+# checking. Deliberately generous-but-bounded "switch to background"
+# triggers, NOT sized to guarantee inline completion -- mypy/pytest/
+# pre-commit routinely exceed these on repos this size (see #1432,
+# GEN-5458/GEN-5463). Tunable per-gate; unlisted gates fall back to
+# GATE_TIMEOUT_DEFAULT_SECONDS.
+GATE_TIMEOUT_DEFAULTS: dict[str, int] = {
+    "mypy": 600,
+    "pytest": 600,
+    "pre-commit": 480,
+}
+GATE_TIMEOUT_DEFAULT_SECONDS: int = 480
+
+# Hard poll ceiling (seconds) once a gate has been backgrounded: total
+# wall-clock time /prep-pr Step 7 may spend re-Read-ing the backgrounded
+# command's output file waiting for a completion notification before
+# concluding the result is lost (dead backgrounding path) rather than
+# merely slow, and emitting an early gate_timeout PREP_PR_BLOCK. Chosen
+# well inside headless_timeout_by_stage[Stage.FINALIZE] (5400s,
+# src/cw/models/orchestrator_config.py) so the block fires with stage
+# budget to spare.
+GATE_POLL_CEILING_SECONDS: int = 1800
+
+
+def gate_timeout_seconds(name: str) -> int:
+    """Foreground ceiling for a gate by name, falling back to the default."""
+    return GATE_TIMEOUT_DEFAULTS.get(name, GATE_TIMEOUT_DEFAULT_SECONDS)
+
+
+def elapsed_exceeds_ceiling(
+    started: str, ceiling_s: int, *, now: datetime | None = None
+) -> dict[str, Any]:
+    """Compute elapsed seconds since an ISO-8601 timestamp vs a ceiling.
+
+    Raises ValueError on a malformed *started* timestamp rather than
+    silently misreporting.
+    """
+    started_dt = datetime.fromisoformat(started)
+    now_dt = now if now is not None else datetime.now(UTC)
+    elapsed_s = (now_dt - started_dt).total_seconds()
+    return {
+        "elapsed_s": elapsed_s,
+        "ceiling_s": ceiling_s,
+        "exceeded": elapsed_s > ceiling_s,
+    }
 
 
 # uv run flags that consume the next token as their argument value
@@ -640,6 +692,26 @@ def cmd_clean(args: argparse.Namespace) -> None:  # noqa: ARG001
     print(json.dumps({"removed": removed}))
 
 
+def cmd_gate_timeout(args: argparse.Namespace) -> None:
+    """Handle gate-timeout subcommand."""
+    result = {
+        "gate": args.name,
+        "foreground_ceiling_s": gate_timeout_seconds(args.name),
+        "poll_ceiling_s": GATE_POLL_CEILING_SECONDS,
+    }
+    print(json.dumps(result, indent=2))
+
+
+def cmd_gate_elapsed(args: argparse.Namespace) -> None:
+    """Handle gate-elapsed subcommand."""
+    try:
+        result = elapsed_exceeds_ceiling(args.started, args.ceiling_seconds)
+    except ValueError:
+        logger.exception("Malformed --started timestamp")
+        sys.exit(1)
+    print(json.dumps(result, indent=2))
+
+
 # --- CLI Entry Point ---
 
 
@@ -682,6 +754,27 @@ def main() -> None:
     # clean
     subparsers.add_parser("clean", help="Remove state file")
 
+    # gate-timeout
+    gate_timeout_parser = subparsers.add_parser(
+        "gate-timeout", help="Foreground/poll timeout ceilings for a named gate"
+    )
+    gate_timeout_parser.add_argument("name", help="Gate name (e.g. mypy, pytest)")
+
+    # gate-elapsed
+    gate_elapsed_parser = subparsers.add_parser(
+        "gate-elapsed", help="Elapsed time since a timestamp vs a ceiling"
+    )
+    gate_elapsed_parser.add_argument(
+        "--started", required=True, help="ISO-8601 start timestamp"
+    )
+    gate_elapsed_parser.add_argument(
+        "--ceiling-seconds",
+        type=int,
+        required=True,
+        dest="ceiling_seconds",
+        help="Ceiling in seconds",
+    )
+
     args = parser.parse_args()
 
     dispatch = {
@@ -690,6 +783,8 @@ def main() -> None:
         "check-scope": cmd_check_scope,
         "status": cmd_status,
         "clean": cmd_clean,
+        "gate-timeout": cmd_gate_timeout,
+        "gate-elapsed": cmd_gate_elapsed,
     }
 
     handler = dispatch.get(args.command)
