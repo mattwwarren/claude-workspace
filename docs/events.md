@@ -614,7 +614,7 @@ must not be auto-retried; the operator must manually clear or close it.
 ### `session.reap_proposed`
 
 **Emitter:** `_emit_reap_proposed` in `cw.reconcile`
-**Payload v2:**
+**Payload v3:**
 ```json
 {
   "session_id": "<str>",
@@ -627,7 +627,8 @@ must not be auto-retried; the operator must manually clear or close it.
   "evidence": {
     "elapsed_seconds": "<float>",
     "in_roster": "<bool>",
-    "transcript_age_seconds": "<float | null>"
+    "transcript_age_seconds": "<float | null>",
+    "transcript_mtime_age_seconds": "<float | null>"
   }
 }
 ```
@@ -637,6 +638,14 @@ invariant 3 (propose before act). Only emitted for `REVERT_TASK`,
 `CRASH_COMPLETE`, and `PARK_BLOCKED_ON_USER` proposed actions; counter
 increments, salvage completions, and skip-parked candidates do not produce
 this event.
+
+`evidence.transcript_age_seconds` is the content-aware staleness
+`_liveness_veto_candidate` evaluated (last content-bearing `user`/`assistant`
+entry, `_transcript_age_seconds`) — not raw file mtime.
+`evidence.transcript_mtime_age_seconds` is the raw `stat().st_mtime` age,
+provided separately for diagnostics; the two can diverge by orders of
+magnitude when a trailing metadata-only record (`ai-title`/`mode`/
+`queue-operation`/etc.) lands after the last real turn (#1427).
 
 Dedup: `session.reap_proposed_at` is stamped on the session object at
 emission time. Subsequent reconcile ticks skip sessions already stamped,
