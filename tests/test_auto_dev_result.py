@@ -3919,6 +3919,44 @@ class TestAutomergeNotArmedBlockerReason:
         assert result.blocker.reason == "automerge_not_armed"
 
 
+class TestGateTimeoutBlockerReason:
+    """#1432 -- `gate_timeout` is a defensive open-enum blocker.reason value.
+
+    Today's /prep-pr Step 7 PREP_PR_BLOCK for a lost/stalled gate collapses
+    through the existing "Any other agent BLOCK" gate-collapse row
+    (docs/headless-contract.md Sec 2), so the sentinel's top-level
+    blocker.reason literally stays "agent_block" with the block's own
+    `reason: gate_timeout` / `gate: <name>` fields preserved verbatim
+    inside blocker.details. This guards the forward-compatible case: if a
+    future change promotes gate_timeout to a first-class top-level
+    blocker.reason (as automerge_not_armed was for #1140), it must (a)
+    parse as a bare open-enum string with no schema_version bump, and (b)
+    not be silently swept into FINALIZE_REGRESS_BLOCKER_REASONS (a stalled
+    gate isn't fixed by re-running impl) or
+    OPERATOR_UNAVAILABLE_BLOCKER_REASONS (this is a producer-side
+    detection gap, not operator/dependency unavailability) -- same
+    precedent as automerge_not_armed, not push_auth_failed.
+    """
+
+    def test_gate_timeout_excluded_from_finalize_regress(self) -> None:
+        assert "gate_timeout" not in FINALIZE_REGRESS_BLOCKER_REASONS
+
+    def test_gate_timeout_excluded_from_operator_unavailable(self) -> None:
+        assert "gate_timeout" not in OPERATOR_UNAVAILABLE_BLOCKER_REASONS
+
+    def test_blocked_gate_timeout_round_trips_as_open_enum(self) -> None:
+        p = _blocked_payload()
+        p["blocker"]["reason"] = "gate_timeout"
+        p["blocker"]["details"] = (
+            "gate: mypy | foreground ceiling 600s exceeded; backgrounded; "
+            "poll ceiling 1800s elapsed with no completion notification"
+        )
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.blocker is not None
+        assert result.blocker.reason == "gate_timeout"
+
+
 class TestReviewAgentsRun:
     """#1237 — Review.agents_run field (count of reviewer agents that ran)."""
 
