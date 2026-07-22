@@ -170,6 +170,63 @@ def test_stalled_veto_park_proceeds_once_quiet(
     assert not any(c.proposed_action == ProposedAction.PARK_VETOED for c in candidates)
 
 
+def test_stalled_veto_suppresses_park_when_nested_subagent_transcript_fresh(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1431: same shape as test_stalled_veto_park_proceeds_once_quiet (stale
+    flat registered transcript past the per-stage floor), but with a FRESH
+    nested subagent transcript (``<uuid>/subagents/agent-*.jsonl``) sibling.
+    Must flip the outcome from REVERT_TASK to PARK_VETOED -- pre-fix, the
+    non-recursive glob is blind to the nested file and this still parks."""
+    from cw.reconcile import ProposedAction, _detect_stalled_candidates
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / "wt-veto-nested-fresh"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session("veto-nested-fresh-1", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="veto-nested-fresh-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="veto-nested-fresh-1",
+        stage=Stage.PLAN,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    transcript = _write_idle_transcript(home, worktree)
+    # 40 minutes stale — past the 15-min PLAN-stage floor -> not LIVE on its own.
+    stale_ts = (now - timedelta(minutes=40)).timestamp()
+    os.utime(str(transcript), (stale_ts, stale_ts))
+
+    # Fresh nested subagent transcript sibling — 1 minute stale, well under
+    # the floor -- invisible to a non-recursive glob.
+    nested = _write_idle_transcript(
+        home, worktree, filename="some-uuid/subagents/agent-abc.jsonl"
+    )
+    nested_ts = (now - timedelta(minutes=1)).timestamp()
+    os.utime(str(nested), (nested_ts, nested_ts))
+
+    candidates = _detect_stalled_candidates(
+        state,
+        now=now,
+        config=_auto_config(),
+        task_by_ticket={"veto-nested-fresh-1": task},
+    )
+
+    assert any(c.proposed_action == ProposedAction.PARK_VETOED for c in candidates)
+    assert not any(c.proposed_action == ProposedAction.REVERT_TASK for c in candidates)
+
+
 def test_stalled_veto_applies_to_cap_exceeded_park_when_transcript_fresh(
     tmp_config_dir: Path,
     tmp_path: Path,
