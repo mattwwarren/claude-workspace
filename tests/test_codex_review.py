@@ -991,6 +991,8 @@ class TestSynthesizeCodexReviewResult:
         assert result.status == "blocked"
         assert result.blocker is not None
         assert result.blocker.reason == CODEX_REVIEW_PARTIAL
+        assert "Performance Reviewer" in result.blocker.details
+        assert reason in result.blocker.details
         # The review counts derived from the roles that DID run still survive
         # onto the blocked sentinel — same "don't drop the parsed data"
         # discipline as the zero-documents and must-fix paths.
