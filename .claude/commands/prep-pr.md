@@ -228,7 +228,7 @@ For each gate:
    ~/.claude/scripts/prep_pr_state.py gate-elapsed --started <started> --ceiling-seconds <poll_ceiling_s>
    ```
    - **If a completion notification arrives before the ceiling is exceeded** → treat as authoritative: read the final output/exit code and apply the existing pass/fail handling (autofix retry, or ask/HEADLESS-BLOCK below).
-   - **If `exceeded: true` and no completion notification has arrived** → the backgrounded command's result is lost or stalled (dead backgrounding path, not merely slow). Emit the `gate_timeout` block below **immediately** — do not wait for the remaining stage budget:
+   - **If `exceeded: true` and no completion notification has arrived** → the backgrounded command's result is lost or stalled (dead backgrounding path, not merely slow). Emit the `gate_timeout` block below **immediately** — do not wait for the remaining stage budget. Note: unlike every other block in this file, `reason:` here is `gate_timeout`, not the fixed `agent_block` literal — this is a deliberate, nested-only forward-compat marker (the sentinel's top-level `blocker.reason` still collapses to `agent_block` per the existing gate-collapse rule; `gate_timeout` and the gate name survive verbatim inside `blocker.details`):
      ```
      <<<PREP_PR_BLOCK
      reason: gate_timeout
@@ -236,7 +236,7 @@ For each gate:
      details: foreground ceiling <foreground_ceiling_s>s exceeded at <started>; backgrounded; poll ceiling <poll_ceiling_s>s elapsed with no completion notification and no output growth in <output_file> since <last-observed-timestamp>. Last captured output: <tail of output_file>
      PREP_PR_BLOCK>>>
      ```
-     This applies uniformly to all 8 quality gates detected by Step 2/`detect-gates` (uv lock check, ruff check, ruff format, mypy, pre-commit, pytest units, pytest integration, diff-cover), not only mypy/pytest/pre-commit.
+     This applies uniformly to all 8 quality gates detected by Step 2/`detect-gates` (uv lock check, ruff check, ruff format, mypy, pre-commit, pytest units, pytest integration, diff-cover), not only mypy/pytest/pre-commit. Known limitation: the pytest-units and pytest-integration gates currently derive the same gate name (`pytest`), so a `gate: pytest` block cannot distinguish which of the two stalled from that field alone — use the block's own `<output_file>` tail to disambiguate.
    - This is an **interactive-mode override too**: outside `--headless`, surface the same block content as a friction BLOCK to the user rather than silently parking — a lost gate result is never something to wait out quietly.
 5. If it **fails** (not timed out) and has an autofix command (e.g., ruff, eslint):
    - Run the autofix command

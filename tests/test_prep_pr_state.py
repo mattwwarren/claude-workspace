@@ -349,12 +349,28 @@ class TestTrailingContinuation:
 
 class TestGateTimeoutSeconds:
     def test_known_gate_returns_configured_ceiling(self) -> None:
-        assert 480 <= _mod.gate_timeout_seconds("mypy") <= 600
-        assert 480 <= _mod.gate_timeout_seconds("pytest") <= 600
-        assert 480 <= _mod.gate_timeout_seconds("pre-commit") <= 600
+        assert _mod.gate_timeout_seconds("mypy") == 600
+        assert _mod.gate_timeout_seconds("pytest") == 600
+        assert _mod.gate_timeout_seconds("pre-commit") == 480
 
     def test_unknown_gate_falls_back_to_default(self) -> None:
-        assert _mod.gate_timeout_seconds("ruff") == _mod.GATE_TIMEOUT_DEFAULT_SECONDS
+        assert _mod.gate_timeout_seconds("ruff") == _mod.GATE_TIMEOUT_FALLBACK_SECONDS
+
+    def test_poll_ceiling_stays_comfortably_inside_finalize_stage_budget(
+        self,
+    ) -> None:
+        """GATE_POLL_CEILING_SECONDS must sit well inside the FINALIZE stage's
+        headless budget (src/cw/models/orchestrator_config.py) so a gate_timeout
+        block fires with stage budget to spare (#1432) -- a read-only import,
+        not a new src/cw mechanism, so it stays within this ticket's R2 scope.
+        """
+        from cw.models.enums import Stage
+        from cw.models.orchestrator_config import OrchestratorConfig
+
+        finalize_budget_s = OrchestratorConfig().headless_timeout_by_stage[
+            Stage.FINALIZE
+        ]
+        assert finalize_budget_s > _mod.GATE_POLL_CEILING_SECONDS
 
     def test_gate_timeout_cli_subcommand_json_shape(
         self, capsys: pytest.CaptureFixture[str]
@@ -396,6 +412,14 @@ class TestGateElapsedExceedsCeiling:
     def test_malformed_timestamp_raises_or_reports_error(self) -> None:
         with pytest.raises(ValueError, match="not-a-timestamp"):
             _mod.elapsed_exceeds_ceiling("not-a-timestamp", ceiling_s=600)
+
+    def test_timezone_naive_timestamp_raises_value_error(self) -> None:
+        """A naive timestamp (no offset) must raise ValueError, not an
+        uncaught TypeError from subtracting it against a tz-aware 'now'.
+        """
+        naive = datetime(2026, 1, 1, tzinfo=UTC).replace(tzinfo=None).isoformat()
+        with pytest.raises(ValueError, match="timezone-aware"):
+            _mod.elapsed_exceeds_ceiling(naive, ceiling_s=600)
 
     def test_cli_gate_elapsed_json_shape(
         self, capsys: pytest.CaptureFixture[str]

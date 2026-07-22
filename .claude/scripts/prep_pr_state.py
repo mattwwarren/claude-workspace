@@ -250,13 +250,13 @@ ECOSYSTEM_GATES: dict[str, list[Gate]] = {
 # triggers, NOT sized to guarantee inline completion -- mypy/pytest/
 # pre-commit routinely exceed these on repos this size (see #1432,
 # GEN-5458/GEN-5463). Tunable per-gate; unlisted gates fall back to
-# GATE_TIMEOUT_DEFAULT_SECONDS.
+# GATE_TIMEOUT_FALLBACK_SECONDS.
 GATE_TIMEOUT_DEFAULTS: dict[str, int] = {
     "mypy": 600,
     "pytest": 600,
     "pre-commit": 480,
 }
-GATE_TIMEOUT_DEFAULT_SECONDS: int = 480
+GATE_TIMEOUT_FALLBACK_SECONDS: int = 480
 
 # Hard poll ceiling (seconds) once a gate has been backgrounded: total
 # wall-clock time /prep-pr Step 7 may spend re-Read-ing the backgrounded
@@ -271,7 +271,7 @@ GATE_POLL_CEILING_SECONDS: int = 1800
 
 def gate_timeout_seconds(name: str) -> int:
     """Foreground ceiling for a gate by name, falling back to the default."""
-    return GATE_TIMEOUT_DEFAULTS.get(name, GATE_TIMEOUT_DEFAULT_SECONDS)
+    return GATE_TIMEOUT_DEFAULTS.get(name, GATE_TIMEOUT_FALLBACK_SECONDS)
 
 
 def elapsed_exceeds_ceiling(
@@ -279,10 +279,14 @@ def elapsed_exceeds_ceiling(
 ) -> dict[str, Any]:
     """Compute elapsed seconds since an ISO-8601 timestamp vs a ceiling.
 
-    Raises ValueError on a malformed *started* timestamp rather than
-    silently misreporting.
+    Raises ValueError on a malformed or timezone-naive *started* timestamp
+    rather than silently misreporting (a naive timestamp would otherwise
+    raise an uncaught TypeError when subtracted from the tz-aware "now").
     """
     started_dt = datetime.fromisoformat(started)
+    if started_dt.tzinfo is None:
+        msg = f"'started' timestamp must be timezone-aware, got {started!r}"
+        raise ValueError(msg)
     now_dt = now if now is not None else datetime.now(UTC)
     elapsed_s = (now_dt - started_dt).total_seconds()
     return {

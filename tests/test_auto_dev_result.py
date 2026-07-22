@@ -3920,22 +3920,35 @@ class TestAutomergeNotArmedBlockerReason:
 
 
 class TestGateTimeoutBlockerReason:
-    """#1432 -- `gate_timeout` is a defensive open-enum blocker.reason value.
+    """#1432 -- `gate_timeout` is a defensive open-enum blocker.reason value,
+    AND today's real collapse path is a documented (not prevented) tradeoff.
 
     Today's /prep-pr Step 7 PREP_PR_BLOCK for a lost/stalled gate collapses
     through the existing "Any other agent BLOCK" gate-collapse row
     (docs/headless-contract.md Sec 2), so the sentinel's top-level
     blocker.reason literally stays "agent_block" with the block's own
     `reason: gate_timeout` / `gate: <name>` fields preserved verbatim
-    inside blocker.details. This guards the forward-compatible case: if a
-    future change promotes gate_timeout to a first-class top-level
-    blocker.reason (as automerge_not_armed was for #1140), it must (a)
-    parse as a bare open-enum string with no schema_version bump, and (b)
-    not be silently swept into FINALIZE_REGRESS_BLOCKER_REASONS (a stalled
-    gate isn't fixed by re-running impl) or
-    OPERATOR_UNAVAILABLE_BLOCKER_REASONS (this is a producer-side
-    detection gap, not operator/dependency unavailability) -- same
-    precedent as automerge_not_armed, not push_auth_failed.
+    inside blocker.details.
+
+    This is a KNOWN, ACCEPTED tradeoff of #1432's binding R2 scope decision
+    (lightweight prompt/script layer only, no `src/cw` changes this ticket)
+    -- NOT a prevented outcome. Because "agent_block" is itself a member of
+    FINALIZE_REGRESS_BLOCKER_REASONS, a real gate_timeout event auto-regresses
+    the FINALIZE task back to IMPL for self-heal (src/cw/dispatch/routing.py)
+    up to FINALIZE_REGRESS_CAP times before falling to BLOCKED_ON_USER --
+    even though a lost/stalled backgrounded-gate result is not something a
+    fresh impl session can fix. See .cw/deferred-findings.md (filed as a
+    follow-up ticket: evaluate excluding gate_timeout-carrying agent_block
+    blocks from FINALIZE_REGRESS_BLOCKER_REASONS, or promoting gate_timeout
+    to its own top-level blocker.reason).
+
+    This class ALSO guards the forward-compatible case: if a future change
+    promotes gate_timeout to a first-class top-level blocker.reason (as
+    automerge_not_armed was for #1140), it must (a) parse as a bare
+    open-enum string with no schema_version bump, and (b) not be silently
+    swept into FINALIZE_REGRESS_BLOCKER_REASONS or
+    OPERATOR_UNAVAILABLE_BLOCKER_REASONS without a deliberate decision --
+    same precedent as automerge_not_armed, not push_auth_failed.
     """
 
     def test_gate_timeout_excluded_from_finalize_regress(self) -> None:
@@ -3945,6 +3958,11 @@ class TestGateTimeoutBlockerReason:
         assert "gate_timeout" not in OPERATOR_UNAVAILABLE_BLOCKER_REASONS
 
     def test_blocked_gate_timeout_round_trips_as_open_enum(self) -> None:
+        """Forward-compat: IF gate_timeout is ever promoted to the literal
+        top-level blocker.reason, it parses cleanly as an open-enum string.
+        Not today's actual behavior -- see
+        test_real_collapse_path_stays_agent_block_and_regress_eligible below.
+        """
         p = _blocked_payload()
         p["blocker"]["reason"] = "gate_timeout"
         p["blocker"]["details"] = (
@@ -3955,6 +3973,29 @@ class TestGateTimeoutBlockerReason:
         assert isinstance(result, AutoDevResult)
         assert result.blocker is not None
         assert result.blocker.reason == "gate_timeout"
+
+    def test_real_collapse_path_stays_agent_block_and_regress_eligible(
+        self,
+    ) -> None:
+        """Documents (does not prevent) today's real production behavior: a
+        /prep-pr Step 7 gate_timeout PREP_PR_BLOCK collapses through the
+        generic "Any other agent BLOCK" row, so blocker.reason is the literal
+        "agent_block" -- which IS a member of FINALIZE_REGRESS_BLOCKER_REASONS
+        and therefore regress-eligible. This is the accepted tradeoff
+        described in the class docstring, not a bug this ticket fixes.
+        """
+        p = _blocked_payload()
+        p["blocker"]["reason"] = "agent_block"
+        p["blocker"]["details"] = (
+            "gate: mypy | foreground ceiling 600s exceeded; backgrounded; "
+            "poll ceiling 1800s elapsed with no completion notification"
+        )
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.blocker is not None
+        assert result.blocker.reason == "agent_block"
+        assert "mypy" in result.blocker.details
+        assert result.blocker.reason in FINALIZE_REGRESS_BLOCKER_REASONS
 
 
 class TestReviewAgentsRun:
