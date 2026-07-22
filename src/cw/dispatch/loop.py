@@ -284,6 +284,17 @@ def _merge_persisted_usage_limited_until(
     return usage_limited_until
 
 
+def _usage_limit_window_is_active(usage_limited_until: datetime | None) -> bool:
+    """Is the usage-limit backoff window currently active (#1343)?
+
+    Single source of truth for the "armed and not yet expired" check, shared
+    by the loop's pre-loop seed and :func:`_handle_usage_limit_window_transition`
+    -- mirrors the wall-clock check :func:`~cw.dispatch.tick.dispatch_tick`
+    itself uses to gate spawning.
+    """
+    return usage_limited_until is not None and usage_limited_until > datetime.now(UTC)
+
+
 def _emit_usage_limit_cleared(armed_at: datetime | None, cleared_at: datetime) -> None:
     """Emit ``dispatch.usage_limit_cleared`` for an armed->cleared transition (#1343).
 
@@ -323,6 +334,7 @@ def _emit_usage_limit_cleared(armed_at: datetime | None, cleared_at: datetime) -
 
 def _handle_usage_limit_window_transition(
     was_active: bool,
+    *,
     usage_limited_until: datetime | None,
     armed_at: datetime | None,
 ) -> bool:
@@ -332,12 +344,15 @@ def _handle_usage_limit_window_transition(
     ``was_active`` into the next tick's call. Fires
     :attr:`OrchestratorEventType.USAGE_LIMIT_CLEARED` exactly once -- on the
     tick that observes ``was_active and not now_active`` -- never per-client
-    (a single event carries the full ``clients_affected`` cohort). "Active"
-    mirrors the wall-clock check :func:`~cw.dispatch.tick.dispatch_tick`
-    itself uses to gate spawning (``usage_limited_until`` set AND still in
-    the future) -- ``usage_limited_until`` is never reset to None on natural
-    expiry (only overwritten by a fresh detection), so "is not None" alone
-    would never observe a transition.
+    (a single event carries the full ``clients_affected`` cohort).
+    ``usage_limited_until`` and ``armed_at`` are keyword-only: both are
+    ``datetime | None``, and a positional call site could otherwise swap them
+    silently past mypy. "Active" mirrors the wall-clock check
+    :func:`~cw.dispatch.tick.dispatch_tick` itself uses to gate spawning
+    (``usage_limited_until`` set AND still in the future) --
+    ``usage_limited_until`` is never reset to None on natural expiry (only
+    overwritten by a fresh detection), so "is not None" alone would never
+    observe a transition.
 
     In-process-local detector state only (#1343 R4): the caller
     (:func:`run_dispatch_loop`) threads ``was_active``/``armed_at`` as plain
@@ -346,9 +361,7 @@ def _handle_usage_limit_window_transition(
     still OPEN). A second concurrent loop would each independently observe
     the same transition and double-emit.
     """
-    now_active = usage_limited_until is not None and usage_limited_until > datetime.now(
-        UTC
-    )
+    now_active = _usage_limit_window_is_active(usage_limited_until)
     if was_active and not now_active:
         _emit_usage_limit_cleared(armed_at, cleared_at=datetime.now(UTC))
     return now_active
@@ -457,9 +470,7 @@ def run_dispatch_loop(
     # #1343: in-process-local usage-limit-window transition detector state --
     # see _handle_usage_limit_window_transition's docstring for the R4
     # single-loop-invariant caveat.
-    usage_limit_window_active: bool = (
-        usage_limited_until is not None and usage_limited_until > datetime.now(UTC)
-    )
+    usage_limit_window_active: bool = _usage_limit_window_is_active(usage_limited_until)
     usage_limit_window_armed_at: datetime | None = load_usage_limit_armed_at()
 
     try:
@@ -482,8 +493,8 @@ def run_dispatch_loop(
             if not once:
                 usage_limit_window_active = _handle_usage_limit_window_transition(
                     usage_limit_window_active,
-                    usage_limited_until,
-                    usage_limit_window_armed_at,
+                    usage_limited_until=usage_limited_until,
+                    armed_at=usage_limit_window_armed_at,
                 )
 
             consume_completed_sessions()

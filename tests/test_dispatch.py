@@ -4350,7 +4350,7 @@ class TestDispatchUsageLimitBackoff:
         import cw.dispatch.loop
 
         now_active = cw.dispatch.loop._handle_usage_limit_window_transition(
-            False, None, None
+            False, usage_limited_until=None, armed_at=None
         )
 
         assert now_active is False
