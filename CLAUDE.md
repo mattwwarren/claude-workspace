@@ -34,24 +34,32 @@ uv run pytest tests/ --cov=cw      # Coverage report
 ## Quality Gates
 
 Before committing, run **every** gate CI enforces (`.github/workflows/ci.yml`),
-in order. The first four mirror CI exactly; passing only a subset is the #1
+in order. The first five mirror CI exactly; passing only a subset is the #1
 cause of a green local run that fails CI (see #436):
 
 ```bash
-uv run ruff check src/ tests/                                    # 1. Lint
-uv run ruff format --check src/ tests/                           # 2. Format
-uv run mypy --strict src/                                        # 3. Type check
-uv run pre-commit run --all-files                                # 4. Hooks
+uv lock --check                                                  # 1. Lockfile in sync
+uv run ruff check src/ tests/                                    # 2. Lint
+uv run ruff format --check src/ tests/                           # 3. Format
+uv run mypy --strict src/                                        # 4. Type check
+uv run pre-commit run --all-files                                # 5. Hooks
 uv run --extra mcp pytest tests/ -m 'not integration' \
-  --cov=cw --cov-report=xml --cov-fail-under=88                  # 5. Unit + total cov ≥88%
-uv run pytest tests/ -m integration                              # 6. tmux integration
+  --cov=cw --cov-report=xml --cov-fail-under=88                  # 6. Unit + total cov ≥88%
+uv run pytest tests/ -m integration                              # 7. tmux integration
 uv run diff-cover coverage.xml --compare-branch=origin/main \
-  --fail-under=90                                                # 7. Patch coverage ≥90%
+  --fail-under=90                                                # 8. Patch coverage ≥90%
 ```
 
-Pre-commit hooks enforce gates 1–4 automatically (`uv run pre-commit install`).
+Gate 1 must run **standalone and first**, exactly as in CI. `uv run` locks-and-
+syncs implicitly, so any later gate silently repairs a stale `uv.lock` on disk —
+leaving the drift uncommitted and CI red. Do not fold it into a `uv run …`
+invocation.
+
+Pre-commit hooks enforce gates 1–5 automatically (`uv run pre-commit install`).
 
 **Requirements:**
+- `uv lock --check` - **ZERO drift**. A `pyproject.toml` version bump must be
+  accompanied by its regenerated `uv.lock` in the same commit.
 - `ruff check` - **ZERO violations allowed**. Function-level complexity is gated by
   the `PLR` rules: ≤12 branches (`PLR0912`), ≤50 statements (`PLR0915`), ≤6 returns
   (`PLR0911`). When a function trips these, **extract helpers** — don't suppress.

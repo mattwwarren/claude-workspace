@@ -29,6 +29,23 @@ repos:
 
   - repo: local
     hooks:
+      # Mirrors the `uv lock --check` step in .github/workflows/ci.yml, which a
+      # version bump would otherwise only trip in CI (see #1416).
+      #
+      # Why first: `uv run` locks-and-syncs implicitly, silently rewriting a
+      # stale uv.lock on disk. Any hook invoking `uv run` (pytest, below) would
+      # repair the drift before this check ever saw it. Keep this ahead of them.
+      #
+      # Note this hook is bypassed when pre-commit is itself launched via
+      # `uv run pre-commit` — that outer `uv run` has already re-locked. The
+      # CLAUDE.md gate list therefore runs `uv lock --check` standalone too.
+      - id: uv-lock-check
+        name: uv.lock in sync with pyproject.toml
+        entry: uv lock --check
+        language: system
+        pass_filenames: false
+        files: ^(pyproject\.toml|uv\.lock)$
+
       - id: pytest
         name: pytest
         entry: uv run pytest tests/ -x -q
