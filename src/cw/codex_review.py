@@ -863,6 +863,7 @@ def synthesize_codex_review_result(
             ticket_id=task.ticket_id,
             worktree=worktree,
             reason=CODEX_MUST_FIX_FINDINGS,
+            details=render_verdict_comment(verdict),
             stage_reached=STAGE3_REVIEW,
         )
         return blocked.model_copy(update={"review": verdict.review}), verdict
