@@ -341,9 +341,23 @@ headless_timeout_by_stage:
 # BLOCKED_ON_USER and a push notification fires. Large-tier sessions can
 # legitimately stall on slow test runs or mypy before emitting any
 # sentinel. Sessions whose scope_hint is unknown fall back to the global
-# IDLE_WATCHDOG_SECONDS (900s). See GitHub issues #326, #340.
+# IDLE_WATCHDOG_SECONDS (900s). Per-stage budgets (`idle_watchdog_by_stage`,
+# see below) are consulted before this per-tier map; a stage present in
+# that map fully overrides the per-tier lookup below for sessions at that
+# stage. See GitHub issues #326, #340, #1061.
 idle_watchdog_by_tier:
   large: 3600   # 60 min — above worst-case FINALIZE gate-run (pytest+mypy); #918
+
+# Per-stage idle-watchdog budgets (seconds), consulted BEFORE the per-tier
+# default above. Keyed by Stage (plan/impl/review/finalize); FINALIZE
+# deliberately has no entry -- that stage's idle disposition is owned by
+# stalled.py (#1054), not this map. Empty by default: no per-stage IDLE
+# baseline exists yet (contrast headless_timeout_by_stage's #1020 baseline).
+# A review-stage fan-out to several worktree-isolated reviewer subagents
+# can legitimately leave the parent session quiet well past the flat 900s
+# default; set review: 3600 (or similar) once you've observed your own
+# fan-out idle profile. See GitHub issue #1061.
+idle_watchdog_by_stage: {}
 
 # Global idle-watchdog budget (seconds) when a session has no per-tier
 # budget (e.g. it stalled before Stage 1 set a scope_hint).
