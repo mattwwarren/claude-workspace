@@ -37,9 +37,12 @@ from cw.reconcile import (
 )
 from tests._reconcile_helpers import (
     _auto_config,
+    _mk_headless_daemon_session,
     _mk_phantom_daemon_session,
     _mk_session,
+    _ul_record,
     _write_idle_transcript_with_text,
+    _write_transcript_records,
 )
 from tests.conftest import _make_daemon_session
 
@@ -235,6 +238,137 @@ def test_reconcile_usage_limited_true_from_phantom_path(
 
     assert report.usage_limited is True
     assert "phantom-ul-reconcile" in report.reverted_ticket_ids
+
+
+def _setup_stalled_ul_session(
+    home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    records: list[dict[str, object]],
+    slug: str,
+) -> None:
+    """Wire up a headless daemon session whose ancient started_at trips the
+    wall-clock watchdog, with a real timestamped transcript for the recency gate."""
+    monkeypatch.setattr("cw.reconcile.core.load_orchestrator_config", _auto_config)
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / f"wt-{slug}"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    sess = _mk_headless_daemon_session(slug, worktree, started_at)
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=slug,
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=slug,
+                    attempts=1,  # below cap -> normal REVERT_TASK path
+                )
+            ]
+        )
+    )
+
+    transcript = _write_transcript_records(home, worktree, records)
+    after_ts = started_at.timestamp() + 60
+    os.utime(str(transcript), (after_ts, after_ts))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        lambda _branch, **_kw: (True, True),
+    )
+    # Non-empty (decoy) live set bypasses the outage guard.
+    monkeypatch.setattr(
+        "cw.reconcile.core._claude_agents_json",
+        lambda: [{"sessionId": "decoy00001111222233334444555566"}],
+    )
+
+
+def test_watchdog_usage_limited_true_when_limit_message_at_tail(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1345: a limit message at the transcript tail → report.usage_limited True."""
+    home = tmp_path / "home"
+    home.mkdir()
+    _setup_stalled_ul_session(
+        home,
+        tmp_path,
+        monkeypatch,
+        records=[
+            _ul_record("working through the plan", "2026-01-01T00:00:10+00:00"),
+            _ul_record(
+                "You've hit your session limit · resets 3:40am",
+                "2026-01-01T00:00:20+00:00",
+            ),
+        ],
+        slug="watchdog-ul-recent",
+    )
+
+    report = reconcile()
+
+    assert report.usage_limited is True
+    assert "watchdog-ul-recent" in report.reverted_ticket_ids
+
+
+def test_watchdog_usage_limited_false_when_limit_message_stale_and_reap_unrelated(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1345: an early limit message with later unrelated work is stale →
+    report.usage_limited False even though the session is still reaped."""
+    home = tmp_path / "home"
+    home.mkdir()
+    _setup_stalled_ul_session(
+        home,
+        tmp_path,
+        monkeypatch,
+        records=[
+            _ul_record(
+                "You've hit your session limit · resets 3:40am",
+                "2026-01-01T00:00:10+00:00",
+            ),
+            # 301s after the match — beyond the 300s backoff window.
+            _ul_record("unrelated later progress", "2026-01-01T00:05:11+00:00"),
+        ],
+        slug="watchdog-ul-stale",
+    )
+
+    report = reconcile()
+
+    assert report.usage_limited is False
+    assert "watchdog-ul-stale" in report.reverted_ticket_ids
+
+
+def test_watchdog_usage_limited_true_when_timestamp_missing(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1345: a limit message with no parseable timestamp has no recency anchor
+    → the backoff site's fail_open=True default still arms report.usage_limited."""
+    home = tmp_path / "home"
+    home.mkdir()
+    _setup_stalled_ul_session(
+        home,
+        tmp_path,
+        monkeypatch,
+        records=[_ul_record("You've hit your session limit · resets 3:40am")],
+        slug="watchdog-ul-nots",
+    )
+
+    report = reconcile()
+
+    assert report.usage_limited is True
+    assert "watchdog-ul-nots" in report.reverted_ticket_ids
 
 
 def test_reconcile_noop_when_no_phantoms(

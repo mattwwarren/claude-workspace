@@ -97,7 +97,10 @@ def _revert_task_candidate(
         elapsed_seconds=elapsed,
         worktree_dirty=worktree_dirty,
         new_observation_count=new_count,
-        usage_limit_detected=_shared.detect_usage_limit(session),
+        usage_limit_detected=_shared.usage_limit_is_recent(
+            _shared.detect_usage_limit(session),
+            window_seconds=_shared.USAGE_LIMIT_BACKOFF_WINDOW_SECONDS,
+        ),
         lane=lane,
         client=session.client,
     )

@@ -44,6 +44,7 @@ from cw.reconcile import (
     _SILENTLY_IDLE_REASON,
     IDLE_WATCHDOG_SECONDS,
     TRANSCRIPT_LIVENESS_WINDOW_SECONDS,
+    UsageLimitDetection,
     flag_silently_idle_daemon_sessions,
     reconcile,
     resolve_idle_watchdog_budget,
@@ -57,6 +58,7 @@ from tests._reconcile_helpers import (
     _shipped_salvage_payload,
     _stage_complete_payload,
     _state_queue_snapshot,
+    _ul_record,
     _write_idle_transcript_with_text,
     _write_salvage_transcript,
     _write_staged_clients_yaml,
@@ -2539,7 +2541,12 @@ def test_reap_reason_idle_stall(
     with (
         patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
         patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
-        patch("cw.reconcile._shared.detect_usage_limit", return_value=False),
+        patch(
+            "cw.reconcile._shared.detect_usage_limit",
+            return_value=UsageLimitDetection(
+                detected=False, matched_at=None, transcript_tail_at=None
+            ),
+        ),
         patch("cw.reconcile._deps.get_native_daemon_client", return_value=MagicMock()),
         patch("cw.reconcile._deps.fire_push_notification"),
     ):
@@ -2594,7 +2601,12 @@ def test_reap_reason_usage_limit_cutoff(
     with (
         patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
         patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
-        patch("cw.reconcile._shared.detect_usage_limit", return_value=True),
+        patch(
+            "cw.reconcile._shared.detect_usage_limit",
+            return_value=UsageLimitDetection(
+                detected=True, matched_at=None, transcript_tail_at=None
+            ),
+        ),
         patch("cw.reconcile._deps.get_native_daemon_client", return_value=MagicMock()),
         patch("cw.reconcile._deps.fire_push_notification"),
     ):
@@ -2608,6 +2620,115 @@ def test_reap_reason_usage_limit_cutoff(
     reloaded = load_state()
     s = next(s for s in reloaded.sessions if s.id == "usage-limit-1")
     assert s.reap_reason == ReapReason.USAGE_LIMIT_CUTOFF
+
+
+def _run_idle_recover_with_transcript(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    sid: str,
+    records: list[dict[str, object]],
+) -> Session:
+    """Drive the idle recover branch (_revert_task_candidate) against a REAL
+    detector + transcript. Returns the reloaded session."""
+    home = tmp_path / f"home-{sid}"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / f"wt-{sid}"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    sess = Session(
+        id=sid,
+        name=f"client-a/auto-dev/{sid.upper()}",
+        client="client-a",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=Path("/tmp/ws"),
+        worktree_path=worktree,
+        surface_ref="live-ref",
+        started_at=started_at,
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=sid.upper(),
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=sid,
+                    attempts=1,  # < cap → recover path
+                )
+            ]
+        )
+    )
+    transcript = _write_transcript_records(
+        home, worktree, records, filename="live-ref-sess-1345.jsonl"
+    )
+    after_ts = started_at.timestamp() + 60
+    os.utime(str(transcript), (after_ts, after_ts))
+
+    with (
+        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
+        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
+        patch("cw.reconcile._deps.get_native_daemon_client", return_value=MagicMock()),
+        patch("cw.reconcile._deps.fire_push_notification"),
+    ):
+        flag_silently_idle_daemon_sessions(
+            state,
+            now=now,
+            native_live={"live-ref"},
+            config=_auto_config(idle_confirm_observations=1),
+        )
+
+    reloaded = load_state()
+    return next(s for s in reloaded.sessions if s.id == sid)
+
+
+def test_idle_revert_usage_limit_recent_sets_cutoff_cause(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1345 idle recover branch, real detector: limit at tail → USAGE_LIMIT_CUTOFF."""
+    s = _run_idle_recover_with_transcript(
+        tmp_path,
+        monkeypatch,
+        sid="idle-ul-recent",
+        records=[
+            _ul_record("working on it", "2026-01-01T00:00:10+00:00"),
+            _ul_record(
+                "You've hit your session limit · resets 5am",
+                "2026-01-01T00:00:20+00:00",
+            ),
+        ],
+    )
+    assert s.reap_reason == ReapReason.USAGE_LIMIT_CUTOFF
+
+
+def test_idle_revert_usage_limit_stale_keeps_idle_stall_cause(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1345 idle recover branch, real detector: stale limit → IDLE_STALL."""
+    s = _run_idle_recover_with_transcript(
+        tmp_path,
+        monkeypatch,
+        sid="idle-ul-stale",
+        records=[
+            _ul_record(
+                "You've hit your session limit · resets 5am",
+                "2026-01-01T00:00:10+00:00",
+            ),
+            # 301s later — beyond the 300s backoff window.
+            _ul_record("unrelated later progress", "2026-01-01T00:05:11+00:00"),
+        ],
+    )
+    assert s.reap_reason == ReapReason.IDLE_STALL
 
 
 def test_reap_reason_retry_cap_parked(

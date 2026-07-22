@@ -6,6 +6,7 @@ finalize-blocked rescue, and salvage reap-reason stamping.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -41,6 +42,7 @@ from cw.reconcile import (
     _NEEDS_SALVAGE_REASON,
     _SALVAGE_KIND_GIT_STATE,
     _STAGE_REVIEW_COMPLETE,
+    UsageLimitDetection,
     flag_silently_idle_daemon_sessions,
     reconcile,
     revert_stalled_headless_sessions,
@@ -50,9 +52,20 @@ from cw.reconcile import (
 from tests._reconcile_helpers import (
     _auto_config,
     _mk_timed_out_daemon_session,
+    _ul_record,
     _write_staged_clients_yaml,
+    _write_transcript_records,
 )
 from tests.conftest import _make_daemon_session, _make_ticket_task
+
+# #1345: the salvage low-path gates detect_usage_limit through
+# usage_limit_is_recent(..., fail_open=False, 60s). A recent detection (match at
+# the transcript tail) survives that gate as True; a not-detected result is False.
+_UL_NOW = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+_RECENT_UL = UsageLimitDetection(
+    detected=True, matched_at=_UL_NOW, transcript_tail_at=_UL_NOW
+)
+_NO_UL = UsageLimitDetection(detected=False, matched_at=None, transcript_tail_at=None)
 
 
 def _mk_live_daemon_session_with_worktree(
@@ -366,7 +379,9 @@ class TestSalvageCommittedNoPrSessions:
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
         )
-        monkeypatch.setattr("cw.reconcile._shared.detect_usage_limit", lambda _s: True)
+        monkeypatch.setattr(
+            "cw.reconcile._shared.detect_usage_limit", lambda _s: _RECENT_UL
+        )
         mock_daemon = MagicMock()
         monkeypatch.setattr(
             "cw.reconcile._deps.get_native_daemon_client",
@@ -445,7 +460,9 @@ class TestSalvageCommittedNoPrSessions:
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
         )
-        monkeypatch.setattr("cw.reconcile._shared.detect_usage_limit", lambda _s: False)
+        monkeypatch.setattr(
+            "cw.reconcile._shared.detect_usage_limit", lambda _s: _NO_UL
+        )
         monkeypatch.setattr(
             "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
         )
@@ -478,6 +495,148 @@ class TestSalvageCommittedNoPrSessions:
         assert s.reap_reason == ReapReason.SALVAGE_PARKED
         assert s.status == SessionStatus.COMPLETED
         assert s.completed_reason == CompletionReason.CRASHED
+
+    def _run_low_path_with_transcript(
+        self,
+        tmp_path: Path,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        slug: str,
+        records: list[dict[str, object]],
+    ) -> Session:
+        """Drive the salvage low-path against a REAL detector + transcript.
+
+        Returns the reloaded session so callers can assert on its disposition.
+        """
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+
+        worktree = tmp_path / f"wt-{slug}"
+        worktree.mkdir(parents=True)
+        ticket_id = f"TKT-{slug.upper()}"
+        sess = _mk_live_daemon_session_with_worktree(
+            f"sess-{slug}", worktree, ticket_id
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id=f"sess-{slug}",
+                    )
+                ]
+            )
+        )
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+        transcript = _write_transcript_records(
+            home, worktree, records, filename="live-ref-sess-1345.jsonl"
+        )
+        after_ts = sess.started_at.timestamp() + 60
+        os.utime(str(transcript), (after_ts, after_ts))
+
+        monkeypatch.setattr(
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
+        )
+        monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
+
+        candidates: list[tuple[str, str | None, str, str, bool]] = [
+            (f"sess-{slug}", ticket_id, f"dev/{slug}-branch", str(worktree), False)
+        ]
+        salvage_committed_no_pr_sessions(candidates)
+
+        reloaded = load_state()
+        return next(s for s in reloaded.sessions if s.id == f"sess-{slug}")
+
+    def test_low_path_stamps_usage_limit_cutoff_when_limit_message_at_tail(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#1345: a real limit message at the transcript tail passes the tight
+        60s fail-closed gate → USAGE_LIMIT_CUTOFF disposition."""
+        s = self._run_low_path_with_transcript(
+            tmp_path,
+            tmp_config_dir,
+            monkeypatch,
+            slug="ul-tail",
+            records=[
+                _ul_record("committing work", "2026-01-01T00:00:10+00:00"),
+                _ul_record(
+                    "You've hit your session limit · resets 5am",
+                    "2026-01-01T00:00:40+00:00",
+                ),
+            ],
+        )
+        assert s.status == SessionStatus.TIMED_OUT
+        assert s.reap_reason == ReapReason.USAGE_LIMIT_CUTOFF
+        lr = s.last_result or {}
+        assert lr.get("paused_status") != _NEEDS_SALVAGE_REASON
+
+    def test_low_path_parks_for_salvage_when_limit_message_stale(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#1345 regression: an early limit message the worker recovered from,
+        followed by a later crash, must NOT be mislabeled a live cutoff — the
+        60s window fails and the needs_salvage disposition is preserved."""
+        s = self._run_low_path_with_transcript(
+            tmp_path,
+            tmp_config_dir,
+            monkeypatch,
+            slug="ul-stale",
+            records=[
+                _ul_record(
+                    "You've hit your session limit · resets 5am",
+                    "2026-01-01T00:00:10+00:00",
+                ),
+                # 90s later — beyond the 60s salvage window.
+                _ul_record("resumed and kept working", "2026-01-01T00:01:40+00:00"),
+            ],
+        )
+        assert s.status == SessionStatus.COMPLETED
+        assert s.completed_reason == CompletionReason.CRASHED
+        assert s.reap_reason == ReapReason.SALVAGE_PARKED
+        lr = s.last_result or {}
+        assert lr.get("paused_status") == _NEEDS_SALVAGE_REASON
+
+    def test_low_path_parks_for_salvage_when_timestamps_missing(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#1345 fail-closed mandate: a detected limit message with NO parseable
+        timestamp yields no anchor; with fail_open=False the salvage low-path
+        must NOT stamp a cutoff — genuine behavior change vs the old detector."""
+        s = self._run_low_path_with_transcript(
+            tmp_path,
+            tmp_config_dir,
+            monkeypatch,
+            slug="ul-nots",
+            records=[
+                _ul_record("You've hit your session limit · resets 5am"),
+            ],
+        )
+        assert s.status == SessionStatus.COMPLETED
+        assert s.completed_reason == CompletionReason.CRASHED
+        assert s.reap_reason == ReapReason.SALVAGE_PARKED
+        lr = s.last_result or {}
+        assert lr.get("paused_status") == _NEEDS_SALVAGE_REASON
 
     def test_low_path_usage_limit_true_dirty_worktree_still_parks_via_backstop(
         self,
@@ -517,7 +676,9 @@ class TestSalvageCommittedNoPrSessions:
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
         )
-        monkeypatch.setattr("cw.reconcile._shared.detect_usage_limit", lambda _s: True)
+        monkeypatch.setattr(
+            "cw.reconcile._shared.detect_usage_limit", lambda _s: _RECENT_UL
+        )
         monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
 
         candidates: list[tuple[str, str | None, str, str, bool]] = [
@@ -607,7 +768,9 @@ class TestSalvageCommittedNoPrSessions:
         monkeypatch.setattr(
             "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
         )
-        monkeypatch.setattr("cw.reconcile._shared.detect_usage_limit", lambda _s: True)
+        monkeypatch.setattr(
+            "cw.reconcile._shared.detect_usage_limit", lambda _s: _RECENT_UL
+        )
         monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
 
         candidates: list[tuple[str, str | None, str, str, bool]] = [

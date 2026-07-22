@@ -74,6 +74,7 @@ from cw.worktree import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
     from cw.dispatch import _StagePosition
@@ -115,6 +116,21 @@ DEFAULT_STALLED_RETRY_CAP = 2  # wall-clock-budget retries before parking (#756)
 # 5 min — widened from 2 min (#384): covers short inter-turn gaps;
 # subagent gaps handled by _awaiting_subagent below.
 TRANSCRIPT_LIVENESS_WINDOW_SECONDS = 300
+
+# Recency bound for treating a detected usage-limit message as the *current*
+# reason a session stalled or was reaped (GitHub #1345). A limit message far
+# behind the transcript's own tail is stale backstory (an early rate-limit the
+# worker recovered from), not a live cutoff. The gate is anchored to the
+# transcript's last content-bearing record, NOT wall-clock now, so a long-
+# quiescent transcript isn't judged against real elapsed time. Reuses the same
+# 300s "how recent counts as now" horizon the liveness watchdog uses above.
+USAGE_LIMIT_BACKOFF_WINDOW_SECONDS = TRANSCRIPT_LIVENESS_WINDOW_SECONDS
+# Tighter recency bound for the salvage low-path (#1345). Salvage stamps a
+# terminal USAGE_LIMIT_CUTOFF disposition and (per #1336) preserves the
+# worktree, so a false-positive mislabels an ordinary crash as a rate-limit
+# cutoff and suppresses auto-retry. 60s admits only a limit message essentially
+# at the transcript tail; this site also fails CLOSED (fail_open=False).
+USAGE_LIMIT_SALVAGE_WINDOW_SECONDS = 60
 
 # A worker awaiting a subagent leaves the parent transcript quiet (subagent output
 # only lands on return). Treat a pending tool_use at the transcript tail as alive
@@ -621,18 +637,126 @@ def _assistant_text_from_transcript(path: Path) -> str:
     return "\n".join(parts)
 
 
-def _detect_usage_limit(session: Session) -> bool:
-    """Return True iff the newest post-start transcript contains a usage-limit message.
+class UsageLimitDetection(NamedTuple):
+    """Outcome of scanning a session transcript for a usage-limit message (#1345).
 
-    Uses :func:`_locate_session_transcript` for precise per-session lookup
-    (surface_ref-prefix glob, #541).  Returns False (never raises) when the
-    project dir is absent, no matching .jsonl exists, or the transcript
-    predates the session start.
+    ``detected`` is True iff any post-start assistant record's text matched
+    :data:`USAGE_LIMIT_RE`. ``matched_at`` is the ``timestamp`` of the LAST such
+    matching record that carried a parseable timestamp (last-match-wins
+    tie-break); ``None`` when nothing matched or no matching record had a usable
+    timestamp. ``transcript_tail_at`` is the timestamp of the transcript's last
+    content-bearing record — matched or not — via
+    :func:`_last_content_entry_timestamp`; ``None`` when no record has a
+    parseable timestamp. The recency gate (:func:`_usage_limit_is_recent`)
+    compares the two so a stale limit message is not mistaken for a live cutoff.
+    """
+
+    detected: bool
+    matched_at: datetime | None
+    transcript_tail_at: datetime | None
+
+
+def _parse_iso_timestamp(raw: object) -> datetime | None:
+    """Parse a record's top-level ``"timestamp"`` value, or ``None`` if unusable."""
+    if not isinstance(raw, str):
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+def _iter_assistant_records(path: Path) -> Iterator[tuple[datetime | None, str]]:
+    """Yield ``(timestamp, text)`` for each assistant record in a jsonl transcript.
+
+    ``timestamp`` is the record's top-level ``"timestamp"`` parsed via
+    :func:`_parse_iso_timestamp`, or ``None`` when absent/malformed — the
+    record is still yielded, because its text may match even without a usable
+    anchor. ``text`` concatenates every text block of the assistant message.
+    Mirrors :func:`_assistant_text_from_transcript`'s per-record content guard
+    and the top-level-``"timestamp"`` convention of
+    :func:`_last_content_entry_timestamp`. Yields nothing on any read error.
+    """
+    try:
+        with path.open() as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict) or record.get("type") != "assistant":
+                    continue
+                message = record.get("message")
+                if not isinstance(message, dict):
+                    continue
+                content = message.get("content")
+                if not isinstance(content, list):
+                    continue
+                text = "\n".join(
+                    block["text"]
+                    for block in content
+                    if isinstance(block, dict)
+                    and block.get("type") == "text"
+                    and isinstance(block.get("text"), str)
+                )
+                yield _parse_iso_timestamp(record.get("timestamp")), text
+    except OSError:
+        return
+
+
+def _detect_usage_limit(session: Session) -> UsageLimitDetection:
+    """Scan the newest post-start transcript for a usage-limit message (#1345).
+
+    Returns a :class:`UsageLimitDetection`: ``detected`` True iff any assistant
+    record's text matched :data:`USAGE_LIMIT_RE`, ``matched_at`` the LAST
+    matching record's timestamp (last-match-wins among records with a parseable
+    timestamp), ``transcript_tail_at`` the transcript's last content-bearing
+    timestamp. Uses :func:`_locate_session_transcript` for precise per-session
+    lookup (surface_ref-prefix glob, #541). Never raises; returns an all-empty
+    detection when the project dir is absent, no matching .jsonl exists, or the
+    transcript predates the session start.
     """
     transcript = _locate_session_transcript(session)
     if transcript is None:
+        return UsageLimitDetection(
+            detected=False, matched_at=None, transcript_tail_at=None
+        )
+    detected = False
+    matched_at: datetime | None = None
+    for ts, text in _iter_assistant_records(transcript):
+        if USAGE_LIMIT_RE.search(text):
+            detected = True
+            if ts is not None:
+                matched_at = ts  # last-match-wins
+    return UsageLimitDetection(
+        detected=detected,
+        matched_at=matched_at,
+        transcript_tail_at=_last_content_entry_timestamp(transcript),
+    )
+
+
+def _usage_limit_is_recent(
+    detection: UsageLimitDetection,
+    *,
+    window_seconds: float,
+    fail_open: bool = True,
+) -> bool:
+    """Decide whether a detected usage-limit message is *current* (#1345).
+
+    Contract (operator resolution, issue #1345):
+    - not detected → ``False``;
+    - detected but either ``matched_at`` or ``transcript_tail_at`` is ``None``
+      (no usable anchor) → return ``fail_open`` verbatim;
+    - else → recent iff the message landed within ``window_seconds`` of the
+      transcript's own tail:
+      ``(transcript_tail_at - matched_at).total_seconds() <= window_seconds``.
+    """
+    if not detection.detected:
         return False
-    return bool(USAGE_LIMIT_RE.search(_assistant_text_from_transcript(transcript)))
+    if detection.matched_at is None or detection.transcript_tail_at is None:
+        return fail_open
+    gap = (detection.transcript_tail_at - detection.matched_at).total_seconds()
+    return gap <= window_seconds
 
 
 def _parse_sentinel_from_blocks(path: Path) -> AutoDevResult | BlockedResult | None:
@@ -1596,5 +1720,6 @@ def _emit_reap_proposed(
 # ``cw.reconcile._shared.NAME`` intercepts all callers. These helpers are not
 # called elsewhere inside this module, so there is no dual-name hazard.
 detect_usage_limit = _detect_usage_limit
+usage_limit_is_recent = _usage_limit_is_recent
 salvage_terminal_result = _salvage_terminal_result
 worktree_dirty_by_path = _worktree_dirty_by_path

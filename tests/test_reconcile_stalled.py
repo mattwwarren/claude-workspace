@@ -48,6 +48,7 @@ from cw.reconcile import (
     _NEEDS_SALVAGE_REASON,
     _SILENTLY_IDLE_REASON,
     HEADLESS_TIMEOUT_SECONDS,
+    UsageLimitDetection,
     reconcile,
     resolve_headless_budget,
     revert_stalled_headless_sessions,
@@ -59,9 +60,11 @@ from tests._reconcile_helpers import (
     _no_op_salvage_payload,
     _shipped_salvage_payload,
     _state_queue_snapshot,
+    _ul_record,
     _write_idle_transcript_with_text,
     _write_salvage_transcript,
     _write_staged_clients_yaml,
+    _write_transcript_records,
 )
 
 
@@ -1487,7 +1490,12 @@ def test_stalled_revert_usage_limit_detected_sets_cause(
         "cw.reconcile._deps.branch_exists_on_origin",
         lambda _branch, **_kw: (True, True),
     )
-    with patch("cw.reconcile._shared.detect_usage_limit", return_value=True):
+    with patch(
+        "cw.reconcile._shared.detect_usage_limit",
+        return_value=UsageLimitDetection(
+            detected=True, matched_at=None, transcript_tail_at=None
+        ),
+    ):
         reverted = revert_stalled_headless_sessions(
             state, now=now, config=_auto_config()
         )
@@ -1532,7 +1540,12 @@ def test_stalled_revert_no_usage_limit_keeps_wall_clock_budget_cause(
         "cw.reconcile._deps.branch_exists_on_origin",
         lambda _branch, **_kw: (True, True),
     )
-    with patch("cw.reconcile._shared.detect_usage_limit", return_value=False):
+    with patch(
+        "cw.reconcile._shared.detect_usage_limit",
+        return_value=UsageLimitDetection(
+            detected=False, matched_at=None, transcript_tail_at=None
+        ),
+    ):
         reverted = revert_stalled_headless_sessions(
             state, now=now, config=_auto_config()
         )
@@ -1580,7 +1593,12 @@ def test_stalled_cap_park_usage_limit_detected_sets_cause(
         "cw.reconcile._deps.pr_is_merged_for_ticket",
         lambda _tid, **_kw: (False, True),
     )
-    with patch("cw.reconcile._shared.detect_usage_limit", return_value=True):
+    with patch(
+        "cw.reconcile._shared.detect_usage_limit",
+        return_value=UsageLimitDetection(
+            detected=True, matched_at=None, transcript_tail_at=None
+        ),
+    ):
         reverted = revert_stalled_headless_sessions(
             state, now=now, config=_auto_config(headless_timeout_by_stage={})
         )
@@ -1629,13 +1647,171 @@ def test_stalled_cap_park_no_usage_limit_keeps_retry_cap_parked_cause(
         "cw.reconcile._deps.pr_is_merged_for_ticket",
         lambda _tid, **_kw: (False, True),
     )
-    with patch("cw.reconcile._shared.detect_usage_limit", return_value=False):
+    with patch(
+        "cw.reconcile._shared.detect_usage_limit",
+        return_value=UsageLimitDetection(
+            detected=False, matched_at=None, transcript_tail_at=None
+        ),
+    ):
         reverted = revert_stalled_headless_sessions(
             state, now=now, config=_auto_config(headless_timeout_by_stage={})
         )
 
     assert "cap-no-ul" not in reverted
     s = next(s for s in state.sessions if s.id == "cap-no-ul")
+    assert s.status == SessionStatus.TIMED_OUT
+    assert s.reap_reason == ReapReason.STALLED_RETRY_CAP_PARKED
+
+
+_STALLED_UL_RECENT = [
+    _ul_record("working the ticket", "2026-01-01T00:00:10+00:00"),
+    _ul_record(
+        "You've hit your session limit · resets 11am", "2026-01-01T00:00:20+00:00"
+    ),
+]
+# Early limit the worker recovered from, then unrelated work 301s later (stale).
+_STALLED_UL_STALE = [
+    _ul_record(
+        "You've hit your session limit · resets 11am", "2026-01-01T00:00:10+00:00"
+    ),
+    _ul_record("unrelated later progress", "2026-01-01T00:05:11+00:00"),
+]
+
+
+def _setup_stalled_real_transcript(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    sid: str,
+    records: list[dict[str, object]],
+    attempts: int,
+) -> tuple[CwState, datetime]:
+    """Build a wall-clock-expired stalled session with a REAL timestamped
+    transcript (no detect_usage_limit mock). Returns (state, now)."""
+    home = tmp_path / f"home-{sid}"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / f"wt-{sid}"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    sess = _mk_headless_daemon_session(sid, worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=sid,
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=sid,
+                    stage=Stage.IMPL,
+                    attempts=attempts,
+                )
+            ]
+        )
+    )
+    transcript = _write_transcript_records(home, worktree, records)
+    after_ts = started_at.timestamp() + 60
+    os.utime(str(transcript), (after_ts, after_ts))
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._deps.branch_exists_on_origin",
+        lambda _branch, **_kw: (True, True),
+    )
+    return state, now
+
+
+def test_stalled_revert_usage_limit_recent_sets_cutoff_cause(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1345 revert path, real detector: limit at tail → USAGE_LIMIT_CUTOFF."""
+    state, now = _setup_stalled_real_transcript(
+        tmp_path,
+        monkeypatch,
+        sid="revert-ul-recent",
+        records=_STALLED_UL_RECENT,
+        attempts=1,
+    )
+    reverted = revert_stalled_headless_sessions(
+        state, now=now, config=_auto_config(headless_timeout_by_stage={})
+    )
+    assert "revert-ul-recent" in reverted
+    s = next(s for s in state.sessions if s.id == "revert-ul-recent")
+    assert s.reap_reason == ReapReason.USAGE_LIMIT_CUTOFF
+
+
+def test_stalled_revert_usage_limit_stale_keeps_wall_clock_cause(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1345 revert path, real detector: stale limit → WALL_CLOCK_BUDGET."""
+    state, now = _setup_stalled_real_transcript(
+        tmp_path,
+        monkeypatch,
+        sid="revert-ul-stale",
+        records=_STALLED_UL_STALE,
+        attempts=1,
+    )
+    reverted = revert_stalled_headless_sessions(
+        state, now=now, config=_auto_config(headless_timeout_by_stage={})
+    )
+    assert "revert-ul-stale" in reverted
+    s = next(s for s in state.sessions if s.id == "revert-ul-stale")
+    assert s.reap_reason == ReapReason.WALL_CLOCK_BUDGET
+
+
+def test_stalled_cap_park_usage_limit_recent_sets_cutoff_cause(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1345 cap-park branch, real detector: limit at tail → USAGE_LIMIT_CUTOFF."""
+    from cw.reconcile import DEFAULT_STALLED_RETRY_CAP
+
+    state, now = _setup_stalled_real_transcript(
+        tmp_path,
+        monkeypatch,
+        sid="cap-ul-recent",
+        records=_STALLED_UL_RECENT,
+        attempts=DEFAULT_STALLED_RETRY_CAP,
+    )
+    reverted = revert_stalled_headless_sessions(
+        state, now=now, config=_auto_config(headless_timeout_by_stage={})
+    )
+    assert "cap-ul-recent" not in reverted  # park, not requeue
+    s = next(s for s in state.sessions if s.id == "cap-ul-recent")
+    assert s.status == SessionStatus.TIMED_OUT
+    assert s.reap_reason == ReapReason.USAGE_LIMIT_CUTOFF
+
+
+def test_stalled_cap_park_usage_limit_stale_keeps_retry_cap_cause(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1345 cap-park branch, real detector: stale limit → STALLED_RETRY_CAP_PARKED."""
+    from cw.reconcile import DEFAULT_STALLED_RETRY_CAP
+
+    state, now = _setup_stalled_real_transcript(
+        tmp_path,
+        monkeypatch,
+        sid="cap-ul-stale",
+        records=_STALLED_UL_STALE,
+        attempts=DEFAULT_STALLED_RETRY_CAP,
+    )
+    reverted = revert_stalled_headless_sessions(
+        state, now=now, config=_auto_config(headless_timeout_by_stage={})
+    )
+    assert "cap-ul-stale" not in reverted
+    s = next(s for s in state.sessions if s.id == "cap-ul-stale")
     assert s.status == SessionStatus.TIMED_OUT
     assert s.reap_reason == ReapReason.STALLED_RETRY_CAP_PARKED
 
