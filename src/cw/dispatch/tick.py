@@ -34,10 +34,12 @@ from cw.native_daemon import get_native_daemon_client
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from cw.dispatch.lanes import _ClientDispatchResult
     from cw.models import (
         ClientConfig,
         CwState,
         DevQueueStore,
+        LaneConfig,
         OrchestratorConfig,
     )
     from cw.native_daemon import NativeDaemonClient
@@ -51,6 +53,7 @@ from cw.dispatch.gating import (
     _resolve_freshness,
     _resolve_ssh_key_once,
 )
+from cw.dispatch.host_capacity import resolve_host_capacity
 from cw.dispatch.lanes import (
     _dispatch_client_lanes,
     _record_client_freshness_block,
@@ -161,6 +164,127 @@ def _client_tick_snapshot(
         queue_snapshot=queue_snapshot,
         pending_count=pending_count,
     )
+
+
+def _resolve_host_budget_snapshot(
+    state: CwState, queue: DevQueueStore, config: OrchestratorConfig
+) -> tuple[int, int | None, int | None]:
+    """Resolve this tick's host-capacity numbers, once, before the client loop (#1444).
+
+    Returns ``(host_running, host_budget, host_slots_remaining)``.
+    ``host_slots_remaining`` is ``None`` (feature off, no-op fold downstream)
+    when ``config.host_session_budget`` is unset; otherwise
+    ``host_budget - host_running``, floor unclamped (a negative value simply
+    means every client is host-capacity-gated this tick). Extracted from
+    :func:`dispatch_tick` to keep it within the PLR0912/PLR0915 ceilings
+    (CLAUDE.md).
+    """
+    host_running, host_budget = resolve_host_capacity(state, queue, config)
+    host_slots_remaining = None if host_budget is None else host_budget - host_running
+    return host_running, host_budget, host_slots_remaining
+
+
+def _decrement_host_slots(host_slots_remaining: int | None, spawned: int) -> int | None:
+    """Decrement the host-capacity budget by a client's spawn count this tick.
+
+    A no-op when the feature is off (``host_slots_remaining is None``).
+    Extracted from :func:`_dispatch_client_with_host_budget` to keep both it
+    and :func:`dispatch_tick` within the PLR0912/PLR0915 ceilings (CLAUDE.md).
+    """
+    if host_slots_remaining is None:
+        return None
+    return host_slots_remaining - spawned
+
+
+def _dispatch_client_with_host_budget(
+    client: ClientConfig,
+    effective_lanes: list[LaneConfig],
+    queue_snapshot: DevQueueStore,
+    *,
+    running_count: int,
+    client_ceiling: int,
+    cap: int,
+    pending_count: int,
+    cap_full: bool,
+    running_by_lane: dict[str, int],
+    priority_ids: list[str] | None,
+    config: OrchestratorConfig,
+    resolved_native_daemon: NativeDaemonClient,
+    parent: str | None,
+    emit: Callable[[str], None] | None,
+    usage_limited_until: datetime | None,
+    host_slots_remaining: int | None,
+    host_running: int,
+    host_budget: int | None,
+) -> tuple[_ClientDispatchResult, int | None]:
+    """Wrap :func:`_dispatch_client_lanes` with the host-capacity gate (#1444).
+
+    Computes ``host_capacity_gated`` from ``host_slots_remaining``, delegates
+    to :func:`_dispatch_client_lanes`, then decrements the remaining host
+    budget by this client's spawn count -- extracted to keep
+    :func:`dispatch_tick`'s client loop within the PLR0912/PLR0915 ceilings
+    (CLAUDE.md).
+    """
+    host_capacity_gated = host_slots_remaining is not None and host_slots_remaining <= 0
+    client_result = _dispatch_client_lanes(
+        client,
+        effective_lanes,
+        queue_snapshot,
+        running_count=running_count,
+        client_ceiling=client_ceiling,
+        cap=cap,
+        pending_count=pending_count,
+        cap_full=cap_full,
+        running_by_lane=running_by_lane,
+        priority_ids=priority_ids,
+        config=config,
+        resolved_native_daemon=resolved_native_daemon,
+        parent=parent,
+        emit=emit,
+        usage_limited_until=usage_limited_until,
+        host_slots_remaining=host_slots_remaining,
+        host_capacity_gated=host_capacity_gated,
+        host_running=host_running,
+        host_budget=host_budget,
+    )
+    return (
+        client_result,
+        _decrement_host_slots(host_slots_remaining, client_result.spawned),
+    )
+
+
+def _resolve_client_lane_context(
+    client: ClientConfig, queue_snapshot: DevQueueStore, client_ceiling: int
+) -> tuple[dict[str, int], list[LaneConfig]]:
+    """Build a client's per-lane running count and effective lane list for this tick.
+
+    Returns ``(running_by_lane, effective_lanes)``. Tasks in RUNNING,
+    BLOCKED_ON_USER, or AWAITING_OPERATOR_SIGNOFF with an active session_id
+    count toward their lane's cap (ADR-0006: BLOCKED_ON_USER occupies the
+    slot; #990 extends this to a signoff-parked ticket, which is likewise not
+    eligible for re-dispatch). Reuses the *queue_snapshot* the caller already
+    holds — nothing between the two points mutates the queue (auto-ff is
+    git-only). For clients with no declared lanes, the synthesized default
+    lane's ``max_parallel`` is overridden with *client_ceiling* so
+    backward-compat behaviour is preserved. Extracted from
+    :func:`dispatch_tick` to keep it within the PLR0912/PLR0915 ceilings
+    (CLAUDE.md).
+    """
+    running_by_lane: dict[str, int] = {}
+    for qt in queue_snapshot.tasks:
+        if qt.client != client.name:
+            continue
+        if qt.status not in OCCUPIED_LANE_STATUSES:
+            continue
+        lane_key = qt.lane
+        running_by_lane[lane_key] = running_by_lane.get(lane_key, 0) + 1
+
+    effective_lanes = client.effective_lanes
+    if not client.lanes:
+        effective_lanes = [
+            effective_lanes[0].model_copy(update={"max_parallel": client_ceiling})
+        ]
+    return running_by_lane, effective_lanes
 
 
 class _PreflightGateResult(NamedTuple):
@@ -355,6 +479,18 @@ def dispatch_tick(
     # SSH-agent-key preflight verdict (#927), memoized the same way as
     # ``available`` -- see the SSH-key gate below.
     ssh_key_available: bool | None = None
+
+    # Host-capacity admission budget (#1444): resolved once per tick,
+    # client-filter-independent, against the fleet-wide state/queue snapshots
+    # already loaded above (``collision_snapshot`` is an unfiltered
+    # DevQueueStore load taken before this loop -- reused here rather than a
+    # second dev-queue load). host_slots_remaining is decremented by each
+    # client's spawn count as the loop proceeds so a later-declared client
+    # sees the budget already consumed by an earlier-declared one this same
+    # tick (R3/R5: fleet-wide, declaration order preserved).
+    host_running, host_budget, host_slots_remaining = _resolve_host_budget_snapshot(
+        state, collision_snapshot, config
+    )
     for client in clients.values():
         if (
             config.max_parallel_clients is not None
@@ -453,32 +589,11 @@ def dispatch_tick(
         priority_ids = plan_order_by_client.get(client.name)
         cap_full = running_count >= client_ceiling
 
-        # Build per-lane running count from tasks→sessions join.
-        # Tasks in RUNNING, BLOCKED_ON_USER, or AWAITING_OPERATOR_SIGNOFF with
-        # an active session_id count toward their lane's cap (ADR-0006:
-        # BLOCKED_ON_USER occupies the slot; #990 extends this to a
-        # signoff-parked ticket, which is likewise not eligible for re-dispatch).
-        # Reuses the queue_snapshot taken above — nothing between the two
-        # points mutates the queue (auto-ff is git-only).
-        running_by_lane: dict[str, int] = {}
-        for qt in queue_snapshot.tasks:
-            if qt.client != client.name:
-                continue
-            if qt.status not in OCCUPIED_LANE_STATUSES:
-                continue
-            lane_key = qt.lane
-            running_by_lane[lane_key] = running_by_lane.get(lane_key, 0) + 1
+        running_by_lane, effective_lanes = _resolve_client_lane_context(
+            client, queue_snapshot, client_ceiling
+        )
 
-        # Resolve effective lanes. For clients with no declared lanes, use the
-        # synthesized default lane but override its max_parallel with the client
-        # ceiling so backward-compat behaviour is preserved.
-        effective_lanes = client.effective_lanes
-        if not client.lanes:
-            effective_lanes = [
-                effective_lanes[0].model_copy(update={"max_parallel": client_ceiling})
-            ]
-
-        client_result = _dispatch_client_lanes(
+        client_result, host_slots_remaining = _dispatch_client_with_host_budget(
             client,
             effective_lanes,
             queue_snapshot,
@@ -494,6 +609,9 @@ def dispatch_tick(
             parent=parent,
             emit=emit,
             usage_limited_until=usage_limited_until,
+            host_slots_remaining=host_slots_remaining,
+            host_running=host_running,
+            host_budget=host_budget,
         )
         spawned += client_result.spawned
         if client_result.usage_limit_detected:

@@ -218,6 +218,23 @@ def _reset_client_freshness_blocks(client_name: str) -> None:
         _save_concurrency_overrides(overrides)
 
 
+def _apply_host_capacity_budget(
+    available_client_slots: int, host_slots_remaining: int | None
+) -> int:
+    """Fold the fleet-wide host-capacity budget into a client's slot count (#1444).
+
+    A no-op when the feature is off (``host_slots_remaining is None``). When
+    set, this can only shrink the client's slot budget, never grow it -- R0
+    (never reject/shed/kill running work; gate admission only) means excess
+    PENDING work is simply left untouched for a later tick, not rejected.
+    Extracted from :func:`_dispatch_client_lanes` to keep it within the
+    PLR0912/PLR0915 ceilings (CLAUDE.md).
+    """
+    if host_slots_remaining is None:
+        return available_client_slots
+    return min(available_client_slots, host_slots_remaining)
+
+
 def _dispatch_client_lanes(
     client: ClientConfig,
     effective_lanes: list[LaneConfig],
@@ -235,6 +252,10 @@ def _dispatch_client_lanes(
     parent: str | None,
     emit: Callable[[str], None] | None,
     usage_limited_until: datetime | None = None,
+    host_slots_remaining: int | None = None,
+    host_capacity_gated: bool = False,
+    host_running: int = 0,
+    host_budget: int | None = None,
 ) -> _ClientDispatchResult:
     """Claim + spawn across a client's lanes, then emit its dispatch.tick.
 
@@ -246,6 +267,16 @@ def _dispatch_client_lanes(
     *usage_limited_until* is threaded straight through to
     :func:`_claim_next_pending` as defense-in-depth (#1346) — the caller
     (dispatch_tick) already gates the whole tick on this same value.
+
+    *host_slots_remaining* (#1444) is the fleet-wide host-capacity budget
+    remaining as of this client's turn in the loop (``None`` when
+    ``OrchestratorConfig.host_session_budget`` is unset — feature off, folded
+    into ``available_client_slots`` as a no-op). *host_capacity_gated* is
+    precomputed by the caller (``host_slots_remaining is not None and
+    host_slots_remaining <= 0``) and drives the ``HOST_CAPACITY_GATED``
+    skip_reason. *host_running*/*host_budget* are carried through purely for
+    the DISPATCH_TICK event payload (observability, R7) — they do not affect
+    admission math here (that's ``host_slots_remaining``).
     """
     client_spawned = 0
     spawn_error = False
@@ -268,7 +299,9 @@ def _dispatch_client_lanes(
     # the task-based total_running) so pre-existing DAEMON sessions without
     # a corresponding task still occupy slots (backward compat). The per-
     # lane running_by_lane counts govern per-lane grants within this budget.
-    available_client_slots = client_ceiling - running_count
+    available_client_slots = _apply_host_capacity_budget(
+        client_ceiling - running_count, host_slots_remaining
+    )
     lane_stats: dict[str, dict[str, int]] = {}
     # Per-lane occupant {ticket_id, status} lists for the dispatch.tick payload
     # (#1243). Computed once here (all lanes), the same OCCUPIED_LANE_STATUSES
@@ -391,6 +424,7 @@ def _dispatch_client_lanes(
         spawn_backoff_skipped=spawn_backoff_skipped,
         lane_circuit_paused=lane_circuit_paused,
         client_spawned=client_spawned,
+        host_capacity_gated=host_capacity_gated,
     )
 
     record_event(
@@ -405,6 +439,8 @@ def _dispatch_client_lanes(
             "lanes": lane_stats,
             "lane_occupants": occupants_by_lane,
             "occupied": sum(len(v) for v in occupants_by_lane.values()),
+            "host_running": host_running,
+            "host_budget": host_budget,
         },
     )
     return _ClientDispatchResult(
@@ -444,25 +480,31 @@ def _resolve_dispatch_skip_reason(
     spawn_backoff_skipped: bool,
     lane_circuit_paused: bool,
     client_spawned: int,
+    host_capacity_gated: bool = False,
 ) -> DispatchSkipReason:
     """Resolve the dispatch.tick skip_reason via first-match precedence.
 
-    Mirrors the operator resolution order (issue #459, #588, #875):
+    Mirrors the operator resolution order (issue #459, #588, #875, #1444):
     1. freshness_gate — handled by early-continue before this is called
     2. usage_limited — usage limit detected this tick for this client
-    3. cap_full — running_count >= cap before loop entered
-    4. lane_cap_blocked — pending>0 but every lane slot is occupied by
+    3. host_capacity_gated — the fleet-wide host_session_budget is exhausted
+       (#1444); ranks above cap_full so an operator can distinguish "the
+       whole host is out of budget" from "this client's own cap is full"
+    4. cap_full — running_count >= cap before loop entered
+    5. lane_cap_blocked — pending>0 but every lane slot is occupied by
        RUNNING or BLOCKED_ON_USER tasks; grant<=0 for all lanes
-    5. spawn_error — exception broke the loop (regardless of client_spawned)
-    6. lane_circuit_paused — a lane's circuit breaker has tripped and pending
+    6. spawn_error — exception broke the loop (regardless of client_spawned)
+    7. lane_circuit_paused — a lane's circuit breaker has tripped and pending
        work is stranded behind it (see _resolve_low_precedence_skip_reason)
-    7. spawn_error_backoff — pending tasks exist but all are in spawn_error
+    8. spawn_error_backoff — pending tasks exist but all are in spawn_error
        backoff (next_eligible_at in the future); no exception occurred
-    8. no_pending — loop exited with zero claims and no spawn error
-    9. none — at least one session spawned
+    9. no_pending — loop exited with zero claims and no spawn error
+    10. none — at least one session spawned
     """
     if usage_limit_detected:
         return DispatchSkipReason.USAGE_LIMITED
+    if host_capacity_gated:
+        return DispatchSkipReason.HOST_CAPACITY_GATED
     if cap_full:
         return DispatchSkipReason.CAP_FULL
     if lane_cap_blocked:
