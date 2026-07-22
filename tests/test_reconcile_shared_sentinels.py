@@ -489,7 +489,11 @@ def test_detect_usage_limit_returns_true_when_message_present(
     after_ts = started_at.timestamp() + 60
     os.utime(str(transcript), (after_ts, after_ts))
 
-    assert _detect_usage_limit(sess) is True
+    detection = _detect_usage_limit(sess)
+    assert detection.detected is True
+    # No top-level "timestamp" on the record → no anchors available.
+    assert detection.matched_at is None
+    assert detection.transcript_tail_at is None
 
 
 def test_detect_usage_limit_returns_false_when_absent(
@@ -514,7 +518,7 @@ def test_detect_usage_limit_returns_false_when_absent(
     after_ts = started_at.timestamp() + 60
     os.utime(str(transcript), (after_ts, after_ts))
 
-    assert _detect_usage_limit(sess) is False
+    assert _detect_usage_limit(sess).detected is False
 
 
 def test_detect_usage_limit_returns_false_for_stale_transcript(
@@ -540,7 +544,10 @@ def test_detect_usage_limit_returns_false_for_stale_transcript(
     before_ts = started_at.timestamp() - 3600
     os.utime(str(transcript), (before_ts, before_ts))
 
-    assert _detect_usage_limit(sess) is False
+    detection = _detect_usage_limit(sess)
+    assert detection.detected is False
+    assert detection.matched_at is None
+    assert detection.transcript_tail_at is None
 
 
 def test_detect_usage_limit_returns_false_when_no_transcript(
@@ -560,7 +567,249 @@ def test_detect_usage_limit_returns_false_when_no_transcript(
     sess = _mk_headless_daemon_session("no-trans", worktree, started_at)
     # Do NOT write any transcript — project dir doesn't exist either.
 
-    assert _detect_usage_limit(sess) is False
+    detection = _detect_usage_limit(sess)
+    assert detection.detected is False
+    assert detection.matched_at is None
+    assert detection.transcript_tail_at is None
+
+
+# ---------------------------------------------------------------------------
+# #1345: usage-limit recency bound — matched_at / transcript_tail_at tracking
+# ---------------------------------------------------------------------------
+
+_UL_TEXT = "You've hit your session limit · resets 5:20pm"
+
+
+def _assistant_record(text: str, timestamp: str | None) -> dict[str, object]:
+    """Build one assistant jsonl record, optionally carrying a top-level ts."""
+    record: dict[str, object] = {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": text}],
+        },
+    }
+    if timestamp is not None:
+        record["timestamp"] = timestamp
+    return record
+
+
+def _stamp_after_start(transcript: Path, started_at: datetime) -> None:
+    """Stamp mtime after started_at so the stale-transcript guard doesn't fire."""
+    after_ts = started_at.timestamp() + 60
+    os.utime(str(transcript), (after_ts, after_ts))
+
+
+def test_detect_usage_limit_matched_at_is_last_matching_record_timestamp(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """matched_at is the LAST matching record's timestamp (last-match-wins)."""
+    from cw.reconcile import _detect_usage_limit
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-lastmatch"
+    sess = _mk_headless_daemon_session("lastmatch", worktree, started_at)
+
+    t0 = "2026-01-01T00:00:10+00:00"
+    t1 = "2026-01-01T00:00:20+00:00"
+    t2 = "2026-01-01T00:00:30+00:00"
+    t3 = "2026-01-01T00:00:40+00:00"
+    transcript = _write_transcript_records(
+        home,
+        worktree,
+        [
+            _assistant_record(_UL_TEXT, t0),
+            _assistant_record("continuing work", t1),
+            _assistant_record("You've hit your usage limit again", t2),
+            _assistant_record("all done", t3),
+        ],
+    )
+    _stamp_after_start(transcript, started_at)
+
+    detection = _detect_usage_limit(sess)
+    assert detection.detected is True
+    assert detection.matched_at == datetime.fromisoformat(t2)
+    assert detection.transcript_tail_at == datetime.fromisoformat(t3)
+
+
+def test_detect_usage_limit_transcript_tail_at_tracks_last_record_even_when_unmatched(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """transcript_tail_at follows the last content record even if it's unmatched."""
+    from cw.reconcile import _detect_usage_limit
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-tailunmatched"
+    sess = _mk_headless_daemon_session("tailunmatched", worktree, started_at)
+
+    t0 = "2026-01-01T00:00:10+00:00"
+    t1 = "2026-01-01T00:10:00+00:00"
+    transcript = _write_transcript_records(
+        home,
+        worktree,
+        [
+            _assistant_record(_UL_TEXT, t0),
+            _assistant_record("later unrelated work", t1),
+        ],
+    )
+    _stamp_after_start(transcript, started_at)
+
+    detection = _detect_usage_limit(sess)
+    assert detection.detected is True
+    assert detection.matched_at == datetime.fromisoformat(t0)
+    assert detection.transcript_tail_at == datetime.fromisoformat(t1)
+
+
+def test_detect_usage_limit_matched_at_none_when_matching_record_has_no_timestamp(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A matching record without a parseable timestamp yields matched_at None."""
+    from cw.reconcile import _detect_usage_limit
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-matchnots"
+    sess = _mk_headless_daemon_session("matchnots", worktree, started_at)
+
+    t1 = "2026-01-01T00:00:20+00:00"
+    transcript = _write_transcript_records(
+        home,
+        worktree,
+        [
+            _assistant_record(_UL_TEXT, None),
+            _assistant_record("done", t1),
+        ],
+    )
+    _stamp_after_start(transcript, started_at)
+
+    detection = _detect_usage_limit(sess)
+    assert detection.detected is True
+    assert detection.matched_at is None
+    # The later non-matching record still carries a parseable tail timestamp.
+    assert detection.transcript_tail_at == datetime.fromisoformat(t1)
+
+
+def test_detect_usage_limit_transcript_tail_at_none_when_no_record_has_parseable_timestamp(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No record carries a parseable timestamp → transcript_tail_at is None."""
+    from cw.reconcile import _detect_usage_limit
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-nots"
+    sess = _mk_headless_daemon_session("nots", worktree, started_at)
+
+    transcript = _write_transcript_records(
+        home,
+        worktree,
+        [
+            _assistant_record(_UL_TEXT, None),
+            _assistant_record("done", None),
+        ],
+    )
+    _stamp_after_start(transcript, started_at)
+
+    detection = _detect_usage_limit(sess)
+    assert detection.detected is True
+    assert detection.matched_at is None
+    assert detection.transcript_tail_at is None
+
+
+# ---------------------------------------------------------------------------
+# #1345: usage-limit recency bound — _usage_limit_is_recent contract
+# ---------------------------------------------------------------------------
+
+
+def test_usage_limit_is_recent_false_when_not_detected() -> None:
+    """Not detected → always False, regardless of window."""
+    from cw.reconcile._shared import UsageLimitDetection, _usage_limit_is_recent
+
+    detection = UsageLimitDetection(
+        detected=False, matched_at=None, transcript_tail_at=None
+    )
+    assert _usage_limit_is_recent(detection, window_seconds=300) is False
+
+
+def test_usage_limit_is_recent_true_when_match_at_tail() -> None:
+    """Match landing at the transcript tail (gap 0) is recent."""
+    from cw.reconcile._shared import UsageLimitDetection, _usage_limit_is_recent
+
+    ts = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    detection = UsageLimitDetection(
+        detected=True, matched_at=ts, transcript_tail_at=ts
+    )
+    assert _usage_limit_is_recent(detection, window_seconds=300) is True
+
+
+def test_usage_limit_is_recent_false_when_gap_exceeds_window() -> None:
+    """A limit message far before the tail is stale (early+unrelated scenario)."""
+    from cw.reconcile._shared import UsageLimitDetection, _usage_limit_is_recent
+
+    matched = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    tail = matched + timedelta(seconds=301)
+    detection = UsageLimitDetection(
+        detected=True, matched_at=matched, transcript_tail_at=tail
+    )
+    assert _usage_limit_is_recent(detection, window_seconds=300) is False
+
+
+def test_usage_limit_is_recent_boundary_gap_equals_window_is_recent() -> None:
+    """Gap exactly equal to the window is recent (<= boundary)."""
+    from cw.reconcile._shared import UsageLimitDetection, _usage_limit_is_recent
+
+    matched = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    tail = matched + timedelta(seconds=300)
+    detection = UsageLimitDetection(
+        detected=True, matched_at=matched, transcript_tail_at=tail
+    )
+    assert _usage_limit_is_recent(detection, window_seconds=300) is True
+
+
+def test_usage_limit_is_recent_fails_open_when_timestamps_missing_default() -> None:
+    """Detected but no anchor → returns fail_open (default True)."""
+    from cw.reconcile._shared import UsageLimitDetection, _usage_limit_is_recent
+
+    detection = UsageLimitDetection(
+        detected=True, matched_at=None, transcript_tail_at=None
+    )
+    assert _usage_limit_is_recent(detection, window_seconds=300) is True
+
+
+def test_usage_limit_is_recent_fails_closed_when_timestamps_missing_and_fail_open_false() -> (
+    None
+):
+    """Detected but no anchor with fail_open=False → returns False."""
+    from cw.reconcile._shared import UsageLimitDetection, _usage_limit_is_recent
+
+    detection = UsageLimitDetection(
+        detected=True, matched_at=None, transcript_tail_at=datetime.now(UTC)
+    )
+    assert (
+        _usage_limit_is_recent(detection, window_seconds=60, fail_open=False) is False
+    )
 
 
 def test_awaiting_subagent_skips_blank_lines_and_bad_json(
