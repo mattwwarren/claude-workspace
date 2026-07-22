@@ -103,6 +103,7 @@ def _write_idle_transcript(
     project_dir = home / ".claude" / "projects" / encoded
     project_dir.mkdir(parents=True, exist_ok=True)
     path = project_dir / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
     record = '{"type": "assistant", "message": {"role": "assistant", "content": []}}\n'
     path.write_text(record)
     return path

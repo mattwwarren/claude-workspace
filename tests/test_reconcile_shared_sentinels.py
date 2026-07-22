@@ -2030,6 +2030,39 @@ def test_transcript_age_seconds_widens_to_subagent_transcript(
     assert abs(age - 30) < 5
 
 
+def test_transcript_age_seconds_widens_to_nested_subagent_transcript(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1431: a fresh subagent transcript nested under a subdirectory (e.g.
+    ``<uuid>/subagents/agent-x.jsonl``) must widen liveness too, not just a
+    flat sibling -- the glob must be recursive."""
+    from cw.reconcile import _transcript_age_seconds
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-widen-nested-age"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+    reg = _write_idle_transcript(home, worktree, filename="fake-short-id-sess.jsonl")
+    reg_ts = (started_at + timedelta(seconds=60)).timestamp()
+    os.utime(reg, (reg_ts, reg_ts))
+    sib = _write_idle_transcript(
+        home, worktree, filename="some-uuid/subagents/agent-abc.jsonl"
+    )
+    sib_ts = (now - timedelta(seconds=30)).timestamp()
+    os.utime(sib, (sib_ts, sib_ts))
+
+    sess = _mk_content_ts_session("widen-nested-age-1", worktree, started_at)
+
+    age = _transcript_age_seconds(sess, now)
+    assert age is not None
+    assert abs(age - 30) < 5
+
+
 def test_transcript_recently_active_ignores_stale_prior_session_transcript(
     tmp_config_dir: Path,
     tmp_path: Path,
