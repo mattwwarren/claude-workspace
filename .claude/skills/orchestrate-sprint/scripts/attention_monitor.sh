@@ -35,9 +35,13 @@ if [[ -n "$LANE" ]]; then
   LANE_ARGS=(--lane "$LANE")
 fi
 
+# Why: on bash < 4.4 (macOS system /bin/bash is 3.2), "${LANE_ARGS[@]}" on an
+# EMPTY array raises "unbound variable" under set -u. The [@]+ alternate-value
+# guard below expands to nothing when unset/empty and to the full args when
+# populated — safe on 3.2, identical behavior when LANE is set (#1413).
 cw event tail --follow --client "$CLIENT" --dedup-terminal \
   --since "$SINCE" \
-  "${LANE_ARGS[@]}" \
+  "${LANE_ARGS[@]+"${LANE_ARGS[@]}"}" \
   --type session.needs_attention \
   --type operator.escalation \
   --type session.timed_out \
