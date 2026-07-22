@@ -58,6 +58,7 @@ from tests._reconcile_helpers import (
     _shipped_salvage_payload,
     _stage_complete_payload,
     _state_queue_snapshot,
+    _ul_record,
     _write_idle_transcript_with_text,
     _write_salvage_transcript,
     _write_staged_clients_yaml,
@@ -1160,18 +1161,6 @@ def test_detect_phantom_candidates_usage_limit_false_when_no_transcript(
     c = candidates[0]
     assert c.proposed_action == ProposedAction.CRASH_COMPLETE
     assert c.usage_limit_detected is False
-
-
-def _ul_record(text: str, timestamp: str) -> dict[str, object]:
-    """One timestamped assistant text record for _write_transcript_records."""
-    return {
-        "type": "assistant",
-        "timestamp": timestamp,
-        "message": {
-            "role": "assistant",
-            "content": [{"type": "text", "text": text}],
-        },
-    }
 
 
 def test_detect_phantom_candidates_usage_limit_recent_at_tail_true(

@@ -60,6 +60,7 @@ from tests._reconcile_helpers import (
     _no_op_salvage_payload,
     _shipped_salvage_payload,
     _state_queue_snapshot,
+    _ul_record,
     _write_idle_transcript_with_text,
     _write_salvage_transcript,
     _write_staged_clients_yaml,
@@ -1662,30 +1663,18 @@ def test_stalled_cap_park_no_usage_limit_keeps_retry_cap_parked_cause(
     assert s.reap_reason == ReapReason.STALLED_RETRY_CAP_PARKED
 
 
-def _stalled_ul_record(text: str, timestamp: str) -> dict[str, object]:
-    """One timestamped assistant text record for _write_transcript_records."""
-    return {
-        "type": "assistant",
-        "timestamp": timestamp,
-        "message": {
-            "role": "assistant",
-            "content": [{"type": "text", "text": text}],
-        },
-    }
-
-
 _STALLED_UL_RECENT = [
-    _stalled_ul_record("working the ticket", "2026-01-01T00:00:10+00:00"),
-    _stalled_ul_record(
+    _ul_record("working the ticket", "2026-01-01T00:00:10+00:00"),
+    _ul_record(
         "You've hit your session limit · resets 11am", "2026-01-01T00:00:20+00:00"
     ),
 ]
 # Early limit the worker recovered from, then unrelated work 301s later (stale).
 _STALLED_UL_STALE = [
-    _stalled_ul_record(
+    _ul_record(
         "You've hit your session limit · resets 11am", "2026-01-01T00:00:10+00:00"
     ),
-    _stalled_ul_record("unrelated later progress", "2026-01-01T00:05:11+00:00"),
+    _ul_record("unrelated later progress", "2026-01-01T00:05:11+00:00"),
 ]
 
 

@@ -52,6 +52,7 @@ from cw.reconcile import (
 from tests._reconcile_helpers import (
     _auto_config,
     _mk_timed_out_daemon_session,
+    _ul_record,
     _write_staged_clients_yaml,
     _write_transcript_records,
 )
@@ -65,20 +66,6 @@ _RECENT_UL = UsageLimitDetection(
     detected=True, matched_at=_UL_NOW, transcript_tail_at=_UL_NOW
 )
 _NO_UL = UsageLimitDetection(detected=False, matched_at=None, transcript_tail_at=None)
-
-
-def _ul_record(text: str, timestamp: str | None = None) -> dict[str, object]:
-    """One assistant text record (optionally timestamped) for the real detector."""
-    record: dict[str, object] = {
-        "type": "assistant",
-        "message": {
-            "role": "assistant",
-            "content": [{"type": "text", "text": text}],
-        },
-    }
-    if timestamp is not None:
-        record["timestamp"] = timestamp
-    return record
 
 
 def _mk_live_daemon_session_with_worktree(

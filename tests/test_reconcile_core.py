@@ -40,6 +40,7 @@ from tests._reconcile_helpers import (
     _mk_headless_daemon_session,
     _mk_phantom_daemon_session,
     _mk_session,
+    _ul_record,
     _write_idle_transcript_with_text,
     _write_transcript_records,
 )
@@ -239,18 +240,6 @@ def test_reconcile_usage_limited_true_from_phantom_path(
     assert "phantom-ul-reconcile" in report.reverted_ticket_ids
 
 
-def _ul_record(text: str, timestamp: str) -> dict[str, object]:
-    """One timestamped assistant text record for _write_transcript_records."""
-    return {
-        "type": "assistant",
-        "timestamp": timestamp,
-        "message": {
-            "role": "assistant",
-            "content": [{"type": "text", "text": text}],
-        },
-    }
-
-
 def _setup_stalled_ul_session(
     home: Path,
     tmp_path: Path,
@@ -357,6 +346,29 @@ def test_watchdog_usage_limited_false_when_limit_message_stale_and_reap_unrelate
 
     assert report.usage_limited is False
     assert "watchdog-ul-stale" in report.reverted_ticket_ids
+
+
+def test_watchdog_usage_limited_true_when_timestamp_missing(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1345: a limit message with no parseable timestamp has no recency anchor
+    → the backoff site's fail_open=True default still arms report.usage_limited."""
+    home = tmp_path / "home"
+    home.mkdir()
+    _setup_stalled_ul_session(
+        home,
+        tmp_path,
+        monkeypatch,
+        records=[_ul_record("You've hit your session limit · resets 3:40am")],
+        slug="watchdog-ul-nots",
+    )
+
+    report = reconcile()
+
+    assert report.usage_limited is True
+    assert "watchdog-ul-nots" in report.reverted_ticket_ids
 
 
 def test_reconcile_noop_when_no_phantoms(

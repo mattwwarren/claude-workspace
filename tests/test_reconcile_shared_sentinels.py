@@ -66,6 +66,7 @@ from tests._reconcile_helpers import (
     _mk_session,
     _shipped_salvage_payload,
     _stage_complete_payload,
+    _ul_record,
     _write_idle_transcript_with_text,
     _write_salvage_transcript,
     _write_transcript_records,
@@ -580,20 +581,6 @@ def test_detect_usage_limit_returns_false_when_no_transcript(
 _UL_TEXT = "You've hit your session limit · resets 5:20pm"
 
 
-def _assistant_record(text: str, timestamp: str | None) -> dict[str, object]:
-    """Build one assistant jsonl record, optionally carrying a top-level ts."""
-    record: dict[str, object] = {
-        "type": "assistant",
-        "message": {
-            "role": "assistant",
-            "content": [{"type": "text", "text": text}],
-        },
-    }
-    if timestamp is not None:
-        record["timestamp"] = timestamp
-    return record
-
-
 def _stamp_after_start(transcript: Path, started_at: datetime) -> None:
     """Stamp mtime after started_at so the stale-transcript guard doesn't fire."""
     after_ts = started_at.timestamp() + 60
@@ -624,10 +611,10 @@ def test_detect_usage_limit_matched_at_is_last_matching_record_timestamp(
         home,
         worktree,
         [
-            _assistant_record(_UL_TEXT, t0),
-            _assistant_record("continuing work", t1),
-            _assistant_record("You've hit your usage limit again", t2),
-            _assistant_record("all done", t3),
+            _ul_record(_UL_TEXT, t0),
+            _ul_record("continuing work", t1),
+            _ul_record("You've hit your usage limit again", t2),
+            _ul_record("all done", t3),
         ],
     )
     _stamp_after_start(transcript, started_at)
@@ -660,8 +647,8 @@ def test_detect_usage_limit_transcript_tail_at_tracks_last_record_even_when_unma
         home,
         worktree,
         [
-            _assistant_record(_UL_TEXT, t0),
-            _assistant_record("later unrelated work", t1),
+            _ul_record(_UL_TEXT, t0),
+            _ul_record("later unrelated work", t1),
         ],
     )
     _stamp_after_start(transcript, started_at)
@@ -693,8 +680,8 @@ def test_detect_usage_limit_matched_at_none_when_matching_record_has_no_timestam
         home,
         worktree,
         [
-            _assistant_record(_UL_TEXT, None),
-            _assistant_record("done", t1),
+            _ul_record(_UL_TEXT, None),
+            _ul_record("done", t1),
         ],
     )
     _stamp_after_start(transcript, started_at)
@@ -726,8 +713,8 @@ def test_detect_usage_limit_tail_none_when_no_record_has_timestamp(
         home,
         worktree,
         [
-            _assistant_record(_UL_TEXT, None),
-            _assistant_record("done", None),
+            _ul_record(_UL_TEXT, None),
+            _ul_record("done", None),
         ],
     )
     _stamp_after_start(transcript, started_at)

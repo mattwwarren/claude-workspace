@@ -329,6 +329,21 @@ def _write_transcript_records(
     return path
 
 
+def _ul_record(text: str, timestamp: str | None = None) -> dict[str, object]:
+    """One assistant text record (optionally timestamped) for
+    ``_write_transcript_records`` (#1345 usage-limit recency-gate tests)."""
+    record: dict[str, object] = {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": text}],
+        },
+    }
+    if timestamp is not None:
+        record["timestamp"] = timestamp
+    return record
+
+
 def _make_terminal_payload(status: str, ticket_id: str) -> dict[str, Any]:
     """Build a minimal valid AutoDevResult payload for the given terminal status."""
     # Base shape shared by most statuses.

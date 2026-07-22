@@ -656,16 +656,26 @@ class UsageLimitDetection(NamedTuple):
     transcript_tail_at: datetime | None
 
 
+def _parse_iso_timestamp(raw: object) -> datetime | None:
+    """Parse a record's top-level ``"timestamp"`` value, or ``None`` if unusable."""
+    if not isinstance(raw, str):
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
 def _iter_assistant_records(path: Path) -> Iterator[tuple[datetime | None, str]]:
     """Yield ``(timestamp, text)`` for each assistant record in a jsonl transcript.
 
     ``timestamp`` is the record's top-level ``"timestamp"`` parsed via
-    ``datetime.fromisoformat``, or ``None`` when absent/malformed — the record
-    is still yielded, because its text may match even without a usable anchor.
-    ``text`` concatenates every text block of the assistant message. Mirrors
-    :func:`_assistant_text_from_transcript`'s per-record content guard and the
-    top-level-``"timestamp"`` convention of :func:`_last_content_entry_timestamp`.
-    Yields nothing on any read error.
+    :func:`_parse_iso_timestamp`, or ``None`` when absent/malformed — the
+    record is still yielded, because its text may match even without a usable
+    anchor. ``text`` concatenates every text block of the assistant message.
+    Mirrors :func:`_assistant_text_from_transcript`'s per-record content guard
+    and the top-level-``"timestamp"`` convention of
+    :func:`_last_content_entry_timestamp`. Yields nothing on any read error.
     """
     try:
         with path.open() as handle:
@@ -689,14 +699,7 @@ def _iter_assistant_records(path: Path) -> Iterator[tuple[datetime | None, str]]
                     and block.get("type") == "text"
                     and isinstance(block.get("text"), str)
                 )
-                ts_raw = record.get("timestamp")
-                ts: datetime | None = None
-                if isinstance(ts_raw, str):
-                    try:
-                        ts = datetime.fromisoformat(ts_raw)
-                    except ValueError:
-                        ts = None
-                yield ts, text
+                yield _parse_iso_timestamp(record.get("timestamp")), text
     except OSError:
         return
 

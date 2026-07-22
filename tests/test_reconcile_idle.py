@@ -58,6 +58,7 @@ from tests._reconcile_helpers import (
     _shipped_salvage_payload,
     _stage_complete_payload,
     _state_queue_snapshot,
+    _ul_record,
     _write_idle_transcript_with_text,
     _write_salvage_transcript,
     _write_staged_clients_yaml,
@@ -2621,18 +2622,6 @@ def test_reap_reason_usage_limit_cutoff(
     assert s.reap_reason == ReapReason.USAGE_LIMIT_CUTOFF
 
 
-def _idle_ul_record(text: str, timestamp: str) -> dict[str, object]:
-    """One timestamped assistant text record for _write_transcript_records."""
-    return {
-        "type": "assistant",
-        "timestamp": timestamp,
-        "message": {
-            "role": "assistant",
-            "content": [{"type": "text", "text": text}],
-        },
-    }
-
-
 def _run_idle_recover_with_transcript(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2710,8 +2699,8 @@ def test_idle_revert_usage_limit_recent_sets_cutoff_cause(
         monkeypatch,
         sid="idle-ul-recent",
         records=[
-            _idle_ul_record("working on it", "2026-01-01T00:00:10+00:00"),
-            _idle_ul_record(
+            _ul_record("working on it", "2026-01-01T00:00:10+00:00"),
+            _ul_record(
                 "You've hit your session limit · resets 5am",
                 "2026-01-01T00:00:20+00:00",
             ),
@@ -2731,12 +2720,12 @@ def test_idle_revert_usage_limit_stale_keeps_idle_stall_cause(
         monkeypatch,
         sid="idle-ul-stale",
         records=[
-            _idle_ul_record(
+            _ul_record(
                 "You've hit your session limit · resets 5am",
                 "2026-01-01T00:00:10+00:00",
             ),
             # 301s later — beyond the 300s backoff window.
-            _idle_ul_record("unrelated later progress", "2026-01-01T00:05:11+00:00"),
+            _ul_record("unrelated later progress", "2026-01-01T00:05:11+00:00"),
         ],
     )
     assert s.reap_reason == ReapReason.IDLE_STALL
