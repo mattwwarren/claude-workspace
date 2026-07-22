@@ -1181,7 +1181,12 @@ def test_act_auto_fix_ci_dispatch_loop_locked_elsewhere_fails_open(
 
     assert acted == []
     failed = read_events(event_types=[OrchestratorEventType.PR_ACTION_FAILED])
-    assert any(e.correlation_id == task.ticket_id for e in failed)
+    matching = [e for e in failed if e.correlation_id == task.ticket_id]
+    assert len(matching) == 1
+    # Pin the failure to the lock-contention path specifically -- not just
+    # "some CwError" -- mirroring test_reconcile_reentry_guard_fires_and_is_swallowed's
+    # exact-exception check for the analogous #1228 SessionsLockReentryError case.
+    assert "dispatch loop already running" in matching[0].payload["error"]
     # Latch stays stamped even on dispatch failure (no retry storm); it is the
     # ONLY mutation this act phase makes to the row -- same invariant as the
     # successful-dispatch case above.
