@@ -1464,9 +1464,11 @@ def resolve_idle_watchdog_budget(
 
     Precedence (highest first):
     1. task.idle_watchdog_override — explicit per-ticket escape hatch.
-    2. task.scope_hint — look up per-tier default in config.
-    3. config.idle_watchdog_seconds — operator-tunable global default.
-    4. IDLE_WATCHDOG_SECONDS — hardcoded fallback.
+    2. config.idle_watchdog_by_stage[task.stage] — per-stage default, when
+       task is not None and task.stage has an entry in the map.
+    3. task.scope_hint — look up per-tier default in config.
+    4. config.idle_watchdog_seconds — operator-tunable global default.
+    5. IDLE_WATCHDOG_SECONDS — hardcoded fallback.
     """
     global_default = (
         IDLE_WATCHDOG_SECONDS
@@ -1477,6 +1479,9 @@ def resolve_idle_watchdog_budget(
         return global_default
     if task.idle_watchdog_override is not None:
         return task.idle_watchdog_override
+    stage_budget = config.idle_watchdog_by_stage.get(task.stage)
+    if stage_budget is not None:
+        return stage_budget
     if task.scope_hint is not None:
         tier_budget = config.idle_watchdog_by_tier.get(task.scope_hint)
         if tier_budget is not None:
