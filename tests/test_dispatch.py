@@ -51,6 +51,7 @@ from cw.dispatch_state import (
     AvailabilityProbeCache,
     load_availability_probe_cache,
     save_availability_probe_cache,
+    save_usage_limit_armed_at,
     save_usage_limited_until,
 )
 from cw.events import read_events, record_event
@@ -4092,6 +4093,272 @@ class TestDispatchUsageLimitBackoff:
         # not resurrect it -- spawning proceeds normally. Exactly one spawn
         # total confirms tick 1 contributed none and tick 2 contributed one.
         assert len(daemon.spawn_calls) == 1
+
+    def test_usage_limit_cleared_emitted_on_active_to_inactive_transition(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The tick that observes an active window lapse emits
+        dispatch.usage_limit_cleared exactly once (#1343 R1)."""
+        from freezegun import freeze_time
+
+        import cw.dispatch
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-1343-CLEARED", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+
+        with freeze_time("2026-07-16 12:00:00") as frozen:
+            armed_at = datetime.now(UTC) - timedelta(minutes=5)
+            expiring = datetime.now(UTC) + timedelta(seconds=30)
+            save_usage_limit_armed_at(armed_at)
+            save_usage_limited_until(expiring)
+
+            call_count = 0
+            real_tick = cw.dispatch.loop.dispatch_tick
+
+            def advancing_tick(*args: object, **kwargs: object) -> DispatchTickResult:
+                nonlocal call_count
+                call_count += 1
+                if call_count == 3:
+                    raise KeyboardInterrupt
+                result = real_tick(*args, **kwargs)  # type: ignore[arg-type]
+                if call_count == 1:
+                    # Advance past the window's expiry before tick 2.
+                    frozen.tick(delta=timedelta(seconds=60))
+                return result
+
+            monkeypatch.setattr("cw.dispatch.loop.dispatch_tick", advancing_tick)
+            monkeypatch.setattr("cw.dispatch.loop.time.sleep", lambda _: None)
+
+            with contextlib.suppress(KeyboardInterrupt):
+                run_dispatch_loop(native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-ul-cleared-transition",
+            event_types=[OrchestratorEventType.USAGE_LIMIT_CLEARED],
+        )
+        assert len(events) == 1
+        assert events[0].payload["detected_at"] == armed_at.isoformat()
+
+    def test_usage_limit_cleared_payload_has_clients_affected_and_counts(
+        self,
+        tmp_dispatch_dirs: Path,
+    ) -> None:
+        """_emit_usage_limit_cleared's payload carries the exact cohort
+        computed from session.timed_out(cause=usage_limit_cutoff) events
+        recorded since armed_at (#1343 R1/R2)."""
+        import cw.dispatch.loop
+
+        armed_at = datetime.now(UTC) - timedelta(minutes=10)
+        record_event(
+            OrchestratorEventType.SESSION_TIMED_OUT,
+            {
+                "session_id": "s1",
+                "session_name": "client-a/impl",
+                "client": "client-a",
+                "ticket_id": "GEN-1",
+                "cause": "usage_limit_cutoff",
+            },
+        )
+        cleared_at = datetime.now(UTC)
+
+        cw.dispatch.loop._emit_usage_limit_cleared(armed_at, cleared_at)
+
+        events = read_events(
+            consumer="test-ul-cleared-payload",
+            event_types=[OrchestratorEventType.USAGE_LIMIT_CLEARED],
+        )
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["clients_affected"] == ["client-a"]
+        assert payload["sessions_affected"] == 1
+        assert payload["detected_at"] == armed_at.isoformat()
+        assert payload["cleared_at"] == cleared_at.isoformat()
+
+    def test_usage_limit_cleared_restart_mid_backoff_still_detects_later_clear(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A freshly-started process that loads an already-active persisted
+        window still detects the eventual clear, using the persisted
+        armed_at -- not a value derived from this process's own
+        backoff_seconds (#1343 R2)."""
+        from freezegun import freeze_time
+
+        import cw.dispatch
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-1343-RESTART", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+
+        with freeze_time("2026-07-16 12:00:00") as frozen:
+            # Simulate a PRIOR process's fresh detection, well before this
+            # process starts -- this process never itself arms the window.
+            armed_at = datetime.now(UTC) - timedelta(minutes=20)
+            expiring = datetime.now(UTC) + timedelta(seconds=30)
+            save_usage_limit_armed_at(armed_at)
+            save_usage_limited_until(expiring)
+
+            call_count = 0
+            real_tick = cw.dispatch.loop.dispatch_tick
+
+            def advancing_tick(*args: object, **kwargs: object) -> DispatchTickResult:
+                nonlocal call_count
+                call_count += 1
+                if call_count == 3:
+                    raise KeyboardInterrupt
+                result = real_tick(*args, **kwargs)  # type: ignore[arg-type]
+                if call_count == 1:
+                    frozen.tick(delta=timedelta(seconds=60))
+                return result
+
+            monkeypatch.setattr("cw.dispatch.loop.dispatch_tick", advancing_tick)
+            monkeypatch.setattr("cw.dispatch.loop.time.sleep", lambda _: None)
+
+            # A fresh run_dispatch_loop() call simulates a process restart:
+            # its usage_limit_window_armed_at local is loaded from the
+            # sidecar at loop start, not from any prior in-process history.
+            with contextlib.suppress(KeyboardInterrupt):
+                run_dispatch_loop(native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-ul-cleared-restart",
+            event_types=[OrchestratorEventType.USAGE_LIMIT_CLEARED],
+        )
+        assert len(events) == 1
+        assert events[0].payload["detected_at"] == armed_at.isoformat()
+
+    def test_usage_limit_cleared_degrades_gracefully_when_armed_at_missing(
+        self,
+        tmp_dispatch_dirs: Path,
+    ) -> None:
+        """When armed_at is None (persist failed, or the window predates
+        this field), the event still emits with detected_at=null rather
+        than being skipped -- skipping would silently drop the correlating
+        signal orchestrators need most (#1343)."""
+        import cw.dispatch.loop
+
+        cleared_at = datetime.now(UTC)
+        cw.dispatch.loop._emit_usage_limit_cleared(None, cleared_at)
+
+        events = read_events(
+            consumer="test-ul-cleared-degraded",
+            event_types=[OrchestratorEventType.USAGE_LIMIT_CLEARED],
+        )
+        assert len(events) == 1
+        assert events[0].payload["detected_at"] is None
+
+    def test_run_dispatch_loop_once_mode_does_not_emit_usage_limit_cleared(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """--once never calls the transition detector, so it structurally
+        cannot emit dispatch.usage_limit_cleared -- even when the loaded
+        window happens to already be within seconds of lapsing at load
+        time (#1343 R3)."""
+        import cw.dispatch.loop
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-1343-ONCE", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+
+        future = datetime.now(UTC) + timedelta(seconds=1)
+        save_usage_limited_until(future)
+        save_usage_limit_armed_at(datetime.now(UTC) - timedelta(minutes=5))
+
+        calls: list[object] = []
+        real_handler = cw.dispatch.loop._handle_usage_limit_window_transition
+
+        def spy_handler(*args: object, **kwargs: object) -> bool:
+            calls.append(args)
+            return real_handler(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(
+            "cw.dispatch.loop._handle_usage_limit_window_transition", spy_handler
+        )
+
+        run_dispatch_loop(once=True, native_daemon=daemon)
+
+        assert calls == []
+        events = read_events(
+            consumer="test-ul-cleared-once",
+            event_types=[OrchestratorEventType.USAGE_LIMIT_CLEARED],
+        )
+        assert events == []
+
+    def test_usage_limit_cleared_cohort_count_excludes_idle_stall_cause(
+        self,
+        tmp_dispatch_dirs: Path,
+    ) -> None:
+        """The cohort scan filters on cause=usage_limit_cutoff -- an
+        idle-stall timeout recorded in the same window must not inflate
+        sessions_affected/clients_affected (#1343 R5)."""
+        import cw.dispatch.loop
+
+        armed_at = datetime.now(UTC) - timedelta(minutes=10)
+        record_event(
+            OrchestratorEventType.SESSION_TIMED_OUT,
+            {
+                "session_id": "s1",
+                "client": "client-a",
+                "ticket_id": "GEN-1",
+                "cause": "usage_limit_cutoff",
+            },
+        )
+        record_event(
+            OrchestratorEventType.SESSION_TIMED_OUT,
+            {
+                "session_id": "s2",
+                "client": "client-b",
+                "ticket_id": "GEN-2",
+                "cause": "idle_stall_recovered",
+            },
+        )
+        cleared_at = datetime.now(UTC)
+
+        cw.dispatch.loop._emit_usage_limit_cleared(armed_at, cleared_at)
+
+        events = read_events(
+            consumer="test-ul-cleared-cohort-filter",
+            event_types=[OrchestratorEventType.USAGE_LIMIT_CLEARED],
+        )
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["clients_affected"] == ["client-a"]
+        assert payload["sessions_affected"] == 1
+
+    def test_usage_limit_cleared_not_emitted_when_window_never_active(
+        self,
+        tmp_dispatch_dirs: Path,
+    ) -> None:
+        """_handle_usage_limit_window_transition emits nothing when the
+        window was never active -- no false clear on a fleet that never hit
+        a usage limit (#1343)."""
+        import cw.dispatch.loop
+
+        now_active = cw.dispatch.loop._handle_usage_limit_window_transition(
+            False, usage_limited_until=None, armed_at=None
+        )
+
+        assert now_active is False
+        events = read_events(
+            consumer="test-ul-cleared-never-active",
+            event_types=[OrchestratorEventType.USAGE_LIMIT_CLEARED],
+        )
+        assert events == []
 
 
 class TestClaimNextPendingUsageLimitedGate:

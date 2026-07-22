@@ -312,6 +312,44 @@ Operator-relevant: if you see this without having stopped the loop yourself,
 dispatch is down and pending tickets will not be claimed until it is
 restarted.
 
+### `dispatch.usage_limit_cleared`
+
+**Emitter:** `run_dispatch_loop` in `cw.dispatch.loop` (via
+`_handle_usage_limit_window_transition`/`_emit_usage_limit_cleared`)
+**Payload:**
+```json
+{
+  "clients_affected": ["<str>", "..."],
+  "sessions_affected": 3,
+  "detected_at": "<iso8601 | null>",
+  "cleared_at": "<iso8601>"
+}
+```
+**Semantics:** Fires exactly once, on the tick that observes the fleet-wide
+usage-limit back-off window (`usage_limited_until`) transition from active
+to lapsed — never per-client; `clients_affected` carries the full cohort in
+a single event. `clients_affected` and `sessions_affected` are computed by
+scanning `session.timed_out` events with `cause: "usage_limit_cutoff"`
+recorded since `detected_at`. `detected_at` is the persisted arm timestamp
+(the moment the window was opened, not derived from
+`usage_limit_backoff_seconds`); it is `null` when that timestamp failed to
+persist or predates this window's arming — the event still fires rather
+than being dropped, but the cohort scan degrades to unbounded history in
+that case. `cleared_at` is when the loop *noticed* the lapse, which can lag
+the window's true expiry instant by up to `tick_interval_seconds` — the loop
+is itself only tick-granular.
+
+Two caveats:
+- **`--once` mode never emits this event.** A single tick cannot observe a
+  two-tick armed→cleared transition, and the detector is not invoked at all
+  in `--once` mode.
+- **In-process-local detector state.** The armed/cleared tracking lives in
+  plain locals inside one `run_dispatch_loop()` call, not a persisted latch
+  — this depends on the single-long-running-loop-per-fleet invariant (only
+  one dispatch loop process running at a time). A second concurrent loop
+  would each independently observe the same transition and double-emit.
+  Tracked as a known gap by #1362 (confirmed still OPEN).
+
 ### `session.timed_out`
 
 **Emitter:** the idle watchdog (`cw.reconcile.idle`) and the stalled

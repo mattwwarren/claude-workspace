@@ -1985,6 +1985,163 @@ class TestUsageLimitedUntilPersistence:
         mock_write.assert_not_called()
 
 
+class TestUsageLimitArmedAt:
+    """Unit tests for load_usage_limit_armed_at / save_usage_limit_armed_at (#1343).
+
+    Sibling of TestUsageLimitedUntilPersistence: persisted in the same
+    DISPATCH_STATE_FILE sidecar under the ``"usage_limit_armed_at"`` key.
+    Unlike ``usage_limited_until``, this is a historical marker (not a
+    forward-looking deadline) — it is NOT expiry-checked against "now".
+    """
+
+    def test_save_and_load_roundtrip(self, tmp_config_dir: Path) -> None:
+        from datetime import UTC, datetime
+
+        from cw.dispatch_state import (
+            load_usage_limit_armed_at,
+            save_usage_limit_armed_at,
+        )
+
+        armed_at = datetime.now(UTC)
+        save_usage_limit_armed_at(armed_at)
+        loaded = load_usage_limit_armed_at()
+        assert loaded is not None
+        assert abs((loaded - armed_at).total_seconds()) < 1
+
+    def test_load_returns_none_when_file_absent(self, tmp_config_dir: Path) -> None:
+        import cw.dispatch_state
+        from cw.dispatch_state import load_usage_limit_armed_at
+
+        cw.dispatch_state.DISPATCH_STATE_FILE.unlink(missing_ok=True)
+        assert load_usage_limit_armed_at() is None
+
+    def test_load_returns_none_on_corrupt_json(self, tmp_config_dir: Path) -> None:
+        import cw.dispatch_state
+        from cw.dispatch_state import load_usage_limit_armed_at
+
+        cw.dispatch_state.DISPATCH_STATE_FILE.write_text("not-json")
+        assert load_usage_limit_armed_at() is None
+
+    def test_load_does_not_expire_old_timestamp(self, tmp_config_dir: Path) -> None:
+        """Unlike usage_limited_until, an armed_at far in the past still loads.
+
+        It's a historical marker read at the moment the loop notices a
+        cleared window, not a forward-looking deadline — see the class
+        docstring and dispatch_state.py's load_usage_limited_until for the
+        contrast.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        from cw.dispatch_state import (
+            load_usage_limit_armed_at,
+            save_usage_limit_armed_at,
+        )
+
+        past = datetime.now(UTC) - timedelta(days=1)
+        save_usage_limit_armed_at(past)
+        loaded = load_usage_limit_armed_at()
+        assert loaded is not None
+        assert abs((loaded - past).total_seconds()) < 1
+
+    def test_save_usage_limit_armed_at_preserves_usage_limited_until(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Writing the armed_at key must not clobber usage_limited_until."""
+        from datetime import UTC, datetime, timedelta
+
+        from cw.dispatch_state import (
+            load_usage_limited_until,
+            save_usage_limit_armed_at,
+            save_usage_limited_until,
+        )
+
+        future = datetime.now(UTC) + timedelta(hours=1)
+        save_usage_limited_until(future)
+        save_usage_limit_armed_at(datetime.now(UTC))
+        loaded = load_usage_limited_until()
+        assert loaded is not None
+        assert abs((loaded - future).total_seconds()) < 1
+
+    def test_save_usage_limited_until_preserves_usage_limit_armed_at(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Writing usage_limited_until must not clobber the armed_at key."""
+        from datetime import UTC, datetime, timedelta
+
+        from cw.dispatch_state import (
+            load_usage_limit_armed_at,
+            save_usage_limit_armed_at,
+            save_usage_limited_until,
+        )
+
+        armed_at = datetime.now(UTC)
+        save_usage_limit_armed_at(armed_at)
+        save_usage_limited_until(datetime.now(UTC) + timedelta(hours=1))
+        loaded = load_usage_limit_armed_at()
+        assert loaded is not None
+        assert abs((loaded - armed_at).total_seconds()) < 1
+
+    def test_save_usage_limit_armed_at_swallows_corrupt_existing_sidecar(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """save_usage_limit_armed_at also tolerates a corrupt existing sidecar."""
+        from datetime import UTC, datetime
+
+        import cw.dispatch_state
+        from cw.dispatch_state import (
+            load_usage_limit_armed_at,
+            save_usage_limit_armed_at,
+        )
+
+        cw.dispatch_state.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cw.dispatch_state.DISPATCH_STATE_FILE.write_text("not-json")
+        armed_at = datetime.now(UTC)
+        save_usage_limit_armed_at(armed_at)
+        loaded = load_usage_limit_armed_at()
+        assert loaded is not None
+        assert abs((loaded - armed_at).total_seconds()) < 1
+
+    def test_save_warns_and_does_not_raise_on_oserror(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """save_usage_limit_armed_at swallows OSError and emits a warning."""
+        from datetime import UTC, datetime
+        from unittest.mock import patch
+
+        from cw.dispatch_state import save_usage_limit_armed_at
+
+        armed_at = datetime.now(UTC)
+        with patch(
+            "cw.dispatch_state.atomic_write_text", side_effect=OSError("disk full")
+        ):
+            save_usage_limit_armed_at(armed_at)
+
+    def test_save_refuses_real_path_and_does_not_swallow(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The #1017 CwError guard must propagate, unlike the OSError above."""
+        from datetime import UTC, datetime
+
+        from cw.dispatch_state import save_usage_limit_armed_at
+
+        real_dispatch_state_file = _REAL_STATE_DIR / "dispatch_state.json"
+        monkeypatch.setattr(
+            "cw.dispatch_state.DISPATCH_STATE_FILE", real_dispatch_state_file
+        )
+        mock_write = MagicMock()
+        monkeypatch.setattr("cw.dispatch_state.atomic_write_text", mock_write)
+
+        armed_at = datetime.now(UTC)
+        with pytest.raises(CwError, match="refusing real-state write"):
+            save_usage_limit_armed_at(armed_at)
+
+        mock_write.assert_not_called()
+
+
 class TestAvailabilityProbeCachePersistence:
     """Unit tests for the fleet-wide gh-availability probe cache (RFC 0011 A5).
 

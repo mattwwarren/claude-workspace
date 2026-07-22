@@ -154,6 +154,52 @@ def save_usage_limited_until(dt: datetime | None) -> None:
         logger.warning("dispatch_state: failed to persist usage_limited_until")
 
 
+def load_usage_limit_armed_at() -> datetime | None:
+    """Load the persisted usage-limit backoff arm timestamp (#1343).
+
+    Unlike :func:`load_usage_limited_until`, this is a historical marker, not
+    a forward-looking deadline: it is NOT expiry-checked against "now", so it
+    remains readable after the window it armed has lapsed -- needed so the
+    dispatch loop can read an exact ``detected_at`` at the moment it notices
+    the armed->cleared transition. Returns None when the file is absent,
+    unreadable, malformed, or the key is missing.
+    """
+    path = DISPATCH_STATE_FILE
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text())
+        ts = raw.get("usage_limit_armed_at")
+        if not isinstance(ts, str):
+            return None
+        return datetime.fromisoformat(ts)
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        return None
+
+
+def save_usage_limit_armed_at(dt: datetime | None) -> None:
+    """Persist (or clear) the usage-limit backoff arm timestamp (#1343).
+
+    Writes ``{"usage_limit_armed_at": "<iso>"}`` when *dt* is set; writes
+    ``{"usage_limit_armed_at": null}`` to clear it. Read-merge-writes the
+    shared sidecar so the other keys (``usage_limited_until``,
+    ``availability_probe``, ``main_drift_latches``) are preserved rather than
+    clobbered (#1157). Creates STATE_DIR if needed. Silently swallows write
+    errors -- a failed persist just means a later ``dispatch.usage_limit_cleared``
+    event degrades ``detected_at`` to null rather than being suppressed
+    (acceptable degradation).
+    """
+    try:
+        refuse_real_state_write(DISPATCH_STATE_FILE)
+        DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with dispatch_state_lock():
+            payload = _load_dispatch_state_raw()
+            payload["usage_limit_armed_at"] = dt.isoformat() if dt is not None else None
+            atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
+    except OSError:
+        logger.warning("dispatch_state: failed to persist usage_limit_armed_at")
+
+
 def load_availability_probe_cache() -> AvailabilityProbeCache | None:
     """Load the fleet-wide gh-availability probe cache from DISPATCH_STATE_FILE.
 
