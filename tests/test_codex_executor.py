@@ -457,6 +457,38 @@ def test_post_review_comment_forwards_cwd() -> None:
     post_mock.assert_called_once_with("T-1", "findings", cwd=want_cwd)
 
 
+def test_post_review_comment_logs_on_none_result(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """gh call couldn't run at all (missing binary / timeout) -> warning, not silent."""
+    with (
+        patch("cw.executor.post_issue_comment", return_value=None),
+        caplog.at_level("WARNING"),
+    ):
+        _post_review_comment("T-1", "findings", cwd=None)
+    assert any(
+        "T-1" in r.message and "gh call failed" in r.message for r in caplog.records
+    )
+
+
+def test_post_review_comment_logs_on_nonzero_returncode(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Non-zero gh exit -> warning carries ticket_id, returncode, and stderr."""
+    fake_result = subprocess.CompletedProcess(
+        args=["gh"], returncode=1, stdout=b"", stderr=b"invalid issue format"
+    )
+    with (
+        patch("cw.executor.post_issue_comment", return_value=fake_result),
+        caplog.at_level("WARNING"),
+    ):
+        _post_review_comment("T-1", "findings", cwd=None)
+    assert any(
+        "T-1" in r.message and "1" in r.message and "invalid issue format" in r.message
+        for r in caplog.records
+    )
+
+
 def test_make_blocked_backward_compat(tmp_path: Path) -> None:
     """make_blocked without stage_reached defaults to stage2_impl."""
     result = make_blocked(ticket_id="T-1", worktree=tmp_path, reason="some_reason")
