@@ -217,9 +217,16 @@ Fetching `main` alongside `<branch-name>` ensures `origin/main` is current befor
 
 ```bash
 FORK_POINT=$(git merge-base origin/main origin/<branch-name>)
-TMPWT="/tmp/gate-wt-$$"
-trap 'git worktree remove --force "$TMPWT" 2>/dev/null' EXIT
-git worktree add --detach "$TMPWT" origin/<branch-name>
+TMPWT="/tmp/gate-wt-$CW_SESSION"
+# Deterministic path (keyed on $CW_SESSION, not $$) — reconstructable by an
+# external reconciler even if this invocation is SIGKILLed before any trap runs.
+# Self-heal: a prior invocation for this same session may have been killed
+# after `git worktree add` registered the entry but before cleanup ran.
+git worktree remove --force "$TMPWT" 2>/dev/null
+rm -rf "$TMPWT" 2>/dev/null
+git worktree prune
+trap 'git worktree remove --force "$TMPWT" 2>/dev/null; rm -rf "$TMPWT" 2>/dev/null' EXIT INT TERM
+git worktree add --detach "$TMPWT" origin/<branch-name> || { echo "IMPL_FAILED: git worktree add exited $?"; exit 1; }
 ```
 
 All gates below run inside `$TMPWT`. Do NOT run gates from the cw session worktree with origin-qualified refs — that cwd confusion is the bug this step fixes. FORK_POINT is recomputed from `origin` refs; do not trust the impl agent's reported value.
@@ -249,7 +256,7 @@ All gates below run inside `$TMPWT`. Do NOT run gates from the cw session worktr
 
 5. **Incremental commit discipline** (Mitigation 3): `git -C "$TMPWT" log --oneline "$FORK_POINT"..HEAD | wc -l` MUST be > 1 for any non-trivial change (>50 lines OR >3 files touched). A single commit on a large change → flag as discipline failure in friction (does NOT block, but compromises OOM recovery for any follow-up fix loop; record `"impl_no_incremental_commits"` in `friction_highlights`).
 
-**On gate failure (any of checks 1, 3, 4):**
+**On gate failure (gate setup itself — e.g. `git worktree add` erroring — or any of checks 1, 3, 4):**
 - **Interactive:** AskUserQuestion with the failed-check output: "Implementation agent's completion claim failed gate <N>: <details>. Retry impl, abort ticket, or override?"
 - **Headless:** EXIT `blocked` with `blocker.reason: "impl_failed"`, `blocker.details: "Step 2.5 gate <N> failed: <verbatim check output>"`. Do NOT spawn reviewers — the impl is not done.
 
