@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
+from cw.config import dispatch_loop_lock
 from cw.dispatch_serve import (
     _SERVE_BACKOFF_CAP_SECONDS,
     _SERVE_CRASH_WINDOW_SECONDS,
@@ -16,7 +17,11 @@ from cw.dispatch_serve import (
     _prune_crash_window,
     run_dispatch_serve,
 )
-from cw.exceptions import DispatchServeError, VersionDriftError
+from cw.exceptions import (
+    DispatchLoopLockedError,
+    DispatchServeError,
+    VersionDriftError,
+)
 
 # ---------------------------------------------------------------------------
 # TestRunDispatchServeConstants
@@ -540,3 +545,82 @@ class TestVersionDriftError:
             run_dispatch_serve(max_restarts=0)  # must not raise
 
         assert call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# TestRunDispatchServeSingletonLock — #1362 dispatch-loop singleton lock
+# ---------------------------------------------------------------------------
+
+
+class TestRunDispatchServeSingletonLock:
+    """serve fails fast on DispatchLoopLockedError and forwards ``force`` (#1362)."""
+
+    def test_dispatch_loop_locked_error_propagates_without_restart(self) -> None:
+        """A DispatchLoopLockedError fails fast — no retry/backoff, no swallow."""
+        call_count = 0
+        sleep_calls: list[float] = []
+
+        def _fake_loop(**_kwargs: object) -> None:
+            nonlocal call_count
+            call_count += 1
+            msg = "dispatch loop already running (pid 999999: cw dev-queue run)"
+            raise DispatchLoopLockedError(msg)
+
+        with (
+            pytest.raises(DispatchLoopLockedError),
+            patch("cw.dispatch_serve.run_dispatch_loop", _fake_loop),
+            patch("cw.dispatch_serve.time.sleep", side_effect=sleep_calls.append),
+        ):
+            run_dispatch_serve()
+
+        assert call_count == 1
+        assert sleep_calls == []
+
+    def test_force_forwarded_to_every_restart(self) -> None:
+        """force=True is forwarded into every run_dispatch_loop call across restarts."""
+        captured_force: list[object] = []
+        call_count = 0
+
+        def _fake_loop(**kwargs: object) -> None:
+            nonlocal call_count
+            call_count += 1
+            captured_force.append(kwargs.get("force"))
+            if call_count == 1:
+                msg = "crash"
+                raise RuntimeError(msg)
+            # Second call returns cleanly.
+
+        with (
+            patch("cw.dispatch_serve.run_dispatch_loop", _fake_loop),
+            patch("cw.dispatch_serve.time.sleep"),
+        ):
+            run_dispatch_serve(force=True)
+
+        assert call_count == 2
+        assert captured_force == [True, True]
+
+    def test_no_deadlock_against_own_previous_iteration_on_restart(self) -> None:
+        """A crashed iteration releases the lock before the supervisor restarts.
+
+        Uses the REAL ``dispatch_loop_lock()`` inside the fake loop: the first
+        call raises while holding the lock, the second must be able to acquire
+        it again — proving the crash path released it (no self-deadlock).
+        """
+        call_count = 0
+
+        def _fake_loop(**_kwargs: object) -> None:
+            nonlocal call_count
+            call_count += 1
+            with dispatch_loop_lock():
+                if call_count == 1:
+                    msg = "crash"
+                    raise RuntimeError(msg)
+                # Second call acquires cleanly and returns.
+
+        with (
+            patch("cw.dispatch_serve.run_dispatch_loop", _fake_loop),
+            patch("cw.dispatch_serve.time.sleep"),
+        ):
+            run_dispatch_serve()
+
+        assert call_count == 2

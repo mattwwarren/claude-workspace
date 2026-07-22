@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import io
 import json
 import logging
@@ -12,7 +13,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner, Result
 from freezegun import freeze_time
@@ -6270,6 +6271,145 @@ class TestDevQueueServe:
         result = runner.invoke(main, ["dev-queue", "serve", "--once"])
         assert result.exit_code != 0
         assert "no such option" in result.output.lower()
+
+
+# ---------------------------------------------------------------------------
+# Tests: dev-queue run/serve singleton lock (#1362)
+# ---------------------------------------------------------------------------
+
+
+@contextmanager
+def _hold_foreign_dispatch_loop_lock(pid: int, cmd: str) -> Iterator[None]:
+    """Seed holder identity JSON and hold the dispatch-loop lock via a raw fd.
+
+    fcntl.flock is per open-file-description, so this denies acquisition even
+    from the same process — exactly what a real second ``cw`` process would do.
+    """
+    from cw.config import dispatch_loop_lock_file
+
+    lock_path = dispatch_loop_lock_file()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(json.dumps({"pid": pid, "cmd": cmd}))
+    fd = lock_path.open("r+")
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()
+
+
+class TestDevQueueSingletonLock:
+    """A held dispatch-loop lock blocks both run and serve, both directions (#1362)."""
+
+    def test_run_blocked_when_run_already_running(self) -> None:
+        """``run --once`` exits non-zero naming the holding run process."""
+        from cw.cli import main
+
+        runner = CliRunner()
+        with _hold_foreign_dispatch_loop_lock(999999, "cw dev-queue run"):
+            result = runner.invoke(main, ["dev-queue", "run", "--once"])
+        assert result.exit_code != 0
+        assert "999999" in result.output
+        assert "cw dev-queue run" in result.output
+
+    def test_serve_blocked_when_run_already_running(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``serve`` fails fast (no backoff sleep) when a run holds the lock."""
+        from cw.cli import main
+
+        sleep_mock = MagicMock()
+        monkeypatch.setattr("cw.dispatch_serve.time.sleep", sleep_mock)
+
+        runner = CliRunner()
+        with _hold_foreign_dispatch_loop_lock(999999, "cw dev-queue run"):
+            result = runner.invoke(main, ["dev-queue", "serve"])
+        assert result.exit_code != 0
+        assert "999999" in result.output
+        assert "cw dev-queue run" in result.output
+        # Fast-fail: the supervisor never entered its crash-restart backoff.
+        sleep_mock.assert_not_called()
+
+    def test_run_blocked_when_serve_already_running(self) -> None:
+        """``run --once`` is blocked by a serve holder (reverse direction)."""
+        from cw.cli import main
+
+        runner = CliRunner()
+        with _hold_foreign_dispatch_loop_lock(888888, "cw dev-queue serve"):
+            result = runner.invoke(main, ["dev-queue", "run", "--once"])
+        assert result.exit_code != 0
+        assert "cw dev-queue serve" in result.output
+
+    def test_serve_blocked_when_serve_already_running(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``serve`` is blocked by another serve holder."""
+        from cw.cli import main
+
+        monkeypatch.setattr("cw.dispatch_serve.time.sleep", MagicMock())
+
+        runner = CliRunner()
+        with _hold_foreign_dispatch_loop_lock(888888, "cw dev-queue serve"):
+            result = runner.invoke(main, ["dev-queue", "serve"])
+        assert result.exit_code != 0
+        assert "cw dev-queue serve" in result.output
+
+    def test_force_flag_bypasses_lock_on_run(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """``run --once --force`` bypasses a held lock, exits 0, and warns."""
+        from cw.cli import main
+
+        runner = CliRunner()
+        with (
+            _hold_foreign_dispatch_loop_lock(999999, "cw dev-queue run"),
+            caplog.at_level(logging.WARNING, logger="cw.dispatch"),
+        ):
+            result = runner.invoke(main, ["dev-queue", "run", "--once", "--force"])
+        assert result.exit_code == 0, result.output
+        assert any("force" in record.message.lower() for record in caplog.records)
+
+    def test_force_flag_bypasses_lock_on_serve(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """``serve --force`` bypasses a held lock; force reaches the loop, which warns."""
+        from cw.cli import main
+        from cw.dispatch import run_dispatch_loop as real_loop
+
+        def _once_loop(
+            *,
+            max_parallel: int | None = None,
+            use_plan: bool = False,
+            parent: str | None = None,
+            emit: Callable[[str], None] | None = None,
+            auto_ff: bool = True,
+            client: str | None = None,
+            force: bool = False,
+        ) -> None:
+            # Force a single tick so the supervisor returns cleanly instead of
+            # looping forever, while still exercising the real force-bypass path.
+            real_loop(
+                max_parallel=max_parallel,
+                once=True,
+                use_plan=use_plan,
+                parent=parent,
+                emit=emit,
+                auto_ff=auto_ff,
+                client=client,
+                force=force,
+            )
+
+        monkeypatch.setattr("cw.dispatch_serve.run_dispatch_loop", _once_loop)
+
+        runner = CliRunner()
+        with (
+            _hold_foreign_dispatch_loop_lock(999999, "cw dev-queue run"),
+            caplog.at_level(logging.WARNING, logger="cw.dispatch"),
+        ):
+            result = runner.invoke(main, ["dev-queue", "serve", "--force"])
+        assert result.exit_code == 0, result.output
+        assert any("force" in record.message.lower() for record in caplog.records)
 
 
 # ---------------------------------------------------------------------------

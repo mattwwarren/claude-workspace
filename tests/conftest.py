@@ -338,6 +338,9 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr("cw.config.SESSIONS_LOCK", state_dir / ".sessions.lock")
     monkeypatch.setattr("cw.config.CLIENTS_LOCK", config_dir / ".clients.yaml.lock")
     monkeypatch.setattr(
+        "cw.config.DISPATCH_LOOP_LOCK", state_dir / ".dispatch_loop.lock"
+    )
+    monkeypatch.setattr(
         "cw.dispatch_state.DISPATCH_STATE_FILE", state_dir / "dispatch_state.json"
     )
     monkeypatch.setattr(
