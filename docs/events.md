@@ -980,24 +980,33 @@ the next legitimate sentinel or operator action.
   "client": "<str | null>",
   "session_id": "<str>",
   "stage": "harden | plan | impl | review | finalize",
-  "reason": "wall_clock_budget",
-  "stale_minutes": "<float>"
+  "reason": "wall_clock_budget | stalled_retry_cap_parked",
+  "stale_minutes": "<float>",
+  "consecutive_vetoes": "<int>"
 }
 ```
-**Semantics:** GitHub #976. Emitted instead of the normal wall-clock-budget
-REVERT_TASK/park when the session's freshly-classified transcript-staleness
-liveness bucket (`_classify_liveness_bucket`, same per-stage-floor ladder as
-`session.liveness_changed`) is still `live` at the moment the wall-clock
-budget expired — the session is demonstrably still making progress, so the
-park is suppressed. The veto is indefinite while the session stays live:
-there is no suppress-counter and no escalation latch, it simply re-evaluates
-every tick. **Zero queue or session-state mutation** accompanies this event —
-the task stays `RUNNING` and the session stays `ACTIVE`/`IDLE`.
+**Semantics:** GitHub #976, #1277, #1445. Emitted instead of the normal
+wall-clock-budget REVERT_TASK/park when the session's freshly-classified
+transcript-staleness liveness bucket (`_classify_liveness_bucket`, same
+per-stage-floor ladder as `session.liveness_changed`) is still `live` at the
+moment the pending park would fire — the session is demonstrably still making
+progress, so the park is suppressed. `reason` names the park that was vetoed:
+`wall_clock_budget` (the ordinary wall-clock revert) or
+`stalled_retry_cap_parked` (the retry-cap park; the veto applies to **both**
+sites since #1277). The task stays `RUNNING` and the session stays
+`ACTIVE`/`IDLE` — but the session's `consecutive_park_vetoes` latch **is**
+incremented (`consecutive_vetoes` in the payload is the post-increment value);
+that is the only state this event mutates.
 
-The veto does **not** apply to the cap-exceeded retry-cap park
-(`stalled_retry_cap_parked`) — that park fires unconditionally once
-`task.attempts >= cap`, regardless of liveness; the veto is only reachable
-from the ordinary wall-clock-budget fallthrough.
+The veto is **bounded** (#1445): it is granted only while
+`consecutive_park_vetoes < OrchestratorConfig.park_veto_cap` (default 2). Once
+the count reaches the cap the veto stops firing and the pending park proceeds,
+and — at parity across both cap-fire sites — an immediate `session.needs_attention`
+is emitted (the retry-cap park via its own emission with
+`paused_status=stalled_retry_cap_parked`; the wall-clock-budget SIGNAL_ONLY
+reroute via a dedicated escalation loop with `paused_status=wall_clock_budget`,
+non-destructive: no daemon-stop / worktree removal). The counter resets for free
+per pipeline episode, since each episode constructs a brand-new `Session`.
 
 `correlation_id` is the `ticket_id`.
 

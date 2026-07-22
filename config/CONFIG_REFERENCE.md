@@ -403,6 +403,16 @@ liveness_first_bucket_by_stage:
 freshness_block_attention_threshold: 5
 salvage_skip_attention_threshold: 5
 
+# Maximum consecutive POST-BUDGET liveness vetoes the stalled sweep grants a
+# single session before letting the pending wall-clock-budget / retry-cap park
+# proceed (#1445). Deliberately small: it counts only vetoes that fire after
+# the session has already blown its wall-clock budget, so 2 already reproduces
+# the "would have parked two sweeps after budget exhaustion" arithmetic behind
+# the veto-runaway this bound fixes. On cap-fire an immediate
+# session.needs_attention is emitted at both park sites. Resets for free per
+# pipeline episode (fresh Session object).
+park_veto_cap: 2
+
 # Review-recipe repeat-fire burst detector (RFC 0010 anomaly layer, #1201).
 # When a single (ticket, recipe) records this many PR_ACTION_TAKEN events
 # within review_recipe_repeat_fire_window_minutes, one
