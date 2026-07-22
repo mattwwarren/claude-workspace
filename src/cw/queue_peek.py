@@ -491,6 +491,7 @@ def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[st
             "signal_source": signal_source,
             "jsonl_idle_min": jsonl_idle_min,
             "stage_high_water": t.stage_high_water,
+            "pipeline_stage": t.stage,
         }
 
     age = minutes_since(info.get("first_user_ts"), now)
@@ -522,6 +523,7 @@ def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[st
         "signal_source": signal_source,
         "jsonl_idle_min": None,
         "stage_high_water": t.stage_high_water,
+        "pipeline_stage": t.stage,
     }
 
 
