@@ -34,7 +34,12 @@ from cw.dev_queue import (
     load_dev_queue,
     save_dev_queue,
 )
-from cw.dispatch_state import load_usage_limited_until, save_usage_limited_until
+from cw.dispatch_state import (
+    load_usage_limit_armed_at,
+    load_usage_limited_until,
+    save_usage_limit_armed_at,
+    save_usage_limited_until,
+)
 from cw.events import advance_cursor, read_events, record_event
 from cw.exceptions import (
     ConfigValidationError,
@@ -47,6 +52,7 @@ from cw.models import (
 from cw.native_daemon import get_native_daemon_client
 from cw.pr_hydrate import hydrate_pr_states
 from cw.reconcile import (
+    _CAUSE_USAGE_LIMIT,
     ticket_id_for_session,
 )
 
@@ -278,6 +284,76 @@ def _merge_persisted_usage_limited_until(
     return usage_limited_until
 
 
+def _emit_usage_limit_cleared(armed_at: datetime | None, cleared_at: datetime) -> None:
+    """Emit ``dispatch.usage_limit_cleared`` for an armed->cleared transition (#1343).
+
+    Scans ``session.timed_out`` events with ``cause=usage_limit_cutoff`` since
+    *armed_at* (stateless re-scan -- no consumer cursor, since this must be
+    re-evaluated fresh on every transition) to compute the affected cohort.
+    When *armed_at* is None (persist failed, or the window predates this
+    field existing), still emits with ``detected_at: null`` rather than
+    skipping -- skipping would silently drop the correlating signal
+    orchestrators need most; the cohort scan degrades to unbounded (all
+    matching history) in that case, an accepted trade-off.
+    """
+    events = read_events(
+        event_types=[OrchestratorEventType.SESSION_TIMED_OUT],
+        since_ts=armed_at,
+    )
+    cutoff_events = [
+        event for event in events if event.payload.get("cause") == _CAUSE_USAGE_LIMIT
+    ]
+    clients_affected = sorted(
+        {
+            event.payload["client"]
+            for event in cutoff_events
+            if isinstance(event.payload.get("client"), str)
+        }
+    )
+    record_event(
+        OrchestratorEventType.USAGE_LIMIT_CLEARED,
+        {
+            "clients_affected": clients_affected,
+            "sessions_affected": len(cutoff_events),
+            "detected_at": armed_at.isoformat() if armed_at is not None else None,
+            "cleared_at": cleared_at.isoformat(),
+        },
+    )
+
+
+def _handle_usage_limit_window_transition(
+    was_active: bool,
+    usage_limited_until: datetime | None,
+    armed_at: datetime | None,
+) -> bool:
+    """Detect an armed->cleared usage-limit backoff transition; emit for it (#1343).
+
+    Returns this tick's active state, for the caller to carry forward as
+    ``was_active`` into the next tick's call. Fires
+    :attr:`OrchestratorEventType.USAGE_LIMIT_CLEARED` exactly once -- on the
+    tick that observes ``was_active and not now_active`` -- never per-client
+    (a single event carries the full ``clients_affected`` cohort). "Active"
+    mirrors the wall-clock check :func:`~cw.dispatch.tick.dispatch_tick`
+    itself uses to gate spawning (``usage_limited_until`` set AND still in
+    the future) -- ``usage_limited_until`` is never reset to None on natural
+    expiry (only overwritten by a fresh detection), so "is not None" alone
+    would never observe a transition.
+
+    In-process-local detector state only (#1343 R4): the caller
+    (:func:`run_dispatch_loop`) threads ``was_active``/``armed_at`` as plain
+    locals, not a persisted latch -- this depends on the single-long-running-
+    loop-per-fleet invariant (documented, not enforced; #1362, confirmed
+    still OPEN). A second concurrent loop would each independently observe
+    the same transition and double-emit.
+    """
+    now_active = usage_limited_until is not None and usage_limited_until > datetime.now(
+        UTC
+    )
+    if was_active and not now_active:
+        _emit_usage_limit_cleared(armed_at, cleared_at=datetime.now(UTC))
+    return now_active
+
+
 def _reload_tick_config(
     config: OrchestratorConfig, max_parallel: int | None
 ) -> OrchestratorConfig:
@@ -378,6 +454,13 @@ def run_dispatch_loop(
     # a code merge honours an active backoff rather than re-opening the spawn gate
     # immediately (#804).
     usage_limited_until: datetime | None = load_usage_limited_until()
+    # #1343: in-process-local usage-limit-window transition detector state --
+    # see _handle_usage_limit_window_transition's docstring for the R4
+    # single-loop-invariant caveat.
+    usage_limit_window_active: bool = (
+        usage_limited_until is not None and usage_limited_until > datetime.now(UTC)
+    )
+    usage_limit_window_armed_at: datetime | None = load_usage_limit_armed_at()
 
     try:
         while True:
@@ -389,6 +472,19 @@ def run_dispatch_loop(
             usage_limited_until = _merge_persisted_usage_limited_until(
                 usage_limited_until
             )
+            # #1343 R3: skip the transition check in --once mode. A single
+            # tick's pre-loop-loaded `usage_limit_window_active` could
+            # otherwise appear to "lapse" within that one tick (e.g. a
+            # window that was seconds from expiry at loop start), which
+            # would violate --once's "never emits" contract -- the natural
+            # multi-tick invariant this check relies on doesn't hold for a
+            # single-tick run.
+            if not once:
+                usage_limit_window_active = _handle_usage_limit_window_transition(
+                    usage_limit_window_active,
+                    usage_limited_until,
+                    usage_limit_window_armed_at,
+                )
 
             consume_completed_sessions()
             try:
@@ -424,6 +520,14 @@ def run_dispatch_loop(
                     seconds=config.usage_limit_backoff_seconds
                 )
                 save_usage_limited_until(usage_limited_until)
+                # #1343 R2: stamp the arm timestamp on every fresh detection
+                # (this block already only fires when the window was NOT
+                # already active this tick -- see tick.py's early-return at
+                # usage_limit_detected=False while a window is active) so
+                # the eventual cleared-event's detected_at is exact, not
+                # derived from backoff_seconds.
+                usage_limit_window_armed_at = datetime.now(UTC)
+                save_usage_limit_armed_at(usage_limit_window_armed_at)
                 _log.warning(
                     "dispatch: usage limit detected; backing off until %s",
                     usage_limited_until,

@@ -148,6 +148,11 @@ class OrchestratorEventType(StrEnum):
     PR_MERGED = "pr.merged"
     DISPATCH_TICK = "dispatch.tick"
     DISPATCH_LOOP_EXITED = "dispatch.loop_exited"
+    # #1343 -- fires when the dispatch loop's usage-limit back-off window
+    # (usage_limited_until) transitions from armed to lapsed. See
+    # docs/events.md for the payload shape and the --once / single-loop-
+    # invariant caveats.
+    USAGE_LIMIT_CLEARED = "dispatch.usage_limit_cleared"
     SESSION_PHANTOM_REVERTED = "session.phantom_reverted"
     SESSION_SALVAGE_SKIPPED = "session.salvage_skipped"
     SESSION_REAP_PROPOSED = "session.reap_proposed"
