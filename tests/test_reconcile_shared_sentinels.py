@@ -706,7 +706,7 @@ def test_detect_usage_limit_matched_at_none_when_matching_record_has_no_timestam
     assert detection.transcript_tail_at == datetime.fromisoformat(t1)
 
 
-def test_detect_usage_limit_transcript_tail_at_none_when_no_record_has_parseable_timestamp(
+def test_detect_usage_limit_tail_none_when_no_record_has_timestamp(
     tmp_config_dir: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -758,9 +758,7 @@ def test_usage_limit_is_recent_true_when_match_at_tail() -> None:
     from cw.reconcile._shared import UsageLimitDetection, _usage_limit_is_recent
 
     ts = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
-    detection = UsageLimitDetection(
-        detected=True, matched_at=ts, transcript_tail_at=ts
-    )
+    detection = UsageLimitDetection(detected=True, matched_at=ts, transcript_tail_at=ts)
     assert _usage_limit_is_recent(detection, window_seconds=300) is True
 
 
@@ -798,9 +796,7 @@ def test_usage_limit_is_recent_fails_open_when_timestamps_missing_default() -> N
     assert _usage_limit_is_recent(detection, window_seconds=300) is True
 
 
-def test_usage_limit_is_recent_fails_closed_when_timestamps_missing_and_fail_open_false() -> (
-    None
-):
+def test_usage_limit_is_recent_fails_closed_when_missing_and_no_fail_open() -> None:
     """Detected but no anchor with fail_open=False → returns False."""
     from cw.reconcile._shared import UsageLimitDetection, _usage_limit_is_recent
 

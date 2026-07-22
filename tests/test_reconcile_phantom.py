@@ -61,6 +61,7 @@ from tests._reconcile_helpers import (
     _write_idle_transcript_with_text,
     _write_salvage_transcript,
     _write_staged_clients_yaml,
+    _write_transcript_records,
 )
 
 
@@ -1147,6 +1148,115 @@ def test_detect_phantom_candidates_usage_limit_false_when_no_transcript(
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     sess = _mk_phantom_daemon_session("phantom-noul-1", started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+
+    candidates = _detect_phantom_candidates(
+        state, phantom_set={sess.id}, now=started_at
+    )
+
+    assert len(candidates) == 1
+    c = candidates[0]
+    assert c.proposed_action == ProposedAction.CRASH_COMPLETE
+    assert c.usage_limit_detected is False
+
+
+def _ul_record(text: str, timestamp: str) -> dict[str, object]:
+    """One timestamped assistant text record for _write_transcript_records."""
+    return {
+        "type": "assistant",
+        "timestamp": timestamp,
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": text}],
+        },
+    }
+
+
+def test_detect_phantom_candidates_usage_limit_recent_at_tail_true(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1345: a limit message at the transcript tail is recent → detected True."""
+    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-ul-recent"
+    sess = _mk_phantom_daemon_session(
+        "phantom-ul-recent",
+        started_at,
+        surface_ref="fake-short-id",
+        worktree_path=worktree,
+    )
+    transcript = _write_transcript_records(
+        home,
+        worktree,
+        [
+            _ul_record("working on it", "2026-01-01T00:00:10+00:00"),
+            _ul_record(
+                "You've hit your session limit · resets 5am",
+                "2026-01-01T00:00:20+00:00",
+            ),
+        ],
+    )
+    after_ts = started_at.timestamp() + 60
+    os.utime(str(transcript), (after_ts, after_ts))
+
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+
+    candidates = _detect_phantom_candidates(
+        state, phantom_set={sess.id}, now=started_at
+    )
+
+    assert len(candidates) == 1
+    c = candidates[0]
+    assert c.proposed_action == ProposedAction.CRASH_COMPLETE
+    assert c.usage_limit_detected is True
+
+
+def test_detect_phantom_candidates_usage_limit_stale_false(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1345: an early limit message with later unrelated work is stale → False."""
+    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    worktree = tmp_path / "wt-ul-stale"
+    sess = _mk_phantom_daemon_session(
+        "phantom-ul-stale",
+        started_at,
+        surface_ref="fake-short-id",
+        worktree_path=worktree,
+    )
+    transcript = _write_transcript_records(
+        home,
+        worktree,
+        [
+            _ul_record(
+                "You've hit your session limit · resets 5am",
+                "2026-01-01T00:00:10+00:00",
+            ),
+            # 301s after the match — beyond the 300s backoff window.
+            _ul_record("unrelated later progress", "2026-01-01T00:05:11+00:00"),
+        ],
+    )
+    after_ts = started_at.timestamp() + 60
+    os.utime(str(transcript), (after_ts, after_ts))
+
     state = CwState(sessions=[sess])
     save_state(state)
     save_dev_queue(DevQueueStore(tasks=[]))
