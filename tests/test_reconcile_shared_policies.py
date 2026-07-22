@@ -6,6 +6,7 @@ routing, emitted-sentinel routing, and _apply_sentinel_to_task disposition.
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -68,6 +69,7 @@ from tests._reconcile_helpers import (
     _state_queue_snapshot,
     _write_salvage_transcript,
     _write_staged_clients_yaml,
+    _write_transcript_records,
 )
 
 
@@ -436,6 +438,12 @@ class TestEmitReapProposed:
         assert ev.payload["reason"] == "wall_clock_budget"
         assert ev.correlation_id == "prop-revert-1"
 
+        # No transcript file was written for this session — both age fields
+        # must fail open to None rather than raising or defaulting to 0 (#1427).
+        evidence = ev.payload["evidence"]
+        assert evidence["transcript_age_seconds"] is None
+        assert evidence["transcript_mtime_age_seconds"] is None
+
         # Session stamped
         assert sess.reap_proposed_at == now
 
@@ -665,6 +673,174 @@ class TestEmitReapProposed:
         _emit_reap_proposed(state, [], native_live=set(), now=now)
 
         assert _state_queue_snapshot() == snap
+
+    def test_reap_proposed_evidence_uses_content_age_not_mtime(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """evidence.transcript_age_seconds reflects content-entry staleness, not
+        raw mtime, when a trailing metadata-only record (queue-operation/
+        ai-title/mode — no timestamp, no message) bumped the file's mtime after
+        the last real turn (#1427).
+        """
+        from cw.reconcile import ProposedAction, ReapCandidate, _emit_reap_proposed
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+
+        worktree = tmp_path / "wt-prop-content-age"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 2, 0, 0, tzinfo=UTC)  # 2h after start
+        old_content_ts = now - timedelta(hours=1, minutes=46)  # ~106min old
+
+        transcript = _write_transcript_records(
+            home,
+            worktree,
+            [
+                {
+                    "type": "user",
+                    "timestamp": old_content_ts.isoformat(),
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "go"}],
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "timestamp": old_content_ts.isoformat(),
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "working"}],
+                    },
+                },
+                # Trailing metadata-only records: no "timestamp", no "message" —
+                # these bump the file's mtime without representing live activity.
+                {"type": "queue-operation", "op": "dequeue"},
+                {"type": "last-prompt", "prompt": "go"},
+                {"type": "ai-title", "title": "Fix the thing"},
+                {"type": "agent-name", "name": "worker"},
+                {"type": "mode", "mode": "default"},
+                {"type": "permission-mode", "mode": "acceptEdits"},
+            ],
+        )
+        # Bump mtime to just before `now` — ~221s before, mirrors a fresh-mtime
+        # trailing metadata write.
+        recent_mtime = (now - timedelta(seconds=221)).timestamp()
+        os.utime(transcript, (recent_mtime, recent_mtime))
+
+        sess = _mk_headless_daemon_session("prop-content-age-1", worktree, started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        candidate = ReapCandidate(
+            session_id="prop-content-age-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="prop-content-age-1",
+            elapsed_seconds=7436.79,
+            reap_reason=ReapReason.STALLED_RETRY_CAP_PARKED,
+        )
+
+        _emit_reap_proposed(state, [candidate], native_live=set(), now=now)
+
+        events = read_events()
+        reap_events = [
+            e for e in events if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+        ]
+        assert len(reap_events) == 1
+        evidence = reap_events[0].payload["evidence"]
+
+        # Content-aware age: ~106 minutes (6360s), NOT the ~221s mtime age.
+        content_age = evidence["transcript_age_seconds"]
+        assert content_age is not None
+        expected_content_age = (now - old_content_ts).total_seconds()
+        assert abs(content_age - expected_content_age) < 5
+
+        # The raw mtime age is still reported, but under the distinct field name.
+        mtime_age = evidence["transcript_mtime_age_seconds"]
+        assert mtime_age is not None
+        assert abs(mtime_age - 221) < 5
+
+        # The two must diverge by orders of magnitude in this fixture, matching
+        # the bug report (this assertion documents *why* two fields exist).
+        assert content_age > mtime_age * 10
+
+    def test_reap_proposed_evidence_ages_equal_without_trailing_metadata(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When a transcript has only content-bearing entries (mtime == last
+        content timestamp), transcript_age_seconds and
+        transcript_mtime_age_seconds must agree — guards against an off-by-`now`
+        construction bug in the new field (#1427)."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _emit_reap_proposed
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+
+        worktree = tmp_path / "wt-prop-no-divergence"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 2, 0, 0, tzinfo=UTC)
+        content_ts = now - timedelta(seconds=300)
+
+        transcript = _write_transcript_records(
+            home,
+            worktree,
+            [
+                {
+                    "type": "user",
+                    "timestamp": content_ts.isoformat(),
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "go"}],
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "timestamp": content_ts.isoformat(),
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "done"}],
+                    },
+                },
+            ],
+        )
+        mtime = content_ts.timestamp()
+        os.utime(transcript, (mtime, mtime))
+
+        sess = _mk_headless_daemon_session("prop-no-divergence-1", worktree, started_at)
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        candidate = ReapCandidate(
+            session_id="prop-no-divergence-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="prop-no-divergence-1",
+            elapsed_seconds=300.0,
+            reap_reason=ReapReason.WALL_CLOCK_BUDGET,
+        )
+
+        _emit_reap_proposed(state, [candidate], native_live=set(), now=now)
+
+        events = read_events()
+        reap_events = [
+            e for e in events if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+        ]
+        assert len(reap_events) == 1
+        evidence = reap_events[0].payload["evidence"]
+
+        content_age = evidence["transcript_age_seconds"]
+        mtime_age = evidence["transcript_mtime_age_seconds"]
+        assert content_age is not None
+        assert mtime_age is not None
+        assert abs(content_age - mtime_age) < 1
 
 
 # ---------------------------------------------------------------------------
