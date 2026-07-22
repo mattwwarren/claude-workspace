@@ -38,7 +38,7 @@ with no readable cause. The root enabler is architectural: result delivery is
 five mechanisms with no shared contract, so each new path re-invents (or
 forgets) validation, error surfacing, and clobber protection.
 
-Evidence of the current fragmentation (all refs at main `765db6a`):
+Evidence of the current fragmentation (all refs at main `16e24e9`):
 
 - `cli/sessions.py:478-491` — Stop hook skips transcript parse when
   `last_result` already carries `"status"` (#536 precedence). The guard is
@@ -50,7 +50,7 @@ Evidence of the current fragmentation (all refs at main `765db6a`):
   documented write-only, but the sequence is inlined in the Click command.
   There is no importable function; an in-process caller must shell out or
   hand-roll the ~15-line lock block.
-- `executor.py:452-458, 614-620` and `reconcile/local.py:183` — three direct
+- `executor.py:452-459, 614-621` and `reconcile/local.py:183` — three direct
   `session.last_result =` assignments, each with its own locking and no shared
   validation gate.
 - `dispatch/loop.py:209-213, 230-257` — `persist_last_result` parses a
@@ -199,7 +199,7 @@ explicitly blessed as display/forensic surfaces that never write state.
 - **Wave:** 1
 - **Sprint:** 1
 - **Depends on:** S2
-- **Context:** `executor.py:452-458` (LocalExecutor pre-flight/liveness failures) and `executor.py:614-620` (CodexExecutor synchronous completion) assign `last_result` directly; route both through the door with source executor_direct, preserving each path's session-status transition, event emission (or deliberate non-emission on exception paths), and lock ordering.
+- **Context:** `executor.py:452-459` (LocalExecutor pre-flight/liveness failures) and `executor.py:614-621` (CodexExecutor synchronous completion) assign `last_result` directly; route both through the door with source executor_direct, preserving each path's session-status transition, event emission (or deliberate non-emission on exception paths), and lock ordering.
 - **Scope:** D-A1, D-S3
 - **Acceptance:**
   - Both executor writes go through the door and stamp executor_direct; direct `last_result` assignment is gone from `executor.py`.
@@ -211,7 +211,7 @@ explicitly blessed as display/forensic surfaces that never write state.
 - **Wave:** 1
 - **Sprint:** 1
 - **Depends on:** S2
-- **Context:** `reconcile/local.py:183` (git-facts synthesis) and `salvage_terminal_result` callers in phantom/idle/stalled write `last_result` from synthesis or transcript parse; route them through the door with sources git_synthesis and salvage_transcript respectively. Salvage already fires only when no terminal result exists, matching the door's arbitration; remove the now-redundant per-caller `_has_terminal_sentinel` pre-checks only where the door covers them.
+- **Context:** `reconcile/local.py:183` (git-facts synthesis) and `salvage_terminal_result` callers in phantom/idle/stalled write `last_result` from synthesis or transcript parse; route them through the door with sources git_synthesis and salvage_transcript respectively. Salvage already fires only when no terminal result exists, matching the door's arbitration; remove the now-redundant per-caller `_has_terminal_sentinel` pre-checks only where the door covers them. Bundling both sources is deliberate: all four call sites live in reconcile, share the salvage-only firing condition, and are the same one-pattern mechanical swap — unlike A1/A2's stateful hook and executor paths.
 - **Scope:** D-A1, D-S3
 - **Acceptance:**
   - Salvaged results are distinguishable in state (`salvage_transcript`); git-synthesized results carry git_synthesis.
@@ -243,9 +243,9 @@ explicitly blessed as display/forensic surfaces that never write state.
 
 ## References
 
-- #536 — `cw result emit` + emit-precedence in the Stop hook (the door's seed).
-- #694 — the ordering bug that motivated pre-advance `last_result` persistence.
-- #1031 / #1019 — staged-advance authority; sentinel refusal semantics.
-- #1390 / #1391 / #1392 — codex-review incident cluster (motivation).
-- RFC 0005 — executor backends (E1), local backend (F3).
+- `#536` — `cw result emit` + emit-precedence in the Stop hook (the door's seed).
+- `#694` — the ordering bug that motivated pre-advance `last_result` persistence.
+- `#1031` / `#1019` — staged-advance authority; sentinel refusal semantics.
+- `#1390` / `#1391` / `#1392` — codex-review incident cluster (motivation).
+- `RFC 0005` — executor backends (E1), local backend (F3).
 - `docs/headless-contract.md` — the sentinel contract this RFC leaves unchanged.
