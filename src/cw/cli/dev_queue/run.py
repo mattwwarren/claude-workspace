@@ -64,6 +64,15 @@ if TYPE_CHECKING:
     default=None,
     help="Dispatch only this client's queue.",
 )
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help=(
+        "Bypass the dispatch-loop singleton lock (#1362). Logs a WARNING;"
+        " use only to override a wedged/foreign holder."
+    ),
+)
 @handle_errors
 def dev_queue_run(
     max_parallel: int | None,
@@ -73,6 +82,7 @@ def dev_queue_run(
     quiet: bool,
     auto_ff: bool,
     client: str | None,
+    force: bool,
 ) -> None:
     """Run the dispatch loop, spawning sessions for pending tickets."""
     if client is not None:
@@ -85,6 +95,7 @@ def dev_queue_run(
         emit=None if quiet else click.echo,
         auto_ff=auto_ff,
         client=client,
+        force=force,
     )
 
 
@@ -136,6 +147,15 @@ def dev_queue_run(
     show_default=True,
     help="Maximum number of restarts. -1 = unlimited.",
 )
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help=(
+        "Bypass the dispatch-loop singleton lock (#1362). Logs a WARNING;"
+        " use only to override a wedged/foreign holder."
+    ),
+)
 @handle_errors
 def dev_queue_serve(
     max_parallel: int | None,
@@ -145,6 +165,7 @@ def dev_queue_serve(
     auto_ff: bool,
     client: str | None,
     max_restarts: int,
+    force: bool,
 ) -> None:
     """Run the dispatch loop with automatic restart on crash.
 
@@ -163,6 +184,7 @@ def dev_queue_serve(
         auto_ff=auto_ff,
         client=client,
         max_restarts=max_restarts,
+        force=force,
     )
 
 

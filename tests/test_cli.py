@@ -5902,6 +5902,7 @@ class TestDevQueueRunQuiet:
             emit: object = None,
             auto_ff: bool = True,
             client: str | None = None,
+            force: bool = False,
         ) -> None:
             captured_emit.append(emit)
 
@@ -5931,6 +5932,7 @@ class TestDevQueueRunQuiet:
             emit: object = None,
             auto_ff: bool = True,
             client: str | None = None,
+            force: bool = False,
         ) -> None:
             captured_emit.append(emit)
 
@@ -5961,6 +5963,7 @@ class TestDevQueueRunQuiet:
             emit: object = None,
             auto_ff: bool = True,
             client: str | None = None,
+            force: bool = False,
         ) -> None:
             captured_auto_ff.append(auto_ff)
 
@@ -5990,6 +5993,7 @@ class TestDevQueueRunQuiet:
             emit: object = None,
             auto_ff: bool = True,
             client: str | None = None,
+            force: bool = False,
         ) -> None:
             captured_auto_ff.append(auto_ff)
 
@@ -6032,6 +6036,7 @@ class TestDevQueueRunClientFilter:
             emit: object = None,
             auto_ff: bool = True,
             client: str | None = None,
+            force: bool = False,
         ) -> None:
             captured_client.append(client)
 
@@ -6065,6 +6070,7 @@ class TestDevQueueRunClientFilter:
             emit: object = None,
             auto_ff: bool = True,
             client: str | None = None,
+            force: bool = False,
         ) -> None:
             captured_client.append(client)
 
@@ -6373,7 +6379,7 @@ class TestDevQueueSingletonLock:
     def test_force_flag_bypasses_lock_on_serve(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """``serve --force`` bypasses a held lock; force reaches the loop, which warns."""
+        """``serve --force`` bypasses a held lock; force reaches the warning path."""
         from cw.cli import main
         from cw.dispatch import run_dispatch_loop as real_loop
 

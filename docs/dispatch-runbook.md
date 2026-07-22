@@ -186,11 +186,25 @@ Restart behaviour:
 - **Crash window cap**: ≥ 5 crashes within 300s → `sys.exit(1)` with a
   CRITICAL log. Use `cw doctor` to investigate the underlying cause.
 - `serve` does **not** accept `--once`; use `run --once` for single-tick
-  dry-runs.
-- **Single-instance**: `serve` provides no pidfile or lock. Running two
-  `serve` processes simultaneously creates two competing dispatch loops.
-  The operator is responsible for ensuring exactly one `serve` is running
-  (same responsibility as the existing `run` command).
+  dry-runs. Note that `run --once` **also contends for the single-instance
+  lock** below — a dry-run tick is refused while any loop is running.
+- **Single-instance lock** (#1362): both `run` and `serve` acquire one
+  **global** advisory `fcntl.flock` (`~/.local/share/cw/.dispatch_loop.lock`)
+  for their full lifetime — there is no `--client` keying, so exactly one
+  dispatch loop runs per machine/state-dir regardless of which client(s) it
+  scopes to. A second launch of either command (including `run --once`) fails
+  fast, exiting non-zero with a message naming the holder's PID and command,
+  e.g. `dispatch loop already running (pid 3212239: cw dev-queue serve) —
+  stop it first or use --force`. The lock is advisory and kernel-released:
+  a `SIGKILL`ed or crashed loop leaves **no stale lock** (the kernel drops the
+  flock when the process's fd table is torn down), so no manual cleanup is
+  ever needed.
+- **`--force`**: both `run` and `serve` accept a bare `--force` flag that
+  bypasses the lock entirely (via `contextlib.nullcontext()`) and logs a
+  WARNING on every use. It exists only to override a genuinely wedged or
+  foreign holder; running two real loops concurrently re-introduces the
+  per-process state divergence (in-memory dedup sets, usage-limit windows)
+  the lock exists to prevent, so use it deliberately and sparingly.
 
 ### Lane serialization — cli.py and other shared files
 

@@ -10629,18 +10629,16 @@ class TestRunDispatchLoopSingletonLock:
     def test_run_dispatch_loop_raises_when_lock_already_held(
         self, tmp_dispatch_dirs: Path
     ) -> None:
-        """A second loop launch while the lock is held raises DispatchLoopLockedError."""
-        with dispatch_loop_lock():
-            with pytest.raises(DispatchLoopLockedError):
-                run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
+        """A second loop launch while the lock is held is refused."""
+        with dispatch_loop_lock(), pytest.raises(DispatchLoopLockedError):
+            run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
 
     def test_run_dispatch_loop_once_contends_for_lock(
         self, tmp_dispatch_dirs: Path
     ) -> None:
         """R1: ``--once`` is NOT exempt — it blocks on an externally-held lock."""
-        with dispatch_loop_lock():
-            with pytest.raises(DispatchLoopLockedError):
-                run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
+        with dispatch_loop_lock(), pytest.raises(DispatchLoopLockedError):
+            run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
 
     def test_run_dispatch_loop_once_acquires_freely_when_unheld(
         self, tmp_dispatch_dirs: Path
@@ -10655,13 +10653,15 @@ class TestRunDispatchLoopSingletonLock:
         self, tmp_dispatch_dirs: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         """R3: ``force=True`` bypasses an externally-held lock and logs a WARNING."""
-        with dispatch_loop_lock():
-            with caplog.at_level(logging.WARNING, logger="cw.dispatch"):
-                run_dispatch_loop(
-                    once=True,
-                    force=True,
-                    native_daemon=FakeNativeDaemonClient(),
-                )
-        assert any(
-            "force" in record.message.lower() for record in caplog.records
-        ), f"expected a force WARNING but got: {[r.message for r in caplog.records]!r}"
+        with (
+            dispatch_loop_lock(),
+            caplog.at_level(logging.WARNING, logger="cw.dispatch"),
+        ):
+            run_dispatch_loop(
+                once=True,
+                force=True,
+                native_daemon=FakeNativeDaemonClient(),
+            )
+        assert any("force" in record.message.lower() for record in caplog.records), (
+            f"expected a force WARNING but got: {[r.message for r in caplog.records]!r}"
+        )
