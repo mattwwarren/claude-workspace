@@ -208,7 +208,9 @@ class TestResolveHostCapacity:
 
     def test_counts_active_session_with_no_owning_task(self) -> None:
         """Exclusion only fires on a CONFIRMED parked-task join, never on absence."""
-        state = CwState(sessions=[_make_daemon_session(id="s1", status=SessionStatus.ACTIVE)])
+        state = CwState(
+            sessions=[_make_daemon_session(id="s1", status=SessionStatus.ACTIVE)]
+        )
         queue = DevQueueStore(tasks=[])
         config = OrchestratorConfig(host_session_budget=5)
 
@@ -218,7 +220,9 @@ class TestResolveHostCapacity:
 
     def test_counts_session_whose_task_is_running(self) -> None:
         """Only the two parked statuses exclude — RUNNING does not."""
-        state = CwState(sessions=[_make_daemon_session(id="s1", status=SessionStatus.ACTIVE)])
+        state = CwState(
+            sessions=[_make_daemon_session(id="s1", status=SessionStatus.ACTIVE)]
+        )
         queue = DevQueueStore(
             tasks=[
                 _make_ticket_task(
@@ -340,7 +344,8 @@ class TestDispatchTickHostCapacity:
         assert by_client["client-a"]["skip_reason"] == DispatchSkipReason.NONE
         assert by_client["client-a"]["claimed"] == 1
         assert (
-            by_client["client-b"]["skip_reason"] == DispatchSkipReason.HOST_CAPACITY_GATED
+            by_client["client-b"]["skip_reason"]
+            == DispatchSkipReason.HOST_CAPACITY_GATED
         )
         assert by_client["client-b"]["claimed"] == 0
 
@@ -353,8 +358,12 @@ class TestDispatchTickHostCapacity:
         """Pre-existing sessions over budget are left alone (R0: no kill, no reject)."""
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         pre_existing = [
-            _make_daemon_session(id="pre-1", client="other-client", status=SessionStatus.ACTIVE),
-            _make_daemon_session(id="pre-2", client="other-client", status=SessionStatus.ACTIVE),
+            _make_daemon_session(
+                id="pre-1", client="other-client", status=SessionStatus.ACTIVE
+            ),
+            _make_daemon_session(
+                id="pre-2", client="other-client", status=SessionStatus.ACTIVE
+            ),
         ]
         save_state(CwState(sessions=pre_existing))
         add_ticket(TicketTask(ticket_id="CW-1", client="test-client"))
@@ -490,4 +499,6 @@ class TestDispatchTickHostCapacity:
             event_types=[OrchestratorEventType.DISPATCH_TICK],
         )
         assert len(events) == 1
-        assert events[0].payload["skip_reason"] == DispatchSkipReason.HOST_CAPACITY_GATED
+        assert (
+            events[0].payload["skip_reason"] == DispatchSkipReason.HOST_CAPACITY_GATED
+        )
