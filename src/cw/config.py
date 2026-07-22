@@ -417,6 +417,21 @@ def dispatch_loop_lock() -> Iterator[None]:
             message = _dispatch_loop_holder_message(lock_path)
             raise DispatchLoopLockedError(message) from exc
         # Won the lock — safe to truncate and write our identity now.
+        #
+        # Why not an atomic temp-file + os.replace() here: os.replace() would
+        # swap the underlying inode out from under this held fd's flock,
+        # leaving a fresh, unlocked inode at this path that a losing
+        # contender could then successfully flock -- breaking the mutex
+        # itself, which is strictly worse than the narrow race this would
+        # fix. There IS a real (but narrow) window between this truncate and
+        # the write below completing where a concurrent losing acquirer's
+        # unlocked read (_dispatch_loop_holder_message) could see stale or
+        # empty content; a fully correct fix requires a separate, atomically
+        # -replaced holder-info file independent of the lock file, which is
+        # more design than this narrow, cosmetic-only race (worst case: a
+        # transiently stale-but-plausible PID in an error message that
+        # already degrades gracefully to "holder unknown" on any read
+        # failure) currently warrants.
         fd.seek(0)
         fd.truncate()
         fd.write(json.dumps({"pid": os.getpid(), "cmd": _current_command_str()}))

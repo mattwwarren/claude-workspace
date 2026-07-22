@@ -185,6 +185,17 @@ def _dispatch_auto_fix_ci(job: _RedispatchJob) -> str | None:
     The ``auto_fix_ci_fired_at`` latch stays stamped even when this dispatch
     fails — same posture as ``request_reviewer``: ``PR_ACTION_FAILED`` is the
     visible signal, the latch is NOT rolled back on dispatch failure.
+
+    Why ``force=True``: this call runs on the SAME process/thread as the
+    outer dispatch loop that is already holding the singleton
+    ``dispatch_loop_lock()`` (#1362) — e.g. ``dispatch_tick`` ->
+    ``_reconcile_usage_limited`` -> ``reconcile`` -> this recipe. Without
+    ``force``, this legitimate same-process single-tick reentry would always
+    raise ``DispatchLoopLockedError`` (flock is per-open-file-description, so
+    even the lock's own holder can't re-acquire it), silently breaking this
+    recipe every time it fires while any loop is running. This is a
+    deliberate internal reentry, not an operator override of a foreign/wedged
+    holder, so it bypasses the lock rather than competing for it.
     """
     from cw.dev_queue import add_ticket
     from cw.dispatch import run_dispatch_loop
@@ -194,7 +205,7 @@ def _dispatch_auto_fix_ci(job: _RedispatchJob) -> str | None:
         add_ticket(
             TicketTask(ticket_id=job.ticket_id, client=job.client, lane=job.lane)
         )
-        run_dispatch_loop(once=True, client=job.client, emit=None)
+        run_dispatch_loop(once=True, client=job.client, emit=None, force=True)
     except CwError as exc:
         _log.warning(
             "review_recipe_redispatch_failed ticket=%s",

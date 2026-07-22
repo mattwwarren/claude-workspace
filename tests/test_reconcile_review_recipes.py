@@ -1120,7 +1120,9 @@ def test_act_auto_fix_ci_calls_add_ticket_and_dispatch_once(
     assert added[0].ticket_id == task.ticket_id
     assert added[0].client == task.client
     assert added[0].lane == task.lane
-    assert dispatched == [{"once": True, "client": task.client, "emit": None}]
+    assert dispatched == [
+        {"once": True, "client": task.client, "emit": None, "force": True}
+    ]
     taken = read_events(event_types=[OrchestratorEventType.PR_ACTION_TAKEN])
     # auto_fix_ci's evidence is the failing checks, not the (meaningless-here)
     # review_decision field the address_review recipe uses.

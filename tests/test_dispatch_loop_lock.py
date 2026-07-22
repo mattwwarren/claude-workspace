@@ -71,11 +71,20 @@ def test_lock_releases_on_exception_inside_with_block() -> None:
         pass
 
 
-@pytest.mark.parametrize("content", ["", "not-json {{{", "[1, 2, 3]"])
+@pytest.mark.parametrize(
+    "content",
+    ["", "not-json {{{", "[1, 2, 3]", '{"pid": 123}'],
+)
 def test_malformed_or_empty_holder_content_falls_back_to_unknown(
     content: str,
 ) -> None:
-    """Empty/garbage holder JSON yields a 'holder unknown' message, no crash."""
+    """Empty/garbage/incomplete holder JSON yields 'holder unknown', no crash.
+
+    ``'{"pid": 123}'`` (valid JSON, missing "cmd") exercises the KeyError
+    branch specifically -- the shape a partial/truncated write is most
+    likely to produce, since the holder's own write is seek/truncate/write,
+    not atomic.
+    """
     lock_path = dispatch_loop_lock_file()
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path.write_text(content)
@@ -103,6 +112,17 @@ def test_sigkill_leaves_no_stale_lock() -> None:
     This is the one acceptance-criterion test that genuinely needs a second OS
     process: flock is released when a process's fd table is torn down, which a
     thread-based simulation cannot exercise.
+
+    Why ``get_context("fork")`` specifically: ``spawn`` would re-import
+    ``cw.config`` fresh in the child, losing the ``tmp_config_dir`` fixture's
+    monkeypatch of ``DISPATCH_LOOP_LOCK`` and pointing the child at the real
+    ``~/.local/share/cw`` lock path instead of the test's tmp dir. CI's matrix
+    includes ``macos-latest``, where ``fork``-based multiprocessing carries
+    known caveats in multi-threaded processes; this repo has no other
+    ``multiprocessing`` usage yet to confirm against. pytest itself does not
+    run multi-threaded by default, so no threads should be alive across this
+    fork -- if this test ever flakes specifically on the macOS CI leg, that
+    assumption is the first thing to revisit.
     """
     ctx = multiprocessing.get_context("fork")
     ready = ctx.Event()

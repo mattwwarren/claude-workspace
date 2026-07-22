@@ -6361,6 +6361,34 @@ class TestDevQueueSingletonLock:
         assert result.exit_code != 0
         assert "cw dev-queue serve" in result.output
 
+    def test_run_blocked_across_different_clients(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """R2: the lock is GLOBAL, not per-client — a different --client is
+        still blocked.
+
+        A held lock reporting itself as scoped to ``client-a`` must still
+        block a ``--client client-b`` launch, proving there is no per-client
+        keying (a naive/expected alternative design the ticket explicitly
+        rejected).
+        """
+        from cw.cli import main
+
+        _write_clients_yaml_for_test(
+            tmp_config_dir,
+            [("client-a", str(tmp_path / "a")), ("client-b", str(tmp_path / "b"))],
+        )
+
+        runner = CliRunner()
+        with _hold_foreign_dispatch_loop_lock(
+            999999, "cw dev-queue run --client client-a"
+        ):
+            result = runner.invoke(
+                main, ["dev-queue", "run", "--once", "--client", "client-b"]
+            )
+        assert result.exit_code != 0
+        assert "cw dev-queue run --client client-a" in result.output
+
     def test_force_flag_bypasses_lock_on_run(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:

@@ -10626,17 +10626,12 @@ class TestSpawnInvalidatesStaleContextJson:
 class TestRunDispatchLoopSingletonLock:
     """run_dispatch_loop acquires the global singleton lock at entry (#1362)."""
 
-    def test_run_dispatch_loop_raises_when_lock_already_held(
+    def test_run_dispatch_loop_once_raises_when_lock_already_held(
         self, tmp_dispatch_dirs: Path
     ) -> None:
-        """A second loop launch while the lock is held is refused."""
-        with dispatch_loop_lock(), pytest.raises(DispatchLoopLockedError):
-            run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
-
-    def test_run_dispatch_loop_once_contends_for_lock(
-        self, tmp_dispatch_dirs: Path
-    ) -> None:
-        """R1: ``--once`` is NOT exempt — it blocks on an externally-held lock."""
+        """R1: ``--once`` is NOT exempt — a second launch while the lock is
+        held (e.g. by a live ``serve``) is refused, not silently allowed
+        through as a "quick" single tick."""
         with dispatch_loop_lock(), pytest.raises(DispatchLoopLockedError):
             run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
 
