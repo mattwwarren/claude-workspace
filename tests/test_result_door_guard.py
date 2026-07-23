@@ -126,6 +126,14 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
 }
 
 
+# Why: _iter_cw_files/_line_no/_assignment_statement_text/_run_scan below
+# duplicate the scan-skeleton shape already present in
+# test_review_approval_guard.py and test_ticket_boundary_guard.py rather than
+# extracting a shared tests/_guard_scan.py helper. Deliberate, not an
+# oversight: this ticket's file set is pinned to exactly 3 files (no new
+# tests/ helper module), and its instruction was to follow the existing
+# precedent's shape, not refactor it. Revisit if a fourth guard test makes
+# the duplication a real maintenance cost.
 def _iter_cw_files() -> list[Path]:
     """Return every ``*.py`` file under ``src/cw/``, sorted for determinism."""
     return sorted(_CW_ROOT.rglob("*.py"))
