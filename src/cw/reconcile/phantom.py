@@ -133,19 +133,23 @@ def _sentinel_mismatch_veto_candidate(
       ``consecutive_sentinel_mismatch_vetoes + 1``.
     - ``(None, True, stale_seconds)`` — LIVE and the count is *exactly* at the cap
       this tick (the first tick cap-exhaustion is observed): fall through and
-      escalate. ``==`` not ``>=`` so a still-LIVE session that already escalated
-      (its counter bumped to ``cap + 1`` by the act phase) reads back ``> cap``
-      and returns ``(None, False, stale_seconds)`` instead — edge-triggering the
-      escalation rather than re-firing it every tick the session stays LIVE. The
-      caller threads ``stale_seconds`` from this exact tuple — the value the cap
-      decision was made on — into the CRASH_COMPLETE fallthrough's
+      escalate. The caller threads ``stale_seconds`` from this exact tuple — the
+      value the cap decision was made on — into the CRASH_COMPLETE fallthrough's
       ``stale_minutes`` instead of re-reading the transcript (#1449 fix cycle 2:
       avoids both a duplicate filesystem read and a TOCTOU window between the
       decision and the value reported in the escalation payload).
-    - ``(None, False, None)`` — not LIVE, or transcript unlocatable
-      (fail-toward-crash): an ordinary crash, NOT a cap-fire. A genuinely-stale
-      session must never be misreported as "cap fired" even if its counter sits
-      at the cap from earlier ticks.
+    - ``(None, False, None)`` — either not LIVE / transcript unlocatable
+      (fail-toward-crash: an ordinary crash, NOT a cap-fire), OR LIVE but
+      *already* past the cap (``> cap``, not ``==``): a still-LIVE session that
+      already escalated (its counter bumped to ``cap + 1`` by the act phase)
+      reads back ``> cap`` here — edge-triggering the escalation rather than
+      re-firing it every tick the session stays LIVE. ``stale_seconds`` is
+      deliberately dropped (not threaded) in this sub-case too (#1449 fix cycle
+      3): only the tick that actually fires the cap-exhaustion escalation may
+      populate ``stale_minutes`` on the resulting candidate — a still-LIVE
+      already-escalated session must never carry a populated ``stale_minutes``
+      on a ``veto_cap_exhausted=False`` candidate, mirroring the ``cap_exhausted``
+      boolean's own two-source-of-truth requirement above it.
 
     See GitHub #1281, #1449.
     """
@@ -154,7 +158,8 @@ def _sentinel_mismatch_veto_candidate(
         return None, False, None
     cap = config.sentinel_mismatch_veto_cap
     if session.consecutive_sentinel_mismatch_vetoes >= cap:
-        return None, session.consecutive_sentinel_mismatch_vetoes == cap, stale_seconds
+        cap_exhausted = session.consecutive_sentinel_mismatch_vetoes == cap
+        return None, cap_exhausted, stale_seconds if cap_exhausted else None
     return (
         ReapCandidate(
             session_id=session.id,
@@ -260,7 +265,9 @@ def _detect_phantom_candidates(
         # fallthrough's stale_minutes reports the exact value the decision was
         # made on -- never re-read (fix cycle 2: avoids both a duplicate
         # filesystem read and a TOCTOU window between the decision and the value
-        # reported in the escalation payload).
+        # reported in the escalation payload). Non-None if-and-only-if
+        # veto_cap_exhausted is True this tick (fix cycle 3: the helper itself
+        # enforces this pairing -- see _sentinel_mismatch_veto_candidate).
         veto_stale_seconds: float | None = None
         if session.origin is SessionOrigin.DAEMON and not already_refused:
             advance = _phantom_advance_sentinel_candidate(session, ticket_id, lane)

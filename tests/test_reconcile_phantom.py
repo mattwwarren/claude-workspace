@@ -2086,7 +2086,10 @@ def test_sentinel_mismatch_veto_candidate_stamps_incrementing_veto_count(
     assert cand0.proposed_action == ProposedAction.SENTINEL_STAGE_MISMATCH_VETOED
     assert cand0.new_veto_count == 1
     assert exhausted0 is False
-    assert stale_seconds0 is not None
+    # _write_fresh_refused_transcript's default stale_seconds=30 makes this
+    # deterministic -- assert the exact value, not just non-None (#1449 fix
+    # cycle 3).
+    assert stale_seconds0 == pytest.approx(30.0)
 
     sess.consecutive_sentinel_mismatch_vetoes = 1
     cand1, exhausted1, stale_seconds1 = _sentinel_mismatch_veto_candidate(
@@ -2095,7 +2098,7 @@ def test_sentinel_mismatch_veto_candidate_stamps_incrementing_veto_count(
     assert cand1 is not None
     assert cand1.new_veto_count == 2
     assert exhausted1 is False
-    assert stale_seconds1 is not None
+    assert stale_seconds1 == pytest.approx(30.0)
 
 
 def test_sentinel_mismatch_veto_candidate_returns_none_once_cap_reached(
@@ -2127,7 +2130,51 @@ def test_sentinel_mismatch_veto_candidate_returns_none_once_cap_reached(
     )
     assert cand is None
     assert exhausted is True
-    assert stale_seconds is not None
+    assert stale_seconds == pytest.approx(30.0)
+
+
+def test_sentinel_mismatch_veto_candidate_already_escalated_no_stale_minutes(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A LIVE already_refused phantom already PAST the cap (count > cap, not
+    == cap -- i.e. already escalated on a prior tick) returns
+    (None, False, None): exhausted is False (edge-triggering: no re-escalation)
+    AND stale_seconds is None (#1449 fix cycle 3 regression test).
+
+    Guards against a fix-cycle-2 regression where this sub-case leaked a
+    non-None stale_seconds, which would have let a still-LIVE, already-escalated
+    session's CRASH_COMPLETE candidate carry a populated stale_minutes despite
+    veto_cap_exhausted=False -- violating the field's cap-exhaustion-only
+    invariant (caught in review before merge, never shipped)."""
+    from cw.reconcile.phantom import _sentinel_mismatch_veto_candidate
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-veto-already-escalated"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(minutes=5)
+    sess = _mk_phantom_daemon_session(
+        "veto-already-escalated-1",
+        started_at,
+        surface_ref="fake-short-id",
+        worktree_path=worktree,
+    )
+    _write_fresh_refused_transcript(home, worktree, "csid-veto-already-escalated", now)
+    config = OrchestratorConfig(sentinel_mismatch_veto_cap=2)
+    # cap + 1: the act phase's post-escalation stamp (see
+    # test_sentinel_mismatch_veto_escalation_fires_once_not_every_tick), not the
+    # cap itself.
+    sess.consecutive_sentinel_mismatch_vetoes = 3
+
+    cand, exhausted, stale_seconds = _sentinel_mismatch_veto_candidate(
+        sess, "veto-already-escalated-1", "default", now=now, config=config
+    )
+    assert cand is None
+    assert exhausted is False
+    assert stale_seconds is None
 
 
 def test_sentinel_mismatch_veto_candidate_stale_transcript_not_exhausted(
