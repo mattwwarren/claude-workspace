@@ -31,13 +31,13 @@ from cw.executor_diagnostics import diagnostics_bundle_dir
 from cw.local_runner import make_blocked
 from cw.models import Stage, TicketTask
 from cw.review_findings import AcceptedFinding, _dedup_key, consolidate_verdict
+from tests._codex_review_helpers import _Clock, _SequencedRunner
 from tests.conftest import (
     _make_diff,
     _make_finding,
     _make_reviewer_doc,
     _make_ticket_task,
 )
-from tests.test_codex_review import _Clock, _SequencedRunner
 
 if TYPE_CHECKING:
     from collections.abc import Callable

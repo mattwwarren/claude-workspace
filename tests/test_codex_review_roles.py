@@ -24,7 +24,7 @@ from cw.codex_review import (
 from cw.codex_runner import CodexRunResult
 from cw.config import state_dir
 from cw.executor_diagnostics import ExecutorFailure, diagnostics_bundle_dir
-from tests._codex_review_helpers import _Clock, _SequencedRunner, _ok_result
+from tests._codex_review_helpers import _Clock, _ok_result, _SequencedRunner
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from cw.codex_review import _prepare_review_pass, run_review
-from tests._codex_review_helpers import _SequencedRunner, _git, _ok_result, _task
+from tests._codex_review_helpers import _git, _ok_result, _SequencedRunner, _task
 from tests.conftest import _make_reviewer_doc
 
 if TYPE_CHECKING:
