@@ -13,15 +13,33 @@ from cw.auto_dev_result import AutoDevResult, BlockedResult
 from cw.cli import main
 from cw.config import load_state, save_state, sessions_lock
 from cw.exceptions import EmitSessionNotFoundError, EmitValidationError
-from cw.models import LastResultSource
+from cw.models import LastResultSource, Session, SessionPurpose
 from cw.result import (
     EmitOutcome,
     emit_result,
     emit_result_locked,
+    emit_result_on,
     has_terminal_result,
     validate_payload,
 )
 from tests.conftest import _seed_daemon_session
+
+
+def _in_memory_session(**overrides: Any) -> Session:
+    """Construct a bare in-memory Session for pure emit_result_on tests.
+
+    No state file is touched -- emit_result_on performs zero I/O, so these
+    tests never go through load_state/save_state.
+    """
+    kwargs: dict[str, Any] = {
+        "id": "sess1234",
+        "name": "acme/impl",
+        "client": "acme",
+        "purpose": SessionPurpose.IMPL,
+        "workspace_path": Path("/tmp/acme"),
+    }
+    kwargs.update(overrides)
+    return Session(**kwargs)
 
 
 def _valid_payload() -> dict[str, Any]:
@@ -101,6 +119,62 @@ class TestValidatePayload:
         assert any("lines_actual" in e for e in errors)
 
 
+class TestEmitResultOn:
+    """Pure-mutator tests for ``emit_result_on`` (RFC 0012 A3, #1459).
+
+    No ``sessions_lock``/``load_state``/``save_state`` -- the function performs
+    zero I/O and mutates the passed-in ``Session`` in place.
+    """
+
+    def test_mutates_session_in_place_and_returns_outcome(self) -> None:
+        session = _in_memory_session()
+        outcome = emit_result_on(
+            session, _valid_payload(), source=LastResultSource.GIT_SYNTHESIS
+        )
+
+        assert isinstance(outcome, EmitOutcome)
+        assert outcome.refused is False
+        assert outcome.result is not None
+        assert outcome.result.status == "shipped"
+        assert outcome.prior_status is None
+        assert outcome.session_id == "sess1234"
+        # Mutated in place.
+        assert session.last_result is not None
+        assert session.last_result["status"] == "shipped"
+        assert session.last_result_source == LastResultSource.GIT_SYNTHESIS
+
+    def test_refusal_leaves_session_byte_identical(self) -> None:
+        foreign = {"status": "blocked", "totally_unknown": {"x": 1}}
+        session = _in_memory_session(
+            last_result=foreign,
+            last_result_source=LastResultSource.STOP_HOOK_HARVEST,
+        )
+        before = session.model_dump(mode="json")
+
+        outcome = emit_result_on(
+            session, _valid_payload(), source=LastResultSource.SALVAGE_TRANSCRIPT
+        )
+
+        assert outcome.refused is True
+        assert outcome.result is None
+        assert outcome.prior_status == "blocked"
+        assert outcome.existing_result == foreign
+        assert outcome.existing_source == LastResultSource.STOP_HOOK_HARVEST
+        # Session left completely untouched.
+        assert session.model_dump(mode="json") == before
+
+    def test_validation_error_raises_before_mutation(self) -> None:
+        session = _in_memory_session()
+        payload = _valid_payload()
+        payload["pr"] = None  # shipped requires non-null pr -> cross-field error
+
+        with pytest.raises(EmitValidationError):
+            emit_result_on(session, payload, source=LastResultSource.GIT_SYNTHESIS)
+
+        assert session.last_result is None
+        assert session.last_result_source is None
+
+
 class TestEmitResultLocked:
     """Direct-call tests for ``emit_result_locked`` (RFC 0012 S1, #1455).
 
@@ -129,6 +203,76 @@ class TestEmitResultLocked:
         assert sess.last_result is not None
         assert sess.last_result["status"] == "shipped"
         assert sess.last_result_source == LastResultSource.EMIT_CLI
+
+    def test_performs_exactly_one_load_and_one_save(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The thin I/O wrapper does one load_state and one save_state on an
+        accepted write (RFC 0012 A3 #1459 -- signature/behavior unchanged)."""
+        import cw.result as result_mod
+
+        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
+        load_calls = 0
+        save_calls = 0
+        real_load = result_mod.load_state
+        real_save = result_mod.save_state
+
+        def _spy_load() -> Any:
+            nonlocal load_calls
+            load_calls += 1
+            return real_load()
+
+        def _spy_save(state: Any) -> None:
+            nonlocal save_calls
+            save_calls += 1
+            real_save(state)
+
+        monkeypatch.setattr(result_mod, "load_state", _spy_load)
+        monkeypatch.setattr(result_mod, "save_state", _spy_save)
+
+        with sessions_lock():
+            emit_result_locked(
+                _valid_payload(), "test1234", source=LastResultSource.EMIT_CLI
+            )
+
+        assert load_calls == 1
+        assert save_calls == 1
+
+    def test_refusal_skips_save_state(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A refused write mutates nothing, so no save_state is issued."""
+        import cw.result as result_mod
+
+        _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            session_id="test1234",
+            last_result={"status": "shipped"},
+        )
+        save_calls = 0
+        real_save = result_mod.save_state
+
+        def _spy_save(state: Any) -> None:
+            nonlocal save_calls
+            save_calls += 1
+            real_save(state)
+
+        monkeypatch.setattr(result_mod, "save_state", _spy_save)
+
+        with sessions_lock():
+            outcome = emit_result_locked(
+                _valid_payload(), "test1234", source=LastResultSource.EMIT_CLI
+            )
+
+        assert outcome.refused is True
+        assert save_calls == 0
 
     def test_prior_status_captured_when_result_already_present(
         self, tmp_config_dir: Path, tmp_path: Path

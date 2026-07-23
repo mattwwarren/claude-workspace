@@ -7,7 +7,7 @@ import logging
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import click
 from pydantic import ValidationError
@@ -16,6 +16,9 @@ from cw.auto_dev_result import AutoDevResult, BlockedResult
 from cw.config import load_state, save_state, sessions_lock
 from cw.exceptions import EmitSessionNotFoundError, EmitValidationError
 from cw.models import LastResultSource
+
+if TYPE_CHECKING:
+    from cw.models import Session
 
 logger = logging.getLogger(__name__)
 
@@ -234,23 +237,23 @@ def _validate_harvest_payload(payload: dict[str, Any]) -> AutoDevResult | Blocke
         raise EmitValidationError(msg, errors=_format_errors(exc)) from exc
 
 
-def emit_result_locked(
-    payload: dict[str, Any], session_id: str, *, source: LastResultSource
+def emit_result_on(
+    session: Session, payload: dict[str, Any], *, source: LastResultSource
 ) -> EmitOutcome:
-    """Validate PAYLOAD and record it onto SESSION_ID's last_result.
+    """Validate PAYLOAD and record it onto SESSION's last_result in place.
 
-    Caller MUST already hold sessions_lock(). Extracted from emit_result()
-    so an in-process caller that has already acquired the sessions lock can
-    invoke the mutation directly without a second acquisition of the same
-    flock-based lock, which would self-deadlock (mirrors
-    cw.dev_queue.approval._approve_ticket_locked, GitHub #1065).
-
-    Emits no event and performs no task routing -- write-only, matching the
-    original cw result emit CLI contract byte-for-byte (RFC 0012 D-A1).
+    Pure mutator (RFC 0012 A3, #1459): performs NO I/O -- it does not load or
+    save state and acquires no lock. It validates PAYLOAD, arbitrates first-
+    writer-wins against the passed-in ``session``, and (when accepted) mutates
+    ``session.last_result``/``session.last_result_source`` on the object it was
+    handed. The caller owns persistence: :func:`emit_result_locked` wraps it in
+    a load/save under the sessions lock; the reconcile write sites call it on a
+    ``Session`` already inside ``state.sessions`` and rely on their own single
+    trailing ``save_state`` to flush the mutation.
 
     Refusing to overwrite an already-terminal last_result (RFC 0012 S2,
     #1456) is a normal, non-raising return -- EmitOutcome(refused=True,
-    result=None, ...) -- not one of the two exceptions below.
+    result=None, ...) -- and leaves ``session`` byte-identical.
 
     Validation is discriminated (RFC 0012 A1, #1457): PAYLOAD is checked
     against ``AutoDevResult`` or, for the parser-synthesized blocked shape
@@ -259,16 +262,10 @@ def emit_result_locked(
 
     Raises:
         EmitValidationError: if PAYLOAD fails validation against the
-            discriminated AutoDevResult/BlockedResult union.
-        EmitSessionNotFoundError: if SESSION_ID has no matching session.
+            discriminated AutoDevResult/BlockedResult union (before any
+            mutation of ``session``).
     """
     result_obj = _validate_harvest_payload(payload)
-
-    state = load_state()
-    session = state.find_by_name_or_id(session_id)
-    if session is None:
-        msg = f"Session {session_id!r} not found"
-        raise EmitSessionNotFoundError(msg, session_id=session_id)
 
     prior_status: str | None = (
         session.last_result.get("status")
@@ -296,11 +293,62 @@ def emit_result_locked(
 
     session.last_result = result_obj.model_dump(mode="json")
     session.last_result_source = source
-    save_state(state)
 
     return EmitOutcome(
         session_id=session.id, result=result_obj, prior_status=prior_status
     )
+
+
+def emit_result_locked(
+    payload: dict[str, Any], session_id: str, *, source: LastResultSource
+) -> EmitOutcome:
+    """Validate PAYLOAD and record it onto SESSION_ID's last_result.
+
+    Caller MUST already hold sessions_lock(). Extracted from emit_result()
+    so an in-process caller that has already acquired the sessions lock can
+    invoke the mutation directly without a second acquisition of the same
+    flock-based lock, which would self-deadlock (mirrors
+    cw.dev_queue.approval._approve_ticket_locked, GitHub #1065).
+
+    Thin I/O wrapper (RFC 0012 A3, #1459) over the pure :func:`emit_result_on`:
+    ``load_state`` -> ``find_by_name_or_id`` -> ``emit_result_on`` -> ``save_state``
+    only when the write was accepted (a refusal mutated nothing, so persisting
+    it is wasted work). External behavior/signature/exceptions are unchanged.
+
+    Emits no event and performs no task routing -- write-only, matching the
+    original cw result emit CLI contract byte-for-byte (RFC 0012 D-A1).
+
+    Refusing to overwrite an already-terminal last_result (RFC 0012 S2,
+    #1456) is a normal, non-raising return -- EmitOutcome(refused=True,
+    result=None, ...) -- not one of the two exceptions below.
+
+    Validation is discriminated (RFC 0012 A1, #1457): PAYLOAD is checked
+    against ``AutoDevResult`` or, for the parser-synthesized blocked shape
+    (``status=blocked`` with no ``schema_version``), ``BlockedResult`` --
+    see :func:`_validate_harvest_payload`. Because validation now runs inside
+    ``emit_result_on`` (after the session lookup), a request supplying BOTH an
+    unknown ``session_id`` and an invalid payload raises
+    ``EmitSessionNotFoundError`` (not ``EmitValidationError``); this exception-
+    precedence flip is the accepted structural consequence of the pure-mutator
+    split (RFC 0012 A3 #1459 Adopted Assumption 5). ``cw result emit``'s CLI
+    contract is unaffected -- it independently re-validates via
+    ``_validate_or_exit`` before touching state at all.
+
+    Raises:
+        EmitValidationError: if PAYLOAD fails validation against the
+            discriminated AutoDevResult/BlockedResult union.
+        EmitSessionNotFoundError: if SESSION_ID has no matching session.
+    """
+    state = load_state()
+    session = state.find_by_name_or_id(session_id)
+    if session is None:
+        msg = f"Session {session_id!r} not found"
+        raise EmitSessionNotFoundError(msg, session_id=session_id)
+
+    outcome = emit_result_on(session, payload, source=source)
+    if not outcome.refused:
+        save_state(state)
+    return outcome
 
 
 def emit_result(
