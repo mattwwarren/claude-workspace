@@ -352,11 +352,11 @@ class LocalExecutor:
     the session COMPLETED, and emit SESSION_COMPLETED before returning — the
     launch never happens.
 
-    Result delivery bypasses persist_last_result (no sentinel framing). Every
+    Result delivery bypasses stdout-sentinel parsing entirely. Every
     SESSION_COMPLETED event this class or the harvest path emits carries no
-    'stdout' key, so dispatch.py's isinstance(stdout, str) guard is False and
-    persist_last_result is skipped; the last_result written via the door
-    (source=EXECUTOR_DIRECT) is consumed as-is by consume_completed_sessions.
+    result payload; the last_result written onto the session by the door
+    (``emit_result_locked``, source=EXECUTOR_DIRECT) is consumed as-is by
+    consume_completed_sessions.
     """
 
     def __init__(
@@ -454,9 +454,9 @@ class LocalExecutor:
                 completion_result = preflight
 
             # Pre-flight blocked OR proc stat unreadable: complete synchronously.
-            # Persist the blocked result, mark COMPLETED, and emit SESSION_COMPLETED
-            # — no "stdout" key so dispatch skips persist_last_result and uses
-            # last_result.
+            # Write the blocked result through the door (_complete_session_via_door,
+            # RFC 0012 A2), mark COMPLETED, and emit SESSION_COMPLETED — dispatch
+            # reads last_result from the session directly, no payload needed.
             with sessions_lock():
                 _complete_session_via_door(
                     sid=sid, payload=completion_result.model_dump(mode="json")
@@ -586,9 +586,9 @@ class CodexExecutor:
     and synthesizes a typed AutoDevResult from the consolidated verdict. The
     consolidated verdict is posted as a GitHub issue comment on a clean run.
 
-    Like LocalExecutor, spawn() is synchronous and bypasses persist_last_result:
-    the SESSION_COMPLETED event carries no 'stdout' key, so dispatch consumes the
-    last_result written here via the door (``emit_result_locked``,
+    Like LocalExecutor, spawn() is synchronous and bypasses stdout-sentinel
+    parsing: the SESSION_COMPLETED event carries no result payload, so dispatch
+    consumes the last_result written here via the door (``emit_result_locked``,
     source=EXECUTOR_DIRECT — RFC 0012 A2, #1458) as-is. Appropriate only for
     max_parallel=1 lanes.
     """
@@ -680,8 +680,8 @@ class CodexExecutor:
                     cwd=_git_dir(client),
                 )
 
-            # Step 5: Emit SESSION_COMPLETED — no "stdout" key so dispatch skips
-            # persist_last_result and uses the last_result written in Step 4.
+            # Step 5: Emit SESSION_COMPLETED — no result payload; dispatch reads
+            # the last_result written through the door in Step 4.
             _record_orchestrator_event(
                 OrchestratorEventType.SESSION_COMPLETED,
                 {

@@ -12,7 +12,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from cw.config import load_state, save_state, sessions_lock
-from cw.models import CwState, Session, SessionPurpose, SessionStatus
+from cw.models import CwState, LastResultSource, Session, SessionPurpose, SessionStatus
+from cw.result import emit_result
+from tests.test_result import _valid_payload
 
 if TYPE_CHECKING:
     pass
@@ -92,17 +94,15 @@ class TestSessionsLockConcurrency:
             assert f"sess-{i:04d}" in ids, f"session sess-{i:04d} was lost"
 
 
-class TestSessionsLockPersistLastResult:
-    """persist_last_result must hold the sessions lock so a concurrent
+class TestSessionsLockEmitResult:
+    """emit_result must hold the sessions lock so a concurrent
     reconcile-style mutation is not clobbered.
     """
 
-    def test_persist_last_result_survives_concurrent_reconcile_style_write(
+    def test_emit_result_survives_concurrent_reconcile_style_write(
         self, tmp_config_dir: Path
     ) -> None:
-        """persist_last_result and a concurrent load→mutate→save both survive."""
-        from cw.dispatch import persist_last_result
-
+        """emit_result and a concurrent load→mutate→save both survive."""
         # Seed a session into state.
         initial = CwState()
         initial.sessions.append(
@@ -124,14 +124,10 @@ class TestSessionsLockPersistLastResult:
         def do_persist() -> None:
             barrier.wait()
             try:
-                persist_last_result(
+                emit_result(
+                    _valid_payload(),
                     "sess-target",
-                    "<<<AUTO_DEV_RESULT\n"
-                    '{"status": "shipped", "ticket_id": "T-1", '
-                    '"pr_url": "https://github.com/x/y/pull/1", '
-                    '"next_actions": [], "scope": null, '
-                    '"cost_usd": null, "schema_version": 1}\n'
-                    "AUTO_DEV_RESULT>>>",
+                    source=LastResultSource.STOP_HOOK_HARVEST,
                 )
             except Exception as exc:  # noqa: BLE001
                 errors.append(exc)
@@ -153,7 +149,7 @@ class TestSessionsLockPersistLastResult:
         t1.join()
         t2.join()
 
-        assert not errors, f"persist_last_result raised: {errors}"
+        assert not errors, f"emit_result raised: {errors}"
         final = load_state()
         target = next((s for s in final.sessions if s.id == "sess-target"), None)
         assert target is not None, "target session disappeared"

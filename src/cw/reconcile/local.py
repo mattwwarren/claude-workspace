@@ -117,10 +117,10 @@ def _act_on_local_harvest_candidates(
     ``phantom._apply_phantom_routed_mutations`` and the ``_apply_sentinel_to_task``
     docstring): synthesize an AutoDevResult from git facts, route it through the
     shared staged-advance authority, then mark the session COMPLETED/NORMAL. Emits
-    a ``SESSION_COMPLETED`` event with ``crashed: False`` and no ``stdout`` key,
-    so dispatch's persist_last_result guard skips it. Returns the harvested ticket
-    IDs. Acquires no gh subprocess; runs entirely under the caller's
-    ``sessions_lock``.
+    a ``SESSION_COMPLETED`` event with ``crashed: False`` and no result payload;
+    dispatch simply reads ``last_result`` as written by the RFC 0012 door.
+    Returns the harvested ticket IDs. Acquires no gh subprocess; runs entirely
+    under the caller's ``sessions_lock``.
 
     GitHub #1031 (extends #1019's phantom-path guard): when
     ``_apply_sentinel_to_task`` reports ``routed=False`` (a stage-mismatch

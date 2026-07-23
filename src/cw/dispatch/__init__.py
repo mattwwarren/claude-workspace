@@ -75,7 +75,6 @@ from cw.dispatch.loop import (
     _apply_events_to_store,
     _resolve_loaded_version,
     consume_completed_sessions,
-    persist_last_result,
     run_dispatch_loop,
 )
 from cw.dispatch.routing import (
@@ -193,7 +192,6 @@ __all__ = [
     "apply_staged_decision",
     "consume_completed_sessions",
     "dispatch_tick",
-    "persist_last_result",
     "resolve_signoff",
     "run_dispatch_loop",
 ]

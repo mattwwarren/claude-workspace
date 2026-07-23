@@ -101,8 +101,8 @@ def _accumulate_task_cost(task: TicketTask, session_id: str | None) -> None:
 
     Reads cost via two-source fallback:
       1. session.cost_usd (populated by signal_stop — normal headless path)
-      2. session.last_result.get('cost_usd') (populated by persist_last_result —
-         event-replay path where signal_stop did not run)
+      2. session.last_result.get('cost_usd') (populated by the RFC 0012 door —
+         the harvest-authority write path used when signal_stop did not run)
 
     When both sources are absent, total_cost_usd is left unchanged.
     Called inside dev_queue_lock so the mutation is covered by the same

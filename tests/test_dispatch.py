@@ -45,7 +45,6 @@ from cw.dispatch import (
     _resolve_dispatch_skip_reason,
     consume_completed_sessions,
     dispatch_tick,
-    persist_last_result,
     run_dispatch_loop,
 )
 from cw.dispatch_state import (
@@ -855,11 +854,11 @@ class TestConsumeCompletesTasks:
         When a session ends with ambiguities_pending_resolution or
         premises_pending_verification, consume_completed_sessions must emit a
         SESSION_NEEDS_ATTENTION event so operators watching that event type
-        receive the park signal. Uses the stdout path (persist_last_result) so
-        the sentinel is parsed before apply_staged_decision reads it.
+        receive the park signal. ``last_result`` is populated by the RFC 0012
+        door in production; here it is pre-populated directly on the ``Session``
+        (mirroring ``test_consume_paused_status_routes_to_blocked_on_user``) so
+        ``apply_staged_decision`` reads a real sentinel.
         """
-        import json
-
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
 
         task = TicketTask(
@@ -869,18 +868,6 @@ class TestConsumeCompletesTasks:
             session_id="sess-923",
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
-
-        # Fresh session: last_result NOT pre-populated — only the event stdout
-        # carries the sentinel, exercising persist-before-decide ordering.
-        sess = Session(
-            id="sess-923",
-            name="test-client/auto-dev/GEN-923",
-            client="test-client",
-            purpose=SessionPurpose.IMPL,
-            status=SessionStatus.ACTIVE,
-            workspace_path=sample_client_config.workspace_path,
-        )
-        save_state(CwState(sessions=[sess]))
 
         sentinel = {
             "schema_version": 4,
@@ -915,10 +902,21 @@ class TestConsumeCompletesTasks:
             "blocker": None,
             "next_actions": ["Resolve open question before proceeding"],
         }
-        stdout = f"<<<AUTO_DEV_RESULT\n{json.dumps(sentinel)}\nAUTO_DEV_RESULT>>>\n"
+
+        sess = Session(
+            id="sess-923",
+            name="test-client/auto-dev/GEN-923",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            status=SessionStatus.ACTIVE,
+            workspace_path=sample_client_config.workspace_path,
+            last_result=sentinel,
+        )
+        save_state(CwState(sessions=[sess]))
+
         record_event(
             OrchestratorEventType.SESSION_COMPLETED,
-            {"ticket_id": "GEN-923", "session_id": "sess-923", "stdout": stdout},
+            {"ticket_id": "GEN-923", "session_id": "sess-923"},
         )
 
         completed = consume_completed_sessions()
@@ -985,22 +983,22 @@ class TestConsumeCompletesTasks:
 
         assert task.stage == Stage.IMPL
 
-    def test_consume_persists_sentinel_before_advance_decision(
+    def test_consume_advances_staged_pipeline_from_prepopulated_last_result(
         self,
         tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
         simple_config: OrchestratorConfig,
     ) -> None:
-        """Event-stdout sentinel is persisted BEFORE the advance decision (#694).
+        """A small-tier plan_pending_approval at PLAN auto-advances to IMPL.
 
-        Regression: ``consume_completed_sessions`` must persist ``last_result``
-        from the event's stdout before ``_apply_events_to_store`` reads it.
-        Otherwise a freshly-completed stage has ``last_result=None`` at decision
-        time -> status None -> Rule 6 -> BLOCKED_ON_USER, and the staged pipeline
-        never advances. Unlike the sibling consume tests, this session starts
-        with ``last_result`` unset; only the event stdout carries the sentinel,
-        exercising the real persist-before-decide path the unit-level
-        ``_apply_events_to_store`` tests cannot reach.
+        ``last_result`` is populated by the RFC 0012 door (``emit_result_on``/
+        ``emit_result_locked``) at each producer's write site before
+        ``SESSION_COMPLETED`` is emitted -- the event itself carries no result
+        payload. This test pre-populates the session's ``last_result`` the way
+        the door would have (mirroring
+        ``test_consume_paused_status_routes_to_blocked_on_user``) and verifies
+        ``consume_completed_sessions`` reads it and advances the staged
+        pipeline instead of falling through to Rule 6's BLOCKED_ON_USER default.
         """
         from cw.models import Stage
 
@@ -1015,8 +1013,6 @@ class TestConsumeCompletesTasks:
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
 
-        # Fresh session: last_result NOT pre-populated -- only the event stdout
-        # carries the sentinel, exercising persist-before-decide ordering.
         sess = Session(
             id="sess-694",
             name="test-client/auto-dev/GEN-694",
@@ -1024,43 +1020,55 @@ class TestConsumeCompletesTasks:
             purpose=SessionPurpose.IMPL,
             status=SessionStatus.ACTIVE,
             workspace_path=sample_client_config.workspace_path,
+            last_result={
+                "schema_version": 4,
+                "ticket_id": "GEN-694",
+                "status": "plan_pending_approval",
+                "stage_reached": "stage1_plan",
+                "scope": {
+                    "tier": "small",
+                    "files": 4,
+                    "lines_estimate": 258,
+                    "lines_actual": 0,
+                    "forbidden_touched": False,
+                },
+                "plan_source": "github_issue_existing",
+                "branch": None,
+                "worktree_path": "/tmp/wt",
+                "fork_point_sha": None,
+                "commits": [],
+                "pr": None,
+                "review": {
+                    "must_fix_initial": 0,
+                    "should_fix": 0,
+                    "fix_cycles_used": 0,
+                },
+                "health": {
+                    "lowest_agent_confidence": "HIGH",
+                    "any_incomplete_risk": False,
+                    "shortcuts": [],
+                    "recommendation": "PROCEED",
+                    "downgrade_applied": False,
+                    "fix_loop_escalated": False,
+                },
+                "friction_highlights": [],
+                "ambiguities": [],
+                "blocker": None,
+                "next_actions": [],
+            },
         )
         save_state(CwState(sessions=[sess]))
 
-        stdout = (
-            "<<<AUTO_DEV_RESULT\n"
-            '{"schema_version": 4, "ticket_id": "GEN-694",'
-            ' "status": "plan_pending_approval",'
-            ' "stage_reached": "stage1_plan",'
-            ' "scope": {"tier": "small", "files": 4, "lines_estimate": 258,'
-            ' "lines_actual": 0, "forbidden_touched": false},'
-            ' "plan_source": "github_issue_existing", "branch": null,'
-            ' "worktree_path": "/tmp/wt", "fork_point_sha": null,'
-            ' "commits": [], "pr": null,'
-            ' "review": {"must_fix_initial": 0, "should_fix": 0,'
-            ' "fix_cycles_used": 0},'
-            ' "health": {"lowest_agent_confidence": "HIGH",'
-            ' "any_incomplete_risk": false, "shortcuts": [],'
-            ' "recommendation": "PROCEED", "downgrade_applied": false,'
-            ' "fix_loop_escalated": false},'
-            ' "friction_highlights": [], "ambiguities": [], "blocker": null,'
-            ' "next_actions": []}\n'
-            "AUTO_DEV_RESULT>>>\n"
-        )
         record_event(
             OrchestratorEventType.SESSION_COMPLETED,
-            {
-                "ticket_id": "GEN-694",
-                "session_id": "sess-694",
-                "stdout": stdout,
-            },
+            {"ticket_id": "GEN-694", "session_id": "sess-694"},
         )
 
         completed = consume_completed_sessions()
         assert completed == 1
         advanced = load_dev_queue().tasks[0]
         # Small-tier plan_pending_approval auto-advances PLAN -> IMPL (PENDING),
-        # NOT BLOCKED_ON_USER -- proves the sentinel was persisted pre-decision.
+        # NOT BLOCKED_ON_USER.
         assert advanced.status == QueueItemStatus.PENDING
         assert advanced.stage == Stage.IMPL
 
@@ -1123,69 +1131,6 @@ class TestConsumeCompletesTasks:
         # Second consume: cursor advanced, no new events
         completed2 = consume_completed_sessions()
         assert completed2 == 0
-
-
-class TestPersistLastResult:
-    @staticmethod
-    def _seed_session(session_id: str = "sess0001") -> Session:
-        s = _make_daemon_session(
-            id=session_id,
-            name="test-client/impl",
-            client="test-client",
-            workspace_path=Path("/tmp/wt"),
-            surface_ref=None,
-            worktree_path=None,
-            started_at=datetime.now(UTC),
-        )
-        save_state(CwState(sessions=[s]))
-        return s
-
-    def test_persists_parsed_result(self, tmp_dispatch_dirs: Path) -> None:
-        self._seed_session("sess0001")
-        stdout = (
-            "narrative\n"
-            "<<<AUTO_DEV_RESULT\n"
-            '{"schema_version": 1, "ticket_id": "GEN-1", "status": "shipped",'
-            ' "stage_reached": "stage5_post_create",'
-            ' "scope": {"tier": "small", "files": 1, "lines_estimate": 5,'
-            ' "lines_actual": 5, "forbidden_touched": false},'
-            ' "plan_source": "linear_existing", "branch": "dev/gen-1",'
-            ' "worktree_path": "/tmp/wt", "fork_point_sha": "abc",'
-            ' "commits": ["c1"],'
-            ' "pr": {"number": 1, "url": "https://example.com",'
-            ' "auto_merge": true, "base": "main"},'
-            ' "review": {"must_fix_initial": 0, "should_fix": 0,'
-            ' "fix_cycles_used": 0},'
-            ' "health": {"lowest_agent_confidence": "HIGH",'
-            ' "any_incomplete_risk": false, "shortcuts": [],'
-            ' "recommendation": "PROCEED", "downgrade_applied": false,'
-            ' "fix_loop_escalated": false},'
-            ' "friction_highlights": [], "blocker": null,'
-            ' "next_actions": ["wait_for_ci"]}\n'
-            "AUTO_DEV_RESULT>>>\n"
-        )
-        assert persist_last_result("sess0001", stdout) is True
-        state = load_state()
-        assert state.sessions[0].last_result is not None
-        assert state.sessions[0].last_result["status"] == "shipped"
-
-    def test_persists_blocked_for_missing_sentinel(
-        self,
-        tmp_dispatch_dirs: Path,
-    ) -> None:
-        self._seed_session("sess0002")
-        assert persist_last_result("sess0002", "no sentinel here\n") is True
-        state = load_state()
-        assert state.sessions[0].last_result is not None
-        assert state.sessions[0].last_result["status"] == "blocked"
-        assert state.sessions[0].last_result["blocker"]["reason"] == "no_result_emitted"
-
-    def test_returns_false_when_session_missing(
-        self,
-        tmp_dispatch_dirs: Path,
-    ) -> None:
-        save_state(CwState(sessions=[]))
-        assert persist_last_result("nope0000", "anything") is False
 
 
 # ---------------------------------------------------------------------------
