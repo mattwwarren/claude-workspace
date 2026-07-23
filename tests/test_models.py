@@ -18,6 +18,7 @@ from cw.models import (
     CwState,
     DevQueueStore,
     LaneConfig,
+    LastResultSource,
     OrchestratorConfig,
     OrchestratorEvent,
     OrchestratorEventType,
@@ -898,6 +899,32 @@ def test_session_lane_round_trips() -> None:
         lane="my-lane",
     )
     assert sess.lane == "my-lane"
+
+
+def test_session_last_result_source_defaults_none() -> None:
+    """Session.last_result_source defaults to None (RFC 0012 S2, #1456)."""
+    sess = Session(
+        name="test/impl",
+        client="test",
+        purpose=SessionPurpose.IMPL,
+        workspace_path=Path("/tmp"),
+    )
+    assert sess.last_result_source is None
+
+
+def test_session_last_result_source_round_trips() -> None:
+    """Session(last_result_source=...) survives a model_dump/model_validate
+    round trip (mirrors TicketTask.stage_high_water's round-trip precedent)."""
+    sess = Session(
+        name="test/impl",
+        client="test",
+        purpose=SessionPurpose.IMPL,
+        workspace_path=Path("/tmp"),
+        last_result_source=LastResultSource.EMIT_CLI,
+    )
+    dumped = sess.model_dump(mode="json")
+    restored = Session.model_validate(dumped)
+    assert restored.last_result_source == LastResultSource.EMIT_CLI
 
 
 class TestPrStateAndSchemaV8:
