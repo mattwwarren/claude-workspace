@@ -2001,13 +2001,17 @@ def test_act_on_phantom_sentinel_mismatch_veto_persists_consecutive_count(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
+    # #1449 fix cycle 2: use a distinctive new_veto_count (not 1, the value the
+    # session-mutation assertion below would also converge on for a fresh
+    # session) so the payload assertion actually proves the field is copied
+    # from candidate.new_veto_count, not a coincidentally-matching constant.
     candidate = ReapCandidate(
         session_id="phantom-veto-act-1",
         proposed_action=ProposedAction.SENTINEL_STAGE_MISMATCH_VETOED,
         ticket_id="phantom-veto-act-1",
         client="client-a",
         stale_minutes=4.2,
-        new_veto_count=1,
+        new_veto_count=7,
     )
 
     _act_on_phantom_candidates(state, [candidate], now=now)
@@ -2020,7 +2024,7 @@ def test_act_on_phantom_sentinel_mismatch_veto_persists_consecutive_count(
     reloaded = load_state()
     s = next(s for s in reloaded.sessions if s.id == "phantom-veto-act-1")
     assert s.status == SessionStatus.ACTIVE
-    assert s.consecutive_sentinel_mismatch_vetoes == 1
+    assert s.consecutive_sentinel_mismatch_vetoes == 7
 
     events = read_events(
         consumer="test-phantom-veto-act-1",
@@ -2032,7 +2036,7 @@ def test_act_on_phantom_sentinel_mismatch_veto_persists_consecutive_count(
     assert payload["client"] == "client-a"
     assert payload["session_id"] == "phantom-veto-act-1"
     assert payload["stale_minutes"] == 4.2
-    assert payload["new_veto_count"] == 1
+    assert payload["new_veto_count"] == 7
 
 
 def _write_fresh_refused_transcript(
@@ -2075,21 +2079,23 @@ def test_sentinel_mismatch_veto_candidate_stamps_incrementing_veto_count(
     config = OrchestratorConfig(sentinel_mismatch_veto_cap=2)
 
     sess.consecutive_sentinel_mismatch_vetoes = 0
-    cand0, exhausted0 = _sentinel_mismatch_veto_candidate(
+    cand0, exhausted0, stale_seconds0 = _sentinel_mismatch_veto_candidate(
         sess, "veto-count-1", "default", now=now, config=config
     )
     assert cand0 is not None
     assert cand0.proposed_action == ProposedAction.SENTINEL_STAGE_MISMATCH_VETOED
     assert cand0.new_veto_count == 1
     assert exhausted0 is False
+    assert stale_seconds0 is not None
 
     sess.consecutive_sentinel_mismatch_vetoes = 1
-    cand1, exhausted1 = _sentinel_mismatch_veto_candidate(
+    cand1, exhausted1, stale_seconds1 = _sentinel_mismatch_veto_candidate(
         sess, "veto-count-1", "default", now=now, config=config
     )
     assert cand1 is not None
     assert cand1.new_veto_count == 2
     assert exhausted1 is False
+    assert stale_seconds1 is not None
 
 
 def test_sentinel_mismatch_veto_candidate_returns_none_once_cap_reached(
@@ -2097,8 +2103,9 @@ def test_sentinel_mismatch_veto_candidate_returns_none_once_cap_reached(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A LIVE already_refused phantom already at the cap returns (None, True):
-    the veto is exhausted and the caller falls through to CRASH_COMPLETE
+    """A LIVE already_refused phantom already at the cap returns
+    (None, True, stale_seconds): the veto is exhausted and the caller falls
+    through to CRASH_COMPLETE, carrying the staleness the decision was made on
     (#1449)."""
     from cw.reconcile.phantom import _sentinel_mismatch_veto_candidate
 
@@ -2115,11 +2122,12 @@ def test_sentinel_mismatch_veto_candidate_returns_none_once_cap_reached(
     config = OrchestratorConfig(sentinel_mismatch_veto_cap=2)
     sess.consecutive_sentinel_mismatch_vetoes = 2
 
-    cand, exhausted = _sentinel_mismatch_veto_candidate(
+    cand, exhausted, stale_seconds = _sentinel_mismatch_veto_candidate(
         sess, "veto-capped-1", "default", now=now, config=config
     )
     assert cand is None
     assert exhausted is True
+    assert stale_seconds is not None
 
 
 def test_sentinel_mismatch_veto_candidate_stale_transcript_not_exhausted(
@@ -2127,9 +2135,9 @@ def test_sentinel_mismatch_veto_candidate_stale_transcript_not_exhausted(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A genuinely stale transcript returns (None, False) even with the counter
-    pinned at the cap: "not live" must never be misreported as "cap fired"
-    (#1449 — the two-source-of-truth requirement)."""
+    """A genuinely stale transcript returns (None, False, None) even with the
+    counter pinned at the cap: "not live" must never be misreported as "cap
+    fired" (#1449 — the two-source-of-truth requirement)."""
     from cw.reconcile.phantom import _sentinel_mismatch_veto_candidate
 
     home = tmp_path / "home"
@@ -2149,11 +2157,12 @@ def test_sentinel_mismatch_veto_candidate_stale_transcript_not_exhausted(
     config = OrchestratorConfig(sentinel_mismatch_veto_cap=2)
     sess.consecutive_sentinel_mismatch_vetoes = 2  # at cap, but transcript stale
 
-    cand, exhausted = _sentinel_mismatch_veto_candidate(
+    cand, exhausted, stale_seconds = _sentinel_mismatch_veto_candidate(
         sess, "veto-stale-1", "default", now=now, config=config
     )
     assert cand is None
     assert exhausted is False
+    assert stale_seconds is None
 
 
 def test_phantom_veto_bounded_falls_through_to_crash_complete(

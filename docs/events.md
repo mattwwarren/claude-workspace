@@ -1019,7 +1019,8 @@ per pipeline episode, since each episode constructs a brand-new `Session`.
   "ticket_id": "<str | null>",
   "client": "<str | null>",
   "session_id": "<str>",
-  "stale_minutes": "<float>"
+  "stale_minutes": "<float>",
+  "new_veto_count": "<int>"
 }
 ```
 **Semantics:** GitHub #1281, #1449. Emitted instead of the phantom sweep's
