@@ -459,7 +459,7 @@ class LocalExecutor:
             # last_result.
             with sessions_lock():
                 _complete_session_via_door(
-                    sid, completion_result.model_dump(mode="json")
+                    sid=sid, payload=completion_result.model_dump(mode="json")
                 )
             _record_orchestrator_event(
                 OrchestratorEventType.SESSION_COMPLETED,
@@ -484,8 +484,8 @@ class LocalExecutor:
             )
             with sessions_lock():
                 _complete_session_via_door(
-                    sid,
-                    make_blocked(
+                    sid=sid,
+                    payload=make_blocked(
                         ticket_id=task.ticket_id,
                         worktree=worktree,
                         reason=UNEXPECTED_ERROR,
@@ -665,7 +665,9 @@ class CodexExecutor:
 
             # Step 4: Persist result under sessions_lock.
             with sessions_lock():
-                _complete_session_via_door(sid, result.model_dump(mode="json"))
+                _complete_session_via_door(
+                    sid=sid, payload=result.model_dump(mode="json")
+                )
 
             # Step 4b: Post the consolidated verdict as an issue comment
             # (best-effort). Runs after save_state so a retry on save_state
@@ -696,8 +698,8 @@ class CodexExecutor:
             # reverts the task to PENDING, which is the correct recovery path.
             with sessions_lock():
                 _complete_session_via_door(
-                    sid,
-                    make_blocked(
+                    sid=sid,
+                    payload=make_blocked(
                         ticket_id=task.ticket_id,
                         worktree=worktree,
                         reason=UNEXPECTED_ERROR,
