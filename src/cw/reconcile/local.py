@@ -29,6 +29,7 @@ from cw.local_runner import (
 from cw.models import (
     DEFAULT_LANE,
     CompletionReason,
+    LastResultSource,
     OrchestratorEventType,
     SessionOrigin,
     SessionStatus,
@@ -42,6 +43,7 @@ from cw.reconcile._shared import (
     _apply_sentinel_to_task,
     ticket_id_for_session,
 )
+from cw.result import emit_result_on
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -175,12 +177,27 @@ def _act_on_local_harvest_candidates(
             routed = outcome.routed
         if not routed:
             continue
+        # RFC 0012 A3 (#1459): route the git-synthesized completion through the
+        # door (source=GIT_SYNTHESIS) instead of writing session.last_result
+        # directly. A first-writer-wins refusal (another authority already
+        # recorded a terminal result) short-circuits the WHOLE completion for
+        # this candidate -- skip the harvested-id count, the session-completion
+        # stamp, and the SESSION_COMPLETED event. The task was already routed
+        # by _apply_sentinel_to_task above (pre-existing ordering, unchanged);
+        # a refusal does not roll that back (Adopted Assumption 2). The door's
+        # own warning logs existing_source/attempted_source, so no log here.
+        emit_outcome = emit_result_on(
+            session,
+            sentinel.model_dump(mode="json"),
+            source=LastResultSource.GIT_SYNTHESIS,
+        )
+        if emit_outcome.refused:
+            continue
         if candidate.ticket_id:
             harvested_ticket_ids.append(candidate.ticket_id)
         session.status = SessionStatus.COMPLETED
         session.completed_reason = CompletionReason.NORMAL
         session.completed_at = now
-        session.last_result = sentinel.model_dump(mode="json")
         harvest_payload: dict[str, object] = {
             "session_id": session.id,
             "session_name": session.name,

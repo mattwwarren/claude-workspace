@@ -26,6 +26,7 @@ from cw.models import (
     CompletionReason,
     CwState,
     DevQueueStore,
+    LastResultSource,
     LocalLivenessHandle,
     OrchestratorEventType,
     QueueItemStatus,
@@ -165,6 +166,104 @@ def test_local_harvest_dead_process_completes_and_advances(
     assert harvest_events[0].payload.get("crashed") is False
     assert "stdout" not in harvest_events[0].payload
     assert harvest_events[0].payload.get("ticket_id") == "harv-1"
+
+
+def test_local_harvest_stamps_git_synthesis_source(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """RFC 0012 A3 (#1459): a successful git-synthesis harvest routes through
+    the door and stamps ``last_result_source == GIT_SYNTHESIS``."""
+    worktree = _local_git_worktree(make_git_repo, "wt-harvest-gitsrc", with_commit=True)
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    liveness = LocalLivenessHandle(pid=2_000_000_000, start_time_ns=5)
+    sess = _mk_local_session("harv-gitsrc", worktree, liveness)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="harv-gitsrc",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="harv-gitsrc",
+                    stage=Stage.IMPL,
+                )
+            ]
+        )
+    )
+    task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
+    candidates = _detect_local_harvest_candidates(state, task_by_ticket)
+
+    harvested = _act_on_local_harvest_candidates(
+        state,
+        candidates,
+        now=datetime(2026, 1, 2, tzinfo=UTC),
+        task_by_ticket=task_by_ticket,
+    )
+
+    assert harvested == ["harv-gitsrc"]
+    reloaded = next(s for s in load_state().sessions if s.id == "harv-gitsrc")
+    assert reloaded.status == SessionStatus.COMPLETED
+    assert reloaded.last_result_source == LastResultSource.GIT_SYNTHESIS
+
+
+def test_local_harvest_refused_by_door_leaves_session_and_task_untouched(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """RFC 0012 A3 (#1459): when the door refuses (a foreign terminal result is
+    already recorded), the session-completion write is suppressed and no
+    SESSION_COMPLETED event fires for the candidate. The task was already routed
+    by _apply_sentinel_to_task before the door check (Adopted Assumption 2)."""
+    worktree = _local_git_worktree(
+        make_git_repo, "wt-harvest-refused", with_commit=True
+    )
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+    liveness = LocalLivenessHandle(pid=2_000_000_000, start_time_ns=9)
+    sess = _mk_local_session("harv-refused", worktree, liveness)
+    foreign = {"status": "shipped", "foreign_authority": True}
+    sess.last_result = foreign
+    sess.last_result_source = LastResultSource.STOP_HOOK_HARVEST
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="harv-refused",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="harv-refused",
+                    stage=Stage.IMPL,
+                )
+            ]
+        )
+    )
+    task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
+    candidates = _detect_local_harvest_candidates(state, task_by_ticket)
+
+    harvested = _act_on_local_harvest_candidates(
+        state,
+        candidates,
+        now=datetime(2026, 1, 2, tzinfo=UTC),
+        task_by_ticket=task_by_ticket,
+    )
+
+    # Candidate dropped: not counted as harvested.
+    assert harvested == []
+    reloaded = next(s for s in load_state().sessions if s.id == "harv-refused")
+    # Session left untouched: still ACTIVE, foreign result + source intact.
+    assert reloaded.status == SessionStatus.ACTIVE
+    assert reloaded.last_result == foreign
+    assert reloaded.last_result_source == LastResultSource.STOP_HOOK_HARVEST
+    # No SESSION_COMPLETED event fired for the refused candidate.
+    events = read_events(
+        consumer="test-harvest-refused",
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
+    )
+    assert not any(e.payload.get("session_id") == "harv-refused" for e in events)
 
 
 def test_local_harvest_stage_mismatch_does_not_orphan_task_or_complete_session(

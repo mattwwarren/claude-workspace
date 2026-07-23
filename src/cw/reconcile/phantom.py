@@ -366,9 +366,15 @@ def _apply_phantom_salvage_mutations(
         session = session_by_id[candidate.session_id]
         if candidate.salvage_result is None or candidate.salvage_csid is None:
             continue  # Invariant: SALVAGE_COMPLETION always has salvage_result + csid
-        _apply_salvaged_completion(
+        # RFC 0012 A3 (#1459): the door arbitrates first-writer-wins. A refusal
+        # (another authority already recorded a terminal result) short-circuits
+        # the whole completion for this candidate -- skip every accumulator
+        # append so its ticket is not routed and no SESSION_COMPLETED fires.
+        outcome = _apply_salvaged_completion(
             session, candidate.salvage_result, candidate.salvage_csid, now=now
         )
+        if outcome.refused:
+            continue
         phantom_names.append(session.name)
         if candidate.ticket_id:
             salvaged_ticket_ids.append(candidate.ticket_id)

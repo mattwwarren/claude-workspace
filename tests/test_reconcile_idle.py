@@ -795,6 +795,196 @@ def test_flag_silently_idle_salvages_no_op_sentinel(
     mock_daemon.stop.assert_called_once_with("fake-short-id")
 
 
+def _idle_salvage_candidate(
+    session_id: str, ticket_id: str, result: AutoDevResult
+) -> object:
+    """Build a SALVAGE_COMPLETION ReapCandidate for the idle act phase."""
+    from cw.reconcile import ProposedAction, ReapCandidate
+
+    return ReapCandidate(
+        session_id=session_id,
+        proposed_action=ProposedAction.SALVAGE_COMPLETION,
+        ticket_id=ticket_id,
+        salvage_result=result,
+        salvage_csid=f"csid-{session_id}",
+        client="client-a",
+    )
+
+
+def test_idle_salvage_stamps_salvage_transcript_source(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RFC 0012 A3 (#1459): an idle SALVAGE_COMPLETION routes through the door
+    and stamps ``last_result_source == SALVAGE_TRANSCRIPT``."""
+    from cw.models import LastResultSource
+    from cw.reconcile.idle import _act_on_idle_candidates
+    from tests.conftest import _make_daemon_session
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+    )
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+    sess = _make_daemon_session(
+        id="idle-salv-src", name="client-a/auto-dev/idle-salv-src"
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="idle-salv-src",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="idle-salv-src",
+                )
+            ]
+        )
+    )
+    payload = _shipped_salvage_payload()
+    payload["ticket_id"] = "idle-salv-src"
+    result = AutoDevResult.model_validate(payload)
+    candidate = _idle_salvage_candidate("idle-salv-src", "idle-salv-src", result)
+
+    _act_on_idle_candidates(state, [candidate], now=now, config=_auto_config())
+
+    assert sess.status == SessionStatus.COMPLETED
+    assert sess.last_result_source == LastResultSource.SALVAGE_TRANSCRIPT
+
+
+def test_idle_salvage_refused_by_door_excluded_from_queue_and_event_mutations(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RFC 0012 A3 (#1459): a door-refused idle salvage candidate is excluded
+    from queue routing and SESSION_COMPLETED emission, while a co-occurring
+    non-refused salvage candidate in the same tick still routes/emits."""
+    from cw.models import LastResultSource
+    from cw.reconcile.idle import _act_on_idle_candidates
+    from tests.conftest import _make_daemon_session
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+    )
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+    foreign = {"status": "shipped", "foreign_authority": True}
+    refused = _make_daemon_session(
+        id="idle-refused",
+        name="client-a/auto-dev/idle-refused",
+        last_result=foreign,
+        last_result_source=LastResultSource.STOP_HOOK_HARVEST,
+    )
+    accepted = _make_daemon_session(
+        id="idle-accepted", name="client-a/auto-dev/idle-accepted"
+    )
+    state = CwState(sessions=[refused, accepted])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="idle-refused",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="idle-refused",
+                ),
+                TicketTask(
+                    ticket_id="idle-accepted",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="idle-accepted",
+                ),
+            ]
+        )
+    )
+    refused_payload = _shipped_salvage_payload()
+    refused_payload["ticket_id"] = "idle-refused"
+    accepted_payload = _shipped_salvage_payload()
+    accepted_payload["ticket_id"] = "idle-accepted"
+    candidates = [
+        _idle_salvage_candidate(
+            "idle-refused",
+            "idle-refused",
+            AutoDevResult.model_validate(refused_payload),
+        ),
+        _idle_salvage_candidate(
+            "idle-accepted",
+            "idle-accepted",
+            AutoDevResult.model_validate(accepted_payload),
+        ),
+    ]
+
+    _act_on_idle_candidates(state, candidates, now=now, config=_auto_config())
+
+    # Refused: session untouched, task NOT completed.
+    assert refused.status == SessionStatus.ACTIVE
+    assert refused.last_result == foreign
+    assert refused.last_result_source == LastResultSource.STOP_HOOK_HARVEST
+    store = load_dev_queue()
+    refused_task = next(t for t in store.tasks if t.ticket_id == "idle-refused")
+    assert refused_task.status == QueueItemStatus.RUNNING
+    # Accepted: session COMPLETED, task COMPLETED.
+    assert accepted.status == SessionStatus.COMPLETED
+    accepted_task = next(t for t in store.tasks if t.ticket_id == "idle-accepted")
+    assert accepted_task.status == QueueItemStatus.COMPLETED
+    # SESSION_COMPLETED fires only for the accepted candidate.
+    events = read_events(
+        consumer="test-idle-salv-refused",
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
+    )
+    completed_ids = {e.payload.get("session_id") for e in events}
+    assert "idle-accepted" in completed_ids
+    assert "idle-refused" not in completed_ids
+
+
+def test_apply_idle_state_mutations_returns_accepted_salvage_subset(
+    tmp_config_dir: Path,
+) -> None:
+    """RFC 0012 A3 (#1459): the widened ``tuple[bool, list[ReapCandidate]]``
+    return excludes a door-refused salvage candidate and retains the accepted."""
+    from cw.models import LastResultSource
+    from cw.reconcile.idle import _apply_idle_state_mutations
+    from tests.conftest import _make_daemon_session
+
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+    foreign = {"status": "shipped", "foreign_authority": True}
+    refused = _make_daemon_session(
+        id="idle-w-refused",
+        name="client-a/auto-dev/idle-w-refused",
+        last_result=foreign,
+        last_result_source=LastResultSource.STOP_HOOK_HARVEST,
+    )
+    accepted = _make_daemon_session(
+        id="idle-w-accepted", name="client-a/auto-dev/idle-w-accepted"
+    )
+    session_by_id = {s.id: s for s in (refused, accepted)}
+    payload = _shipped_salvage_payload()
+    salvage_candidates = [
+        _idle_salvage_candidate(
+            "idle-w-refused", "idle-w-refused", AutoDevResult.model_validate(payload)
+        ),
+        _idle_salvage_candidate(
+            "idle-w-accepted", "idle-w-accepted", AutoDevResult.model_validate(payload)
+        ),
+    ]
+
+    counters_changed, accepted_salvage = _apply_idle_state_mutations(
+        session_by_id,
+        now=now,
+        counter_candidates=[],
+        salvage_candidates=salvage_candidates,  # type: ignore[arg-type]
+        merged_revert_candidates=[],
+        gh_blocked_revert_candidates=[],
+        revert_candidates=[],
+        park_candidates=[],
+    )
+
+    assert counters_changed is False
+    accepted_ids = {c.session_id for c in accepted_salvage}
+    assert accepted_ids == {"idle-w-accepted"}
+
+
 def test_silently_idle_parked_session_salvaged_on_next_pass(
     tmp_config_dir: Path,
     tmp_path: Path,

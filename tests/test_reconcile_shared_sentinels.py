@@ -13,7 +13,7 @@ import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import freezegun
 import pytest
@@ -2441,10 +2441,11 @@ def test_salvage_skipped_not_emitted_for_terminal_sentinel(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     # Mock _salvage_terminal_result to return a real terminal result so the
-    # session bypasses the salvage-skipped gate entirely.
-    fake_result = MagicMock()
-    fake_result.cost_usd = None
-    fake_result.status = "shipped"
+    # session bypasses the salvage-skipped gate entirely. A real AutoDevResult
+    # (not a MagicMock) is required now that _apply_salvaged_completion routes
+    # the salvaged result through the validating door (emit_result_on), which
+    # re-validates result.model_dump() against the AutoDevResult schema (#1459).
+    fake_result = AutoDevResult.model_validate(_shipped_salvage_payload())
     monkeypatch.setattr(
         "cw.reconcile._shared.salvage_terminal_result",
         lambda *_args, **_kwargs: (fake_result, "fake-claude-id"),

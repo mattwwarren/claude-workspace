@@ -43,10 +43,12 @@ subsequent write fails. See GitHub #1015.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from cw.auto_dev_result import AutoDevResult, BlockedResult
 from cw.config import get_client, load_state, save_state
 from cw.dev_queue import (
     _derive_disposition,
@@ -57,7 +59,7 @@ from cw.dev_queue import (
     transition_task_status,
 )
 from cw.events import record_event
-from cw.exceptions import CwError
+from cw.exceptions import CwError, EmitValidationError
 from cw.models import (
     CompletionReason,
     LivenessBucket,
@@ -80,13 +82,15 @@ from cw.reconcile._shared import (
     ticket_id_for_session,
 )
 from cw.reconcile.liveness import _classify_liveness_bucket
+from cw.result import EmitOutcome, _validate_harvest_payload
 from cw.worktree import _has_commits_beyond_base
 
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from cw.auto_dev_result import AutoDevResult
     from cw.models import CwState, OrchestratorConfig, Session, TicketTask
+
+_log = logging.getLogger(__name__)
 
 # Recipe name constants — the recognised keys of
 # OrchestratorConfig.concierge_recoveries (Q7).
@@ -529,8 +533,10 @@ def _detect_park_marker_poison_candidates(
 
 def _close_confirmed_dead_session(
     session_id: str, now: datetime
-) -> tuple[bool, AutoDevResult | None]:
-    """Flip a confirmed-dead session to COMPLETED. Returns (changed, salvage_result).
+) -> tuple[bool, AutoDevResult | None, EmitOutcome | None]:
+    """Flip a confirmed-dead session to COMPLETED.
+
+    Returns ``(changed, salvage_result, refusal)``.
 
     GitHub #1353: attempts terminal-sentinel salvage before stamping CRASHED —
     mirrors idle.py/stalled.py/phantom.py's own pre-close salvage check
@@ -540,6 +546,15 @@ def _close_confirmed_dead_session(
     instead of PENDING); None means the session is genuinely unrecoverable and
     the pre-existing CRASHED stamp applies unchanged.
 
+    RFC 0012 A3 (#1459): the pre-close salvage now routes through the door
+    (``_apply_salvaged_completion`` -> ``emit_result_on``). On a first-writer-
+    wins refusal (another authority already recorded a terminal result for this
+    session) the session is left COMPLETELY untouched -- ``changed`` stays False,
+    ``salvage_result`` stays None, and the door's refusal ``EmitOutcome`` is
+    returned as ``refusal`` so the caller can route the task off the existing
+    (foreign) result instead of blindly requeuing to PENDING (Adopted
+    Assumption 1).
+
     Fresh load_state()/save_state() pair — safe under the sessions_lock the
     reconcile-tick caller already holds (mirrors revert_timed_out_tasks's own
     load_state()/save_state() pattern rather than re-acquiring the lock).
@@ -547,6 +562,7 @@ def _close_confirmed_dead_session(
     state = load_state()
     changed = False
     salvage_result: AutoDevResult | None = None
+    refusal: EmitOutcome | None = None
     for session in state.sessions:
         if session.id != session_id:
             continue
@@ -558,17 +574,127 @@ def _close_confirmed_dead_session(
             )
             if salvage is not None:
                 result, claude_session_id = salvage
-                _apply_salvaged_completion(session, result, claude_session_id, now=now)
-                salvage_result = result
+                outcome = _apply_salvaged_completion(
+                    session, result, claude_session_id, now=now
+                )
+                if outcome.refused:
+                    # Door declined: leave the session byte-identical (no
+                    # changed/save), hand the refusal back for task routing.
+                    refusal = outcome
+                else:
+                    salvage_result = result
+                    changed = True
             else:
                 session.status = SessionStatus.COMPLETED
                 session.completed_at = now
                 session.completed_reason = CompletionReason.CRASHED
-            changed = True
+                changed = True
         break
     if changed:
         save_state(state)
-    return changed, salvage_result
+    return changed, salvage_result, refusal
+
+
+def _validate_existing_result_for_routing(
+    existing_result: dict[str, Any] | None,
+) -> AutoDevResult | BlockedResult | None:
+    """Validate a door-refused foreign ``existing_result`` for routing, or None.
+
+    Reuses the door's own discriminated validation
+    (:func:`cw.result._validate_harvest_payload`) against a **foreign, untrusted**
+    dict written by an unknown authority. A validation failure means the shape is
+    unroutable, so the caller falls through to the PENDING-requeue floor.
+
+    RFC 0012 A3 (#1459): this read-side foreign-shape check is the one deliberate
+    exception to R6's "no defensive ladder around this ticket's own emit sites"
+    rule -- it validates a dict this ticket did NOT construct, so a
+    ``EmitValidationError`` here is a genuine "is this even routable" reading, not
+    a widening of a known-valid payload.
+    """
+    if existing_result is None:
+        return None
+    try:
+        return _validate_harvest_payload(existing_result)
+    except EmitValidationError:
+        return None
+
+
+def _route_park_marker_poison_task(
+    task: TicketTask,
+    salvage_result: AutoDevResult | None,
+    refusal: EmitOutcome | None,
+) -> None:
+    """Route a poison-clear TASK to its terminal/requeue status (RFC 0012 A3).
+
+    Extracted from ``_act_on_park_marker_poison_candidates``' loop so that
+    function stays under the branch cap. Three arms:
+
+    1. ``salvage_result`` present -> the door accepted a fresh salvage; route
+       via ``_queue_status_for_salvaged`` (session_id / stage_base_ref left
+       intact per the #918 rescue contract).
+    2. door refused with a validating ``existing_result`` -> route off that
+       foreign terminal result, special-casing ``status=="blocked"`` (both
+       shapes) to BLOCKED_ON_USER so a blocked result is not mis-completed.
+    3. otherwise (no salvage, unroutable/absent refusal) -> requeue PENDING and
+       clear session_id / stage_base_ref (the pre-existing floor).
+    """
+    if salvage_result is not None:
+        last_result = salvage_result.model_dump(mode="json")
+        transition_task_status(
+            task,
+            _queue_status_for_salvaged(salvage_result),
+            disposition=_derive_disposition(salvage_result.status),
+            pr_url=_extract_pr_url(last_result),
+        )
+        return
+
+    validated_refusal: AutoDevResult | BlockedResult | None = (
+        _validate_existing_result_for_routing(refusal.existing_result)
+        if refusal is not None
+        else None
+    )
+    if validated_refusal is not None:
+        _log.warning(
+            "concierge park_marker_poison_clear: routing door-refused "
+            "existing result ticket=%s existing_source=%s",
+            task.ticket_id,
+            refusal.existing_source if refusal is not None else None,
+        )
+        dumped = validated_refusal.model_dump(mode="json")
+        # isinstance(BlockedResult) MUST precede the .status=="blocked" elif:
+        # "blocked" is a valid AutoDevResult.status too, so the status-only
+        # discriminant does not narrow away AutoDevResult for mypy --strict --
+        # the isinstance check is what proves the else branch's operand is an
+        # AutoDevResult (RFC 0012 A3 #1459).
+        if isinstance(validated_refusal, BlockedResult):
+            target_status = QueueItemStatus.BLOCKED_ON_USER
+        elif validated_refusal.status == "blocked":
+            # A foreign AutoDevResult with status=blocked would otherwise be
+            # mis-routed to COMPLETED by _queue_status_for_salvaged (which does
+            # not treat "blocked" as paused-for-user) -- special-case it to
+            # BLOCKED_ON_USER (round-3 bug fix).
+            target_status = QueueItemStatus.BLOCKED_ON_USER
+        else:
+            target_status = _queue_status_for_salvaged(validated_refusal)
+        transition_task_status(
+            task,
+            target_status,
+            disposition=_derive_disposition(validated_refusal.status),
+            pr_url=_extract_pr_url(dumped),
+        )
+        return
+
+    if refusal is not None:
+        _log.warning(
+            "concierge park_marker_poison_clear: door-refused result "
+            "unroutable ticket=%s existing_source=%s existing_shape=%r",
+            task.ticket_id,
+            refusal.existing_source,
+            refusal.existing_result,
+        )
+    transition_task_status(task, QueueItemStatus.PENDING)
+    task.session_id = None
+    task.stage_base_ref = None
 
 
 def _act_on_park_marker_poison_candidates(
@@ -611,30 +737,17 @@ def _act_on_park_marker_poison_candidates(
                 correlation_id=task.ticket_id,
             )
             salvage_result: AutoDevResult | None = None
+            refusal: EmitOutcome | None = None
             if candidate.session_id is not None:
-                _, salvage_result = _close_confirmed_dead_session(
+                _, salvage_result, refusal = _close_confirmed_dead_session(
                     candidate.session_id, now
                 )
-            if salvage_result is not None:
-                last_result = salvage_result.model_dump(mode="json")
-                transition_task_status(
-                    task,
-                    _queue_status_for_salvaged(salvage_result),
-                    disposition=_derive_disposition(salvage_result.status),
-                    pr_url=_extract_pr_url(last_result),
-                )
-                # session_id intentionally NOT cleared — a BLOCKED_ON_USER-routed
-                # task retains it so a later rescue can re-find the session
-                # (mirrors _apply_sentinel_to_task's #918 rescue contract).
-                # stage_base_ref is likewise left untouched: it's only ever
-                # reset on the PENDING-requeue arm below (a fresh restart from
-                # scratch); a salvaged task is resuming from its recovered
-                # sentinel, not restarting, so the existing base ref still
-                # applies.
-            else:
-                transition_task_status(task, QueueItemStatus.PENDING)
-                task.session_id = None
-                task.stage_base_ref = None
+            # RFC 0012 A3 (#1459): route via the shared arm-picker -- a fresh
+            # salvage, a door-refused-but-routable foreign result, or the
+            # PENDING-requeue floor. Extracted so this loop stays under the
+            # branch cap. session_id / stage_base_ref are cleared only on the
+            # PENDING arm inside the helper.
+            _route_park_marker_poison_task(task, salvage_result, refusal)
             recovered.append(task.ticket_id)
             changed = True
         if changed:
