@@ -208,6 +208,13 @@ clients:
 
 `backend` defaults to `claude-native` and can be omitted.
 
+Each `backend` here corresponds to a harvest-authority mechanism documented in
+[`docs/headless-contract.md` §11](../docs/headless-contract.md#11-result-publishing-harvest-authority-rfc-0012)
+— `claude-native` harvests via the Stop hook (`stop_hook_harvest`), `codex`
+and `local` harvest via their supervised-child executor (`executor_direct` /
+`git_synthesis`) — for how each backend's end state ultimately reaches
+`Session.last_result`.
+
 ### Local Backend (aider + LM Studio)
 
 Set `backend: local` to delegate a stage to `aider` running against a local
