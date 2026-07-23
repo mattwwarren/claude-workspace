@@ -27,7 +27,8 @@ from cw.models.session import Session
 #      pre-v14 handles are cleared on migration so they don't false-positive
 #      as "dead" against a live process re-read in the new format (GitHub #921).
 # v15: added Session.consecutive_park_vetoes (#1445).
-CW_STATE_SCHEMA_VERSION = 15
+# v16: added Session.last_result_source (RFC 0012 S2, #1456).
+CW_STATE_SCHEMA_VERSION = 16
 
 
 class CwState(BaseModel):

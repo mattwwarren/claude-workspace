@@ -67,6 +67,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.reconcile import _deps
+from cw.result import has_terminal_result
 from cw.worktree import (
     remove_worktree,
     worktree_has_unsaved_work,
@@ -1471,8 +1472,12 @@ def _has_terminal_sentinel(session: Session) -> bool:
     no ``"status"``. Key presence — not value — is the structural discriminant,
     so a parked session is correctly NOT treated as terminal and the idle
     watchdog re-checks it for a late terminal sentinel. See #418, #497.
+
+    Thin delegation onto ``cw.result.has_terminal_result`` (RFC 0012 S2,
+    #1456), which now owns this predicate since the emit_result_locked door
+    also uses it to arbitrate first-writer-wins.
     """
-    return isinstance(session.last_result, dict) and "status" in session.last_result
+    return has_terminal_result(session.last_result)
 
 
 def resolve_idle_watchdog_budget(

@@ -1557,6 +1557,7 @@ class TestPackageExportCompleteness:
             "LOCAL_BACKEND",
             "LaneConcurrencyOverride",
             "LaneConfig",
+            "LastResultSource",
             "LivenessBucket",
             "LocalLivenessHandle",
             "OCCUPIED_LANE_STATUSES",

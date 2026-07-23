@@ -100,6 +100,22 @@ class ReapReason(StrEnum):
     TERMINAL_SIBLING = "terminal_sibling"
 
 
+class LastResultSource(StrEnum):
+    """RFC 0012 S2 — provenance of ``Session.last_result``.
+
+    Records which mechanism wrote the session's terminal sentinel, so the
+    ``emit_result_locked`` door (``cw.result``) can arbitrate first-writer-
+    wins and log a collision naming both sources. ``None`` on ``Session``
+    means pre-migration (no writer has stamped a source yet). See #1456.
+    """
+
+    EMIT_CLI = "emit_cli"
+    STOP_HOOK_HARVEST = "stop_hook_harvest"
+    EXECUTOR_DIRECT = "executor_direct"
+    GIT_SYNTHESIS = "git_synthesis"
+    SALVAGE_TRANSCRIPT = "salvage_transcript"
+
+
 class Stage(StrEnum):
     """RFC 0005 pipeline stage. Mutated live by dispatch via
     ``_stage_advance_unchecked`` as a task moves through the pipeline."""

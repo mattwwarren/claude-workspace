@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from cw.models.enums import (
     CompletionReason,
+    LastResultSource,
     LivenessBucket,
     ReapReason,
     SessionOrigin,
@@ -128,3 +129,9 @@ class Session(BaseModel):
     # per-stage floor; the owning TicketTask.stage is (see
     # cw.reconcile.liveness._detect_liveness_candidates). See GitHub #1001.
     liveness_bucket: LivenessBucket = LivenessBucket.LIVE
+    # RFC 0012 S2 — provenance of last_result: which mechanism wrote it
+    # (cw result emit, the Stop hook harvest, an executor's direct write, git
+    # synthesis, or transcript salvage). Stamped by the emit_result_locked
+    # door on every successful write; None = pre-migration (no writer has
+    # stamped a source yet). See GitHub #1456.
+    last_result_source: LastResultSource | None = None
