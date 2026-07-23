@@ -43,12 +43,13 @@ from cw.dev_queue import (
     transition_task_status,
 )
 from cw.events import record_event
-from cw.exceptions import CwError
+from cw.exceptions import CwError, EmitSessionNotFoundError, EmitValidationError
 from cw.models import (
     WORKER_PURPOSES,
     CompletionReason,
     CwState,
     DispatchSkipReason,
+    LastResultSource,
     OrchestratorEventType,
     QueueItemStatus,
     Session,
@@ -64,6 +65,7 @@ from cw.reconcile import (
     reconcile,
     resolve_headless_budget,
 )
+from cw.result import emit_result_locked
 from cw.session import (
     background_all_sessions,
     background_session,
@@ -445,6 +447,39 @@ def _handle_headless_no_sentinel(
     return True
 
 
+def _harvest_last_result_through_door(
+    session_id: str, sentinel: AutoDevResult | BlockedResult
+) -> None:
+    """Push a freshly re-parsed Stop-hook sentinel through the emit door.
+
+    RFC 0012 A1 (#1457): the Stop-hook harvest write no longer assigns
+    ``session.last_result`` directly -- it routes through
+    ``emit_result_locked`` (the same first-writer-wins arbitration ``cw
+    result emit`` uses, RFC 0012 S2, #1456) so a session that already has a
+    terminal result recorded from another writer can't be silently
+    clobbered by a late transcript re-parse.
+
+    Best-effort: a validation failure or missing session is logged and
+    swallowed, never raised -- the Stop hook must never block claude from
+    exiting. There is no fallback write; a failure here just means
+    ``last_result`` stays whatever it already was. A refusal (terminal
+    result already present) is not logged again here -- ``emit_result_locked``
+    already emits its own warning on refusal.
+    """
+    try:
+        emit_result_locked(
+            sentinel.model_dump(mode="json"),
+            session_id,
+            source=LastResultSource.STOP_HOOK_HARVEST,
+        )
+    except (EmitValidationError, EmitSessionNotFoundError) as exc:
+        logger.warning(
+            "stop-hook harvest write rejected by door for session %s: %s",
+            session_id,
+            exc,
+        )
+
+
 def _resolve_and_complete_headless_session(
     state: CwState,
     session: Session,
@@ -525,12 +560,15 @@ def _resolve_and_complete_headless_session(
     # (consume_completed_sessions, /cw-followup) can route by status.
     # parse_stdout returns BlockedResult on malformed payloads — we
     # persist either shape; both serialize to a dict with a "status" field.
-    # Issue #536: when the result was pushed via ``cw result emit``
-    # (emit_terminal), session.last_result is already the authoritative value
-    # — do NOT overwrite it with the reconstructed/re-parsed sentinel.
-    if parsed_sentinel is not None and not emit_terminal:
-        session.last_result = parsed_sentinel.model_dump(mode="json")
     save_state(state)
+    # Issue #536 / RFC 0012 A1 (#1457): when the result was pushed via
+    # ``cw result emit`` (emit_terminal), session.last_result is already the
+    # authoritative value — do NOT overwrite it with the reconstructed/
+    # re-parsed sentinel. Otherwise, push the freshly re-parsed sentinel
+    # through the emit door (first-writer-wins arbitration, RFC 0012 S2)
+    # rather than assigning session.last_result directly.
+    if parsed_sentinel is not None and not emit_terminal:
+        _harvest_last_result_through_door(session.id, parsed_sentinel)
     return rescued
 
 
