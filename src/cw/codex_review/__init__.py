@@ -53,8 +53,10 @@ from cw.codex_review._context import (
     _load_ticket_context,
     _parse_review_policy,
     _parse_reviewer_document,
+    _prepare_review_pass,
     _read_sensitive_manifest,
     _render_sensitive_block,
+    _ReviewPassInputs,
     _select_reviewer_roles,
     _SensitiveHit,
 )
@@ -82,11 +84,7 @@ from cw.codex_review._verdict import (
     render_verdict_comment,
     synthesize_codex_review_result,
 )
-from cw.codex_review.core import (
-    _prepare_review_pass,
-    _ReviewPassInputs,
-    run_review,
-)
+from cw.codex_review.core import run_review
 
 __all__ = [
     "CODEX_BUDGET_EXHAUSTED",
