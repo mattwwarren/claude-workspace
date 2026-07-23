@@ -1976,13 +1976,15 @@ def test_act_on_phantom_salvage_completion_routes_queue_and_emits_event(
     assert events[0].payload["crashed"] is False
 
 
-def test_act_on_phantom_sentinel_mismatch_veto_emits_event_no_mutation(
+def test_act_on_phantom_sentinel_mismatch_veto_persists_consecutive_count(
     tmp_config_dir: Path,
 ) -> None:
-    """SENTINEL_STAGE_MISMATCH_VETOED candidate emits the vetoed event only.
+    """SENTINEL_STAGE_MISMATCH_VETOED candidate persists its new_veto_count onto
+    the session and emits the vetoed event.
 
-    session.sentinel_stage_mismatch_vetoed fires; zero queue/session mutation
-    accompanies it (GitHub #1281).
+    session.sentinel_stage_mismatch_vetoed fires; the task stays RUNNING and the
+    session stays ACTIVE, but the veto count IS persisted so the veto is bounded
+    across ticks (#1449, was zero-mutation under #1281).
     """
     from cw.reconcile import ProposedAction, ReapCandidate, _act_on_phantom_candidates
 
@@ -2005,6 +2007,7 @@ def test_act_on_phantom_sentinel_mismatch_veto_emits_event_no_mutation(
         ticket_id="phantom-veto-act-1",
         client="client-a",
         stale_minutes=4.2,
+        new_veto_count=1,
     )
 
     _act_on_phantom_candidates(state, [candidate], now=now)
@@ -2014,8 +2017,10 @@ def test_act_on_phantom_sentinel_mismatch_veto_emits_event_no_mutation(
     assert t.status == QueueItemStatus.RUNNING
     assert t.disposition is None
 
-    s = next(s for s in state.sessions if s.id == "phantom-veto-act-1")
+    reloaded = load_state()
+    s = next(s for s in reloaded.sessions if s.id == "phantom-veto-act-1")
     assert s.status == SessionStatus.ACTIVE
+    assert s.consecutive_sentinel_mismatch_vetoes == 1
 
     events = read_events(
         consumer="test-phantom-veto-act-1",
@@ -2027,6 +2032,439 @@ def test_act_on_phantom_sentinel_mismatch_veto_emits_event_no_mutation(
     assert payload["client"] == "client-a"
     assert payload["session_id"] == "phantom-veto-act-1"
     assert payload["stale_minutes"] == 4.2
+
+
+def _write_fresh_refused_transcript(
+    home: Path,
+    worktree: Path,
+    csid: str,
+    now: datetime,
+    *,
+    stale_seconds: int = 30,
+) -> None:
+    """Write a stage_complete transcript for an already_refused phantom, stamped
+    ``stale_seconds`` behind *now* so it reads LIVE (#1449 cap tests)."""
+    payload = _stage_complete_payload()
+    transcript = _write_salvage_transcript(home, worktree, csid, payload)
+    fresh_ts = (now - timedelta(seconds=stale_seconds)).timestamp()
+    os.utime(str(transcript), (fresh_ts, fresh_ts))
+
+
+def test_sentinel_mismatch_veto_candidate_stamps_incrementing_veto_count(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A LIVE already_refused phantom below the cap yields a
+    SENTINEL_STAGE_MISMATCH_VETOED candidate whose new_veto_count is the current
+    count + 1, with exhausted False (#1449)."""
+    from cw.reconcile import ProposedAction
+    from cw.reconcile.phantom import _sentinel_mismatch_veto_candidate
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-veto-count"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(minutes=5)
+    sess = _mk_phantom_daemon_session(
+        "veto-count-1", started_at, surface_ref="fake-short-id", worktree_path=worktree
+    )
+    _write_fresh_refused_transcript(home, worktree, "csid-veto-count", now)
+    config = OrchestratorConfig(sentinel_mismatch_veto_cap=2)
+
+    sess.consecutive_sentinel_mismatch_vetoes = 0
+    cand0, exhausted0 = _sentinel_mismatch_veto_candidate(
+        sess, "veto-count-1", "default", now=now, config=config
+    )
+    assert cand0 is not None
+    assert cand0.proposed_action == ProposedAction.SENTINEL_STAGE_MISMATCH_VETOED
+    assert cand0.new_veto_count == 1
+    assert exhausted0 is False
+
+    sess.consecutive_sentinel_mismatch_vetoes = 1
+    cand1, exhausted1 = _sentinel_mismatch_veto_candidate(
+        sess, "veto-count-1", "default", now=now, config=config
+    )
+    assert cand1 is not None
+    assert cand1.new_veto_count == 2
+    assert exhausted1 is False
+
+
+def test_sentinel_mismatch_veto_candidate_returns_none_once_cap_reached(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A LIVE already_refused phantom already at the cap returns (None, True):
+    the veto is exhausted and the caller falls through to CRASH_COMPLETE
+    (#1449)."""
+    from cw.reconcile.phantom import _sentinel_mismatch_veto_candidate
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-veto-capped"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(minutes=5)
+    sess = _mk_phantom_daemon_session(
+        "veto-capped-1", started_at, surface_ref="fake-short-id", worktree_path=worktree
+    )
+    _write_fresh_refused_transcript(home, worktree, "csid-veto-capped", now)
+    config = OrchestratorConfig(sentinel_mismatch_veto_cap=2)
+    sess.consecutive_sentinel_mismatch_vetoes = 2
+
+    cand, exhausted = _sentinel_mismatch_veto_candidate(
+        sess, "veto-capped-1", "default", now=now, config=config
+    )
+    assert cand is None
+    assert exhausted is True
+
+
+def test_sentinel_mismatch_veto_candidate_stale_transcript_not_exhausted(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuinely stale transcript returns (None, False) even with the counter
+    pinned at the cap: "not live" must never be misreported as "cap fired"
+    (#1449 — the two-source-of-truth requirement)."""
+    from cw.reconcile.phantom import _sentinel_mismatch_veto_candidate
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-veto-stale"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 2, 0, 0, tzinfo=UTC)
+    sess = _mk_phantom_daemon_session(
+        "veto-stale-1", started_at, surface_ref="fake-short-id", worktree_path=worktree
+    )
+    # Stamp the transcript at now-1h (mtime strictly after started_at so it stays
+    # locatable) — well past TRANSCRIPT_LIVENESS_WINDOW_SECONDS (300s), so stale.
+    _write_fresh_refused_transcript(
+        home, worktree, "csid-veto-stale", now, stale_seconds=3600
+    )
+    config = OrchestratorConfig(sentinel_mismatch_veto_cap=2)
+    sess.consecutive_sentinel_mismatch_vetoes = 2  # at cap, but transcript stale
+
+    cand, exhausted = _sentinel_mismatch_veto_candidate(
+        sess, "veto-stale-1", "default", now=now, config=config
+    )
+    assert cand is None
+    assert exhausted is False
+
+
+def test_phantom_veto_bounded_falls_through_to_crash_complete(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A LIVE, already_refused phantom at the veto cap falls through to a single
+    CRASH_COMPLETE candidate stamped veto_cap_exhausted=True — no
+    SENTINEL_STAGE_MISMATCH_VETOED candidate (#1449)."""
+    from cw.reconcile import ProposedAction, _detect_phantom_candidates
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-bound-crash"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(minutes=5)
+    sess = _mk_phantom_daemon_session(
+        "bound-crash-1", started_at, surface_ref="fake-short-id", worktree_path=worktree
+    )
+    sess.last_result = {"paused_status": _SENTINEL_STAGE_MISMATCH_REFUSED_REASON}
+    sess.consecutive_sentinel_mismatch_vetoes = 2  # at cap
+    _write_fresh_refused_transcript(home, worktree, "csid-bound-crash", now)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+
+    candidates = _detect_phantom_candidates(
+        state,
+        phantom_set={sess.id},
+        now=now,
+        config=OrchestratorConfig(sentinel_mismatch_veto_cap=2),
+    )
+    crash = next(
+        c for c in candidates if c.proposed_action == ProposedAction.CRASH_COMPLETE
+    )
+    assert crash.veto_cap_exhausted is True
+    assert crash.new_veto_count == 3
+    assert not any(
+        c.proposed_action == ProposedAction.SENTINEL_STAGE_MISMATCH_VETOED
+        for c in candidates
+    )
+
+
+def test_sentinel_mismatch_veto_cap_end_to_end_via_detect_and_act(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Full N-tick simulation (cap=2): tick 1 vetoes (count->1), tick 2 vetoes
+    (count->2), tick 3 falls through to CRASH_COMPLETE (#1449)."""
+    monkeypatch.setattr(
+        "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
+    )
+    from cw.reconcile import (
+        ProposedAction,
+        _act_on_phantom_candidates,
+        _detect_phantom_candidates,
+    )
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-veto-e2e"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(minutes=5)
+    sess = _mk_phantom_daemon_session(
+        "veto-e2e-1", started_at, surface_ref="fake-short-id", worktree_path=worktree
+    )
+    sess.last_result = {"paused_status": _SENTINEL_STAGE_MISMATCH_REFUSED_REASON}
+    _write_fresh_refused_transcript(home, worktree, "csid-veto-e2e", now)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="veto-e2e-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="veto-e2e-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    config = OrchestratorConfig(sentinel_mismatch_veto_cap=2)
+
+    def _tick() -> list[object]:
+        cands = _detect_phantom_candidates(
+            state, phantom_set={sess.id}, now=now, config=config
+        )
+        _act_on_phantom_candidates(state, cands, now=now, config=config)
+        return cands
+
+    # Tick 1 — veto, count -> 1.
+    cands = _tick()
+    assert any(
+        c.proposed_action == ProposedAction.SENTINEL_STAGE_MISMATCH_VETOED
+        for c in cands
+    )
+    assert state.sessions[0].consecutive_sentinel_mismatch_vetoes == 1
+    assert state.sessions[0].status == SessionStatus.ACTIVE
+
+    # Tick 2 — veto, count -> 2.
+    cands = _tick()
+    assert any(
+        c.proposed_action == ProposedAction.SENTINEL_STAGE_MISMATCH_VETOED
+        for c in cands
+    )
+    assert state.sessions[0].consecutive_sentinel_mismatch_vetoes == 2
+    assert state.sessions[0].status == SessionStatus.ACTIVE
+
+    # Tick 3 — veto exhausted, falls through to CRASH_COMPLETE (SIGNAL_ONLY).
+    cands = _tick()
+    assert any(c.proposed_action == ProposedAction.CRASH_COMPLETE for c in cands)
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "veto-e2e-1")
+    assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+def test_sentinel_mismatch_veto_cap_exhaustion_emits_immediate_needs_attention(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the veto cap is exhausted under SIGNAL_ONLY, a session.needs_attention
+    fires this tick with a push notification, the task routes to BLOCKED_ON_USER,
+    and no daemon-stop / worktree removal occurs (#1449)."""
+    from cw.reconcile import (
+        ProposedAction,
+        _act_on_phantom_candidates,
+        _detect_phantom_candidates,
+    )
+
+    daemon = FakeNativeDaemonClient()
+    monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", lambda: daemon)
+    push_calls: list[object] = []
+    monkeypatch.setattr(
+        "cw.reconcile._deps.fire_push_notification",
+        lambda *a, **kw: push_calls.append((a, kw)),
+    )
+    removed: list[object] = []
+    monkeypatch.setattr(
+        "cw.reconcile._shared.remove_worktree",
+        lambda *a, **kw: removed.append((a, kw)),
+    )
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-veto-attn"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(minutes=5)
+    sess = _mk_phantom_daemon_session(
+        "veto-attn-1", started_at, surface_ref="fake-short-id", worktree_path=worktree
+    )
+    sess.last_result = {"paused_status": _SENTINEL_STAGE_MISMATCH_REFUSED_REASON}
+    sess.consecutive_sentinel_mismatch_vetoes = 2  # at cap
+    _write_fresh_refused_transcript(home, worktree, "csid-veto-attn", now)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="veto-attn-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="veto-attn-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    config = OrchestratorConfig(sentinel_mismatch_veto_cap=2)
+
+    candidates = _detect_phantom_candidates(
+        state, phantom_set={sess.id}, now=now, config=config
+    )
+    assert not any(
+        c.proposed_action == ProposedAction.SENTINEL_STAGE_MISMATCH_VETOED
+        for c in candidates
+    )
+    _act_on_phantom_candidates(state, candidates, now=now, config=config)
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "veto-attn-1")
+    assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+    events = read_events(
+        consumer="test-veto-attn-1",
+        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+    )
+    attn = [e for e in events if e.payload.get("session_id") == sess.id]
+    assert len(attn) == 1
+    assert attn[0].payload["new_veto_count"] == 3
+    assert len(push_calls) == 1
+    # Non-destructive escalation: SIGNAL_ONLY never stops the daemon or removes
+    # the worktree on this path.
+    assert daemon.stop_calls == []
+    assert removed == []
+
+
+def test_sentinel_mismatch_veto_escalation_fires_once_not_every_tick(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cap-exhaustion escalation must be edge-triggered: a session that
+    stays LIVE past its veto cap emits exactly one session.needs_attention /
+    push across repeated ticks, and the persisted counter reads cap + 1
+    (#1449)."""
+    monkeypatch.setattr(
+        "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+    )
+    push_calls: list[object] = []
+    monkeypatch.setattr(
+        "cw.reconcile._deps.fire_push_notification",
+        lambda *a, **kw: push_calls.append((a, kw)),
+    )
+    from cw.reconcile import _act_on_phantom_candidates, _detect_phantom_candidates
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-veto-once"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(minutes=5)
+    sess = _mk_phantom_daemon_session(
+        "veto-once-1", started_at, surface_ref="fake-short-id", worktree_path=worktree
+    )
+    sess.last_result = {"paused_status": _SENTINEL_STAGE_MISMATCH_REFUSED_REASON}
+    sess.consecutive_sentinel_mismatch_vetoes = 2  # at cap
+    _write_fresh_refused_transcript(home, worktree, "csid-veto-once", now)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="veto-once-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="veto-once-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    config = OrchestratorConfig(sentinel_mismatch_veto_cap=2)
+
+    for _ in range(3):
+        cands = _detect_phantom_candidates(
+            state, phantom_set={sess.id}, now=now, config=config
+        )
+        _act_on_phantom_candidates(state, cands, now=now, config=config)
+
+    events = read_events(
+        consumer="test-veto-once-1",
+        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+    )
+    attn = [e for e in events if e.payload.get("session_id") == sess.id]
+    assert len(attn) == 1
+    assert len(push_calls) == 1
+    assert (
+        state.sessions[0].consecutive_sentinel_mismatch_vetoes
+        == config.sentinel_mismatch_veto_cap + 1
+    )
+
+
+def test_sentinel_mismatch_veto_falls_through_ordinary_first_veto_no_escalation(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ordinary first-ever veto (non-exhausted) under SIGNAL_ONLY emits only
+    session.sentinel_stage_mismatch_vetoed — no session.needs_attention / push
+    (#1449)."""
+    daemon = FakeNativeDaemonClient()
+    monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", lambda: daemon)
+    push_calls: list[object] = []
+    monkeypatch.setattr(
+        "cw.reconcile._deps.fire_push_notification",
+        lambda *a, **kw: push_calls.append((a, kw)),
+    )
+    from cw.reconcile import _act_on_phantom_candidates, _detect_phantom_candidates
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-first-veto"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(minutes=5)
+    sess = _mk_phantom_daemon_session(
+        "first-veto-1", started_at, surface_ref="fake-short-id", worktree_path=worktree
+    )
+    sess.last_result = {"paused_status": _SENTINEL_STAGE_MISMATCH_REFUSED_REASON}
+    _write_fresh_refused_transcript(home, worktree, "csid-first-veto", now)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="first-veto-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="first-veto-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    config = OrchestratorConfig(sentinel_mismatch_veto_cap=2)
+
+    cands = _detect_phantom_candidates(
+        state, phantom_set={sess.id}, now=now, config=config
+    )
+    _act_on_phantom_candidates(state, cands, now=now, config=config)
+
+    attn = read_events(
+        consumer="test-first-veto-1",
+        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+    )
+    assert [e for e in attn if e.payload.get("session_id") == sess.id] == []
+    assert push_calls == []
+    vetoed = read_events(
+        consumer="test-first-veto-1-vetoed",
+        event_types=[OrchestratorEventType.SESSION_SENTINEL_STAGE_MISMATCH_VETOED],
+    )
+    assert len(vetoed) == 1
 
 
 class TestActOnPhantomCandidatesSignalOnly:
