@@ -12,6 +12,7 @@ import pytest
 
 from cw.auto_dev_result import AutoDevResult
 from cw.config import load_state
+from cw.exceptions import EmitSessionNotFoundError
 from cw.executor import (
     ClaudeNativeExecutor,
     LocalExecutor,
@@ -39,6 +40,7 @@ from cw.models import (
     LOCAL_BACKEND,
     ClientConfig,
     LaneConfig,
+    LastResultSource,
     LocalLivenessHandle,
     SessionStatus,
     Stage,
@@ -46,6 +48,8 @@ from cw.models import (
     StagePipelineConfig,
     TicketTask,
 )
+from cw.result import EmitOutcome
+from tests.conftest import find_completed_session
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -545,11 +549,9 @@ def test_local_executor_blocked_endpoint_none(
 
     assert len(fake_runner.calls) == 0
     state = load_state()
-    result_raw = next(
-        (s.last_result for s in state.sessions if s.last_result is not None), None
-    )
-    assert result_raw is not None
-    result = AutoDevResult.model_validate(result_raw)
+    session = find_completed_session(state)
+    assert session.last_result_source == LastResultSource.EXECUTOR_DIRECT
+    result = AutoDevResult.model_validate(session.last_result)
     assert result.status == "blocked"
     assert result.blocker is not None
     assert result.blocker.reason == ENDPOINT_NOT_CONFIGURED
@@ -735,9 +737,9 @@ def test_local_executor_exception_handler_marks_session_completed(
         executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
 
     state = load_state()
-    session = next((s for s in state.sessions if s.last_result is not None), None)
-    assert session is not None
+    session = find_completed_session(state)
     assert session.status == SessionStatus.COMPLETED
+    assert session.last_result_source == LastResultSource.EXECUTOR_DIRECT
     result = AutoDevResult.model_validate(session.last_result)
     assert result.status == "blocked"
     assert result.blocker is not None
@@ -792,10 +794,10 @@ def test_local_executor_proc_stat_unreadable_marks_session_completed(
             proc.wait()
 
     state = load_state()
-    session = next((s for s in state.sessions if s.last_result is not None), None)
-    assert session is not None
+    session = find_completed_session(state)
     assert session.status == SessionStatus.COMPLETED
     assert session.local_liveness is None  # no stale handle recorded
+    assert session.last_result_source == LastResultSource.EXECUTOR_DIRECT
     result = AutoDevResult.model_validate(session.last_result)
     assert result.status == "blocked"
     assert result.blocker is not None
@@ -806,6 +808,82 @@ def test_local_executor_proc_stat_unreadable_marks_session_completed(
         f"process {fake_runner.procs[-1].pid} start-time unavailable "
         f"[diagnostics: {render_bundle_path(sid)}]"
     )
+
+
+def test_local_executor_emit_session_not_found_logs_and_skips(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """emit_result_locked raises EmitSessionNotFoundError → spawn() returns
+    normally and the session's status is not force-completed (R4).
+
+    Exercises _complete_session_via_door's not-found catch on the LocalExecutor
+    main completion path (Site 1, pre-flight-blocked branch).
+    """
+    worktree = make_git_repo("wt-local-emit-not-found")
+    fake_runner = FakeAiderRunner()
+    config = StageExecutorConfig(backend=LOCAL_BACKEND, model="m", endpoint=None)
+    executor = LocalExecutor(config=config, runner=fake_runner)
+    client = ClientConfig(name="test", workspace_path=worktree)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
+
+    with patch(
+        "cw.executor.emit_result_locked",
+        side_effect=EmitSessionNotFoundError("not found", session_id="ignored"),
+    ):
+        sid = executor.spawn(
+            stage=Stage.IMPL, task=task, worktree=worktree, client=client
+        )
+
+    assert len(fake_runner.calls) == 0
+    state = load_state()
+    session = next((s for s in state.sessions if s.id == sid), None)
+    assert session is not None
+    assert session.status == SessionStatus.ACTIVE
+    assert session.last_result is None
+
+
+def test_local_executor_door_refusal_still_completes_session(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Door refusal (terminal result already recorded by another writer) still
+    transitions the session to COMPLETED and emits SESSION_COMPLETED (R5) --
+    refusal affects only the last_result write, not status/event bookkeeping.
+    """
+    worktree = make_git_repo("wt-local-door-refusal")
+    fake_runner = FakeAiderRunner()
+    config = StageExecutorConfig(backend=LOCAL_BACKEND, model="m", endpoint=None)
+    executor = LocalExecutor(config=config, runner=fake_runner)
+    client = ClientConfig(name="test", workspace_path=worktree)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
+
+    def _refuse(
+        payload: dict[str, object], sid: str, *, source: LastResultSource
+    ) -> EmitOutcome:
+        del payload, source
+        return EmitOutcome(
+            session_id=sid,
+            result=None,
+            prior_status="shipped",
+            refused=True,
+            existing_result={"status": "shipped"},
+            existing_source=LastResultSource.STOP_HOOK_HARVEST,
+        )
+
+    with (
+        patch("cw.executor.emit_result_locked", side_effect=_refuse),
+        patch("cw.executor._record_orchestrator_event") as record_mock,
+    ):
+        sid = executor.spawn(
+            stage=Stage.IMPL, task=task, worktree=worktree, client=client
+        )
+
+    state = load_state()
+    session = next((s for s in state.sessions if s.id == sid), None)
+    assert session is not None
+    assert session.status == SessionStatus.COMPLETED
+    record_mock.assert_called_once()
 
 
 def test_local_executor_liveness_unavailable_persists_runtime_error_diagnostics(

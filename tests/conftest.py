@@ -133,6 +133,19 @@ def _make_daemon_session(**overrides: object) -> Session:
     return Session.model_validate(kwargs)
 
 
+def find_completed_session(state: CwState) -> Session:
+    """Return the sole session carrying a terminal last_result.
+
+    Shared by test_executor.py and test_codex_executor.py's completion-path
+    tests so the `next((s for s in state.sessions if s.last_result is not
+    None), None)` idiom isn't duplicated at every call site (GitHub #1458).
+    Asserts exactly one such session exists.
+    """
+    session = next((s for s in state.sessions if s.last_result is not None), None)
+    assert session is not None
+    return session
+
+
 def _make_ticket_task(**overrides: object) -> TicketTask:
     """Minimal-but-valid ``TicketTask`` with keyword overrides (#1308).
 
