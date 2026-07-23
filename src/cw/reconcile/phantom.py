@@ -291,6 +291,18 @@ def _detect_phantom_candidates(
             if session.origin is SessionOrigin.DAEMON
             else False
         )
+        # #1449: when the cap fires, re-read the same transcript staleness the
+        # veto helper just computed so the SESSION_NEEDS_ATTENTION escalation
+        # payload built from this candidate (see
+        # _emit_sentinel_mismatch_veto_escalation_events) reports the actual
+        # staleness instead of the ReapCandidate default of None. Cheap and
+        # safe to recompute: veto_cap_exhausted is only True when the transcript
+        # was just confirmed LIVE (non-None, below the liveness window) by
+        # _sentinel_mismatch_veto_candidate under the same `now` and session
+        # state, and this branch only runs at most once per cap-exhaustion tick.
+        cap_exhausted_stale_seconds = (
+            _transcript_age_seconds(session, now) if veto_cap_exhausted else None
+        )
         candidates.append(
             ReapCandidate(
                 session_id=session.id,
@@ -312,6 +324,11 @@ def _detect_phantom_candidates(
                     effective_config.sentinel_mismatch_veto_cap + 1
                     if veto_cap_exhausted
                     else 0
+                ),
+                stale_minutes=(
+                    cap_exhausted_stale_seconds / 60.0
+                    if cap_exhausted_stale_seconds is not None
+                    else None
                 ),
             )
         )
@@ -866,6 +883,7 @@ def _act_on_phantom_candidates(
                 "client": candidate.client,
                 "session_id": candidate.session_id,
                 "stale_minutes": candidate.stale_minutes,
+                "new_veto_count": candidate.new_veto_count,
             },
             correlation_id=candidate.ticket_id,
         )

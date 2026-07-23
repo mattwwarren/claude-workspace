@@ -2032,6 +2032,7 @@ def test_act_on_phantom_sentinel_mismatch_veto_persists_consecutive_count(
     assert payload["client"] == "client-a"
     assert payload["session_id"] == "phantom-veto-act-1"
     assert payload["stale_minutes"] == 4.2
+    assert payload["new_veto_count"] == 1
 
 
 def _write_fresh_refused_transcript(
@@ -2342,6 +2343,10 @@ def test_sentinel_mismatch_veto_cap_exhaustion_emits_immediate_needs_attention(
     attn = [e for e in events if e.payload.get("session_id") == sess.id]
     assert len(attn) == 1
     assert attn[0].payload["new_veto_count"] == 3
+    # #1449: the escalation payload's stale_minutes reflects the transcript's
+    # actual staleness (helper stamps 30s behind now => 0.5 minutes), not the
+    # ReapCandidate default of None.
+    assert attn[0].payload["stale_minutes"] == pytest.approx(0.5)
     assert len(push_calls) == 1
     # Non-destructive escalation: SIGNAL_ONLY never stops the daemon or removes
     # the worktree on this path.
