@@ -17,18 +17,12 @@ from typing import TYPE_CHECKING
 
 import yaml
 
-from cw.auto_dev_result import (
-    AutoDevResult,
-    parse_stdout,
-)
 from cw.config import (
     dispatch_loop_lock,
     load_clients,
     load_effective_clients,
     load_effective_config,
     load_state,
-    save_state,
-    sessions_lock,
 )
 from cw.dev_queue import (
     dev_queue_lock,
@@ -197,25 +191,17 @@ def consume_completed_sessions() -> int:
     if not events:
         return 0
 
-    # Persist sentinel-block summaries on Sessions BEFORE the advance
-    # decision, so _apply_events_to_store reads each just-completed session's
-    # last_result (status + scope.tier) instead of a stale/None value. Without
-    # this ordering, a freshly-completed stage has last_result=None at decision
-    # time → status=None → Rule 6 → BLOCKED_ON_USER, so the staged pipeline
-    # never advances (#694). Producer side (worker stdout capture) is gated on
-    # the orchestrator P1.A wiring; this consumer is forward-compatible with
-    # events that lack a ``stdout`` payload (such an event leaves last_result
-    # unset → the conservative-safe BLOCKED_ON_USER default).
-    for event in events:
-        session_id = event.payload.get("session_id")
-        stdout = event.payload.get("stdout")
-        if isinstance(session_id, str) and isinstance(stdout, str):
-            persist_last_result(session_id, stdout)
-
-    # Gap class (#867, severity=low): persist_last_result writes sessions.json
-    # under sessions_lock; the dev-queue mutation below is a separate file.
-    # A crash here leaves last_result updated but the task RUNNING.  The
-    # un-advanced cursor causes self-healing reprocessing on the next tick.
+    # ``last_result`` is populated by the RFC 0012 door at each producer's
+    # write site BEFORE SESSION_COMPLETED is emitted -- the Stop hook via
+    # ``emit_result_locked`` (A1), executors via ``_complete_session_via_door``
+    # (A2), and reconcile's git-synthesis path (A3). The event itself carries
+    # no result payload; _apply_events_to_store reads ``session.last_result``
+    # from state directly. An absent last_result (a producer that hasn't
+    # written through the door, or a session with no sentinel at all) still
+    # routes conservative-safe via Rule 6 -> BLOCKED_ON_USER. The crash-window
+    # gap this replaces (a door write landing but the task mutation below not
+    # yet persisted) now sits at each producer's door-write-vs-task-routing
+    # boundary rather than inside this consumer; still tracked by #867.
     with dev_queue_lock():
         store = load_dev_queue()
         clients = load_effective_clients()
@@ -225,36 +211,6 @@ def consume_completed_sessions() -> int:
         advance_cursor(_DISPATCH_CONSUMER, events[-1].id)
 
     return completed
-
-
-def persist_last_result(session_id: str, stdout: str) -> bool:
-    """Parse *stdout* and write the result onto the matching Session.
-
-    Returns True if a session was updated, False if no match or if parsing
-    yielded nothing actionable. Never raises — parser failures surface as
-    a synthetic blocker dict on ``Session.last_result`` so post-hoc
-    inspection still has something to look at.
-    """
-    parsed = parse_stdout(stdout)
-    with sessions_lock():
-        state = load_state()
-        target = None
-        for session in state.sessions:
-            if session.id == session_id:
-                target = session
-                break
-        if target is None:
-            _log.warning(
-                "persist_last_result: session %s not found in state",
-                session_id,
-            )
-            return False
-        if isinstance(parsed, AutoDevResult):
-            target.last_result = parsed.model_dump(mode="json")
-        else:
-            target.last_result = parsed.model_dump(mode="json")
-        save_state(state)
-    return True
 
 
 TICK_STALE_SECONDS = 90  # 3x default tick_interval_seconds=30
