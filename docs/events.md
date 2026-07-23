@@ -1022,7 +1022,7 @@ per pipeline episode, since each episode constructs a brand-new `Session`.
   "stale_minutes": "<float>"
 }
 ```
-**Semantics:** GitHub #1281. Emitted instead of the phantom sweep's
+**Semantics:** GitHub #1281, #1449. Emitted instead of the phantom sweep's
 already_refused → `CRASH_COMPLETE` fall-through (GitHub #1149's
 `already_refused` latch: a session whose most recent tick refused a
 stage-mismatched sentinel) when the session's transcript is still actively
@@ -1030,14 +1030,28 @@ advancing — `_transcript_age_seconds` reports a staleness below
 `TRANSCRIPT_LIVENESS_WINDOW_SECONDS`. The #1281 incident: a session was
 crash-completed 56 seconds before its valid `AUTO_DEV_RESULT` sentinel
 landed, burning the task's final retry attempt on a session that was in fact
-still making progress. **Zero queue or session-state mutation** accompanies
-this event — the task stays `RUNNING` and the session stays `ACTIVE`/`IDLE`.
+still making progress. The task stays `RUNNING` and the session stays
+`ACTIVE`/`IDLE` — but the session's `consecutive_sentinel_mismatch_vetoes`
+latch **is** incremented; that is the only state this event mutates.
 
 Unlike `session.park_vetoed`, this veto has exactly one trigger path (the
 already_refused latch), so its payload carries no `reason` field — there is
 only one reason it can fire. A session whose transcript cannot be located
 falls through to `CRASH_COMPLETE` unchanged (fail-toward-crash), as does a
 transcript that has since gone stale beyond the liveness window.
+
+The veto is **bounded** (#1449): it is granted only while
+`consecutive_sentinel_mismatch_vetoes < OrchestratorConfig.sentinel_mismatch_veto_cap`
+(default 2). Once the count reaches the cap the veto stops firing and the pending
+`CRASH_COMPLETE` proceeds; under the default `SIGNAL_ONLY` policy a clean phantom
+routes silently to `BLOCKED_ON_USER` **and** — at parity with the retry-cap park
+— an immediate `session.needs_attention` is emitted
+(`paused_status=sentinel_mismatch_veto_cap_exhausted`, carrying `new_veto_count`,
+non-destructive: no daemon-stop / worktree removal). That escalation is
+edge-triggered: the counter is bumped past the cap (`cap + 1`) when it fires, so
+a session that stays LIVE past its cap does not re-escalate every tick. The
+counter resets for free per pipeline episode, since each episode constructs a
+brand-new `Session`.
 
 `correlation_id` is the `ticket_id`.
 
