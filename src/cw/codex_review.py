@@ -940,21 +940,32 @@ def render_verdict_comment(verdict: ReviewVerdict) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def run_review(
-    *,
-    runner: CodexRunner,
-    task: TicketTask,
-    worktree: Path,
-    default_branch: str,
-    model: str | None,
-    wall_clock_budget_seconds: int | None,
-    session_id: str,
-) -> tuple[AutoDevResult, ReviewVerdict | None]:
-    """Run the full per-role review pass; return ``(result, verdict)``.
+class _ReviewPassInputs(NamedTuple):
+    """Assembled, side-effect-free inputs for one per-role review pass (#1392).
 
-    This is ``CodexExecutor.spawn()``'s Step 3 delegation target: capture the
-    diff, select reviewers, materialize prompts, run the shared-deadline loop,
-    and synthesize the typed result.
+    The output of :func:`_prepare_review_pass` — everything ``run_codex_roles``
+    needs (selected ``roles`` and their materialized ``prompts_by_role``) plus
+    the captured ``diff`` and ``reviewed_sha`` that
+    ``synthesize_codex_review_result`` consumes. Extracted so the fix loop can
+    re-run a fresh review pass each cycle without re-inlining ``run_review``'s
+    input-assembly body.
+    """
+
+    roles: list[str]
+    prompts_by_role: dict[str, str]
+    diff: CapturedDiff
+    reviewed_sha: str
+
+
+def _prepare_review_pass(
+    task: TicketTask, worktree: Path, default_branch: str
+) -> _ReviewPassInputs:
+    """Assemble one review pass's inputs: capture diff, select roles, build prompts.
+
+    Pure extraction of ``run_review``'s former input-assembly body (everything
+    before ``run_codex_roles`` was called) — no logic change, no side effects
+    beyond the read-only git/\u200bfilesystem reads it already performed. Shared by
+    ``run_review`` and ``cw.codex_fix_loop``'s per-cycle re-review (#1392).
     """
     diff, reviewed_sha, changed_files = _capture_diff(worktree, default_branch)
     scope_tier = resolve_tier(task.scope_hint)
@@ -986,11 +997,36 @@ def run_review(
         )
         for role in roles
     }
+    return _ReviewPassInputs(
+        roles=roles,
+        prompts_by_role=prompts_by_role,
+        diff=diff,
+        reviewed_sha=reviewed_sha,
+    )
+
+
+def run_review(
+    *,
+    runner: CodexRunner,
+    task: TicketTask,
+    worktree: Path,
+    default_branch: str,
+    model: str | None,
+    wall_clock_budget_seconds: int | None,
+    session_id: str,
+) -> tuple[AutoDevResult, ReviewVerdict | None]:
+    """Run the full per-role review pass; return ``(result, verdict)``.
+
+    This is ``CodexExecutor.spawn()``'s Step 3 delegation target: capture the
+    diff, select reviewers, materialize prompts, run the shared-deadline loop,
+    and synthesize the typed result.
+    """
+    prepared = _prepare_review_pass(task, worktree, default_branch)
     documents, failures = run_codex_roles(
         runner=runner,
         worktree=worktree,
-        roles=roles,
-        prompts_by_role=prompts_by_role,
+        roles=prepared.roles,
+        prompts_by_role=prepared.prompts_by_role,
         model=model,
         wall_clock_budget_seconds=wall_clock_budget_seconds,
         session_id=session_id,
@@ -1000,7 +1036,7 @@ def run_review(
         worktree=worktree,
         documents=documents,
         failures=failures,
-        diff=diff,
-        reviewed_sha=reviewed_sha,
+        diff=prepared.diff,
+        reviewed_sha=prepared.reviewed_sha,
         session_id=session_id,
     )
