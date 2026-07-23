@@ -1,0 +1,435 @@
+"""Tests for cw.codex_review._context — reviewer selection and prompt-context
+assembly, incl. ``_prepare_review_pass`` (#1236)."""
+
+from __future__ import annotations
+
+import json
+import logging
+import subprocess
+from typing import TYPE_CHECKING
+
+import pytest
+
+from cw.codex_review import (
+    _build_reviewer_prompt,
+    _categorize_changed_files,
+    _load_optional_text,
+    _load_review_policy,
+    _load_sensitive_hits,
+    _load_ticket_context,
+    _parse_reviewer_document,
+    _prepare_review_pass,
+    _read_sensitive_manifest,
+    _select_reviewer_roles,
+)
+from tests._codex_review_helpers import _doc_json, _git, _task
+from tests.conftest import _make_diff
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
+
+
+# ---------------------------------------------------------------------------
+# _categorize_changed_files
+# ---------------------------------------------------------------------------
+
+
+class TestCategorizeChangedFiles:
+    def test_python_and_tests(self) -> None:
+        cats = _categorize_changed_files(["src/cw/foo.py", "tests/test_foo.py"])
+        assert cats.python
+        assert cats.tests
+        assert not cats.frontend
+
+    def test_frontend_and_infra_and_config(self) -> None:
+        cats = _categorize_changed_files(["ui/app.tsx", "Dockerfile", "pyproject.toml"])
+        assert cats.frontend
+        assert cats.infra
+        assert cats.config
+
+    def test_package_json_not_config(self) -> None:
+        cats = _categorize_changed_files(["package.json"])
+        assert not cats.config
+
+    def test_github_workflow_is_infra(self) -> None:
+        cats = _categorize_changed_files([".github/workflows/ci.yml"])
+        assert cats.infra
+
+
+# ---------------------------------------------------------------------------
+# _select_reviewer_roles
+# ---------------------------------------------------------------------------
+
+
+class TestSelectReviewerRoles:
+    def test_small_mandatory_only(self) -> None:
+        cats = _categorize_changed_files(["docs/readme.md"])
+        roles = _select_reviewer_roles(
+            "small",
+            categories=cats,
+            mutates_persisted_state=False,
+            has_ticket_context=False,
+        )
+        assert roles == ["Code Quality Reviewer", "SysAdmin Reviewer"]
+
+    def test_small_with_conditionals_ordered(self) -> None:
+        cats = _categorize_changed_files(["src/cw/foo.py"])
+        roles = _select_reviewer_roles(
+            "small",
+            categories=cats,
+            mutates_persisted_state=True,
+            has_ticket_context=True,
+        )
+        assert roles == [
+            "Code Quality Reviewer",
+            "SysAdmin Reviewer",
+            "Data Safety Reviewer",
+            "Product Manager Reviewer",
+        ]
+
+    def test_large_doc_only_sysadmin_heads_queue(self) -> None:
+        # No code changed: Code Quality is NOT selected, SysAdmin heads the queue.
+        cats = _categorize_changed_files(["Dockerfile"])
+        roles = _select_reviewer_roles(
+            "large",
+            categories=cats,
+            mutates_persisted_state=False,
+            has_ticket_context=False,
+        )
+        assert roles[0] == "SysAdmin Reviewer"
+        assert "Code Quality Reviewer" not in roles
+        assert "Deployment Reviewer" in roles
+
+    def test_large_python_and_frontend_full_set(self) -> None:
+        cats = _categorize_changed_files(["src/cw/foo.py", "ui/app.tsx"])
+        roles = _select_reviewer_roles(
+            "large",
+            categories=cats,
+            mutates_persisted_state=True,
+            has_ticket_context=True,
+        )
+        assert roles[:2] == ["Code Quality Reviewer", "SysAdmin Reviewer"]
+        assert "Architecture Reviewer" in roles
+        assert "Test Reviewer" in roles
+        assert "Performance Reviewer" in roles
+        assert "API Contract Validator" in roles
+        assert "Data Safety Reviewer" in roles
+        assert "Product Manager Reviewer" in roles
+
+    def test_large_api_contract_needs_both(self) -> None:
+        cats = _categorize_changed_files(["src/cw/foo.py"])
+        roles = _select_reviewer_roles(
+            "large",
+            categories=cats,
+            mutates_persisted_state=False,
+            has_ticket_context=False,
+        )
+        assert "API Contract Validator" not in roles
+
+
+# ---------------------------------------------------------------------------
+# _load_optional_text
+# ---------------------------------------------------------------------------
+
+
+class TestLoadOptionalText:
+    def test_present(self, tmp_path: Path) -> None:
+        p = tmp_path / "f.md"
+        p.write_text("hello", encoding="utf-8")
+        assert _load_optional_text(p) == "hello"
+
+    def test_absent(self, tmp_path: Path) -> None:
+        assert _load_optional_text(tmp_path / "missing.md") is None
+
+    def test_non_utf8(self, tmp_path: Path) -> None:
+        p = tmp_path / "bad.md"
+        p.write_bytes(b"\xff\xfe")
+        assert _load_optional_text(p) is None
+
+
+# ---------------------------------------------------------------------------
+# _load_sensitive_hits — scope-tier divergence
+# ---------------------------------------------------------------------------
+
+
+def _write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+_MANIFEST = """sensitive_files:
+  - path: "src/cw/auth.py"
+    category: auth
+    reason: "auth boundary"
+"""
+
+_GLOB_MANIFEST = """sensitive_files:
+  - path: "src/cw/*.py"
+    category: core
+    reason: "core module"
+"""
+
+
+class TestLoadSensitiveHitsSmall:
+    def test_small_matches_glob_claude_only(self, tmp_path: Path) -> None:
+        _write(tmp_path / ".claude" / "sensitive-files.yml", _GLOB_MANIFEST)
+        # A .github manifest that would match must be ignored by small scope.
+        _write(tmp_path / ".github" / "sensitive-files.yml", _MANIFEST)
+        hits = _load_sensitive_hits(tmp_path, ["src/cw/foo.py"], "small")
+        assert len(hits) == 1
+        assert hits[0].path == "src/cw/foo.py"
+        assert hits[0].category == "core"
+
+    def test_small_ignores_github_when_claude_absent(self, tmp_path: Path) -> None:
+        # No .claude manifest: small scope never consults .github, so no hits.
+        _write(tmp_path / ".github" / "sensitive-files.yml", _MANIFEST)
+        hits = _load_sensitive_hits(tmp_path, ["src/cw/auth.py"], "small")
+        assert hits == []
+
+    def test_small_no_registry(self, tmp_path: Path) -> None:
+        assert _load_sensitive_hits(tmp_path, ["src/cw/foo.py"], "small") == []
+
+
+class TestLoadSensitiveHitsLarge:
+    def test_large_substring_match_claude(self, tmp_path: Path) -> None:
+        _write(tmp_path / ".claude" / "sensitive-files.yml", _MANIFEST)
+        hits = _load_sensitive_hits(tmp_path, ["a/b/src/cw/auth.py"], "large")
+        assert len(hits) == 1
+        assert hits[0].category == "auth"
+
+    def test_large_first_hit_wins_claude_over_github(self, tmp_path: Path) -> None:
+        _write(tmp_path / ".claude" / "sensitive-files.yml", _MANIFEST)
+        # .github has a different entry that would also match; must NOT be read
+        # because .claude exists (first-hit-wins).
+        _write(
+            tmp_path / ".github" / "sensitive-files.yml",
+            'sensitive_files:\n  - path: "other.py"\n    category: x\n    reason: y\n',
+        )
+        hits = _load_sensitive_hits(tmp_path, ["src/cw/auth.py"], "large")
+        assert [h.category for h in hits] == ["auth"]
+
+    def test_large_falls_back_to_github(self, tmp_path: Path) -> None:
+        _write(tmp_path / ".github" / "sensitive-files.yml", _MANIFEST)
+        hits = _load_sensitive_hits(tmp_path, ["src/cw/auth.py"], "large")
+        assert len(hits) == 1
+        assert hits[0].category == "auth"
+
+    def test_large_no_registry(self, tmp_path: Path) -> None:
+        assert _load_sensitive_hits(tmp_path, ["src/cw/auth.py"], "large") == []
+
+
+class TestReadSensitiveManifest:
+    def test_missing_file(self, tmp_path: Path) -> None:
+        assert _read_sensitive_manifest(tmp_path / "nope.yml") == []
+
+    def test_malformed_yaml(self, tmp_path: Path) -> None:
+        p = tmp_path / "m.yml"
+        p.write_text("key: [unclosed\n", encoding="utf-8")
+        assert _read_sensitive_manifest(p) == []
+
+    def test_non_dict_root(self, tmp_path: Path) -> None:
+        p = tmp_path / "m.yml"
+        p.write_text("- just\n- a\n- list\n", encoding="utf-8")
+        assert _read_sensitive_manifest(p) == []
+
+    def test_entries_not_a_list(self, tmp_path: Path) -> None:
+        p = tmp_path / "m.yml"
+        p.write_text("sensitive_files: nope\n", encoding="utf-8")
+        assert _read_sensitive_manifest(p) == []
+
+    def test_drops_entries_without_path(self, tmp_path: Path) -> None:
+        p = tmp_path / "m.yml"
+        p.write_text(
+            "sensitive_files:\n  - category: x\n  - path: keep.py\n", encoding="utf-8"
+        )
+        entries = _read_sensitive_manifest(p)
+        assert entries == [{"path": "keep.py"}]
+
+
+class TestLoadTicketContext:
+    def test_plan_and_context_present(self, tmp_path: Path) -> None:
+        _write(tmp_path / ".cw" / "plan.md", "THE PLAN")
+        _write(
+            tmp_path / ".cw" / "context.json",
+            json.dumps({"title": "Ticket Title", "body": "Ticket Body"}),
+        )
+        plan_text, ticket_text = _load_ticket_context(tmp_path)
+        assert plan_text == "THE PLAN"
+        assert ticket_text is not None
+        assert "Ticket Title" in ticket_text
+        assert "Ticket Body" in ticket_text
+
+    def test_both_absent(self, tmp_path: Path) -> None:
+        plan_text, ticket_text = _load_ticket_context(tmp_path)
+        assert plan_text is None
+        assert ticket_text is None
+
+    def test_malformed_context_json(self, tmp_path: Path) -> None:
+        _write(tmp_path / ".cw" / "context.json", "not json{{")
+        _plan, ticket_text = _load_ticket_context(tmp_path)
+        assert ticket_text is None
+
+    def test_empty_title_body(self, tmp_path: Path) -> None:
+        _write(tmp_path / ".cw" / "context.json", json.dumps({"title": "", "body": ""}))
+        _plan, ticket_text = _load_ticket_context(tmp_path)
+        assert ticket_text is None
+
+
+class TestParseReviewerDocument:
+    def test_none_content(self) -> None:
+        assert _parse_reviewer_document(None) is None
+
+    def test_invalid_json(self) -> None:
+        assert _parse_reviewer_document("not json{{") is None
+
+    def test_schema_invalid_dict(self) -> None:
+        # Valid JSON but a failed status carrying findings is a schema violation.
+        payload = json.dumps(
+            {
+                "reviewer_role": "R",
+                "status": "failed",
+                "detail": "",
+                "findings": [{"severity": "MUST_FIX"}],
+            }
+        )
+        assert _parse_reviewer_document(payload) is None
+
+    def test_valid_document(self) -> None:
+        payload = _doc_json()
+        doc = _parse_reviewer_document(payload)
+        assert doc is not None
+        assert doc.status == "ok"
+
+
+# ---------------------------------------------------------------------------
+# _load_review_policy — scope-tier divergence
+# ---------------------------------------------------------------------------
+
+
+class TestLoadReviewPolicy:
+    def test_small_returns_empty_without_reading(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _write(tmp_path / ".claude" / "review-policy.md", "## Code Quality Reviewer\nx")
+        calls: list[str] = []
+        import cw.codex_review._context as cr
+
+        real = cr._load_optional_text
+
+        def _spy(path: Path) -> str | None:
+            calls.append(str(path))
+            return real(path)
+
+        monkeypatch.setattr(cr, "_load_optional_text", _spy)
+        result = _load_review_policy(tmp_path, "small")
+        assert result == {}
+        assert not any("review-policy.md" in c for c in calls)
+
+    def test_large_parses_valid_section(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path / ".claude" / "review-policy.md",
+            "## Code Quality Reviewer\nApply the house style.\n",
+        )
+        result = _load_review_policy(tmp_path, "large")
+        assert result == {"Code Quality Reviewer": "Apply the house style."}
+
+    def test_large_warns_and_skips_unmatched(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _write(
+            tmp_path / ".claude" / "review-policy.md",
+            "## Code Quality Reviewer\nvalid body\n\n## Bogus Reviewer\nignored\n",
+        )
+        with caplog.at_level(logging.WARNING):
+            result = _load_review_policy(tmp_path, "large")
+        assert result == {"Code Quality Reviewer": "valid body"}
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("Bogus Reviewer" in w.getMessage() for w in warnings)
+
+    def test_large_missing_file(self, tmp_path: Path) -> None:
+        assert _load_review_policy(tmp_path, "large") == {}
+
+
+# ---------------------------------------------------------------------------
+# _build_reviewer_prompt
+# ---------------------------------------------------------------------------
+
+
+class TestBuildReviewerPrompt:
+    def test_all_sections_present(self) -> None:
+        from cw.codex_review import _SensitiveHit
+
+        prompt = _build_reviewer_prompt(
+            "Code Quality Reviewer",
+            agent_spec_text="AGENT SPEC BODY",
+            diff=_make_diff(),
+            changed_files=["src/cw/foo.py"],
+            plan_text="PLAN BODY",
+            ticket_text="TICKET BODY",
+            project_rubrics="RUBRIC BODY",
+            repo_policy_section="POLICY BODY",
+            sensitive_hits=[_SensitiveHit("src/cw/foo.py", "core", "why")],
+        )
+        assert "# Reviewer Role: Code Quality Reviewer" in prompt
+        assert "AGENT SPEC BODY" in prompt
+        assert "PLAN BODY" in prompt
+        assert "TICKET BODY" in prompt
+        assert "RUBRIC BODY" in prompt
+        assert "POLICY BODY" in prompt
+        assert "ELEVATED SCRUTINY" in prompt
+        assert "src/cw/foo.py (core) — why" in prompt
+        assert "## Diff" in prompt
+
+    def test_optional_sections_absent(self) -> None:
+        prompt = _build_reviewer_prompt(
+            "SysAdmin Reviewer",
+            agent_spec_text="SPEC",
+            diff=_make_diff(),
+            changed_files=["src/cw/foo.py"],
+            plan_text=None,
+            ticket_text=None,
+            project_rubrics=None,
+            repo_policy_section=None,
+            sensitive_hits=[],
+        )
+        assert "## Approved Plan" not in prompt
+        assert "## Ticket Context" not in prompt
+        assert "## Project Rubrics" not in prompt
+        assert "ELEVATED SCRUTINY" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# _prepare_review_pass extraction (#1392)
+# ---------------------------------------------------------------------------
+
+
+class TestPrepareReviewPass:
+    def test_assembles_roles_prompts_diff_and_sha(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = make_git_repo("wt-prepare")
+        _git(repo, "checkout", "-b", "feature")
+        (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
+        _git(repo, "add", "mod.py")
+        _git(repo, "commit", "-m", "add mod.py")
+
+        prepared = _prepare_review_pass(_task(), repo, "main")
+
+        # A python-only small-scope change selects code/sysadmin + data-safety
+        # (python mutates persisted state) and no product-manager (no ticket ctx).
+        assert prepared.roles == _select_reviewer_roles(
+            "small",
+            categories=_categorize_changed_files(["mod.py"]),
+            mutates_persisted_state=True,
+            has_ticket_context=False,
+        )
+        # Every selected role has a materialized prompt.
+        assert set(prepared.prompts_by_role) == set(prepared.roles)
+        assert all(prepared.prompts_by_role[r] for r in prepared.roles)
+        # diff + reviewed_sha reflect the captured worktree state.
+        assert "mod.py" in prepared.diff.files
+        head = subprocess.check_output(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
+        ).strip()
+        assert prepared.reviewed_sha == head
