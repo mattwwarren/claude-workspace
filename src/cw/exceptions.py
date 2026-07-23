@@ -157,6 +157,35 @@ class ApproveGateError(CwError):
     __slots__ = ()
 
 
+class EmitValidationError(CwError):
+    """Raised by emit_result_locked() when the payload fails AutoDevResult
+    validation. Carries the formatted field-error lines (see _format_errors
+    in cw.result) so the cw result emit CLI wrapper can reproduce the
+    existing 'field.path: message' stderr lines byte-identically without
+    reaching back across the pydantic import boundary.
+    """
+
+    __slots__ = ("errors",)
+
+    def __init__(self, message: str, *, errors: list[str]) -> None:
+        super().__init__(message)
+        self.errors = errors
+
+
+class EmitSessionNotFoundError(CwError):
+    """Raised by emit_result_locked() when the resolved session_id has no
+    matching session in state. Carries the session id so callers (the CLI
+    wrapper) can reconstruct the "Session '<id>' not found; no state was
+    modified." message without re-deriving it.
+    """
+
+    __slots__ = ("session_id",)
+
+    def __init__(self, message: str, *, session_id: str) -> None:
+        super().__init__(message)
+        self.session_id = session_id
+
+
 class RequeueStateError(CwError):
     """Raised when a ticket cannot be requeued because it is not BLOCKED_ON_USER."""
 
