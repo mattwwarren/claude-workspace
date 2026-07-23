@@ -983,7 +983,7 @@ class TestConsumeCompletesTasks:
 
         assert task.stage == Stage.IMPL
 
-    def test_consume_persists_sentinel_before_advance_decision(
+    def test_consume_advances_staged_pipeline_from_prepopulated_last_result(
         self,
         tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
