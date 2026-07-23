@@ -1976,6 +1976,128 @@ def test_act_on_phantom_salvage_completion_routes_queue_and_emits_event(
     assert events[0].payload["crashed"] is False
 
 
+def test_phantom_salvage_stamps_salvage_transcript_source(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RFC 0012 A3 (#1459): a phantom SALVAGE_COMPLETION routes through the door
+    and stamps ``last_result_source == SALVAGE_TRANSCRIPT``."""
+    from cw.models import LastResultSource
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_phantom_candidates
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.get_native_daemon_client",
+        FakeNativeDaemonClient,
+    )
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+    sess = _mk_phantom_daemon_session("phantom-salv-src", started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="phantom-salv-src",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="phantom-salv-src",
+                )
+            ]
+        )
+    )
+    payload = _shipped_salvage_payload()
+    payload["ticket_id"] = "phantom-salv-src"
+    result = AutoDevResult.model_validate(payload)
+    candidate = ReapCandidate(
+        session_id="phantom-salv-src",
+        proposed_action=ProposedAction.SALVAGE_COMPLETION,
+        ticket_id="phantom-salv-src",
+        salvage_result=result,
+        salvage_csid="csid-phantom-salv-src",
+        client="client-a",
+        worktree_path=None,
+    )
+
+    _act_on_phantom_candidates(state, [candidate], now=now)
+
+    assert sess.status == SessionStatus.COMPLETED
+    assert sess.last_result_source == LastResultSource.SALVAGE_TRANSCRIPT
+
+
+def test_phantom_salvage_refused_by_door_skips_ticket_and_event(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RFC 0012 A3 (#1459): when the door refuses (a foreign terminal result is
+    already recorded), the phantom salvage skips every accumulator append -- the
+    ticket is not routed to COMPLETED and no SESSION_COMPLETED event fires."""
+    from cw.models import LastResultSource
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_phantom_candidates
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.get_native_daemon_client",
+        FakeNativeDaemonClient,
+    )
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+    sess = _mk_phantom_daemon_session("phantom-salv-refused", started_at)
+    foreign = {"status": "shipped", "foreign_authority": True}
+    sess.last_result = foreign
+    sess.last_result_source = LastResultSource.STOP_HOOK_HARVEST
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="phantom-salv-refused",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="phantom-salv-refused",
+                )
+            ]
+        )
+    )
+    payload = _shipped_salvage_payload()
+    payload["ticket_id"] = "phantom-salv-refused"
+    result = AutoDevResult.model_validate(payload)
+    candidate = ReapCandidate(
+        session_id="phantom-salv-refused",
+        proposed_action=ProposedAction.SALVAGE_COMPLETION,
+        ticket_id="phantom-salv-refused",
+        salvage_result=result,
+        salvage_csid="csid-refused",
+        client="client-a",
+        worktree_path=None,
+    )
+
+    _, _, _, salvaged_ids, _, _ = _act_on_phantom_candidates(
+        state, [candidate], now=now
+    )
+
+    # Refused candidate excluded from salvaged ids.
+    assert "phantom-salv-refused" not in salvaged_ids
+    # Session left byte-identical: still ACTIVE, foreign result + source intact.
+    assert sess.status == SessionStatus.ACTIVE
+    assert sess.last_result == foreign
+    assert sess.last_result_source == LastResultSource.STOP_HOOK_HARVEST
+    # Task not routed to COMPLETED.
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "phantom-salv-refused")
+    assert t.status == QueueItemStatus.RUNNING
+    # No SESSION_COMPLETED event for the refused candidate.
+    events = read_events(
+        consumer="test-phantom-salv-refused",
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
+    )
+    assert not any(
+        e.payload.get("session_id") == "phantom-salv-refused" for e in events
+    )
+
+
 def test_act_on_phantom_sentinel_mismatch_veto_emits_event_no_mutation(
     tmp_config_dir: Path,
 ) -> None:
