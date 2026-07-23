@@ -1116,3 +1116,159 @@ def test_park_marker_poison_clear_survives_widened_transcript_lookup(
         _park_marker_transcript_stale_45m(session, task, now=_NOW, config=_config())
         is True
     )
+
+
+class TestParkMarkerPoisonClearDoorRefusal:
+    """RFC 0012 A3 (#1459): recipe 2's routing when the door refuses the salvage.
+
+    _close_confirmed_dead_session now returns a refusal EmitOutcome when another
+    authority already holds a terminal result. These tests drive
+    _act_on_park_marker_poison_candidates directly with a fabricated refusal so
+    each routing arm is exercised in isolation (round-3 4-branch set).
+    """
+
+    def _candidate(self) -> Any:
+        from cw.reconcile.concierge import ConciergeCandidate
+
+        return ConciergeCandidate(
+            ticket_id="GEN-1",
+            client="acme",
+            recipe=RECIPE_PARK_MARKER_POISON_CLEAR,
+            evidence={},
+            session_id="sess-1",
+            refused_ceiling=False,
+        )
+
+    def _refusal(self, existing_result: dict[str, Any]) -> Any:
+        from cw.models import LastResultSource
+        from cw.result import EmitOutcome
+
+        return EmitOutcome(
+            session_id="sess-1",
+            result=None,
+            prior_status=existing_result.get("status"),
+            refused=True,
+            existing_result=existing_result,
+            existing_source=LastResultSource.STOP_HOOK_HARVEST,
+        )
+
+    def _run(self, monkeypatch: pytest.MonkeyPatch, refusal: Any) -> TicketTask:
+        from cw.reconcile.concierge import _act_on_park_marker_poison_candidates
+
+        task = _make_task(disposition=None, attempts=1, session_id="sess-1")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[]))
+        monkeypatch.setattr(
+            "cw.reconcile.concierge._close_confirmed_dead_session",
+            lambda *_a, **_kw: (False, None, refusal),
+        )
+        recovered = _act_on_park_marker_poison_candidates([self._candidate()], now=_NOW)
+        assert recovered == ["GEN-1"]
+        return load_dev_queue().tasks[0]
+
+    def test_routes_routable_foreign_autodev_result(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A validating non-blocked AutoDevResult routes via
+        _queue_status_for_salvaged's default (shipped -> COMPLETED), not PENDING."""
+        refusal = self._refusal(_shipped_salvage_payload())
+        requeued = self._run(monkeypatch, refusal)
+        assert requeued.status == QueueItemStatus.COMPLETED
+        assert requeued.disposition == "shipped"
+
+    def test_routes_blocked_status_autodev_result_to_blocked_on_user(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A validating AutoDevResult whose status=='blocked' (carries
+        schema_version) routes to BLOCKED_ON_USER via the concierge special case,
+        NOT to COMPLETED via _queue_status_for_salvaged's default (round-3 bug)."""
+        blocked_autodev = _make_terminal_payload("review_pending_approval", "GEN-1")
+        blocked_autodev["status"] = "blocked"
+        blocked_autodev["pr"] = None
+        blocked_autodev["next_actions"] = []
+        blocked_autodev["blocker"] = {
+            "stage": "s2",
+            "reason": "impl_failed",
+            "details": "x",
+        }
+        refusal = self._refusal(blocked_autodev)
+        requeued = self._run(monkeypatch, refusal)
+        assert requeued.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_routes_blocked_result_shape_to_blocked_on_user(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A validating BlockedResult (status=='blocked', no schema_version)
+        routes to BLOCKED_ON_USER via the isinstance(BlockedResult) branch."""
+        blocked_result = {
+            "status": "blocked",
+            "blocker": {"stage": "s1", "reason": "validation_failed", "details": "x"},
+        }
+        refusal = self._refusal(blocked_result)
+        requeued = self._run(monkeypatch, refusal)
+        assert requeued.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_unroutable_foreign_shape_falls_through_to_pending(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """An existing_result that fails BOTH validations falls through to the
+        PENDING-requeue floor, logging a warning naming the source and shape."""
+        # {"status": "blocked"} with no blocker, no schema_version -> discriminant
+        # picks BlockedResult but validation fails on the missing blocker field.
+        refusal = self._refusal({"status": "blocked"})
+        with caplog.at_level("WARNING"):
+            requeued = self._run(monkeypatch, refusal)
+        assert requeued.status == QueueItemStatus.PENDING
+        assert requeued.session_id is None
+        assert requeued.stage_base_ref is None
+        assert any(
+            "unroutable" in r.getMessage() and "stop_hook_harvest" in r.getMessage()
+            for r in caplog.records
+        )
+
+
+def test_close_confirmed_dead_session_returns_refusal_outcome_on_door_refusal(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RFC 0012 A3 (#1459): when the door refuses the pre-close salvage (the
+    session already holds a terminal result), _close_confirmed_dead_session
+    returns (False, None, refusal) and leaves the session byte-identical."""
+    from cw.models import LastResultSource
+    from cw.reconcile.concierge import _close_confirmed_dead_session
+
+    foreign = {"status": "shipped", "foreign_authority": True}
+    session = _make_session(
+        session_id="sess-refuse",
+        last_result=foreign,
+        last_result_source=LastResultSource.STOP_HOOK_HARVEST,
+        surface_ref="surf-dead",
+    )
+    save_state(CwState(sessions=[session]))
+    salvaged = AutoDevResult.model_validate(_shipped_salvage_payload())
+    monkeypatch.setattr(
+        "cw.reconcile.concierge.salvage_terminal_result",
+        lambda *_a, **_kw: (salvaged, "fake-claude-id"),
+    )
+
+    changed, salvage_result, refusal = _close_confirmed_dead_session(
+        "sess-refuse", _NOW
+    )
+
+    assert changed is False
+    assert salvage_result is None
+    assert refusal is not None
+    assert refusal.refused is True
+    assert refusal.existing_result == foreign
+    assert refusal.existing_source == LastResultSource.STOP_HOOK_HARVEST
+    # Session left byte-identical (still ACTIVE, foreign result + source intact).
+    state = CwState.model_validate_json(
+        (tmp_config_dir / ".local" / "share" / "cw" / "sessions.json").read_text()
+    )
+    reloaded = state.find_by_name_or_id("sess-refuse")
+    assert reloaded is not None
+    assert reloaded.status == SessionStatus.ACTIVE
+    assert reloaded.last_result == foreign
+    assert reloaded.last_result_source == LastResultSource.STOP_HOOK_HARVEST
