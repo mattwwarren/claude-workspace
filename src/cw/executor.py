@@ -10,10 +10,10 @@ import subprocess
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 
 from cw.auto_dev_result import AutoDevResult
+from cw.codex_fix_loop import run_review_with_fix_loop
 from cw.codex_review import (
     STAGE3_REVIEW,
     render_verdict_comment,
-    run_review,
 )
 from cw.codex_runner import CodexRunner, RealCodexRunner
 from cw.config import load_state, save_state, sessions_lock
@@ -602,8 +602,9 @@ class CodexExecutor:
 
         try:
             if result is None:
-                # Step 3: Run the per-role review pass (delegated to codex_review).
-                result, verdict = run_review(
+                # Step 3: Run the per-role review pass + bounded fix loop
+                # (delegated to codex_fix_loop, #1392).
+                result, verdict = run_review_with_fix_loop(
                     runner=self._runner,
                     task=task,
                     worktree=worktree,

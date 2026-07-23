@@ -228,7 +228,14 @@ def test_codex_executor_must_fix_blocked(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """A validating MUST_FIX finding → blocked/codex_must_fix_findings."""
+    """A persistent MUST_FIX finding → fix loop runs to cap → blocked (#1392).
+
+    ``FakeCodexRunner`` returns the same MUST_FIX doc for every call and never
+    edits the worktree, so each fix invocation is a no-op the re-review still
+    finds blocking — the loop caps at ``_MAX_FIX_CYCLES`` and parks with the
+    finding recorded in BOTH ``must_fix_initial`` (cycle-0 snapshot) and
+    ``deferred`` (the cross-cycle survivor set).
+    """
     worktree = _worktree_with_change(
         make_git_repo, "wt-codex-mf", filename="new.py", content="def broken():\n"
     )
@@ -251,15 +258,14 @@ def test_codex_executor_must_fix_blocked(
     assert result.status == "blocked"
     assert result.blocker is not None
     assert result.blocker.reason == CODEX_MUST_FIX_FINDINGS
-    # #1203's bug (parsed counts must survive onto the blocked sentinel, not
-    # fall back to hardcoded 0/0/0/0) re-verified on the per-role path: every
-    # role echoes the identical finding, dedup collapses them to exactly one.
+    # Every role echoes the identical finding; dedup collapses them to one, and
+    # the survivor is counted in both must_fix_initial and deferred at cap.
     assert result.review.must_fix_initial == 1
     assert result.review.should_fix == 0
-    assert result.review.deferred == 0
-    assert result.review.fix_cycles_used == 0
-    assert result.review.agents_run == len(runner.calls)
-    # A blocking verdict is still posted as a comment.
+    assert result.review.deferred == 1
+    assert result.review.fix_cycles_used == 5
+    assert result.health.fix_loop_escalated is True
+    # The survivor verdict is still posted as a blocking comment.
     post_mock.assert_called_once()
     assert "BLOCKING" in post_mock.call_args.args[1]
 
@@ -346,6 +352,41 @@ def test_codex_executor_should_fix_only_stays_complete(
     assert result.review.agents_run == len(runner.calls)
 
 
+def test_spawn_delegates_to_fix_loop_not_bare_run_review(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """#1392: CodexExecutor.spawn on REVIEW calls run_review_with_fix_loop."""
+    worktree = make_git_repo("wt-codex-wiring")
+    runner = FakeCodexRunner(returncode=0)
+    config = StageExecutorConfig(backend=CODEX_BACKEND)
+    executor = CodexExecutor(config=config, runner=runner)
+    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+    task = TicketTask(ticket_id="T-wire", client="test", stage=Stage.REVIEW)
+
+    blocked = make_blocked(
+        ticket_id="T-wire",
+        worktree=worktree,
+        reason=CODEX_REVIEW_UNPARSEABLE,
+        stage_reached="stage3_review",
+    )
+    with (
+        patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+        patch(
+            "cw.executor.run_review_with_fix_loop", return_value=(blocked, None)
+        ) as fix_loop_mock,
+    ):
+        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+
+    fix_loop_mock.assert_called_once()
+    # No FakeCodexRunner call happened — the executor delegated the whole review
+    # pass to the (patched) fix loop rather than driving codex itself.
+    assert len(runner.calls) == 0
+    result = _persisted_result()
+    assert result.blocker is not None
+    assert result.blocker.reason == CODEX_REVIEW_UNPARSEABLE
+
+
 def test_resolve_executor_returns_codex_executor(
     tmp_config_dir: Path, tmp_path: Path
 ) -> None:
@@ -379,7 +420,10 @@ def test_codex_executor_exception_handler_marks_session_completed(
 
     with (
         patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
-        patch("cw.executor.run_review", side_effect=RuntimeError("git boom")),
+        patch(
+            "cw.executor.run_review_with_fix_loop",
+            side_effect=RuntimeError("git boom"),
+        ),
         pytest.raises(RuntimeError, match="git boom"),
     ):
         executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
@@ -423,7 +467,7 @@ def test_spawn_threads_real_session_id_into_run_review(
 
     with (
         patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
-        patch("cw.executor.run_review", _spy_run_review),
+        patch("cw.executor.run_review_with_fix_loop", _spy_run_review),
     ):
         sid = executor.spawn(
             stage=Stage.REVIEW, task=task, worktree=worktree, client=client
