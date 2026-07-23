@@ -75,6 +75,7 @@ def migrate_cw_state(raw: dict[str, Any]) -> dict[str, Any]:
             _fill_session_liveness_bucket_default(session_raw)
             _fill_session_consecutive_park_vetoes_default(session_raw)
             _fill_session_last_result_source_default(session_raw)
+            _fill_session_consecutive_sentinel_mismatch_vetoes_default(session_raw)
     # Bump persisted schema_version to current after all migration steps.
     raw["schema_version"] = CW_STATE_SCHEMA_VERSION
     return raw
@@ -199,6 +200,17 @@ def _fill_session_last_result_source_default(session_raw: dict[str, Any]) -> Non
     """
     if "last_result_source" not in session_raw:
         session_raw["last_result_source"] = None
+
+
+def _fill_session_consecutive_sentinel_mismatch_vetoes_default(
+    session_raw: dict[str, Any],
+) -> None:
+    """Fill Session.consecutive_sentinel_mismatch_vetoes (schema v17, #1449).
+
+    Idempotent.
+    """
+    if "consecutive_sentinel_mismatch_vetoes" not in session_raw:
+        session_raw["consecutive_sentinel_mismatch_vetoes"] = 0
 
 
 def _clear_non_hex_surface_refs(session_raw: dict[str, Any]) -> None:
