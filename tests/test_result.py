@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 import pytest
 from click.testing import CliRunner
@@ -11,11 +12,15 @@ from click.testing import CliRunner
 from cw.cli import main
 from cw.config import load_state, save_state, sessions_lock
 from cw.exceptions import EmitSessionNotFoundError, EmitValidationError
-from cw.result import EmitOutcome, emit_result, emit_result_locked, validate_payload
+from cw.models import LastResultSource
+from cw.result import (
+    EmitOutcome,
+    emit_result,
+    emit_result_locked,
+    has_terminal_result,
+    validate_payload,
+)
 from tests.conftest import _seed_daemon_session
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _valid_payload() -> dict[str, Any]:
@@ -108,20 +113,26 @@ class TestEmitResultLocked:
     ) -> None:
         _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
         with sessions_lock():
-            outcome = emit_result_locked(_valid_payload(), "test1234")
+            outcome = emit_result_locked(
+                _valid_payload(), "test1234", source=LastResultSource.EMIT_CLI
+            )
 
         assert isinstance(outcome, EmitOutcome)
         assert outcome.session_id == "test1234"
+        assert outcome.refused is False
+        assert outcome.result is not None
         assert outcome.result.status == "shipped"
         assert outcome.prior_status is None
 
         sess = next(s for s in load_state().sessions if s.id == "test1234")
         assert sess.last_result is not None
         assert sess.last_result["status"] == "shipped"
+        assert sess.last_result_source == LastResultSource.EMIT_CLI
 
     def test_prior_status_captured_when_result_already_present(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
+        """A terminal last_result is refused, not overwritten (RFC 0012 S2)."""
         _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
         with sessions_lock():
             state = load_state()
@@ -129,9 +140,18 @@ class TestEmitResultLocked:
             sess.last_result = {"status": "blocked"}
             save_state(state)
 
-            outcome = emit_result_locked(_valid_payload(), "test1234")
+            outcome = emit_result_locked(
+                _valid_payload(), "test1234", source=LastResultSource.EMIT_CLI
+            )
 
+        assert outcome.refused is True
+        assert outcome.result is None
         assert outcome.prior_status == "blocked"
+        assert outcome.existing_result == {"status": "blocked"}
+        assert outcome.existing_source is None
+
+        sess = next(s for s in load_state().sessions if s.id == "test1234")
+        assert sess.last_result == {"status": "blocked"}
 
     def test_validation_failure_raises_and_carries_errors(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -141,7 +161,7 @@ class TestEmitResultLocked:
         payload["pr"] = None  # shipped requires non-null pr -> cross-field error
 
         with sessions_lock(), pytest.raises(EmitValidationError) as exc_info:
-            emit_result_locked(payload, "test1234")
+            emit_result_locked(payload, "test1234", source=LastResultSource.EMIT_CLI)
 
         assert any("pr must be non-null" in line for line in exc_info.value.errors)
 
@@ -154,9 +174,93 @@ class TestEmitResultLocked:
         _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
 
         with sessions_lock(), pytest.raises(EmitSessionNotFoundError) as exc_info:
-            emit_result_locked(_valid_payload(), "nosuch99")
+            emit_result_locked(
+                _valid_payload(), "nosuch99", source=LastResultSource.EMIT_CLI
+            )
 
         assert exc_info.value.session_id == "nosuch99"
+
+    def test_emit_result_locked_refuses_second_write_and_logs_collision(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            session_id="test1234",
+            last_result={"status": "shipped"},
+            last_result_source=LastResultSource.STOP_HOOK_HARVEST,
+        )
+        with caplog.at_level("WARNING"), sessions_lock():
+            outcome = emit_result_locked(
+                _valid_payload(), "test1234", source=LastResultSource.EMIT_CLI
+            )
+
+        assert outcome.refused is True
+        assert outcome.existing_source == LastResultSource.STOP_HOOK_HARVEST
+        assert outcome.existing_result is not None
+        assert outcome.existing_result["status"] == "shipped"
+
+        assert len(caplog.records) == 1
+        message = caplog.records[0].getMessage()
+        assert "test1234" in message
+        assert "stop_hook_harvest" in message
+        assert "emit_cli" in message
+        assert "shipped" in message
+
+    def test_emit_result_locked_refusal_does_not_validate_foreign_shape(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        foreign_result = {"status": "blocked", "totally_unknown_field": {"x": 1}}
+        _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            session_id="test1234",
+            last_result=foreign_result,
+        )
+        with sessions_lock():
+            outcome = emit_result_locked(
+                _valid_payload(), "test1234", source=LastResultSource.EMIT_CLI
+            )
+
+        assert outcome.refused is True
+        assert outcome.existing_result == foreign_result
+
+    def test_emit_result_locked_writes_over_non_terminal_park_marker(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            session_id="test1234",
+            last_result={"paused_status": "silently_idle"},
+        )
+        with sessions_lock():
+            outcome = emit_result_locked(
+                _valid_payload(), "test1234", source=LastResultSource.GIT_SYNTHESIS
+            )
+
+        assert outcome.refused is False
+
+        sess = next(s for s in load_state().sessions if s.id == "test1234")
+        assert sess.last_result_source == LastResultSource.GIT_SYNTHESIS
+
+    def test_emit_result_locked_stamps_source_on_first_write(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        # last_result defaults to None per the Session model -- no override.
+        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
+        with sessions_lock():
+            outcome = emit_result_locked(
+                _valid_payload(), "test1234", source=LastResultSource.EXECUTOR_DIRECT
+            )
+
+        assert outcome.refused is False
+
+        sess = next(s for s in load_state().sessions if s.id == "test1234")
+        assert sess.last_result_source == LastResultSource.EXECUTOR_DIRECT
 
 
 class TestEmitResult:
@@ -170,9 +274,13 @@ class TestEmitResult:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
-        outcome = emit_result(_valid_payload(), "test1234")
+        outcome = emit_result(
+            _valid_payload(), "test1234", source=LastResultSource.EMIT_CLI
+        )
 
         assert outcome.session_id == "test1234"
+        assert outcome.refused is False
+        assert outcome.result is not None
         assert outcome.result.status == "shipped"
         assert outcome.prior_status is None
 
@@ -188,7 +296,7 @@ class TestEmitResult:
         payload["pr"] = None
 
         with pytest.raises(EmitValidationError) as exc_info:
-            emit_result(payload, "test1234")
+            emit_result(payload, "test1234", source=LastResultSource.EMIT_CLI)
 
         assert any("pr must be non-null" in line for line in exc_info.value.errors)
 
@@ -201,9 +309,34 @@ class TestEmitResult:
         _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
 
         with pytest.raises(EmitSessionNotFoundError) as exc_info:
-            emit_result(_valid_payload(), "nosuch99")
+            emit_result(_valid_payload(), "nosuch99", source=LastResultSource.EMIT_CLI)
 
         assert exc_info.value.session_id == "nosuch99"
+
+    def test_emit_result_forwards_source_to_locked(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Mirrors test_acquires_lock_and_delegates re: refusal + stamping."""
+        _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            session_id="test1234",
+            last_result={"status": "shipped"},
+            last_result_source=LastResultSource.STOP_HOOK_HARVEST,
+        )
+        outcome = emit_result(
+            _valid_payload(), "test1234", source=LastResultSource.EMIT_CLI
+        )
+        assert outcome.refused is True
+        assert outcome.existing_source == LastResultSource.STOP_HOOK_HARVEST
+
+        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="fresh999")
+        outcome2 = emit_result(
+            _valid_payload(), "fresh999", source=LastResultSource.EXECUTOR_DIRECT
+        )
+        assert outcome2.refused is False
+        sess = next(s for s in load_state().sessions if s.id == "fresh999")
+        assert sess.last_result_source == LastResultSource.EXECUTOR_DIRECT
 
 
 class TestResultEmit:
@@ -376,3 +509,58 @@ class TestResultEmit:
 
         sess = next(s for s in load_state().sessions if s.id == "test1234")
         assert sess.last_result is None
+
+    def test_result_emit_cli_refusal_exit_zero_pinned_message(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            session_id="test1234",
+            last_result={"status": "blocked"},
+            last_result_source=LastResultSource.SALVAGE_TRANSCRIPT,
+        )
+        result = CliRunner().invoke(
+            main,
+            ["result", "emit", "-", "--session-id", "test1234"],
+            input=json.dumps(_valid_payload()),
+        )
+        assert result.exit_code == 0, result.output
+        assert result.output == (
+            "Result already recorded for session test1234 "
+            "(source=salvage_transcript); not overwritten.\n"
+        )
+
+        state = load_state()
+        sess = next(s for s in state.sessions if s.id == "test1234")
+        assert sess.last_result == {"status": "blocked"}
+        assert sess.last_result_source == LastResultSource.SALVAGE_TRANSCRIPT
+
+
+class TestHasTerminalResult:
+    """cw.result.has_terminal_result -- the door's terminal-ness predicate
+    (RFC 0012 S2, #1456), and its delegation from reconcile/_shared."""
+
+    def test_has_terminal_result_predicate_shapes(self) -> None:
+        assert has_terminal_result({"status": "shipped"}) is True
+        assert has_terminal_result({"paused_status": "silently_idle"}) is False
+        assert has_terminal_result(None) is False
+
+    def test_has_terminal_sentinel_delegates_to_door_predicate(self) -> None:
+        from cw.models import Session, SessionOrigin, SessionPurpose, SessionStatus
+        from cw.reconcile._shared import _has_terminal_sentinel
+
+        def make_session(last_result: dict[str, Any] | None) -> Session:
+            return Session(
+                name="acme/impl",
+                client="acme",
+                purpose=SessionPurpose.IMPL,
+                origin=SessionOrigin.DAEMON,
+                status=SessionStatus.ACTIVE,
+                workspace_path=Path("/tmp/acme"),
+                last_result=last_result,
+            )
+
+        for shape in ({"status": "shipped"}, {"paused_status": "x"}, None):
+            session = make_session(shape)
+            assert _has_terminal_sentinel(session) == has_terminal_result(shape)
