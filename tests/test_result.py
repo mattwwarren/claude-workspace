@@ -9,8 +9,9 @@ import pytest
 from click.testing import CliRunner
 
 from cw.cli import main
-from cw.config import load_state
-from cw.result import validate_payload
+from cw.config import load_state, save_state, sessions_lock
+from cw.exceptions import EmitSessionNotFoundError, EmitValidationError
+from cw.result import EmitOutcome, emit_result, emit_result_locked, validate_payload
 from tests.conftest import _seed_daemon_session
 
 if TYPE_CHECKING:
@@ -92,6 +93,117 @@ class TestValidatePayload:
         payload["next_actions"] = []
         errors = validate_payload(payload)
         assert any("lines_actual" in e for e in errors)
+
+
+class TestEmitResultLocked:
+    """Direct-call tests for ``emit_result_locked`` (RFC 0012 S1, #1455).
+
+    Mirrors ``TestValidatePayload``'s direct-call style (no ``CliRunner``).
+    Every call is made from inside an already-held ``sessions_lock()`` block,
+    per the "caller MUST already hold the lock" contract.
+    """
+
+    def test_records_result_and_returns_outcome(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
+        with sessions_lock():
+            outcome = emit_result_locked(_valid_payload(), "test1234")
+
+        assert isinstance(outcome, EmitOutcome)
+        assert outcome.session_id == "test1234"
+        assert outcome.result.status == "shipped"
+        assert outcome.prior_status is None
+
+        sess = next(s for s in load_state().sessions if s.id == "test1234")
+        assert sess.last_result is not None
+        assert sess.last_result["status"] == "shipped"
+
+    def test_prior_status_captured_when_result_already_present(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
+        with sessions_lock():
+            state = load_state()
+            sess = next(s for s in state.sessions if s.id == "test1234")
+            sess.last_result = {"status": "blocked"}
+            save_state(state)
+
+            outcome = emit_result_locked(_valid_payload(), "test1234")
+
+        assert outcome.prior_status == "blocked"
+
+    def test_validation_failure_raises_and_carries_errors(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
+        payload = _valid_payload()
+        payload["pr"] = None  # shipped requires non-null pr -> cross-field error
+
+        with sessions_lock(), pytest.raises(EmitValidationError) as exc_info:
+            emit_result_locked(payload, "test1234")
+
+        assert any("pr must be non-null" in line for line in exc_info.value.errors)
+
+        sess = next(s for s in load_state().sessions if s.id == "test1234")
+        assert sess.last_result is None
+
+    def test_session_not_found_raises_and_carries_session_id(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
+
+        with sessions_lock(), pytest.raises(EmitSessionNotFoundError) as exc_info:
+            emit_result_locked(_valid_payload(), "nosuch99")
+
+        assert exc_info.value.session_id == "nosuch99"
+
+
+class TestEmitResult:
+    """Direct-call tests for ``emit_result``, the unlocked wrapper.
+
+    No ambient ``sessions_lock()`` is held here -- ``emit_result`` acquires
+    the lock itself, mirroring ``cw.dev_queue.approval.approve_ticket``.
+    """
+
+    def test_acquires_lock_and_delegates(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
+        outcome = emit_result(_valid_payload(), "test1234")
+
+        assert outcome.session_id == "test1234"
+        assert outcome.result.status == "shipped"
+        assert outcome.prior_status is None
+
+        sess = next(s for s in load_state().sessions if s.id == "test1234")
+        assert sess.last_result is not None
+        assert sess.last_result["status"] == "shipped"
+
+    def test_propagates_validation_error(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
+        payload = _valid_payload()
+        payload["pr"] = None
+
+        with pytest.raises(EmitValidationError) as exc_info:
+            emit_result(payload, "test1234")
+
+        assert any("pr must be non-null" in line for line in exc_info.value.errors)
+
+        sess = next(s for s in load_state().sessions if s.id == "test1234")
+        assert sess.last_result is None
+
+    def test_propagates_session_not_found_error(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
+
+        with pytest.raises(EmitSessionNotFoundError) as exc_info:
+            emit_result(_valid_payload(), "nosuch99")
+
+        assert exc_info.value.session_id == "nosuch99"
 
 
 class TestResultEmit:
