@@ -335,8 +335,7 @@ def result_emit(path: str, session_id: str | None) -> None:
         )
         raise click.exceptions.Exit(1) from exc
 
-    if outcome.result is None:
-        # refused=True whenever result is None -- see emit_result_locked.
+    if outcome.refused or outcome.result is None:
         click.echo(
             f"Result already recorded for session {outcome.session_id} "
             f"(source={outcome.existing_source}); not overwritten."
