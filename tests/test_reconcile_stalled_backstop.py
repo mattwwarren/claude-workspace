@@ -466,6 +466,162 @@ def test_act_on_stalled_park_vetoed_emits_event_no_mutation(
     assert events[0].correlation_id == "act-veto-1"
 
 
+def _stalled_salvage_candidate(
+    session_id: str, ticket_id: str, result: object
+) -> object:
+    """Build a SALVAGE_COMPLETION ReapCandidate for the stalled act phase."""
+    from cw.reconcile import ProposedAction, ReapCandidate
+
+    return ReapCandidate(
+        session_id=session_id,
+        proposed_action=ProposedAction.SALVAGE_COMPLETION,
+        ticket_id=ticket_id,
+        salvage_result=result,  # type: ignore[arg-type]
+        salvage_csid=f"csid-{session_id}",
+        client="client-a",
+        stage=Stage.IMPL,
+    )
+
+
+def test_stalled_salvage_stamps_salvage_transcript_source(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RFC 0012 A3 (#1459): a stalled SALVAGE_COMPLETION routes through the door
+    and stamps ``last_result_source == SALVAGE_TRANSCRIPT``."""
+    from cw.auto_dev_result import AutoDevResult
+    from cw.models import LastResultSource
+    from cw.reconcile import _act_on_stalled_candidates
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+    )
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    sess = _mk_headless_daemon_session("stalled-salv-src", tmp_path / "wt", started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="stalled-salv-src",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="stalled-salv-src",
+                    stage=Stage.IMPL,
+                )
+            ]
+        )
+    )
+    payload = _shipped_salvage_payload()
+    payload["ticket_id"] = "stalled-salv-src"
+    result = AutoDevResult.model_validate(payload)
+    candidate = _stalled_salvage_candidate(
+        "stalled-salv-src", "stalled-salv-src", result
+    )
+
+    _act_on_stalled_candidates(state, [candidate], now=now)
+
+    assert sess.status == SessionStatus.COMPLETED
+    assert sess.last_result_source == LastResultSource.SALVAGE_TRANSCRIPT
+
+
+def test_stalled_salvage_refused_by_door_session_never_completes(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RFC 0012 A3 (#1459), primary refusal test case (R2): a door-refused
+    stalled salvage leaves the session byte-identical, does NOT route the task,
+    and fires no SESSION_COMPLETED -- while a co-occurring accepted salvage in
+    the same tick still routes/emits (confirms the widened list excludes the
+    refused entry while retaining the accepted one)."""
+    from cw.auto_dev_result import AutoDevResult
+    from cw.models import LastResultSource
+    from cw.reconcile import _act_on_stalled_candidates
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+    )
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    foreign = {"status": "shipped", "foreign_authority": True}
+    refused = _mk_headless_daemon_session(
+        "stalled-refused", tmp_path / "wt-r", started_at, surface_ref="ref-refused"
+    )
+    refused.last_result = foreign
+    refused.last_result_source = LastResultSource.STOP_HOOK_HARVEST
+    completed_reason_before = refused.completed_reason
+    completed_at_before = refused.completed_at
+    accepted = _mk_headless_daemon_session(
+        "stalled-accepted", tmp_path / "wt-a", started_at, surface_ref="ref-accepted"
+    )
+    state = CwState(sessions=[refused, accepted])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="stalled-refused",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="stalled-refused",
+                    stage=Stage.IMPL,
+                ),
+                TicketTask(
+                    ticket_id="stalled-accepted",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="stalled-accepted",
+                    stage=Stage.IMPL,
+                ),
+            ]
+        )
+    )
+    refused_payload = _shipped_salvage_payload()
+    refused_payload["ticket_id"] = "stalled-refused"
+    accepted_payload = _shipped_salvage_payload()
+    accepted_payload["ticket_id"] = "stalled-accepted"
+    candidates = [
+        _stalled_salvage_candidate(
+            "stalled-refused",
+            "stalled-refused",
+            AutoDevResult.model_validate(refused_payload),
+        ),
+        _stalled_salvage_candidate(
+            "stalled-accepted",
+            "stalled-accepted",
+            AutoDevResult.model_validate(accepted_payload),
+        ),
+    ]
+
+    _act_on_stalled_candidates(state, candidates, now=now)
+
+    # Refused: byte-identical session, task NOT routed.
+    assert refused.status == SessionStatus.ACTIVE
+    assert refused.completed_reason == completed_reason_before
+    assert refused.completed_at == completed_at_before
+    assert refused.last_result == foreign
+    assert refused.last_result_source == LastResultSource.STOP_HOOK_HARVEST
+    store = load_dev_queue()
+    refused_task = next(t for t in store.tasks if t.ticket_id == "stalled-refused")
+    assert refused_task.status == QueueItemStatus.RUNNING
+    # Accepted: session COMPLETED, task COMPLETED.
+    assert accepted.status == SessionStatus.COMPLETED
+    accepted_task = next(t for t in store.tasks if t.ticket_id == "stalled-accepted")
+    assert accepted_task.status == QueueItemStatus.COMPLETED
+    # SESSION_COMPLETED fires only for the accepted candidate.
+    events = read_events(
+        consumer="test-stalled-salv-refused",
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
+    )
+    completed_ids = {e.payload.get("session_id") for e in events}
+    assert "stalled-accepted" in completed_ids
+    assert "stalled-refused" not in completed_ids
+
+
 # ---------------------------------------------------------------------------
 # GitHub #1149 Path 1 backstop -- stalled.py harvests a same-/later-stage
 # stage_complete advance sentinel instead of wall-clock-reverting it.

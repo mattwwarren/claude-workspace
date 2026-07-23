@@ -675,19 +675,29 @@ def _apply_stalled_state_mutations(
     park_candidates: list[ReapCandidate],
     finalize_blocked_candidates: list[ReapCandidate],
     reset_salvage_skip_candidates: list[ReapCandidate],
-) -> None:
+) -> list[ReapCandidate]:
     """Apply in-place session-state mutations for stalled dispositions.
 
     Mirrors the pattern from _apply_idle_state_mutations; save_state is left
     to the caller's combined flush.
+
+    Returns the door-accepted salvage subset (RFC 0012 A3, #1459): any candidate
+    whose ``_apply_salvaged_completion`` returned ``refused=True`` (first-writer-
+    wins) is dropped, so the caller routes tickets / emits events off the
+    accepted list rather than the raw ``salvage_candidates`` (which is built from
+    the candidate list independently of what the door actually wrote).
     """
+    accepted_salvage: list[ReapCandidate] = []
     for candidate in salvage_candidates:
         session = session_by_id[candidate.session_id]
         if candidate.salvage_result is None or candidate.salvage_csid is None:
             continue  # Invariant: SALVAGE_COMPLETION always has salvage_result + csid
-        _apply_salvaged_completion(
+        outcome = _apply_salvaged_completion(
             session, candidate.salvage_result, candidate.salvage_csid, now=now
         )
+        if outcome.refused:
+            continue
+        accepted_salvage.append(candidate)
     # Merged-complete: PR already shipped; mark session COMPLETED, not TIMED_OUT.
     for candidate in merged_revert_candidates:
         session = session_by_id[candidate.session_id]
@@ -741,6 +751,8 @@ def _apply_stalled_state_mutations(
     # so every candidate here is a real transition back to 0.
     for candidate in reset_salvage_skip_candidates:
         session_by_id[candidate.session_id].consecutive_salvage_skips = 0
+
+    return accepted_salvage
 
 
 def _apply_stalled_routed_mutations(
@@ -1384,7 +1396,11 @@ def _act_on_stalled_candidates(
             candidate.session_id
         ].consecutive_park_vetoes = candidate.new_veto_count
 
-    _apply_stalled_state_mutations(
+    # Reassign salvage_candidates to the door-accepted subset (RFC 0012 A3,
+    # #1459) so a refused candidate is excluded from salvaged_result_by_ticket,
+    # _apply_stalled_queue_mutations, and _emit_stalled_events below -- mirrors
+    # the routed_sentinel_candidates reassignment just below.
+    salvage_candidates = _apply_stalled_state_mutations(
         session_by_id,
         now=now,
         salvage_candidates=salvage_candidates,
