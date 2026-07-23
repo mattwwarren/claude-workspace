@@ -356,9 +356,15 @@ class ReapCandidate:
     # carried into the session.park_vetoed / session.sentinel_stage_mismatch_vetoed
     # event payload so the act phase does not need to recompute it. See #976, #1281.
     stale_minutes: float | None = None
-    # PARK_VETOED only: the session's consecutive_park_vetoes value AFTER this
-    # veto (current + 1). The act phase persists it back onto the Session and
-    # carries it into the session.park_vetoed payload. See #1445.
+    # The session's consecutive_park_vetoes value the act phase should persist
+    # after this candidate. See #1445. Two producers: (1) PARK_VETOED sets it
+    # to current + 1 (the ordinary increment), carried into the
+    # session.park_vetoed payload; (2) a wall-clock REVERT_TASK candidate with
+    # veto_cap_exhausted=True sets it to park_veto_cap + 1 — a deliberate bump
+    # past the cap so the escalation this candidate drives is edge-triggered
+    # (see _liveness_veto_candidate's docstring) rather than re-firing every
+    # tick the session stays LIVE. Meaningless (left 0) on every other
+    # ProposedAction/veto_cap_exhausted combination.
     new_veto_count: int = 0
     # Stamped True on the fallthrough PARK_BLOCKED_ON_USER / REVERT_TASK
     # candidate when the liveness veto declined *because the veto cap was

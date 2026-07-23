@@ -2548,13 +2548,79 @@ def test_veto_cap_exhaustion_emits_immediate_needs_attention(
     attn = [e for e in events if e.payload.get("session_id") == sess.id]
     assert len(attn) == 1
     assert attn[0].payload["paused_status"] == expected_paused_status
-    assert push_calls  # a push notification fired this tick
+    assert len(push_calls) == 1  # exactly one push notification fired this tick
 
     if expected_paused_status == "wall_clock_budget":
         # Non-destructive escalation: SIGNAL_ONLY never stops the daemon or
         # removes the worktree on this path.
         assert daemon.stop_calls == []
         assert removed == []
+
+
+def test_wall_clock_veto_escalation_fires_once_not_every_tick(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (#1445 fix-loop, review-caught): the wall-clock veto-cap
+    escalation must be edge-triggered. Unlike the retry-cap park (which
+    durably parks the session, removing it from _LIVE_STATUSES), the
+    wall-clock/SIGNAL_ONLY escalation deliberately never stops the daemon or
+    removes the worktree -- so without an explicit one-shot guard, a session
+    that stays LIVE past its veto cap would re-emit SESSION_NEEDS_ATTENTION +
+    a push notification on every subsequent reconcile tick, forever,
+    reproducing the exact unbounded-side-effect defect class this ticket was
+    opened to close, just on the escalation channel instead of park_vetoed."""
+    monkeypatch.setattr(
+        "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+    )
+    push_calls: list[object] = []
+    monkeypatch.setattr(
+        "cw.reconcile._deps.fire_push_notification",
+        lambda *a, **kw: push_calls.append((a, kw)),
+    )
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / "wt-veto-escalation-once"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    sess = _mk_headless_daemon_session("veto-escalation-once-1", worktree, started_at)
+    sess.consecutive_park_vetoes = 2  # at veto cap
+    state = CwState(sessions=[sess])
+    save_state(state)
+    _write_fresh_transcript(home, worktree, now)
+    task = TicketTask(
+        ticket_id="veto-escalation-once-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="veto-escalation-once-1",
+        stage=Stage.PLAN,
+        attempts=0,  # below retry cap -> wall-clock/SIGNAL_ONLY path
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    config = OrchestratorConfig(park_veto_cap=2)
+
+    # Tick 1: count == cap this tick -> first exhaustion -> escalates.
+    revert_stalled_headless_sessions(state, now=now, config=config)
+    # Tick 2: session still LIVE, still SIGNAL_ONLY, still over budget -- must
+    # NOT re-fire the escalation.
+    revert_stalled_headless_sessions(state, now=now, config=config)
+    # Tick 3: same, for good measure -- the guard must hold, not just once.
+    revert_stalled_headless_sessions(state, now=now, config=config)
+
+    events = read_events(
+        consumer="test-veto-escalation-once-1",
+        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+    )
+    attn = [e for e in events if e.payload.get("session_id") == sess.id]
+    assert len(attn) == 1
+    assert len(push_calls) == 1
+    # The counter is bumped past the cap on escalation (the edge-trigger latch)
+    # -- not left pinned at the cap.
+    assert state.sessions[0].consecutive_park_vetoes == config.park_veto_cap + 1
 
 
 def test_stalled_veto_falls_through_ordinary_first_park_no_escalation(

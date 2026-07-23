@@ -1071,6 +1071,11 @@ class TestConsecutiveSkipLatches:
     def test_orchestrator_config_salvage_skip_threshold_default(self) -> None:
         assert OrchestratorConfig().salvage_skip_attention_threshold == 5
 
+    def test_orchestrator_config_park_veto_cap_default(self) -> None:
+        """#1445: default is a deliberate, load-bearing 2 (counts only
+        post-budget vetoes) -- must not silently drift."""
+        assert OrchestratorConfig().park_veto_cap == 2
+
     def test_client_concurrency_override_freshness_blocks_defaults_zero(self) -> None:
         from cw.models import ClientConcurrencyOverride
 
