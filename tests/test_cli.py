@@ -3214,6 +3214,62 @@ class TestSignalStop:
         assert events[0].payload["session_id"] == session.id
 
 
+class TestHarvestLastResultThroughDoor:
+    """Direct tests for _harvest_last_result_through_door (RFC 0012 A1, #1457).
+
+    Covers the best-effort exception-swallow path: a door-side validation or
+    session-not-found failure must never propagate out of the Stop hook.
+    """
+
+    def test_swallows_emit_validation_error(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from cw.auto_dev_result import AutoDevResult
+        from cw.cli.sessions import _harvest_last_result_through_door
+        from cw.exceptions import EmitValidationError
+
+        sentinel = AutoDevResult.model_validate(_valid_payload())
+
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            msg = "boom"
+            raise EmitValidationError(msg, errors=["status: bad"])
+
+        monkeypatch.setattr("cw.cli.sessions.emit_result_locked", _raise)
+
+        with caplog.at_level("WARNING"):
+            _harvest_last_result_through_door("sess-does-not-matter", sentinel)
+
+        assert any("rejected by door" in r.getMessage() for r in caplog.records)
+
+    def test_swallows_emit_session_not_found_error(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from cw.auto_dev_result import AutoDevResult
+        from cw.cli.sessions import _harvest_last_result_through_door
+        from cw.exceptions import EmitSessionNotFoundError
+
+        sentinel = AutoDevResult.model_validate(_valid_payload())
+
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            msg = "not found"
+            raise EmitSessionNotFoundError(msg, session_id="ghost-session")
+
+        monkeypatch.setattr("cw.cli.sessions.emit_result_locked", _raise)
+
+        with caplog.at_level("WARNING"):
+            _harvest_last_result_through_door("ghost-session", sentinel)
+
+        assert any("rejected by door" in r.getMessage() for r in caplog.records)
+
+
 class TestSentinelPresentInTranscript:
     """Direct tests for the real _sentinel_present_in_transcript helper.
 
