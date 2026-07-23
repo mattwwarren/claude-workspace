@@ -667,6 +667,21 @@ class TestFixLoopReviewParity:
         assert verdict is not None
         assert verdict.reviewed_sha == orig  # no commit landed
 
+    def test_rereview_zero_documents_parks_unparseable(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        # A re-review whose every role fails to parse → zero documents →
+        # verdict None terminal (blocked/unparseable), loop stops.
+        worktree = _worktree(make_git_repo, "wt-rereview-fail")
+        runner = _FixLoopRunner([_MF_DOC, "not json{{"])
+        out, verdict = _run_loop(runner, worktree, session_id="s-rereview-fail")
+
+        assert out.status == "blocked"
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_REVIEW_UNPARSEABLE
+        assert verdict is None
+        assert runner.fix_calls == 1  # one fix ran before the failed re-review
+
 
 # ---------------------------------------------------------------------------
 # TestFixLoopNonBlockingPassthrough
