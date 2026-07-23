@@ -1272,3 +1272,19 @@ def test_close_confirmed_dead_session_returns_refusal_outcome_on_door_refusal(
     assert reloaded.status == SessionStatus.ACTIVE
     assert reloaded.last_result == foreign
     assert reloaded.last_result_source == LastResultSource.STOP_HOOK_HARVEST
+
+
+def test_validate_existing_result_for_routing_none_returns_none() -> None:
+    """RFC 0012 A3 (#1459): a None existing_result is trivially unroutable."""
+    from cw.reconcile.concierge import _validate_existing_result_for_routing
+
+    assert _validate_existing_result_for_routing(None) is None
+
+
+def test_validate_existing_result_for_routing_invalid_shape_returns_none() -> None:
+    """An existing_result that fails discriminated validation returns None."""
+    from cw.reconcile.concierge import _validate_existing_result_for_routing
+
+    # status=="blocked", no schema_version -> BlockedResult branch, but missing
+    # the required blocker field -> EmitValidationError -> None.
+    assert _validate_existing_result_for_routing({"status": "blocked"}) is None
