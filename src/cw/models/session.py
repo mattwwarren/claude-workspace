@@ -69,6 +69,15 @@ class Session(BaseModel):
     # recovery (any non-SKIP_PARKED detect-phase disposition). Same
     # reset-on-recovery latch shape as idle_observation_count above.
     consecutive_salvage_skips: int = 0
+    # Consecutive post-budget park-vetoes for this session (closes #1445).
+    # Incremented once each time the stalled sweep's liveness veto suppresses
+    # a wall-clock-budget / retry-cap park while the transcript is still LIVE;
+    # once it reaches OrchestratorConfig.park_veto_cap the veto stops firing
+    # and the pending park proceeds. Never explicitly reset: every pipeline
+    # episode constructs a brand-new Session object (spawn/resume never reuse a
+    # retired one), so a fresh episode starts back at 0 for free. Same
+    # per-session latch shape as consecutive_salvage_skips above.
+    consecutive_park_vetoes: int = 0
     backgrounded_at: datetime | None = None
     resumed_at: datetime | None = None
     completed_reason: CompletionReason | None = None

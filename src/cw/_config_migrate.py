@@ -73,6 +73,7 @@ def migrate_cw_state(raw: dict[str, Any]) -> dict[str, Any]:
             _fill_session_stage_default(session_raw)
             _fill_session_consecutive_salvage_skips_default(session_raw)
             _fill_session_liveness_bucket_default(session_raw)
+            _fill_session_consecutive_park_vetoes_default(session_raw)
     # Bump persisted schema_version to current after all migration steps.
     raw["schema_version"] = CW_STATE_SCHEMA_VERSION
     return raw
@@ -177,6 +178,17 @@ def _fill_session_liveness_bucket_default(session_raw: dict[str, Any]) -> None:
     """
     if "liveness_bucket" not in session_raw:
         session_raw["liveness_bucket"] = "live"
+
+
+def _fill_session_consecutive_park_vetoes_default(
+    session_raw: dict[str, Any],
+) -> None:
+    """Fill Session.consecutive_park_vetoes introduced in schema v15 (#1445).
+
+    Idempotent.
+    """
+    if "consecutive_park_vetoes" not in session_raw:
+        session_raw["consecutive_park_vetoes"] = 0
 
 
 def _clear_non_hex_surface_refs(session_raw: dict[str, Any]) -> None:

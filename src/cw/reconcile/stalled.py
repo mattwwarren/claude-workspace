@@ -392,7 +392,7 @@ def _detect_stalled_candidates(
             # STALLED_RETRY_CAP_PARKED (rather than WALL_CLOCK_BUDGET) keeps
             # the emitted session.park_vetoed event's reason attributable to
             # the branch that actually produced it.
-            cap_veto = _liveness_veto_candidate(
+            cap_veto, veto_cap_exhausted = _liveness_veto_candidate(
                 session,
                 task,
                 ticket_id,
@@ -434,6 +434,9 @@ def _detect_stalled_candidates(
                     attempts=task.attempts if task else 0,
                     paused_status=_STALLED_CAP_PARKED_REASON,
                     usage_limit_detected=cap_usage_limit_detected,
+                    # #1445: True only when the veto declined because the cap was
+                    # reached on a still-LIVE session (not a genuine timeout).
+                    veto_cap_exhausted=veto_cap_exhausted,
                 )
             )
             continue
@@ -464,43 +467,79 @@ def _liveness_veto_candidate(
     now: datetime,
     config: OrchestratorConfig,
     reap_reason: ReapReason,
-) -> ReapCandidate | None:
-    """Return a PARK_VETOED candidate when the session is still LIVE, else None.
+) -> tuple[ReapCandidate | None, bool]:
+    """Return ``(veto_candidate_or_None, cap_exhausted)`` for a stalled session.
 
     Computes fresh transcript-mtime staleness via :func:`_transcript_age_seconds`
     and classifies it through the same per-stage-floor liveness ladder the
     observability sweep (``cw.reconcile.liveness``) uses. When the freshly-
-    classified bucket is :attr:`LivenessBucket.LIVE`, the caller's pending
-    park is vetoed entirely — no disposition, no queue mutation — because the
-    session is demonstrably still making progress despite the wall-clock
-    budget (or retry cap) having been exceeded. Fail-toward-park: a session
-    whose transcript cannot be located (``_transcript_age_seconds`` returns
-    ``None``) returns ``None`` so the caller falls through to its normal
-    park/revert candidate.
+    classified bucket is :attr:`LivenessBucket.LIVE` AND the session has not yet
+    reached ``config.park_veto_cap`` consecutive post-budget vetoes, the caller's
+    pending park is vetoed entirely — no disposition, no queue mutation — because
+    the session is demonstrably still making progress despite the wall-clock
+    budget (or retry cap) having been exceeded (#976).
+
+    The veto is bounded (#1445): once ``session.consecutive_park_vetoes`` reaches
+    the cap, this returns ``(None, True)`` — no veto candidate, and the ``True``
+    flag tells the caller the fallthrough park is due to *cap exhaustion* (a
+    still-live session that has exhausted its veto budget) rather than an ordinary
+    timeout, so the caller can escalate to the operator. The three return shapes:
+
+    - ``(candidate, False)`` — LIVE and under the cap: veto, with the candidate's
+      ``new_veto_count`` set to ``consecutive_park_vetoes + 1``.
+    - ``(None, True)``       — LIVE and the count is *exactly* at the cap this
+      tick (the first tick cap-exhaustion is observed): escalate. Deliberately
+      ``==`` rather than ``>=`` — the wall-clock/SIGNAL_ONLY call site persists
+      a bumped counter (``park_veto_cap + 1``) once it escalates (see
+      ``_resolve_wall_clock_candidate`` and the act-phase loop that applies it),
+      so a still-LIVE session that already escalated reads back ``> cap`` on
+      every subsequent tick and this returns ``(None, False)`` instead —
+      otherwise a session that stays LIVE past its cap would re-escalate every
+      tick forever, reproducing the exact unbounded-side-effect defect class
+      this ticket exists to close, just on the escalation channel. The
+      cap-exceeded/retry-cap-park call site does not need this distinction —
+      that branch's session is durably parked (removed from ``_LIVE_STATUSES``)
+      the same tick it fires, so it can only ever observe the boundary once.
+    - ``(None, False)``      — not LIVE, or transcript unlocatable (fail-toward-
+      park): an ordinary timeout, NOT a cap-fire. A genuinely-dead session must
+      never be misreported as "cap fired" even if its counter happens to sit at
+      the cap from earlier ticks.
 
     Shared by two call sites (GitHub #1277): the ordinary wall-clock revert
     path (``reap_reason=WALL_CLOCK_BUDGET``) and the stalled-retry-cap park
-    branch (``reap_reason=STALLED_RETRY_CAP_PARKED``). See GitHub #976.
+    branch (``reap_reason=STALLED_RETRY_CAP_PARKED``). Detect-phase purity is
+    preserved — only reads are added, never a write. See GitHub #976, #1445.
     """
     stage = task.stage if task is not None else DEFAULT_STAGE
     stale_seconds = _transcript_age_seconds(session, now)
     if stale_seconds is None:
-        return None
+        return None, False
     stale_minutes = stale_seconds / 60.0
     bucket = _classify_liveness_bucket(stale_minutes, stage=stage, config=config)
     if bucket is not LivenessBucket.LIVE:
-        return None
-    return ReapCandidate(
-        session_id=session.id,
-        proposed_action=ProposedAction.PARK_VETOED,
-        ticket_id=ticket_id,
-        elapsed_seconds=elapsed,
-        reap_reason=reap_reason,
-        lane=task.lane if task else DEFAULT_LANE,
-        client=session.client,
-        stage=stage,
-        attempts=task.attempts if task else 0,
-        stale_minutes=stale_minutes,
+        return None, False
+    # LIVE — bound the veto (#1445). At/over the cap, decline the veto. Flag
+    # exhaustion only on the exact tick the count reaches the cap (`==`, not
+    # `>=`) so a call site that persists a past-cap bump after escalating
+    # (see the wall-clock/SIGNAL_ONLY path) gets an edge-triggered signal
+    # instead of a per-tick one.
+    if session.consecutive_park_vetoes >= config.park_veto_cap:
+        return None, session.consecutive_park_vetoes == config.park_veto_cap
+    return (
+        ReapCandidate(
+            session_id=session.id,
+            proposed_action=ProposedAction.PARK_VETOED,
+            ticket_id=ticket_id,
+            elapsed_seconds=elapsed,
+            reap_reason=reap_reason,
+            lane=task.lane if task else DEFAULT_LANE,
+            client=session.client,
+            stage=stage,
+            attempts=task.attempts if task else 0,
+            stale_minutes=stale_minutes,
+            new_veto_count=session.consecutive_park_vetoes + 1,
+        ),
+        False,
     )
 
 
@@ -518,7 +557,7 @@ def _resolve_wall_clock_candidate(
     Delegates the liveness check to :func:`_liveness_veto_candidate` with
     ``reap_reason=ReapReason.WALL_CLOCK_BUDGET``. See GitHub #976, #1277.
     """
-    veto = _liveness_veto_candidate(
+    veto, veto_cap_exhausted = _liveness_veto_candidate(
         session,
         task,
         ticket_id,
@@ -552,6 +591,17 @@ def _resolve_wall_clock_candidate(
         stage=stage,
         attempts=task.attempts if task else 0,
         usage_limit_detected=revert_usage_limit_detected,
+        # #1445: True only when the veto declined because the cap was reached
+        # on a still-LIVE session — routes this REVERT to an immediate operator
+        # escalation under SIGNAL_ONLY instead of a silent BLOCKED_ON_USER.
+        veto_cap_exhausted=veto_cap_exhausted,
+        # #1445: stamp the post-escalation counter value (cap + 1) so the act
+        # phase can persist it BEFORE the veto is re-checked next tick. This is
+        # what makes the escalation edge-triggered: next tick reads back a
+        # count strictly greater than the cap, so _liveness_veto_candidate's
+        # `==` check no longer reports exhaustion and the escalation does not
+        # re-fire. Meaningless (left 0) when veto_cap_exhausted is False.
+        new_veto_count=(config.park_veto_cap + 1) if veto_cap_exhausted else 0,
     )
 
 
@@ -561,13 +611,21 @@ def _route_stalled_by_policy(
     config: OrchestratorConfig | None,
     merged_ticket_ids: frozenset[str],
     gh_blocked_ticket_ids: frozenset[str],
-) -> list[ReapCandidate]:
+) -> tuple[list[ReapCandidate], list[ReapCandidate]]:
     """Apply per-lane reap-policy routing to stalled REVERT_TASK candidates.
 
     Under ``ReapPolicy.SIGNAL_ONLY`` a REVERT_TASK candidate is routed to
     BLOCKED_ON_USER (via _apply_queue_mutations) instead of passing through.
     Merged / gh-blocked tickets always pass through (#637). Non-REVERT
-    candidates are unaffected. Returns the surviving "auto" candidates.
+    candidates are unaffected.
+
+    Returns ``(auto_candidates, escalate_candidates)``. ``auto_candidates`` are
+    the survivors that pass through to the normal act phase. ``escalate_candidates``
+    are the SIGNAL_ONLY-rerouted REVERT_TASK candidates whose liveness veto was
+    *cap-exhausted* (#1445): the task still routes silently to BLOCKED_ON_USER via
+    the existing mutation, but they additionally drive an immediate
+    session.needs_attention in :func:`_emit_stalled_events` so a still-live worker
+    that has exhausted its veto budget surfaces to the operator this same tick.
     """
     effective_config = config if config is not None else OrchestratorConfig()
     clients = _deps.load_effective_clients()
@@ -576,6 +634,7 @@ def _route_stalled_by_policy(
     # that a confirmed-merged ticket is always completed, even under SIGNAL_ONLY.
     signal_mutations: dict[str, QueueItemStatus] = {}
     auto_candidates: list[ReapCandidate] = []
+    escalate_candidates: list[ReapCandidate] = []
     for c in candidates:
         if c.proposed_action == ProposedAction.REVERT_TASK:
             if c.ticket_id and (
@@ -587,6 +646,11 @@ def _route_stalled_by_policy(
             if policy is ReapPolicy.SIGNAL_ONLY:
                 if c.ticket_id:
                     signal_mutations[c.ticket_id] = QueueItemStatus.BLOCKED_ON_USER
+                # #1445: a cap-exhausted veto on a still-live session escalates
+                # to the operator this tick (parity with the retry-cap park,
+                # which already emits needs_attention) instead of a silent park.
+                if c.veto_cap_exhausted:
+                    escalate_candidates.append(c)
             else:
                 auto_candidates.append(c)
         else:
@@ -597,7 +661,7 @@ def _route_stalled_by_policy(
             clear_session_id=set(),
             disposition=ReapReason.WALL_CLOCK_BUDGET.value,
         )
-    return auto_candidates
+    return auto_candidates, escalate_candidates
 
 
 def _apply_stalled_state_mutations(
@@ -907,6 +971,7 @@ def _emit_stalled_events(
     salvage_candidates: list[ReapCandidate],
     finalize_blocked_candidates: list[ReapCandidate],
     routed_sentinel_candidates: list[ReapCandidate],
+    wall_clock_veto_escalation_candidates: list[ReapCandidate],
     *,
     branch_absent_ticket_ids: frozenset[str] = frozenset(),
 ) -> None:
@@ -917,6 +982,12 @@ def _emit_stalled_events(
     SESSION_NEEDS_ATTENTION for gh-blocked and finalize-blocked candidates.
     ROUTE_EMITTED_SENTINEL candidates (Path 1 backstop, #1149) emit a salvaged
     SESSION_COMPLETED and stop the surface, mirroring the salvage loop.
+    ``wall_clock_veto_escalation_candidates`` (#1445) are SIGNAL_ONLY-rerouted
+    REVERT_TASK candidates whose liveness veto was cap-exhausted: they emit an
+    immediate SESSION_NEEDS_ATTENTION + push notification (parity with the
+    retry-cap park) but — preserving SIGNAL_ONLY's non-destructive contract —
+    do NOT stop the daemon or remove the worktree; the task already routed
+    silently to BLOCKED_ON_USER via _route_stalled_by_policy's mutation.
     """
     for candidate in revert_candidates:
         session = session_by_id[candidate.session_id]
@@ -989,21 +1060,9 @@ def _emit_stalled_events(
         _cleanup_timed_out_worktree(session, candidate.ticket_id)
         record_event(
             OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-            {
-                "session_id": session.id,
-                "session_name": session.name,
-                "client": session.client,
-                "ticket_id": candidate.ticket_id,
-                "claude_session_id": session.claude_session_id,
-                "paused_status": _STALLED_CAP_PARKED_REASON,
-                "breadcrumbs": str(session.worktree_path)
-                if session.worktree_path
-                else "",
-                "crashed": False,
-                "stage": str(candidate.stage),
-                "attempts": candidate.attempts,
-                "lane": candidate.lane,
-            },
+            _build_needs_attention_park_payload(
+                session, candidate, paused_status=_STALLED_CAP_PARKED_REASON
+            ),
             correlation_id=candidate.ticket_id,
         )
         _deps.fire_push_notification(session.name, session.client)
@@ -1021,8 +1080,68 @@ def _emit_stalled_events(
         if session.surface_ref is not None:
             _deps.get_native_daemon_client().stop(session.surface_ref)
 
+    _emit_wall_clock_veto_escalation_events(
+        session_by_id, wall_clock_veto_escalation_candidates
+    )
     _emit_stalled_routed_events(session_by_id, routed_sentinel_candidates)
     _emit_finalize_blocked_events(session_by_id, finalize_blocked_candidates)
+
+
+def _build_needs_attention_park_payload(
+    session: Session,
+    candidate: ReapCandidate,
+    *,
+    paused_status: str,
+) -> dict[str, object]:
+    """Shared SESSION_NEEDS_ATTENTION payload for the two "parity" park-notice
+    sites (#1445): the retry-cap park_candidates loop and the wall-clock
+    veto-escalation loop below. Extracted so the two sites cannot silently
+    drift apart on payload shape — the exact failure mode this ticket is about.
+    """
+    return {
+        "session_id": session.id,
+        "session_name": session.name,
+        "client": session.client,
+        "ticket_id": candidate.ticket_id,
+        "claude_session_id": session.claude_session_id,
+        "paused_status": paused_status,
+        "breadcrumbs": str(session.worktree_path) if session.worktree_path else "",
+        "crashed": False,
+        "stage": str(candidate.stage),
+        "attempts": candidate.attempts,
+        "lane": candidate.lane,
+    }
+
+
+def _emit_wall_clock_veto_escalation_events(
+    session_by_id: dict[str, Session],
+    candidates: list[ReapCandidate],
+) -> None:
+    """Emit SESSION_NEEDS_ATTENTION + push for cap-exhausted wall-clock vetoes (#1445).
+
+    Reuses the park_candidates payload shape
+    (:func:`_build_needs_attention_park_payload`) but with
+    ``paused_status=WALL_CLOCK_BUDGET`` and WITHOUT ``daemon.stop()`` /
+    worktree cleanup — the task already routed silently to BLOCKED_ON_USER via
+    :func:`_route_stalled_by_policy`'s SIGNAL_ONLY mutation; only the operator
+    notification is added here (parity with the retry-cap park's own
+    needs_attention emission). Extracted so ``_emit_stalled_events`` stays under
+    the branch cap, mirroring ``_emit_finalize_blocked_events``. Edge-triggered:
+    the act phase already persisted each candidate's post-cap counter bump
+    before this runs (see ``_act_on_stalled_candidates``), so a still-LIVE
+    session that already escalated will not produce a new candidate here on a
+    later tick — see ``_liveness_veto_candidate``'s docstring.
+    """
+    for candidate in candidates:
+        session = session_by_id[candidate.session_id]
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            _build_needs_attention_park_payload(
+                session, candidate, paused_status=ReapReason.WALL_CLOCK_BUDGET.value
+            ),
+            correlation_id=candidate.ticket_id,
+        )
+        _deps.fire_push_notification(session.name, session.client)
 
 
 def _record_salvage_skip(
@@ -1139,13 +1258,13 @@ def _act_on_stalled_candidates(
             correlation_id=_c.ticket_id,
         )
 
-    candidates = _route_stalled_by_policy(
+    candidates, wall_clock_veto_escalation_candidates = _route_stalled_by_policy(
         candidates,
         config=config,
         merged_ticket_ids=merged_ticket_ids,
         gh_blocked_ticket_ids=gh_blocked_ticket_ids,
     )
-    if not candidates:
+    if not candidates and not wall_clock_veto_escalation_candidates:
         return [], []
 
     # Separate by action for batch processing.
@@ -1222,9 +1341,14 @@ def _act_on_stalled_candidates(
     for candidate in skip_candidates:
         _record_salvage_skip(session_by_id, candidate, config=effective_config)
 
-    # PARK_VETOED: side-effect-only — emit session.park_vetoed, mutate nothing
-    # (#976). No state/queue mutation is added for this action anywhere below.
+    # PARK_VETOED: emit session.park_vetoed AND persist the incremented veto
+    # count onto the session so the veto is bounded across ticks (#1445). The
+    # count is the only state this action mutates; the task stays RUNNING and
+    # the session stays ACTIVE/IDLE. The save_state(state) below persists it.
     for candidate in park_vetoed_candidates:
+        session_by_id[
+            candidate.session_id
+        ].consecutive_park_vetoes = candidate.new_veto_count
         record_event(
             OrchestratorEventType.SESSION_PARK_VETOED,
             {
@@ -1232,6 +1356,7 @@ def _act_on_stalled_candidates(
                 "client": candidate.client,
                 "session_id": candidate.session_id,
                 "stage": candidate.stage,
+                "consecutive_vetoes": candidate.new_veto_count,
                 # #1030 pattern: read the candidate's own reap_reason (now
                 # branched at construction across two call sites — the
                 # wall-clock revert path and the retry-cap park path, #1277)
@@ -1247,6 +1372,17 @@ def _act_on_stalled_candidates(
             },
             correlation_id=candidate.ticket_id,
         )
+
+    # Wall-clock veto-cap escalation (#1445): persist the bumped counter here,
+    # BEFORE save_state below, so the next tick reads it back as > park_veto_cap
+    # and _liveness_veto_candidate's exact-cap check no longer reports
+    # exhaustion. Without this the SIGNAL_ONLY escalation -- which deliberately
+    # never stops the daemon or terminates the session, unlike the retry-cap
+    # park -- would re-fire every tick the session stays LIVE past the cap.
+    for candidate in wall_clock_veto_escalation_candidates:
+        session_by_id[
+            candidate.session_id
+        ].consecutive_park_vetoes = candidate.new_veto_count
 
     _apply_stalled_state_mutations(
         session_by_id,
@@ -1294,6 +1430,7 @@ def _act_on_stalled_candidates(
         salvage_candidates,
         finalize_blocked_candidates,
         routed_sentinel_candidates,
+        wall_clock_veto_escalation_candidates,
         branch_absent_ticket_ids=branch_absent_ticket_ids,
     )
 

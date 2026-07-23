@@ -26,7 +26,8 @@ from cw.models.session import Session
 #      boot-relative (/proc) to epoch-relative (psutil.create_time); stale
 #      pre-v14 handles are cleared on migration so they don't false-positive
 #      as "dead" against a live process re-read in the new format (GitHub #921).
-CW_STATE_SCHEMA_VERSION = 14
+# v15: added Session.consecutive_park_vetoes (#1445).
+CW_STATE_SCHEMA_VERSION = 15
 
 
 class CwState(BaseModel):

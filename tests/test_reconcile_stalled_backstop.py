@@ -1951,14 +1951,15 @@ class TestSalvageSkipAttentionLatch:
             ticket_id="route-reset-1",
         )
 
-        routed = _route_stalled_by_policy(
+        auto, escalate = _route_stalled_by_policy(
             [reset_candidate],
             config=OrchestratorConfig(reap_policy=ReapPolicy.SIGNAL_ONLY),
             merged_ticket_ids=frozenset(),
             gh_blocked_ticket_ids=frozenset(),
         )
 
-        assert routed == [reset_candidate]
+        assert auto == [reset_candidate]
+        assert escalate == []
 
     def test_main_drift_module_docstring_no_stale_929_citation(self) -> None:
         """main_drift.py's docstring must not attribute the counter to #929 (#974)."""
@@ -2099,3 +2100,579 @@ class TestActOnStalledCandidatesPerLane:
         store = load_dev_queue()
         t = next(t for t in store.tasks if t.ticket_id == "lane-sig-stall-1")
         assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+# ---------------------------------------------------------------------------
+# GitHub #1445 — bounded liveness veto: after park_veto_cap consecutive
+# post-budget vetoes the veto stops suppressing the park, and cap-fire
+# emits an immediate session.needs_attention at BOTH call sites (parity).
+# ---------------------------------------------------------------------------
+
+
+def _write_fresh_transcript(home: Path, worktree: Path, now: datetime) -> None:
+    """Write a transcript for *worktree* stamped 5 min stale (LIVE at PLAN)."""
+    transcript = _write_idle_transcript(home, worktree)
+    fresh_ts = (now - timedelta(minutes=5)).timestamp()
+    os.utime(str(transcript), (fresh_ts, fresh_ts))
+
+
+def test_liveness_veto_candidate_stamps_incrementing_veto_count(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A LIVE session below the cap yields a PARK_VETOED candidate whose
+    new_veto_count is the current count + 1, and cap_exhausted is False (#1445)."""
+    from cw.reconcile import ProposedAction
+    from cw.reconcile.stalled import _liveness_veto_candidate
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / "wt-veto-count"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    sess = _mk_headless_daemon_session("veto-count-1", worktree, started_at)
+    _write_fresh_transcript(home, worktree, now)
+    task = TicketTask(
+        ticket_id="veto-count-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="veto-count-1",
+        stage=Stage.PLAN,
+    )
+    # cap=2: counts 0 and 1 are both below cap -> both veto.
+    config = OrchestratorConfig(park_veto_cap=2)
+
+    sess.consecutive_park_vetoes = 0
+    cand0, exhausted0 = _liveness_veto_candidate(
+        sess,
+        task,
+        "veto-count-1",
+        3700.0,
+        now=now,
+        config=config,
+        reap_reason=ReapReason.WALL_CLOCK_BUDGET,
+    )
+    assert cand0 is not None
+    assert cand0.proposed_action == ProposedAction.PARK_VETOED
+    assert cand0.new_veto_count == 1
+    assert exhausted0 is False
+
+    sess.consecutive_park_vetoes = 1
+    cand1, exhausted1 = _liveness_veto_candidate(
+        sess,
+        task,
+        "veto-count-1",
+        3700.0,
+        now=now,
+        config=config,
+        reap_reason=ReapReason.WALL_CLOCK_BUDGET,
+    )
+    assert cand1 is not None
+    assert cand1.new_veto_count == 2
+    assert exhausted1 is False
+
+
+def test_liveness_veto_candidate_returns_none_once_cap_reached(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A LIVE session already at the cap returns (None, True): the veto is
+    exhausted and the caller must fall through to its park/revert (#1445)."""
+    from cw.reconcile.stalled import _liveness_veto_candidate
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / "wt-veto-capped"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    sess = _mk_headless_daemon_session("veto-capped-1", worktree, started_at)
+    _write_fresh_transcript(home, worktree, now)
+    task = TicketTask(
+        ticket_id="veto-capped-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="veto-capped-1",
+        stage=Stage.PLAN,
+    )
+    config = OrchestratorConfig(park_veto_cap=2)
+    sess.consecutive_park_vetoes = 2
+
+    cand, exhausted = _liveness_veto_candidate(
+        sess,
+        task,
+        "veto-capped-1",
+        3700.0,
+        now=now,
+        config=config,
+        reap_reason=ReapReason.WALL_CLOCK_BUDGET,
+    )
+    assert cand is None
+    assert exhausted is True
+
+
+def test_liveness_veto_candidate_never_live_returns_false_not_exhausted(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuinely stale session returns (None, False): "not live" must never
+    be misreported as "cap fired", even with a counter sitting at the cap
+    (#1445 — the two-source-of-truth requirement)."""
+    from cw.reconcile.stalled import _liveness_veto_candidate
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / "wt-veto-stale"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    sess = _mk_headless_daemon_session("veto-stale-1", worktree, started_at)
+    transcript = _write_idle_transcript(home, worktree)
+    # 40 minutes stale — past the 15-min PLAN floor -> not LIVE.
+    stale_ts = (now - timedelta(minutes=40)).timestamp()
+    os.utime(str(transcript), (stale_ts, stale_ts))
+    task = TicketTask(
+        ticket_id="veto-stale-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="veto-stale-1",
+        stage=Stage.PLAN,
+    )
+    config = OrchestratorConfig(park_veto_cap=2)
+    sess.consecutive_park_vetoes = 2  # at cap, but transcript is genuinely stale
+
+    cand, exhausted = _liveness_veto_candidate(
+        sess,
+        task,
+        "veto-stale-1",
+        3700.0,
+        now=now,
+        config=config,
+        reap_reason=ReapReason.WALL_CLOCK_BUDGET,
+    )
+    assert cand is None
+    assert exhausted is False
+
+
+def test_stalled_veto_bounded_falls_through_to_revert_task(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LIVE session below the retry cap but at the veto cap -> REVERT_TASK with
+    veto_cap_exhausted=True, not PARK_VETOED (#1445)."""
+    from cw.reconcile import ProposedAction, _detect_stalled_candidates
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / "wt-bound-revert"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    sess = _mk_headless_daemon_session("bound-revert-1", worktree, started_at)
+    sess.consecutive_park_vetoes = 2  # at cap
+    state = CwState(sessions=[sess])
+    save_state(state)
+    _write_fresh_transcript(home, worktree, now)
+    task = TicketTask(
+        ticket_id="bound-revert-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="bound-revert-1",
+        stage=Stage.PLAN,
+        attempts=0,  # below retry cap -> wall-clock revert path
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidates = _detect_stalled_candidates(
+        state,
+        now=now,
+        config=OrchestratorConfig(park_veto_cap=2),
+        task_by_ticket={"bound-revert-1": task},
+    )
+    revert = next(
+        c for c in candidates if c.proposed_action == ProposedAction.REVERT_TASK
+    )
+    assert revert.veto_cap_exhausted is True
+    assert revert.reap_reason == ReapReason.WALL_CLOCK_BUDGET
+    assert not any(c.proposed_action == ProposedAction.PARK_VETOED for c in candidates)
+
+
+def test_stalled_veto_bounded_falls_through_to_park_blocked_on_user(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LIVE session at BOTH the retry cap and the veto cap -> PARK_BLOCKED_ON_USER
+    with veto_cap_exhausted=True, not PARK_VETOED (#1445)."""
+    from cw.reconcile import (
+        DEFAULT_STALLED_RETRY_CAP,
+        ProposedAction,
+        _detect_stalled_candidates,
+    )
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / "wt-bound-park"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    sess = _mk_headless_daemon_session("bound-park-1", worktree, started_at)
+    sess.consecutive_park_vetoes = 2  # at veto cap
+    state = CwState(sessions=[sess])
+    save_state(state)
+    _write_fresh_transcript(home, worktree, now)
+    task = TicketTask(
+        ticket_id="bound-park-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="bound-park-1",
+        stage=Stage.PLAN,
+        attempts=DEFAULT_STALLED_RETRY_CAP,  # at retry cap -> cap-park path
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidates = _detect_stalled_candidates(
+        state,
+        now=now,
+        config=OrchestratorConfig(park_veto_cap=2),
+        task_by_ticket={"bound-park-1": task},
+    )
+    park = next(
+        c
+        for c in candidates
+        if c.proposed_action == ProposedAction.PARK_BLOCKED_ON_USER
+    )
+    assert park.veto_cap_exhausted is True
+    assert park.reap_reason == ReapReason.STALLED_RETRY_CAP_PARKED
+    assert not any(c.proposed_action == ProposedAction.PARK_VETOED for c in candidates)
+
+
+def test_act_on_stalled_park_vetoed_persists_consecutive_count(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """A PARK_VETOED candidate's new_veto_count is persisted onto the session
+    and carried into the event payload as consecutive_vetoes (#1445)."""
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_stalled_candidates
+
+    worktree = tmp_path / "wt-veto-persist"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    sess = _mk_headless_daemon_session("veto-persist-1", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="veto-persist-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="veto-persist-1",
+        stage=Stage.IMPL,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidate = ReapCandidate(
+        session_id="veto-persist-1",
+        proposed_action=ProposedAction.PARK_VETOED,
+        ticket_id="veto-persist-1",
+        elapsed_seconds=3700.0,
+        client="client-a",
+        stage=Stage.IMPL,
+        stale_minutes=4.2,
+        reap_reason=ReapReason.WALL_CLOCK_BUDGET,
+        new_veto_count=1,
+    )
+
+    _act_on_stalled_candidates(state, [candidate], now=now)
+
+    reloaded = load_state()
+    s = next(s for s in reloaded.sessions if s.id == "veto-persist-1")
+    assert s.consecutive_park_vetoes == 1
+
+    events = read_events(
+        consumer="test-veto-persist-1",
+        event_types=[OrchestratorEventType.SESSION_PARK_VETOED],
+    )
+    assert len(events) == 1
+    assert events[0].payload["consecutive_vetoes"] == 1
+
+
+def test_stalled_veto_cap_end_to_end_via_revert_stalled_headless_sessions(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Full N-tick simulation (park_veto_cap=2): tick 1 vetoes (count->1),
+    tick 2 vetoes (count->2), tick 3 falls through to the terminal cap-park
+    disposition (#1445)."""
+    monkeypatch.setattr(
+        "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
+    )
+    monkeypatch.setattr("cw.reconcile._shared.remove_worktree", lambda *_a, **_kw: None)
+
+    from cw.reconcile import DEFAULT_STALLED_RETRY_CAP
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / "wt-veto-e2e-bound"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    sess = _mk_headless_daemon_session("veto-e2e-bound-1", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    _write_fresh_transcript(home, worktree, now)
+    task = TicketTask(
+        ticket_id="veto-e2e-bound-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="veto-e2e-bound-1",
+        stage=Stage.PLAN,
+        attempts=DEFAULT_STALLED_RETRY_CAP,  # cap-park path once veto exhausts
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    config = OrchestratorConfig(park_veto_cap=2)
+
+    # Tick 1 — veto, count -> 1.
+    revert_stalled_headless_sessions(state, now=now, config=config)
+    assert state.sessions[0].consecutive_park_vetoes == 1
+    assert state.sessions[0].status == SessionStatus.ACTIVE
+
+    # Tick 2 — veto, count -> 2.
+    revert_stalled_headless_sessions(state, now=now, config=config)
+    assert state.sessions[0].consecutive_park_vetoes == 2
+    assert state.sessions[0].status == SessionStatus.ACTIVE
+
+    # Tick 3 — veto exhausted, falls through to the cap-park terminal.
+    revert_stalled_headless_sessions(state, now=now, config=config)
+    assert state.sessions[0].status == SessionStatus.TIMED_OUT
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "veto-e2e-bound-1")
+    assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+@pytest.mark.parametrize(
+    ("attempts", "expected_paused_status"),
+    [
+        (2, "stalled_retry_cap_parked"),
+        (0, "wall_clock_budget"),
+    ],
+    ids=["stalled_retry_cap_parked", "wall_clock_budget"],
+)
+def test_veto_cap_exhaustion_emits_immediate_needs_attention(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    attempts: int,
+    expected_paused_status: str,
+) -> None:
+    """Parity: when the veto cap is exhausted, a session.needs_attention fires
+    this same tick at BOTH cap-fire sites — the retry-cap park (via its
+    pre-existing emission) and the wall-clock-budget SIGNAL_ONLY reroute (via
+    the new escalation loop) — each with a push notification and no
+    daemon-stop / worktree removal on the wall-clock path (#1445)."""
+    from cw.reconcile import (
+        ProposedAction,
+        _act_on_stalled_candidates,
+        _detect_stalled_candidates,
+    )
+
+    daemon = FakeNativeDaemonClient()
+    monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", lambda: daemon)
+    push_calls: list[object] = []
+    monkeypatch.setattr(
+        "cw.reconcile._deps.fire_push_notification",
+        lambda *a, **kw: push_calls.append((a, kw)),
+    )
+    removed: list[object] = []
+    monkeypatch.setattr(
+        "cw.reconcile._shared.remove_worktree",
+        lambda *a, **kw: removed.append((a, kw)),
+    )
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / f"wt-veto-attn-{expected_paused_status}"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    sid = f"veto-attn-{expected_paused_status}"
+    sess = _mk_headless_daemon_session(sid, worktree, started_at)
+    sess.consecutive_park_vetoes = 2  # at veto cap
+    state = CwState(sessions=[sess])
+    save_state(state)
+    _write_fresh_transcript(home, worktree, now)
+    task = TicketTask(
+        ticket_id=sid,
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id=sid,
+        stage=Stage.PLAN,
+        attempts=attempts,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    # Default SIGNAL_ONLY policy so the wall-clock REVERT_TASK reroutes to
+    # BLOCKED_ON_USER (never a destructive auto-revert).
+    config = OrchestratorConfig(park_veto_cap=2)
+
+    candidates = _detect_stalled_candidates(
+        state, now=now, config=config, task_by_ticket={sid: task}
+    )
+    assert not any(c.proposed_action == ProposedAction.PARK_VETOED for c in candidates)
+    _act_on_stalled_candidates(state, candidates, now=now, config=config)
+
+    # Task routes to BLOCKED_ON_USER via either the park path or the
+    # SIGNAL_ONLY silent mutation.
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == sid)
+    assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+    events = read_events(
+        consumer=f"test-{sid}",
+        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+    )
+    attn = [e for e in events if e.payload.get("session_id") == sess.id]
+    assert len(attn) == 1
+    assert attn[0].payload["paused_status"] == expected_paused_status
+    assert len(push_calls) == 1  # exactly one push notification fired this tick
+
+    if expected_paused_status == "wall_clock_budget":
+        # Non-destructive escalation: SIGNAL_ONLY never stops the daemon or
+        # removes the worktree on this path.
+        assert daemon.stop_calls == []
+        assert removed == []
+
+
+def test_wall_clock_veto_escalation_fires_once_not_every_tick(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (#1445 fix-loop, review-caught): the wall-clock veto-cap
+    escalation must be edge-triggered. Unlike the retry-cap park (which
+    durably parks the session, removing it from _LIVE_STATUSES), the
+    wall-clock/SIGNAL_ONLY escalation deliberately never stops the daemon or
+    removes the worktree -- so without an explicit one-shot guard, a session
+    that stays LIVE past its veto cap would re-emit SESSION_NEEDS_ATTENTION +
+    a push notification on every subsequent reconcile tick, forever,
+    reproducing the exact unbounded-side-effect defect class this ticket was
+    opened to close, just on the escalation channel instead of park_vetoed."""
+    monkeypatch.setattr(
+        "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+    )
+    push_calls: list[object] = []
+    monkeypatch.setattr(
+        "cw.reconcile._deps.fire_push_notification",
+        lambda *a, **kw: push_calls.append((a, kw)),
+    )
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / "wt-veto-escalation-once"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    sess = _mk_headless_daemon_session("veto-escalation-once-1", worktree, started_at)
+    sess.consecutive_park_vetoes = 2  # at veto cap
+    state = CwState(sessions=[sess])
+    save_state(state)
+    _write_fresh_transcript(home, worktree, now)
+    task = TicketTask(
+        ticket_id="veto-escalation-once-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="veto-escalation-once-1",
+        stage=Stage.PLAN,
+        attempts=0,  # below retry cap -> wall-clock/SIGNAL_ONLY path
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    config = OrchestratorConfig(park_veto_cap=2)
+
+    # Tick 1: count == cap this tick -> first exhaustion -> escalates.
+    revert_stalled_headless_sessions(state, now=now, config=config)
+    # Tick 2: session still LIVE, still SIGNAL_ONLY, still over budget -- must
+    # NOT re-fire the escalation.
+    revert_stalled_headless_sessions(state, now=now, config=config)
+    # Tick 3: same, for good measure -- the guard must hold, not just once.
+    revert_stalled_headless_sessions(state, now=now, config=config)
+
+    events = read_events(
+        consumer="test-veto-escalation-once-1",
+        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+    )
+    attn = [e for e in events if e.payload.get("session_id") == sess.id]
+    assert len(attn) == 1
+    assert len(push_calls) == 1
+    # The counter is bumped past the cap on escalation (the edge-trigger latch)
+    # -- not left pinned at the cap.
+    assert state.sessions[0].consecutive_park_vetoes == config.park_veto_cap + 1
+
+
+def test_stalled_veto_falls_through_ordinary_first_park_no_escalation(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard: an ordinary first-ever REVERT_TASK (never vetoed,
+    veto_cap_exhausted=False) under SIGNAL_ONLY must route to BLOCKED_ON_USER
+    WITHOUT gaining a new session.needs_attention emission (#1445)."""
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_stalled_candidates
+
+    daemon = FakeNativeDaemonClient()
+    monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", lambda: daemon)
+    push_calls: list[object] = []
+    monkeypatch.setattr(
+        "cw.reconcile._deps.fire_push_notification",
+        lambda *a, **kw: push_calls.append((a, kw)),
+    )
+
+    worktree = tmp_path / "wt-ordinary-revert"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    sess = _mk_headless_daemon_session("ordinary-revert-1", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="ordinary-revert-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="ordinary-revert-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidate = ReapCandidate(
+        session_id="ordinary-revert-1",
+        proposed_action=ProposedAction.REVERT_TASK,
+        ticket_id="ordinary-revert-1",
+        elapsed_seconds=3700.0,
+        reap_reason=ReapReason.WALL_CLOCK_BUDGET,
+        veto_cap_exhausted=False,
+    )
+
+    _act_on_stalled_candidates(state, [candidate], now=now, config=OrchestratorConfig())
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "ordinary-revert-1")
+    assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+    events = read_events(
+        consumer="test-ordinary-revert-1",
+        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+    )
+    assert events == []
+    assert push_calls == []

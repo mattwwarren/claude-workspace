@@ -264,22 +264,39 @@ where one already existed:
 to track these newly-non-null values so a ceiling-refused row in one of
 these classes still surfaces to the operator instead of silently sticking.
 
-### 6a. The liveness veto (#976)
+### 6a. The liveness veto (#976, #1277, #1445)
 
-The stalled sweep's wall-clock-budget park (`ReapReason.WALL_CLOCK_BUDGET`)
-is additionally **vetoed** — suppressed entirely, no disposition stamped,
-no queue mutation — when the session's freshly-classified liveness bucket
-(`_classify_liveness_bucket`, `cw.reconcile.liveness`) is `LivenessBucket.LIVE`
-at the moment the wall-clock budget would otherwise fire. This stops the
-sweep from parking a session that is still visibly making progress just
-because its wall-clock budget expired. The veto does not apply to the
-cap-exceeded retry-cap park (`ReapReason.STALLED_RETRY_CAP_PARKED`) — that
-park is unconditional once `task.attempts >= cap`, regardless of liveness.
+The stalled sweep's pending park is additionally **vetoed** — suppressed
+entirely, no disposition stamped, no queue mutation — when the session's
+freshly-classified liveness bucket (`_classify_liveness_bucket`,
+`cw.reconcile.liveness`) is `LivenessBucket.LIVE` at the moment the park would
+otherwise fire. This stops the sweep from parking a session that is still
+visibly making progress just because its budget expired. Since #1277 the veto
+applies to **both** park sites: the ordinary wall-clock-budget revert
+(`ReapReason.WALL_CLOCK_BUDGET`) **and** the retry-cap park
+(`ReapReason.STALLED_RETRY_CAP_PARKED`, reached once `task.attempts >= cap`).
+
+The veto is **bounded** (#1445). Each granted veto increments the session's
+`consecutive_park_vetoes` latch; the veto is only granted while that count is
+below `OrchestratorConfig.park_veto_cap` (default 2). Once the cap is reached
+the veto stops firing and the pending park proceeds — and at **parity** across
+both cap-fire sites an immediate `session.needs_attention` is emitted this same
+tick so a still-live worker that has exhausted its veto budget surfaces to the
+operator rather than looping silently. The retry-cap park emits it via its
+existing path (`paused_status=stalled_retry_cap_parked`); the wall-clock-budget
+SIGNAL_ONLY reroute emits it via a dedicated escalation loop
+(`paused_status=wall_clock_budget`) that adds only the notification — the task
+still routes to `BLOCKED_ON_USER` via the ordinary silent queue mutation, with
+no daemon-stop or worktree removal. A "genuinely stale" session (bucket not
+`LIVE`) is never misreported as a cap-fire, even if its counter happens to sit
+at the cap. The counter resets for free per pipeline episode (each episode is a
+fresh `Session`).
 
 A vetoed candidate emits `session.park_vetoed` (see
-[`docs/events.md`](events.md)) instead of `session.reap_proposed` /
+[`docs/events.md`](events.md)) — carrying the post-increment
+`consecutive_vetoes` — instead of `session.reap_proposed` /
 `session.needs_attention`, and the session simply continues running —
-the sweep re-evaluates it again next tick.
+the sweep re-evaluates it again next tick until the veto cap is hit.
 
 ---
 

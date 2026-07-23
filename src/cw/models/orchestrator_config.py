@@ -359,6 +359,16 @@ class OrchestratorConfig(BaseModel):
     # emitted exactly once (same latch semantics as
     # freshness_block_attention_threshold above). Closes #974.
     salvage_skip_attention_threshold: int = 5
+    # Maximum consecutive post-budget liveness vetoes the stalled sweep will
+    # grant a single session before it lets the pending wall-clock-budget /
+    # retry-cap park proceed anyway (closes #1445). Deliberately small: this
+    # counts ONLY vetoes that fire *after* the session has already blown its
+    # wall-clock budget (the pre-budget short-circuit in
+    # _detect_stalled_candidates never reaches the veto), so 2 consecutive
+    # post-budget vetoes already reproduces the "would have parked two sweeps
+    # after budget exhaustion" arithmetic behind the 37-veto runaway that
+    # motivated this bound. Reset for free per episode via a fresh Session.
+    park_veto_cap: int = 2
     # RFC 0010 anomaly layer (#1201) — review-recipe repeat-fire burst detector.
     # A review recipe that keeps firing on the same PR across successive
     # attention_state episodes without the PR ever clearing is thrashing.
