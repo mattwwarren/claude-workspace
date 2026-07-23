@@ -622,6 +622,37 @@ class TestConsolidateVerdictFailedReviewers:
         assert verdict.stripped_escalations[1].reviewer_role == "R2"
 
 
+class TestConsolidateVerdictFixCycles:
+    """The #1392 fix_cycles_used threading through consolidate_verdict."""
+
+    def test_fix_cycles_used_threads_into_review(self) -> None:
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="MUST_FIX"))
+        verdict = consolidate_verdict(
+            [doc], diff, reviewed_sha="sha", fix_cycles_used=3
+        )
+        assert verdict.review.fix_cycles_used == 3
+
+    def test_fix_cycles_used_defaults_to_zero_when_omitted(self) -> None:
+        # Regression guard: the pre-#1392 call shape (no fix_cycles_used) still
+        # yields fix_cycles_used=0, so every existing single-pass caller is
+        # byte-identical.
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="SHOULD_FIX"))
+        verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        assert verdict.review.fix_cycles_used == 0
+
+    def test_derive_review_counts_default_unchanged(self) -> None:
+        # derive_review_counts still defaults fix_cycles_used to 0 for the
+        # hardcoded-zero Review(...) constructions in local_runner.
+        findings = [
+            AcceptedFinding(finding=_make_finding(severity="MUST_FIX"), reviewers=["a"])
+        ]
+        review = derive_review_counts(findings)
+        assert review.fix_cycles_used == 0
+        assert review.must_fix_initial == 1
+
+
 class TestWriteReviewVerdictArtifact:
     def test_atomic_write_round_trips(self, tmp_path: Path) -> None:
         diff = _make_diff()

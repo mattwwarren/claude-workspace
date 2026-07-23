@@ -516,6 +516,7 @@ def consolidate_verdict(
     reviewed_sha: str,
     *,
     failed_reviewers: list[ReviewerRunFailure] | None = None,
+    fix_cycles_used: int = 0,
 ) -> ReviewVerdict:
     """Consolidate every reviewer's document into a single :class:`ReviewVerdict`.
 
@@ -535,6 +536,17 @@ def consolidate_verdict(
     (timeout/error/unparseable) contributed nothing to this review pass and
     must not inflate the count the ``auto_approve_clean_review`` gate recipe
     treats as a required-non-zero signal (standing binding decision, #1236).
+
+    ``fix_cycles_used`` (default ``0``) is threaded into the internal
+    :func:`derive_review_counts` call so a caller running this per fix-loop
+    cycle can stamp each intermediate ``Review`` with the cycle it belongs to.
+    A single call still CANNOT produce a correct ``fix_cycles_used`` /
+    ``must_fix_initial`` / ``deferred`` combination across a multi-pass loop
+    (``must_fix_initial`` needs cycle 0's pre-defer snapshot, ``deferred`` needs
+    the loop's cross-cycle survivor set) — a fix-loop adapter reconstructs the
+    terminal ``Review`` itself (see ``cw.codex_fix_loop._finalize_review``);
+    this parameter only carries the per-cycle count for that adapter's own
+    intermediate verdicts (#1392).
     """
     failures = failed_reviewers if failed_reviewers is not None else []
     candidates: list[tuple[str, Finding]] = []
@@ -561,7 +573,9 @@ def consolidate_verdict(
     )
 
     accepted_findings = dedupe_findings(candidates)
-    review = derive_review_counts(accepted_findings, agents_run=len(documents))
+    review = derive_review_counts(
+        accepted_findings, fix_cycles_used=fix_cycles_used, agents_run=len(documents)
+    )
     must_fix = [
         af.finding
         for af in accepted_findings

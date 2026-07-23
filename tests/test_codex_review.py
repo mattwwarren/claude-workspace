@@ -32,6 +32,7 @@ from cw.codex_review import (
     _load_ticket_context,
     _parse_reviewer_document,
     _parse_unified_diff,
+    _prepare_review_pass,
     _read_sensitive_manifest,
     _run_codex_role,
     _select_reviewer_roles,
@@ -1390,3 +1391,66 @@ def test_duration_captured_without_extending_codex_run_result(
     path = _bundle_file("sess-dur", "code-quality-reviewer", "nonzero_exit")
     failure = ExecutorFailure.model_validate_json(path.read_text())
     assert failure.duration_seconds == pytest.approx(5.5)
+
+
+# ---------------------------------------------------------------------------
+# _prepare_review_pass extraction (#1392)
+# ---------------------------------------------------------------------------
+
+
+class TestPrepareReviewPass:
+    def test_assembles_roles_prompts_diff_and_sha(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = make_git_repo("wt-prepare")
+        _git(repo, "checkout", "-b", "feature")
+        (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
+        _git(repo, "add", "mod.py")
+        _git(repo, "commit", "-m", "add mod.py")
+
+        prepared = _prepare_review_pass(_task(), repo, "main")
+
+        # A python-only small-scope change selects code/sysadmin + data-safety
+        # (python mutates persisted state) and no product-manager (no ticket ctx).
+        assert prepared.roles == _select_reviewer_roles(
+            "small",
+            categories=_categorize_changed_files(["mod.py"]),
+            mutates_persisted_state=True,
+            has_ticket_context=False,
+        )
+        # Every selected role has a materialized prompt.
+        assert set(prepared.prompts_by_role) == set(prepared.roles)
+        assert all(prepared.prompts_by_role[r] for r in prepared.roles)
+        # diff + reviewed_sha reflect the captured worktree state.
+        assert "mod.py" in prepared.diff.files
+        head = subprocess.check_output(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
+        ).strip()
+        assert prepared.reviewed_sha == head
+
+    def test_run_review_delegates_through_prepared_inputs(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        # run_review's output is unchanged by the extraction: a clean per-role
+        # pass over the prepared inputs still yields stage_complete.
+        repo = make_git_repo("wt-prepare-run")
+        _git(repo, "checkout", "-b", "feature")
+        (repo / "mod.py").write_text("def broken():\n", encoding="utf-8")
+        _git(repo, "add", "mod.py")
+        _git(repo, "commit", "-m", "add mod.py")
+
+        prepared = _prepare_review_pass(_task(), repo, "main")
+        runner = _SequencedRunner([_ok_result() for _ in prepared.roles])
+        result, verdict = run_review(
+            runner=runner,
+            task=_task(),
+            worktree=repo,
+            default_branch="main",
+            model=None,
+            wall_clock_budget_seconds=None,
+            session_id="sess-prepare-run",
+        )
+        assert result.status == "stage_complete"
+        assert verdict is not None
+        assert verdict.blocking is False
+        assert len(runner.calls) == len(prepared.roles)

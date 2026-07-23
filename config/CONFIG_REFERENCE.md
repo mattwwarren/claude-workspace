@@ -426,6 +426,16 @@ salvage_skip_attention_threshold: 5
 # pipeline episode (fresh Session object).
 park_veto_cap: 2
 
+# Maximum consecutive sentinel-stage-mismatch vetoes the phantom sweep grants a
+# single already_refused session before letting the pending CRASH_COMPLETE
+# proceed (#1449). Mirrors park_veto_cap: counts only vetoes that fire while the
+# transcript is still LIVE on a session whose most recent tick refused a
+# stage-mismatched sentinel, so 2 already reproduces the #1281 "would have
+# crashed two sweeps after the refusal" window this bound fixes. On cap-fire an
+# immediate session.needs_attention is emitted. Resets for free per pipeline
+# episode (fresh Session object).
+sentinel_mismatch_veto_cap: 2
+
 # Review-recipe repeat-fire burst detector (RFC 0010 anomaly layer, #1201).
 # When a single (ticket, recipe) records this many PR_ACTION_TAKEN events
 # within review_recipe_repeat_fire_window_minutes, one

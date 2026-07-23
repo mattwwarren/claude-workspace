@@ -10,14 +10,15 @@ import subprocess
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 
 from cw.auto_dev_result import AutoDevResult
+from cw.codex_fix_loop import run_review_with_fix_loop
 from cw.codex_review import (
     STAGE3_REVIEW,
     render_verdict_comment,
-    run_review,
 )
 from cw.codex_runner import CodexRunner, RealCodexRunner
 from cw.config import load_state, save_state, sessions_lock
 from cw.events import record_event as _record_orchestrator_event
+from cw.exceptions import EmitSessionNotFoundError
 from cw.executor_diagnostics import (
     append_diagnostics_pointer,
     build_executor_failure,
@@ -46,6 +47,7 @@ from cw.models import (
     CODEX_BACKEND,
     LOCAL_BACKEND,
     ClientConfig,
+    LastResultSource,
     LocalLivenessHandle,
     OrchestratorEventType,
     Session,
@@ -57,6 +59,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.reconcile import AUTO_DEV_LABEL_PREFIX
+from cw.result import emit_result_locked
 from cw.spawn import spawn_create_impl
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 from cw.worktree import _git_dir
@@ -344,14 +347,16 @@ class LocalExecutor:
     keeps the shared ``dispatch_tick`` thread from blocking for the full run.
 
     Pre-flight failures (endpoint/aider/plan missing) stay synchronous: they
-    persist a blocked result to Session.last_result, mark the session COMPLETED,
-    and emit SESSION_COMPLETED before returning — the launch never happens.
+    persist a blocked result to Session.last_result via the door
+    (``emit_result_locked``, source=EXECUTOR_DIRECT — RFC 0012 A2, #1458), mark
+    the session COMPLETED, and emit SESSION_COMPLETED before returning — the
+    launch never happens.
 
     Result delivery bypasses persist_last_result (no sentinel framing). Every
     SESSION_COMPLETED event this class or the harvest path emits carries no
     'stdout' key, so dispatch.py's isinstance(stdout, str) guard is False and
-    persist_last_result is skipped; the last_result written directly is consumed
-    as-is by consume_completed_sessions.
+    persist_last_result is skipped; the last_result written via the door
+    (source=EXECUTOR_DIRECT) is consumed as-is by consume_completed_sessions.
     """
 
     def __init__(
@@ -453,12 +458,9 @@ class LocalExecutor:
             # — no "stdout" key so dispatch skips persist_last_result and uses
             # last_result.
             with sessions_lock():
-                state = load_state()
-                target = next((s for s in state.sessions if s.id == sid), None)
-                if target is not None:
-                    target.last_result = completion_result.model_dump(mode="json")
-                    target.status = SessionStatus.COMPLETED
-                    save_state(state)
+                _complete_session_via_door(
+                    sid=sid, payload=completion_result.model_dump(mode="json")
+                )
             _record_orchestrator_event(
                 OrchestratorEventType.SESSION_COMPLETED,
                 {
@@ -481,19 +483,18 @@ class LocalExecutor:
                 details=unexpected_error_detail,
             )
             with sessions_lock():
-                state = load_state()
-                target = next((s for s in state.sessions if s.id == sid), None)
-                if target is not None and target.status != SessionStatus.COMPLETED:
-                    target.last_result = make_blocked(
+                _complete_session_via_door(
+                    sid=sid,
+                    payload=make_blocked(
                         ticket_id=task.ticket_id,
                         worktree=worktree,
                         reason=UNEXPECTED_ERROR,
                         details=append_diagnostics_pointer(
                             unexpected_error_detail, session_id=sid
                         ),
-                    ).model_dump(mode="json")
-                    target.status = SessionStatus.COMPLETED
-                    save_state(state)
+                    ).model_dump(mode="json"),
+                    guard_already_completed=True,
+                )
             raise
 
         return sid
@@ -528,6 +529,52 @@ def _persist_aider_runtime_error_diagnostics(
     )
 
 
+def _complete_session_via_door(
+    sid: str,
+    payload: dict[str, Any],
+    *,
+    guard_already_completed: bool = False,
+) -> None:
+    """Route SID's terminal write through the door (RFC 0012 D-A1/D-S3,
+    source=EXECUTOR_DIRECT), then transition status to COMPLETED.
+
+    Caller MUST already hold sessions_lock(). Shared by all four
+    LocalExecutor/CodexExecutor direct-write sites (#1458) so the
+    door-call + not-found-catch + status-transition shape isn't
+    duplicated four times.
+
+    Session-not-found (EmitSessionNotFoundError) is logged at debug and
+    swallowed -- preserves the pre-migration silent no-op when SID has no
+    matching session (R4).
+
+    guard_already_completed=True re-checks SID's status before the door
+    call and skips entirely if already COMPLETED -- the exception-handler
+    idempotency guard the two ``except Exception:`` sites carried before
+    this migration (R1). The two main-path sites (each the session's
+    first and only completion write) pass the default False.
+
+    Door refusal (a terminal result already recorded by another writer)
+    is a normal, non-raising return -- the status transition below still
+    runs regardless (R5): refusal affects only the last_result write, not
+    the executor's status/event bookkeeping.
+    """
+    if guard_already_completed:
+        state = load_state()
+        target = next((s for s in state.sessions if s.id == sid), None)
+        if target is None or target.status == SessionStatus.COMPLETED:
+            return
+    try:
+        emit_result_locked(payload, sid, source=LastResultSource.EXECUTOR_DIRECT)
+    except EmitSessionNotFoundError:
+        _log.debug("executor_direct emit skipped: session %s not found", sid)
+        return
+    state = load_state()
+    target = next((s for s in state.sessions if s.id == sid), None)
+    if target is not None:
+        target.status = SessionStatus.COMPLETED
+        save_state(state)
+
+
 class CodexExecutor:
     """StageExecutor backed by prompt-driven ``codex exec`` reviewers (#1236).
 
@@ -541,7 +588,9 @@ class CodexExecutor:
 
     Like LocalExecutor, spawn() is synchronous and bypasses persist_last_result:
     the SESSION_COMPLETED event carries no 'stdout' key, so dispatch consumes the
-    last_result written here as-is. Appropriate only for max_parallel=1 lanes.
+    last_result written here via the door (``emit_result_locked``,
+    source=EXECUTOR_DIRECT — RFC 0012 A2, #1458) as-is. Appropriate only for
+    max_parallel=1 lanes.
     """
 
     def __init__(
@@ -602,8 +651,9 @@ class CodexExecutor:
 
         try:
             if result is None:
-                # Step 3: Run the per-role review pass (delegated to codex_review).
-                result, verdict = run_review(
+                # Step 3: Run the per-role review pass + bounded fix loop
+                # (delegated to codex_fix_loop, #1392).
+                result, verdict = run_review_with_fix_loop(
                     runner=self._runner,
                     task=task,
                     worktree=worktree,
@@ -615,12 +665,9 @@ class CodexExecutor:
 
             # Step 4: Persist result under sessions_lock.
             with sessions_lock():
-                state = load_state()
-                target = next((s for s in state.sessions if s.id == sid), None)
-                if target is not None:
-                    target.last_result = result.model_dump(mode="json")
-                    target.status = SessionStatus.COMPLETED
-                    save_state(state)
+                _complete_session_via_door(
+                    sid=sid, payload=result.model_dump(mode="json")
+                )
 
             # Step 4b: Post the consolidated verdict as an issue comment
             # (best-effort). Runs after save_state so a retry on save_state
@@ -650,17 +697,16 @@ class CodexExecutor:
             # SESSION_COMPLETED is NOT emitted; dispatch's exception handler
             # reverts the task to PENDING, which is the correct recovery path.
             with sessions_lock():
-                state = load_state()
-                target = next((s for s in state.sessions if s.id == sid), None)
-                if target is not None and target.status != SessionStatus.COMPLETED:
-                    target.last_result = make_blocked(
+                _complete_session_via_door(
+                    sid=sid,
+                    payload=make_blocked(
                         ticket_id=task.ticket_id,
                         worktree=worktree,
                         reason=UNEXPECTED_ERROR,
                         stage_reached=STAGE3_REVIEW,
-                    ).model_dump(mode="json")
-                    target.status = SessionStatus.COMPLETED
-                    save_state(state)
+                    ).model_dump(mode="json"),
+                    guard_already_completed=True,
+                )
             raise
 
         return sid

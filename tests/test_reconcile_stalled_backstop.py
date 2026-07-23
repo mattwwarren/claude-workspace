@@ -95,8 +95,8 @@ def test_stalled_veto_suppresses_park_when_transcript_fresh(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     transcript = _write_idle_transcript(home, worktree)
-    # 5 minutes stale — well under the 15-min PLAN-stage floor -> LIVE.
-    fresh_ts = (now - timedelta(minutes=5)).timestamp()
+    # 6 minutes stale -- well under the 15-min PLAN-stage floor -> LIVE.
+    fresh_ts = (now - timedelta(minutes=6)).timestamp()
     os.utime(str(transcript), (fresh_ts, fresh_ts))
 
     candidates = _detect_stalled_candidates(
@@ -2266,10 +2266,17 @@ class TestActOnStalledCandidatesPerLane:
 
 
 def _write_fresh_transcript(home: Path, worktree: Path, now: datetime) -> None:
-    """Write a transcript for *worktree* stamped 5 min stale (LIVE at PLAN)."""
+    """Write a transcript for *worktree* stamped 6 min stale (LIVE at PLAN)."""
     transcript = _write_idle_transcript(home, worktree)
-    fresh_ts = (now - timedelta(minutes=5)).timestamp()
+    fresh_ts = (now - timedelta(minutes=6)).timestamp()
     os.utime(str(transcript), (fresh_ts, fresh_ts))
+
+
+def _write_active_transcript(home: Path, worktree: Path, now: datetime) -> None:
+    """Write a transcript inside the 120s active-write hard grace (#1471)."""
+    transcript = _write_idle_transcript(home, worktree)
+    active_ts = (now - timedelta(seconds=45)).timestamp()
+    os.utime(str(transcript), (active_ts, active_ts))
 
 
 def test_liveness_veto_candidate_stamps_incrementing_veto_count(
@@ -2370,6 +2377,91 @@ def test_liveness_veto_candidate_returns_none_once_cap_reached(
     )
     assert cand is None
     assert exhausted is True
+
+
+def test_liveness_veto_candidate_active_write_ignores_veto_cap(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An actively-writing session inside the 120s hard grace still vetoes
+    at the old cap, and does not increment the bounded broad-LIVE counter (#1471)."""
+    from cw.reconcile import ProposedAction
+    from cw.reconcile.stalled import _liveness_veto_candidate
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / "wt-veto-active-cap"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    sess = _mk_headless_daemon_session("veto-active-cap-1", worktree, started_at)
+    sess.consecutive_park_vetoes = 2
+    _write_active_transcript(home, worktree, now)
+    task = TicketTask(
+        ticket_id="veto-active-cap-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="veto-active-cap-1",
+        stage=Stage.PLAN,
+    )
+
+    cand, exhausted = _liveness_veto_candidate(
+        sess,
+        task,
+        "veto-active-cap-1",
+        3700.0,
+        now=now,
+        config=OrchestratorConfig(park_veto_cap=2),
+        reap_reason=ReapReason.WALL_CLOCK_BUDGET,
+    )
+
+    assert cand is not None
+    assert cand.proposed_action == ProposedAction.PARK_VETOED
+    assert cand.new_veto_count == 2
+    assert exhausted is False
+
+
+def test_liveness_veto_candidate_active_write_stops_at_hard_elapsed_cap(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Active-write hard grace is bounded so continuously-writing livelock
+    still falls through once the caller-provided hard cap is reached (#1471)."""
+    from cw.reconcile.stalled import _liveness_veto_candidate
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / "wt-veto-active-hard-cap"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 2, 0, 0, tzinfo=UTC)
+    sess = _mk_headless_daemon_session("veto-active-hard-cap-1", worktree, started_at)
+    _write_active_transcript(home, worktree, now)
+    task = TicketTask(
+        ticket_id="veto-active-hard-cap-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="veto-active-hard-cap-1",
+        stage=Stage.PLAN,
+    )
+
+    cand, exhausted = _liveness_veto_candidate(
+        sess,
+        task,
+        "veto-active-hard-cap-1",
+        7200.0,
+        now=now,
+        config=OrchestratorConfig(park_veto_cap=2),
+        reap_reason=ReapReason.WALL_CLOCK_BUDGET,
+        hard_elapsed_cap_seconds=7200.0,
+    )
+
+    assert cand is None
+    assert exhausted is False
 
 
 def test_liveness_veto_candidate_never_live_returns_false_not_exhausted(
@@ -2620,6 +2712,55 @@ def test_stalled_veto_cap_end_to_end_via_revert_stalled_headless_sessions(
     assert t.status == QueueItemStatus.BLOCKED_ON_USER
 
 
+def test_stalled_active_write_hard_grace_end_to_end_past_veto_cap(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Full multi-tick regression for #1471: fresh transcript output inside
+    the active-write window must keep vetoing even after the old cap is reached."""
+    monkeypatch.setattr(
+        "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
+    )
+    monkeypatch.setattr("cw.reconcile._shared.remove_worktree", lambda *_a, **_kw: None)
+
+    from cw.reconcile import DEFAULT_STALLED_RETRY_CAP
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    worktree = tmp_path / "wt-veto-active-e2e"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    sess = _mk_headless_daemon_session("veto-active-e2e-1", worktree, started_at)
+    sess.consecutive_park_vetoes = 2
+    state = CwState(sessions=[sess])
+    save_state(state)
+    _write_active_transcript(home, worktree, now)
+    task = TicketTask(
+        ticket_id="veto-active-e2e-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="veto-active-e2e-1",
+        stage=Stage.PLAN,
+        attempts=DEFAULT_STALLED_RETRY_CAP,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    config = OrchestratorConfig(park_veto_cap=2)
+
+    for _ in range(3):
+        revert_stalled_headless_sessions(state, now=now, config=config)
+        assert state.sessions[0].status == SessionStatus.ACTIVE
+        assert state.sessions[0].consecutive_park_vetoes == 2
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "veto-active-e2e-1")
+        assert t.status == QueueItemStatus.RUNNING
+
+
 @pytest.mark.parametrize(
     ("attempts", "expected_paused_status"),
     [
@@ -2651,6 +2792,10 @@ def test_veto_cap_exhaustion_emits_immediate_needs_attention(
     push_calls: list[object] = []
     monkeypatch.setattr(
         "cw.reconcile._deps.fire_push_notification",
+        lambda *a, **kw: push_calls.append((a, kw)),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile.stalled._deps.fire_push_notification",
         lambda *a, **kw: push_calls.append((a, kw)),
     )
     removed: list[object] = []
@@ -2735,6 +2880,10 @@ def test_wall_clock_veto_escalation_fires_once_not_every_tick(
         "cw.reconcile._deps.fire_push_notification",
         lambda *a, **kw: push_calls.append((a, kw)),
     )
+    monkeypatch.setattr(
+        "cw.reconcile.stalled._deps.fire_push_notification",
+        lambda *a, **kw: push_calls.append((a, kw)),
+    )
 
     home = tmp_path / "home"
     home.mkdir()
@@ -2759,13 +2908,24 @@ def test_wall_clock_veto_escalation_fires_once_not_every_tick(
     save_dev_queue(DevQueueStore(tasks=[task]))
     config = OrchestratorConfig(park_veto_cap=2)
 
+    from cw.reconcile import _act_on_stalled_candidates, _detect_stalled_candidates
+
     # Tick 1: count == cap this tick -> first exhaustion -> escalates.
-    revert_stalled_headless_sessions(state, now=now, config=config)
-    # Tick 2: session still LIVE, still SIGNAL_ONLY, still over budget -- must
-    # NOT re-fire the escalation.
-    revert_stalled_headless_sessions(state, now=now, config=config)
-    # Tick 3: same, for good measure -- the guard must hold, not just once.
-    revert_stalled_headless_sessions(state, now=now, config=config)
+    # Tick 2/3: session still LIVE, still SIGNAL_ONLY, still over budget -- must
+    # NOT re-fire the escalation. Use detect/act directly so the assertion is
+    # not diverted by the wrapper environment-dependent gh check.
+    for _ in range(3):
+        candidates = _detect_stalled_candidates(
+            state, now=now, config=config, task_by_ticket={task.ticket_id: task}
+        )
+        _act_on_stalled_candidates(
+            state,
+            candidates,
+            now=now,
+            config=config,
+            merged_ticket_ids=frozenset(),
+            gh_blocked_ticket_ids=frozenset(),
+        )
 
     events = read_events(
         consumer="test-veto-escalation-once-1",

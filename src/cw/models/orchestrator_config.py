@@ -369,6 +369,16 @@ class OrchestratorConfig(BaseModel):
     # after budget exhaustion" arithmetic behind the 37-veto runaway that
     # motivated this bound. Reset for free per episode via a fresh Session.
     park_veto_cap: int = 2
+    # Maximum consecutive sentinel-stage-mismatch vetoes the phantom sweep will
+    # grant a single already_refused session before it lets the pending
+    # CRASH_COMPLETE fall-through proceed anyway (closes #1449). Deliberately
+    # small, mirroring park_veto_cap: this counts ONLY vetoes that fire while the
+    # transcript is still LIVE (staleness below TRANSCRIPT_LIVENESS_WINDOW_SECONDS)
+    # on a session whose most recent tick refused a stage-mismatched sentinel, so
+    # 2 consecutive live vetoes already reproduce the #1281 "would have crashed
+    # two sweeps after the refusal" window that motivated this bound. Reset for
+    # free per episode via a fresh Session.
+    sentinel_mismatch_veto_cap: int = 2
     # RFC 0010 anomaly layer (#1201) — review-recipe repeat-fire burst detector.
     # A review recipe that keeps firing on the same PR across successive
     # attention_state episodes without the PR ever clearing is thrashing.

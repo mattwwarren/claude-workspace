@@ -57,6 +57,14 @@ if TYPE_CHECKING:
     from cw.models import CwState, Session, TicketTask
 
 
+# paused_status written to SESSION_NEEDS_ATTENTION when the phantom sweep's
+# sentinel-stage-mismatch veto cap is exhausted on a still-LIVE already_refused
+# session and the pending CRASH_COMPLETE proceeds (#1449). Defined locally (not
+# in _shared.py, which is outside this ticket's file set) — mirrors the
+# retry-cap park's own escalation reason. See docs/events.md.
+_SENTINEL_MISMATCH_VETO_CAP_EXHAUSTED_REASON = "sentinel_mismatch_veto_cap_exhausted"
+
+
 def _phantom_advance_sentinel_candidate(
     session: Session,
     ticket_id: str | None,
@@ -101,39 +109,70 @@ def _sentinel_mismatch_veto_candidate(
     lane: str,
     *,
     now: datetime,
-) -> ReapCandidate | None:
-    """Return a SENTINEL_STAGE_MISMATCH_VETOED candidate, or None (#1281).
+    config: OrchestratorConfig,
+) -> tuple[ReapCandidate | None, bool, float | None]:
+    """Return ``(veto_candidate_or_None, cap_exhausted, stale_seconds)`` for an
+    already_refused phantom (#1281, bounded by #1449).
 
     Guards the already_refused latch's fall-through to CRASH_COMPLETE in
     _detect_phantom_candidates: a session whose most recent tick refused a
     stage-mismatched sentinel (#1149) must not be crash-completed while
     its transcript is still advancing -- the #1281 incident killed a
     session 56 seconds before its valid sentinel landed. Mirrors
-    stalled.py's _liveness_veto_candidate (#976) architecture (a
-    side-effect-only ReapCandidate consumed identically by the act
-    phase), but checks the plain _transcript_age_seconds <
+    stalled.py's _liveness_veto_candidate (#976, #1445) architecture,
+    but checks the plain _transcript_age_seconds <
     TRANSCRIPT_LIVENESS_WINDOW_SECONDS window instead of the per-stage
-    liveness-bucket ladder: this only ever fires once per
-    already-refused phantom (not repeatedly across a wall-clock budget),
-    so the coarser check needs no Stage/OrchestratorConfig threading into
-    the phantom detect phase.
+    liveness-bucket ladder.
 
-    Fail-toward-crash: a session whose transcript cannot be located
-    (_transcript_age_seconds returns None) returns None so the caller
-    falls through to its pre-existing CRASH_COMPLETE construction --
-    unchanged behavior when no positive liveness evidence exists.
+    The veto is bounded (#1449): once ``session.consecutive_sentinel_mismatch_vetoes``
+    reaches ``config.sentinel_mismatch_veto_cap`` the pending crash proceeds. The
+    three return shapes mirror ``_liveness_veto_candidate`` exactly:
+
+    - ``(candidate, False, stale_seconds)`` — LIVE and under the cap: veto, with
+      the candidate's ``new_veto_count`` set to
+      ``consecutive_sentinel_mismatch_vetoes + 1``.
+    - ``(None, True, stale_seconds)`` — LIVE and the count is *exactly* at the cap
+      this tick (the first tick cap-exhaustion is observed): fall through and
+      escalate. The caller threads ``stale_seconds`` from this exact tuple — the
+      value the cap decision was made on — into the CRASH_COMPLETE fallthrough's
+      ``stale_minutes`` instead of re-reading the transcript (#1449 fix cycle 2:
+      avoids both a duplicate filesystem read and a TOCTOU window between the
+      decision and the value reported in the escalation payload).
+    - ``(None, False, None)`` — either not LIVE / transcript unlocatable
+      (fail-toward-crash: an ordinary crash, NOT a cap-fire), OR LIVE but
+      *already* past the cap (``> cap``, not ``==``): a still-LIVE session that
+      already escalated (its counter bumped to ``cap + 1`` by the act phase)
+      reads back ``> cap`` here — edge-triggering the escalation rather than
+      re-firing it every tick the session stays LIVE. ``stale_seconds`` is
+      deliberately dropped (not threaded) in this sub-case too (#1449 fix cycle
+      3): only the tick that actually fires the cap-exhaustion escalation may
+      populate ``stale_minutes`` on the resulting candidate — a still-LIVE
+      already-escalated session must never carry a populated ``stale_minutes``
+      on a ``veto_cap_exhausted=False`` candidate, mirroring the ``cap_exhausted``
+      boolean's own two-source-of-truth requirement above it.
+
+    See GitHub #1281, #1449.
     """
     stale_seconds = _transcript_age_seconds(session, now)
     if stale_seconds is None or stale_seconds >= TRANSCRIPT_LIVENESS_WINDOW_SECONDS:
-        return None
-    return ReapCandidate(
-        session_id=session.id,
-        proposed_action=ProposedAction.SENTINEL_STAGE_MISMATCH_VETOED,
-        ticket_id=ticket_id,
-        lane=lane,
-        client=session.client,
-        worktree_path=session.worktree_path,
-        stale_minutes=stale_seconds / 60.0,
+        return None, False, None
+    cap = config.sentinel_mismatch_veto_cap
+    if session.consecutive_sentinel_mismatch_vetoes >= cap:
+        cap_exhausted = session.consecutive_sentinel_mismatch_vetoes == cap
+        return None, cap_exhausted, stale_seconds if cap_exhausted else None
+    return (
+        ReapCandidate(
+            session_id=session.id,
+            proposed_action=ProposedAction.SENTINEL_STAGE_MISMATCH_VETOED,
+            ticket_id=ticket_id,
+            lane=lane,
+            client=session.client,
+            worktree_path=session.worktree_path,
+            stale_minutes=stale_seconds / 60.0,
+            new_veto_count=session.consecutive_sentinel_mismatch_vetoes + 1,
+        ),
+        False,
+        stale_seconds,
     )
 
 
@@ -143,6 +182,7 @@ def _detect_phantom_candidates(
     task_by_ticket: dict[str, TicketTask] | None = None,
     *,
     now: datetime,
+    config: OrchestratorConfig | None = None,
 ) -> list[ReapCandidate]:
     """Pure classification phase for phantom sessions.
 
@@ -155,7 +195,14 @@ def _detect_phantom_candidates(
 
     now is used by the already_refused liveness veto (#1281) — see
     _sentinel_mismatch_veto_candidate.
+
+    config bounds that veto (#1449): its ``sentinel_mismatch_veto_cap`` caps how
+    many consecutive LIVE vetoes a single already_refused session may collect
+    before the pending CRASH_COMPLETE proceeds. Defaults to a fresh
+    OrchestratorConfig() (cap=2) — a pure read, no I/O, preserving detect-phase
+    purity — so all existing callers keep today's behavior.
     """
+    effective_config = config if config is not None else OrchestratorConfig()
     _task_by_ticket = task_by_ticket or {}
     candidates: list[ReapCandidate] = []
     for session in state.sessions:
@@ -209,6 +256,19 @@ def _detect_phantom_candidates(
             == _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
             or session.last_result.get(_SENTINEL_ADVANCE_REFUSED_KEY) is True
         )
+        # #1449: stamped True on the CRASH_COMPLETE fall-through below when the
+        # veto declined *because the cap was reached* (as opposed to the
+        # transcript being genuinely stale). Reset per-iteration.
+        veto_cap_exhausted = False
+        # #1449: the transcript staleness _sentinel_mismatch_veto_candidate used
+        # to make the cap-exhaustion call, threaded through so the CRASH_COMPLETE
+        # fallthrough's stale_minutes reports the exact value the decision was
+        # made on -- never re-read (fix cycle 2: avoids both a duplicate
+        # filesystem read and a TOCTOU window between the decision and the value
+        # reported in the escalation payload). Non-None if-and-only-if
+        # veto_cap_exhausted is True this tick (fix cycle 3: the helper itself
+        # enforces this pairing -- see _sentinel_mismatch_veto_candidate).
+        veto_stale_seconds: float | None = None
         if session.origin is SessionOrigin.DAEMON and not already_refused:
             advance = _phantom_advance_sentinel_candidate(session, ticket_id, lane)
             if advance is not None:
@@ -223,7 +283,11 @@ def _detect_phantom_candidates(
             # after the refusal that burned the task's final attempt). Veto the
             # crash while the transcript is fresh -- see
             # _sentinel_mismatch_veto_candidate.
-            veto = _sentinel_mismatch_veto_candidate(session, ticket_id, lane, now=now)
+            veto, veto_cap_exhausted, veto_stale_seconds = (
+                _sentinel_mismatch_veto_candidate(
+                    session, ticket_id, lane, now=now, config=effective_config
+                )
+            )
             if veto is not None:
                 candidates.append(veto)
                 continue
@@ -260,6 +324,23 @@ def _detect_phantom_candidates(
                 lane=lane,
                 client=session.client,
                 worktree_path=session.worktree_path,
+                # #1449: when the sentinel-mismatch veto declined because the cap
+                # was reached on a still-LIVE session, route this crash to an
+                # immediate operator escalation under SIGNAL_ONLY (see
+                # _route_phantom_by_policy) and stamp the post-escalation counter
+                # value (cap + 1) so the act phase persists it before the veto is
+                # re-checked next tick — edge-triggering the escalation.
+                veto_cap_exhausted=veto_cap_exhausted,
+                new_veto_count=(
+                    effective_config.sentinel_mismatch_veto_cap + 1
+                    if veto_cap_exhausted
+                    else 0
+                ),
+                stale_minutes=(
+                    veto_stale_seconds / 60.0
+                    if veto_stale_seconds is not None
+                    else None
+                ),
             )
         )
     return candidates
@@ -355,13 +436,22 @@ def _route_phantom_by_policy(
     config: OrchestratorConfig | None,
     merged_ticket_ids: frozenset[str],
     gh_blocked_ticket_ids: frozenset[str],
-) -> list[ReapCandidate]:
+) -> tuple[list[ReapCandidate], list[ReapCandidate]]:
     """Apply per-lane reap-policy routing to clean CRASH_COMPLETE candidates.
 
     Under ``ReapPolicy.SIGNAL_ONLY`` a clean (non-dirty) CRASH_COMPLETE candidate
     is routed to BLOCKED_ON_USER instead of passing through. Dirty phantoms and
     merged / gh-blocked tickets always pass through (#637). SALVAGE_COMPLETION
-    candidates are unaffected. Returns the surviving "auto" candidates.
+    candidates are unaffected.
+
+    Returns ``(auto_candidates, escalate_candidates)``. ``auto_candidates`` are
+    the survivors that pass through to the normal act phase. ``escalate_candidates``
+    are the SIGNAL_ONLY-rerouted CRASH_COMPLETE candidates whose sentinel-mismatch
+    veto was *cap-exhausted* (#1449): the task still routes silently to
+    BLOCKED_ON_USER via the existing mutation, but they additionally drive an
+    immediate session.needs_attention in :func:`_act_on_phantom_candidates` so a
+    still-live already_refused worker that has exhausted its veto budget surfaces
+    to the operator this same tick (mirrors stalled.py's wall-clock escalation).
     """
     effective_config = config if config is not None else OrchestratorConfig()
     clients = _deps.load_effective_clients()
@@ -371,6 +461,7 @@ def _route_phantom_by_policy(
     # Dirty phantoms always go to BLOCKED_ON_USER regardless of policy.
     signal_mutations: dict[str, QueueItemStatus] = {}
     auto_candidates: list[ReapCandidate] = []
+    escalate_candidates: list[ReapCandidate] = []
     for c in candidates:
         if c.proposed_action == ProposedAction.CRASH_COMPLETE and not c.worktree_dirty:
             if c.ticket_id and (
@@ -382,6 +473,11 @@ def _route_phantom_by_policy(
             if policy is ReapPolicy.SIGNAL_ONLY:
                 if c.ticket_id:
                     signal_mutations[c.ticket_id] = QueueItemStatus.BLOCKED_ON_USER
+                # #1449: a cap-exhausted veto on a still-live already_refused
+                # session escalates to the operator this tick (parity with the
+                # retry-cap park) instead of a silent BLOCKED_ON_USER park.
+                if c.veto_cap_exhausted:
+                    escalate_candidates.append(c)
             else:
                 auto_candidates.append(c)
         else:
@@ -392,7 +488,7 @@ def _route_phantom_by_policy(
             clear_session_id=set(),
             disposition=ReapReason.PHANTOM_SURFACE.value,
         )
-    return auto_candidates
+    return auto_candidates, escalate_candidates
 
 
 def _emit_phantom_terminal_events(
@@ -678,6 +774,48 @@ def _emit_phantom_routed_events(
         )
 
 
+def _emit_sentinel_mismatch_veto_escalation_events(
+    session_by_id: dict[str, Session],
+    escalate_candidates: list[ReapCandidate],
+) -> None:
+    """Emit SESSION_NEEDS_ATTENTION + push for cap-exhausted sentinel-mismatch
+    vetoes (#1449).
+
+    Reuses phantom.py's own gh-blocked SESSION_NEEDS_ATTENTION payload shape (see
+    _emit_phantom_terminal_events) with ``paused_status``
+    =_SENTINEL_MISMATCH_VETO_CAP_EXHAUSTED_REASON plus ``stale_minutes`` /
+    ``new_veto_count`` — the task already routed silently to BLOCKED_ON_USER via
+    :func:`_route_phantom_by_policy`'s SIGNAL_ONLY mutation, so only the operator
+    notification is added here (parity with the retry-cap park's needs_attention
+    emission; no daemon-stop / worktree removal). Edge-triggered: the act phase
+    already persisted each candidate's post-cap counter bump before this runs, so
+    a still-LIVE session that already escalated will not produce a new escalate
+    candidate on a later tick — see ``_sentinel_mismatch_veto_candidate``.
+    """
+    for candidate in escalate_candidates:
+        session = session_by_id[candidate.session_id]
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": session.id,
+                "session_name": session.name,
+                "client": session.client,
+                "ticket_id": candidate.ticket_id,
+                "claude_session_id": session.claude_session_id,
+                "paused_status": _SENTINEL_MISMATCH_VETO_CAP_EXHAUSTED_REASON,
+                "breadcrumbs": str(candidate.worktree_path)
+                if candidate.worktree_path
+                else "",
+                "crashed": False,
+                "lane": candidate.lane,
+                "stale_minutes": candidate.stale_minutes,
+                "new_veto_count": candidate.new_veto_count,
+            },
+            correlation_id=candidate.ticket_id,
+        )
+        _deps.fire_push_notification(session.name, session.client)
+
+
 def _act_on_phantom_candidates(
     state: CwState,
     candidates: list[ReapCandidate],
@@ -709,13 +847,13 @@ def _act_on_phantom_candidates(
     # Compute before policy routing: signal-only candidates are dropped from the
     # auto-reap list but still carry their usage_limit_detected flag (#804).
     usage_limited = any(c.usage_limit_detected for c in candidates)
-    candidates = _route_phantom_by_policy(
+    candidates, escalate_candidates = _route_phantom_by_policy(
         candidates,
         config=config,
         merged_ticket_ids=merged_ticket_ids,
         gh_blocked_ticket_ids=gh_blocked_ticket_ids,
     )
-    if not candidates:
+    if not candidates and not escalate_candidates:
         return [], [], usage_limited, [], {}, []
 
     session_by_id = {s.id: s for s in state.sessions}
@@ -745,10 +883,16 @@ def _act_on_phantom_candidates(
     salvaged_result_by_ticket: dict[str, AutoDevResult] = {}
     pending_events: list[dict[str, object]] = []
 
-    # SENTINEL_STAGE_MISMATCH_VETOED: side-effect-only -- emit
-    # session.sentinel_stage_mismatch_vetoed, mutate nothing (#1281). Mirrors
-    # stalled.py's PARK_VETOED loop (#976).
+    # SENTINEL_STAGE_MISMATCH_VETOED: emit session.sentinel_stage_mismatch_vetoed
+    # AND persist the incremented veto count onto the session so the veto is
+    # bounded across ticks (#1449, was zero-mutation under #1281). The count is
+    # the only state this action mutates; the task stays RUNNING and the session
+    # stays ACTIVE/IDLE. The save_state(state) below persists it. Mirrors
+    # stalled.py's PARK_VETOED loop (#976, #1445).
     for candidate in veto_candidates:
+        session_by_id[
+            candidate.session_id
+        ].consecutive_sentinel_mismatch_vetoes = candidate.new_veto_count
         record_event(
             OrchestratorEventType.SESSION_SENTINEL_STAGE_MISMATCH_VETOED,
             {
@@ -756,9 +900,21 @@ def _act_on_phantom_candidates(
                 "client": candidate.client,
                 "session_id": candidate.session_id,
                 "stale_minutes": candidate.stale_minutes,
+                "new_veto_count": candidate.new_veto_count,
             },
             correlation_id=candidate.ticket_id,
         )
+
+    # Sentinel-mismatch veto-cap escalation (#1449): persist the bumped counter
+    # here, BEFORE save_state below, so the next tick reads it back as
+    # > sentinel_mismatch_veto_cap and _sentinel_mismatch_veto_candidate's
+    # exact-cap check no longer reports exhaustion. Without this the SIGNAL_ONLY
+    # escalation -- which deliberately never stops the daemon or terminates the
+    # session -- would re-fire every tick the session stays LIVE past the cap.
+    for candidate in escalate_candidates:
+        session_by_id[
+            candidate.session_id
+        ].consecutive_sentinel_mismatch_vetoes = candidate.new_veto_count
 
     _apply_phantom_salvage_mutations(
         session_by_id,
@@ -860,6 +1016,7 @@ def _act_on_phantom_candidates(
         gh_blocked_crash_candidates,
     )
     _emit_phantom_routed_events(session_by_id, routed_candidates)
+    _emit_sentinel_mismatch_veto_escalation_events(session_by_id, escalate_candidates)
 
     return (
         ticket_ids_to_revert,
