@@ -120,7 +120,7 @@ Dispatch shape depends on mode (see issues #175 / #176 in claude-workspace for t
 REVIEW_FINDINGS>>>
 ```
 
-`NO_ISSUES` (a clean review) maps to `status="ok", findings=[]`. `evidence` MUST be a verbatim substring of the diff text at the claimed lines — `cw review consolidate` (Checkpoint 3a) rejects any finding whose evidence doesn't literally appear there. This block, plus the Friction Protocol and Health Check blocks, is the reviewer's entire structured output — this instruction **supersedes** the reviewer agent spec's own prose "## Output Format" section (MUST_FIX/SHOULD_FIX headings). The Codex adapter (#1236) applies the same override — see `codex_review.py`'s `_OUTPUT_INSTRUCTIONS`, which inlines each agent spec verbatim then appends its own final JSON-schema instruction last so it takes precedence.
+`NO_ISSUES` (a clean review) maps to `status="ok", findings=[]`. `evidence` MUST be a verbatim substring of the diff text at the claimed lines — `cw review consolidate` (Checkpoint 3a) rejects any finding whose evidence doesn't literally appear there. This block, plus the Friction Protocol and Health Check blocks, is the reviewer's entire structured output — this instruction **supersedes** the reviewer agent spec's own prose "## Output Format" section (MUST_FIX/SHOULD_FIX headings). The Codex adapter (#1236) applies the same override — see `cw.codex_review._context`'s `_OUTPUT_INSTRUCTIONS`, which inlines each agent spec verbatim then appends its own final JSON-schema instruction last so it takes precedence.
 
 ### Checkpoint 3a: Adjudicate every finding
 
