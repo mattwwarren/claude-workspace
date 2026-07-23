@@ -5,14 +5,17 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import click
 from pydantic import ValidationError
 
-from cw.auto_dev_result import AutoDevResult
+from cw.auto_dev_result import AutoDevResult, BlockedResult
 from cw.config import load_state, save_state, sessions_lock
+from cw.exceptions import EmitSessionNotFoundError, EmitValidationError
+from cw.models import LastResultSource
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +171,153 @@ def _resolve_emit_session_id(session_id: str | None) -> str:
     return ctx_session_id
 
 
+def has_terminal_result(last_result: dict[str, Any] | None) -> bool:
+    """True when LAST_RESULT is an already-emitted terminal sentinel.
+
+    A real AUTO_DEV sentinel dump always carries a ``"status"`` key; the park
+    markers (``silently_idle``/``needs_salvage``) carry ``"paused_status"`` and
+    no ``"status"``. Key presence -- not value -- is the structural discriminant,
+    so a parked session is correctly NOT treated as terminal and the idle
+    watchdog re-checks it for a late terminal sentinel. See #418, #497.
+
+    The door (``emit_result_locked``) uses this to arbitrate first-writer-wins
+    (RFC 0012 S2, #1456); ``cw.reconcile._shared._has_terminal_sentinel``
+    delegates here so both layers share one predicate.
+    """
+    return isinstance(last_result, dict) and "status" in last_result
+
+
+@dataclass(frozen=True)
+class EmitOutcome:
+    """Result of an emit_result_locked() call: either a successful write
+    (``result`` non-None, ``refused=False``) or a refusal because a terminal
+    result was already recorded (``result=None``, ``refused=True``,
+    ``existing_result``/``existing_source`` populated).
+
+    Carries exactly what the CLI/log line need to render the current
+    'Recorded result for session ...' stdout line and the
+    'cw result emit: session=... prior_status=... new_status=...' log line.
+    """
+
+    session_id: str
+    result: AutoDevResult | BlockedResult | None
+    prior_status: str | None
+    refused: bool = False
+    existing_result: dict[str, Any] | None = None
+    existing_source: LastResultSource | None = None
+
+
+def _validate_harvest_payload(payload: dict[str, Any]) -> AutoDevResult | BlockedResult:
+    """Validate PAYLOAD against the discriminated AutoDevResult/BlockedResult union.
+
+    RFC 0012 A1 (#1457): the Stop-hook harvest write pushes both shapes a
+    parsed sentinel can take -- ``parse_stdout`` returns either a full
+    ``AutoDevResult`` or a parser-synthesized ``BlockedResult`` (issued on a
+    §6 failure mode, e.g. cross-field-invariant failure). The two shapes are
+    told apart structurally, not by a schema field: a genuine producer-emitted
+    ``AutoDevResult`` with ``status=blocked`` always carries ``schema_version``
+    (and every other AutoDevResult field); a synthetic ``BlockedResult`` never
+    does. So ``status == "blocked"`` with no ``schema_version`` key routes to
+    ``BlockedResult``; everything else (including a real blocked AutoDevResult)
+    routes to ``AutoDevResult`` as before.
+    """
+    if payload.get("status") == "blocked" and "schema_version" not in payload:
+        try:
+            return BlockedResult.model_validate(payload)
+        except ValidationError as exc:
+            msg = "BlockedResult payload failed validation"
+            raise EmitValidationError(msg, errors=_format_errors(exc)) from exc
+    try:
+        return AutoDevResult.model_validate(payload)
+    except ValidationError as exc:
+        msg = "AutoDevResult payload failed validation"
+        raise EmitValidationError(msg, errors=_format_errors(exc)) from exc
+
+
+def emit_result_locked(
+    payload: dict[str, Any], session_id: str, *, source: LastResultSource
+) -> EmitOutcome:
+    """Validate PAYLOAD and record it onto SESSION_ID's last_result.
+
+    Caller MUST already hold sessions_lock(). Extracted from emit_result()
+    so an in-process caller that has already acquired the sessions lock can
+    invoke the mutation directly without a second acquisition of the same
+    flock-based lock, which would self-deadlock (mirrors
+    cw.dev_queue.approval._approve_ticket_locked, GitHub #1065).
+
+    Emits no event and performs no task routing -- write-only, matching the
+    original cw result emit CLI contract byte-for-byte (RFC 0012 D-A1).
+
+    Refusing to overwrite an already-terminal last_result (RFC 0012 S2,
+    #1456) is a normal, non-raising return -- EmitOutcome(refused=True,
+    result=None, ...) -- not one of the two exceptions below.
+
+    Validation is discriminated (RFC 0012 A1, #1457): PAYLOAD is checked
+    against ``AutoDevResult`` or, for the parser-synthesized blocked shape
+    (``status=blocked`` with no ``schema_version``), ``BlockedResult`` --
+    see :func:`_validate_harvest_payload`.
+
+    Raises:
+        EmitValidationError: if PAYLOAD fails validation against the
+            discriminated AutoDevResult/BlockedResult union.
+        EmitSessionNotFoundError: if SESSION_ID has no matching session.
+    """
+    result_obj = _validate_harvest_payload(payload)
+
+    state = load_state()
+    session = state.find_by_name_or_id(session_id)
+    if session is None:
+        msg = f"Session {session_id!r} not found"
+        raise EmitSessionNotFoundError(msg, session_id=session_id)
+
+    prior_status: str | None = (
+        session.last_result.get("status")
+        if isinstance(session.last_result, dict)
+        else None
+    )
+
+    if has_terminal_result(session.last_result):
+        logger.warning(
+            "cw result emit: refusing overwrite session=%s existing_source=%s "
+            "attempted_source=%s existing_status=%s",
+            session.id,
+            session.last_result_source,
+            source,
+            prior_status,
+        )
+        return EmitOutcome(
+            session_id=session.id,
+            result=None,
+            prior_status=prior_status,
+            refused=True,
+            existing_result=session.last_result,
+            existing_source=session.last_result_source,
+        )
+
+    session.last_result = result_obj.model_dump(mode="json")
+    session.last_result_source = source
+    save_state(state)
+
+    return EmitOutcome(
+        session_id=session.id, result=result_obj, prior_status=prior_status
+    )
+
+
+def emit_result(
+    payload: dict[str, Any], session_id: str, *, source: LastResultSource
+) -> EmitOutcome:
+    """Acquire sessions_lock() and record PAYLOAD onto SESSION_ID.
+
+    Thin lock-acquiring wrapper over emit_result_locked() (mirrors
+    cw.dev_queue.approval.approve_ticket). Use this from any caller not
+    already holding sessions_lock(); use emit_result_locked() directly from
+    inside an existing `with sessions_lock():` block to avoid the
+    non-reentrant flock deadlocking (see SessionsLockReentryError).
+    """
+    with sessions_lock():
+        return emit_result_locked(payload, session_id, source=source)
+
+
 @result.command(name="emit")
 @click.argument("path")
 @click.option(
@@ -193,41 +343,48 @@ def result_emit(path: str, session_id: str | None) -> None:
     'Recorded result for session <short_id>: status=<status>'.
     On validation failure: exits 1, prints 'field.path: message' lines plus a
     'No session state was modified.' notice to stderr.
+    On refusal (result already recorded): exits 0, prints
+    'Result already recorded for session <id> (source=<source>); not
+    overwritten.'
     """
     payload = _read_json_payload(path)
-    result_obj = _validate_or_exit(
-        payload, extra_stderr_line="No session state was modified."
-    )
-
+    # RFC 0012 A1 (#1457): emit_result_locked's validation widened to accept
+    # the parser-synthesized BlockedResult shape (for the Stop-hook harvest
+    # write), but `cw result emit`'s CLI contract must not change alongside
+    # it -- strictly re-validate against AutoDevResult only, byte-compatible
+    # with the pre-#1457 behavior, before resolving the session or mutating
+    # any state.
+    _validate_or_exit(payload, extra_stderr_line="No session state was modified.")
     resolved_id = _resolve_emit_session_id(session_id)
 
-    # Why not mutate_state: the not-found case must abort loudly before any
-    # write, and the post-write echo/log needs the prior status captured
-    # during the mutation -- mutate_state's Callable[[CwState], None] shape
-    # has no return value, so both would need a nonlocal-capturing closure.
-    # An explicit lock block reads more plainly here; mirrors the equally
-    # simple single-mutation site at doctor.py's targeted-reap path.
-    with sessions_lock():
-        state = load_state()
-        session = state.find_by_name_or_id(resolved_id)
-        if session is None:
-            click.echo(
-                f"Session '{resolved_id}' not found; no state was modified.",
-                err=True,
-            )
-            raise click.exceptions.Exit(1)
-        prior_status = (
-            session.last_result.get("status")
-            if isinstance(session.last_result, dict)
-            else None
+    try:
+        outcome = emit_result(payload, resolved_id, source=LastResultSource.EMIT_CLI)
+    except EmitValidationError as exc:
+        for line in exc.errors:
+            click.echo(line, err=True)
+        click.echo("No session state was modified.", err=True)
+        raise click.exceptions.Exit(1) from exc
+    except EmitSessionNotFoundError as exc:
+        click.echo(
+            f"Session '{exc.session_id}' not found; no state was modified.",
+            err=True,
         )
-        session.last_result = result_obj.model_dump(mode="json")
-        save_state(state)
+        raise click.exceptions.Exit(1) from exc
+
+    if outcome.refused or outcome.result is None:
+        click.echo(
+            f"Result already recorded for session {outcome.session_id} "
+            f"(source={outcome.existing_source}); not overwritten."
+        )
+        return
 
     logger.info(
         "cw result emit: session=%s prior_status=%s new_status=%s",
-        session.id,
-        prior_status,
-        result_obj.status,
+        outcome.session_id,
+        outcome.prior_status,
+        outcome.result.status,
     )
-    click.echo(f"Recorded result for session {session.id}: status={result_obj.status}")
+    click.echo(
+        f"Recorded result for session {outcome.session_id}: "
+        f"status={outcome.result.status}"
+    )

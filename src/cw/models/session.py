@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from cw.models.enums import (
     CompletionReason,
+    LastResultSource,
     LivenessBucket,
     ReapReason,
     SessionOrigin,
@@ -78,6 +79,15 @@ class Session(BaseModel):
     # retired one), so a fresh episode starts back at 0 for free. Same
     # per-session latch shape as consecutive_salvage_skips above.
     consecutive_park_vetoes: int = 0
+    # Consecutive sentinel-stage-mismatch veto count for this session (closes
+    # #1449). Incremented once each time the phantom sweep's already_refused ->
+    # CRASH_COMPLETE fall-through is suppressed by _sentinel_mismatch_veto_candidate
+    # while the transcript is still LIVE; once it reaches
+    # OrchestratorConfig.sentinel_mismatch_veto_cap the veto stops firing and the
+    # pending crash proceeds. Never explicitly reset: every pipeline episode
+    # constructs a brand-new Session object, so a fresh episode starts back at 0
+    # for free. Same per-session latch shape as consecutive_park_vetoes above.
+    consecutive_sentinel_mismatch_vetoes: int = 0
     backgrounded_at: datetime | None = None
     resumed_at: datetime | None = None
     completed_reason: CompletionReason | None = None
@@ -128,3 +138,9 @@ class Session(BaseModel):
     # per-stage floor; the owning TicketTask.stage is (see
     # cw.reconcile.liveness._detect_liveness_candidates). See GitHub #1001.
     liveness_bucket: LivenessBucket = LivenessBucket.LIVE
+    # RFC 0012 S2 — provenance of last_result: which mechanism wrote it
+    # (cw result emit, the Stop hook harvest, an executor's direct write, git
+    # synthesis, or transcript salvage). Stamped by the emit_result_locked
+    # door on every successful write; None = pre-migration (no writer has
+    # stamped a source yet). See GitHub #1456.
+    last_result_source: LastResultSource | None = None

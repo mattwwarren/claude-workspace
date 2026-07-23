@@ -33,6 +33,7 @@ from cw.exceptions import CwError, SprintApplyError
 from cw.models import (
     ClientConfig,
     CwState,
+    LastResultSource,
     OrchestratorEventType,
     Session,
     SessionOrigin,
@@ -1349,6 +1350,7 @@ class TestSignalStop:
         assert updated.last_result["status"] == "blocked"
         assert updated.last_result["ticket_id"] == "214"
         assert updated.last_result["stage_reached"] == "stage1_plan"
+        assert updated.last_result_source == LastResultSource.STOP_HOOK_HARVEST
 
     def test_signal_stop_defers_under_budget_no_sentinel(
         self,
@@ -1675,6 +1677,7 @@ class TestSignalStop:
         state = load_state()
         target = next(s for s in state.sessions if s.id == session.id)
         target.last_result = _valid_payload()
+        target.last_result_source = LastResultSource.EMIT_CLI
         save_state(state)
 
         # B2: apply_staged_decision needs the pipeline to route shipped →
@@ -1729,6 +1732,9 @@ class TestSignalStop:
         # Emit-time value preserved — NOT overwritten by the transcript's no_op.
         assert updated.last_result is not None
         assert updated.last_result["status"] == "shipped"
+        # Door is never called on the emit_terminal branch — source stays
+        # the original emitter's, no flip to STOP_HOOK_HARVEST.
+        assert updated.last_result_source == LastResultSource.EMIT_CLI
 
         # Stop remains the completion-event source.
         events = read_events(
@@ -1751,14 +1757,22 @@ class TestSignalStop:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """#536: a malformed emitted ``last_result`` falls back, not crashes.
+        """#536: a malformed emitted ``last_result`` doesn't crash the hook.
 
         ``_has_terminal_sentinel`` only checks for a "status" key -- it does
         not guarantee the dict validates as ``AutoDevResult``. If some other
         writer ever leaves a "status"-keyed dict that isn't a full
-        AutoDevResult, the Stop hook must fall back to the transcript parse
-        rather than raising ``ValidationError`` out of the hook (which must
-        never block claude from exiting).
+        AutoDevResult, the Stop hook must not raise ``ValidationError`` out of
+        the hook (which must never block claude from exiting): it re-parses
+        the transcript for task routing purposes, but the freshly re-parsed
+        transcript sentinel (#1457) is now written through the
+        ``emit_result_locked`` door, which arbitrates first-writer-wins on
+        ``has_terminal_result`` (key presence only, RFC 0012 S2). The
+        malformed ``{"status": "blocked"}`` value already counts as
+        terminal, so the door refuses the harvest write and the malformed
+        value is left in place untouched -- task routing is unaffected since
+        it runs off the in-memory re-parsed ``no_op`` object before the door
+        is ever called.
         """
         import datetime as dt
 
@@ -1816,10 +1830,11 @@ class TestSignalStop:
 
         updated = next(s for s in load_state().sessions if s.id == session.id)
         assert updated.status == SessionStatus.COMPLETED
-        # Fell back to the transcript's no_op — not a crash, not the
-        # unparseable emitted value.
-        assert updated.last_result is not None
-        assert updated.last_result["status"] == "no_op"
+        # Door refuses the harvest write (has_terminal_result is key-presence
+        # only) -- the malformed value is left in place, not overwritten by
+        # the transcript's freshly-parsed no_op.
+        assert updated.last_result == {"status": "blocked"}
+        assert updated.last_result_source is None
 
         store = load_dev_queue()
         task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
@@ -2014,6 +2029,12 @@ class TestSignalStop:
 
         updated = next(s for s in load_state().sessions if s.id == session.id)
         assert updated.status == SessionStatus.COMPLETED
+        # Genuine parser-synthesized BlockedResult goes through the widened
+        # door (RFC 0012 A1, #1457) and is accepted -- no prior terminal
+        # result was present to trigger refusal.
+        assert updated.last_result is not None
+        assert updated.last_result["status"] == "blocked"
+        assert updated.last_result_source == LastResultSource.STOP_HOOK_HARVEST
 
         store = load_dev_queue()
         task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
@@ -2088,6 +2109,9 @@ class TestSignalStop:
         # session whose task it just landed terminal-FAILED.
         updated = next(s for s in load_state().sessions if s.id == session.id)
         assert updated.status != SessionStatus.COMPLETED
+        # routed=False bails before the door is ever called (#1457) -- nothing
+        # is written to last_result.
+        assert updated.last_result is None
 
     def test_signal_stop_blocked_retry_eligible_routes_blocked_on_user(
         self,
@@ -3188,6 +3212,62 @@ class TestSignalStop:
         )
         assert len(events) == 1
         assert events[0].payload["session_id"] == session.id
+
+
+class TestHarvestLastResultThroughDoor:
+    """Direct tests for _harvest_last_result_through_door (RFC 0012 A1, #1457).
+
+    Covers the best-effort exception-swallow path: a door-side validation or
+    session-not-found failure must never propagate out of the Stop hook.
+    """
+
+    def test_swallows_emit_validation_error(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from cw.auto_dev_result import AutoDevResult
+        from cw.cli.sessions import _harvest_last_result_through_door
+        from cw.exceptions import EmitValidationError
+
+        sentinel = AutoDevResult.model_validate(_valid_payload())
+
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            msg = "boom"
+            raise EmitValidationError(msg, errors=["status: bad"])
+
+        monkeypatch.setattr("cw.cli.sessions.emit_result_locked", _raise)
+
+        with caplog.at_level("WARNING"):
+            _harvest_last_result_through_door("sess-does-not-matter", sentinel)
+
+        assert any("rejected by door" in r.getMessage() for r in caplog.records)
+
+    def test_swallows_emit_session_not_found_error(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from cw.auto_dev_result import AutoDevResult
+        from cw.cli.sessions import _harvest_last_result_through_door
+        from cw.exceptions import EmitSessionNotFoundError
+
+        sentinel = AutoDevResult.model_validate(_valid_payload())
+
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            msg = "not found"
+            raise EmitSessionNotFoundError(msg, session_id="ghost-session")
+
+        monkeypatch.setattr("cw.cli.sessions.emit_result_locked", _raise)
+
+        with caplog.at_level("WARNING"):
+            _harvest_last_result_through_door("ghost-session", sentinel)
+
+        assert any("rejected by door" in r.getMessage() for r in caplog.records)
 
 
 class TestSentinelPresentInTranscript:
