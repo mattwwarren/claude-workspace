@@ -668,3 +668,53 @@ cw surfaces `last_stage` per running session in `cw orchestrate status` (text ou
 ### 10.6 Cross-Repo Status
 
 The producer side ships in `mattwwarren/global-claude` `commands/auto-dev.md` as a coordinated PR; the consumer side (event taxonomy + `last_stage` plumbing) ships in cw#173.
+
+## 11. Result-Publishing Harvest Authority (RFC 0012)
+
+### 11.1 Harvest-Authority Model
+
+Every backend has a designated harvest authority that pushes `Session.last_result` through one validated door — `cw.result.emit_result_on` / `emit_result_locked`. Consumers read `session.last_result` only, never transcripts; `tests/test_result_door_guard.py` enforces this as a source-level deny-list scan (#1461).
+
+| Authority mechanism | `LastResultSource` value | Backend(s) | Call site |
+|---|---|---|---|
+| Manual CLI push | `emit_cli` | operator / scripted | `cw.result.result_emit` |
+| Stop-hook harvest | `stop_hook_harvest` | detached Claude daemon | `cw.cli.sessions` |
+| Executor-direct | `executor_direct` | codex, aider/local (supervised-child, synchronous) | `cw.executor` |
+| Git-facts synthesis | `git_synthesis` | aider/local (no sentinel emitted) | `cw.reconcile.local` |
+| Salvage-transcript | `salvage_transcript` | idle/phantom/stalled sweeps (supervising worker died mid-run) | `cw.reconcile._shared` |
+
+### 11.2 `LastResultSource` Provenance Enum
+
+`cw.models.enums.LastResultSource` records which mechanism wrote a session's terminal sentinel, so the door can arbitrate first-writer-wins and log a collision naming both sources:
+
+- `EMIT_CLI = "emit_cli"`
+- `STOP_HOOK_HARVEST = "stop_hook_harvest"`
+- `EXECUTOR_DIRECT = "executor_direct"`
+- `GIT_SYNTHESIS = "git_synthesis"`
+- `SALVAGE_TRANSCRIPT = "salvage_transcript"`
+
+The door (`emit_result_on`) stamps `session.last_result_source` alongside `session.last_result` at write time. `None` on `Session.last_result_source` means pre-migration — no writer has stamped a source yet.
+
+### 11.3 The Salvage Label
+
+Two distinct things carry a "salvage" connotation and must not be conflated:
+
+- **Terminal salvage completion** (`LastResultSource.SALVAGE_TRANSCRIPT`) — reconcile's idle/phantom/stalled sweeps parse a transcript for a real, emitted terminal sentinel after the supervising worker died mid-run, then route it through the door via `_apply_salvaged_completion` → `emit_result_on`. This *is* a door write, arbitrated first-writer-wins like any other.
+- **Park markers and rescue bookkeeping** — the 13 sites allowlisted by `tests/test_result_door_guard.py` (`idle.py`, `phantom.py`, `salvage.py`, `stalled.py`, `dev_queue/requeue.py`). These write a `paused_status`-only dict (no `"status"` key, so `has_terminal_result()` stays `False`) or add a bookkeeping flag (e.g. `rescue_attempted`) onto an existing dict, or erase `last_result` back to `None` ahead of a requeue. None of these publish a terminal sentinel, so door arbitration is not implicated — they are direct, individually-rationaled writes to `Session.last_result` outside the door, distinct from the salvage-transcript mechanism above.
+
+### 11.4 The Opencode Slot-In Rule
+
+From RFC 0012's Summary (`docs/rfcs/0012-unified-result-publishing.md`):
+
+> A future backend (e.g. opencode) slots in by answering one question: is cw its
+> supervising parent? If yes, its executor is the harvest authority (prefer
+> structured output enforced at the tool level, as codex does with
+> `--output-schema`). If no, it needs a stop-signal harvest path like Claude's.
+
+### 11.5 Blessed Read-Only Transcript Surfaces
+
+Three surfaces re-parse or re-display transcript/sentinel data for the operator without ever writing `Session.last_result`:
+
+- **`cw dev-queue wait`** (`src/cw/cli/dev_queue/wait.py`) — blessed by a zero-hit scan: `tests/test_result_door_guard.py::TestReadOnlySurfacesNeverWrite` asserts no `last_result` assignment exists in this file. It re-parses transcripts for display only.
+- **`queue_peek`** (`src/cw/queue_peek.py`) — same zero-hit scan coverage; re-parses transcripts for display only, never writes `Session.last_result`.
+- **`.claude/skills/cw-followup/scripts/parse_sentinel.py`** — outside `src/cw/`, so the enforcement test structurally cannot cover it. Its blessing is doc-prose only, stated here: it parses a completed session's sentinel for the `/cw-followup` skill's disposition logic and never writes back to `Session.last_result`.
