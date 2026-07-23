@@ -78,7 +78,7 @@ _log = logging.getLogger(__name__)
 CODEX_NOT_FOUND = "codex_not_found"
 CODEX_REVIEW_ONLY = "codex_review_only"
 
-# Capability-probe diagnosis (distinct from codex_review.py's per-role review
+# Capability-probe diagnosis (distinct from cw.codex_review's per-role review
 # failure-reason vocabulary): the binary is present but `codex --version`
 # could not be confirmed.
 CODEX_VERSION_UNKNOWN = "codex_version_unknown"

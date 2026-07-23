@@ -206,7 +206,7 @@ def append_diagnostics_pointer(detail: str, *, session_id: str) -> str:
     """Append a ``[diagnostics: <bundle path>]`` pointer to *detail*.
 
     Shared by every executor path (codex per-role failures via
-    ``codex_review.py``'s ``_format_failures_detail``, and the
+    ``cw.codex_review._verdict``'s ``_format_failures_detail``, and the
     LocalExecutor/aider paths) so a blocked sentinel's ``Blocker.details``
     always points an operator at the on-disk diagnostics artifacts (#1239).
     When *detail* is empty (e.g. an unreadable aider.log), the pointer is
