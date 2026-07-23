@@ -6,6 +6,74 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.23.0] - 2026-07-23
+
+### Added
+
+- **Unified result publishing — one door, per-backend harvest authorities
+  (RFC 0012, #1446, milestone v1.23.0).** Every `Session.last_result` write in
+  `src/cw/` now routes through a single importable door in `cw.result`:
+  - `emit_result()` / `emit_result_locked()` extracted from the `cw result
+    emit` CLI, with domain exceptions (`EmitValidationError`,
+    `EmitSessionNotFoundError`) and a typed `EmitOutcome` (#1455).
+  - `Session.last_result_source` provenance enum (`emit_cli`,
+    `stop_hook_harvest`, `executor_direct`, `git_synthesis`,
+    `salvage_transcript`; `None` = pre-migration) and first-writer-wins
+    arbitration: the door refuses to overwrite a terminal result, logs the
+    collision with both sources, and returns the existing result (#1456).
+  - Writer migrations: the Stop-hook transcript harvest (#1457, including a
+    discriminated `AutoDevResult | BlockedResult` union so parser-synthesized
+    blocked results pass the door), CodexExecutor/LocalExecutor direct writes
+    (#1458), and reconcile git-synthesis + transcript salvage (#1459, via a
+    pure `emit_result_on()` that batched reconcile sweeps call without
+    double-save clobbering; door refusals short-circuit salvage completions).
+  - Retirement of `persist_last_result` and the dead `stdout` event-payload
+    branch in dispatch (#1460), and a source-scan guard test that fails on
+    any `last_result` assignment outside the door module, with a
+    self-documenting allowlist for park markers, routed-sentinel advances,
+    rescue bookkeeping, and the requeue reset (#1461). The harvest-authority
+    model and provenance enum are documented in `docs/headless-contract.md`.
+- **Codex review fix-loop** (#1392): the codex review backend now drives a
+  real fix loop — accepted MUST_FIX findings feed a second write-capable
+  `codex exec --sandbox workspace-write` invocation plus an in-process
+  commit, followed by a full re-review against a freshly captured diff;
+  shared 7200s deadline with floor-gated cycles, cap 5 with escalation at
+  3+, disposition tracking by dedup key, and cycle-0-snapshot
+  `must_fix_initial` semantics per the headless contract. Review roles stay
+  read-only.
+- **Bounded reconcile vetoes:** consecutive park-veto counter +
+  `park_veto_cap` for the stalled-session liveness veto (#1445), and the
+  sibling `consecutive_sentinel_mismatch_vetoes` counter +
+  `sentinel_mismatch_veto_cap` for the phantom sentinel-stage-mismatch veto
+  (#1449) — cap-exhaustion escalates via `SESSION_NEEDS_ATTENTION` instead
+  of looping silently, including under `signal_only`.
+- **`ARCHITECTURE.md`** (#1451): repo-root architecture document with
+  numbered `§7 Principles` / `§8 Anti-patterns` sections, making the Plan
+  Soundness Reviewer's Tier-1 codified-violation check enforceable (it was
+  previously vacuous).
+- **Per-stage idle-watchdog budgets** (#1061): `idle_watchdog_by_stage`
+  config field + resolver.
+- **`host_session_budget`** config field and dispatch skip-reason (#1444).
+
+### Fixed
+
+- **Wall-clock reaps no longer kill actively-working sessions** (#1471): a
+  transcript written within the liveness window earns a hard grace veto that
+  is not charged against `park_veto_cap`, ending same-night token loss from
+  liveness-blind budget kills.
+- `Blocker.details` now carries the rendered verdict on MUST_FIX blocks
+  (#1390) and a failure summary on `CODEX_REVIEW_PARTIAL` (#1439);
+  `_post_review_comment` gh failures are logged instead of swallowed (#1391).
+- Review-gate worktree path keyed on `$CW_SESSION` with INT/TERM traps and
+  exit-status checks (#1443).
+
+### Changed
+
+- `codex_review.py` (1042 lines) split into the `cw.codex_review` package —
+  `_const` / `_diff` / `_context` / `_roles` / `_verdict` / `core` submodules
+  behind a pure re-export `__init__` (#1462); move-only, consumer imports
+  unchanged.
+
 ## [1.22.3] - 2026-07-21
 
 ### Fixed
