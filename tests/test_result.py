@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from click.testing import CliRunner
 
+from cw.auto_dev_result import AutoDevResult, BlockedResult
 from cw.cli import main
 from cw.config import load_state, save_state, sessions_lock
 from cw.exceptions import EmitSessionNotFoundError, EmitValidationError
@@ -261,6 +262,68 @@ class TestEmitResultLocked:
 
         sess = next(s for s in load_state().sessions if s.id == "test1234")
         assert sess.last_result_source == LastResultSource.EXECUTOR_DIRECT
+
+    def test_emit_result_locked_accepts_blocked_result_shape_and_stamps_source(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """RFC 0012 A1 (#1457): the door widens to accept a parser-synthesized
+        ``BlockedResult`` shape (no ``schema_version``, no full AutoDevResult
+        fields) -- the shape the Stop-hook harvest writes now route through."""
+        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
+        blocked_payload = {
+            "status": "blocked",
+            "blocker": {"stage": "s1", "reason": "validation_failed", "details": "x"},
+        }
+        with sessions_lock():
+            outcome = emit_result_locked(
+                blocked_payload, "test1234", source=LastResultSource.STOP_HOOK_HARVEST
+            )
+
+        assert outcome.refused is False
+        assert isinstance(outcome.result, BlockedResult)
+
+        sess = next(s for s in load_state().sessions if s.id == "test1234")
+        assert sess.last_result_source == LastResultSource.STOP_HOOK_HARVEST
+
+    def test_emit_result_locked_rejects_foreign_blocked_shape_missing_blocker(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """A bare ``{"status": "blocked"}`` (no ``blocker``, no
+        ``schema_version``) matches neither model -- the discriminant picks
+        ``BlockedResult`` (no schema_version) but it still fails validation
+        on the missing required ``blocker`` field."""
+        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
+        with (
+            sessions_lock(),
+            pytest.raises(EmitValidationError) as exc_info,
+        ):
+            emit_result_locked(
+                {"status": "blocked"},
+                "test1234",
+                source=LastResultSource.STOP_HOOK_HARVEST,
+            )
+
+        assert any("blocker" in line for line in exc_info.value.errors)
+
+    def test_emit_result_locked_full_autodev_result_with_blocked_status_still_validates_as_autodev_result(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """A full producer-emitted AutoDevResult with status=blocked (carries
+        ``schema_version``) must NOT be misrouted to the ``BlockedResult``
+        branch -- the discriminant keys off ``schema_version`` presence."""
+        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
+        payload = _valid_payload()
+        payload["status"] = "blocked"
+        payload["pr"] = None
+        payload["next_actions"] = []
+        payload["blocker"] = {"stage": "s2", "reason": "impl_failed", "details": "x"}
+        with sessions_lock():
+            outcome = emit_result_locked(
+                payload, "test1234", source=LastResultSource.STOP_HOOK_HARVEST
+            )
+
+        assert outcome.refused is False
+        assert isinstance(outcome.result, AutoDevResult)
 
 
 class TestEmitResult:
@@ -535,6 +598,30 @@ class TestResultEmit:
         sess = next(s for s in state.sessions if s.id == "test1234")
         assert sess.last_result == {"status": "blocked"}
         assert sess.last_result_source == LastResultSource.SALVAGE_TRANSCRIPT
+
+    def test_result_emit_cli_rejects_bare_blocked_shape_payload(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """CLI byte-compat (RFC 0012 A1, #1457): the widened door would
+        accept a bare ``{"status": "blocked", "blocker": {...}}`` shape (no
+        ``schema_version``), but ``cw result emit``'s strict pre-check
+        (``_validate_or_exit``, AutoDevResult-only) still rejects it -- the
+        widening is Stop-hook-harvest-only, not a CLI contract change."""
+        _seed_daemon_session(tmp_path, tmp_config_dir, session_id="test1234")
+        blocked_payload = {
+            "status": "blocked",
+            "blocker": {"stage": "s1", "reason": "validation_failed", "details": "x"},
+        }
+        result = CliRunner().invoke(
+            main,
+            ["result", "emit", "-", "--session-id", "test1234"],
+            input=json.dumps(blocked_payload),
+        )
+        assert result.exit_code == 1
+        assert result.output.strip() != ""
+
+        sess = next(s for s in load_state().sessions if s.id == "test1234")
+        assert sess.last_result is None
 
 
 class TestHasTerminalResult:
