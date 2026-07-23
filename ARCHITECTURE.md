@@ -117,8 +117,8 @@ for the operator-facing dispatch procedure.
 
 ## §5 Result Publishing & Events
 
-**RFC 0012 — one door, per-backend harvest authorities.** Before this RFC,
-every backend delivered its `AutoDevResult` end state through a different
+**RFC 0012 — one door, per-backend harvest authorities (accepted, merged via
+PR #1446).** Before this RFC, every backend delivered its `AutoDevResult` end state through a different
 mechanism, each carrying its own copy of the don't-clobber guard, with no
 record of which mechanism wrote the result. The invariant this RFC
 establishes: "every backend has a designated harvest authority that pushes
@@ -177,7 +177,8 @@ cites one of these.
 2. Harvest authority / one-door result publishing: each backend has one
    designated harvest authority pushing through one validated door;
    consumers read `session.last_result` only, never transcripts. — Source:
-   `docs/rfcs/0012-unified-result-publishing.md`
+   `docs/rfcs/0012-unified-result-publishing.md` (accepted, merged via
+   PR #1446)
 3. Dispatch admission, host budget: dispatch admission enforces a single
    optional host-wide ceiling on concurrent DAEMON sessions, folded into
    the per-client ceiling. — Source: `src/cw/dispatch/host_capacity.py`
@@ -186,7 +187,7 @@ cites one of these.
    Source: `src/cw/dispatch/claim.py`
 5. Sentinel/emit contract: the Stop hook is the sole completion-event
    source; the result-publishing door emits no events and routes no
-   tasks. — Source: `docs/rfcs/0012-unified-result-publishing.md`
+   tasks. — Source: `docs/headless-contract.md`
 6. Module-size / package-split convention: modules stay under ~1000 lines;
    exceeding it means splitting into a package with an `__init__.py` that
    re-exports the public surface. — Source: `CLAUDE.md`
@@ -232,8 +233,7 @@ principle, grounded in the same source document.
 5. A new completion-event source competing with the Stop hook — any code
    path that both writes a result and emits its own completion event
    instead of routing through the existing Stop-hook /
-   `_apply_sentinel_to_task` seam. — Source:
-   `docs/rfcs/0012-unified-result-publishing.md`
+   `_apply_sentinel_to_task` seam. — Source: `docs/headless-contract.md`
 6. A source module silently growing past ~1000 lines with no package
    split — accreting unrelated concerns into one file instead of
    extracting helpers or splitting into a package with a re-exporting
@@ -270,7 +270,7 @@ new one.
 | [0002](docs/adr/0002-blocker-retry-policy-pair.md) | Blocker carries an explicit retry policy | Accepted |
 | [0003](docs/adr/0003-stop-hook-canonical-completion-signal.md) | Stop hook is the canonical worker-completion signal | Accepted |
 | [0004](docs/adr/0004-stage-events-on-orchestrator-bus.md) | Stage-transition events on the orchestrator event bus | Accepted |
-| [0007](docs/adr/0007-reconcile-cadence-and-ownership.md) | Reconcile cadence and ownership: on-demand, ticker, or daemon primary runner | Proposed |
+| [0007](docs/adr/0007-reconcile-cadence-and-ownership.md) | Reconcile cadence and ownership: on-demand, ticker, or daemon primary runner | Deferred |
 | [0008](docs/adr/0008-tracker-resolution-is-a-typed-seam.md) | Tracker resolution is a declared descriptor, not bespoke code | Proposed |
 | [0010](docs/adr/0010-live-dashboard-extends-orchestrate-watch.md) | The live work dashboard extends `cw orchestrate watch`, not a new surface *(deprecated — see `cw board`)* | Accepted |
 | [0013](docs/adr/0013-agent-delegated-ticket-work.md) | Provider-portable ticket work is agent work; cw keeps one GitHub-only programmatic client | Accepted |
