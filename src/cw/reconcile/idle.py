@@ -584,12 +584,17 @@ def _apply_idle_state_mutations(
     gh_blocked_revert_candidates: list[ReapCandidate],
     revert_candidates: list[ReapCandidate],
     park_candidates: list[ReapCandidate],
-) -> bool:
+) -> tuple[bool, list[ReapCandidate]]:
     """Apply in-place session-state mutations for idle dispositions.
 
-    Returns whether any counter-only update occurred (so the caller can decide
-    to save_state even when there are no dispositions). save_state itself is
-    left to the caller's combined flush.
+    Returns ``(counters_changed, accepted_salvage_candidates)``. ``counters_changed``
+    is whether any counter-only update occurred (so the caller can decide to
+    save_state even when there are no dispositions). ``accepted_salvage_candidates``
+    is the salvage subset the door actually wrote (RFC 0012 A3, #1459) -- any
+    candidate whose ``_apply_salvaged_completion`` returned ``refused=True`` is
+    dropped, so the caller routes tickets / emits events off the accepted list,
+    not the raw one (mirrors ``_apply_idle_routed_mutations``' filtered return one
+    call above). save_state itself is left to the caller's combined flush.
     """
     # Counter-only updates: just update the counter and possibly save_state.
     counters_changed = False
@@ -599,13 +604,20 @@ def _apply_idle_state_mutations(
         counters_changed = True
 
     # Salvage completions.
+    accepted_salvage: list[ReapCandidate] = []
     for candidate in salvage_candidates:
         session = session_by_id[candidate.session_id]
         if candidate.salvage_result is None or candidate.salvage_csid is None:
             continue  # Invariant: SALVAGE_COMPLETION always has salvage_result + csid
-        _apply_salvaged_completion(
+        # RFC 0012 A3 (#1459): a door refusal (first-writer-wins) skips the
+        # completion; drop the candidate so downstream ticket-routing / event
+        # emission never fires for a session that was never actually completed.
+        outcome = _apply_salvaged_completion(
             session, candidate.salvage_result, candidate.salvage_csid, now=now
         )
+        if outcome.refused:
+            continue
+        accepted_salvage.append(candidate)
 
     # Merged-complete: PR already shipped; mark session COMPLETED, not TIMED_OUT.
     for candidate in merged_revert_candidates:
@@ -649,7 +661,7 @@ def _apply_idle_state_mutations(
         session.last_result = {"paused_status": _SILENTLY_IDLE_REASON}
         session.reap_reason = ReapReason.RETRY_CAP_PARKED
 
-    return counters_changed
+    return counters_changed, accepted_salvage
 
 
 def _apply_idle_queue_mutations(
@@ -866,7 +878,12 @@ def _act_on_idle_candidates(
         and sess.last_result.get("paused_status") == _SILENTLY_IDLE_REASON
     }
 
-    counters_changed = _apply_idle_state_mutations(
+    # Reassign salvage_candidates to the door-accepted subset (RFC 0012 A3,
+    # #1459) so the refused ones are excluded from has_dispositions,
+    # salvaged_result_by_ticket, _apply_idle_queue_mutations, and
+    # _emit_idle_events below -- mirrors the routed_sentinel_candidates
+    # reassignment one function above.
+    counters_changed, salvage_candidates = _apply_idle_state_mutations(
         session_by_id,
         now=now,
         counter_candidates=counter_candidates,
