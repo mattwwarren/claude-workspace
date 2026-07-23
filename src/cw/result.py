@@ -12,7 +12,7 @@ from typing import Any
 import click
 from pydantic import ValidationError
 
-from cw.auto_dev_result import AutoDevResult
+from cw.auto_dev_result import AutoDevResult, BlockedResult
 from cw.config import load_state, save_state, sessions_lock
 from cw.exceptions import EmitSessionNotFoundError, EmitValidationError
 from cw.models import LastResultSource
@@ -200,11 +200,38 @@ class EmitOutcome:
     """
 
     session_id: str
-    result: AutoDevResult | None
+    result: AutoDevResult | BlockedResult | None
     prior_status: str | None
     refused: bool = False
     existing_result: dict[str, Any] | None = None
     existing_source: LastResultSource | None = None
+
+
+def _validate_harvest_payload(payload: dict[str, Any]) -> AutoDevResult | BlockedResult:
+    """Validate PAYLOAD against the discriminated AutoDevResult/BlockedResult union.
+
+    RFC 0012 A1 (#1457): the Stop-hook harvest write pushes both shapes a
+    parsed sentinel can take -- ``parse_stdout`` returns either a full
+    ``AutoDevResult`` or a parser-synthesized ``BlockedResult`` (issued on a
+    §6 failure mode, e.g. cross-field-invariant failure). The two shapes are
+    told apart structurally, not by a schema field: a genuine producer-emitted
+    ``AutoDevResult`` with ``status=blocked`` always carries ``schema_version``
+    (and every other AutoDevResult field); a synthetic ``BlockedResult`` never
+    does. So ``status == "blocked"`` with no ``schema_version`` key routes to
+    ``BlockedResult``; everything else (including a real blocked AutoDevResult)
+    routes to ``AutoDevResult`` as before.
+    """
+    if payload.get("status") == "blocked" and "schema_version" not in payload:
+        try:
+            return BlockedResult.model_validate(payload)
+        except ValidationError as exc:
+            msg = "BlockedResult payload failed validation"
+            raise EmitValidationError(msg, errors=_format_errors(exc)) from exc
+    try:
+        return AutoDevResult.model_validate(payload)
+    except ValidationError as exc:
+        msg = "AutoDevResult payload failed validation"
+        raise EmitValidationError(msg, errors=_format_errors(exc)) from exc
 
 
 def emit_result_locked(
@@ -225,15 +252,17 @@ def emit_result_locked(
     #1456) is a normal, non-raising return -- EmitOutcome(refused=True,
     result=None, ...) -- not one of the two exceptions below.
 
+    Validation is discriminated (RFC 0012 A1, #1457): PAYLOAD is checked
+    against ``AutoDevResult`` or, for the parser-synthesized blocked shape
+    (``status=blocked`` with no ``schema_version``), ``BlockedResult`` --
+    see :func:`_validate_harvest_payload`.
+
     Raises:
-        EmitValidationError: if PAYLOAD fails AutoDevResult validation.
+        EmitValidationError: if PAYLOAD fails validation against the
+            discriminated AutoDevResult/BlockedResult union.
         EmitSessionNotFoundError: if SESSION_ID has no matching session.
     """
-    try:
-        result_obj = AutoDevResult.model_validate(payload)
-    except ValidationError as exc:
-        msg = "AutoDevResult payload failed validation"
-        raise EmitValidationError(msg, errors=_format_errors(exc)) from exc
+    result_obj = _validate_harvest_payload(payload)
 
     state = load_state()
     session = state.find_by_name_or_id(session_id)
@@ -319,6 +348,13 @@ def result_emit(path: str, session_id: str | None) -> None:
     overwritten.'
     """
     payload = _read_json_payload(path)
+    # RFC 0012 A1 (#1457): emit_result_locked's validation widened to accept
+    # the parser-synthesized BlockedResult shape (for the Stop-hook harvest
+    # write), but `cw result emit`'s CLI contract must not change alongside
+    # it -- strictly re-validate against AutoDevResult only, byte-compatible
+    # with the pre-#1457 behavior, before resolving the session or mutating
+    # any state.
+    _validate_or_exit(payload, extra_stderr_line="No session state was modified.")
     resolved_id = _resolve_emit_session_id(session_id)
 
     try:

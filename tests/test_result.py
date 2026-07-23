@@ -305,7 +305,7 @@ class TestEmitResultLocked:
 
         assert any("blocker" in line for line in exc_info.value.errors)
 
-    def test_emit_result_locked_full_autodev_result_with_blocked_status_still_validates_as_autodev_result(
+    def test_emit_result_locked_full_blocked_autodev_result_stays_autodev_result(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """A full producer-emitted AutoDevResult with status=blocked (carries
