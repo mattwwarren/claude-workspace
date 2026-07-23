@@ -80,6 +80,9 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 
+_ACTIVE_WRITE_GRACE_WINDOW_SECONDS = 120
+_ACTIVE_WRITE_HARD_CAP_MULTIPLIER = 2.0
+
 
 def _resolve_finalize_blocked_condition(
     task: TicketTask | None,
@@ -400,6 +403,7 @@ def _detect_stalled_candidates(
                 now=now,
                 config=config,
                 reap_reason=ReapReason.STALLED_RETRY_CAP_PARKED,
+                hard_elapsed_cap_seconds=budget * _ACTIVE_WRITE_HARD_CAP_MULTIPLIER,
             )
             if cap_veto is not None:
                 _maybe_append_salvage_skip_reset(candidates, session, ticket_id)
@@ -467,17 +471,20 @@ def _liveness_veto_candidate(
     now: datetime,
     config: OrchestratorConfig,
     reap_reason: ReapReason,
+    hard_elapsed_cap_seconds: float | None = None,
 ) -> tuple[ReapCandidate | None, bool]:
     """Return ``(veto_candidate_or_None, cap_exhausted)`` for a stalled session.
 
-    Computes fresh transcript-mtime staleness via :func:`_transcript_age_seconds`
-    and classifies it through the same per-stage-floor liveness ladder the
-    observability sweep (``cw.reconcile.liveness``) uses. When the freshly-
-    classified bucket is :attr:`LivenessBucket.LIVE` AND the session has not yet
-    reached ``config.park_veto_cap`` consecutive post-budget vetoes, the caller's
-    pending park is vetoed entirely — no disposition, no queue mutation — because
-    the session is demonstrably still making progress despite the wall-clock
-    budget (or retry cap) having been exceeded (#976).
+    Computes fresh transcript-mtime staleness via :func:`_transcript_age_seconds`.
+    A transcript active inside ``_ACTIVE_WRITE_GRACE_WINDOW_SECONDS`` gets a
+    hard grace veto that is not charged against ``park_veto_cap`` until
+    ``hard_elapsed_cap_seconds`` is reached: actively writing sessions must not
+    be killed just because their wall-clock budget expired, but a continuously
+    writing livelock still dies at the caller-provided hard cap (#1471).
+    Less-fresh but still-LIVE sessions are classified through the same
+    per-stage-floor liveness ladder the observability sweep
+    (``cw.reconcile.liveness``) uses, and keep the bounded veto behavior from
+    #976/#1445.
 
     The veto is bounded (#1445): once ``session.consecutive_park_vetoes`` reaches
     the cap, this returns ``(None, True)`` — no veto candidate, and the ``True``
@@ -485,6 +492,8 @@ def _liveness_veto_candidate(
     still-live session that has exhausted its veto budget) rather than an ordinary
     timeout, so the caller can escalate to the operator. The three return shapes:
 
+    - ``(candidate, False)`` — actively writing inside the hard grace window:
+      veto, with ``new_veto_count`` preserving the current counter.
     - ``(candidate, False)`` — LIVE and under the cap: veto, with the candidate's
       ``new_veto_count`` set to ``consecutive_park_vetoes + 1``.
     - ``(None, True)``       — LIVE and the count is *exactly* at the cap this
@@ -515,6 +524,28 @@ def _liveness_veto_candidate(
     if stale_seconds is None:
         return None, False
     stale_minutes = stale_seconds / 60.0
+    active_write_grace_allowed = (
+        hard_elapsed_cap_seconds is None or elapsed < hard_elapsed_cap_seconds
+    )
+    if stale_seconds < _ACTIVE_WRITE_GRACE_WINDOW_SECONDS:
+        if not active_write_grace_allowed:
+            return None, False
+        return (
+            ReapCandidate(
+                session_id=session.id,
+                proposed_action=ProposedAction.PARK_VETOED,
+                ticket_id=ticket_id,
+                elapsed_seconds=elapsed,
+                reap_reason=reap_reason,
+                lane=task.lane if task else DEFAULT_LANE,
+                client=session.client,
+                stage=stage,
+                attempts=task.attempts if task else 0,
+                stale_minutes=stale_minutes,
+                new_veto_count=session.consecutive_park_vetoes,
+            ),
+            False,
+        )
     bucket = _classify_liveness_bucket(stale_minutes, stage=stage, config=config)
     if bucket is not LivenessBucket.LIVE:
         return None, False
@@ -565,6 +596,8 @@ def _resolve_wall_clock_candidate(
         now=now,
         config=config,
         reap_reason=ReapReason.WALL_CLOCK_BUDGET,
+        hard_elapsed_cap_seconds=resolve_headless_budget(task, session, config)
+        * _ACTIVE_WRITE_HARD_CAP_MULTIPLIER,
     )
     if veto is not None:
         return veto

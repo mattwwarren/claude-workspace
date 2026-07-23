@@ -38,12 +38,14 @@ from cw.local_runner import UNEXPECTED_ERROR, make_blocked
 from cw.models import (
     CODEX_BACKEND,
     ClientConfig,
+    LastResultSource,
     SessionStatus,
     Stage,
     StageExecutorConfig,
     StagePipelineConfig,
     TicketTask,
 )
+from tests.conftest import find_completed_session
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -219,9 +221,9 @@ def test_codex_executor_clean_stage_complete(
     AutoDevResult.model_validate(result.model_dump(mode="json"))
 
     state = load_state()
-    session = next((s for s in state.sessions if s.last_result is not None), None)
-    assert session is not None
+    session = find_completed_session(state)
     assert session.status == SessionStatus.COMPLETED
+    assert session.last_result_source == LastResultSource.EXECUTOR_DIRECT
 
 
 def test_codex_executor_must_fix_blocked(
@@ -429,9 +431,9 @@ def test_codex_executor_exception_handler_marks_session_completed(
         executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
 
     state = load_state()
-    session = next((s for s in state.sessions if s.last_result is not None), None)
-    assert session is not None
+    session = find_completed_session(state)
     assert session.status == SessionStatus.COMPLETED
+    assert session.last_result_source == LastResultSource.EXECUTOR_DIRECT
     result = AutoDevResult.model_validate(session.last_result)
     assert result.status == "blocked"
     assert result.blocker is not None
