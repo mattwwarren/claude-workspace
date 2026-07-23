@@ -1206,6 +1206,64 @@ class TestMigrateCwState:
         session = migrated["sessions"][0]
         assert session["last_result_source"] == "emit_cli"
 
+    def test_v16_to_v17_fills_consecutive_sentinel_mismatch_vetoes_default(
+        self,
+    ) -> None:
+        """migrate_cw_state fills consecutive_sentinel_mismatch_vetoes=0 on v16
+        sessions that lack the key (#1449)."""
+        raw = {
+            "schema_version": 16,
+            "sessions": [
+                {
+                    "id": "s1",
+                    "parent_session_id": None,
+                    "worker_session_ids": [],
+                    "last_result": None,
+                    "cost_usd": None,
+                    "cost_breakdown": None,
+                    "lane": None,
+                    "stage": None,
+                    "consecutive_salvage_skips": 0,
+                    "liveness_bucket": "live",
+                    "consecutive_park_vetoes": 0,
+                    "last_result_source": None,
+                }
+            ],
+        }
+        migrated = migrate_cw_state(raw)
+        session = migrated["sessions"][0]
+        assert session["consecutive_sentinel_mismatch_vetoes"] == 0
+        assert migrated["schema_version"] == CW_STATE_SCHEMA_VERSION
+
+    def test_v17_consecutive_sentinel_mismatch_vetoes_preserved_idempotently(
+        self,
+    ) -> None:
+        """Existing nonzero consecutive_sentinel_mismatch_vetoes survives a
+        migration pass (#1449)."""
+        raw = {
+            "schema_version": 17,
+            "sessions": [
+                {
+                    "id": "s1",
+                    "parent_session_id": None,
+                    "worker_session_ids": [],
+                    "last_result": None,
+                    "cost_usd": None,
+                    "cost_breakdown": None,
+                    "lane": None,
+                    "stage": None,
+                    "consecutive_salvage_skips": 0,
+                    "liveness_bucket": "live",
+                    "consecutive_park_vetoes": 0,
+                    "last_result_source": None,
+                    "consecutive_sentinel_mismatch_vetoes": 3,
+                }
+            ],
+        }
+        migrated = migrate_cw_state(raw)
+        session = migrated["sessions"][0]
+        assert session["consecutive_sentinel_mismatch_vetoes"] == 3
+
     def test_v13_liveness_bucket_preserved_idempotently(self) -> None:
         """Existing non-default liveness_bucket survives a migration pass."""
         raw = {
