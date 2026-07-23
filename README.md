@@ -401,6 +401,7 @@ _CW_COMPLETE=fish_source cw | source
 
 ## Further Reading
 
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — codified system principles and anti-patterns (§7/§8), source of truth for plan-time soundness review
 - [`cw guide`](src/cw/data/GUIDE.md) — operator how-to, always matches your installed version
 - [`docs/INSTALL.md`](docs/INSTALL.md) — detailed install and upgrade instructions
 - [`docs/dispatch-runbook.md`](docs/dispatch-runbook.md) — end-to-end `cw dev-queue` dispatch procedure
