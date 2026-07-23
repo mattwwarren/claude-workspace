@@ -156,6 +156,19 @@ clients are eligible per tick (default: no limit). The legacy
 `default_max_parallel` / `per_client_max_parallel` keys are deprecated
 aliases that still load with a one-time warning.
 
+`OrchestratorConfig.host_session_budget` (#1444, default: `null` = off) adds
+a further, fleet-wide ceiling: the total number of DAEMON sessions running
+concurrently across every client on the host, folded into the per-client
+admission math ahead of the per-client cap. A client gated by it (rather
+than its own `per_client_ceiling`) gets `skip_reason=host_capacity_gated`
+in its `dispatch.tick` event — distinguishable from `cap_full` (that
+client's own ceiling) via `cw event tail --type dispatch.tick`. Excess
+PENDING work is never killed or rejected by this gate; it simply waits for
+a later tick once budget frees up. A stalled session parked
+BLOCKED_ON_USER / AWAITING_OPERATOR_SIGNOFF by reconcile does not count
+against the budget, so an unresolved "ghost" session cannot permanently
+strand a slot.
+
 To dispatch in a planned order rather than raw priority, produce a
 DispatchPlan first: `cw dev-queue plan -c <client>` spawns a one-shot
 planner session and persists the plan; `run --use-plan` (also on `serve`)

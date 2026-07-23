@@ -301,6 +301,19 @@ default_ceiling: 2
 per_client_ceiling: {}
 max_parallel_clients: null
 
+# Host-capacity admission gate (#1444). Fleet-wide ceiling on concurrently-
+# running DAEMON sessions across the WHOLE HOST, independent of (and folded
+# into, via min()) the per-client available_client_slots math above. null
+# (default) = feature off, byte-identical to pre-#1444 behavior. When set,
+# excess PENDING work is never rejected/killed — a client whose turn this
+# tick would exceed the remaining host budget is simply skipped with
+# skip_reason=host_capacity_gated and retried on a later tick. The count
+# excludes any DAEMON session whose owning TicketTask has been parked
+# BLOCKED_ON_USER / AWAITING_OPERATOR_SIGNOFF by reconcile, so a stalled
+# ("ghost") session under the default signal_only reap policy does not
+# permanently strand a unit of host budget.
+host_session_budget: null
+
 linear_prefix_map: {}
 # ^ routes a ticket-id prefix to the client/repo that owns it in a
 # multi-client cw deployment — it is not provider selection. cw does not

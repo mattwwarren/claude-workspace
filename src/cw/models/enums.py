@@ -246,9 +246,9 @@ class DispatchSkipReason(StrEnum):
     """First-match skip_reason values emitted in dispatch.tick events.
 
     Precedence (highest first):
-    AVAILABILITY_GATE > SSH_KEY_GATE > FRESHNESS_GATE > USAGE_LIMITED > CAP_FULL
-    > LANE_CAP_BLOCKED > SPAWN_ERROR > LANE_CIRCUIT_PAUSED > SPAWN_ERROR_BACKOFF
-    > NO_PENDING > NONE.
+    AVAILABILITY_GATE > SSH_KEY_GATE > FRESHNESS_GATE > USAGE_LIMITED
+    > HOST_CAPACITY_GATED > CAP_FULL > LANE_CAP_BLOCKED > SPAWN_ERROR
+    > LANE_CIRCUIT_PAUSED > SPAWN_ERROR_BACKOFF > NO_PENDING > NONE.
     AVAILABILITY_GATE ranks first: it is the fleet-wide gh-availability
     preflight probe (RFC 0011 A5), checked before the per-client freshness
     gate so a real GitHub outage short-circuits every client before any pays
@@ -259,12 +259,19 @@ class DispatchSkipReason(StrEnum):
     cannot push and would burn a slot for a guaranteed-failing session.
     ATTEMPT_CAP_BLOCKED is emitted per-task when the global attempt ceiling
     parks a task; it is not part of the per-client-tick precedence chain.
+    HOST_CAPACITY_GATED ranks just above CAP_FULL (#1444): a fleet-wide
+    ``OrchestratorConfig.host_session_budget`` ceiling on concurrently-running
+    DAEMON sessions across the whole host, folded into the per-client
+    ``available_client_slots`` admission math ahead of the per-client cap
+    check so an operator can distinguish "this client's own cap is full"
+    from "the whole host is out of budget".
     """
 
     AVAILABILITY_GATE = "availability_gate"
     SSH_KEY_GATE = "ssh_key_gate"
     FRESHNESS_GATE = "freshness_gate"
     USAGE_LIMITED = "usage_limited"
+    HOST_CAPACITY_GATED = "host_capacity_gated"
     CAP_FULL = "cap_full"
     LANE_CAP_BLOCKED = "lane_cap_blocked"
     ATTEMPT_CAP_BLOCKED = "attempt_cap_blocked"

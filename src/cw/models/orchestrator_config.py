@@ -406,6 +406,11 @@ class OrchestratorConfig(BaseModel):
     # aliases for one release.
     per_client_ceiling: dict[str, int] = Field(default_factory=dict)
     default_ceiling: int = 1
+    # GitHub #1444 — host-capacity admission gate. Fleet-wide ceiling on
+    # concurrent DAEMON sessions, independent of (and folded into) the
+    # per-client ceiling above. None = feature off, byte-identical to
+    # pre-#1444 behavior.
+    host_session_budget: int | None = None
     # Minimum elapsed seconds between PR-state hydration passes in the serve
     # tick. Gated off max(pr_state.hydrated_at) across tasks (no separate timer
     # state). See GitHub #929.
