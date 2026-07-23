@@ -522,7 +522,7 @@ class TestLoadReviewPolicy:
     ) -> None:
         _write(tmp_path / ".claude" / "review-policy.md", "## Code Quality Reviewer\nx")
         calls: list[str] = []
-        import cw.codex_review as cr
+        import cw.codex_review._context as cr
 
         real = cr._load_optional_text
 
@@ -689,7 +689,7 @@ class TestRunCodexRoles:
         # Deterministic clock: deadline=100 (call0); role1's remaining =
         # 100 - 69 = 31 seconds — just above the 30s skip threshold, close
         # enough to the floor that the clamp is genuinely in play.
-        monkeypatch.setattr("cw.codex_review.time.monotonic", _Clock([0, 69]))
+        monkeypatch.setattr("cw.codex_review._roles.time.monotonic", _Clock([0, 69]))
         runner = _SequencedRunner([_ok_result()])
         run_codex_roles(
             runner=runner,
@@ -713,7 +713,7 @@ class TestRunCodexRoles:
         # deadline-remaining reads land at call1 (role1: 100>30 run), call4
         # (role2: 100>30 run), call7 (role3: remaining=100-80=20<=30 -> skip).
         monkeypatch.setattr(
-            "cw.codex_review.time.monotonic", _Clock([0, 0, 0, 0, 0, 0, 0, 80])
+            "cw.codex_review._roles.time.monotonic", _Clock([0, 0, 0, 0, 0, 0, 0, 80])
         )
         runner = _SequencedRunner([_ok_result(), _ok_result()])
         with caplog.at_level(logging.WARNING):
@@ -851,7 +851,7 @@ class TestRunCodexRoles:
         # MUST_FIX 1 (#1236): the scratch dir under state_dir() must not leak
         # after a normal, fully-successful run.
         fixed_uuid = uuid.UUID("11111111-1111-1111-1111-111111111111")
-        monkeypatch.setattr("cw.codex_review.uuid.uuid4", lambda: fixed_uuid)
+        monkeypatch.setattr("cw.codex_review._roles.uuid.uuid4", lambda: fixed_uuid)
         runner = _SequencedRunner([_ok_result()])
         run_codex_roles(
             runner=runner,
@@ -869,7 +869,7 @@ class TestRunCodexRoles:
     ) -> None:
         # Cleanup must happen on the failure path too, not only on success.
         fixed_uuid = uuid.UUID("22222222-2222-2222-2222-222222222222")
-        monkeypatch.setattr("cw.codex_review.uuid.uuid4", lambda: fixed_uuid)
+        monkeypatch.setattr("cw.codex_review._roles.uuid.uuid4", lambda: fixed_uuid)
         runner = _SequencedRunner(
             [CodexRunResult(returncode=1, stdout="", stderr="boom")]
         )
@@ -1327,7 +1327,7 @@ def test_run_codex_roles_scratch_dir_still_removed_after_persist(
     # run_codex_roles still removes the scratch dir before returning; the
     # persisted bundle (under a different tree) survives.
     fixed_uuid = uuid.UUID("33333333-3333-3333-3333-333333333333")
-    monkeypatch.setattr("cw.codex_review.uuid.uuid4", lambda: fixed_uuid)
+    monkeypatch.setattr("cw.codex_review._roles.uuid.uuid4", lambda: fixed_uuid)
     runner = _SequencedRunner([CodexRunResult(returncode=1, stdout="", stderr="boom")])
     run_codex_roles(
         runner=runner,
@@ -1365,7 +1365,7 @@ def test_run_review_threads_session_id_to_run_codex_role(
         captured["session_id"] = kwargs["session_id"]
         return _make_reviewer_doc(), None
 
-    monkeypatch.setattr("cw.codex_review._run_codex_role", _spy_run_codex_role)
+    monkeypatch.setattr("cw.codex_review._roles._run_codex_role", _spy_run_codex_role)
     run_review(
         runner=_SequencedRunner([]),
         task=_task(),
@@ -1383,7 +1383,7 @@ def test_duration_captured_without_extending_codex_run_result(
 ) -> None:
     # CodexRunResult stays free of a duration attribute; the persisted
     # ExecutorFailure.duration_seconds is populated from a monotonic() delta.
-    monkeypatch.setattr("cw.codex_review.time.monotonic", _Clock([100.0, 105.5]))
+    monkeypatch.setattr("cw.codex_review._roles.time.monotonic", _Clock([100.0, 105.5]))
     runner = _SequencedRunner([CodexRunResult(returncode=1, stdout="", stderr="boom")])
     _run_one_role(runner, tmp_path, session_id="sess-dur")
     result = runner._results[0]
