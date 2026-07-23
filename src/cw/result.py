@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from pydantic import ValidationError
 
 from cw.auto_dev_result import AutoDevResult
 from cw.config import load_state, save_state, sessions_lock
+from cw.exceptions import EmitSessionNotFoundError, EmitValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +170,74 @@ def _resolve_emit_session_id(session_id: str | None) -> str:
     return ctx_session_id
 
 
+@dataclass(frozen=True)
+class EmitOutcome:
+    """Result of a successful emit_result_locked() call.
+
+    Carries exactly what the CLI/log line need to render the current
+    'Recorded result for session ...' stdout line and the
+    'cw result emit: session=... prior_status=... new_status=...' log line.
+    """
+
+    session_id: str
+    result: AutoDevResult
+    prior_status: str | None
+
+
+def emit_result_locked(payload: dict[str, Any], session_id: str) -> EmitOutcome:
+    """Validate PAYLOAD and record it onto SESSION_ID's last_result.
+
+    Caller MUST already hold sessions_lock(). Extracted from emit_result()
+    so an in-process caller that has already acquired the sessions lock can
+    invoke the mutation directly without a second acquisition of the same
+    flock-based lock, which would self-deadlock (mirrors
+    cw.dev_queue.approval._approve_ticket_locked, GitHub #1065).
+
+    Emits no event and performs no task routing -- write-only, matching the
+    original cw result emit CLI contract byte-for-byte (RFC 0012 D-A1).
+
+    Raises:
+        EmitValidationError: if PAYLOAD fails AutoDevResult validation.
+        EmitSessionNotFoundError: if SESSION_ID has no matching session.
+    """
+    try:
+        result_obj = AutoDevResult.model_validate(payload)
+    except ValidationError as exc:
+        msg = "AutoDevResult payload failed validation"
+        raise EmitValidationError(msg, errors=_format_errors(exc)) from exc
+
+    state = load_state()
+    session = state.find_by_name_or_id(session_id)
+    if session is None:
+        msg = f"Session {session_id!r} not found"
+        raise EmitSessionNotFoundError(msg, session_id=session_id)
+
+    prior_status: str | None = (
+        session.last_result.get("status")
+        if isinstance(session.last_result, dict)
+        else None
+    )
+    session.last_result = result_obj.model_dump(mode="json")
+    save_state(state)
+
+    return EmitOutcome(
+        session_id=session.id, result=result_obj, prior_status=prior_status
+    )
+
+
+def emit_result(payload: dict[str, Any], session_id: str) -> EmitOutcome:
+    """Acquire sessions_lock() and record PAYLOAD onto SESSION_ID.
+
+    Thin lock-acquiring wrapper over emit_result_locked() (mirrors
+    cw.dev_queue.approval.approve_ticket). Use this from any caller not
+    already holding sessions_lock(); use emit_result_locked() directly from
+    inside an existing `with sessions_lock():` block to avoid the
+    non-reentrant flock deadlocking (see SessionsLockReentryError).
+    """
+    with sessions_lock():
+        return emit_result_locked(payload, session_id)
+
+
 @result.command(name="emit")
 @click.argument("path")
 @click.option(
@@ -195,39 +265,29 @@ def result_emit(path: str, session_id: str | None) -> None:
     'No session state was modified.' notice to stderr.
     """
     payload = _read_json_payload(path)
-    result_obj = _validate_or_exit(
-        payload, extra_stderr_line="No session state was modified."
-    )
-
     resolved_id = _resolve_emit_session_id(session_id)
 
-    # Why not mutate_state: the not-found case must abort loudly before any
-    # write, and the post-write echo/log needs the prior status captured
-    # during the mutation -- mutate_state's Callable[[CwState], None] shape
-    # has no return value, so both would need a nonlocal-capturing closure.
-    # An explicit lock block reads more plainly here; mirrors the equally
-    # simple single-mutation site at doctor.py's targeted-reap path.
-    with sessions_lock():
-        state = load_state()
-        session = state.find_by_name_or_id(resolved_id)
-        if session is None:
-            click.echo(
-                f"Session '{resolved_id}' not found; no state was modified.",
-                err=True,
-            )
-            raise click.exceptions.Exit(1)
-        prior_status = (
-            session.last_result.get("status")
-            if isinstance(session.last_result, dict)
-            else None
+    try:
+        outcome = emit_result(payload, resolved_id)
+    except EmitValidationError as exc:
+        for line in exc.errors:
+            click.echo(line, err=True)
+        click.echo("No session state was modified.", err=True)
+        raise click.exceptions.Exit(1) from exc
+    except EmitSessionNotFoundError as exc:
+        click.echo(
+            f"Session '{exc.session_id}' not found; no state was modified.",
+            err=True,
         )
-        session.last_result = result_obj.model_dump(mode="json")
-        save_state(state)
+        raise click.exceptions.Exit(1) from exc
 
     logger.info(
         "cw result emit: session=%s prior_status=%s new_status=%s",
-        session.id,
-        prior_status,
-        result_obj.status,
+        outcome.session_id,
+        outcome.prior_status,
+        outcome.result.status,
     )
-    click.echo(f"Recorded result for session {session.id}: status={result_obj.status}")
+    click.echo(
+        f"Recorded result for session {outcome.session_id}: "
+        f"status={outcome.result.status}"
+    )
