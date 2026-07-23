@@ -55,6 +55,7 @@ from cw.models import (
     OCCUPIED_LANE_STATUSES,
     ClientConfig,
     CompletionReason,
+    LastResultSource,
     OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
@@ -67,7 +68,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.reconcile import _deps
-from cw.result import has_terminal_result
+from cw.result import EmitOutcome, emit_result_on, has_terminal_result
 from cw.worktree import (
     remove_worktree,
     worktree_has_unsaved_work,
@@ -1374,15 +1375,36 @@ def _apply_salvaged_completion(
     claude_session_id: str,
     *,
     now: datetime,
-) -> None:
-    """Mark ``session`` COMPLETED from a salvaged sentinel (like signal_stop)."""
+) -> EmitOutcome:
+    """Mark ``session`` COMPLETED from a salvaged sentinel (like signal_stop).
+
+    RFC 0012 A3 (#1459): the ``last_result`` write is routed through the door
+    (:func:`emit_result_on`, source=SALVAGE_TRANSCRIPT) FIRST. On a first-
+    writer-wins refusal -- another authority already recorded a terminal result
+    for this session -- the status/completed_at/completed_reason/cost_usd/
+    claude_session_id mutations are ALL skipped and the refusal ``EmitOutcome``
+    is returned so the caller can drop this candidate from its downstream
+    ticket-routing / event-emission accounting. The door's own ``emit_result_on``
+    warning already logs ``existing_source``/``attempted_source`` on refusal, so
+    no duplicate log is emitted here.
+
+    Returns the ``EmitOutcome`` (``refused=True`` when the door declined). All
+    four callers (phantom/idle/stalled/concierge) check ``.refused``.
+    """
+    outcome = emit_result_on(
+        session,
+        result.model_dump(mode="json"),
+        source=LastResultSource.SALVAGE_TRANSCRIPT,
+    )
+    if outcome.refused:
+        return outcome
     session.status = SessionStatus.COMPLETED
     session.completed_at = now
     session.completed_reason = CompletionReason.NORMAL
-    session.last_result = result.model_dump(mode="json")
     if result.cost_usd is not None:
         session.cost_usd = result.cost_usd
     session.claude_session_id = claude_session_id
+    return outcome
 
 
 def _compute_worktree_dirty(client_name: str, branch: str | None) -> bool:
