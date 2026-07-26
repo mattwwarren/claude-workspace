@@ -93,7 +93,20 @@ git fetch origin <base>
 git merge origin/<base>
 ```
 
-- **If merge succeeds cleanly** → proceed to Step 2
+- **If merge succeeds cleanly** → push and verify:
+  ```bash
+  BRANCH=$(git branch --show-current)
+  git push origin HEAD:refs/heads/"$BRANCH"
+  git fetch origin "$BRANCH"
+  test "$(git rev-parse origin/"$BRANCH")" = "$(git rev-parse HEAD)"
+  ```
+  - **On success** → proceed to Step 2.
+  - **On push failure or verify mismatch**: ask the user:
+    > "Failed to push the merged branch to origin (<error>). Retry the push, or abort /prep-pr?"
+    - **Retry** → re-attempt the push once.
+    - **Abort** → stop /prep-pr.
+
+    **Headless:** emit `HEADLESS BLOCK` (`gate: "Step 1 sync-with-base push"`, `reason: agent_block` per this file's fixed convention, `details:` the verbatim push failure output). Do NOT retry automatically in headless mode and do NOT proceed to Step 2 — an unavailability condition (auth/network) needs the operator, not a blind retry.
 - **If merge conflicts** → surface the conflicting files to the user:
   > "Merge conflicts with `<base>`. Conflicting files: [list]. Resolve before continuing?"
   - **Yes** → help resolve conflicts, commit the merge
