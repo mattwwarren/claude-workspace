@@ -1002,10 +1002,21 @@ class SentinelRouteOutcome(NamedTuple):
     outside ``OCCUPIED_LANE_STATUSES`` (raced to terminal by a concurrent
     caller). A truly-absent task is the only remaining ``routed=True`` miss
     shape (#1189).
+
+    ``landed_terminal`` (#1273) is True only for cause (b) above -- this very
+    call just wrote the task terminal-FAILED via
+    ``_route_blocked_result_to_task``. It is False for causes (a) and (c) and
+    for every ``routed=True`` case. The distinction matters because (a) and
+    (c) both leave a still-legitimately-running (or already-handled) worker
+    alone, while (b) means the worker backing this task is now leaked --
+    ``routed=False`` alone can't tell them apart. Callers (``signal_stop``)
+    use ``landed_terminal`` to `daemon.stop()` the leaked worker in the (b)
+    case without touching a worker refused by the #986 stage-mismatch guard.
     """
 
     rescued: bool
     routed: bool
+    landed_terminal: bool
 
 
 def _apply_sentinel_to_task(
@@ -1058,10 +1069,13 @@ def _apply_sentinel_to_task(
                     ticket_id,
                     cw_session_id,
                 )
-            return SentinelRouteOutcome(rescued=False, routed=not matched_excluded)
+            return SentinelRouteOutcome(
+                rescued=False, routed=not matched_excluded, landed_terminal=False
+            )
 
         rescued = False
         routed = True
+        landed_terminal = False
         mutated = True
         if isinstance(sentinel, AutoDevResult):
             # Delegate to the shared B2 staged advance decision so both the
@@ -1103,6 +1117,7 @@ def _apply_sentinel_to_task(
             # persisted below even when routed=False -- routed=False means
             # "don't also complete the session," not "don't write the task."
             routed = _route_blocked_result_to_task(target, sentinel)
+            landed_terminal = not routed
         else:
             # True no-op: a late BlockedResult against an already-parked task
             # carries no success signal and must not write (#918).
@@ -1110,7 +1125,9 @@ def _apply_sentinel_to_task(
 
         if mutated:
             save_dev_queue(store)
-        return SentinelRouteOutcome(rescued=rescued, routed=routed)
+        return SentinelRouteOutcome(
+            rescued=rescued, routed=routed, landed_terminal=landed_terminal
+        )
 
 
 def _route_blocked_result_to_task(target: TicketTask, sentinel: BlockedResult) -> bool:
