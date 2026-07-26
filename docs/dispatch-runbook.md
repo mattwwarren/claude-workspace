@@ -756,9 +756,12 @@ co-occur), #786 (re-spawn churn), #787 (diff-cover skipped pre-PR).
 ### 9.5 Manual PR for a tombstoned finalize-blocked session (#816)
 
 **Symptom.** A task is stuck at `blocked_on_user` with `paused_status:
-finalize_blocked` and a `rescue_attempted: true` marker. The branch is pushed
-to origin; `gh pr create` failed transiently (permission error, usage limit, or
-network blip) and the rescue loop will not retry.
+finalize_blocked` and a `rescue_attempted: true` marker. By this point the
+branch is reliably on origin — the post-merge push in `auto-dev-finalize.md`
+Step 4c.2 and `/prep-pr`'s own Step 1 push (both added by #1414) land the
+branch before the quality-gate window this scenario's transient `gh pr
+create` failure (permission error, usage limit, or network blip) occurs in
+— and the rescue loop will not retry.
 
 **Diagnose.**
 
