@@ -9,7 +9,11 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from cw.auto_dev_result import INTERMEDIATE_ADVANCE_STATUSES, AutoDevResult
+from cw.auto_dev_result import (
+    INTERMEDIATE_ADVANCE_STATUSES,
+    AutoDevResult,
+    BlockedResult,
+)
 from cw.config import save_state
 from cw.dev_queue import (
     _derive_disposition,
@@ -53,10 +57,13 @@ from cw.reconcile._shared import (
     _apply_sentinel_to_task,
     _cleanup_timed_out_worktree,
     _emit_reap_proposed,
+    _foreign_result_target_queue_status,
+    _has_terminal_sentinel,
     _is_headless,
     _parse_any_sentinel_from_transcript,
     _queue_status_for_salvaged,
     _transcript_age_seconds,
+    _validate_existing_result_for_routing,
     classify_sentinel_stage_position,
     feature_branch_key,
     resolve_headless_budget,
@@ -154,8 +161,8 @@ def _maybe_append_salvage_skip_reset(
 ) -> None:
     """Append a RESET_SALVAGE_SKIP_COUNTER candidate when the latch is nonzero.
 
-    Shared by all 5 non-SKIP_PARKED detect-phase exits in
-    _detect_stalled_candidates (#974). Gated at detect time on
+    Shared by all 6 non-SKIP_PARKED detect-phase exits in
+    _detect_stalled_candidates (#974, #1470). Gated at detect time on
     session.consecutive_salvage_skips != 0 so a session whose counter is
     already 0 never grows the per-tick candidate list. A session can thus
     yield TWO ReapCandidates in one pass — its own disposition candidate plus
@@ -248,6 +255,141 @@ def _append_routed_advance_candidate(
     return True
 
 
+def _append_foreign_result_candidate(
+    candidates: list[ReapCandidate],
+    session: Session,
+    task: TicketTask | None,
+    ticket_id: str | None,
+) -> bool:
+    """Append a COMPLETE_FOREIGN_RESULT candidate; return whether the guard fired.
+
+    A live session whose ``last_result`` already carries a terminal sentinel
+    from another authority (e.g. an out-of-band ``cw result emit``, which by
+    contract never flips ``session.status``) must not be re-offered to the
+    budget / transcript-salvage / retry-cap chain below -- that chain can only
+    ever end in a door-refused SALVAGE_COMPLETION candidate silently dropped
+    every tick (the exact unbounded-reoffer defect this ticket closes). Mirrors
+    ``_append_routed_advance_candidate``: on a guard fire (True), also appends
+    the RESET_SALVAGE_SKIP_COUNTER reset when the latch is nonzero (#974). The
+    caller ``continue``s whenever this returns True, REGARDLESS of whether a
+    disposition candidate was appended -- an unroutable/invalid foreign result
+    still short-circuits the chain (drop-only fallthrough, R4) rather than
+    being re-offered to it; it is not this ticket's scope to disposition an
+    unroutable foreign write, only to stop re-parsing the transcript for one.
+    See GitHub #1470.
+    """
+    if not _has_terminal_sentinel(session):
+        return False
+    _maybe_append_salvage_skip_reset(candidates, session, ticket_id)
+    validated_foreign = _validate_existing_result_for_routing(session.last_result)
+    if validated_foreign is not None:
+        candidates.append(
+            ReapCandidate(
+                session_id=session.id,
+                proposed_action=ProposedAction.COMPLETE_FOREIGN_RESULT,
+                ticket_id=ticket_id,
+                routed_sentinel=validated_foreign,
+                lane=task.lane if task else DEFAULT_LANE,
+                client=session.client,
+            )
+        )
+    return True
+
+
+def _append_skip_parked_candidate(
+    candidates: list[ReapCandidate],
+    session: Session,
+    task_by_ticket: dict[str, TicketTask],
+) -> bool:
+    """Append a SKIP_PARKED candidate for a session already parked by the idle
+    watchdog; return whether the park-marker guard fired.
+
+    Extracted from ``_detect_stalled_candidates``'s loop body to keep that
+    function under the branch/statement cap (#1470). Detect returns the
+    SKIP_PARKED candidate; act emits the skip event.
+    """
+    if not (
+        isinstance(session.last_result, dict)
+        and session.last_result.get("paused_status")
+        in (_SILENTLY_IDLE_REASON, _NEEDS_SALVAGE_REASON)
+    ):
+        return False
+    actual_paused_status = session.last_result.get("paused_status")
+    ticket_id = ticket_id_for_session(session.name)
+    # Stamp lane for SKIP_PARKED too so act phase has a consistent candidate.
+    skip_task = task_by_ticket.get(ticket_id) if ticket_id else None
+    candidates.append(
+        ReapCandidate(
+            session_id=session.id,
+            proposed_action=ProposedAction.SKIP_PARKED,
+            ticket_id=ticket_id,
+            paused_status=str(actual_paused_status) if actual_paused_status else None,
+            lane=skip_task.lane if skip_task else DEFAULT_LANE,
+            client=session.client,
+        )
+    )
+    return True
+
+
+def _append_finalize_blocked_candidate(
+    candidates: list[ReapCandidate],
+    session: Session,
+    task: TicketTask | None,
+    ticket_id: str | None,
+    elapsed: float,
+    effective_clients: dict[str, ClientConfig],
+    finalize_pr_by_branch: dict[str, tuple[bool | None, bool]] | None,
+) -> bool:
+    """Append a PARK_FINALIZE_BLOCKED candidate if one applies; return whether it did.
+
+    Extracted from ``_detect_stalled_candidates``'s loop body to keep that
+    function under the branch/statement cap (#1470). Branch pushed but
+    finalize failed before opening a PR (GitHub #812). Must run BEFORE the
+    retry-cap check so the task is parked (preserving the worktree) rather
+    than capped-and-abandoned. On a hit, also appends the
+    RESET_SALVAGE_SKIP_COUNTER reset when the latch is nonzero (#974).
+    """
+    if session.worktree_path is None or task is None:
+        return False
+    fb_client_cfg = effective_clients.get(session.client)
+    if fb_client_cfg is None:
+        _log.warning(
+            "finalize_blocked: unknown client %r for session %s — skipping",
+            session.client,
+            session.id,
+        )
+        return False
+    fb_blocked, fb_branch = _resolve_finalize_blocked_condition(
+        task,
+        session,
+        session.worktree_path,
+        fb_client_cfg.default_branch,
+        clients=effective_clients,
+        finalize_pr_by_branch=finalize_pr_by_branch,
+    )
+    if not (fb_blocked and fb_branch is not None):
+        return False
+    # Why: recovery via finalize-park — a session can yield both its
+    # PARK_FINALIZE_BLOCKED disposition and a RESET_SALVAGE_SKIP_COUNTER
+    # candidate in the same pass (#974).
+    _maybe_append_salvage_skip_reset(candidates, session, ticket_id)
+    candidates.append(
+        ReapCandidate(
+            session_id=session.id,
+            proposed_action=ProposedAction.PARK_FINALIZE_BLOCKED,
+            ticket_id=ticket_id,
+            elapsed_seconds=elapsed,
+            reap_reason=ReapReason.FINALIZE_BLOCKED,
+            lane=task.lane,
+            client=session.client,
+            stage=task.stage,
+            worktree_path=session.worktree_path,
+            branch=fb_branch,
+        )
+    )
+    return True
+
+
 def _detect_stalled_candidates(
     state: CwState,
     *,
@@ -274,29 +416,16 @@ def _detect_stalled_candidates(
         ):
             continue
         # Park-marker check: sessions already parked by the idle watchdog.
-        # Detect returns SKIP_PARKED candidate; act emits the skip event.
-        if isinstance(session.last_result, dict) and session.last_result.get(
-            "paused_status"
-        ) in (_SILENTLY_IDLE_REASON, _NEEDS_SALVAGE_REASON):
-            actual_paused_status = session.last_result.get("paused_status")
-            ticket_id = ticket_id_for_session(session.name)
-            # Stamp lane for SKIP_PARKED too so act phase has a consistent candidate.
-            skip_task = task_by_ticket.get(ticket_id) if ticket_id else None
-            candidates.append(
-                ReapCandidate(
-                    session_id=session.id,
-                    proposed_action=ProposedAction.SKIP_PARKED,
-                    ticket_id=ticket_id,
-                    paused_status=str(actual_paused_status)
-                    if actual_paused_status
-                    else None,
-                    lane=skip_task.lane if skip_task else DEFAULT_LANE,
-                    client=session.client,
-                )
-            )
+        if _append_skip_parked_candidate(candidates, session, task_by_ticket):
             continue
         ticket_id = ticket_id_for_session(session.name)
         task = task_by_ticket.get(ticket_id) if ticket_id else None
+        # COMPLETE_FOREIGN_RESULT guard (#1470): runs BEFORE the budget gate so
+        # a session already carrying a foreign terminal result is completed
+        # immediately rather than only after its wall-clock budget expires
+        # (R2). See _append_foreign_result_candidate's docstring.
+        if _append_foreign_result_candidate(candidates, session, task, ticket_id):
+            continue
         budget = resolve_headless_budget(task, session, config)
         elapsed = (now - session.started_at).total_seconds()
         if elapsed < budget:
@@ -343,44 +472,16 @@ def _detect_stalled_candidates(
         # Finalize-blocked check: branch pushed but finalize failed before opening
         # a PR (GitHub #812). Must run BEFORE the retry-cap check so the task
         # is parked (preserving the worktree) rather than capped-and-abandoned.
-        if session.worktree_path is not None and task is not None:
-            fb_client_cfg = effective_clients.get(session.client)
-            if fb_client_cfg is None:
-                _log.warning(
-                    "finalize_blocked: unknown client %r for session %s — skipping",
-                    session.client,
-                    session.id,
-                )
-            else:
-                fb_blocked, fb_branch = _resolve_finalize_blocked_condition(
-                    task,
-                    session,
-                    session.worktree_path,
-                    fb_client_cfg.default_branch,
-                    clients=effective_clients,
-                    finalize_pr_by_branch=finalize_pr_by_branch,
-                )
-                if fb_blocked and fb_branch is not None:
-                    # Why: recovery via finalize-park — a session can yield
-                    # both its PARK_FINALIZE_BLOCKED disposition and a
-                    # RESET_SALVAGE_SKIP_COUNTER candidate in the same pass
-                    # (#974).
-                    _maybe_append_salvage_skip_reset(candidates, session, ticket_id)
-                    candidates.append(
-                        ReapCandidate(
-                            session_id=session.id,
-                            proposed_action=ProposedAction.PARK_FINALIZE_BLOCKED,
-                            ticket_id=ticket_id,
-                            elapsed_seconds=elapsed,
-                            reap_reason=ReapReason.FINALIZE_BLOCKED,
-                            lane=task.lane,
-                            client=session.client,
-                            stage=task.stage,
-                            worktree_path=session.worktree_path,
-                            branch=fb_branch,
-                        )
-                    )
-                    continue
+        if _append_finalize_blocked_candidate(
+            candidates,
+            session,
+            task,
+            ticket_id,
+            elapsed,
+            effective_clients,
+            finalize_pr_by_branch,
+        ):
+            continue
         cap = resolve_stalled_retry_cap(task, config)
         # Why: task.attempts is the shared counter for both this per-tier stalled cap
         # and the global attempt ceiling (#786). Do not add a parallel counter.
@@ -708,6 +809,7 @@ def _apply_stalled_state_mutations(
     park_candidates: list[ReapCandidate],
     finalize_blocked_candidates: list[ReapCandidate],
     reset_salvage_skip_candidates: list[ReapCandidate],
+    foreign_result_candidates: list[ReapCandidate],
 ) -> list[ReapCandidate]:
     """Apply in-place session-state mutations for stalled dispositions.
 
@@ -719,6 +821,16 @@ def _apply_stalled_state_mutations(
     wins) is dropped, so the caller routes tickets / emits events off the
     accepted list rather than the raw ``salvage_candidates`` (which is built from
     the candidate list independently of what the door actually wrote).
+
+    ``foreign_result_candidates`` (#1470) are completed unconditionally -- no
+    door arbitration needed, since the result being completed from IS the
+    session's own already-recorded ``last_result`` (there is nothing to
+    refuse). Unlike ``_apply_salvaged_completion``'s own-session salvage path,
+    this does not backfill ``session.cost_usd``: the more-directly-comparable
+    precedent (``_apply_stalled_routed_mutations``/ROUTE_EMITTED_SENTINEL,
+    below) does not set it either, and a foreign result was never captured
+    through this session's own run, so there is no "recovered cost" to
+    restore.
     """
     accepted_salvage: list[ReapCandidate] = []
     for candidate in salvage_candidates:
@@ -785,6 +897,15 @@ def _apply_stalled_state_mutations(
     for candidate in reset_salvage_skip_candidates:
         session_by_id[candidate.session_id].consecutive_salvage_skips = 0
 
+    # COMPLETE_FOREIGN_RESULT (#1470): complete directly from the session's
+    # own already-recorded last_result -- no door write (R1), no cost_usd
+    # backfill (see docstring above).
+    for candidate in foreign_result_candidates:
+        session = session_by_id[candidate.session_id]
+        session.status = SessionStatus.COMPLETED
+        session.completed_at = now
+        session.completed_reason = CompletionReason.NORMAL
+
     return accepted_salvage
 
 
@@ -835,6 +956,27 @@ def _apply_stalled_routed_mutations(
     return accepted
 
 
+def _apply_foreign_result_queue_mutation(
+    task: TicketTask,
+    validated: AutoDevResult | BlockedResult,
+) -> None:
+    """Route a RUNNING task off a validated COMPLETE_FOREIGN_RESULT result.
+
+    Extracted from ``_apply_stalled_queue_mutations``'s per-task dispatch loop
+    to keep that function under the branch/statement cap (#1470). Mirrors
+    ``concierge._route_park_marker_poison_task``'s foreign-result arm; does
+    NOT clear ``task.session_id``, matching the existing salvaged-ticket
+    branch immediately below (session_id is kept for operator traceability).
+    """
+    dumped = validated.model_dump(mode="json")
+    transition_task_status(
+        task,
+        _foreign_result_target_queue_status(validated),
+        disposition=_derive_disposition(validated.status),
+        pr_url=_extract_pr_url(dumped),
+    )
+
+
 def _apply_stalled_queue_mutations(
     revert_candidates: list[ReapCandidate],
     merged_revert_candidates: list[ReapCandidate],
@@ -842,6 +984,7 @@ def _apply_stalled_queue_mutations(
     park_candidates: list[ReapCandidate],
     salvage_candidates: list[ReapCandidate],
     salvaged_result_by_ticket: dict[str, AutoDevResult],
+    foreign_result_candidates: list[ReapCandidate],
 ) -> tuple[list[str], list[str]]:
     """Apply dev-queue status changes for stalled-session dispositions.
 
@@ -855,6 +998,11 @@ def _apply_stalled_queue_mutations(
         c.ticket_id: c.paused_status for c in park_candidates if c.ticket_id
     }
     salvaged_ticket_ids_set = {c.ticket_id for c in salvage_candidates if c.ticket_id}
+    foreign_result_by_ticket: dict[str, AutoDevResult | BlockedResult] = {
+        c.ticket_id: c.routed_sentinel
+        for c in foreign_result_candidates
+        if c.ticket_id and c.routed_sentinel is not None
+    }
     reverted: list[str] = []
     merged_completed: list[str] = []
     if not (
@@ -863,6 +1011,7 @@ def _apply_stalled_queue_mutations(
         or gh_blocked_tids
         or park_disposition_by_tid
         or salvaged_ticket_ids_set
+        or foreign_result_by_ticket
     ):
         return reverted, merged_completed
     with dev_queue_lock():
@@ -908,6 +1057,11 @@ def _apply_stalled_queue_mutations(
                     _queue_status_for_salvaged(result),
                     disposition=_derive_disposition(result.status),
                     pr_url=_extract_pr_url(last_result),
+                )
+                changed = True
+            elif task.ticket_id in foreign_result_by_ticket:
+                _apply_foreign_result_queue_mutation(
+                    task, foreign_result_by_ticket[task.ticket_id]
                 )
                 changed = True
         if changed:
@@ -1007,6 +1161,29 @@ def _emit_stalled_routed_events(
         )
 
 
+def _emit_stalled_foreign_result_events(
+    session_by_id: dict[str, Session],
+    foreign_result_candidates: list[ReapCandidate],
+) -> None:
+    """Emit salvaged SESSION_COMPLETED + stop surface for foreign-result completions.
+
+    #1470. Mirrors ``_emit_stalled_routed_events`` and stalled.py's own salvage
+    loop exactly. Extracted so ``_emit_stalled_events`` stays under the branch cap.
+    """
+    for candidate in foreign_result_candidates:
+        if candidate.routed_sentinel is None:
+            continue  # Invariant: COMPLETE_FOREIGN_RESULT always has routed_sentinel
+        session = session_by_id[candidate.session_id]
+        completed_payload = build_salvage_completion_payload(
+            session,
+            ticket_id=candidate.ticket_id,
+            status=candidate.routed_sentinel.status,
+        )
+        record_event(OrchestratorEventType.SESSION_COMPLETED, completed_payload)
+        if session.surface_ref is not None:
+            _deps.get_native_daemon_client().stop(session.surface_ref)
+
+
 def _emit_stalled_events(
     session_by_id: dict[str, Session],
     revert_candidates: list[ReapCandidate],
@@ -1017,6 +1194,7 @@ def _emit_stalled_events(
     finalize_blocked_candidates: list[ReapCandidate],
     routed_sentinel_candidates: list[ReapCandidate],
     wall_clock_veto_escalation_candidates: list[ReapCandidate],
+    foreign_result_candidates: list[ReapCandidate],
     *,
     branch_absent_ticket_ids: frozenset[str] = frozenset(),
 ) -> None:
@@ -1033,6 +1211,8 @@ def _emit_stalled_events(
     retry-cap park) but — preserving SIGNAL_ONLY's non-destructive contract —
     do NOT stop the daemon or remove the worktree; the task already routed
     silently to BLOCKED_ON_USER via _route_stalled_by_policy's mutation.
+    ``foreign_result_candidates`` (#1470) emit a salvaged SESSION_COMPLETED and
+    stop the surface, mirroring the salvage_candidates loop exactly.
     """
     for candidate in revert_candidates:
         session = session_by_id[candidate.session_id]
@@ -1130,6 +1310,7 @@ def _emit_stalled_events(
     )
     _emit_stalled_routed_events(session_by_id, routed_sentinel_candidates)
     _emit_finalize_blocked_events(session_by_id, finalize_blocked_candidates)
+    _emit_stalled_foreign_result_events(session_by_id, foreign_result_candidates)
 
 
 def _build_needs_attention_park_payload(
@@ -1345,6 +1526,11 @@ def _act_on_stalled_candidates(
         for c in candidates
         if c.proposed_action == ProposedAction.ROUTE_EMITTED_SENTINEL
     ]
+    foreign_result_candidates = [
+        c
+        for c in candidates
+        if c.proposed_action == ProposedAction.COMPLETE_FOREIGN_RESULT
+    ]
 
     # Split REVERT_TASK candidates by world-state check results (GitHub #637).
     # merged_ticket_ids / gh_blocked_ticket_ids come from a pre-pass in
@@ -1371,13 +1557,13 @@ def _act_on_stalled_candidates(
     # mutations on a skip/reset-only tick because it predated those two
     # candidate lists). The `if not candidates: return [], []` above already
     # guarantees non-emptiness, and skip/salvage/revert/park/finalize_blocked/
-    # reset_salvage_skip/park_vetoed/routed_sentinel exhaustively partition every
-    # ProposedAction that _detect_stalled_candidates emits — so a second guard here
-    # can never fire and only risks silently reintroducing the same bug class
-    # the next time a new ProposedAction is added and this list isn't updated
-    # to match. session_by_id must be built unconditionally: SKIP_PARKED/
-    # RESET_SALVAGE_SKIP_COUNTER candidates need live Session objects even
-    # when they are the tick's only candidates.
+    # reset_salvage_skip/park_vetoed/routed_sentinel/foreign_result exhaustively
+    # partition every ProposedAction that _detect_stalled_candidates emits — so
+    # a second guard here can never fire and only risks silently reintroducing
+    # the same bug class the next time a new ProposedAction is added and this
+    # list isn't updated to match. session_by_id must be built unconditionally:
+    # SKIP_PARKED/RESET_SALVAGE_SKIP_COUNTER candidates need live Session
+    # objects even when they are the tick's only candidates.
     session_by_id = {s.id: s for s in state.sessions}
 
     effective_config = config if config is not None else OrchestratorConfig()
@@ -1443,6 +1629,7 @@ def _act_on_stalled_candidates(
         park_candidates=park_candidates,
         finalize_blocked_candidates=finalize_blocked_candidates,
         reset_salvage_skip_candidates=reset_salvage_skip_candidates,
+        foreign_result_candidates=foreign_result_candidates,
     )
 
     # Path 1 backstop (#1149): route emitted advance sentinels through the shared
@@ -1466,6 +1653,7 @@ def _act_on_stalled_candidates(
         park_candidates,
         salvage_candidates,
         salvaged_result_by_ticket,
+        foreign_result_candidates=foreign_result_candidates,
     )
 
     _apply_finalize_blocked_queue_mutations(finalize_blocked_candidates)
@@ -1480,6 +1668,7 @@ def _act_on_stalled_candidates(
         finalize_blocked_candidates,
         routed_sentinel_candidates,
         wall_clock_veto_escalation_candidates,
+        foreign_result_candidates=foreign_result_candidates,
         branch_absent_ticket_ids=branch_absent_ticket_ids,
     )
 
