@@ -217,7 +217,7 @@ def test_incident_418_silently_idle_emits_salvage_skipped(
     )
     sess.last_result = {"paused_status": _SILENTLY_IDLE_REASON}
     state = CwState(sessions=[sess])
-    monkeypatch.setattr("cw.reconcile.stalled._is_headless", lambda *_: True)
+    monkeypatch.setattr("cw.reconcile.stalled._detect._is_headless", lambda *_: True)
 
     now = _NOW_418
     revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
@@ -249,7 +249,7 @@ def test_incident_418_terminal_sentinel_no_salvage_skip(
     # Real terminal sentinel — no paused_status key.
     sess.last_result = {"status": "shipped", "schema_version": 4}
     state = CwState(sessions=[sess])
-    monkeypatch.setattr("cw.reconcile.stalled._is_headless", lambda *_: True)
+    monkeypatch.setattr("cw.reconcile.stalled._detect._is_headless", lambda *_: True)
 
     now = _NOW_418
     revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
