@@ -24,7 +24,7 @@ completed. Branch-absence does not imply "merged."
 
 ## What this means for producers
 
-- `revert_stalled_headless_sessions` (`src/cw/reconcile/stalled.py`) calls
+- `revert_stalled_headless_sessions` (`src/cw/reconcile/stalled/core.py`) calls
   `branch_exists_on_origin` only on `(False, True)` (no-merged-PR) candidates,
   forwards `branch_absent_ticket_ids` through `_act_on_stalled_candidates`
   (mirroring `merged_ticket_ids` / `gh_blocked_ticket_ids`), and tags the

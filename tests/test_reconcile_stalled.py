@@ -829,7 +829,7 @@ def test_revert_stalled_gh_prepass_skips_none_ticket_id_and_none_client(
         return [*real_candidates, injected]
 
     monkeypatch.setattr(
-        "cw.reconcile.stalled._detect_stalled_candidates",
+        "cw.reconcile.stalled.core._detect_stalled_candidates",
         _patched_detect,
     )
 

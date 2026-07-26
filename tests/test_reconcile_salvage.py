@@ -2012,10 +2012,11 @@ class TestFinalizeBlocked:
             lambda name, _client: push_calls.append(name),
         )
         monkeypatch.setattr(
-            "cw.reconcile.stalled._has_commits_beyond_base", lambda _p, _b: True
+            "cw.reconcile.stalled._detect._has_commits_beyond_base", lambda _p, _b: True
         )
         monkeypatch.setattr(
-            "cw.reconcile.stalled.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+            "cw.reconcile.stalled._detect.pr_exists_for_branch",
+            lambda _b, **_kw: (False, True),
         )
 
         reverted = revert_stalled_headless_sessions(
@@ -2076,7 +2077,8 @@ class TestFinalizeBlocked:
             "cw.reconcile._deps.fire_push_notification", lambda *_a: None
         )
         monkeypatch.setattr(
-            "cw.reconcile.stalled._has_commits_beyond_base", lambda _p, _b: False
+            "cw.reconcile.stalled._detect._has_commits_beyond_base",
+            lambda _p, _b: False,
         )
         monkeypatch.setattr(
             "cw.reconcile._deps.pr_is_merged_for_ticket",
@@ -2122,11 +2124,12 @@ class TestFinalizeBlocked:
             "cw.reconcile._deps.fire_push_notification", lambda *_a: None
         )
         monkeypatch.setattr(
-            "cw.reconcile.stalled._has_commits_beyond_base", lambda _p, _b: True
+            "cw.reconcile.stalled._detect._has_commits_beyond_base", lambda _p, _b: True
         )
         # PR exists → (True, True): not finalize-blocked
         monkeypatch.setattr(
-            "cw.reconcile.stalled.pr_exists_for_branch", lambda _b, **_kw: (True, True)
+            "cw.reconcile.stalled._detect.pr_exists_for_branch",
+            lambda _b, **_kw: (True, True),
         )
         monkeypatch.setattr(
             "cw.reconcile._deps.pr_is_merged_for_ticket",
@@ -2177,10 +2180,11 @@ class TestFinalizeBlocked:
             "cw.reconcile._deps.fire_push_notification", lambda *_a: None
         )
         monkeypatch.setattr(
-            "cw.reconcile.stalled._has_commits_beyond_base", lambda _p, _b: True
+            "cw.reconcile.stalled._detect._has_commits_beyond_base", lambda _p, _b: True
         )
         monkeypatch.setattr(
-            "cw.reconcile.stalled.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+            "cw.reconcile.stalled._detect.pr_exists_for_branch",
+            lambda _b, **_kw: (False, True),
         )
         monkeypatch.setattr(
             "cw.reconcile._deps.pr_is_merged_for_ticket",
@@ -2226,11 +2230,12 @@ class TestFinalizeBlocked:
             "cw.reconcile._deps.fire_push_notification", lambda *_a: None
         )
         monkeypatch.setattr(
-            "cw.reconcile.stalled._has_commits_beyond_base", lambda _p, _b: True
+            "cw.reconcile.stalled._detect._has_commits_beyond_base", lambda _p, _b: True
         )
         # gh unavailable in _resolve_finalize_blocked_condition
         monkeypatch.setattr(
-            "cw.reconcile.stalled.pr_exists_for_branch", lambda _b, **_kw: (None, False)
+            "cw.reconcile.stalled._detect.pr_exists_for_branch",
+            lambda _b, **_kw: (None, False),
         )
         # gh also unavailable in revert_stalled_headless_sessions pre-pass
         monkeypatch.setattr(
@@ -2283,14 +2288,15 @@ class TestFinalizeBlocked:
             "cw.reconcile._deps.fire_push_notification", lambda *_a: None
         )
         monkeypatch.setattr(
-            "cw.reconcile.stalled._cleanup_timed_out_worktree",
+            "cw.reconcile.stalled._events._cleanup_timed_out_worktree",
             lambda s, _tid: cleanup_calls.append(s.id),
         )
         monkeypatch.setattr(
-            "cw.reconcile.stalled._has_commits_beyond_base", lambda _p, _b: True
+            "cw.reconcile.stalled._detect._has_commits_beyond_base", lambda _p, _b: True
         )
         monkeypatch.setattr(
-            "cw.reconcile.stalled.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+            "cw.reconcile.stalled._detect.pr_exists_for_branch",
+            lambda _b, **_kw: (False, True),
         )
 
         revert_stalled_headless_sessions(load_state(), now=now, config=_auto_config())
@@ -2327,10 +2333,11 @@ class TestFinalizeBlocked:
             "cw.reconcile._deps.fire_push_notification", lambda *_a: None
         )
         monkeypatch.setattr(
-            "cw.reconcile.stalled._has_commits_beyond_base", lambda _p, _b: True
+            "cw.reconcile.stalled._detect._has_commits_beyond_base", lambda _p, _b: True
         )
         monkeypatch.setattr(
-            "cw.reconcile.stalled.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+            "cw.reconcile.stalled._detect.pr_exists_for_branch",
+            lambda _b, **_kw: (False, True),
         )
 
         revert_stalled_headless_sessions(load_state(), now=now, config=_auto_config())
@@ -2378,10 +2385,11 @@ class TestFinalizeBlocked:
             "cw.reconcile._deps.fire_push_notification", lambda *_a: None
         )
         monkeypatch.setattr(
-            "cw.reconcile.stalled._has_commits_beyond_base", lambda _p, _b: True
+            "cw.reconcile.stalled._detect._has_commits_beyond_base", lambda _p, _b: True
         )
         monkeypatch.setattr(
-            "cw.reconcile.stalled.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+            "cw.reconcile.stalled._detect.pr_exists_for_branch",
+            lambda _b, **_kw: (False, True),
         )
 
         # Tick 1: detect + act → TIMED_OUT
@@ -2428,7 +2436,7 @@ class TestFinalizeBlocked:
         )
 
         monkeypatch.setattr(
-            "cw.reconcile.stalled._has_commits_beyond_base", lambda _p, _b: True
+            "cw.reconcile.stalled._detect._has_commits_beyond_base", lambda _p, _b: True
         )
         pr_cwds: list[object] = []
 
@@ -2437,7 +2445,7 @@ class TestFinalizeBlocked:
             return False, True
 
         monkeypatch.setattr(
-            "cw.reconcile.stalled.pr_exists_for_branch", _capture_pr_exists
+            "cw.reconcile.stalled._detect.pr_exists_for_branch", _capture_pr_exists
         )
 
         blocked, branch = _resolve_finalize_blocked_condition(
@@ -2484,7 +2492,7 @@ class TestFinalizeBlocked:
         finalize_task = self._mk_finalize_task("FB-D", "fb-dangling")
 
         monkeypatch.setattr(
-            "cw.reconcile.stalled._has_commits_beyond_base", lambda _p, _b: True
+            "cw.reconcile.stalled._detect._has_commits_beyond_base", lambda _p, _b: True
         )
         called: list[str] = []
 
@@ -2493,7 +2501,7 @@ class TestFinalizeBlocked:
             return False, True
 
         monkeypatch.setattr(
-            "cw.reconcile.stalled.pr_exists_for_branch", _should_not_run
+            "cw.reconcile.stalled._detect.pr_exists_for_branch", _should_not_run
         )
 
         blocked, branch = _resolve_finalize_blocked_condition(
@@ -3255,7 +3263,7 @@ class TestFinalizeBlocked:
         task = self._mk_finalize_task("FB-18", "fb-sess-18")
 
         monkeypatch.setattr(
-            "cw.reconcile.stalled._has_commits_beyond_base", lambda _p, _b: True
+            "cw.reconcile.stalled._detect._has_commits_beyond_base", lambda _p, _b: True
         )
 
         branch = "dev/FB-18"
@@ -3670,11 +3678,11 @@ class TestFinalizeBlocked:
         state = CwState(sessions=[sess])
         config = _auto_config()
         monkeypatch.setattr(
-            "cw.reconcile.stalled._has_commits_beyond_base", lambda _p, _b: True
+            "cw.reconcile.stalled._detect._has_commits_beyond_base", lambda _p, _b: True
         )
         pr_calls: list[str] = []
         monkeypatch.setattr(
-            "cw.reconcile.stalled.pr_exists_for_branch",
+            "cw.reconcile.stalled._detect.pr_exists_for_branch",
             lambda b, **_kw: pr_calls.append(b) or (False, True),  # type: ignore[func-returns-value]
         )
 

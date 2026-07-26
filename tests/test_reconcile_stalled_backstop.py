@@ -2434,7 +2434,7 @@ class TestSalvageSkipAttentionLatch:
         )
 
         monkeypatch.setattr(
-            "cw.reconcile.stalled._has_commits_beyond_base", lambda _p, _b: True
+            "cw.reconcile.stalled._detect._has_commits_beyond_base", lambda _p, _b: True
         )
         branch = f"dev/{ticket_id}"
         finalize_pr_by_branch: dict[str, tuple[bool | None, bool]] = {

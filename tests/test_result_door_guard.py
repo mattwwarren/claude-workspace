@@ -101,20 +101,21 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
             "pre-existing dict); still no 'status' key"
         ),
     },
-    "reconcile/stalled.py": {
+    "reconcile/stalled/_mutations.py": {
         (
             "session.last_result = {\n"
             '"paused_status": _FINALIZE_BLOCKED_REASON,\n'
             '"branch": candidate.branch,\n'
             "}"
         ): (
-            "stalled.py:778 — park marker, finalize-blocked (carries the "
-            "branch name for rescue_finalize_blocked_sessions); no 'status' "
-            "key"
+            "stalled/_mutations.py:133 — park marker, finalize-blocked "
+            "(carries the branch name for rescue_finalize_blocked_sessions); "
+            "no 'status' key"
         ),
         'session.last_result = candidate.routed_sentinel.model_dump(mode="json")': (
-            "stalled.py:832 — routed-sentinel advance; a real terminal "
-            "sentinel routed via _apply_sentinel_to_task, carries 'status'"
+            "stalled/_mutations.py:196 — routed-sentinel advance; a real "
+            "terminal sentinel routed via _apply_sentinel_to_task, carries "
+            "'status'"
         ),
     },
     "dev_queue/requeue.py": {
