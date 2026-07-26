@@ -237,6 +237,11 @@ def test_codex_executor_must_fix_blocked(
     finds blocking — the loop caps at ``_MAX_FIX_CYCLES`` and parks with the
     finding recorded in BOTH ``must_fix_initial`` (cycle-0 snapshot) and
     ``deferred`` (the cross-cycle survivor set).
+
+    ``codex_fix_loop_enabled=True`` is required here (#1465): the default is
+    False, which would park at cycle 0 instead of running the loop to cap —
+    that default-off path is covered by ``TestFixLoopDisabledGate`` in
+    ``test_codex_fix_loop.py``.
     """
     worktree = _worktree_with_change(
         make_git_repo, "wt-codex-mf", filename="new.py", content="def broken():\n"
@@ -247,7 +252,12 @@ def test_codex_executor_must_fix_blocked(
     runner = FakeCodexRunner(returncode=0, output_file_content=doc)
     config = StageExecutorConfig(backend=CODEX_BACKEND)
     executor = CodexExecutor(config=config, runner=runner)
-    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+    client = ClientConfig(
+        name="test",
+        workspace_path=worktree,
+        default_branch="main",
+        codex_fix_loop_enabled=True,
+    )
     task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
 
     with (

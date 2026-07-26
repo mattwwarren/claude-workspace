@@ -762,7 +762,9 @@ class TestFixLoopDisabledGate:
         assert loop_result.blocker is not None
         assert loop_result.blocker.reason == CODEX_MUST_FIX_FINDINGS
         assert loop_runner.fix_calls == 0
-        assert loop_runner.review_calls == 1
+        # One review pass worth of per-role calls (however many roles
+        # run_review selects) — no re-review, since no fix cycle ran.
+        assert loop_runner.review_calls == plain_runner.review_calls
         assert loop_result.review.fix_cycles_used == 0
         # No commits landed — the disabled gate never invoked the fix loop.
         assert _head(worktree) == head_before
