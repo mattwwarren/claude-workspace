@@ -16,7 +16,7 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from cw._transcript import locate_transcript
 from cw._util import (
@@ -48,7 +48,7 @@ from cw.dev_queue import (
     transition_task_status,
 )
 from cw.events import read_events, record_event
-from cw.exceptions import USAGE_LIMIT_RE, CwError
+from cw.exceptions import USAGE_LIMIT_RE, CwError, EmitValidationError
 from cw.models import (
     DEFAULT_LANE,
     DEFAULT_STAGE,
@@ -68,7 +68,12 @@ from cw.models import (
     TicketTask,
 )
 from cw.reconcile import _deps
-from cw.result import EmitOutcome, emit_result_on, has_terminal_result
+from cw.result import (
+    EmitOutcome,
+    _validate_harvest_payload,
+    emit_result_on,
+    has_terminal_result,
+)
 from cw.worktree import (
     remove_worktree,
     worktree_has_unsaved_work,
@@ -315,6 +320,12 @@ class ProposedAction(StrEnum):
     # fall-through is suppressed while the session's transcript is still
     # actively advancing. Closes #1281.
     SENTINEL_STAGE_MISMATCH_VETOED = "sentinel_stage_mismatch_vetoed"
+    # A live session whose last_result already carries a validated terminal
+    # result from another authority (RFC 0012 first-writer-wins) -- e.g. an
+    # out-of-band `cw result emit`, which never flips session.status. No door
+    # write: the session/task are completed directly from the existing data.
+    # See #1470.
+    COMPLETE_FOREIGN_RESULT = "complete_foreign_result"
 
 
 @dataclass(frozen=True)
@@ -331,6 +342,8 @@ class ReapCandidate:
     salvage_result: AutoDevResult | None = None
     salvage_csid: str | None = None
     # ROUTE_EMITTED_SENTINEL carries the full parsed result (any status).
+    # COMPLETE_FOREIGN_RESULT also carries its validated foreign result here
+    # (a second producer of this same field). See #1470.
     routed_sentinel: AutoDevResult | BlockedResult | None = None
     usage_limit_detected: bool = False
     elapsed_seconds: float = 0.0
@@ -437,6 +450,61 @@ def _queue_status_for_salvaged(result: AutoDevResult) -> QueueItemStatus:
     if result.status in PAUSED_FOR_USER_INPUT_STATUSES:
         return QueueItemStatus.BLOCKED_ON_USER
     return QueueItemStatus.COMPLETED
+
+
+def _validate_existing_result_for_routing(
+    existing_result: dict[str, Any] | None,
+) -> AutoDevResult | BlockedResult | None:
+    """Validate a door-refused foreign ``existing_result`` for routing, or None.
+
+    Reuses the door's own discriminated validation
+    (:func:`cw.result._validate_harvest_payload`) against a **foreign, untrusted**
+    dict written by an unknown authority. A validation failure means the shape is
+    unroutable, so the caller falls through to the PENDING-requeue floor.
+
+    RFC 0012 A3 (#1459): this read-side foreign-shape check is the one deliberate
+    exception to R6's "no defensive ladder around this ticket's own emit sites"
+    rule -- it validates a dict this ticket did NOT construct, so a
+    ``EmitValidationError`` here is a genuine "is this even routable" reading, not
+    a widening of a known-valid payload.
+
+    Promoted here from ``cw.reconcile.concierge`` (#1470) so stalled.py's
+    COMPLETE_FOREIGN_RESULT detect-phase guard can reuse it without a
+    cross-module private import; concierge.py's own call site now delegates here.
+    """
+    if existing_result is None:
+        return None
+    try:
+        return _validate_harvest_payload(existing_result)
+    except EmitValidationError:
+        return None
+
+
+def _foreign_result_target_queue_status(
+    validated: AutoDevResult | BlockedResult,
+) -> QueueItemStatus:
+    """Map a validated foreign result to its target QueueItemStatus.
+
+    Extracted from ``cw.reconcile.concierge``'s
+    ``_route_park_marker_poison_task`` isinstance/status ladder (#1470) so both
+    concierge.py's park-marker-poison routing and stalled.py's
+    COMPLETE_FOREIGN_RESULT routing share one mapping.
+
+    isinstance(BlockedResult) MUST precede the .status=="blocked" elif:
+    "blocked" is a valid AutoDevResult.status too, so the status-only
+    discriminant does not narrow away AutoDevResult for mypy --strict -- the
+    isinstance check is what proves the else branch's operand is an
+    AutoDevResult (RFC 0012 A3 #1459).
+    """
+    if isinstance(validated, BlockedResult):
+        return QueueItemStatus.BLOCKED_ON_USER
+    if validated.status == "blocked":
+        # A foreign AutoDevResult with status=blocked would otherwise be
+        # mis-routed to COMPLETED by _queue_status_for_salvaged (which does
+        # not treat "blocked" as paused-for-user) -- special-case it to
+        # BLOCKED_ON_USER (round-3 bug fix).
+        return QueueItemStatus.BLOCKED_ON_USER
+    return _queue_status_for_salvaged(validated)
 
 
 def compute_drift(
