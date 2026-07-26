@@ -237,6 +237,11 @@ def test_codex_executor_must_fix_blocked(
     finds blocking — the loop caps at ``_MAX_FIX_CYCLES`` and parks with the
     finding recorded in BOTH ``must_fix_initial`` (cycle-0 snapshot) and
     ``deferred`` (the cross-cycle survivor set).
+
+    ``codex_fix_loop_enabled=True`` is required here (#1465): the default is
+    False, which would park at cycle 0 instead of running the loop to cap —
+    that default-off path is covered by ``TestFixLoopDisabledGate`` in
+    ``test_codex_fix_loop.py``.
     """
     worktree = _worktree_with_change(
         make_git_repo, "wt-codex-mf", filename="new.py", content="def broken():\n"
@@ -247,7 +252,12 @@ def test_codex_executor_must_fix_blocked(
     runner = FakeCodexRunner(returncode=0, output_file_content=doc)
     config = StageExecutorConfig(backend=CODEX_BACKEND)
     executor = CodexExecutor(config=config, runner=runner)
-    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+    client = ClientConfig(
+        name="test",
+        workspace_path=worktree,
+        default_branch="main",
+        codex_fix_loop_enabled=True,
+    )
     task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
 
     with (
@@ -387,6 +397,44 @@ def test_spawn_delegates_to_fix_loop_not_bare_run_review(
     result = _persisted_result()
     assert result.blocker is not None
     assert result.blocker.reason == CODEX_REVIEW_UNPARSEABLE
+    # #1465: default (omitted) codex_fix_loop_enabled is False — the gate is
+    # threaded through as the fix_loop_enabled kwarg.
+    assert fix_loop_mock.call_args.kwargs["fix_loop_enabled"] is False
+
+
+def test_spawn_threads_codex_fix_loop_enabled_true_from_client(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """#1465: client.codex_fix_loop_enabled=True threads fix_loop_enabled=True."""
+    worktree = make_git_repo("wt-codex-wiring-enabled")
+    runner = FakeCodexRunner(returncode=0)
+    config = StageExecutorConfig(backend=CODEX_BACKEND)
+    executor = CodexExecutor(config=config, runner=runner)
+    client = ClientConfig(
+        name="test",
+        workspace_path=worktree,
+        default_branch="main",
+        codex_fix_loop_enabled=True,
+    )
+    task = TicketTask(ticket_id="T-wire-2", client="test", stage=Stage.REVIEW)
+
+    blocked = make_blocked(
+        ticket_id="T-wire-2",
+        worktree=worktree,
+        reason=CODEX_REVIEW_UNPARSEABLE,
+        stage_reached="stage3_review",
+    )
+    with (
+        patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+        patch(
+            "cw.executor.run_review_with_fix_loop", return_value=(blocked, None)
+        ) as fix_loop_mock,
+    ):
+        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+
+    fix_loop_mock.assert_called_once()
+    assert fix_loop_mock.call_args.kwargs["fix_loop_enabled"] is True
 
 
 def test_resolve_executor_returns_codex_executor(

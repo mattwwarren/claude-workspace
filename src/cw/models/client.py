@@ -70,6 +70,17 @@ class ClientConfig(BaseModel):
     # logged-in gh identity differs from the login this client should treat
     # as "self."
     operator_github_login: str | None = None
+    # #1465 — master switch for the codex backend's autonomous MUST_FIX fix
+    # loop (cw.codex_fix_loop.run_review_with_fix_loop's fix_loop_enabled
+    # kwarg is the enforcement seam: CodexExecutor.spawn threads this field
+    # straight through). Default False, mirroring gate_recipes_enabled's and
+    # concierge_enabled's fail-safe defaults: enabling `review: {backend:
+    # codex}` must not implicitly enable autonomous fix commits. When False,
+    # a blocking cycle-0 codex review parks on CODEX_MUST_FIX_FINDINGS with
+    # zero fix cycles attempted — the pre-#1392 park-on-MUST_FIX behavior.
+    # Set True to let the bounded fix-cycle loop run and commit fixes
+    # autonomously.
+    codex_fix_loop_enabled: bool = False
     auto_background_threshold: int | None = None
     notifications: bool = False
     lanes: list[LaneConfig] = Field(default_factory=list)

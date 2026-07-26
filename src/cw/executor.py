@@ -661,6 +661,7 @@ class CodexExecutor:
                     model=self._config.model,
                     wall_clock_budget_seconds=wall_clock_budget_seconds,
                     session_id=sid,
+                    fix_loop_enabled=client.codex_fix_loop_enabled,
                 )
 
             # Step 4: Persist result under sessions_lock.

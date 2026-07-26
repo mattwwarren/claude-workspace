@@ -473,14 +473,17 @@ def run_review_with_fix_loop(
     model: str | None,
     wall_clock_budget_seconds: int | None,
     session_id: str,
+    fix_loop_enabled: bool,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run the initial review pass plus a bounded MUST_FIX fix loop.
 
     Drop-in replacement for :func:`cw.codex_review.run_review` (identical
-    signature and return shape). One shared wall-clock deadline spans the
-    initial pass, every fix invocation, and every re-review. A non-blocking or
-    unparseable cycle-0 verdict passes straight through with zero fix
-    invocations attempted.
+    signature and return shape, plus ``fix_loop_enabled``). One shared
+    wall-clock deadline spans the initial pass, every fix invocation, and
+    every re-review. A non-blocking or unparseable cycle-0 verdict passes
+    straight through with zero fix invocations attempted. When
+    ``fix_loop_enabled`` is False and cycle 0 blocks, returns cycle 0's tuple
+    unchanged with zero fix cycles attempted.
     """
     deadline = (
         None
@@ -496,7 +499,7 @@ def run_review_with_fix_loop(
         wall_clock_budget_seconds=wall_clock_budget_seconds,
         session_id=session_id,
     )
-    if verdict is None or not verdict.blocking:
+    if verdict is None or not verdict.blocking or not fix_loop_enabled:
         return result, verdict
 
     cycle0_review = verdict.review

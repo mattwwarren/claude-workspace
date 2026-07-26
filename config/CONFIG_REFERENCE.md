@@ -53,6 +53,7 @@ State is stored at `~/.local/share/cw/` (or `$XDG_DATA_HOME/cw/`).
 | `notifications` | bool | `false` | Desktop notifications on session events. A top-level `notifications: true` key in `clients.yaml` (sibling of `clients:`) turns it on for every client that doesn't set it explicitly |
 | `auto_background_threshold` | int \| null | `null` | Auto-background the session after N conversation turns |
 | `worker_model` | string \| null | `null` | Pin the model for DAEMON-origin worker spawns (auto-dev). Forwarded as `--model <id>` to `claude --bg` from both initial spawn and DAEMON-origin resume. USER-origin sessions (interactive `cw start` / `cw resume`) always inherit the operator's logged-in default model. Opaque string — no validation. |
+| `codex_fix_loop_enabled` | bool | `false` | Master switch for the codex backend's autonomous MUST_FIX fix loop (#1465). When `false` (default), a blocking cycle-0 codex review parks on `CODEX_MUST_FIX_FINDINGS` with zero autonomous fix commits — the pre-#1392 behavior. Set `true` to let `CodexExecutor` run up to the bounded fix-cycle loop and commit fixes autonomously. See [Codex Fix-Loop Gate](#codex-fix-loop-gate-1465) below. |
 | `operator_github_login` | string \| null | `null` | Override the runtime-resolved GitHub login used for counterparty/self-identity resolution (RFC 0011 S1). Rare multi-account case; the runtime `gh api user` login is authoritative when unset. |
 | `repo_path` | path | *none** | Shared repo path (worktree mode) |
 | `branch` | string | *none** | Branch name (worktree mode) |
@@ -291,6 +292,32 @@ Recommended models per stage:
 **Intake Note**:
 - No separate `intake` executor stage — intake (Stage 0) runs within the PLAN session.
 - Dedicated cheap-intake tracked as #895.
+
+### Codex Fix-Loop Gate (#1465)
+
+`CodexExecutor.spawn`'s Step 3 (`review` stage, `backend: codex`) delegates to
+`run_review_with_fix_loop`, which runs a bounded, autonomous fix-cycle loop
+(codex writes to the worktree and commits) whenever cycle 0's review blocks on
+a MUST_FIX finding. `client.codex_fix_loop_enabled` gates that loop and
+defaults to `false` as a fail-safe: turning on `review: {backend: codex}`
+should not implicitly grant codex the ability to commit fixes to the
+worktree on its own. With the gate off, a blocking cycle-0 review parks on
+`CODEX_MUST_FIX_FINDINGS` immediately — the pre-#1392 park-on-MUST_FIX
+behavior — with zero fix cycles attempted.
+
+```yaml
+clients:
+  my-project:
+    workspace_path: /home/user/projects/my-project
+    codex_fix_loop_enabled: true
+```
+
+**Operator callout:** this repo change does not itself re-enable the
+codex-trial lane's fix loop. To restore the prior (pre-gate) fix-loop
+behavior for the `claude-workspace` client's codex-trial lane, the operator
+must separately set `codex_fix_loop_enabled: true` on the `claude-workspace`
+client block in `~/.config/cw/clients.yaml` — not a repo file, so this change
+alone does not flip it.
 
 ## Orchestrator Configuration (`~/.claude-workspace/orchestrator.yaml`)
 
