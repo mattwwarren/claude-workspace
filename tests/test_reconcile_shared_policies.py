@@ -2471,7 +2471,9 @@ class TestApplySentinelToTaskLateRescue:
             "GH-1019-no-target", "sess-no-target", sentinel
         )
 
-        assert outcome == SentinelRouteOutcome(rescued=False, routed=True)
+        assert outcome == SentinelRouteOutcome(
+            rescued=False, routed=True, landed_terminal=False
+        )
 
 
 class TestApplySentinelToTaskRoutedFalseFailedRace:
@@ -2515,6 +2517,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
 
         assert outcome.routed is False
         assert outcome.rescued is False
+        assert outcome.landed_terminal is True
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
         assert t.status == QueueItemStatus.FAILED
         assert t.disposition == "abandoned"
@@ -2549,6 +2552,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
 
         assert outcome.routed is False
+        assert outcome.landed_terminal is True
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
         assert t.status == QueueItemStatus.FAILED
         assert t.disposition == "abandoned"
@@ -2588,6 +2592,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
 
         assert outcome.routed is False
+        assert outcome.landed_terminal is True
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
         assert t.status == QueueItemStatus.FAILED
         assert t.disposition == "abandoned"
@@ -2662,7 +2667,9 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
 
         outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
 
-        assert outcome == SentinelRouteOutcome(rescued=False, routed=False)
+        assert outcome == SentinelRouteOutcome(
+            rescued=False, routed=False, landed_terminal=False
+        )
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
         assert t.status == QueueItemStatus.FAILED
         assert t.disposition == "abandoned"
@@ -2727,7 +2734,9 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
             "GH-1189-no-match", "sess-1189-no-match", sentinel
         )
 
-        assert outcome == SentinelRouteOutcome(rescued=False, routed=True)
+        assert outcome == SentinelRouteOutcome(
+            rescued=False, routed=True, landed_terminal=False
+        )
 
     def test_lookup_excluded_row_before_occupied_row_still_routes(
         self, tmp_config_dir: Path
@@ -2803,4 +2812,6 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
 
         outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
 
-        assert outcome == SentinelRouteOutcome(rescued=False, routed=True)
+        assert outcome == SentinelRouteOutcome(
+            rescued=False, routed=True, landed_terminal=False
+        )

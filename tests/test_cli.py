@@ -1555,6 +1555,7 @@ class TestSignalStop:
         tmp_path: Path,
         session_id: str,
         worktree_name: str,
+        surface_ref: str | None = None,
     ) -> tuple[Path, Session]:
         """Seed state with a DAEMON ACTIVE session and return (worktree, session)."""
         import datetime as dt
@@ -1574,6 +1575,7 @@ class TestSignalStop:
             worktree_path=worktree,
             status=SessionStatus.ACTIVE,
             started_at=dt.datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+            surface_ref=surface_ref,
         )
         state = load_state()
         state.sessions.append(session)
@@ -2061,7 +2063,10 @@ class TestSignalStop:
         from cw.reconcile import _VALIDATION_FAILED_MAX_ATTEMPTS
 
         worktree, session = self._setup_headless_session(
-            tmp_path, "sess-251-vf-cap", "worktree-251-vf-cap"
+            tmp_path,
+            "sess-251-vf-cap",
+            "worktree-251-vf-cap",
+            surface_ref="sfref-251-vfcap",
         )
         dev_store = DevQueueStore(
             tasks=[
@@ -2077,7 +2082,9 @@ class TestSignalStop:
         save_dev_queue(dev_store)
         self._write_headless_context(worktree, session_id=session.id)
 
-        claude_session_id = "uuid-251-vf-cap"
+        # Prefix must match surface_ref="sfref-251-vfcap" (stale-hook guard,
+        # sessions.py ~:731-737) or the hook is dropped before it's parsed.
+        claude_session_id = "sfref-251-vfcap-uuid"
         fake_home = tmp_path / "fake-home-vf-cap"
         self._write_transcript(
             worktree, claude_session_id, _SENTINEL_251_VALIDATION_FAILED, fake_home
@@ -2112,6 +2119,7 @@ class TestSignalStop:
         # routed=False bails before the door is ever called (#1457) -- nothing
         # is written to last_result.
         assert updated.last_result is None
+        assert daemon.stop_calls == ["sfref-251-vfcap"]
 
     def test_signal_stop_blocked_retry_eligible_routes_blocked_on_user(
         self,
@@ -2936,7 +2944,10 @@ class TestSignalStop:
         from cw.native_daemon import FakeNativeDaemonClient
 
         worktree, session = self._setup_headless_session(
-            tmp_path, "sess-263-schema-unsupported", "worktree-263-schema-unsupported"
+            tmp_path,
+            "sess-263-schema-unsupported",
+            "worktree-263-schema-unsupported",
+            surface_ref="sfref-263-schema",
         )
         dev_store = DevQueueStore(
             tasks=[
@@ -2952,7 +2963,9 @@ class TestSignalStop:
         save_dev_queue(dev_store)
         self._write_headless_context(worktree, session_id=session.id)
 
-        claude_session_id = "uuid-263-schema-unsupported"
+        # Prefix must match surface_ref="sfref-263-schema" (stale-hook guard,
+        # sessions.py ~:731-737) or the hook is dropped before it's parsed.
+        claude_session_id = "sfref-263-schema-uuid"
         fake_home = tmp_path / "fake-home-263-schema-unsupported"
         self._write_transcript(
             worktree,
@@ -2987,6 +3000,7 @@ class TestSignalStop:
         store = load_dev_queue()
         task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
         assert task.status == QueueItemStatus.FAILED
+        assert daemon.stop_calls == ["sfref-263-schema"]
 
     def test_signal_stop_unknown_blocker_reason_marks_failed(
         self,
@@ -3036,6 +3050,82 @@ class TestSignalStop:
         store = load_dev_queue()
         task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
         assert task.status == QueueItemStatus.FAILED
+
+    def test_signal_stop_unrecognized_reason_marks_failed_and_stops_daemon(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """GitHub #1273: a BlockedResult catch-all FAILED landing must also
+        stop the leaked daemon worker.
+
+        Mirrors ``test_signal_stop_schema_version_unsupported_marks_failed``'s
+        structure but drives the malformed/unrecognized-reason sentinel
+        through the real signal-stop CLI path: ``_route_blocked_result_to_
+        task`` lands the task terminal-FAILED (``routed=False``,
+        ``landed_terminal=True``), and since that call itself just wrote the
+        terminal state (not a stage mismatch or a race-to-terminal), signal_
+        stop must stop the now-leaked DAEMON worker even though it never
+        marks the session COMPLETED.
+        """
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        worktree, session = self._setup_headless_session(
+            tmp_path,
+            "sess-catchall",
+            "worktree-catchall",
+            surface_ref="sfref-catchall",
+        )
+        dev_store = DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=self.SEED_TICKET_ID,
+                    client="test-client",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=session.id,
+                    attempts=1,
+                )
+            ]
+        )
+        save_dev_queue(dev_store)
+        self._write_headless_context(worktree, session_id=session.id)
+
+        # Prefix must match surface_ref="sfref-catchall" (stale-hook guard,
+        # sessions.py ~:731-737) or the hook is dropped before it's parsed.
+        claude_session_id = "sfref-catchall-uuid"
+        fake_home = tmp_path / "fake-home-catchall"
+        self._write_transcript(
+            worktree, claude_session_id, _SENTINEL_918_MALFORMED, fake_home
+        )
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.sessions.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": claude_session_id,
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        hook_time = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+        runner = CliRunner()
+        with freeze_time(hook_time):
+            result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == self.SEED_TICKET_ID)
+        assert task.status == QueueItemStatus.FAILED
+        assert task.disposition == "abandoned"
+
+        updated = next(s for s in load_state().sessions if s.id == session.id)
+        assert updated.status != SessionStatus.COMPLETED
+        assert daemon.stop_calls == ["sfref-catchall"]
 
     def test_signal_stop_finds_sentinel_via_worktree_path_fallback(
         self,
