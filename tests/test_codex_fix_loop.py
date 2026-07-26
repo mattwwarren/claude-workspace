@@ -188,6 +188,7 @@ def _run_loop(
     *,
     budget: int | None = None,
     session_id: str = "sess-fix",
+    fix_loop_enabled: bool = True,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     return run_review_with_fix_loop(
         runner=runner,
@@ -197,6 +198,7 @@ def _run_loop(
         model=None,
         wall_clock_budget_seconds=budget,
         session_id=session_id,
+        fix_loop_enabled=fix_loop_enabled,
     )
 
 
@@ -726,6 +728,56 @@ class TestFixLoopNonBlockingPassthrough:
         assert out.blocker is not None
         assert out.blocker.reason == CODEX_REVIEW_UNPARSEABLE
         assert verdict is None
+
+
+# ---------------------------------------------------------------------------
+# TestFixLoopDisabledGate
+# ---------------------------------------------------------------------------
+
+
+class TestFixLoopDisabledGate:
+    def test_disabled_gate_blocking_cycle0_returns_run_review_tuple_unchanged(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-gate-blocking")
+        head_before = _head(worktree)
+        loop_runner = _FixLoopRunner([_MF_DOC])
+        loop_result, loop_verdict = _run_loop(
+            loop_runner, worktree, session_id="s-gate", fix_loop_enabled=False
+        )
+        plain_runner = _FixLoopRunner([_MF_DOC])
+        plain_result, plain_verdict = run_review(
+            runner=plain_runner,
+            task=_task(),
+            worktree=worktree,
+            default_branch="main",
+            model=None,
+            wall_clock_budget_seconds=None,
+            session_id="s-gate",
+        )
+
+        assert loop_result == plain_result
+        assert loop_verdict == plain_verdict
+        assert loop_result.status == "blocked"
+        assert loop_result.blocker is not None
+        assert loop_result.blocker.reason == CODEX_MUST_FIX_FINDINGS
+        assert loop_runner.fix_calls == 0
+        assert loop_runner.review_calls == 1
+        assert loop_result.review.fix_cycles_used == 0
+        # No commits landed — the disabled gate never invoked the fix loop.
+        assert _head(worktree) == head_before
+
+    def test_disabled_gate_non_blocking_cycle0_unaffected(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-gate-nonblocking")
+        runner = _FixLoopRunner([_SF_DOC])
+        result, _verdict = _run_loop(
+            runner, worktree, session_id="s-gate-sf", fix_loop_enabled=False
+        )
+
+        assert runner.fix_calls == 0
+        assert result.status == "stage_complete"
 
 
 # ---------------------------------------------------------------------------
