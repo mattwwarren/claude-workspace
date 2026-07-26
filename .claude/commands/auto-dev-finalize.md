@@ -237,6 +237,14 @@ Spawn a **general-purpose** agent (`model: "sonnet"`) scoped to run `/prep-pr`, 
   git merge origin/main --no-edit
   ```
   If conflicts → BLOCK with file list; do NOT force.
+- Once merged cleanly, push immediately — before any quality-gate work begins (the fix for GEN-5343: the merge commit above must not exist only in this local worktree while `/prep-pr`'s quality gates run for up to 5400s):
+  ```bash
+  git push origin HEAD:refs/heads/<branch-name>
+  git fetch origin <branch-name>
+  test "$(git rev-parse origin/<branch-name>)" = "$(git rev-parse HEAD)"
+  ```
+  If the push fails, or the verify comparison mismatches → do NOT invoke `/prep-pr`. STOP and return a BLOCK whose text includes the verbatim push failure output (or the mismatch detail) — the Unavailability classifier below inspects this returned text and, on a signature match, emits the `push_auth_failed` sentinel via the existing template (`stage_reached: "stage4b_pr_create"`); otherwise it falls through to a generic `agent_block` per the "Any other agent BLOCK" gate-collapse row.
+  This `git push` has no `timeout` wrapper — no push site in this file family does (#1414 R9: accepted residual risk, consistent with `ship-it.md`'s existing push and `prep-pr.md`'s own Step 1 push below).
 - Instruction to invoke `/prep-pr --skip-review --base main` via the Skill tool. **If the user chose Force at Step 4a (stacking onto an open pipeline PR), append `--draft`** so `/prep-pr` passes it through to the project's `/ship-it` (`/prep-pr` Step 8 already supports `--draft` pass-through). The PR must be a draft until the parent merges.
   - `--skip-review` is required: Stage 3 already ran scope-aware review with the full reviewer set. `/prep-pr`'s own review pass is thinner and would double up.
 
@@ -258,7 +266,11 @@ Spawn a **general-purpose** agent (`model: "sonnet"`) scoped to run `/prep-pr`, 
   - **Recommendation**: PROCEED | EXIT_FOR_HUMAN_REVIEW
   ```
 
-**Unavailability classifier (#1049, generalized #1156 — RFC 0011 A2):** Immediately after the subagent returns — before the verify-script gate below — inspect its returned text (friction report / BLOCK message) for an unavailability failure. This covers the project's `ship-it.md` initial `git push -u origin "$BRANCH"` (the only push site the Step 4c subagent's returned text can reflect). Match any of these signatures verbatim — this list is a PROSE MIRROR of `src/cw/unavailability.py`'s `UNAVAILABILITY_SIGNATURES` (mirror-comment pattern: `cw.reconcile.gate_recipes._PLAN_SPEC_MARKER` mirroring `gh._PLAN_MARKER`); keep the two copies in sync, see `test_unavailability_signatures_mirrored_in_prose` for the drift guard:
+**Unavailability classifier (#1049, generalized #1156 — RFC 0011 A2):** Immediately after the subagent returns — before the verify-script gate below — inspect its returned text (friction report / BLOCK message) for an unavailability failure. This covers up to three push sites whose failure text the Step 4c subagent's
+returned text can reflect, in the order a single run hits them: (1) this
+Step 4c.2 post-merge push [new, #1414], (2) `/prep-pr`'s own Step 1
+sync-with-base push [new, #1414], (3) the delegated project's `ship-it.md`
+initial `git push -u origin "$BRANCH"` (pre-existing, #1049). Match any of these signatures verbatim — this list is a PROSE MIRROR of `src/cw/unavailability.py`'s `UNAVAILABILITY_SIGNATURES` (mirror-comment pattern: `cw.reconcile.gate_recipes._PLAN_SPEC_MARKER` mirroring `gh._PLAN_MARKER`); keep the two copies in sync, see `test_unavailability_signatures_mirrored_in_prose` for the drift guard:
 
 - Auth-failure (#1049's original four, unchanged):
   - `Permission denied (publickey)`
@@ -314,7 +326,7 @@ If any signature is present, emit the structured `blocked` sentinel below and st
   "blocker": {
     "stage": "stage4b_pr_create",
     "reason": "push_auth_failed",
-    "details": "<matched signature + which push site, e.g. 'ship-it.md initial push: Permission denied (publickey)'>",
+    "details": "<matched signature + which push site, e.g. 'ship-it.md initial push: Permission denied (publickey)', 'Step 4c.2 post-merge push: Could not resolve host', or 'prep-pr.md Step 1 sync-with-base push: Authentication failed'>",
     "exception_type": null,
     "message": "git push failed authentication (SSH key locked or credentials expired)",
     "recovery_hint": "Unlock the SSH key (or refresh credentials) and requeue the ticket",
