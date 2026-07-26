@@ -1,8 +1,9 @@
 name: Release Tag
 
-# Tags a `chore(release): vX.Y.Z` commit on `main` and cuts the matching
-# GitHub Release, so the version-bump merge IS the release — no manual
-# post-merge tagging step.
+# Tags a release-bump commit on `main` — accepting both `chore(release): vX.Y.Z`
+# and `chore(release): bump version to X.Y.Z` subjects (see #1483) — and cuts
+# the matching GitHub Release, so the version-bump merge IS the release — no
+# manual post-merge tagging step.
 #
 # NOTE ON RELEASE-NOTES ASYMMETRY (operator-confirmed, not a bug):
 # A tag created by THIS workflow gets CHANGELOG-derived release notes (see
@@ -56,12 +57,21 @@ jobs:
         run: |
           SUBJECT=$(git log -1 --pretty=%s)
           echo "Commit subject: $SUBJECT"
-          # Squash-merge appends the PR number to the subject ("chore(release): v1.14.0 (#1008)")
-          # — v1.14.0's run matched nothing and skipped every step. Tolerate the suffix.
-          if [[ "$SUBJECT" =~ ^chore\(release\):\ v([0-9]+\.[0-9]+\.[0-9]+)(\ \(#[0-9]+\))?$ ]]; then
+          # Two release-commit subject conventions are in use and both must be tolerated:
+          #   "chore(release): vX.Y.Z"                 (original strict form)
+          #   "chore(release): bump version to X.Y.Z"  (actual release-process convention, #1483)
+          # Squash-merge appends the PR number to either form ("... (#1008)") — tolerate that
+          # too (v1.14.0's run matched nothing under the old v-only regex and skipped every step).
+          # A subject starting "chore(release):" that matches neither form is a release-process
+          # bug, not a "not a release commit" case — fail loudly instead of silently skipping,
+          # so drift here is caught in CI rather than at announce time (#1483).
+          if [[ "$SUBJECT" =~ ^chore\(release\):\ (v|bump\ version\ to\ )([0-9]+\.[0-9]+\.[0-9]+)(\ \(#[0-9]+\))?$ ]]; then
             echo "match=true" >> "$GITHUB_OUTPUT"
-            echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
-            echo "Release commit detected for v${BASH_REMATCH[1]}"
+            echo "version=${BASH_REMATCH[2]}" >> "$GITHUB_OUTPUT"
+            echo "Release commit detected for v${BASH_REMATCH[2]}"
+          elif [[ "$SUBJECT" == "chore(release):"* ]]; then
+            echo "::error::Commit subject starts with 'chore(release):' but matches neither accepted version pattern: \"$SUBJECT\""
+            exit 1
           else
             echo "match=false" >> "$GITHUB_OUTPUT"
             echo "Not a release commit — skipping remaining steps."
