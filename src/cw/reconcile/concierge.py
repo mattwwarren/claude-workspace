@@ -46,9 +46,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-from cw.auto_dev_result import AutoDevResult, BlockedResult
 from cw.config import get_client, load_state, save_state
 from cw.dev_queue import (
     _derive_disposition,
@@ -59,7 +58,7 @@ from cw.dev_queue import (
     transition_task_status,
 )
 from cw.events import record_event
-from cw.exceptions import CwError, EmitValidationError
+from cw.exceptions import CwError
 from cw.models import (
     CompletionReason,
     LivenessBucket,
@@ -76,19 +75,22 @@ from cw.reconcile._shared import (
     _STALLED_CAP_PARKED_REASON,
     TRANSCRIPT_LIVENESS_WINDOW_SECONDS,
     _apply_salvaged_completion,
+    _foreign_result_target_queue_status,
     _queue_status_for_salvaged,
     _transcript_age_seconds,
+    _validate_existing_result_for_routing,
     salvage_terminal_result,
     ticket_id_for_session,
 )
 from cw.reconcile.liveness import _classify_liveness_bucket
-from cw.result import EmitOutcome, _validate_harvest_payload
 from cw.worktree import _has_commits_beyond_base
 
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from cw.auto_dev_result import AutoDevResult, BlockedResult
     from cw.models import CwState, OrchestratorConfig, Session, TicketTask
+    from cw.result import EmitOutcome
 
 _log = logging.getLogger(__name__)
 
@@ -595,30 +597,6 @@ def _close_confirmed_dead_session(
     return changed, salvage_result, refusal
 
 
-def _validate_existing_result_for_routing(
-    existing_result: dict[str, Any] | None,
-) -> AutoDevResult | BlockedResult | None:
-    """Validate a door-refused foreign ``existing_result`` for routing, or None.
-
-    Reuses the door's own discriminated validation
-    (:func:`cw.result._validate_harvest_payload`) against a **foreign, untrusted**
-    dict written by an unknown authority. A validation failure means the shape is
-    unroutable, so the caller falls through to the PENDING-requeue floor.
-
-    RFC 0012 A3 (#1459): this read-side foreign-shape check is the one deliberate
-    exception to R6's "no defensive ladder around this ticket's own emit sites"
-    rule -- it validates a dict this ticket did NOT construct, so a
-    ``EmitValidationError`` here is a genuine "is this even routable" reading, not
-    a widening of a known-valid payload.
-    """
-    if existing_result is None:
-        return None
-    try:
-        return _validate_harvest_payload(existing_result)
-    except EmitValidationError:
-        return None
-
-
 def _route_park_marker_poison_task(
     task: TicketTask,
     salvage_result: AutoDevResult | None,
@@ -661,21 +639,9 @@ def _route_park_marker_poison_task(
             refusal.existing_source if refusal is not None else None,
         )
         dumped = validated_refusal.model_dump(mode="json")
-        # isinstance(BlockedResult) MUST precede the .status=="blocked" elif:
-        # "blocked" is a valid AutoDevResult.status too, so the status-only
-        # discriminant does not narrow away AutoDevResult for mypy --strict --
-        # the isinstance check is what proves the else branch's operand is an
-        # AutoDevResult (RFC 0012 A3 #1459).
-        if isinstance(validated_refusal, BlockedResult):
-            target_status = QueueItemStatus.BLOCKED_ON_USER
-        elif validated_refusal.status == "blocked":
-            # A foreign AutoDevResult with status=blocked would otherwise be
-            # mis-routed to COMPLETED by _queue_status_for_salvaged (which does
-            # not treat "blocked" as paused-for-user) -- special-case it to
-            # BLOCKED_ON_USER (round-3 bug fix).
-            target_status = QueueItemStatus.BLOCKED_ON_USER
-        else:
-            target_status = _queue_status_for_salvaged(validated_refusal)
+        # Ordering (isinstance(BlockedResult) before .status=="blocked") is
+        # binding -- see _foreign_result_target_queue_status's docstring.
+        target_status = _foreign_result_target_queue_status(validated_refusal)
         transition_task_status(
             task,
             target_status,
