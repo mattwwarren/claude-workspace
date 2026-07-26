@@ -12,7 +12,7 @@ import logging
 from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import click
 from pydantic import ValidationError
@@ -480,6 +480,20 @@ def _harvest_last_result_through_door(
         )
 
 
+class _HeadlessResolution(NamedTuple):
+    """Result of ``_resolve_and_complete_headless_session`` (#1273).
+
+    ``rescued`` is ``None`` when the caller must bail without further action
+    (see that function's docstring); ``landed_terminal`` is ``True`` only
+    when the bail was caused by a BlockedResult that itself just landed the
+    task terminal-FAILED (``SentinelRouteOutcome.landed_terminal``) — the
+    signal for ``signal_stop`` to stop the now-leaked DAEMON worker.
+    """
+
+    rescued: bool | None
+    landed_terminal: bool = False
+
+
 def _resolve_and_complete_headless_session(
     state: CwState,
     session: Session,
@@ -491,23 +505,26 @@ def _resolve_and_complete_headless_session(
     ticket_id_value: object,
     is_headless: bool,
     now: datetime,
-) -> bool | None:
+) -> _HeadlessResolution:
     """Resolve the headless sentinel and mark the session COMPLETED (#176, #251).
 
     Extracted from ``signal_stop`` to stay under the branch/return caps; owns
     the sentinel lookup, the #251 staged-advance routing, and the terminal
     session mutation + ``save_state``.
 
-    Returns ``None`` when the caller must bail without any further action:
-    either no sentinel was found under budget (``_handle_headless_no_sentinel``
-    already ran its own transition), or the shared staged-advance authority
-    refused the route on a stage mismatch (GitHub #1031, the #986 incident —
-    extends #1019's phantom-path guard to the Stop-hook path). A refusal
-    leaves session and task completely untouched so a later reconcile tick
-    or Stop hook can re-observe them.
+    Returns a ``_HeadlessResolution`` with ``rescued=None`` when the caller
+    must bail without any further action: either no sentinel was found under
+    budget (``_handle_headless_no_sentinel`` already ran its own transition),
+    or the shared staged-advance authority refused the route on a stage
+    mismatch (GitHub #1031, the #986 incident — extends #1019's phantom-path
+    guard to the Stop-hook path) or a #1189 raced-to-terminal lookup miss. A
+    refusal leaves session and task completely untouched so a later reconcile
+    tick or Stop hook can re-observe them — except when the refusal was
+    itself a BlockedResult landing the task terminal-FAILED, signaled via
+    ``landed_terminal=True`` (#1273), which leaves the daemon worker leaked.
 
-    Returns the ``rescued`` flag (bool) once the session has been marked
-    COMPLETED and persisted.
+    Returns ``_HeadlessResolution(rescued=<bool>)`` once the session has been
+    marked COMPLETED and persisted.
     """
     parsed_sentinel: AutoDevResult | BlockedResult | None = None
     # Issue #536: emit precedence. When the producer already pushed a
@@ -534,7 +551,7 @@ def _resolve_and_complete_headless_session(
                 ticket_id_value=ticket_id_value,
                 hook_payload=hook_payload,
             )
-            return None
+            return _HeadlessResolution(rescued=None, landed_terminal=False)
 
     # Issue #251: directly update the dev-queue task *before* marking the
     # session COMPLETED. This closes the race where revert_completed_silent_tasks
@@ -548,7 +565,9 @@ def _resolve_and_complete_headless_session(
         rescued = outcome.rescued
         routed = outcome.routed
     if not routed:
-        return None
+        return _HeadlessResolution(
+            rescued=None, landed_terminal=outcome.landed_terminal
+        )
 
     session.status = SessionStatus.COMPLETED
     session.completed_at = now
@@ -569,7 +588,7 @@ def _resolve_and_complete_headless_session(
     # rather than assigning session.last_result directly.
     if parsed_sentinel is not None and not emit_terminal:
         _harvest_last_result_through_door(session.id, parsed_sentinel)
-    return rescued
+    return _HeadlessResolution(rescued=rescued, landed_terminal=False)
 
 
 def _handle_user_origin_stop(
@@ -773,10 +792,13 @@ def signal_stop() -> None:
         now = datetime.now(UTC)
 
         # Resolves the sentinel, routes it through the #251 staged-advance
-        # authority, and (if accepted) marks the session COMPLETED. Returns
-        # None when the caller must bail without further action -- no
-        # sentinel under budget, or a #1031 stage-mismatch route refusal.
-        rescued = _resolve_and_complete_headless_session(
+        # authority, and (if accepted) marks the session COMPLETED. rescued
+        # is None when the caller must bail without further action -- no
+        # sentinel under budget, a #1031 stage-mismatch route refusal, or a
+        # #1189 raced-to-terminal lookup miss. landed_terminal (#1273)
+        # distinguishes the case where the bail was itself a BlockedResult
+        # that landed the task terminal-FAILED, leaking the daemon worker.
+        resolution = _resolve_and_complete_headless_session(
             state,
             session,
             hook_payload=hook_payload,
@@ -787,8 +809,24 @@ def signal_stop() -> None:
             is_headless=is_headless,
             now=now,
         )
-        if rescued is None:
-            return
+        rescued = resolution.rescued
+        landed_terminal = resolution.landed_terminal
+
+    if rescued is None:
+        # #1273: a BlockedResult that itself just landed the task
+        # terminal-FAILED leaks the DAEMON worker -- stop it even though the
+        # session is never marked COMPLETED. A stage-mismatch (#986) or
+        # raced-to-terminal (#1189) refusal leaves landed_terminal False, so
+        # a still-legitimate or already-handled worker is left alone. Done
+        # after the lock releases, matching the network-call-outside-lock
+        # convention below.
+        if (
+            landed_terminal
+            and session.origin is SessionOrigin.DAEMON
+            and session.surface_ref is not None
+        ):
+            get_native_daemon_client().stop(session.surface_ref)
+        return
 
     payload = _build_completed_payload(
         session, context, claude_session_id, hook_payload, rescued=rescued
