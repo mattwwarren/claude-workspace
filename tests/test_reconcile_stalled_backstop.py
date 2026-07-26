@@ -11,6 +11,7 @@ import os
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -47,6 +48,7 @@ from cw.reconcile import (
 from tests._reconcile_helpers import (
     _auto_config,
     _client_with_lane,
+    _make_terminal_payload,
     _mk_headless_daemon_session,
     _shipped_salvage_payload,
     _stage_complete_payload,
@@ -57,6 +59,9 @@ from tests.conftest import (
     CapturedEvent,
     _write_idle_transcript,
 )
+
+if TYPE_CHECKING:
+    from cw.reconcile import ReapCandidate
 
 
 def test_stalled_veto_suppresses_park_when_transcript_fresh(
@@ -468,7 +473,7 @@ def test_act_on_stalled_park_vetoed_emits_event_no_mutation(
 
 def _stalled_salvage_candidate(
     session_id: str, ticket_id: str, result: object
-) -> object:
+) -> ReapCandidate:
     """Build a SALVAGE_COMPLETION ReapCandidate for the stalled act phase."""
     from cw.reconcile import ProposedAction, ReapCandidate
 
@@ -528,98 +533,458 @@ def test_stalled_salvage_stamps_salvage_transcript_source(
     assert sess.last_result_source == LastResultSource.SALVAGE_TRANSCRIPT
 
 
-def test_stalled_salvage_refused_by_door_session_never_completes(
+def test_stalled_foreign_result_completes_via_detect_guard_no_door_write(
     tmp_config_dir: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """RFC 0012 A3 (#1459), primary refusal test case (R2): a door-refused
-    stalled salvage leaves the session byte-identical, does NOT route the task,
-    and fires no SESSION_COMPLETED -- while a co-occurring accepted salvage in
-    the same tick still routes/emits (confirms the widened list excludes the
-    refused entry while retaining the accepted one)."""
+    """#1470: a live session already carrying a validated foreign terminal
+    result (e.g. written via an out-of-band `cw result emit`, which never
+    flips session.status) is intercepted at DETECT time -- before the wasted
+    transcript re-parse / retry-cap chain that used to end in a silently-
+    dropped door-refused SALVAGE_COMPLETION candidate every tick. Completed
+    directly from session.last_result: no new door write, task routed off
+    the foreign result's own shape.
+
+    Supersedes the old RFC 0012 A3 (#1459) door-refusal pinning test -- that
+    scenario (manually construct a SALVAGE_COMPLETION candidate for a session
+    already carrying a foreign result, feed it straight to
+    _act_on_stalled_candidates) can no longer occur for a *detected*
+    candidate: the detect phase now intercepts before a SALVAGE_COMPLETION
+    candidate is ever built for such a session (see the still-passing
+    test_stalled_salvage_stamps_salvage_transcript_source and the still-
+    reachable door-refusal branch in _apply_stalled_state_mutations, exercised
+    directly via _act_on_stalled_candidates in this same file, for the
+    residual case where a *fresh* salvage races a foreign write)."""
     from cw.auto_dev_result import AutoDevResult
     from cw.models import LastResultSource
-    from cw.reconcile import _act_on_stalled_candidates
+    from cw.reconcile import (
+        ProposedAction,
+        _act_on_stalled_candidates,
+        _detect_stalled_candidates,
+    )
+
+    daemon = FakeNativeDaemonClient()
+    monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", lambda: daemon)
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    foreign_payload = _shipped_salvage_payload()
+    foreign_payload["ticket_id"] = "stalled-foreign"
+    session = _mk_headless_daemon_session(
+        "stalled-foreign",
+        tmp_path / "wt-foreign",
+        started_at,
+        surface_ref="ref-foreign",
+    )
+    session.last_result = foreign_payload
+    session.last_result_source = LastResultSource.STOP_HOOK_HARVEST
+    state = CwState(sessions=[session])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="stalled-foreign",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="stalled-foreign",
+                    stage=Stage.IMPL,
+                ),
+            ]
+        )
+    )
+    task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
+    config = OrchestratorConfig()
+
+    candidates = _detect_stalled_candidates(
+        state, now=now, config=config, task_by_ticket=task_by_ticket
+    )
+    foreign_candidates = [
+        c
+        for c in candidates
+        if c.proposed_action == ProposedAction.COMPLETE_FOREIGN_RESULT
+    ]
+    assert [c.session_id for c in foreign_candidates] == ["stalled-foreign"]
+    # AutoDevResult.model_validate re-derives the same shape model_dump wrote.
+    assert foreign_candidates[0].routed_sentinel == AutoDevResult.model_validate(
+        foreign_payload
+    )
+
+    _act_on_stalled_candidates(state, candidates, now=now, config=config)
+
+    assert session.status == SessionStatus.COMPLETED
+    assert session.completed_reason == CompletionReason.NORMAL
+    # No new door write -- last_result/last_result_source are unchanged.
+    assert session.last_result == foreign_payload
+    assert session.last_result_source == LastResultSource.STOP_HOOK_HARVEST
+
+    store = load_dev_queue()
+    task = next(t for t in store.tasks if t.ticket_id == "stalled-foreign")
+    assert task.status == QueueItemStatus.COMPLETED
+    assert task.disposition == "shipped"
+    assert task.pr_url == foreign_payload["pr"]["url"]
+
+    events = read_events(
+        consumer="test-stalled-foreign-result",
+        event_types=[OrchestratorEventType.SESSION_COMPLETED],
+    )
+    assert len(events) == 1
+    assert events[0].payload["session_id"] == session.id
+    assert events[0].payload["ticket_id"] == "stalled-foreign"
+    assert events[0].payload["salvaged"] is True
+    assert events[0].payload["crashed"] is False
+    assert events[0].payload["status"] == "shipped"
+
+    assert daemon.stop_calls == ["ref-foreign"]
+
+
+def test_stalled_foreign_result_blocked_autodevresult_routes_blocked_on_user(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1470: a foreign result that discriminates as a producer-emitted
+    AutoDevResult with status="blocked" (schema_version present) routes the
+    task to BLOCKED_ON_USER, not COMPLETED -- _foreign_result_target_queue_
+    status's isinstance(BlockedResult)-then-status=="blocked" ladder must
+    special-case this so _queue_status_for_salvaged's default mapping (which
+    does not treat "blocked" as paused-for-user) never fires."""
+    from cw.reconcile import (
+        ProposedAction,
+        _act_on_stalled_candidates,
+        _detect_stalled_candidates,
+    )
 
     monkeypatch.setattr(
         "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
     )
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
-    foreign = {"status": "shipped", "foreign_authority": True}
-    refused = _mk_headless_daemon_session(
-        "stalled-refused", tmp_path / "wt-r", started_at, surface_ref="ref-refused"
+    foreign_payload = _make_terminal_payload("blocked", "stalled-blocked-adr")
+    foreign_payload["blocker"] = {"stage": "stage1_plan", "reason": "test_blocked"}
+    session = _mk_headless_daemon_session(
+        "stalled-blocked-adr", tmp_path / "wt-blocked-adr", started_at
     )
-    refused.last_result = foreign
-    refused.last_result_source = LastResultSource.STOP_HOOK_HARVEST
-    completed_reason_before = refused.completed_reason
-    completed_at_before = refused.completed_at
-    accepted = _mk_headless_daemon_session(
-        "stalled-accepted", tmp_path / "wt-a", started_at, surface_ref="ref-accepted"
-    )
-    state = CwState(sessions=[refused, accepted])
+    session.last_result = foreign_payload
+    state = CwState(sessions=[session])
     save_state(state)
     save_dev_queue(
         DevQueueStore(
             tasks=[
                 TicketTask(
-                    ticket_id="stalled-refused",
+                    ticket_id="stalled-blocked-adr",
                     client="client-a",
                     status=QueueItemStatus.RUNNING,
-                    session_id="stalled-refused",
-                    stage=Stage.IMPL,
-                ),
-                TicketTask(
-                    ticket_id="stalled-accepted",
-                    client="client-a",
-                    status=QueueItemStatus.RUNNING,
-                    session_id="stalled-accepted",
+                    session_id="stalled-blocked-adr",
                     stage=Stage.IMPL,
                 ),
             ]
         )
     )
-    refused_payload = _shipped_salvage_payload()
-    refused_payload["ticket_id"] = "stalled-refused"
-    accepted_payload = _shipped_salvage_payload()
-    accepted_payload["ticket_id"] = "stalled-accepted"
-    candidates = [
-        _stalled_salvage_candidate(
-            "stalled-refused",
-            "stalled-refused",
-            AutoDevResult.model_validate(refused_payload),
-        ),
-        _stalled_salvage_candidate(
-            "stalled-accepted",
-            "stalled-accepted",
-            AutoDevResult.model_validate(accepted_payload),
-        ),
+    task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
+    config = OrchestratorConfig()
+
+    candidates = _detect_stalled_candidates(
+        state, now=now, config=config, task_by_ticket=task_by_ticket
+    )
+    assert [c.proposed_action for c in candidates] == [
+        ProposedAction.COMPLETE_FOREIGN_RESULT
     ]
 
-    _act_on_stalled_candidates(state, candidates, now=now)
+    _act_on_stalled_candidates(state, candidates, now=now, config=config)
 
-    # Refused: byte-identical session, task NOT routed.
-    assert refused.status == SessionStatus.ACTIVE
-    assert refused.completed_reason == completed_reason_before
-    assert refused.completed_at == completed_at_before
-    assert refused.last_result == foreign
-    assert refused.last_result_source == LastResultSource.STOP_HOOK_HARVEST
+    assert session.status == SessionStatus.COMPLETED
+    assert session.completed_reason == CompletionReason.NORMAL
     store = load_dev_queue()
-    refused_task = next(t for t in store.tasks if t.ticket_id == "stalled-refused")
-    assert refused_task.status == QueueItemStatus.RUNNING
-    # Accepted: session COMPLETED, task COMPLETED.
-    assert accepted.status == SessionStatus.COMPLETED
-    accepted_task = next(t for t in store.tasks if t.ticket_id == "stalled-accepted")
-    assert accepted_task.status == QueueItemStatus.COMPLETED
-    # SESSION_COMPLETED fires only for the accepted candidate.
+    task = next(t for t in store.tasks if t.ticket_id == "stalled-blocked-adr")
+    assert task.status == QueueItemStatus.BLOCKED_ON_USER
+    assert task.disposition == "blocked"
+
+
+def test_stalled_foreign_result_blocked_result_shape_routes_blocked_on_user(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1470: a foreign result shaped as a synthetic BlockedResult (no
+    schema_version key -- "the parser could not extract a valid sentinel")
+    also routes to BLOCKED_ON_USER. Proves the isinstance(BlockedResult)
+    check -- which MUST precede the .status=="blocked" elif -- survived the
+    promotion from concierge.py: a BlockedResult never carries schema_version,
+    so if the ordering were flipped this would mis-route."""
+    from cw.reconcile import (
+        ProposedAction,
+        _act_on_stalled_candidates,
+        _detect_stalled_candidates,
+    )
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+    )
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    foreign_payload = {
+        "status": "blocked",
+        "blocker": {"stage": "stage1_plan", "reason": "parser_failed"},
+    }
+    session = _mk_headless_daemon_session(
+        "stalled-blocked-parser", tmp_path / "wt-blocked-parser", started_at
+    )
+    session.last_result = foreign_payload
+    state = CwState(sessions=[session])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="stalled-blocked-parser",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="stalled-blocked-parser",
+                    stage=Stage.IMPL,
+                ),
+            ]
+        )
+    )
+    task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
+    config = OrchestratorConfig()
+
+    candidates = _detect_stalled_candidates(
+        state, now=now, config=config, task_by_ticket=task_by_ticket
+    )
+    assert [c.proposed_action for c in candidates] == [
+        ProposedAction.COMPLETE_FOREIGN_RESULT
+    ]
+
+    _act_on_stalled_candidates(state, candidates, now=now, config=config)
+
+    assert session.status == SessionStatus.COMPLETED
+    store = load_dev_queue()
+    task = next(t for t in store.tasks if t.ticket_id == "stalled-blocked-parser")
+    assert task.status == QueueItemStatus.BLOCKED_ON_USER
+    assert task.disposition == "blocked"
+
+
+def test_stalled_foreign_result_unroutable_falls_through_to_drop_only(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """#1470, R4: a last_result carrying a "status" key (so _has_terminal_
+    sentinel fires) that fails discriminated validation is dropped -- no
+    COMPLETE_FOREIGN_RESULT candidate, session stays live. Reproduces today's
+    drop-only behavior for this one deliberately-out-of-scope case (the
+    session is never completed off an unroutable foreign write; it is only
+    spared the wasted transcript re-parse)."""
+    from cw.reconcile import _detect_stalled_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    session = _mk_headless_daemon_session(
+        "stalled-unroutable", tmp_path / "wt-unroutable", started_at
+    )
+    session.last_result = {"status": "totally_bogus", "schema_version": 4}
+    state = CwState(sessions=[session])
+    save_state(state)
+    config = OrchestratorConfig()
+
+    candidates = _detect_stalled_candidates(
+        state, now=now, config=config, task_by_ticket={}
+    )
+
+    assert candidates == []
+    assert session.status == SessionStatus.ACTIVE
+
+
+def test_stalled_foreign_result_guard_fires_before_budget_elapsed(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """#1470, R2: the guard fires immediately for a session that just started
+    (elapsed == 0, nowhere near any budget) -- proving it runs BEFORE the
+    budget gate rather than waiting for a wall-clock timeout. No transcript
+    file is written for this session at all, proving the guard has no
+    dependency on one (unlike the ordinary budget-expired transcript-salvage
+    path, which the guard's placement before the budget gate skips
+    entirely)."""
+    from cw.reconcile import ProposedAction, _detect_stalled_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at  # elapsed == 0
+    foreign_payload = _shipped_salvage_payload()
+    foreign_payload["ticket_id"] = "stalled-early"
+    session = _mk_headless_daemon_session(
+        "stalled-early", tmp_path / "wt-early", started_at
+    )
+    session.last_result = foreign_payload
+    state = CwState(sessions=[session])
+    save_state(state)
+    config = OrchestratorConfig()
+
+    candidates = _detect_stalled_candidates(
+        state, now=now, config=config, task_by_ticket={}
+    )
+
+    assert [c.proposed_action for c in candidates] == [
+        ProposedAction.COMPLETE_FOREIGN_RESULT
+    ]
+
+
+def test_stalled_foreign_result_idempotent_across_ticks(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1470, R7: once a session leaves _LIVE_STATUSES, a later detect pass
+    never re-offers it -- no second COMPLETE_FOREIGN_RESULT candidate, no
+    second SESSION_COMPLETED event."""
+    from cw.reconcile import _act_on_stalled_candidates, _detect_stalled_candidates
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+    )
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    foreign_payload = _shipped_salvage_payload()
+    foreign_payload["ticket_id"] = "stalled-idempotent"
+    session = _mk_headless_daemon_session(
+        "stalled-idempotent", tmp_path / "wt-idempotent", started_at
+    )
+    session.last_result = foreign_payload
+    state = CwState(sessions=[session])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="stalled-idempotent",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="stalled-idempotent",
+                    stage=Stage.IMPL,
+                ),
+            ]
+        )
+    )
+    config = OrchestratorConfig()
+
+    task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
+    candidates = _detect_stalled_candidates(
+        state, now=now, config=config, task_by_ticket=task_by_ticket
+    )
+    _act_on_stalled_candidates(state, candidates, now=now, config=config)
+    assert session.status == SessionStatus.COMPLETED
+
+    later = now + timedelta(hours=1)
+    task_by_ticket2 = {t.ticket_id: t for t in load_dev_queue().tasks}
+    candidates2 = _detect_stalled_candidates(
+        state, now=later, config=config, task_by_ticket=task_by_ticket2
+    )
+    assert candidates2 == []
+    reverted, merged_completed = _act_on_stalled_candidates(
+        state, candidates2, now=later, config=config
+    )
+    assert reverted == []
+    assert merged_completed == []
+
     events = read_events(
-        consumer="test-stalled-salv-refused",
+        consumer="test-stalled-foreign-idempotent",
         event_types=[OrchestratorEventType.SESSION_COMPLETED],
     )
-    completed_ids = {e.payload.get("session_id") for e in events}
-    assert "stalled-accepted" in completed_ids
-    assert "stalled-refused" not in completed_ids
+    assert len(events) == 1
+
+
+def test_stalled_park_marker_still_takes_precedence_over_terminal_guard(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """#1470 regression guard: a session carrying a park-marker last_result
+    (a "paused_status" key, no "status" key) still produces SKIP_PARKED, never
+    COMPLETE_FOREIGN_RESULT. Structurally guaranteed mutually exclusive --
+    _has_terminal_sentinel's discriminant is the presence of a "status" key,
+    which park markers never carry -- documented here as a test rather than
+    only as a comment."""
+    from cw.reconcile import _NEEDS_SALVAGE_REASON, ProposedAction
+    from cw.reconcile import _detect_stalled_candidates as detect
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    session = _mk_headless_daemon_session(
+        "stalled-park-marker", tmp_path / "wt-pm", started_at
+    )
+    session.last_result = {"paused_status": _NEEDS_SALVAGE_REASON}
+    state = CwState(sessions=[session])
+    save_state(state)
+    config = OrchestratorConfig()
+
+    candidates = detect(state, now=now, config=config, task_by_ticket={})
+
+    assert [c.proposed_action for c in candidates] == [ProposedAction.SKIP_PARKED]
+
+
+# ---------------------------------------------------------------------------
+# #1470 -- _shared.py unit coverage for the promoted foreign-result helpers.
+# ---------------------------------------------------------------------------
+
+
+def test_shared_validate_existing_result_for_routing_none_returns_none() -> None:
+    from cw.reconcile._shared import _validate_existing_result_for_routing
+
+    assert _validate_existing_result_for_routing(None) is None
+
+
+def test_shared_validate_existing_result_for_routing_invalid_shape_returns_none() -> (
+    None
+):
+    from cw.reconcile._shared import _validate_existing_result_for_routing
+
+    assert _validate_existing_result_for_routing({"status": "blocked"}) is None
+
+
+def test_shared_validate_existing_result_for_routing_valid_returns_autodevresult() -> (
+    None
+):
+    from cw.auto_dev_result import AutoDevResult
+    from cw.reconcile._shared import _validate_existing_result_for_routing
+
+    result = _validate_existing_result_for_routing(_shipped_salvage_payload())
+
+    assert isinstance(result, AutoDevResult)
+    assert result.status == "shipped"
+
+
+def test_shared_foreign_result_target_queue_status_blocked_result() -> None:
+    from cw.auto_dev_result import BlockedResult
+    from cw.reconcile._shared import _foreign_result_target_queue_status
+
+    blocked = BlockedResult.model_validate(
+        {"status": "blocked", "blocker": {"stage": "stage1_plan", "reason": "x"}}
+    )
+
+    assert (
+        _foreign_result_target_queue_status(blocked) == QueueItemStatus.BLOCKED_ON_USER
+    )
+
+
+def test_shared_foreign_result_target_queue_status_autodevresult_blocked() -> None:
+    from cw.auto_dev_result import AutoDevResult
+    from cw.reconcile._shared import _foreign_result_target_queue_status
+
+    payload = _make_terminal_payload("blocked", "shared-blocked-1")
+    payload["blocker"] = {"stage": "stage1_plan", "reason": "x"}
+    result = AutoDevResult.model_validate(payload)
+
+    assert (
+        _foreign_result_target_queue_status(result) == QueueItemStatus.BLOCKED_ON_USER
+    )
+
+
+def test_shared_foreign_result_target_queue_status_shipped_routes_completed() -> None:
+    from cw.auto_dev_result import AutoDevResult
+    from cw.reconcile._shared import _foreign_result_target_queue_status
+
+    result = AutoDevResult.model_validate(_shipped_salvage_payload())
+
+    assert _foreign_result_target_queue_status(result) == QueueItemStatus.COMPLETED
 
 
 # ---------------------------------------------------------------------------
@@ -2706,7 +3071,13 @@ def test_stalled_veto_cap_end_to_end_via_revert_stalled_headless_sessions(
 
     # Tick 3 — veto exhausted, falls through to the cap-park terminal.
     revert_stalled_headless_sessions(state, now=now, config=config)
-    assert state.sessions[0].status == SessionStatus.TIMED_OUT
+    # Why: `sess` (not `state.sessions[0]`) -- a fresh expression avoids a
+    # pre-existing mypy narrowing false-positive where the prior
+    # `state.sessions[0].status == SessionStatus.ACTIVE` asserts above leave
+    # that exact expression narrowed to Literal[SessionStatus.ACTIVE] across
+    # the mutating revert_stalled_headless_sessions() call. `sess` is the same
+    # underlying Session object (passed into CwState(sessions=[sess]) above).
+    assert sess.status == SessionStatus.TIMED_OUT
     store = load_dev_queue()
     t = next(t for t in store.tasks if t.ticket_id == "veto-e2e-bound-1")
     assert t.status == QueueItemStatus.BLOCKED_ON_USER
