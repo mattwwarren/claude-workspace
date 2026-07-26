@@ -244,6 +244,7 @@ Spawn a **general-purpose** agent (`model: "sonnet"`) scoped to run `/prep-pr`, 
   test "$(git rev-parse origin/<branch-name>)" = "$(git rev-parse HEAD)"
   ```
   If the push fails, or the verify comparison mismatches → do NOT invoke `/prep-pr`. STOP and return a BLOCK whose text includes the verbatim push failure output (or the mismatch detail) — the Unavailability classifier below inspects this returned text and, on a signature match, emits the `push_auth_failed` sentinel via the existing template (`stage_reached: "stage4b_pr_create"`); otherwise it falls through to a generic `agent_block` per the "Any other agent BLOCK" gate-collapse row.
+  This `git push` has no `timeout` wrapper — no push site in this file family does (#1414 R9: accepted residual risk, consistent with `ship-it.md`'s existing push and `prep-pr.md`'s own Step 1 push below).
 - Instruction to invoke `/prep-pr --skip-review --base main` via the Skill tool. **If the user chose Force at Step 4a (stacking onto an open pipeline PR), append `--draft`** so `/prep-pr` passes it through to the project's `/ship-it` (`/prep-pr` Step 8 already supports `--draft` pass-through). The PR must be a draft until the parent merges.
   - `--skip-review` is required: Stage 3 already ran scope-aware review with the full reviewer set. `/prep-pr`'s own review pass is thinner and would double up.
 

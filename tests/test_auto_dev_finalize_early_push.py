@@ -29,6 +29,7 @@ established elsewhere in this file family.
 
 from __future__ import annotations
 
+import re
 import typing
 from pathlib import Path
 
@@ -59,6 +60,20 @@ def _prep_pr_step1_section() -> str:
     start = content.index("## Step 1")
     end = content.index("## Step 2")
     return content[start:end]
+
+
+_PUSH_RECIPE_RE = re.compile(
+    r'git push origin HEAD:refs/heads/(?:"\$BRANCH"|<branch-name>)\n'
+    r'\s*git fetch origin (?:"\$BRANCH"|<branch-name>)\n'
+    r'\s*test "\$\(git rev-parse origin/(?:"\$BRANCH"|<branch-name>)\)"'
+    r' = "\$\(git rev-parse HEAD\)"'
+)
+
+
+def _normalized_push_recipe(section: str) -> str:
+    match = _PUSH_RECIPE_RE.search(section)
+    assert match, "push+verify recipe not found in section"
+    return match.group(0).replace('"$BRANCH"', "<branch-name>")
 
 
 def test_step4c2_pushes_before_prep_pr_invocation() -> None:
@@ -117,6 +132,20 @@ def test_prep_pr_step1_push_failure_has_headless_block() -> None:
     section = _prep_pr_step1_section()
     assert "HEADLESS BLOCK" in section
     assert 'gate: "Step 1 sync-with-base push"' in section
+
+
+def test_push_verify_recipe_matches_across_both_sites() -> None:
+    """Guard against the two push+verify recipes silently diverging.
+
+    Mirrors the classifier-signature PROSE MIRROR drift guard elsewhere in
+    this file family (see `test_unavailability_signatures_mirrored_in_prose`):
+    the push/fetch/verify command text must stay identical across
+    auto-dev-finalize.md Step 4c.2 and prep-pr.md Step 1, modulo the
+    `<branch-name>` vs `"$BRANCH"` placeholder substitution.
+    """
+    finalize_recipe = _normalized_push_recipe(_step4c2_section())
+    prep_pr_recipe = _normalized_push_recipe(_prep_pr_step1_section())
+    assert finalize_recipe == prep_pr_recipe
 
 
 def test_dispatch_runbook_95_symptom_no_longer_unconditional() -> None:

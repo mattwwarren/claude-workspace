@@ -100,6 +100,7 @@ git merge origin/<base>
   git fetch origin "$BRANCH"
   test "$(git rev-parse origin/"$BRANCH")" = "$(git rev-parse HEAD)"
   ```
+  This `git push` has no `timeout` wrapper — no push site in this file family does (#1414 R9: accepted residual risk, consistent with `ship-it.md`'s existing push and `auto-dev-finalize.md`'s Step 4c.2 push).
   - **On success** → proceed to Step 2.
   - **On push failure or verify mismatch**: ask the user:
     > "Failed to push the merged branch to origin (<error>). Retry the push, or abort /prep-pr?"
