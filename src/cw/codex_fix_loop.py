@@ -499,9 +499,7 @@ def run_review_with_fix_loop(
         wall_clock_budget_seconds=wall_clock_budget_seconds,
         session_id=session_id,
     )
-    if verdict is None or not verdict.blocking:
-        return result, verdict
-    if not fix_loop_enabled:
+    if verdict is None or not verdict.blocking or not fix_loop_enabled:
         return result, verdict
 
     cycle0_review = verdict.review
