@@ -166,12 +166,14 @@ def _post_plan_approved_marker(
         )
         return False
 
-    comments = _fetch_issue_comments(ticket_id, timeout=_FETCH_COMMENTS_TIMEOUT)
+    repo_cwd = _git_dir(get_client(resolved))
+    comments = _fetch_issue_comments(
+        ticket_id, timeout=_FETCH_COMMENTS_TIMEOUT, cwd=repo_cwd
+    )
     if comments is None:
         click.echo(
             "--post-marker: could not verify existing comments — marker"
-            " not posted (dedup check failed).",
-            err=True,
+            " not posted (dedup check failed)."
         )
         return False
 
@@ -185,9 +187,7 @@ def _post_plan_approved_marker(
         )
         return True
 
-    post_result = post_issue_comment(
-        ticket_id, _PLAN_APPROVED_MARKER, cwd=_git_dir(get_client(resolved))
-    )
+    post_result = post_issue_comment(ticket_id, _PLAN_APPROVED_MARKER, cwd=repo_cwd)
     if post_result is not None and post_result.returncode == 0:
         click.echo(
             f"--post-marker: posted the plan-approved marker comment"
@@ -255,7 +255,7 @@ def dev_queue_approve(ticket_id: str, client: str | None, post_marker: bool) -> 
     marker_already_recorded = False
     if post_marker:
         marker_already_recorded = _post_plan_approved_marker(
-            ticket_id, resolved, result
+            ticket_id=ticket_id, resolved=resolved, result=result
         )
     if result["awaiting_signoff"]:
         click.echo(

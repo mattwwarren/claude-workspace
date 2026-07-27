@@ -7917,6 +7917,10 @@ class TestDevQueueApproveCli:
         assert result.exit_code == 0, result.output
         post_mock.assert_not_called()
         assert "already present" in result.output
+        assert (
+            "Pass --post-marker to also post the plan-approved audit"
+            " marker comment on this ticket."
+        ) not in result.output
 
     def test_approve_post_marker_warns_on_review_stage(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -8025,6 +8029,72 @@ class TestDevQueueApproveCli:
         assert result.exit_code == 0, result.output
         post_mock.assert_not_called()
         assert "could not verify existing comments" in result.output
+
+    def test_approve_post_marker_dedup_check_scopes_cwd_to_client_repo(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The dedup pre-check must be scoped to the same client-repo cwd
+        as the marker post itself -- previously it read via ambient CWD
+        while the write was correctly scoped, the same bug class as
+        #1269/#1279, now on the read side (GitHub #1419 review)."""
+        self._seed_plan_pending(tmp_config_dir, tmp_path, monkeypatch)
+        with (
+            patch("cw.cli.dev_queue.crud._fetch_issue_comments") as fetch_mock,
+            patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock,
+        ):
+            fetch_mock.return_value = []
+            post_mock.return_value = subprocess.CompletedProcess(
+                args=["gh"], returncode=0, stdout=b"", stderr=b""
+            )
+            runner = CliRunner()
+            result = runner.invoke(
+                main,
+                [
+                    "dev-queue",
+                    "approve",
+                    "ACME-1",
+                    "--client",
+                    "acme",
+                    "--post-marker",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        fetch_cwd = fetch_mock.call_args.kwargs["cwd"]
+        post_cwd = post_mock.call_args.kwargs["cwd"]
+        assert fetch_cwd is not None
+        assert fetch_cwd == post_cwd
+
+    def test_approve_post_marker_reports_gh_post_failure(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """post_issue_comment returning a non-zero returncode: --post-marker
+        reports the failure on stderr instead of claiming success."""
+        self._seed_plan_pending(tmp_config_dir, tmp_path, monkeypatch)
+        with patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock:
+            post_mock.return_value = subprocess.CompletedProcess(
+                args=["gh"], returncode=1, stdout=b"", stderr=b"HTTP 404"
+            )
+            runner = CliRunner()
+            result = runner.invoke(
+                main,
+                [
+                    "dev-queue",
+                    "approve",
+                    "ACME-1",
+                    "--client",
+                    "acme",
+                    "--post-marker",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        post_mock.assert_called_once()
+        assert "failed to post the plan-approved marker comment" in result.output
 
 
 # ---------------------------------------------------------------------------
