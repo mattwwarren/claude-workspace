@@ -56,7 +56,11 @@ from cw.reconcile import (
     flag_silently_idle_daemon_sessions,
     resolve_headless_budget,
 )
-from cw.reconcile._shared import _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
+from cw.reconcile._shared import (
+    TRANSCRIPT_LIVENESS_WINDOW_SECONDS,
+    _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
+    _route_blocked_result_to_task,
+)
 from tests._reconcile_helpers import (
     _auto_config,
     _client_with_lane,
@@ -71,6 +75,7 @@ from tests._reconcile_helpers import (
     _write_staged_clients_yaml,
     _write_transcript_records,
 )
+from tests.conftest import _make_daemon_session
 
 
 def test_resolve_headless_budget_small_tier(
@@ -1901,6 +1906,7 @@ class TestApplySentinelToTaskStagedAdvance:
 
         ticket_id = "GH-698-small"
         session_id = "sess-698-small"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
 
         task = TicketTask(
             ticket_id=ticket_id,
@@ -1913,7 +1919,7 @@ class TestApplySentinelToTaskStagedAdvance:
         save_dev_queue(DevQueueStore(tasks=[task]))
 
         sentinel = _plan_pending_approval_sentinel(ticket_id, scope_tier="small")
-        _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+        _apply_sentinel_to_task(ticket_id, session, sentinel)
 
         store = load_dev_queue()
         t = next(t for t in store.tasks if t.ticket_id == ticket_id)
@@ -1940,6 +1946,7 @@ class TestApplySentinelToTaskStagedAdvance:
         _write_staged_clients_yaml(tmp_config_dir, client_name)
         ticket_id = "GH-750"
         session_id = "sess-750"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
         task = TicketTask(
             ticket_id=ticket_id,
             client=client_name,
@@ -1957,7 +1964,7 @@ class TestApplySentinelToTaskStagedAdvance:
         assert isinstance(sentinel, BlockedResult)
         assert sentinel.blocker.reason == "status_unknown"
 
-        _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+        _apply_sentinel_to_task(ticket_id, session, sentinel)
 
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
         assert t.status == QueueItemStatus.FAILED, (
@@ -1980,6 +1987,7 @@ class TestApplySentinelToTaskStagedAdvance:
 
         ticket_id = "GH-698-null-tier"
         session_id = "sess-698-null-tier"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
 
         task = TicketTask(
             ticket_id=ticket_id,
@@ -1992,7 +2000,7 @@ class TestApplySentinelToTaskStagedAdvance:
         save_dev_queue(DevQueueStore(tasks=[task]))
 
         sentinel = _plan_pending_approval_sentinel(ticket_id, scope_tier=None)
-        _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+        _apply_sentinel_to_task(ticket_id, session, sentinel)
 
         store = load_dev_queue()
         t = next(t for t in store.tasks if t.ticket_id == ticket_id)
@@ -2009,6 +2017,7 @@ class TestApplySentinelToTaskStagedAdvance:
 
         ticket_id = "GH-698-large"
         session_id = "sess-698-large"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
 
         task = TicketTask(
             ticket_id=ticket_id,
@@ -2021,7 +2030,7 @@ class TestApplySentinelToTaskStagedAdvance:
         save_dev_queue(DevQueueStore(tasks=[task]))
 
         sentinel = _plan_pending_approval_sentinel(ticket_id, scope_tier="large")
-        _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+        _apply_sentinel_to_task(ticket_id, session, sentinel)
 
         store = load_dev_queue()
         t = next(t for t in store.tasks if t.ticket_id == ticket_id)
@@ -2106,6 +2115,7 @@ class TestApplySentinelToTaskLateRescue:
     ) -> None:
         """Parked at IMPL + late stage_complete → PENDING at REVIEW; return True."""
         ticket_id, session_id = "GH-918-nonterm", "sess-918-nonterm"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
         self._seed_parked_task(
             tmp_config_dir,
             ticket_id=ticket_id,
@@ -2114,7 +2124,7 @@ class TestApplySentinelToTaskLateRescue:
         )
         sentinel = AutoDevResult.model_validate(_stage_complete_payload())
 
-        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel).rescued
+        rescued = _apply_sentinel_to_task(ticket_id, session, sentinel).rescued
 
         assert rescued is True
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
@@ -2126,6 +2136,7 @@ class TestApplySentinelToTaskLateRescue:
     ) -> None:
         """Parked at FINALIZE + late shipped → COMPLETED + pr_url; return True."""
         ticket_id, session_id = "GH-918-ship", "sess-918-ship"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
         self._seed_parked_task(
             tmp_config_dir,
             ticket_id=ticket_id,
@@ -2134,7 +2145,7 @@ class TestApplySentinelToTaskLateRescue:
         )
         sentinel = AutoDevResult.model_validate(_shipped_salvage_payload())
 
-        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel).rescued
+        rescued = _apply_sentinel_to_task(ticket_id, session, sentinel).rescued
 
         assert rescued is True
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
@@ -2145,6 +2156,7 @@ class TestApplySentinelToTaskLateRescue:
     def test_late_no_op_rescues_parked_task(self, tmp_config_dir: Path) -> None:
         """Parked + late no_op → COMPLETED disposition='no_op'; return True."""
         ticket_id, session_id = "GH-918-noop", "sess-918-noop"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
         self._seed_parked_task(
             tmp_config_dir,
             ticket_id=ticket_id,
@@ -2153,7 +2165,7 @@ class TestApplySentinelToTaskLateRescue:
         )
         sentinel = AutoDevResult.model_validate(_no_op_salvage_payload())
 
-        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel).rescued
+        rescued = _apply_sentinel_to_task(ticket_id, session, sentinel).rescued
 
         assert rescued is True
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
@@ -2169,6 +2181,7 @@ class TestApplySentinelToTaskLateRescue:
         reports True because the AutoDevResult arm handled a parked task.
         """
         ticket_id, session_id = "GH-918-blk", "sess-918-blk"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
         self._seed_parked_task(
             tmp_config_dir,
             ticket_id=ticket_id,
@@ -2177,7 +2190,7 @@ class TestApplySentinelToTaskLateRescue:
         )
         sentinel = AutoDevResult.model_validate(_blocked_autodev_payload(ticket_id))
 
-        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel).rescued
+        rescued = _apply_sentinel_to_task(ticket_id, session, sentinel).rescued
 
         assert rescued is True
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
@@ -2193,6 +2206,7 @@ class TestApplySentinelToTaskLateRescue:
         parked task must not be mutated (no false FAILED, no false completion).
         """
         ticket_id, session_id = "GH-918-blkres", "sess-918-blkres"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
         self._seed_parked_task(
             tmp_config_dir,
             ticket_id=ticket_id,
@@ -2208,7 +2222,7 @@ class TestApplySentinelToTaskLateRescue:
         assert isinstance(sentinel, BlockedResult)
         assert sentinel.blocker.reason == "status_unknown"
 
-        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel).rescued
+        rescued = _apply_sentinel_to_task(ticket_id, session, sentinel).rescued
 
         assert rescued is False
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
@@ -2225,6 +2239,7 @@ class TestApplySentinelToTaskLateRescue:
         """
         _write_staged_clients_yaml(tmp_config_dir, "staged-client")
         ticket_id, session_id = "GH-918-run", "sess-918-run"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
         task = TicketTask(
             ticket_id=ticket_id,
             client="staged-client",
@@ -2236,7 +2251,7 @@ class TestApplySentinelToTaskLateRescue:
         save_dev_queue(DevQueueStore(tasks=[task]))
         sentinel = AutoDevResult.model_validate(_stage_complete_payload())
 
-        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel).rescued
+        rescued = _apply_sentinel_to_task(ticket_id, session, sentinel).rescued
 
         assert rescued is False
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
@@ -2251,6 +2266,7 @@ class TestApplySentinelToTaskLateRescue:
         """
         _write_staged_clients_yaml(tmp_config_dir, "staged-client")
         ticket_id, session_id = "GH-918-runblk", "sess-918-runblk"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
         task = TicketTask(
             ticket_id=ticket_id,
             client="staged-client",
@@ -2290,7 +2306,7 @@ class TestApplySentinelToTaskLateRescue:
         assert isinstance(sentinel, BlockedResult)
         assert sentinel.blocker.reason == "validation_failed"
 
-        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+        outcome = _apply_sentinel_to_task(ticket_id, session, sentinel)
 
         assert outcome.rescued is False
         assert outcome.routed is True
@@ -2306,6 +2322,7 @@ class TestApplySentinelToTaskLateRescue:
         """
         _write_staged_clients_yaml(tmp_config_dir, "staged-client")
         ticket_id, session_id = "GH-918-transient", "sess-918-transient"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
         task = TicketTask(
             ticket_id=ticket_id,
             client="staged-client",
@@ -2319,7 +2336,7 @@ class TestApplySentinelToTaskLateRescue:
         assert isinstance(sentinel, BlockedResult)
         assert sentinel.blocker.reason == "no_result_emitted"
 
-        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+        outcome = _apply_sentinel_to_task(ticket_id, session, sentinel)
 
         assert outcome.rescued is False
         assert outcome.routed is True
@@ -2338,6 +2355,7 @@ class TestApplySentinelToTaskLateRescue:
         -- not the signoff gate re-firing.
         """
         ticket_id, session_id = "GH-990-signoff", "sess-990-signoff"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
         self._seed_parked_task(
             tmp_config_dir,
             ticket_id=ticket_id,
@@ -2347,7 +2365,7 @@ class TestApplySentinelToTaskLateRescue:
         )
         sentinel = AutoDevResult.model_validate(_stage_complete_payload())
 
-        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel).rescued
+        rescued = _apply_sentinel_to_task(ticket_id, session, sentinel).rescued
 
         assert rescued is True
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
@@ -2370,6 +2388,7 @@ class TestApplySentinelToTaskLateRescue:
         to FINALIZE (#990).
         """
         ticket_id, session_id = "GH-990-signoff-review", "sess-990-signoff-review"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
         self._seed_parked_task(
             tmp_config_dir,
             ticket_id=ticket_id,
@@ -2388,7 +2407,7 @@ class TestApplySentinelToTaskLateRescue:
         payload["stage_reached"] = "stage3_review"
         sentinel = AutoDevResult.model_validate(payload)
 
-        rescued = _apply_sentinel_to_task(ticket_id, session_id, sentinel).rescued
+        rescued = _apply_sentinel_to_task(ticket_id, session, sentinel).rescued
 
         assert rescued is True
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
@@ -2407,6 +2426,7 @@ class TestApplySentinelToTaskLateRescue:
         False (no rescue actually happened), not True.
         """
         ticket_id, session_id = "GH-1019-mismatch-parked", "sess-1019-mismatch-parked"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
         self._seed_parked_task(
             tmp_config_dir,
             ticket_id=ticket_id,
@@ -2415,7 +2435,7 @@ class TestApplySentinelToTaskLateRescue:
         )
         sentinel = AutoDevResult.model_validate(_stage_complete_payload())
 
-        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+        outcome = _apply_sentinel_to_task(ticket_id, session, sentinel)
 
         assert outcome.rescued is False
         assert outcome.routed is False
@@ -2434,6 +2454,7 @@ class TestApplySentinelToTaskLateRescue:
         """
         _write_staged_clients_yaml(tmp_config_dir, "staged-client")
         ticket_id, session_id = "GH-1019-mismatch-running", "sess-1019-mismatch-running"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
         task = TicketTask(
             ticket_id=ticket_id,
             client="staged-client",
@@ -2445,7 +2466,7 @@ class TestApplySentinelToTaskLateRescue:
         save_dev_queue(DevQueueStore(tasks=[task]))
         sentinel = AutoDevResult.model_validate(_stage_complete_payload())
 
-        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+        outcome = _apply_sentinel_to_task(ticket_id, session, sentinel)
 
         assert outcome.rescued is False
         assert outcome.routed is False
@@ -2468,7 +2489,9 @@ class TestApplySentinelToTaskLateRescue:
         sentinel = AutoDevResult.model_validate(_stage_complete_payload())
 
         outcome = _apply_sentinel_to_task(
-            "GH-1019-no-target", "sess-no-target", sentinel
+            "GH-1019-no-target",
+            _make_daemon_session(id="sess-no-target", worktree_path=None),
+            sentinel,
         )
 
         assert outcome == SentinelRouteOutcome(
@@ -2496,6 +2519,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         """RUNNING + deterministic parse-failure BlockedResult → routed=False."""
         _write_staged_clients_yaml(tmp_config_dir, "staged-client")
         ticket_id, session_id = "GH-1189-schema", "sess-1189-schema"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
         task = TicketTask(
             ticket_id=ticket_id,
             client="staged-client",
@@ -2513,7 +2537,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
             )
         )
 
-        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+        outcome = _apply_sentinel_to_task(ticket_id, session, sentinel)
 
         assert outcome.routed is False
         assert outcome.rescued is False
@@ -2532,6 +2556,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         """RUNNING + validation_failed at the attempt cap → routed=False, FAILED."""
         _write_staged_clients_yaml(tmp_config_dir, "staged-client")
         ticket_id, session_id = "GH-1189-vfcap", "sess-1189-vfcap"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
         task = TicketTask(
             ticket_id=ticket_id,
             client="staged-client",
@@ -2549,7 +2574,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
             )
         )
 
-        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+        outcome = _apply_sentinel_to_task(ticket_id, session, sentinel)
 
         assert outcome.routed is False
         assert outcome.landed_terminal is True
@@ -2572,6 +2597,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         """
         _write_staged_clients_yaml(tmp_config_dir, "staged-client")
         ticket_id, session_id = "GH-1189-unknown", "sess-1189-unknown"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
         task = TicketTask(
             ticket_id=ticket_id,
             client="staged-client",
@@ -2589,7 +2615,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
             )
         )
 
-        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+        outcome = _apply_sentinel_to_task(ticket_id, session, sentinel)
 
         assert outcome.routed is False
         assert outcome.landed_terminal is True
@@ -2612,9 +2638,12 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         so an operator can distinguish "no sentinel yet"
         (last_blocked_result=None) from "a rejected sentinel landed this
         FAILED."
-        """
-        from cw.reconcile._shared import _route_blocked_result_to_task
 
+        #1406: doubles as the UNKNOWN-liveness regression pin --
+        ``worktree_path=None`` makes ``_transcript_age_seconds`` return None
+        (no project dir to glob), so the catch-all's new liveness veto cannot
+        fire and this FAILED landing must be preserved exactly.
+        """
         _write_staged_clients_yaml(tmp_config_dir, "staged-client")
         target = TicketTask(
             ticket_id="GH-1266-catchall",
@@ -2632,7 +2661,9 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
             )
         )
 
-        routed = _route_blocked_result_to_task(target, sentinel)
+        session = _make_daemon_session(id="sess-1266-catchall", worktree_path=None)
+
+        routed = _route_blocked_result_to_task(target, session, sentinel)
 
         assert routed is False
         assert target.status == QueueItemStatus.FAILED
@@ -2650,6 +2681,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         """
         _write_staged_clients_yaml(tmp_config_dir, "staged-client")
         ticket_id, session_id = "GH-1189-race", "sess-1189-race"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
         completed_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
         task = TicketTask(
             ticket_id=ticket_id,
@@ -2665,7 +2697,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         # since the lookup misses (task is outside OCCUPIED_LANE_STATUSES).
         sentinel = AutoDevResult.model_validate(_stage_complete_payload())
 
-        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+        outcome = _apply_sentinel_to_task(ticket_id, session, sentinel)
 
         assert outcome == SentinelRouteOutcome(
             rescued=False, routed=False, landed_terminal=False
@@ -2689,6 +2721,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
 
         _write_staged_clients_yaml(tmp_config_dir, "staged-client")
         ticket_id, session_id = "GH-1189-race-log", "sess-1189-race-log"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
         task = TicketTask(
             ticket_id=ticket_id,
             client="staged-client",
@@ -2701,7 +2734,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         sentinel = AutoDevResult.model_validate(_stage_complete_payload())
 
         with caplog.at_level(logging.WARNING):
-            outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+            outcome = _apply_sentinel_to_task(ticket_id, session, sentinel)
 
         assert outcome.routed is False
         assert any(
@@ -2731,7 +2764,9 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         sentinel = AutoDevResult.model_validate(_stage_complete_payload())
 
         outcome = _apply_sentinel_to_task(
-            "GH-1189-no-match", "sess-1189-no-match", sentinel
+            "GH-1189-no-match",
+            _make_daemon_session(id="sess-1189-no-match", worktree_path=None),
+            sentinel,
         )
 
         assert outcome == SentinelRouteOutcome(
@@ -2751,6 +2786,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         """
         _write_staged_clients_yaml(tmp_config_dir, "staged-client")
         ticket_id, session_id = "GH-1189-order", "sess-1189-order"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
         excluded_row = TicketTask(
             ticket_id=ticket_id,
             client="staged-client",
@@ -2769,7 +2805,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         save_dev_queue(DevQueueStore(tasks=[excluded_row, occupied_row]))
         sentinel = AutoDevResult.model_validate(_stage_complete_payload())
 
-        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+        outcome = _apply_sentinel_to_task(ticket_id, session, sentinel)
 
         assert outcome.routed is True
         t = next(
@@ -2799,6 +2835,7 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         """
         _write_staged_clients_yaml(tmp_config_dir, "staged-client")
         ticket_id, session_id = "GH-1189-cleared", "sess-1189-cleared"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
         stale_row = TicketTask(
             ticket_id=ticket_id,
             client="staged-client",
@@ -2810,8 +2847,182 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         save_dev_queue(DevQueueStore(tasks=[stale_row]))
         sentinel = AutoDevResult.model_validate(_stage_complete_payload())
 
-        outcome = _apply_sentinel_to_task(ticket_id, session_id, sentinel)
+        outcome = _apply_sentinel_to_task(ticket_id, session, sentinel)
 
         assert outcome == SentinelRouteOutcome(
             rescued=False, routed=True, landed_terminal=False
         )
+
+
+class TestRouteBlockedResultCatchAllLivenessGuard:
+    """GitHub #1406: the catch-all FAILED/abandoned landing must not fire while
+    the owning session's transcript is still actively advancing.
+
+    Sibling closure to #1281, which added the same transcript-liveness veto to
+    the phantom sweep's stage-mismatch fall-through. #1406 closes the
+    alternative incident route that survived it: a RUNNING task whose
+    BlockedResult is merely *unparseable* (status_unknown,
+    multiple_result_blocks, any unrecognized reason) landed terminal-FAILED
+    even when the worker behind it was still making progress. LIVE now
+    re-queues to PENDING; DEAD (age past the window) and UNKNOWN (no locatable
+    transcript) both fall through to the pre-existing FAILED landing.
+    """
+
+    CATCH_ALL_REASON = "unknown_reason_xyz"
+
+    def _live_session(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        session_id: str,
+        age_seconds: float,
+    ) -> tuple[Session, datetime]:
+        """Build a DAEMON session whose transcript is ``age_seconds`` old at now.
+
+        Returns ``(session, now)``.  ``now`` is a fixed offset past the
+        session's ``started_at`` so the transcript's ``os.utime``-stamped mtime
+        stays strictly after it -- ``_project_transcripts_latest_timestamp``'s
+        reused-worktree guard (#358/#372) discards any candidate older than
+        ``started_at``.
+        """
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        worktree = tmp_path / f"wt-{session_id}"
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = started_at + timedelta(hours=1)
+
+        transcript = _write_salvage_transcript(
+            home, worktree, f"csid-{session_id}", _stage_complete_payload()
+        )
+        mtime = (now - timedelta(seconds=age_seconds)).timestamp()
+        os.utime(str(transcript), (mtime, mtime))
+
+        session = _make_daemon_session(
+            id=session_id,
+            worktree_path=worktree,
+            surface_ref="fake-short-id",
+            started_at=started_at,
+        )
+        return session, now
+
+    def _catch_all_sentinel(self) -> BlockedResult:
+        return BlockedResult(
+            blocker=Blocker(
+                stage="unknown",
+                reason=self.CATCH_ALL_REASON,
+                details="test: unrecognised reason code",
+            )
+        )
+
+    def test_route_blocked_result_catch_all_live_transcript_requeues_pending(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """LIVE transcript → PENDING + cleared session_id instead of FAILED.
+
+        Mirrors the ``_TRANSIENT_PARSE_FAILURES`` branch byte-for-byte,
+        including *not* writing the ``last_blocked_result`` diagnostic (#1266):
+        the veto is a re-queue, not a rejection, so there is no rejected
+        sentinel to record.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        session, now = self._live_session(
+            tmp_path, monkeypatch, session_id="sess-1406-live", age_seconds=30
+        )
+        target = TicketTask(
+            ticket_id="GH-1406-live",
+            client="staged-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=session.id,
+            stage=Stage.IMPL,
+            attempts=1,
+        )
+        sentinel = self._catch_all_sentinel()
+
+        routed = _route_blocked_result_to_task(target, session, sentinel, now=now)
+
+        assert routed is True
+        assert target.status == QueueItemStatus.PENDING
+        assert target.session_id is None
+        assert target.last_blocked_result is None
+
+    def test_route_blocked_result_catch_all_stale_transcript_falls_through_to_failed(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """DEAD transcript (age past the window) → the pre-#1406 FAILED landing.
+
+        Distinct from the UNKNOWN case pinned by
+        ``test_route_blocked_result_catch_all_writes_last_blocked_result``: here
+        the age is *known*, just past ``TRANSCRIPT_LIVENESS_WINDOW_SECONDS``.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        session, now = self._live_session(
+            tmp_path,
+            monkeypatch,
+            session_id="sess-1406-stale",
+            age_seconds=TRANSCRIPT_LIVENESS_WINDOW_SECONDS + 60,
+        )
+        target = TicketTask(
+            ticket_id="GH-1406-stale",
+            client="staged-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=session.id,
+            stage=Stage.IMPL,
+            attempts=1,
+        )
+        sentinel = self._catch_all_sentinel()
+
+        routed = _route_blocked_result_to_task(target, session, sentinel, now=now)
+
+        assert routed is False
+        assert target.status == QueueItemStatus.FAILED
+        assert target.disposition == "abandoned"
+        assert target.last_blocked_result == sentinel.model_dump(mode="json")
+
+    def test_apply_sentinel_to_task_catch_all_live_transcript_requeues_pending_via_apply(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The veto reaches production through ``_apply_sentinel_to_task``.
+
+        Pins the widened ``session``/``now`` threading end-to-end, and that
+        ``landed_terminal`` (#1273) derives False off the vetoed ``routed=True``
+        -- callers must NOT ``daemon.stop()`` a worker that is still advancing.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        session, now = self._live_session(
+            tmp_path, monkeypatch, session_id="sess-1406-apply", age_seconds=30
+        )
+        ticket_id = "GH-1406-apply"
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="staged-client",
+                        status=QueueItemStatus.RUNNING,
+                        session_id=session.id,
+                        stage=Stage.IMPL,
+                        attempts=1,
+                    )
+                ]
+            )
+        )
+        sentinel = self._catch_all_sentinel()
+
+        outcome = _apply_sentinel_to_task(ticket_id, session, sentinel, now=now)
+
+        assert outcome.routed is True
+        assert outcome.landed_terminal is False
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.PENDING
+        assert t.session_id is None
