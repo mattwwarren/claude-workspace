@@ -30,6 +30,19 @@ COMMANDS = ROOT / ".claude" / "commands"
 DRAFT_FILE = ".cw/plan-draft.md"
 PLAN_FILE = ".cw/plan.md"
 
+UNREVIEWABLE_PERSISTS_ANCHOR = (
+    "**MUST_FIX persists after 1 revision cycle, headless** → EXIT "
+    '`blocked` with `blocker.reason: "plan_unreviewable"`.'
+)
+UNSOUND_FIRST_CYCLE_ANCHOR = (
+    "**MUST_FIX, 1st cycle, headless** → EXIT `blocked` with "
+    '`blocker.reason: "plan_unsound"`.'
+)
+UNSOUND_PERSISTS_ANCHOR = (
+    "**MUST_FIX persists after 1 revision cycle, headless** → EXIT "
+    '`blocked` with `blocker.reason: "plan_unsound"`.'
+)
+
 
 def _cmd(name: str) -> str:
     return (COMMANDS / name).read_text()
@@ -79,30 +92,15 @@ def test_step1f3_all_three_blocked_exits_write_draft() -> None:
     """All 3 headless blocked-exit clauses instruct writing the draft file."""
     section = _step1f3_section()
 
-    unreviewable_window = _after(
-        section,
-        "**MUST_FIX persists after 1 revision cycle, headless** → EXIT "
-        '`blocked` with `blocker.reason: "plan_unreviewable"`.',
-        span=500,
-    )
+    unreviewable_window = _after(section, UNREVIEWABLE_PERSISTS_ANCHOR, span=500)
     assert DRAFT_FILE in unreviewable_window
     assert "write the plan's current text" in unreviewable_window
 
-    unsound_first_cycle_window = _after(
-        section,
-        "**MUST_FIX, 1st cycle, headless** → EXIT `blocked` with "
-        '`blocker.reason: "plan_unsound"`.',
-        span=500,
-    )
+    unsound_first_cycle_window = _after(section, UNSOUND_FIRST_CYCLE_ANCHOR, span=500)
     assert DRAFT_FILE in unsound_first_cycle_window
     assert "write the plan's current text" in unsound_first_cycle_window
 
-    unsound_persists_window = _after(
-        section,
-        "**MUST_FIX persists after 1 revision cycle, headless** → EXIT "
-        '`blocked` with `blocker.reason: "plan_unsound"`.',
-        span=500,
-    )
+    unsound_persists_window = _after(section, UNSOUND_PERSISTS_ANCHOR, span=500)
     assert DRAFT_FILE in unsound_persists_window
     assert "write the plan's current text" in unsound_persists_window
 
@@ -118,6 +116,20 @@ def test_step1a_resume_check_names_draft_file() -> None:
     assert DRAFT_FILE in section
     assert "resuming, not regenerating" in section
     assert "skip Step 1b's generation entirely" in section
+
+
+def test_step1a_resume_check_records_friction_highlights() -> None:
+    """Resuming from a persisted draft is recorded in friction_highlights.
+
+    `plan_source` stays the existing "generated" literal on a resume (no new
+    enum value per the ticket's resolution), so friction_highlights is the
+    only sentinel-visible signal that a plan was resumed rather than freshly
+    generated.
+    """
+    section = _step1a_section()
+    assert "friction_highlights" in section
+    window = _after(section, "resuming, not regenerating", span=300)
+    assert "friction_highlights" in window
 
 
 # ---------------------------------------------------------------------------
@@ -232,26 +244,11 @@ def test_blocked_exits_do_not_delete_draft() -> None:
     """The 3 headless blocked-exit clauses write the draft but never delete it."""
     section = _step1f3_section()
 
-    unreviewable_window = _after(
-        section,
-        "**MUST_FIX persists after 1 revision cycle, headless** → EXIT "
-        '`blocked` with `blocker.reason: "plan_unreviewable"`.',
-        span=500,
-    )
+    unreviewable_window = _after(section, UNREVIEWABLE_PERSISTS_ANCHOR, span=500)
     assert "delete" not in unreviewable_window.lower()
 
-    unsound_first_cycle_window = _after(
-        section,
-        "**MUST_FIX, 1st cycle, headless** → EXIT `blocked` with "
-        '`blocker.reason: "plan_unsound"`.',
-        span=500,
-    )
+    unsound_first_cycle_window = _after(section, UNSOUND_FIRST_CYCLE_ANCHOR, span=500)
     assert "delete" not in unsound_first_cycle_window.lower()
 
-    unsound_persists_window = _after(
-        section,
-        "**MUST_FIX persists after 1 revision cycle, headless** → EXIT "
-        '`blocked` with `blocker.reason: "plan_unsound"`.',
-        span=500,
-    )
+    unsound_persists_window = _after(section, UNSOUND_PERSISTS_ANCHOR, span=500)
     assert "delete" not in unsound_persists_window.lower()

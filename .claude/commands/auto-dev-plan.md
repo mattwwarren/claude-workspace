@@ -24,7 +24,7 @@ For each ticket in the queue:
 
 ### Step 1a: Check for Existing Plan
 
-0. **Resume check (runs before the tracker scan):** if `.cw/plan-draft.md` exists in the worktree AND `.cw/plan.md` does NOT exist, treat it exactly like "Plan found (sufficient)" below — extract its content, skip Step 1b's generation entirely, log "Found persisted plan draft from prior blocked attempt — resuming, not regenerating," and proceed to Step 1c (the ambiguity scan still runs unconditionally). **Supersession/ordering guard:** if `.cw/plan.md` already exists, ignore `.cw/plan-draft.md` regardless of either file's timestamp — an approved `.cw/plan.md` always wins over a stale draft.
+0. **Resume check (runs before the tracker scan):** if `.cw/plan-draft.md` exists in the worktree AND `.cw/plan.md` does NOT exist, treat it exactly like "Plan found (sufficient)" below — extract its content, skip Step 1b's generation entirely, log "Found persisted plan draft from prior blocked attempt — resuming, not regenerating," append a `friction_highlights` entry noting the resume (e.g. `resumed plan from .cw/plan-draft.md — prior blocked attempt`, since `plan_source` stays the existing `"generated"` literal and carries no signal of its own that this was a resume rather than a fresh generation), and proceed to Step 1c (the ambiguity scan still runs unconditionally). **Supersession/ordering guard:** if `.cw/plan.md` already exists, ignore `.cw/plan-draft.md` regardless of either file's timestamp — an approved `.cw/plan.md` always wins over a stale draft.
 
 1. **Tracked tickets:** Read the issue description AND comments via the active
    tracker's fetch ops (`get_issue` + `list_comments` for `linear`; a single
