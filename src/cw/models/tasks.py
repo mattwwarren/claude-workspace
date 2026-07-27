@@ -51,7 +51,11 @@ from cw.models.events import PrState, WatchedPr
 #      hatch that bypasses the cross-repo dispatch guard for one row.
 # v21: added TicketTask.stage_high_water (GitHub #1361) — furthest pipeline
 #      stage reached across all attempts; monotonic.
-DEV_QUEUE_SCHEMA_VERSION = 21
+# v22: added TicketTask.blocked_reason (GitHub #1511) — the blocker.reason off
+#      a well-formed blocked/merge_gate_blocked AutoDevResult, stamped by
+#      transition_task_status alongside disposition so it reaches `cw
+#      dev-queue tasks` and the attention-event formatter.
+DEV_QUEUE_SCHEMA_VERSION = 22
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -315,6 +319,17 @@ class TicketTask(BaseModel):
     # distinguish "sentinel never arrived" from "a rejected sentinel landed
     # this FAILED."
     last_blocked_result: dict[str, Any] | None = None
+    # GitHub #1511 — the `blocker.reason` off a well-formed blocked/
+    # merge_gate_blocked AutoDevResult, stamped by transition_task_status
+    # alongside disposition/pr_url/completed_at on every terminal transition
+    # and cleared on requeue/cancel. Distinct from last_blocked_result above:
+    # that field is a diagnostic-only dump for the malformed/unrecognized-
+    # sentinel catch-all; this field carries the specific reason string for
+    # the routine, well-formed blocked park so it can surface verbatim in
+    # `cw dev-queue tasks` and the attention-event formatter. None when the
+    # task was never blocked, or blocked with no blocker reason (e.g.
+    # scope_exceeded/forbidden_area, which carry no blocker field at all).
+    blocked_reason: str | None = None
     # GitHub #1198 — operator escape hatch for the cross-repo dispatch guard.
     # When True, the address_review / auto_fix_ci recipes log a WARNING and
     # dispatch anyway even though the row's client resolves to a different repo
