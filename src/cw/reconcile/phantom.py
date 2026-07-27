@@ -685,10 +685,11 @@ def _apply_phantom_routed_mutations(
     for candidate in routed_candidates:
         if candidate.routed_sentinel is None or candidate.salvage_csid is None:
             continue  # Invariant: ROUTE_EMITTED_SENTINEL has routed_sentinel + csid
+        session = session_by_id[candidate.session_id]
         routed = True
         if candidate.ticket_id:
             outcome = _apply_sentinel_to_task(
-                candidate.ticket_id, candidate.session_id, candidate.routed_sentinel
+                candidate.ticket_id, session, candidate.routed_sentinel, now=now
             )
             routed = outcome.routed
         if not routed:
@@ -715,18 +716,17 @@ def _apply_phantom_routed_mutations(
             # pre-existing dict and merge the refusal flag in under its own
             # key (never touching the caller's own paused_status value);
             # only a None last_result gets the original single-key stamp.
-            existing = session_by_id[candidate.session_id].last_result
+            existing = session.last_result
             if isinstance(existing, dict):
-                session_by_id[candidate.session_id].last_result = {
+                session.last_result = {
                     **existing,
                     _SENTINEL_ADVANCE_REFUSED_KEY: True,
                 }
             else:
-                session_by_id[candidate.session_id].last_result = {
+                session.last_result = {
                     _PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
                 }
             continue
-        session = session_by_id[candidate.session_id]
         session.status = SessionStatus.COMPLETED
         session.completed_at = now
         session.completed_reason = CompletionReason.NORMAL

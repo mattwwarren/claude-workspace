@@ -172,7 +172,7 @@ def _act_on_local_harvest_candidates(
         routed = True
         if candidate.ticket_id:
             outcome = _apply_sentinel_to_task(
-                candidate.ticket_id, candidate.session_id, sentinel
+                candidate.ticket_id, session, sentinel, now=now
             )
             routed = outcome.routed
         if not routed:

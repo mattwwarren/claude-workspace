@@ -256,6 +256,18 @@ class OrchestratorEventType(StrEnum):
     # TRANSCRIPT_LIVENESS_WINDOW_SECONDS. Side-effect-only, mirrors
     # SESSION_PARK_VETOED above: no queue or session mutation accompanies it.
     SESSION_SENTINEL_STAGE_MISMATCH_VETOED = "session.sentinel_stage_mismatch_vetoed"
+    # GitHub #1406 -- catch-all-unparseable-sentinel liveness veto. Emitted by
+    # _route_blocked_result_to_task instead of landing a RUNNING task terminal
+    # FAILED/abandoned when a malformed/unrecognized BlockedResult (the
+    # unrecognized-reason catch-all) arrives but the owning session's
+    # transcript is still advancing within TRANSCRIPT_LIVENESS_WINDOW_SECONDS.
+    # Sibling closure to #1281's SESSION_SENTINEL_STAGE_MISMATCH_VETOED above,
+    # but no persisted veto counter: this decision clears the task's
+    # session_id and re-queues to PENDING (unlike the other two vetoes, which
+    # leave the task RUNNING against the same session for re-evaluation next
+    # tick), so a fresh session is dispatched on retry -- there is no
+    # same-session repeat-veto risk to bound.
+    SESSION_SENTINEL_LIVENESS_VETOED = "session.sentinel_liveness_vetoed"
     # GitHub #1437 — ssh_key_gate operator escape hatch. Emitted by
     # _emit_ssh_key_bypass when the SSH-agent-key preflight probe (#927)
     # reports unavailable but the operator has set

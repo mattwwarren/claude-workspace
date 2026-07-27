@@ -3066,7 +3066,7 @@ class TestSignalStop:
                 details="test: unrecognised reason code",
             )
         )
-        outcome = _apply_sentinel_to_task(self.SEED_TICKET_ID, session.id, sentinel)
+        outcome = _apply_sentinel_to_task(self.SEED_TICKET_ID, session, sentinel)
 
         assert outcome.routed is False
         store = load_dev_queue()
