@@ -1705,6 +1705,46 @@ class TestDispatchTickSpawnErrors:
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.session_id is None
 
+    def test_stale_worktree_dirty_park_emits_session_needs_attention(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """StaleWorktreeError + dirty worktree park emits SESSION_NEEDS_ATTENTION
+        with breadcrumbs == the stringified worktree path (#1257)."""
+        from cw.worktree import worktree_path_for
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-425D-ATT", client="test-client"))
+
+        def _stale(*_args: object, **_kwargs: object) -> Path:
+            msg = "Refusing to reuse stale worktree"
+            raise StaleWorktreeError(msg)
+
+        monkeypatch.setattr("cw.dispatch.claim.create_worktree", _stale)
+        monkeypatch.setattr(
+            "cw.dispatch.claim.worktree_has_unsaved_work", lambda _c, _b: True
+        )
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
+        assert spawned == 0
+
+        expected_path = str(
+            worktree_path_for(sample_client_config, "dev/GEN-425D-ATT")
+        )
+
+        events = read_events(
+            consumer="test-425d-att-attention",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert len(events) == 1
+        assert events[0].payload["paused_status"] == "dirty_worktree"
+        assert events[0].payload["breadcrumbs"] == expected_path
+        assert events[0].payload["ticket_id"] == "GEN-425D-ATT"
+
     def test_stale_worktree_clean_removes_and_reverts(
         self,
         tmp_dispatch_dirs: Path,
@@ -1840,6 +1880,40 @@ class TestDispatchCodexCapabilityGate:
             for record in caplog.records
             if record.name == "cw.dispatch"
         ), "expected WARNING naming the client/ticket"
+
+    def test_codex_not_found_emits_session_needs_attention(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """codex-not-found park emits SESSION_NEEDS_ATTENTION with breadcrumbs (#1257)."""
+        from cw.executor import CODEX_NOT_FOUND, CodexCapabilityDiagnosis
+
+        _make_codex_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-CDX1", client="test-client"))
+
+        monkeypatch.setattr(
+            "cw.dispatch.claim.codex_capability_diagnosis",
+            lambda **_kwargs: CodexCapabilityDiagnosis(
+                CODEX_NOT_FOUND, "codex binary not found"
+            ),
+        )
+        spy = _SpyExecutor()
+        monkeypatch.setattr("cw.dispatch.claim.resolve_executor", lambda *_a, **_k: spy)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(simple_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-cdx1-attention",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert len(events) == 1
+        assert events[0].payload["paused_status"] == CODEX_NOT_FOUND
+        assert events[0].payload["breadcrumbs"] == "codex binary not found"
+        assert events[0].payload["ticket_id"] == "GEN-CDX1"
 
     def test_codex_version_unknown_parks_blocked_on_user(
         self,
@@ -2628,7 +2702,10 @@ class TestGlobalAttemptCeiling:
 
         events = read_events(
             consumer="test-786-cap-event",
-            event_types=[OrchestratorEventType.DISPATCH_TICK],
+            event_types=[
+                OrchestratorEventType.DISPATCH_TICK,
+                OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            ],
         )
         cap_events = [
             e
@@ -2638,6 +2715,15 @@ class TestGlobalAttemptCeiling:
         assert len(cap_events) == 1
         assert cap_events[0].payload["ticket_id"] == "GEN-786-event"
         assert cap_events[0].payload["client"] == "test-client"
+
+        attention_events = [
+            e
+            for e in events
+            if e.payload.get("paused_status") == "attempt_cap_blocked"
+        ]
+        assert len(attention_events) == 1
+        assert attention_events[0].payload["ticket_id"] == "GEN-786-event"
+        assert attention_events[0].payload["lane"] == task.lane
 
     def test_at_ceiling_priority_path_parks_task(
         self,
@@ -6556,20 +6642,34 @@ class TestApplyStagedDecision:
         assert task.session_id is None
 
     def test_stage_advance_unchecked_unknown_client_stamps_disposition(
-        self, tmp_dispatch_dirs: Path
+        self,
+        tmp_dispatch_dirs: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
         """Unknown client -> BLOCKED_ON_USER + disposition='unknown_client' (#976)."""
         from cw.dispatch import _UNKNOWN_CLIENT_REASON, _stage_advance_unchecked
 
         task = self._make_running_task("UNKCLIENT-1")
+        attention = capture_events(
+            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
 
         _stage_advance_unchecked(task, {})
 
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.disposition == _UNKNOWN_CLIENT_REASON
 
+        assert len(attention) == 1
+        _, payload, correlation_id = attention[0]
+        assert payload["paused_status"] == _UNKNOWN_CLIENT_REASON
+        assert payload["ticket_id"] == "UNKCLIENT-1"
+        assert correlation_id == "UNKCLIENT-1"
+
     def test_stage_advance_unchecked_stage_not_in_pipeline_stamps_disposition(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
         """task.stage not in pipeline.stages -> BLOCKED_ON_USER +
         disposition='invalid_stage_config' (#976)."""
@@ -6584,8 +6684,17 @@ class TestApplyStagedDecision:
             ),
         )
         task = self._make_running_task("BADSTAGE-1", stage=Stage.HARDEN)
+        attention = capture_events(
+            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
 
         _stage_advance_unchecked(task, {"test-client": client_cfg})
+
+        assert len(attention) == 1
+        _, payload, correlation_id = attention[0]
+        assert payload["paused_status"] == _INVALID_STAGE_REASON
+        assert payload["ticket_id"] == "BADSTAGE-1"
+        assert correlation_id == "BADSTAGE-1"
 
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.disposition == _INVALID_STAGE_REASON

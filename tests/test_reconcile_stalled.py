@@ -2088,6 +2088,59 @@ def test_revert_stalled_skips_removal_and_blocks_task_when_dirty(
     assert t.status == QueueItemStatus.BLOCKED_ON_USER
 
 
+def test_revert_stalled_dirty_worktree_emits_session_needs_attention(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dirty-worktree park during stalled-headless revert emits
+    SESSION_NEEDS_ATTENTION with breadcrumbs == the worktree path (#1257)."""
+    from cw.worktree import worktree_path_for
+
+    worktree = tmp_path / "wt-dirty"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session(
+        "dirty-1", worktree, started_at, surface_ref=None
+    )
+    sess.branch = "auto-dev/dirty-1"
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="dirty-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="dirty-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    client_cfg = ClientConfig(name="client-a", workspace_path=tmp_path / "ws")
+    monkeypatch.setattr(
+        "cw.reconcile._shared.get_client", lambda _name: client_cfg
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: True
+    )
+
+    revert_stalled_headless_sessions(state, now=now, config=_auto_config())
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "dirty-1")
+    assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+    expected_path = str(worktree_path_for(client_cfg, "auto-dev/dirty-1"))
+    events = read_events(
+        consumer="test-dirty-1-attention",
+        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+    )
+    assert len(events) == 1
+    assert events[0].payload["paused_status"] == "dirty_worktree"
+    assert events[0].payload["ticket_id"] == "dirty-1"
+    assert events[0].payload["breadcrumbs"] == expected_path
+
+
 def test_revert_stalled_removes_when_clean(
     tmp_config_dir: Path,
     tmp_path: Path,
