@@ -79,5 +79,10 @@ def _git(repo: Path, *args: str) -> None:
     )
 
 
+def _write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
 def _task() -> TicketTask:
     return _make_ticket_task(ticket_id="T-1", client="test", stage=Stage.REVIEW)
