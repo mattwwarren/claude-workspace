@@ -46,6 +46,7 @@ from cw.worktree import (
     create_worktree,
     remove_worktree,
     worktree_has_unsaved_work,
+    worktree_path_for,
 )
 
 if TYPE_CHECKING:
@@ -135,6 +136,37 @@ def _emit_attempt_cap_blocked_event(client_name: str, ticket_id: str) -> None:
     )
 
 
+def _emit_attempt_cap_attention_event(
+    task: TicketTask, client_name: str, lane: str
+) -> None:
+    """Emit SESSION_NEEDS_ATTENTION when a task is parked at the global attempt ceiling.
+
+    Sibling of :func:`_emit_attempt_cap_blocked_event` (#1257) -- that helper
+    emits a DISPATCH_TICK event (operator-visible tick summary); this one
+    emits the SESSION_NEEDS_ATTENTION event the attention-monitor/board
+    surfaces consume, using the same canonical 9-field payload shape as
+    ``_route_scope_gated_approval`` in routing.py. No session/breadcrumb
+    detail exists at this pre-spawn ceiling check (the task never spawned a
+    session this attempt), so ``session_id``/``session_name``/``breadcrumbs``
+    are empty/None.
+    """
+    record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {
+            "session_id": task.session_id or "",
+            "session_name": "",
+            "client": client_name,
+            "ticket_id": task.ticket_id,
+            "claude_session_id": None,
+            "paused_status": "attempt_cap_blocked",
+            "breadcrumbs": "",
+            "crashed": False,
+            "lane": lane,
+        },
+        correlation_id=task.ticket_id,
+    )
+
+
 def _claim_next_pending(
     client_name: str,
     *,
@@ -212,6 +244,9 @@ def _claim_next_pending(
                             )
                             save_dev_queue(store)
                             _emit_attempt_cap_blocked_event(client_name, task.ticket_id)
+                            _emit_attempt_cap_attention_event(
+                                task, client_name, lane
+                            )
                             break
                         transition_task_status(task, QueueItemStatus.RUNNING)
                         task.attempts += 1
@@ -239,6 +274,7 @@ def _claim_next_pending(
                 )
                 save_dev_queue(store)
                 _emit_attempt_cap_blocked_event(client_name, task.ticket_id)
+                _emit_attempt_cap_attention_event(task, client_name, lane)
                 continue
             transition_task_status(task, QueueItemStatus.RUNNING)
             task.attempts += 1
@@ -412,7 +448,7 @@ def _revert_claimed_task_to_pending(
 
 
 def _park_running_task_blocked_on_user(
-    *, ticket_id: str, client_name: str, disposition: str
+    *, ticket_id: str, client_name: str, disposition: str, breadcrumbs: str
 ) -> None:
     """Move a still-RUNNING claimed task to BLOCKED_ON_USER, clearing session_id.
 
@@ -423,6 +459,14 @@ def _park_running_task_blocked_on_user(
     session_id, save shape; this is the single copy. ``ticket_id``/``client_name``
     are keyword-only (both plain ``str``, no type-system distinction between
     them) so a future edit can't silently transpose them at a call site.
+
+    Also emits SESSION_NEEDS_ATTENTION (#1257) using the canonical 9-field
+    payload shape (see ``_route_scope_gated_approval`` in routing.py), reading
+    ``stored_task.session_id``/``stored_task.lane`` before ``session_id`` is
+    cleared below. ``breadcrumbs`` is caller-supplied human-readable detail
+    (e.g. the codex-capability probe's ``.detail`` string, or a stale
+    worktree's path) -- distinct from ``disposition``, which is the short
+    reason code also stamped as the task's ``disposition``.
     """
     with dev_queue_lock():
         store = load_dev_queue()
@@ -436,6 +480,21 @@ def _park_running_task_blocked_on_user(
                     stored_task,
                     QueueItemStatus.BLOCKED_ON_USER,
                     disposition=disposition,
+                )
+                record_event(
+                    OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+                    {
+                        "session_id": stored_task.session_id or "",
+                        "session_name": "",
+                        "client": client_name,
+                        "ticket_id": ticket_id,
+                        "claude_session_id": None,
+                        "paused_status": disposition,
+                        "breadcrumbs": breadcrumbs,
+                        "crashed": False,
+                        "lane": stored_task.lane,
+                    },
+                    correlation_id=ticket_id,
                 )
                 stored_task.session_id = None
                 break
@@ -521,7 +580,10 @@ def _codex_capability_gate(
         probe.detail,
     )
     _park_running_task_blocked_on_user(
-        ticket_id=task.ticket_id, client_name=client.name, disposition=probe.diagnosis
+        ticket_id=task.ticket_id,
+        client_name=client.name,
+        disposition=probe.diagnosis,
+        breadcrumbs=probe.detail,
     )
     _codex_capability_park_count[0] += 1
     breaker_engaged = (
@@ -606,6 +668,7 @@ def _spawn_claimed_task(
                     ticket_id=task.ticket_id,
                     client_name=client.name,
                     disposition="dirty_worktree",
+                    breadcrumbs=str(worktree_path_for(client, branch)),
                 )
             else:
                 with contextlib.suppress(WorktreeError, OSError):
