@@ -38,11 +38,11 @@ _DOOR_MODULE = "result.py"
 _ALLOWLIST: dict[str, dict[str, str]] = {
     "reconcile/idle.py": {
         (
-            "session_by_id[candidate.session_id].last_result = {\n"
+            "session.last_result = {\n"
             "_PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON\n"
             "}"
         ): (
-            "idle.py:561 — park marker, stage-mismatch-refused; no 'status' "
+            "idle.py:562 — park marker, stage-mismatch-refused; no 'status' "
             "key so has_terminal_result() stays False"
         ),
         'session.last_result = candidate.routed_sentinel.model_dump(mode="json")': (
@@ -56,21 +56,21 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
     },
     "reconcile/phantom.py": {
         (
-            "session_by_id[candidate.session_id].last_result = {\n"
+            "session.last_result = {\n"
             "**existing,\n"
             "_SENTINEL_ADVANCE_REFUSED_KEY: True,\n"
             "}"
         ): (
-            "phantom.py:720 — park marker, stage-mismatch-refused (merge "
+            "phantom.py:721 — park marker, stage-mismatch-refused (merge "
             "branch: preserves the caller's existing paused_status under "
             "its own key); no 'status' key added"
         ),
         (
-            "session_by_id[candidate.session_id].last_result = {\n"
+            "session.last_result = {\n"
             "_PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON\n"
             "}"
         ): (
-            "phantom.py:725 — park marker, stage-mismatch-refused (fresh "
+            "phantom.py:726 — park marker, stage-mismatch-refused (fresh "
             "branch: no pre-existing dict to merge into); no 'status' key"
         ),
         'session.last_result = candidate.routed_sentinel.model_dump(mode="json")': (

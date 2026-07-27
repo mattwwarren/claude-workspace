@@ -545,10 +545,11 @@ def _apply_idle_routed_mutations(
     for candidate in routed_sentinel_candidates:
         if candidate.routed_sentinel is None or candidate.salvage_csid is None:
             continue
+        session = session_by_id[candidate.session_id]
         routed = True
         if candidate.ticket_id:
             outcome = _apply_sentinel_to_task(
-                candidate.ticket_id, candidate.session_id, candidate.routed_sentinel
+                candidate.ticket_id, session, candidate.routed_sentinel, now=now
             )
             routed = outcome.routed
         if not routed:
@@ -558,12 +559,11 @@ def _apply_idle_routed_mutations(
             # gate (_detect_idle_candidate_for_session) stops re-proposing this same
             # doomed candidate forever. No "status" key -> _has_terminal_sentinel
             # stays False and the ordinary idle-stall machinery still runs.
-            session_by_id[candidate.session_id].last_result = {
+            session.last_result = {
                 _PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
             }
             state_mutated = True
             continue
-        session = session_by_id[candidate.session_id]
         session.status = SessionStatus.COMPLETED
         session.completed_at = now
         session.completed_reason = CompletionReason.NORMAL

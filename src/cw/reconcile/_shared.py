@@ -1012,6 +1012,11 @@ class SentinelRouteOutcome(NamedTuple):
     ``routed=False`` alone can't tell them apart. Callers (``signal_stop``)
     use ``landed_terminal`` to `daemon.stop()` the leaked worker in the (b)
     case without touching a worker refused by the #986 stage-mismatch guard.
+
+    GitHub #1406: a catch-all BlockedResult vetoed by the transcript-liveness
+    guard re-queues to PENDING, so it reports ``routed=True`` and (derived from
+    it) ``landed_terminal=False`` -- exactly the signal that keeps the still-
+    advancing worker alive rather than stopping it as leaked.
     """
 
     rescued: bool
@@ -1021,8 +1026,10 @@ class SentinelRouteOutcome(NamedTuple):
 
 def _apply_sentinel_to_task(
     ticket_id: str,
-    cw_session_id: str,
+    session: Session,
     sentinel: AutoDevResult | BlockedResult,
+    *,
+    now: datetime | None = None,
 ) -> SentinelRouteOutcome:
     """Update the matching dev-queue task based on the sentinel result.
 
@@ -1037,7 +1044,15 @@ def _apply_sentinel_to_task(
     finally arrived, #918, #990). A parked task retains its session_id (the
     idle watchdog does not clear it), so the rescue can re-find it. Returns a
     ``SentinelRouteOutcome`` -- see its docstring for ``rescued``/``routed``.
+
+    Takes the owning ``session`` (not just its id) because the BlockedResult
+    arm's catch-all needs a transcript path to resolve liveness against
+    (#1406); the task lookup itself still keys off ``session.id`` alone.
+    ``now`` is the caller's sweep timestamp, threaded through to that liveness
+    comparison so a reconcile tick judges every session against one clock;
+    it defaults to wall-clock ``now`` for callers that have none.
     """
+    cw_session_id = session.id
     with dev_queue_lock():
         store = load_dev_queue()
         target: TicketTask | None = None
@@ -1116,7 +1131,7 @@ def _apply_sentinel_to_task(
             # writes a real transition (FAILED or PENDING) that must be
             # persisted below even when routed=False -- routed=False means
             # "don't also complete the session," not "don't write the task."
-            routed = _route_blocked_result_to_task(target, sentinel)
+            routed = _route_blocked_result_to_task(target, session, sentinel, now=now)
             landed_terminal = not routed
         else:
             # True no-op: a late BlockedResult against an already-parked task
@@ -1130,18 +1145,35 @@ def _apply_sentinel_to_task(
         )
 
 
-def _route_blocked_result_to_task(target: TicketTask, sentinel: BlockedResult) -> bool:
+def _route_blocked_result_to_task(
+    target: TicketTask,
+    session: Session,
+    sentinel: BlockedResult,
+    *,
+    now: datetime | None = None,
+) -> bool:
     """Route a malformed/unparseable BlockedResult to a RUNNING task's status.
 
     A BlockedResult means the sentinel failed to parse or was malformed.
-    Deterministic parse failures and unknown statuses are terminal FAILED;
-    validation_failed and transient failures re-queue to PENDING (clearing
-    session_id) until the attempt cap. Extracted from _apply_sentinel_to_task
-    to keep that function under the branch cap (#918).
+    Deterministic parse failures are terminal FAILED; validation_failed and
+    transient failures re-queue to PENDING (clearing session_id) until the
+    attempt cap. Extracted from _apply_sentinel_to_task to keep that function
+    under the branch cap (#918).
 
     Returns False when this call just landed the task terminal-FAILED (the
     caller must not also complete the owning session on that outcome), True
     when it re-queued to PENDING instead (#1189).
+
+    GitHub #1406: the unrecognized-reason catch-all is additionally vetoed by
+    ``session``'s transcript liveness. #1281 gave the phantom sweep's
+    stage-mismatch fall-through the same guard; this closes the alternative
+    route to the same incident -- a still-advancing worker whose sentinel
+    merely failed to *parse* was landed terminal-FAILED (and, via #1273's
+    ``landed_terminal``, had its daemon stopped) while it was still working.
+    Only the catch-all is guarded: a deterministic parse failure reproduces
+    identically no matter how much further the worker gets, and
+    validation_failed already carries its own attempt-cap tolerance. ``now``
+    is the caller's sweep timestamp; it defaults to wall-clock ``now``.
     """
     # #1266: the two branches below (deterministic parse failures and
     # validation_failed at the attempt cap) are deliberately out of scope for
@@ -1170,6 +1202,48 @@ def _route_blocked_result_to_task(target: TicketTask, sentinel: BlockedResult) -
     # signal. Never mark it COMPLETED — that silently retires unshipped work
     # as "shipped" (#750, the #728 loss). Surface as FAILED so the operator
     # sees it instead of a phantom completion.
+    # #1406: ...unless the worker behind it is demonstrably still advancing.
+    # An unparseable sentinel is evidence the *frame* was malformed, not that
+    # the run is over -- a fresh transcript means killing it here would drop
+    # work that is still in flight (the #1281 incident shape). Re-queue to
+    # PENDING, same shape as the _TRANSIENT_PARSE_FAILURES branch above (no
+    # last_blocked_result write: a re-queue rejects nothing), plus an audit
+    # event -- unlike that branch, this one overrides what would otherwise be
+    # a terminal FAILED landing, so it needs a durable trace an operator can
+    # find later. record_event nests _inbox_lock inside dev_queue_lock here,
+    # the same safe nesting order crud.py's _emit_task_deleted and
+    # dev_queue/lifecycle.py already rely on (RFC 0008 W1, #978: the reverse
+    # nesting -- _inbox_lock then dev_queue_lock -- never occurs). Not #765:
+    # that ticket is the opposite lesson, a deadlock caused by record_event
+    # inside dev_queue_lock in a since-fixed call site (_shared.py's own
+    # SESSION_NEEDS_ATTENTION emission a few hundred lines below still emits
+    # after the lock releases for that reason) -- citing it here as evidence
+    # of safety would point a future reader at the wrong precedent.
+    #
+    # The `0 <= age` floor is load-bearing, not defensive: a negative age
+    # means the transcript's mtime is *after* `now` (clock skew, or a caller
+    # passing a fictional/frozen timestamp), which is not evidence of
+    # liveness. Without the floor every such case is trivially `< WINDOW` and
+    # would misclassify as LIVE. A None age (no locatable transcript) is
+    # likewise not evidence -- both fall through to the FAILED landing below,
+    # preserving pre-#1406 behavior wherever liveness is unknowable.
+    _now = now if now is not None else datetime.now(UTC)
+    age = _transcript_age_seconds(session, _now)
+    if age is not None and 0 <= age < TRANSCRIPT_LIVENESS_WINDOW_SECONDS:
+        transition_task_status(target, QueueItemStatus.PENDING)
+        target.session_id = None
+        record_event(
+            OrchestratorEventType.SESSION_SENTINEL_LIVENESS_VETOED,
+            {
+                "ticket_id": target.ticket_id,
+                "client": target.client,
+                "session_id": session.id,
+                "transcript_age_seconds": age,
+                "blocker_reason": sentinel.blocker.reason,
+            },
+            correlation_id=target.ticket_id,
+        )
+        return True
     # #1266: persist the rejected sentinel so an operator can tell an absent
     # sentinel (last_blocked_result stays None) from a rejected one, instead
     # of a bare `abandoned` disposition with no diagnostic.
