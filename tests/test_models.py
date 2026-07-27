@@ -1160,6 +1160,7 @@ class TestOperatorChannelForward:
                 OrchestratorEventType.GATE_AUTO_APPROVE_FAILED,
                 OrchestratorEventType.PR_ACTION_TAKEN,
                 OrchestratorEventType.PR_ACTION_FAILED,
+                OrchestratorEventType.SSH_KEY_GATE_BYPASSED,
             }
         )
 
@@ -1388,6 +1389,15 @@ class TestConciergeAndEscalationModelSurface:
     def test_orchestrator_config_gate_recipes_enabled_accepts_true(self) -> None:
         cfg = OrchestratorConfig(gate_recipes_enabled=True)
         assert cfg.gate_recipes_enabled is True
+
+    # -- GitHub #1437 ssh_key_gate operator escape hatch ---------------------
+
+    def test_orchestrator_config_ssh_key_gate_enabled_defaults_true(self) -> None:
+        assert OrchestratorConfig().ssh_key_gate_enabled is True
+
+    def test_orchestrator_config_ssh_key_gate_enabled_accepts_false(self) -> None:
+        cfg = OrchestratorConfig(ssh_key_gate_enabled=False)
+        assert cfg.ssh_key_gate_enabled is False
 
 
 class TestReviewRecipeKeyValidation:

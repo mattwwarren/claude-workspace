@@ -10580,6 +10580,81 @@ class TestSshKeyPreflightGate:
         assert len(events) == 1
         assert events[0].payload["skip_reason"] == DispatchSkipReason.SSH_KEY_GATE
 
+    def test_gate_disabled_bypasses_skip_and_emits_bypass_event(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """GitHub #1437: ssh_key_gate_enabled=False bypasses the probe-failure
+        skip — the client dispatches normally, an SSH_KEY_GATE_BYPASSED event
+        is recorded, and no dispatch.tick SSH_KEY_GATE skip is recorded."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-S1G", client="test-client"))
+        _force_ssh_key_unavailable(monkeypatch)
+
+        bypass_config = simple_config.model_copy(update={"ssh_key_gate_enabled": False})
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(bypass_config, native_daemon=daemon, auto_ff=False)
+
+        assert result.spawned == 1
+
+        bypass_events = read_events(
+            consumer="test-s1-bypass",
+            event_types=[OrchestratorEventType.SSH_KEY_GATE_BYPASSED],
+        )
+        assert len(bypass_events) == 1
+        assert bypass_events[0].payload["client"] == "test-client"
+
+        tick_events = read_events(
+            consumer="test-s1-bypass-tick",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        skip_ticks = [
+            e
+            for e in tick_events
+            if e.payload.get("skip_reason") == DispatchSkipReason.SSH_KEY_GATE
+        ]
+        assert skip_ticks == []
+
+    def test_gate_enforced_by_default_still_skips_and_no_bypass_event(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """GitHub #1437: default (ssh_key_gate_enabled=True) is unchanged —
+        client still skipped, SSH_KEY_GATE skip still recorded, and the new
+        bypass event is NOT recorded."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-S1H", client="test-client"))
+        _force_ssh_key_unavailable(monkeypatch)
+
+        assert simple_config.ssh_key_gate_enabled is True
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon, auto_ff=False)
+
+        assert result.spawned == 0
+
+        tick_events = read_events(
+            consumer="test-s1-enforced-tick",
+            event_types=[OrchestratorEventType.DISPATCH_TICK],
+        )
+        skip_ticks = [
+            e
+            for e in tick_events
+            if e.payload.get("skip_reason") == DispatchSkipReason.SSH_KEY_GATE
+        ]
+        assert len(skip_ticks) == 1
+
+        bypass_events = read_events(
+            consumer="test-s1-enforced-bypass",
+            event_types=[OrchestratorEventType.SSH_KEY_GATE_BYPASSED],
+        )
+        assert bypass_events == []
+
 
 # ---------------------------------------------------------------------------
 # TestSpawnInvalidatesStaleContextJson (#1046)
