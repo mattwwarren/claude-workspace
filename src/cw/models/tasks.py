@@ -321,7 +321,11 @@ class TicketTask(BaseModel):
     # GitHub #1406 narrows that further: the catch-all now exits early, without
     # writing this field, when the owning session's transcript is still live
     # (the sentinel is re-queued PENDING, not rejected). So a set value means
-    # "rejected AND the worker was demonstrably done" -- not merely "rejected."
+    # "rejected AND the worker was demonstrably done on that landing" -- not
+    # merely "rejected." Not a lifetime guarantee: a --from-failed requeue
+    # (see dev_queue/lifecycle.py) doesn't clear this field, so a stale value
+    # from an earlier FAILED landing can persist on a task later revived to
+    # PENDING/RUNNING -- read it relative to the task's *current* status.
     last_blocked_result: dict[str, Any] | None = None
     # GitHub #1511 — the `blocker.reason` off a well-formed blocked/
     # merge_gate_blocked AutoDevResult, stamped by transition_task_status

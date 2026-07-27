@@ -2887,7 +2887,7 @@ class TestRouteBlockedResultCatchAllLivenessGuard:
         ``started_at``.
         """
         home = tmp_path / "home"
-        home.mkdir()
+        home.mkdir(exist_ok=True)
         monkeypatch.setenv("HOME", str(home))
         worktree = tmp_path / f"wt-{session_id}"
         started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -3026,3 +3026,109 @@ class TestRouteBlockedResultCatchAllLivenessGuard:
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
         assert t.status == QueueItemStatus.PENDING
         assert t.session_id is None
+
+    def test_route_blocked_result_catch_all_negative_age_falls_through_to_failed(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The ``0 <= age`` floor: a transcript mtime *after* ``now`` is not LIVE.
+
+        A negative age (clock skew, or a caller-supplied fictional/frozen
+        ``now`` that predates a transcript's real wall-clock mtime) must not
+        be misclassified as freshly-live -- it falls through to the same
+        FAILED landing as DEAD/UNKNOWN. Pins the floor directly, rather than
+        relying on it as an incidental side effect of two unrelated tests
+        (``test_reconcile_idle.py`` and ``test_cli.py``'s ``TestSignalStop``)
+        that happen to combine a fictional/frozen ``now`` with a real
+        transcript mtime, neither of which names this invariant.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+        session, now = self._live_session(
+            tmp_path, monkeypatch, session_id="sess-1406-negative-age", age_seconds=-30
+        )
+        target = TicketTask(
+            ticket_id="GH-1406-negative-age",
+            client="staged-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=session.id,
+            stage=Stage.IMPL,
+            attempts=1,
+        )
+        sentinel = self._catch_all_sentinel()
+
+        routed = _route_blocked_result_to_task(target, session, sentinel, now=now)
+
+        assert routed is False
+        assert target.status == QueueItemStatus.FAILED
+        assert target.disposition == "abandoned"
+        assert target.last_blocked_result == sentinel.model_dump(mode="json")
+
+    def test_route_blocked_result_catch_all_window_boundary(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The window comparison is strict ``<``: exactly at the window is DEAD.
+
+        ``TRANSCRIPT_LIVENESS_WINDOW_SECONDS - 1`` (just inside) requeues to
+        PENDING; ``TRANSCRIPT_LIVENESS_WINDOW_SECONDS`` exactly (not strictly
+        less than the window) falls through to FAILED.
+        """
+        _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+
+        just_inside_session, just_inside_now = self._live_session(
+            tmp_path,
+            monkeypatch,
+            session_id="sess-1406-just-inside",
+            age_seconds=TRANSCRIPT_LIVENESS_WINDOW_SECONDS - 1,
+        )
+        just_inside_target = TicketTask(
+            ticket_id="GH-1406-just-inside",
+            client="staged-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=just_inside_session.id,
+            stage=Stage.IMPL,
+            attempts=1,
+        )
+        just_inside_routed = _route_blocked_result_to_task(
+            just_inside_target,
+            just_inside_session,
+            self._catch_all_sentinel(),
+            now=just_inside_now,
+        )
+
+        assert just_inside_routed is True
+        assert just_inside_target.status == QueueItemStatus.PENDING
+        assert just_inside_target.session_id is None
+
+        at_window_session, at_window_now = self._live_session(
+            tmp_path,
+            monkeypatch,
+            session_id="sess-1406-at-window",
+            age_seconds=TRANSCRIPT_LIVENESS_WINDOW_SECONDS,
+        )
+        at_window_target = TicketTask(
+            ticket_id="GH-1406-at-window",
+            client="staged-client",
+            status=QueueItemStatus.RUNNING,
+            session_id=at_window_session.id,
+            stage=Stage.IMPL,
+            attempts=1,
+        )
+        at_window_sentinel = self._catch_all_sentinel()
+        at_window_routed = _route_blocked_result_to_task(
+            at_window_target,
+            at_window_session,
+            at_window_sentinel,
+            now=at_window_now,
+        )
+
+        assert at_window_routed is False
+        assert at_window_target.status == QueueItemStatus.FAILED
+        assert at_window_target.disposition == "abandoned"
+        assert at_window_target.last_blocked_result == at_window_sentinel.model_dump(
+            mode="json"
+        )
