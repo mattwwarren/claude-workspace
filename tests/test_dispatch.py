@@ -10489,9 +10489,7 @@ class TestSshKeyPreflightGate:
         add_ticket(TicketTask(ticket_id="GEN-S1G", client="test-client"))
         _force_ssh_key_unavailable(monkeypatch)
 
-        bypass_config = simple_config.model_copy(
-            update={"ssh_key_gate_enabled": False}
-        )
+        bypass_config = simple_config.model_copy(update={"ssh_key_gate_enabled": False})
         daemon = FakeNativeDaemonClient()
         result = dispatch_tick(bypass_config, native_daemon=daemon, auto_ff=False)
 
