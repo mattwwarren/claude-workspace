@@ -227,6 +227,26 @@ def test_git_ls_files_failure_warns(
     assert result.warn is True
 
 
+def test_git_ls_files_nonzero_returncode_warns(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """git ls-files exits non-zero -> ok=True, warn=True, no crash."""
+    repo = tmp_path / "repo"
+    claude_home = tmp_path / ".claude"
+    (claude_home / "skills").mkdir(parents=True)
+
+    monkeypatch.setattr("cw.doctor.skills_drift._CLAUDE_HOME", claude_home)
+    monkeypatch.setattr("cw.doctor.skills_drift._resolve_cw_source_path", lambda: repo)
+    monkeypatch.setattr(
+        "cw.doctor.skills_drift._sp.run",
+        lambda *_a, **_kw: _mk_proc("", returncode=128),
+    )
+
+    result = _check_skills_commands_drift()
+    assert result.ok is True
+    assert result.warn is True
+
+
 def test_check_included_in_run_doctor(tmp_config_dir: Path) -> None:
     """_check_skills_commands_drift is wired into run_doctor output."""
     from cw.doctor import run_doctor
