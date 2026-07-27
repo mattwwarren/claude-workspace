@@ -1389,6 +1389,15 @@ class TestConciergeAndEscalationModelSurface:
         cfg = OrchestratorConfig(gate_recipes_enabled=True)
         assert cfg.gate_recipes_enabled is True
 
+    # -- GitHub #1437 ssh_key_gate operator escape hatch ---------------------
+
+    def test_orchestrator_config_ssh_key_gate_enabled_defaults_true(self) -> None:
+        assert OrchestratorConfig().ssh_key_gate_enabled is True
+
+    def test_orchestrator_config_ssh_key_gate_enabled_accepts_false(self) -> None:
+        cfg = OrchestratorConfig(ssh_key_gate_enabled=False)
+        assert cfg.ssh_key_gate_enabled is False
+
 
 class TestReviewRecipeKeyValidation:
     """RFC 0010 P4 (#1099): the review_recipes recognized-key set gains three
