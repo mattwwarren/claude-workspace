@@ -40,9 +40,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   plans re-parked in an approve↔replan loop because the marker the next attempt
   looked for was never written.
 - **`ClientConfig.codex_fix_loop_enabled` (#1465):** per-client gate for the
-  codex fix loop, forwarded by `CodexExecutor.spawn`. `False` on a blocking
-  cycle-0 review returns `run_review`'s result unchanged with zero fix
-  invocations — the checkpoint-2 prerequisite.
+  codex fix loop, forwarded by `CodexExecutor.spawn`. **Defaults to `False`** —
+  the autonomous fix loop shipped in 1.23.0 (#1392) is opt-in per client, not
+  on by default. When disabled, a blocking cycle-0 review returns
+  `run_review`'s result unchanged with zero fix invocations — the checkpoint-2
+  prerequisite.
 - **Release-notes checkpoint step in `release-tag.yml` (#1513):** an
   observation-only step after "Create GitHub Release" records, in the job
   summary and as an annotation, which notes source actually shipped —
@@ -133,7 +135,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - `reconcile/stalled.py` (1601 lines) split into the `cw.reconcile.stalled`
-  package per `ARCHITECTURE.md` §7.6 — `_detect` / `_mutations` / `_events` /
+  package per `ARCHITECTURE.md` §7 principle 6 (module-size / package-split:
+  modules stay under ~1000 lines) — `_detect` / `_mutations` / `_events` /
   `core` submodules behind a re-exporting `__init__` that preserves the
   historical import surface plus `_deps`, so existing patch targets keep
   resolving (#1484). Pure move: all 29 top-level definitions carried over
