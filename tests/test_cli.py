@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 from click.testing import CliRunner, Result
 from freezegun import freeze_time
@@ -43,7 +43,11 @@ from cw.models import (
     TicketTask,
 )
 from cw.sprint import AppliedBuildout, BuildoutPlan
-from tests.conftest import _make_daemon_session, _write_project_config_yaml
+from tests.conftest import (
+    _make_daemon_session,
+    _write_project_config_yaml,
+    stub_fetch_plan,
+)
 from tests.test_result import _valid_payload
 from tests.test_sprint import CONFIG_YAML, MINIMAL_RFC, _plan
 
@@ -7789,6 +7793,238 @@ class TestDevQueueApproveCli:
         )
         assert result.exit_code == 0, result.output
         assert "awaiting operator signoff" in result.output
+
+    def _seed_plan_pending(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        marker_present: bool = False,
+    ) -> None:
+        """Seed a PLAN-stage ticket at ``plan_pending_approval`` (#1419).
+
+        Mirrors ``_seed_review_pending``'s shape but at ``Stage.PLAN``.
+        Also stubs ``fetch_approved_plan_comment`` (the binding
+        ``_plan_is_reviewed`` reads) to ``None`` so ``approve_ticket``
+        deterministically takes the "plan not yet quality-reviewed"
+        re-queue branch, instead of shelling out to a real ``gh`` process.
+        Independently stubs ``_fetch_issue_comments`` at the ``crud``
+        import site -- the binding ``--post-marker``'s dedup check reads --
+        to either an empty list (no marker yet) or a marker-bearing
+        comment, per *marker_present*.
+        """
+        from cw.cli.dev_queue.crud import _PLAN_APPROVED_MARKER
+        from cw.config import save_state
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus
+
+        ws = tmp_path / "ws"
+        ws.mkdir(parents=True, exist_ok=True)
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            f"clients:\n  acme:\n    workspace_path: {ws}\n"
+        )
+
+        task = TicketTask(
+            ticket_id="ACME-1",
+            client="acme",
+            stage=Stage.PLAN,
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            session_id="sess-approve-cli",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = Session(
+            id="sess-approve-cli",
+            name="acme/impl-1",
+            client="acme",
+            purpose=SessionPurpose.IMPL,
+            workspace_path=ws,
+            last_result={"status": "plan_pending_approval"},
+        )
+        save_state(CwState(sessions=[session]))
+
+        stub_fetch_plan(
+            monkeypatch,
+            None,
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
+        )
+
+        comments = (
+            [{"body": f"Approved.\n{_PLAN_APPROVED_MARKER}\n"}]
+            if marker_present
+            else []
+        )
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.crud._fetch_issue_comments",
+            lambda *args, **kwargs: comments,
+        )
+
+    def test_approve_post_marker_posts_comment_on_plan_stage(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """--post-marker posts the marker comment on a PLAN-stage ticket."""
+        from cw.cli.dev_queue.crud import _PLAN_APPROVED_MARKER
+
+        self._seed_plan_pending(tmp_config_dir, tmp_path, monkeypatch)
+        with patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock:
+            post_mock.return_value = subprocess.CompletedProcess(
+                args=["gh"], returncode=0, stdout=b"", stderr=b""
+            )
+            runner = CliRunner()
+            result = runner.invoke(
+                main,
+                [
+                    "dev-queue",
+                    "approve",
+                    "ACME-1",
+                    "--client",
+                    "acme",
+                    "--post-marker",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        post_mock.assert_called_once_with("ACME-1", _PLAN_APPROVED_MARKER, cwd=ANY)
+        assert "posted the plan-approved marker comment" in result.output
+
+    def test_approve_post_marker_dedups_when_already_present(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Marker already on the issue: --post-marker skips, no duplicate."""
+        self._seed_plan_pending(
+            tmp_config_dir, tmp_path, monkeypatch, marker_present=True
+        )
+        with patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock:
+            runner = CliRunner()
+            result = runner.invoke(
+                main,
+                [
+                    "dev-queue",
+                    "approve",
+                    "ACME-1",
+                    "--client",
+                    "acme",
+                    "--post-marker",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        post_mock.assert_not_called()
+        assert "already present" in result.output
+
+    def test_approve_post_marker_warns_on_review_stage(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """--post-marker is PLAN-stage-only: warns and skips on REVIEW."""
+        self._seed_review_pending(tmp_config_dir, tmp_path, signoff=False)
+        with patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock:
+            runner = CliRunner()
+            result = runner.invoke(
+                main,
+                [
+                    "dev-queue",
+                    "approve",
+                    "ACME-1",
+                    "--client",
+                    "acme",
+                    "--post-marker",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        post_mock.assert_not_called()
+        assert "PLAN-stage-only" in result.output
+
+    def test_approve_requeue_message_mentions_post_marker(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Plain `approve` (no flag) on an unreviewed plan still points at
+        --post-marker as the way to record the audit marker."""
+        self._seed_plan_pending(tmp_config_dir, tmp_path, monkeypatch)
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "approve", "ACME-1", "--client", "acme"]
+        )
+        assert result.exit_code == 0, result.output
+        assert (
+            "Approved ACME-1 (acme): plan not yet quality-reviewed"
+            " — re-queued at plan stage to run Plan Quality Review."
+            " Re-run auto-dev-plan (or dispatch) to proceed."
+        ) in result.output
+        assert (
+            "Pass --post-marker to also post the plan-approved audit"
+            " marker comment on this ticket."
+        ) in result.output
+
+    def test_approve_post_marker_suppresses_reminder_when_marker_just_posted(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Marker was just posted this invocation: the --post-marker
+        reminder line is redundant and must not also print."""
+        self._seed_plan_pending(tmp_config_dir, tmp_path, monkeypatch)
+        with patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock:
+            post_mock.return_value = subprocess.CompletedProcess(
+                args=["gh"], returncode=0, stdout=b"", stderr=b""
+            )
+            runner = CliRunner()
+            result = runner.invoke(
+                main,
+                [
+                    "dev-queue",
+                    "approve",
+                    "ACME-1",
+                    "--client",
+                    "acme",
+                    "--post-marker",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        assert "plan not yet quality-reviewed" in result.output
+        assert (
+            "Pass --post-marker to also post the plan-approved audit"
+            " marker comment on this ticket."
+        ) not in result.output
+
+    def test_approve_post_marker_fails_closed_on_dedup_fetch_error(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """_fetch_issue_comments returning None (gh fetch/parse error):
+        fail closed -- do not post a possible duplicate."""
+        self._seed_plan_pending(tmp_config_dir, tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.crud._fetch_issue_comments",
+            lambda *args, **kwargs: None,
+        )
+        with patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock:
+            runner = CliRunner()
+            result = runner.invoke(
+                main,
+                [
+                    "dev-queue",
+                    "approve",
+                    "ACME-1",
+                    "--client",
+                    "acme",
+                    "--post-marker",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        post_mock.assert_not_called()
+        assert "could not verify existing comments" in result.output
 
 
 # ---------------------------------------------------------------------------
