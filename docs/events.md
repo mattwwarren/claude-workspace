@@ -672,11 +672,14 @@ event fires for **all** mutation paths (dispatch claim/complete, approve,
 requeue, cancel, reconcile revert/park, etc.), not just operator commands.
 **Semantics:** Emitted on every *real* status change — the emit is suppressed
 when `new_status == old_status` (a re-assert of the same status stays silent).
-`old_status`/`new_status` are `QueueItemStatus` values. `disposition`/`pr_url`
-reflect the task state *after* the transition (stamped on terminal moves,
-cleared on PENDING/CANCELLED). `session_id` is the value on the task at emit
-time (some callers clear it immediately *after* the transition, so it is
-typically still populated here). `correlation_id` is the `ticket_id`.
+`old_status`/`new_status` are `QueueItemStatus` values. `disposition`/`pr_url`/
+`blocked_reason` reflect the task state *after* the transition (stamped on
+terminal moves, cleared on PENDING/CANCELLED). `blocked_reason` (GitHub #1511)
+is the `blocker.reason` off a well-formed blocked/merge_gate_blocked
+AutoDevResult, `None` when the task isn't blocked or was blocked with no
+blocker reason. `session_id` is the value on the task at emit time (some
+callers clear it immediately *after* the transition, so it is typically still
+populated here). `correlation_id` is the `ticket_id`.
 
 ```json
 {
@@ -688,7 +691,8 @@ typically still populated here). `correlation_id` is the `ticket_id`.
   "new_status": "completed",
   "disposition": "shipped",
   "session_id": "ab12cd34",
-  "pr_url": "https://github.com/owner/repo/pull/42"
+  "pr_url": "https://github.com/owner/repo/pull/42",
+  "blocked_reason": null
 }
 ```
 

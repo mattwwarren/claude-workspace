@@ -34,6 +34,7 @@ def _task_to_dict(task: TicketTask) -> dict[str, object]:
         "total_cost_usd": task.total_cost_usd,
         "worktree_path": str(task.worktree_path) if task.worktree_path else None,
         "disposition": task.disposition,
+        "blocked_reason": task.blocked_reason,
         "pr_url": task.pr_url,
         "pr_state": (
             task.pr_state.model_dump(mode="json") if task.pr_state is not None else None
@@ -74,10 +75,11 @@ def _print_tasks_human(tasks: list[TicketTask]) -> None:
         "ATTEMPTS",
         "LANE",
         "DISPOSITION",
+        "REASON",
         "PR",
         "ATTENTION",
     ]
-    col_widths = [12, 16, 16, 12, 8, 12, 20, 10, 18]
+    col_widths = [12, 16, 16, 12, 8, 12, 20, 20, 10, 18]
     header = "  ".join(f"{h:<{w}}" for h, w in zip(headers, col_widths, strict=True))
     click.echo(header)
     click.echo("-" * len(header))
@@ -91,6 +93,7 @@ def _print_tasks_human(tasks: list[TicketTask]) -> None:
             str(t.attempts)[:8],
             t.lane[:12],
             (t.disposition or "—")[:20],
+            (t.blocked_reason or "—")[:20],
             (t.pr_url or "—")[:10],
             attention[:18],
         ]
