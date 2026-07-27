@@ -318,6 +318,10 @@ class TicketTask(BaseModel):
     # every other task keeps last_blocked_result=None. Lets an operator
     # distinguish "sentinel never arrived" from "a rejected sentinel landed
     # this FAILED."
+    # GitHub #1406 narrows that further: the catch-all now exits early, without
+    # writing this field, when the owning session's transcript is still live
+    # (the sentinel is re-queued PENDING, not rejected). So a set value means
+    # "rejected AND the worker was demonstrably done" -- not merely "rejected."
     last_blocked_result: dict[str, Any] | None = None
     # GitHub #1511 — the `blocker.reason` off a well-formed blocked/
     # merge_gate_blocked AutoDevResult, stamped by transition_task_status

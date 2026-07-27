@@ -57,8 +57,8 @@ from cw.reconcile import (
     resolve_headless_budget,
 )
 from cw.reconcile._shared import (
-    TRANSCRIPT_LIVENESS_WINDOW_SECONDS,
     _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
+    TRANSCRIPT_LIVENESS_WINDOW_SECONDS,
     _route_blocked_result_to_task,
 )
 from tests._reconcile_helpers import (
@@ -2986,7 +2986,7 @@ class TestRouteBlockedResultCatchAllLivenessGuard:
         assert target.disposition == "abandoned"
         assert target.last_blocked_result == sentinel.model_dump(mode="json")
 
-    def test_apply_sentinel_to_task_catch_all_live_transcript_requeues_pending_via_apply(
+    def test_apply_sentinel_catch_all_live_transcript_requeues_pending_via_apply(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
