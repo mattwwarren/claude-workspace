@@ -1212,7 +1212,13 @@ def _route_blocked_result_to_task(
     # a terminal FAILED landing, so it needs a durable trace an operator can
     # find later. record_event nests _inbox_lock inside dev_queue_lock here,
     # the same safe nesting order crud.py's _emit_task_deleted and
-    # dev_queue/lifecycle.py already rely on (never the reverse -- see #765).
+    # dev_queue/lifecycle.py already rely on (RFC 0008 W1, #978: the reverse
+    # nesting -- _inbox_lock then dev_queue_lock -- never occurs). Not #765:
+    # that ticket is the opposite lesson, a deadlock caused by record_event
+    # inside dev_queue_lock in a since-fixed call site (_shared.py's own
+    # SESSION_NEEDS_ATTENTION emission a few hundred lines below still emits
+    # after the lock releases for that reason) -- citing it here as evidence
+    # of safety would point a future reader at the wrong precedent.
     #
     # The `0 <= age` floor is load-bearing, not defensive: a negative age
     # means the transcript's mtime is *after* `now` (clock skew, or a caller

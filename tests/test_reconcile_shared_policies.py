@@ -2669,6 +2669,11 @@ class TestApplySentinelToTaskRoutedFalseFailedRace:
         assert target.status == QueueItemStatus.FAILED
         assert target.disposition == "abandoned"
         assert target.last_blocked_result == sentinel.model_dump(mode="json")
+        assert [
+            e
+            for e in read_events()
+            if e.type == OrchestratorEventType.SESSION_SENTINEL_LIVENESS_VETOED
+        ] == []
 
     def test_apply_sentinel_to_task_race_already_failed_task_returns_routed_false(
         self, tmp_config_dir: Path
@@ -2961,7 +2966,12 @@ class TestRouteBlockedResultCatchAllLivenessGuard:
         assert vetoed[0].payload["ticket_id"] == "GH-1406-live"
         assert vetoed[0].payload["client"] == "staged-client"
         assert vetoed[0].payload["session_id"] == session.id
-        assert vetoed[0].payload["transcript_age_seconds"] == 30
+        # Tolerance, not exact equality: transcript_age_seconds round-trips
+        # through a real os.utime write + disk stat() read-back (mtime
+        # fallback, since the salvage payload carries no content timestamp),
+        # matching the convention test_reconcile_shared_sentinels.py already
+        # uses for the same underlying value.
+        assert abs(vetoed[0].payload["transcript_age_seconds"] - 30) < 5
         assert vetoed[0].payload["blocker_reason"] == self.CATCH_ALL_REASON
 
     def test_route_blocked_result_catch_all_stale_transcript_falls_through_to_failed(
@@ -3018,7 +3028,9 @@ class TestRouteBlockedResultCatchAllLivenessGuard:
         -- callers must NOT ``daemon.stop()`` a worker that is still advancing.
         Also confirms the audit event survives the trip through
         ``_apply_sentinel_to_task``'s own ``dev_queue_lock()`` -- record_event
-        nests _inbox_lock inside it, the established safe order (#765).
+        nests _inbox_lock inside it, the established safe order (RFC 0008 W1,
+        #978 -- not #765, which is the opposite lesson: a deadlock from the
+        reverse mistake in a since-fixed call site).
         """
         _write_staged_clients_yaml(tmp_config_dir, "staged-client")
         session, now = self._live_session(
