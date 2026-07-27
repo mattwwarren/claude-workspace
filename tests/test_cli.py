@@ -7858,7 +7858,7 @@ class TestDevQueueApproveCli:
         )
         monkeypatch.setattr(
             "cw.cli.dev_queue.crud._fetch_issue_comments",
-            lambda *args, **kwargs: comments,
+            lambda *_args, **_kwargs: comments,
         )
 
     def test_approve_post_marker_posts_comment_on_plan_stage(
@@ -8007,7 +8007,7 @@ class TestDevQueueApproveCli:
         self._seed_plan_pending(tmp_config_dir, tmp_path, monkeypatch)
         monkeypatch.setattr(
             "cw.cli.dev_queue.crud._fetch_issue_comments",
-            lambda *args, **kwargs: None,
+            lambda *_args, **_kwargs: None,
         )
         with patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock:
             runner = CliRunner()
