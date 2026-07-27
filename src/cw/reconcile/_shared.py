@@ -1718,6 +1718,7 @@ def _cleanup_timed_out_worktree(
                 wt_path,
                 ticket_id,
             )
+            parked = False
             if ticket_id:
                 with dev_queue_lock():
                     store = load_dev_queue()
@@ -1732,7 +1733,29 @@ def _cleanup_timed_out_worktree(
                                 disposition="dirty_worktree",
                             )
                             save_dev_queue(store)
+                            parked = True
                             break
+            # Emitted after dev_queue_lock() releases (#1257): record_event
+            # acquires _inbox_lock, so holding dev_queue_lock while acquiring
+            # it risks deadlock with a concurrent process taking the two locks
+            # in the opposite order (same rationale as this function's
+            # sibling in reconcile/tasks.py, #765).
+            if parked:
+                record_event(
+                    OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+                    {
+                        "session_id": session.id,
+                        "session_name": session.name,
+                        "client": session.client,
+                        "ticket_id": ticket_id,
+                        "claude_session_id": session.claude_session_id,
+                        "paused_status": _DIRTY_WORKTREE_REASON,
+                        "breadcrumbs": wt_path,
+                        "crashed": False,
+                        "lane": session.lane,
+                    },
+                    correlation_id=ticket_id,
+                )
             return
         remove_worktree(client, session.branch, force=True)
     except (CwError, OSError) as exc:
