@@ -9,7 +9,7 @@ import click
 from pydantic import ValidationError
 
 from cw.cli._base import handle_errors
-from cw.config import load_orchestrator_config, load_state
+from cw.config import get_client, load_orchestrator_config, load_state
 from cw.dev_queue import (
     add_ticket,
     approve_ticket,
@@ -22,6 +22,7 @@ from cw.dev_queue import (
     unblock_ticket,
 )
 from cw.events import record_event
+from cw.gh import _FETCH_COMMENTS_TIMEOUT, _fetch_issue_comments, post_issue_comment
 from cw.models import (
     DEFAULT_LANE,
     OrchestratorEventType,
@@ -30,8 +31,15 @@ from cw.models import (
     TicketTask,
 )
 from cw.native_daemon import get_native_daemon_client
+from cw.worktree import _git_dir
 
 from ._group import dev_queue
+
+# Operator-facing human-signoff marker the auto-dev-plan runbooks document
+# (README.md, docs/dispatch-runbook.md, docs/session-disposition.md) --
+# distinct from lifecycle.py's `_PLAN_SPEC_MARKER`/`_PLAN_SOUNDNESS_MARKER`
+# pair (the coded plan-quality-review gate). See GitHub #1419.
+_PLAN_APPROVED_MARKER = "<!-- auto-dev-plan-approved -->"
 
 
 @dev_queue.command(name="add")
@@ -140,11 +148,83 @@ def dev_queue_move(ticket_id: str, client: str, to_lane: str) -> None:
     click.echo(f"Moved {ticket_id} ({client}): {from_lane} -> {to_lane}")
 
 
+def _post_plan_approved_marker(
+    ticket_id: str, resolved: str, result: dict[str, str | bool]
+) -> bool:
+    """Post (or dedup-skip) the plan-approved marker for ``--post-marker``.
+
+    PLAN-stage only -- warns and returns False on any other stage. Returns
+    True iff the marker is recorded on the issue after this call (either
+    found already present, or just posted successfully); False on every
+    warn / fail-closed / gh-failure path. See GitHub #1419.
+    """
+    if result["from_stage"] != "plan":
+        click.echo(
+            f"--post-marker is PLAN-stage-only; ticket is at"
+            f" {result['from_stage']!r} — marker not posted.",
+            err=True,
+        )
+        return False
+
+    repo_cwd = _git_dir(get_client(resolved))
+    comments = _fetch_issue_comments(
+        ticket_id, timeout=_FETCH_COMMENTS_TIMEOUT, cwd=repo_cwd
+    )
+    if comments is None:
+        click.echo(
+            "--post-marker: could not verify existing comments — marker"
+            " not posted (dedup check failed)."
+        )
+        return False
+
+    if any(
+        isinstance(c.get("body"), str) and _PLAN_APPROVED_MARKER in c["body"]
+        for c in comments
+    ):
+        click.echo(
+            f"--post-marker: plan-approved marker already present on"
+            f" {ticket_id} ({resolved}) — skipped (no duplicate posted)."
+        )
+        return True
+
+    post_result = post_issue_comment(ticket_id, _PLAN_APPROVED_MARKER, cwd=repo_cwd)
+    if post_result is not None and post_result.returncode == 0:
+        click.echo(
+            f"--post-marker: posted the plan-approved marker comment"
+            f" to {ticket_id} ({resolved})."
+        )
+        return True
+
+    click.echo(
+        f"--post-marker: failed to post the plan-approved marker"
+        f" comment to {ticket_id} ({resolved}) — see gh error"
+        " above.",
+        err=True,
+    )
+    return False
+
+
 @dev_queue.command(name="approve")
 @click.argument("ticket_id")
 @click.option("--client", "-c", default=None, help="Client name.")
+@click.option(
+    "--post-marker",
+    "post_marker",
+    is_flag=True,
+    default=False,
+    help=(
+        "Post the human-signoff marker comment"
+        " (<!-- auto-dev-plan-approved -->) to the ticket, confirming"
+        " operator sign-off on a PLAN-stage checkpoint. PLAN-stage only"
+        " (warns and skips on other stages). Distinct from `add"
+        " --signoff`, which requires operator signoff before a ticket"
+        " ships, and from this command's own REVIEW-stage"
+        " operator-signoff gate (see docstring above) — this flag only"
+        " posts an audit-trail comment."
+    ),
+)
 @handle_errors
-def dev_queue_approve(ticket_id: str, client: str | None) -> None:
+def dev_queue_approve(ticket_id: str, client: str | None, post_marker: bool) -> None:
     """Approve a plan/review gate, or clear an operator-signoff gate.
 
     The ticket must be BLOCKED_ON_USER with last_result status of
@@ -153,6 +233,10 @@ def dev_queue_approve(ticket_id: str, client: str | None) -> None:
     gate on a ticket with signoff configured re-routes it to
     AWAITING_OPERATOR_SIGNOFF instead of advancing -- run `approve` again
     to clear it.
+
+    Pass --post-marker to also post the plan-approved audit marker on a
+    PLAN-stage ticket (unrelated to the operator-signoff gate above or to
+    `add --signoff`).
     """
     config = load_orchestrator_config()
     resolved = resolve_client(ticket_id, config, client)
@@ -168,6 +252,11 @@ def dev_queue_approve(ticket_id: str, client: str | None) -> None:
             "plan_requeued": result["plan_requeued"],
         },
     )
+    marker_already_recorded = False
+    if post_marker:
+        marker_already_recorded = _post_plan_approved_marker(
+            ticket_id=ticket_id, resolved=resolved, result=result
+        )
     if result["awaiting_signoff"]:
         click.echo(
             f"Approved {ticket_id} ({resolved}): parked at"
@@ -180,6 +269,11 @@ def dev_queue_approve(ticket_id: str, client: str | None) -> None:
             " — re-queued at plan stage to run Plan Quality Review."
             " Re-run auto-dev-plan (or dispatch) to proceed."
         )
+        if not marker_already_recorded:
+            click.echo(
+                "Pass --post-marker to also post the plan-approved audit"
+                " marker comment on this ticket."
+            )
     else:
         click.echo(
             f"Approved {ticket_id} ({resolved}):"

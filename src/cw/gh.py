@@ -376,8 +376,15 @@ def check_gh_availability(*, timeout: int) -> bool:
     return result.returncode == 0
 
 
-def _fetch_issue_comments(ticket_id: str, timeout: int) -> list[dict[str, Any]] | None:
-    """Return the issue's comments list, or None on any fetch/parse error."""
+def _fetch_issue_comments(
+    ticket_id: str, timeout: int, *, cwd: Path | None = None
+) -> list[dict[str, Any]] | None:
+    """Return the issue's comments list, or None on any fetch/parse error.
+
+    *cwd* scopes the ``gh`` call to a client's repo (defaults to None, i.e.
+    ambient CWD); multi-client callers MUST pass it, mirroring
+    ``post_issue_comment``'s cwd contract (GitHub #1269/#1279/#1419).
+    """
     try:
         result = _sp.run(
             ["gh", "issue", "view", ticket_id, "--json", "comments"],
@@ -385,6 +392,7 @@ def _fetch_issue_comments(ticket_id: str, timeout: int) -> list[dict[str, Any]] 
             text=True,
             check=False,
             timeout=timeout,
+            cwd=cwd,
         )
     except FileNotFoundError:
         return None
