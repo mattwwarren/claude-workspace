@@ -1,0 +1,35 @@
+# Sensitive-files registry for the codex-review pipeline (#1236, #1464).
+#
+# Consumed by cw.codex_review._context._load_sensitive_hits, which matches
+# changed files against this file's `sensitive_files` entries differently per
+# scope tier:
+#   - small tier: matches ONLY this file (.claude/sensitive-files.yml), via
+#     fnmatch GLOB against each entry's `path`.
+#   - large tier: matches this file OR .github/sensitive-files.yml
+#     (first-hit-wins, .claude checked first), via SUBSTRING/ENDSWITH against
+#     each entry's `path`.
+#
+# DUAL-FORM ENTRIES ARE INTENTIONAL — DO NOT DEDUPLICATE. A directory prefix
+# needs both a `**`-glob form (matched by the small tier's fnmatch) and a
+# bare-prefix form with no wildcard (matched by the large tier's substring
+# check, which does not glob-expand `**`). Dropping either form silently
+# blinds one scope tier to that directory.
+sensitive_files:
+  - path: "pyproject.toml"
+    category: dependency
+    reason: dependency changes need review
+  - path: "uv.lock"
+    category: dependency
+    reason: lockfile changes need review
+  - path: ".github/workflows/**"
+    category: ci
+    reason: CI workflow changes need review
+  - path: ".github/workflows/"
+    category: ci
+    reason: CI workflow changes need review
+  - path: "docs/adr/**"
+    category: architecture
+    reason: architecture decision records need review
+  - path: "docs/adr/"
+    category: architecture
+    reason: architecture decision records need review
