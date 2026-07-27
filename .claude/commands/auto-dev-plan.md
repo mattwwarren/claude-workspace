@@ -38,7 +38,25 @@ For each ticket in the queue:
 2. **Free text input:** No existing plan — proceed to Step 1b.
 
 3. **Decision:**
-   - **Plan found (sufficient):** Extract it. AUTO-SKIP plan approval entirely. Log: "Found existing plan on ticket — plan pre-approved." Proceed to scope classification.
+   - **Plan found (sufficient) + a later non-pipeline comment present**
+     (a live-fetched comment newer than the plan content, excluding this
+     file's own `## Multi-Marker Gate Blocked` and `## Pending Verification
+     Scan` fixed-header comments): Extract the existing plan — do **not**
+     proceed to Step 1b. AUTO-SKIP plan approval entirely, same as the "Plan
+     found (sufficient)" branch below. Keep `plan_source:
+     github_issue_existing` when the Stage 1 Completion sentinel is emitted
+     — this is still an extraction, never a regeneration, regardless of what
+     the later comment says. Proceed to Step 1c: the live-fetched comments
+     already include the later comment, so the ambiguity/premise scan
+     naturally re-evaluates against it — no separate "apply the delta" step
+     is needed here. If the later comment supplies an answer to a
+     previously-posted ambiguity/premise, fold it into the plan's `##
+     Decisions` section at Step 1g exactly as the existing interactive-path
+     convention already does — this extends that convention to the headless
+     re-entry case rather than inventing a new one. Log: "Found existing
+     plan + later comment on ticket — merging, not regenerating; plan
+     pre-approved."
+   - **Plan found (sufficient) (no later comment):** Extract it. AUTO-SKIP plan approval entirely. Log: "Found existing plan on ticket — plan pre-approved." Proceed to scope classification.
    - **Partial plan found** (e.g., high-level approach but no file paths or phases): Note what exists, proceed to Step 1b with context.
    - **No plan found:** Proceed to Step 1b.
 
@@ -373,7 +391,7 @@ This is the one reliable, machine-greppable location the three downstream reader
 
 If the plan was loaded from Linear in Step 1a and already contained a current marker, the marker can be preserved as-is (no need to re-stamp). If the plan was revised in Step 1f.4, stamp with today's date.
 
-If Step 1c surfaced ambiguities AND the user resolved them (interactive path), include the resolved answers in the Linear comment under a `## Decisions` section. This preserves the trail of what was clarified and when, so the same questions don't get re-asked in a future re-run.
+If Step 1c surfaced ambiguities AND the user resolved them (interactive path), OR a later ticket comment resolved a previously-posted ambiguity/premise per Step 1a's "later non-pipeline comment" merge branch (headless re-entry), include the resolved answers in the Linear comment under a `## Decisions` section. This preserves the trail of what was clarified and when, so the same questions don't get re-asked in a future re-run.
 
 **Headless only — after plan is posted / confirmed, emit `stage.entered` (`s1_plan_reviewed`):**
 ```bash

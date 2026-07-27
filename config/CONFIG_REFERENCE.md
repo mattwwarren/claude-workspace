@@ -549,6 +549,18 @@ gate_recipes_enabled: false
 # Enablement below.
 review_recipes_enabled: false
 
+# SSH-agent-key preflight gate operator escape hatch (GitHub #1437). Default
+# true (gate stays enforced) -- contrast concierge_enabled/gate_recipes_enabled/
+# review_recipes_enabled above, all default-false because they gate NEW
+# automation opting in. This field gates an already-live safety probe (#927):
+# when the fleet-wide `ssh-add -l` probe reports no key loaded, every client
+# stays PENDING (no claim, no attempts consumed) rather than risk a
+# guaranteed-failing spawn. Setting this false bypasses that skip fleet-wide
+# whenever the probe reports unavailable -- each bypass records a
+# gate.ssh_key_bypassed event (forwarded to the operator channel by default,
+# same as gate.auto_approved) so the operator sees every suppressed gate.
+ssh_key_gate_enabled: true
+
 # Minimum elapsed seconds between PR-state hydration passes in the serve tick
 # (GitHub #929). Gated off max(pr_state.hydrated_at) across dev-queue tasks —
 # no separate timer state. Each pass fetches `gh pr view` for every open PR

@@ -55,6 +55,7 @@ Expected output for a healthy setup:
 - `[WARN] bypass-disclaimer — ...` — disclaimer not yet accepted; run `claude --dangerously-skip-permissions` interactively.
 - `[OK] claude-version` — `claude` binary found and responsive.
 - `[WARN] daemon-reachable` — the Claude native daemon has not been started yet; this resolves automatically when `cw` first spawns a worker session.
+- `[OK/WARN] skills-commands-drift` — repo-tracked `.claude/skills`/`.claude/commands` files compared against `~/.claude`; `[WARN]` means at least one file is missing, differs, or is an abnormal per-file symlink on the global side.
 
 ## Installation
 

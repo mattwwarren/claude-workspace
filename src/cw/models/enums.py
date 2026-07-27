@@ -256,6 +256,15 @@ class OrchestratorEventType(StrEnum):
     # TRANSCRIPT_LIVENESS_WINDOW_SECONDS. Side-effect-only, mirrors
     # SESSION_PARK_VETOED above: no queue or session mutation accompanies it.
     SESSION_SENTINEL_STAGE_MISMATCH_VETOED = "session.sentinel_stage_mismatch_vetoed"
+    # GitHub #1437 — ssh_key_gate operator escape hatch. Emitted by
+    # _emit_ssh_key_bypass when the SSH-agent-key preflight probe (#927)
+    # reports unavailable but the operator has set
+    # OrchestratorConfig.ssh_key_gate_enabled=False, so the would-be skip is
+    # suppressed and the client dispatches anyway. Like GATE_AUTO_APPROVED, an
+    # automated safety decision suppressing a gate with no human in the loop
+    # is operator-attention-worthy — forwarded by default. No paired failure
+    # event: emitting this has no mutation of its own that can fail.
+    SSH_KEY_GATE_BYPASSED = "gate.ssh_key_bypassed"
 
 
 class DispatchSkipReason(StrEnum):

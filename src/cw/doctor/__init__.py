@@ -23,6 +23,8 @@ re-exports. Submodules:
   and targeted single-session reap.
 - ``versions`` — claude/cw version + dependency checks, bypass disclaimer,
   daemon reachability.
+- ``skills_drift`` — repo-tracked ``.claude/skills``/``.claude/commands`` vs
+  ``~/.claude`` drift detection.
 - ``core`` — the ``run_doctor`` orchestrator that assembles the full report.
 - ``report`` — human-readable and JSON rendering.
 """
@@ -57,6 +59,7 @@ from cw.doctor.loop_health import (
     _reap_session_by_selector,
 )
 from cw.doctor.report import format_report, format_report_json
+from cw.doctor.skills_drift import _check_skills_commands_drift
 from cw.doctor.versions import (
     _CW_DEPS_CHECK_NAME,
     _CW_PACKAGE_NAME,
@@ -100,6 +103,7 @@ __all__ = [
     "_check_project_configs",
     "_check_review_recipe_liveness",
     "_check_review_strategy",
+    "_check_skills_commands_drift",
     "_check_timed_out_merged",
     "_check_wedge_repo_ahead",
     "_check_wedge_task_running_completed_session",

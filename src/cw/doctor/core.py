@@ -1,11 +1,11 @@
 """The ``run_doctor`` orchestrator that assembles the full doctor report.
 
 Every individual check lives in a leaf cluster — ``config_checks``,
-``linkage``, ``wedge``, ``loop_health``, ``versions``. This module holds only
-:func:`run_doctor`, which reaches each cluster through direct submodule imports
-(never through the package ``__init__``) so the package import graph stays
-acyclic. The one-directional discipline holds: ``cw.dispatch`` never imports
-``cw.doctor``.
+``linkage``, ``wedge``, ``loop_health``, ``skills_drift``, ``versions``. This
+module holds only :func:`run_doctor`, which reaches each cluster through
+direct submodule imports (never through the package ``__init__``) so the
+package import graph stays acyclic. The one-directional discipline holds:
+``cw.dispatch`` never imports ``cw.doctor``.
 """
 
 from __future__ import annotations
@@ -40,6 +40,7 @@ from cw.doctor.loop_health import (
     _check_loop_liveness,
     _check_timed_out_merged,
 )
+from cw.doctor.skills_drift import _check_skills_commands_drift
 from cw.doctor.versions import (
     _check_bypass_disclaimer,
     _check_claude_version,
@@ -98,6 +99,7 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     report.checks.append(_check_claude_version())
     report.checks.append(_check_cw_version())
     report.checks.append(_check_cw_deps())
+    report.checks.append(_check_skills_commands_drift())
     report.checks.append(_check_codex_capability())
     report.checks.append(_check_daemon_reachable())
     report.checks.extend(_check_loop_health())

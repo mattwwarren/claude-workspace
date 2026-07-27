@@ -203,6 +203,10 @@ _DEFAULT_OPERATOR_EVENT_TYPES: frozenset[OrchestratorEventType] = frozenset(
         # never leaves PR_ACTION_TAKEN standing alone as an uncorrected signal.
         OrchestratorEventType.PR_ACTION_TAKEN,
         OrchestratorEventType.PR_ACTION_FAILED,
+        # GitHub #1437: the ssh_key_gate operator escape hatch suppressing an
+        # already-live safety probe is attention-worthy, same rationale as
+        # GATE_AUTO_APPROVED above.
+        OrchestratorEventType.SSH_KEY_GATE_BYPASSED,
     }
 )
 _DEFAULT_OPERATOR_TASK_TRANSITION_STATUSES: frozenset[QueueItemStatus] = frozenset(
@@ -495,6 +499,15 @@ class OrchestratorConfig(BaseModel):
     # construction until P2 ships). Default False, mirroring
     # gate_recipes_enabled's fail-safe default.
     review_recipes_enabled: bool = False
+    # GitHub #1437 — operator escape hatch for the SSH-agent-key preflight
+    # gate (#927). Default True (gate stays enforced): unlike
+    # concierge_enabled/gate_recipes_enabled above, this does NOT gate new
+    # automation -- it gates an already-live safety probe that holds the
+    # fleet PENDING rather than risk a guaranteed-failing spawn. Setting this
+    # False bypasses that skip fleet-wide when the probe reports unavailable;
+    # each bypass emits SSH_KEY_GATE_BYPASSED (forwarded to the operator
+    # channel by default -- see _DEFAULT_OPERATOR_EVENT_TYPES above).
+    ssh_key_gate_enabled: bool = True
     # Tool-name patterns forwarded to EVERY DAEMON worker spawn as a single
     # `--disallowed-tools=<comma-joined>` token (cw.spawn.build_disallowed_tools_arg).
     # Default empty: cw forces no tool restriction on workers. Replaces the
