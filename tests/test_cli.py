@@ -2778,7 +2778,10 @@ class TestSignalStop:
         from cw.native_daemon import FakeNativeDaemonClient
 
         worktree, session = self._setup_headless_session(
-            tmp_path, "sess-1031-mismatch", "worktree-1031-mismatch"
+            tmp_path,
+            "sess-1031-mismatch",
+            "worktree-1031-mismatch",
+            surface_ref="sfref-1031-mismatch",
         )
         _write_staged_clients_yaml_for_test(tmp_config_dir, "test-client")
         save_dev_queue(
@@ -2799,7 +2802,13 @@ class TestSignalStop:
         )
         self._write_headless_context(worktree, session_id=session.id)
 
-        claude_session_id = "uuid-1031-mismatch"
+        # Prefix must match surface_ref="sfref-1031-mismatch" (stale-hook
+        # guard, sessions.py ~:731-737) or the hook is dropped before it's
+        # parsed -- a non-None surface_ref is required (#1273) so this
+        # regression test actually exercises the landed_terminal=False path
+        # instead of trivially passing via the surface_ref-gated daemon-stop
+        # guard short-circuiting on surface_ref=None.
+        claude_session_id = "sfref-1031-mismatch-uuid"
         fake_home = tmp_path / "fake-home-1031-mismatch"
         self._write_transcript(
             worktree, claude_session_id, _SENTINEL_918_STAGE_COMPLETE, fake_home
@@ -2863,7 +2872,10 @@ class TestSignalStop:
         from cw.native_daemon import FakeNativeDaemonClient
 
         worktree, session = self._setup_headless_session(
-            tmp_path, "sess-1189-race", "worktree-1189-race"
+            tmp_path,
+            "sess-1189-race",
+            "worktree-1189-race",
+            surface_ref="sfref-1189-race",
         )
         _write_staged_clients_yaml_for_test(tmp_config_dir, "test-client")
         save_dev_queue(
@@ -2884,7 +2896,13 @@ class TestSignalStop:
         )
         self._write_headless_context(worktree, session_id=session.id)
 
-        claude_session_id = "uuid-1189-race"
+        # Prefix must match surface_ref="sfref-1189-race" (stale-hook guard,
+        # sessions.py ~:731-737) or the hook is dropped before it's parsed --
+        # a non-None surface_ref is required (#1273) so this regression test
+        # actually exercises the landed_terminal=False path instead of
+        # trivially passing via the surface_ref-gated daemon-stop guard
+        # short-circuiting on surface_ref=None.
+        claude_session_id = "sfref-1189-race-uuid"
         fake_home = tmp_path / "fake-home-1189-race"
         self._write_transcript(
             worktree, claude_session_id, _SENTINEL_918_STAGE_COMPLETE, fake_home
