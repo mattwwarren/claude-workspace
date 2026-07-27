@@ -185,7 +185,7 @@ def test_no_local_source_repo_skips(monkeypatch: pytest.MonkeyPatch) -> None:
     """Registry install (PackageNotFoundError) -> remapped skip CheckResult."""
     _patch_cw_dist_not_found(monkeypatch)
     result = _check_skills_commands_drift()
-    assert result.name == "skills-commands-drift"
+    assert result.name == _CHECK_NAME
     assert result.ok is True
     assert result.warn is False
 

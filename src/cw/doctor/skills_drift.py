@@ -16,10 +16,20 @@ dependencies.
 from __future__ import annotations
 
 import subprocess as _sp
+from enum import StrEnum
 from pathlib import Path
 
 from cw.doctor._shared import CheckResult
 from cw.doctor.versions import _resolve_cw_source_path
+
+
+class _DriftCategory(StrEnum):
+    """One tracked file's drift classification against its _CLAUDE_HOME counterpart."""
+
+    MISSING = "missing"
+    DIFFERS = "differs"
+    SYMLINK = "symlink"
+
 
 # Home-tree root that repo-tracked .claude/skills and .claude/commands are
 # compared against — a module-level Path.home()-derived constant, patched in
@@ -81,18 +91,18 @@ def _counterpart_path(repo_relpath: str) -> Path:
     return _CLAUDE_HOME / repo_relpath
 
 
-def _classify(repo_path: Path, counterpart: Path) -> str | None:
+def _classify(repo_path: Path, counterpart: Path) -> _DriftCategory | None:
     """Classify one tracked file's drift state, or None when it matches.
 
     Leaf-symlink check comes first — a symlinked counterpart is a special
     case of "exists" that still warrants a flag before we compare bytes.
     """
     if counterpart.is_symlink():
-        return "symlink"
+        return _DriftCategory.SYMLINK
     if not counterpart.exists():
-        return "missing"
+        return _DriftCategory.MISSING
     if repo_path.read_bytes() != counterpart.read_bytes():
-        return "differs"
+        return _DriftCategory.DIFFERS
     return None
 
 
@@ -153,11 +163,11 @@ def _check_skills_commands_drift() -> CheckResult:
     symlink: list[str] = []
     for relpath in tracked:
         category = _classify(source_path / relpath, _counterpart_path(relpath))
-        if category == "missing":
+        if category == _DriftCategory.MISSING:
             missing.append(relpath)
-        elif category == "differs":
+        elif category == _DriftCategory.DIFFERS:
             differs.append(relpath)
-        elif category == "symlink":
+        elif category == _DriftCategory.SYMLINK:
             symlink.append(relpath)
 
     if not missing and not differs and not symlink:
@@ -172,5 +182,7 @@ def _check_skills_commands_drift() -> CheckResult:
         _CHECK_NAME,
         ok=True,
         warn=True,
-        detail=_build_detail(len(tracked), missing, differs, symlink),
+        detail=_build_detail(
+            total=len(tracked), missing=missing, differs=differs, symlink=symlink
+        ),
     )
