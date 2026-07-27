@@ -87,13 +87,14 @@ def transition_task_status(
     *,
     disposition: str | None = None,
     pr_url: str | None = None,
+    blocked_reason: str | None = None,
 ) -> None:
     """Single authority for TicketTask status transitions. Mutates in place.
 
-    Stamps disposition/pr_url/completed_at on terminal transitions
-    (COMPLETED/BLOCKED_ON_USER/FAILED/AWAITING_OPERATOR_SIGNOFF); clears them
-    on PENDING/CANCELLED (requeue/cancel).  Companion field resets (session_id,
-    stage_base_ref) stay at call sites.  GitHub #310, #990.
+    Stamps disposition/pr_url/completed_at/blocked_reason on terminal
+    transitions (COMPLETED/BLOCKED_ON_USER/FAILED/AWAITING_OPERATOR_SIGNOFF);
+    clears them on PENDING/CANCELLED (requeue/cancel).  Companion field resets
+    (session_id, stage_base_ref) stay at call sites.  GitHub #310, #990, #1511.
 
     Emits a ``task.transition`` orchestrator event on a real status change (RFC
     0008 W1, closes #978); the emit is suppressed when new_status == old_status
@@ -105,10 +106,12 @@ def transition_task_status(
         task.disposition = disposition
         task.pr_url = pr_url
         task.completed_at = datetime.now(UTC)
+        task.blocked_reason = blocked_reason
     elif new_status in _RESET_DISPOSITION_STATUSES:
         task.disposition = None
         task.pr_url = None
         task.completed_at = None
+        task.blocked_reason = None
     # RFC 0008 capstone (#1015, Q5): unconditional clear-site for the
     # durable-escalation-latch fields. transition_task_status is the single
     # authority for every status/disposition mutation on a TicketTask (see
@@ -145,6 +148,7 @@ def transition_task_status(
                 "disposition": task.disposition,
                 "session_id": task.session_id,
                 "pr_url": task.pr_url,
+                "blocked_reason": task.blocked_reason,
             },
             correlation_id=task.ticket_id,
         )

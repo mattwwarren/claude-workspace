@@ -7357,6 +7357,41 @@ class TestDevQueueTasksPrState:
         assert "ATTENTION" in result.output
         assert "changes_requested" in result.output
 
+    def test_tasks_json_and_human_surface_blocked_reason(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """_task_to_dict carries blocked_reason and the human table's REASON
+        column renders it (GitHub #1511)."""
+        import json as _json
+
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-404",
+                        client="attn-client",
+                        status=QueueItemStatus.BLOCKED_ON_USER,
+                        disposition="blocked",
+                        blocked_reason="plan_unreviewable",
+                    )
+                ]
+            )
+        )
+        runner = CliRunner()
+
+        json_result = runner.invoke(main, ["dev-queue", "tasks", "--json"])
+        assert json_result.exit_code == 0, json_result.output
+        data = _json.loads(json_result.output)
+        assert data[0]["blocked_reason"] == "plan_unreviewable"
+
+        human_result = runner.invoke(main, ["dev-queue", "tasks"])
+        assert human_result.exit_code == 0, human_result.output
+        assert "REASON" in human_result.output
+        assert "plan_unreviewable" in human_result.output
+
 
 # ---------------------------------------------------------------------------
 # TestDevQueueWait (GitHub issue #474)
