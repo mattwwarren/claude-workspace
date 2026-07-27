@@ -802,6 +802,8 @@ def test_revert_stalled_gh_prepass_skips_none_ticket_id_and_none_client(
     save_dev_queue(DevQueueStore(tasks=[]))
 
     # Wrap real detect to also inject a candidate with client=None (covers line 514).
+    detect_call_count = 0
+
     def _patched_detect(
         s: object,
         *,
@@ -809,6 +811,8 @@ def test_revert_stalled_gh_prepass_skips_none_ticket_id_and_none_client(
         config: object,
         task_by_ticket: object,
     ) -> list[ReapCandidate]:
+        nonlocal detect_call_count
+        detect_call_count += 1
         real_candidates: list[ReapCandidate] = _real_detect(
             s,  # type: ignore[arg-type]
             now=now,
@@ -851,6 +855,7 @@ def test_revert_stalled_gh_prepass_skips_none_ticket_id_and_none_client(
 
     # Assert — gh was never called (both candidates were skipped before the call).
     assert call_count == 0
+    assert detect_call_count >= 1
 
 
 def test_revert_stalled_gh_prepass_second_candidate_skips_when_gh_gone(
