@@ -30,6 +30,14 @@ CODEX_BUDGET_EXHAUSTED = "budget_exhausted"
 # reduced review pass — Decision 7 (#1236 finish spec).
 CODEX_REVIEW_PARTIAL = "codex_review_partial"
 
+# Standalone fix-loop park reason (#1464): a successful fix-cycle commit whose
+# changed paths fall both outside the cycle-0 reviewed diff's file set AND
+# match the sensitive-files registry. Deliberately NOT added to
+# _CATEGORY_TO_REASON below — that dict maps ExecutorFailureCategory -> reason
+# for codex-invocation failures, while this reason parks a
+# successful-but-out-of-policy fix, a distinct axis.
+CODEX_FIX_SCOPE_VIOLATION = "codex_fix_scope_violation"
+
 # Failure reasons transient enough that a retry might succeed without any
 # code/config change on our side (the role either never got a turn at all, or
 # codex itself timed out) — used to set Blocker.retry_eligible so reconcile

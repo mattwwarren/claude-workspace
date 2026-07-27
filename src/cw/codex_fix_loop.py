@@ -33,9 +33,12 @@ from cw.codex_review import (
     _MIN_ROLE_TIMEOUT_SECONDS,
     _TRANSIENT_FAILURE_REASONS,
     CODEX_BUDGET_EXHAUSTED,
+    CODEX_FIX_SCOPE_VIOLATION,
     CODEX_MUST_FIX_FINDINGS,
     STAGE3_REVIEW,
+    _capture_diff,
     _classify_codex_failure,
+    _load_sensitive_hits,
     _load_ticket_context,
     _prepare_review_pass,
     render_verdict_comment,
@@ -48,13 +51,14 @@ from cw.executor_diagnostics import (
     build_executor_failure,
     persist_diagnostics_bundle,
 )
-from cw.local_runner import make_blocked
+from cw.local_runner import make_blocked, resolve_tier
 from cw.review_findings import _dedup_key
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cw.auto_dev_result import AutoDevResult, Health, Review
+    from cw.auto_dev_result import AutoDevResult, Health, Review, ScopeTier
+    from cw.codex_review import _SensitiveHit
     from cw.codex_runner import CodexRunner
     from cw.executor_diagnostics import ExecutorFailureCategory
     from cw.models import TicketTask
@@ -165,6 +169,57 @@ def _commit_fix_cycle(
     return subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=worktree, text=True
     ).strip()
+
+
+def _porcelain_changed_paths(worktree: Path) -> list[str]:
+    """Return every path with a pending change per ``git status --porcelain``.
+
+    Rename-aware: a porcelain rename line (``R  old -> new``) contributes only
+    the post-``->`` (destination) path. Untracked (``??``) and
+    modified/added/deleted paths are all included via the same fixed-offset
+    slice — porcelain v1's two-character status code is always followed by a
+    single space, so the path always starts at index 3 regardless of which
+    status letters precede it. ``--untracked-files=all`` is required so a
+    wholly-new directory is reported as its individual file paths rather than
+    collapsed to a single ``?? some/dir/`` entry — the scope/sensitivity check
+    below needs the actual file path, not its containing directory.
+    """
+    status = subprocess.check_output(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=worktree,
+        text=True,
+    )
+    paths: list[str] = []
+    for line in status.splitlines():
+        if not line:
+            continue
+        entry = line[3:]
+        if " -> " in entry:
+            entry = entry.split(" -> ", 1)[1]
+        paths.append(entry)
+    return paths
+
+
+def _scope_violations(
+    worktree: Path,
+    cycle0_files: frozenset[str] | set[str],
+    scope_tier: ScopeTier,
+) -> list[_SensitiveHit]:
+    """Return sensitive-registry hits among this cycle's out-of-scope paths.
+
+    A path is out of scope if it was not part of the cycle-0 reviewed diff's
+    file set. Only out-of-scope paths are checked against the sensitive-files
+    registry (via ``_load_sensitive_hits``, the single source of truth for
+    that match) — an in-scope sensitive edit is always allowed, and an
+    out-of-scope non-sensitive addition is always allowed. Both conditions
+    must hold for a path to appear in the returned list.
+    """
+    out_of_scope = [
+        p for p in _porcelain_changed_paths(worktree) if p not in cycle0_files
+    ]
+    if not out_of_scope:
+        return []
+    return _load_sensitive_hits(worktree, out_of_scope, scope_tier)
 
 
 def _track_open_findings(
@@ -359,6 +414,56 @@ def _park_survivors(
     return patched, survivors
 
 
+def _park_scope_violation(
+    *,
+    task: TicketTask,
+    worktree: Path,
+    cycle: int,
+    violations: list[_SensitiveHit],
+    cycle0_review: Review,
+    open_findings: dict[_DedupKey, AcceptedFinding],
+    verdict: ReviewVerdict,
+) -> tuple[AutoDevResult, ReviewVerdict]:
+    """Park a fix cycle whose commit would touch a sensitive out-of-scope path.
+
+    The gate is AND-only: ``_scope_violations`` only ever returns hits already
+    computed over the out-of-scope subset, so both conditions (out of the
+    cycle-0 reviewed diff's scope, and a sensitive-registry match) hold for
+    every listed path — the details string says so explicitly rather than
+    leaving it implicit. Follows ``_park_survivors``'s pattern verbatim:
+    reconstruct the terminal ``Review`` via ``_finalize_review``, build the
+    ``Blocker`` via ``make_blocked``, then patch review/health onto the
+    result.
+    """
+    review = _finalize_review(
+        cycle0_review=cycle0_review,
+        final_verdict=verdict,
+        open_findings=open_findings,
+        cycle_count=cycle,
+    )
+    lines = [f"- {hit.path} ({hit.category}): {hit.reason}" for hit in violations]
+    details = "\n".join(
+        [
+            f"codex fix cycle {cycle} touched path(s) that are both out of the "
+            "cycle-0 reviewed diff's scope AND match the sensitive-files "
+            "registry:",
+            *lines,
+        ]
+    )
+    blocked = make_blocked(
+        ticket_id=task.ticket_id,
+        worktree=worktree,
+        reason=CODEX_FIX_SCOPE_VIOLATION,
+        details=details,
+        retry_eligible=None,
+        stage_reached=STAGE3_REVIEW,
+    )
+    health = blocked.health.model_copy(
+        update={"fix_loop_escalated": cycle >= _ESCALATE_AT_CYCLE}
+    )
+    return blocked.model_copy(update={"review": review, "health": health}), verdict
+
+
 def _clean_exit(
     result: AutoDevResult,
     verdict: ReviewVerdict,
@@ -390,12 +495,17 @@ def _run_fix_and_commit(
     plan_text: str | None,
     ticket_text: str | None,
     verdict: ReviewVerdict,
+    cycle0_files: frozenset[str],
+    scope_tier: ScopeTier,
+    cycle0_review: Review,
 ) -> tuple[AutoDevResult, ReviewVerdict | None] | None:
     """Run one cycle's fix invocation and commit; return a park tuple or ``None``.
 
     ``None`` means the fix invocation succeeded (its commit may have been a
     no-op) and the caller should proceed to re-review. A non-``None`` return is
-    the terminal park result for a failed fix invocation or a failed commit.
+    the terminal park result for a failed fix invocation, a scope violation
+    (an out-of-scope change that also matches the sensitive-files registry),
+    or a failed commit.
     """
     findings = [af.finding for af in open_findings.values()]
     prompt = _build_fix_prompt(
@@ -413,6 +523,17 @@ def _run_fix_and_commit(
             stdout=result.stdout,
             stderr=result.stderr,
             exit_code=result.returncode,
+            verdict=verdict,
+        )
+    violations = _scope_violations(worktree, cycle0_files, scope_tier)
+    if violations:
+        return _park_scope_violation(
+            task=task,
+            worktree=worktree,
+            cycle=cycle,
+            violations=violations,
+            cycle0_review=cycle0_review,
+            open_findings=open_findings,
             verdict=verdict,
         )
     try:
@@ -503,6 +624,9 @@ def run_review_with_fix_loop(
         return result, verdict
 
     cycle0_review = verdict.review
+    _, _, cycle0_changed = _capture_diff(worktree, default_branch)
+    cycle0_files = frozenset(cycle0_changed)
+    scope_tier = resolve_tier(task.scope_hint)
     plan_text, ticket_text = _load_ticket_context(worktree)
     open_findings = _track_open_findings({}, verdict.accepted)
 
@@ -531,6 +655,9 @@ def run_review_with_fix_loop(
             plan_text=plan_text,
             ticket_text=ticket_text,
             verdict=verdict,
+            cycle0_files=cycle0_files,
+            scope_tier=scope_tier,
+            cycle0_review=cycle0_review,
         )
         if park is not None:
             return park

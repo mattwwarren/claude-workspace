@@ -22,7 +22,7 @@ from cw.codex_review import (
     _read_sensitive_manifest,
     _select_reviewer_roles,
 )
-from tests._codex_review_helpers import _doc_json, _git, _task
+from tests._codex_review_helpers import _doc_json, _git, _task, _write
 from tests.conftest import _make_diff
 
 if TYPE_CHECKING:
@@ -151,11 +151,6 @@ class TestLoadOptionalText:
 # ---------------------------------------------------------------------------
 # _load_sensitive_hits — scope-tier divergence
 # ---------------------------------------------------------------------------
-
-
-def _write(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
 
 
 _MANIFEST = """sensitive_files:

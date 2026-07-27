@@ -21,6 +21,7 @@ from cw.codex_fix_loop import (
 from cw.codex_review import (
     _MIN_ROLE_TIMEOUT_SECONDS,
     CODEX_BUDGET_EXHAUSTED,
+    CODEX_FIX_SCOPE_VIOLATION,
     CODEX_MUST_FIX_FINDINGS,
     CODEX_REVIEW_UNPARSEABLE,
     run_review,
@@ -31,7 +32,7 @@ from cw.executor_diagnostics import diagnostics_bundle_dir
 from cw.local_runner import make_blocked
 from cw.models import Stage, TicketTask
 from cw.review_findings import AcceptedFinding, _dedup_key, consolidate_verdict
-from tests._codex_review_helpers import _Clock, _SequencedRunner
+from tests._codex_review_helpers import _Clock, _SequencedRunner, _write
 from tests.conftest import (
     _make_diff,
     _make_finding,
@@ -64,12 +65,24 @@ def _git(repo: Path, *args: str) -> None:
 
 
 def _worktree(
-    make_git_repo: Callable[..., Path], name: str, *, content: str = _CONTENT
+    make_git_repo: Callable[..., Path],
+    name: str,
+    *,
+    content: str = _CONTENT,
+    manifest: dict[str, str] | None = None,
+    feature_files: dict[str, str] | None = None,
 ) -> Path:
     repo = make_git_repo(name)
+    if manifest is not None:
+        for rel_path, text in manifest.items():
+            _write(repo / rel_path, text)
+        _git(repo, "add", *manifest.keys())
+        _git(repo, "commit", "-m", "add manifest")
     _git(repo, "checkout", "-b", "feature")
-    (repo / "new.py").write_text(content, encoding="utf-8")
-    _git(repo, "add", "new.py")
+    files = feature_files if feature_files is not None else {"new.py": content}
+    for rel_path, text in files.items():
+        _write(repo / rel_path, text)
+    _git(repo, "add", *files.keys())
     _git(repo, "commit", "-m", "add new.py")
     return repo
 
@@ -80,8 +93,10 @@ def _head(repo: Path) -> str:
     ).strip()
 
 
-def _task() -> TicketTask:
-    return _make_ticket_task(ticket_id="T-1", client="test", stage=Stage.REVIEW)
+def _task(*, scope_hint: str | None = None) -> TicketTask:
+    return _make_ticket_task(
+        ticket_id="T-1", client="test", stage=Stage.REVIEW, scope_hint=scope_hint
+    )
 
 
 def _finding_dict(
@@ -189,10 +204,11 @@ def _run_loop(
     budget: int | None = None,
     session_id: str = "sess-fix",
     fix_loop_enabled: bool = True,
+    task: TicketTask | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     return run_review_with_fix_loop(
         runner=runner,
-        task=_task(),
+        task=task if task is not None else _task(),
         worktree=worktree,
         default_branch="main",
         model=None,
@@ -206,10 +222,27 @@ def _editor(
     filename: str = "fix.py", content: str = "patched = 1\n"
 ) -> Callable[[Path, list[str]], CodexRunResult]:
     def _edit(worktree: Path, _argv: list[str]) -> CodexRunResult:
-        (worktree / filename).write_text(content, encoding="utf-8")
+        _write(worktree / filename, content)
         return CodexRunResult(returncode=0, stdout="", stderr="")
 
     return _edit
+
+
+def _renamer(old: str, new: str) -> Callable[[Path, list[str]], CodexRunResult]:
+    """Fix-behavior callable that ``git mv``s *old* to *new* in the worktree.
+
+    Mirrors ``_editor``'s shape (a ``(worktree, argv) -> CodexRunResult``
+    callable for ``_FixLoopRunner``'s ``fix_behaviors`` list) but exercises the
+    rename-aware branch of ``_porcelain_changed_paths`` instead of a plain
+    add/modify.
+    """
+
+    def _rename(worktree: Path, _argv: list[str]) -> CodexRunResult:
+        (worktree / new).parent.mkdir(parents=True, exist_ok=True)
+        _git(worktree, "mv", old, new)
+        return CodexRunResult(returncode=0, stdout="", stderr="")
+
+    return _rename
 
 
 # ---------------------------------------------------------------------------
@@ -780,6 +813,216 @@ class TestFixLoopDisabledGate:
 
         assert runner.fix_calls == 0
         assert result.status == "stage_complete"
+
+
+# ---------------------------------------------------------------------------
+# TestScopeViolationGate
+# ---------------------------------------------------------------------------
+
+_MANIFEST = """\
+sensitive_files:
+  - path: pyproject.toml
+    category: dependency
+    reason: dependency changes need review
+  - path: ".github/workflows/**"
+    category: ci
+    reason: CI changes need review
+  - path: ".github/workflows/"
+    category: ci
+    reason: CI changes need review
+"""
+
+_PYPROJECT_CONTENT = '[project]\nname = "x"\n'
+
+
+def _finding_dict_at(
+    file: str, *, severity: str, line: int, evidence: str, summary: str
+) -> dict[str, object]:
+    return {
+        "severity": severity,
+        "file": file,
+        "line_start": line,
+        "line_end": line,
+        "summary": summary,
+        "consequence": "it breaks",
+        "suggested_fix": "fix it",
+        "evidence": evidence,
+        "confidence": "HIGH",
+    }
+
+
+_MF_PYPROJECT_DOC = _doc(
+    [
+        _finding_dict_at(
+            "pyproject.toml",
+            severity="MUST_FIX",
+            line=1,
+            evidence="[project]",
+            summary="MFP",
+        )
+    ]
+)
+
+
+class TestScopeViolationGate:
+    """The scope-violation gate (#1464): a fix-cycle change parks only if it is
+
+    BOTH out of the cycle-0 reviewed diff's file set AND matches the
+    sensitive-files manifest.
+    """
+
+    def test_in_scope_sensitive_edit_allowed(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(
+            make_git_repo,
+            "wt-scope-in",
+            manifest={".claude/sensitive-files.yml": _MANIFEST},
+            feature_files={"pyproject.toml": _PYPROJECT_CONTENT},
+        )
+        runner = _FixLoopRunner(
+            [_MF_PYPROJECT_DOC, _CLEAN_DOC],
+            fix_behaviors=[
+                _editor(filename="pyproject.toml", content='[project]\nname = "y"\n')
+            ],
+        )
+        out, _ = _run_loop(runner, worktree, session_id="s-scope-in")
+
+        assert out.status == "stage_complete"
+        assert out.blocker is None
+        assert out.review.fix_cycles_used == 1
+
+    def test_out_of_scope_non_sensitive_addition_allowed(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-scope-nonsens")
+        runner = _FixLoopRunner(
+            [_MF_DOC, _CLEAN_DOC],
+            fix_behaviors=[_editor(filename="extra.py", content="x = 1\n")],
+        )
+        out, _ = _run_loop(runner, worktree, session_id="s-scope-nonsens")
+
+        assert out.status == "stage_complete"
+        assert out.blocker is None
+        assert out.review.fix_cycles_used == 1
+
+    def test_out_of_scope_sensitive_modification_parks(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(
+            make_git_repo,
+            "wt-scope-outsens",
+            manifest={
+                ".claude/sensitive-files.yml": _MANIFEST,
+                "pyproject.toml": _PYPROJECT_CONTENT,
+            },
+        )
+        runner = _FixLoopRunner(
+            [_MF_DOC],
+            fix_behaviors=[
+                _editor(filename="pyproject.toml", content='[project]\nname = "z"\n')
+            ],
+        )
+        out, _ = _run_loop(runner, worktree, session_id="s-scope-outsens")
+
+        assert out.status == "blocked"
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_FIX_SCOPE_VIOLATION
+
+    def test_untracked_sensitive_addition_parks_small_tier(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(
+            make_git_repo,
+            "wt-scope-untracked-small",
+            manifest={".claude/sensitive-files.yml": _MANIFEST},
+        )
+        runner = _FixLoopRunner(
+            [_MF_DOC],
+            fix_behaviors=[
+                _editor(filename=".github/workflows/new.yml", content="name: x\n")
+            ],
+        )
+        out, _ = _run_loop(runner, worktree, session_id="s-scope-untracked-small")
+
+        assert out.status == "blocked"
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_FIX_SCOPE_VIOLATION
+        assert ".github/workflows/new.yml" in out.blocker.details
+
+    def test_untracked_sensitive_addition_parks_large_tier(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(
+            make_git_repo,
+            "wt-scope-untracked-large",
+            manifest={".claude/sensitive-files.yml": _MANIFEST},
+        )
+        runner = _FixLoopRunner(
+            [_MF_DOC],
+            fix_behaviors=[
+                _editor(filename=".github/workflows/new.yml", content="name: x\n")
+            ],
+        )
+        out, _ = _run_loop(
+            runner,
+            worktree,
+            session_id="s-scope-untracked-large",
+            task=_task(scope_hint="large"),
+        )
+
+        assert out.status == "blocked"
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_FIX_SCOPE_VIOLATION
+        assert ".github/workflows/new.yml" in out.blocker.details
+
+    def test_rename_into_sensitive_path_parks(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(
+            make_git_repo,
+            "wt-scope-rename",
+            manifest={".claude/sensitive-files.yml": _MANIFEST},
+        )
+        runner = _FixLoopRunner(
+            [_MF_DOC],
+            fix_behaviors=[_renamer("new.py", ".github/workflows/renamed.yml")],
+        )
+        out, _ = _run_loop(runner, worktree, session_id="s-scope-rename")
+
+        assert out.status == "blocked"
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_FIX_SCOPE_VIOLATION
+        assert ".github/workflows/renamed.yml" in out.blocker.details
+
+    def test_park_details_name_violating_path_and_cycle_count(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(
+            make_git_repo,
+            "wt-scope-details",
+            manifest={
+                ".claude/sensitive-files.yml": _MANIFEST,
+                "pyproject.toml": _PYPROJECT_CONTENT,
+            },
+        )
+        runner = _FixLoopRunner(
+            [_MF_DOC],
+            fix_behaviors=[
+                _editor(filename="pyproject.toml", content='[project]\nname = "z"\n')
+            ],
+        )
+        out, _ = _run_loop(runner, worktree, session_id="s-scope-details")
+
+        assert out.status == "blocked"
+        assert out.blocker is not None
+        # Path is named, and both AND-gate conditions are stated explicitly.
+        assert "pyproject.toml" in out.blocker.details
+        assert "out of" in out.blocker.details.lower()
+        assert "sensitive" in out.blocker.details.lower()
+        assert out.review.fix_cycles_used == 1
+        assert out.review.must_fix_initial == 1
+        assert out.blocker.retry_eligible is None
 
 
 # ---------------------------------------------------------------------------
