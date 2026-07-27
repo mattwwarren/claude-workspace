@@ -8028,7 +8028,8 @@ class TestDevQueueApproveCli:
             )
         assert result.exit_code == 0, result.output
         post_mock.assert_not_called()
-        assert "could not verify existing comments" in result.output
+        assert "could not verify existing comments" in result.stdout
+        assert "could not verify existing comments" not in result.stderr
 
     def test_approve_post_marker_dedup_check_scopes_cwd_to_client_repo(
         self,
