@@ -1732,9 +1732,7 @@ class TestDispatchTickSpawnErrors:
         spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
         assert spawned == 0
 
-        expected_path = str(
-            worktree_path_for(sample_client_config, "dev/GEN-425D-ATT")
-        )
+        expected_path = str(worktree_path_for(sample_client_config, "dev/GEN-425D-ATT"))
 
         events = read_events(
             consumer="test-425d-att-attention",
@@ -1888,7 +1886,7 @@ class TestDispatchCodexCapabilityGate:
         simple_config: OrchestratorConfig,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """codex-not-found park emits SESSION_NEEDS_ATTENTION with breadcrumbs (#1257)."""
+        """codex-not-found park emits SESSION_NEEDS_ATTENTION w/ breadcrumbs (#1257)."""
         from cw.executor import CODEX_NOT_FOUND, CodexCapabilityDiagnosis
 
         _make_codex_clients_yaml(tmp_dispatch_dirs, sample_client_config)
@@ -2717,9 +2715,7 @@ class TestGlobalAttemptCeiling:
         assert cap_events[0].payload["client"] == "test-client"
 
         attention_events = [
-            e
-            for e in events
-            if e.payload.get("paused_status") == "attempt_cap_blocked"
+            e for e in events if e.payload.get("paused_status") == "attempt_cap_blocked"
         ]
         assert len(attention_events) == 1
         assert attention_events[0].payload["ticket_id"] == "GEN-786-event"

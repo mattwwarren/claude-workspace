@@ -2117,9 +2117,7 @@ def test_revert_stalled_dirty_worktree_emits_session_needs_attention(
     save_dev_queue(DevQueueStore(tasks=[task]))
 
     client_cfg = ClientConfig(name="client-a", workspace_path=tmp_path / "ws")
-    monkeypatch.setattr(
-        "cw.reconcile._shared.get_client", lambda _name: client_cfg
-    )
+    monkeypatch.setattr("cw.reconcile._shared.get_client", lambda _name: client_cfg)
     monkeypatch.setattr(
         "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: True
     )

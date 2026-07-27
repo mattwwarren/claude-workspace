@@ -244,9 +244,7 @@ def _claim_next_pending(
                             )
                             save_dev_queue(store)
                             _emit_attempt_cap_blocked_event(client_name, task.ticket_id)
-                            _emit_attempt_cap_attention_event(
-                                task, client_name, lane
-                            )
+                            _emit_attempt_cap_attention_event(task, client_name, lane)
                             break
                         transition_task_status(task, QueueItemStatus.RUNNING)
                         task.attempts += 1
