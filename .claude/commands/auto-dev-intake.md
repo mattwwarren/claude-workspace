@@ -90,6 +90,39 @@ If they differ, branch on mode:
 
 ### Step P3 (headless)
 
+If `AHEAD == 0` and `BEHIND > 0` (behind-only divergence — the shape
+`fast_forward_main`'s own guards would allow), do not declare divergence
+yet. R1's dispatch-tick auto-ff (`_resolve_freshness` in
+`src/cw/dispatch/gating.py`) advances the client's base checkout's `main`
+independently and concurrently; give it a bounded window to land before
+falling through to the blocked sentinel below.
+
+#### Behind-only wait-and-recheck
+
+```bash
+for _ in 1 2 3; do
+  sleep 30
+  LOCAL_MAIN=$(git -C "$REPO" rev-parse main)
+  if [ "$LOCAL_MAIN" = "$ORIGIN_MAIN" ]; then
+    break
+  fi
+done
+```
+
+No re-fetch: `ORIGIN_MAIN` was already captured from `origin/main` in Step
+P1, and the shared `main` ref is what advances (via the base checkout, not
+this worktree) — a plain local `rev-parse` is sufficient to observe it.
+Checkpoints land at T+30s, T+60s, and T+90s.
+
+- If `LOCAL_MAIN == ORIGIN_MAIN` after any iteration → continue to Stage 0
+  (the divergence resolved itself; no sentinel emitted).
+- If still diverged after 3 iterations (T+90s, matching
+  `TICK_STALE_SECONDS`'s 3x-`tick_interval_seconds` staleness convention) →
+  fall through to the blocked sentinel below, unchanged.
+
+If `AHEAD > 0` (ahead-only, or both ahead and behind) — no wait. Proceed
+directly to the blocked sentinel below.
+
 EXIT with the structured `blocked` sentinel before any agent is spawned:
 
 ```json
