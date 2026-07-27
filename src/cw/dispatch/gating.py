@@ -270,6 +270,34 @@ def _emit_ssh_key_skip(
     )
 
 
+def _emit_ssh_key_bypass(
+    client: ClientConfig,
+    *,
+    probe_result: bool,
+    gate_enabled: bool,
+) -> None:
+    """Record the operator-forwarded bypass event (GitHub #1437).
+
+    Sibling of :func:`_emit_ssh_key_skip`, NOT a reuse of it: called instead
+    of that helper when the SSH-key probe reports unavailable but
+    ``OrchestratorConfig.ssh_key_gate_enabled`` is False, so the would-be
+    skip is suppressed and the client dispatches anyway. No operator stdout
+    line here -- SSH_KEY_GATE_BYPASSED is in the default operator-channel
+    forward-set (see ``_DEFAULT_OPERATOR_EVENT_TYPES``), so the forward-set
+    already surfaces this to the operator channel without a duplicate
+    stdout emit. No dispatch.tick skip event either: the client is not
+    skipped.
+    """
+    record_event(
+        OrchestratorEventType.SSH_KEY_GATE_BYPASSED,
+        {
+            "client": client.name,
+            "probe_result": probe_result,
+            "gate_enabled": gate_enabled,
+        },
+    )
+
+
 def _record_availability_block(*, now: datetime, was_latched: bool) -> None:
     """Persist a fresh failed probe and fire attention once per outage episode.
 
