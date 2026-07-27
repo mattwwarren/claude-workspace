@@ -1160,6 +1160,7 @@ class TestOperatorChannelForward:
                 OrchestratorEventType.GATE_AUTO_APPROVE_FAILED,
                 OrchestratorEventType.PR_ACTION_TAKEN,
                 OrchestratorEventType.PR_ACTION_FAILED,
+                OrchestratorEventType.SSH_KEY_GATE_BYPASSED,
             }
         )
 
