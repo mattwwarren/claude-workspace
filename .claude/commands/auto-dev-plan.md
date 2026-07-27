@@ -24,6 +24,8 @@ For each ticket in the queue:
 
 ### Step 1a: Check for Existing Plan
 
+0. **Resume check (runs before the tracker scan):** if `.cw/plan-draft.md` exists in the worktree AND `.cw/plan.md` does NOT exist, treat it exactly like "Plan found (sufficient)" below — extract its content, skip Step 1b's generation entirely, log "Found persisted plan draft from prior blocked attempt — resuming, not regenerating," and proceed to Step 1c (the ambiguity scan still runs unconditionally). **Supersession/ordering guard:** if `.cw/plan.md` already exists, ignore `.cw/plan-draft.md` regardless of either file's timestamp — an approved `.cw/plan.md` always wins over a stale draft.
+
 1. **Tracked tickets:** Read the issue description AND comments via the active
    tracker's fetch ops (`get_issue` + `list_comments` for `linear`; a single
    `gh issue view <n> --json title,body,comments` for `github-issues`). Look for content that constitutes an implementation plan — specifically:
@@ -243,7 +245,7 @@ Present to user:
 - **Adjust** → re-plan with user's adjustments, re-present
 - **Skip** → move to next ticket in queue
 
-**Headless** (clauses are evaluated in order; first match wins): If plan agent reported `pre-flight: already satisfied` → EXIT `no_op` (see Step 1e) — this preempts every other clause below, including scope and forbidden-area rejections, since there is nothing to implement. Otherwise: if plan in Linear → AUTO-SKIP plan-approval question (ambiguity scan in Step 1c still runs and may exit `ambiguities_pending_resolution`). If plan generated + small → AUTO-APPROVE and proceed (Step 1c still gates on ambiguities). If plan generated + large → EXIT `plan_pending_approval` (post plan to Linear, no branch — ambiguity scan is bypassed since the human will see the plan and ambiguities together when reviewing the Linear post). If `--scope-limit small` rejects → EXIT `scope_exceeded`. If `--forbidden` rejects → EXIT `forbidden_area`.
+**Headless** (clauses are evaluated in order; first match wins): If plan agent reported `pre-flight: already satisfied` → EXIT `no_op` (see Step 1e) — this preempts every other clause below, including scope and forbidden-area rejections, since there is nothing to implement. Otherwise: if plan in Linear or resumed from `.cw/plan-draft.md` → AUTO-SKIP plan-approval question (ambiguity scan in Step 1c still runs and may exit `ambiguities_pending_resolution`). If plan generated + small → AUTO-APPROVE and proceed (Step 1c still gates on ambiguities). If plan generated + large → EXIT `plan_pending_approval` (post plan to Linear, no branch — ambiguity scan is bypassed since the human will see the plan and ambiguities together when reviewing the Linear post). If `--scope-limit small` rejects → EXIT `scope_exceeded`. If `--forbidden` rejects → EXIT `forbidden_area`.
 
 ### Step 1e: Pre-flight Already-Satisfied Check
 
@@ -254,6 +256,7 @@ Before running Plan Quality Review (Step 1f) or posting the plan to Linear (Step
 - Do NOT post a plan to Linear (the ticket is being closed, not implemented).
 - In headless mode: EXIT immediately with `status: "no_op"`, `blocker: null`, `next_actions: ["close_issue_as_completed"]`, and `health.recommendation: "EXIT_FOR_HUMAN_REVIEW"` (a human still needs to close the ticket — the skill does not auto-close).
 - In interactive mode: surface the agent's per-artifact rundown to the user and **AskUserQuestion:** "Plan agent reports the requested work is already in the desired state. Close ticket as completed, re-plan (in case the agent missed something), or skip?"
+- Best-effort clear the draft: if `.cw/plan-draft.md` is present, delete it on the way out — this exit neither writes `.cw/plan.md` nor intends a resume, so a stale draft left behind is worse than none (same rationale as the Step 1a supersession guard). A pre-existing draft from an earlier blocked attempt must not survive a `no_op` exit. Deletion is best-effort and must not fail this exit.
 
 The `no_op` status is distinct from `blocked` + `agent_block`: "already satisfied" is a healthy outcome, not a failure that needs human attention. Routing it through `blocked` produces alerting noise once orchestrators (e.g. cw) act on the structured contract.
 
@@ -308,7 +311,7 @@ Gate each station independently; the plan proceeds to Step 1g only when **both**
 - **MUST_FIX, 1st cycle, Small or interactive** → spawn plan-revision agent (Step 1f.4), re-review once.
 - **MUST_FIX, 1st cycle, Large + interactive** → AskUserQuestion: revise / surface to human / skip ticket. On "revise" → Step 1f.4.
 - **MUST_FIX persists after 1 revision cycle, interactive** → AskUserQuestion: post stale plan to Linear anyway / abandon ticket.
-- **MUST_FIX persists after 1 revision cycle, headless** → EXIT `blocked` with `blocker.reason: "plan_unreviewable"`. Do NOT post the stale plan to Linear.
+- **MUST_FIX persists after 1 revision cycle, headless** → EXIT `blocked` with `blocker.reason: "plan_unreviewable"`. Do NOT post the stale plan to Linear. Before exiting, write the plan's current text — as it stands at the moment of exit, including any already-appended signoff marker — to `.cw/plan-draft.md`, so a subsequent retry can resume from it instead of regenerating from scratch.
 - **MUST_FIX persists after the format-only cycle (still all `Format-Only`)** → falls through to the standard "persists after 1 revision cycle" branches above (same AskUserQuestion / `blocked` `plan_unreviewable` EXIT, including the existing `stage.errored` emission) — the format-only path is a one-shot, not a second standard cycle.
 
 *Plan Soundness Reviewer verdicts:*
@@ -316,9 +319,9 @@ Gate each station independently; the plan proceeds to Step 1g only when **both**
 - **RISK, interactive** → AskUserQuestion per finding: acknowledge & proceed / treat as MUST_FIX & revise / codify as a §7 principle. On "revise" → Step 1f.4; on acknowledge or codify → append the marker (record acknowledged RISKs and any `codify:` proposals in `friction_highlights`).
 - **RISK, headless** → append each finding's `codify:` line to `friction_highlights`, append the marker, continue. RISK is advisory and never blocks a headless run on its own.
 - **MUST_FIX, 1st cycle, interactive** → AskUserQuestion: revise approach / accept with explicit override / skip ticket. On "revise" → Step 1f.4; on "override" → append the marker and record the override verbatim in `friction_highlights`; on "skip" → abandon the ticket per the existing skip handling (same as the Plan Reviewer "skip ticket" branch above).
-- **MUST_FIX, 1st cycle, headless** → EXIT `blocked` with `blocker.reason: "plan_unsound"`. Do NOT post the plan to Linear.
+- **MUST_FIX, 1st cycle, headless** → EXIT `blocked` with `blocker.reason: "plan_unsound"`. Do NOT post the plan to Linear. Before exiting, write the plan's current text — as it stands at the moment of exit, including any already-appended signoff marker — to `.cw/plan-draft.md`, so a subsequent retry can resume from it instead of regenerating from scratch.
 - **MUST_FIX persists after 1 revision cycle, interactive** → AskUserQuestion: accept with explicit override / abandon ticket.
-- **MUST_FIX persists after 1 revision cycle, headless** → EXIT `blocked` with `blocker.reason: "plan_unsound"`.
+- **MUST_FIX persists after 1 revision cycle, headless** → EXIT `blocked` with `blocker.reason: "plan_unsound"`. Before exiting, write the plan's current text — as it stands at the moment of exit, including any already-appended signoff marker — to `.cw/plan-draft.md`, so a subsequent retry can resume from it instead of regenerating from scratch.
 
 **Codify lessons → wiki inbox:** every RISK finding's `codify:` proposal is written to `~/.claude/wiki/local/inbox/` as a lesson file — filename `lesson-soundness-codify-<shape>-<YYYY-MM-DD>.md`, with the standard `source` / `date` / `topic` frontmatter. This is the *durable* sink; `friction_highlights` is per-run and dies with the result payload. The wiki inbox accumulates across runs, `/wiki-lint` dedupes repeat shapes, and a shape that keeps recurring is the signal to promote it into the target repo's `ARCHITECTURE.md` §7. Route to `wiki/local/inbox/` (not the tracked `wiki/inbox/`) — a codify proposal names a specific repo's architecture and is project-scoped. This write happens for every RISK finding, in both interactive and headless runs, independently of how the human dispositioned the RISK.
 
@@ -346,6 +349,8 @@ If either reviewer's friction is **BLOCK** (e.g., couldn't access the repo, plan
 After plan is approved (or auto-skipped with existing plan) AND Plan Quality Review has passed (Step 1f):
 
 **FIRST, persist the plan file (#943 — this is the stage's primary artifact, not optional):** Write the full reviewed plan text verbatim — including both signoff markers below — to `.cw/plan.md` in the worktree, BEFORE posting to the tracker and BEFORE emitting the sentinel. Stage 2 (`auto-dev-impl.md`) hard-requires this file; a plan that exists only as a tracker comment leaves the ticket unimplementable. Verify the write (`test -s .cw/plan.md`) as part of this step.
+
+**Then, best-effort clear the draft:** if `.cw/plan.md` was written successfully, delete `.cw/plan-draft.md` if present — a stale draft would otherwise resurface on the next Step 1a resume check even though the plan it drafted has since been approved and superseded. Deletion is best-effort: if it fails (permissions, already absent), log and continue — a failed deletion must NOT fail Step 1g.
 
 **THEN** post the same plan as a comment on the Linear issue (skip for free-text tickets — but never skip the `.cw/plan.md` write). This documents the implementation approach on the ticket; the tracker comment is the audit copy, the file is the pipeline artifact.
 
