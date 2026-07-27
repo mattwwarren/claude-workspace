@@ -17,7 +17,9 @@ from tests.conftest import _patch_cw_dist_not_found
 
 
 def _mk_proc(stdout: str = "", returncode: int = 0) -> subprocess.CompletedProcess[str]:
-    return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr="")
+    return subprocess.CompletedProcess(
+        args=[], returncode=returncode, stdout=stdout, stderr=""
+    )
 
 
 def _write(path: Path, content: str) -> None:
@@ -25,9 +27,11 @@ def _write(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
-def test_module_constant_is_patchable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_module_constant_is_patchable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """_CLAUDE_HOME is a module-level Path, honored when monkeypatched."""
-    import cw.doctor.skills_drift as skills_drift
+    from cw.doctor import skills_drift
 
     assert isinstance(skills_drift._CLAUDE_HOME, Path)
 
@@ -66,7 +70,9 @@ def test_no_drift_clean(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     assert "2/2" in result.detail
 
 
-def test_missing_on_global_side(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_missing_on_global_side(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """Repo-tracked file with no counterpart under _CLAUDE_HOME -> warn=True."""
     repo = tmp_path / "repo"
     claude_home = tmp_path / ".claude"
@@ -110,8 +116,10 @@ def test_content_differs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
     assert ".claude/skills/foo/SKILL.md" in result.detail
 
 
-def test_counterpart_is_symlink(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Counterpart leaf path is itself a symlink -> warn=True, detail mentions 'symlink'."""
+def test_counterpart_is_symlink(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Counterpart leaf path is a symlink -> warn=True, detail mentions 'symlink'."""
     repo = tmp_path / "repo"
     claude_home = tmp_path / ".claude"
 
@@ -197,7 +205,9 @@ def test_claude_home_skills_absent_skips(
     assert result.warn is False
 
 
-def test_git_ls_files_failure_warns(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_git_ls_files_failure_warns(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """git binary missing (FileNotFoundError) -> ok=True, warn=True, no crash."""
     repo = tmp_path / "repo"
     claude_home = tmp_path / ".claude"
@@ -207,7 +217,8 @@ def test_git_ls_files_failure_warns(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     monkeypatch.setattr("cw.doctor.skills_drift._resolve_cw_source_path", lambda: repo)
 
     def _raise(*_a: object, **_kw: object) -> subprocess.CompletedProcess[str]:
-        raise FileNotFoundError("git not found")
+        msg = "git not found"
+        raise FileNotFoundError(msg)
 
     monkeypatch.setattr("cw.doctor.skills_drift._sp.run", _raise)
 
@@ -225,8 +236,10 @@ def test_check_included_in_run_doctor(tmp_config_dir: Path) -> None:
     assert _CHECK_NAME in check_names
 
 
-def test_examples_bounded_not_all_39(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """More than _MAX_EXAMPLES drifting files -> detail does not enumerate all of them."""
+def test_examples_bounded_not_all_39(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """More than _MAX_EXAMPLES drifting files -> detail doesn't enumerate all."""
     repo = tmp_path / "repo"
     claude_home = tmp_path / ".claude"
     (claude_home / "skills").mkdir(parents=True)
