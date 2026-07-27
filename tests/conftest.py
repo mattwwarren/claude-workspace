@@ -162,6 +162,18 @@ def _make_ticket_task(**overrides: object) -> TicketTask:
     return TicketTask.model_validate(kwargs)
 
 
+def _patch_cw_dist_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch importlib.metadata.distribution() to raise PackageNotFoundError,
+    simulating a registry/unknown install. Shared helper (#1514).
+    """
+    import importlib.metadata
+
+    def _raise(_pkg: str) -> object:
+        raise importlib.metadata.PackageNotFoundError(_pkg)
+
+    monkeypatch.setattr(importlib.metadata, "distribution", _raise)
+
+
 def _write_project_config_yaml(root: Path, content: str) -> None:
     """Write .claude/project-config.yaml under *root*.
 
