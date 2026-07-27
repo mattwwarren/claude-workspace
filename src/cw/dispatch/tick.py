@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from cw.native_daemon import NativeDaemonClient
 from cw.dispatch.gating import (
     _emit_availability_skip,
+    _emit_ssh_key_bypass,
     _emit_ssh_key_skip,
     _emit_stale_skip,
     _emit_usage_limit_skip_events,
@@ -292,6 +293,7 @@ def _run_preflight_gates(
     cap: int,
     emit: Callable[[str], None] | None,
     warned_ssh_key: set[str] | None,
+    ssh_key_gate_enabled: bool = True,
 ) -> _PreflightGateResult:
     """Resolve + apply the availability and SSH-key preflight gates, in order.
 
@@ -308,6 +310,14 @@ def _run_preflight_gates(
     (possibly still ``None``) when gated on the availability check first,
     since the SSH-key probe short-circuits and is never reached in that
     case.
+
+    ``ssh_key_gate_enabled`` (GitHub #1437) is the operator escape hatch: the
+    probe always runs unconditionally (needed either way to compute the
+    resolved verdict threaded back to the caller, and to populate the bypass
+    event's ``probe_result``), but when the probe reports unavailable and
+    this is False, the would-be skip is suppressed -- a bypass event is
+    recorded instead of the skip, and the client proceeds (``gated=False``).
+    Default True reproduces pre-#1437 behavior exactly.
     """
     resolved_available = _resolve_availability_once(available)
     if not resolved_available:
@@ -322,6 +332,15 @@ def _run_preflight_gates(
 
     resolved_ssh_key_available = _resolve_ssh_key_once(ssh_key_available)
     if not resolved_ssh_key_available:
+        if not ssh_key_gate_enabled:
+            _emit_ssh_key_bypass(
+                client,
+                probe_result=resolved_ssh_key_available,
+                gate_enabled=ssh_key_gate_enabled,
+            )
+            return _PreflightGateResult(
+                resolved_available, resolved_ssh_key_available, False
+            )
         _emit_ssh_key_skip(
             client,
             queue_snapshot,
@@ -523,6 +542,7 @@ def dispatch_tick(
             cap=cap,
             emit=emit,
             warned_ssh_key=warned_ssh_key,
+            ssh_key_gate_enabled=config.ssh_key_gate_enabled,
         )
         if gated:
             continue
