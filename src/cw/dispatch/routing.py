@@ -248,6 +248,21 @@ def _stage_advance_unchecked(
             task.client,
             task.ticket_id,
         )
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": task.session_id or "",
+                "session_name": "",
+                "client": task.client,
+                "ticket_id": task.ticket_id,
+                "claude_session_id": None,
+                "paused_status": _UNKNOWN_CLIENT_REASON,
+                "breadcrumbs": "",
+                "crashed": False,
+                "lane": task.lane,
+            },
+            correlation_id=task.ticket_id,
+        )
         transition_task_status(
             task, QueueItemStatus.BLOCKED_ON_USER, disposition=_UNKNOWN_CLIENT_REASON
         )
@@ -259,6 +274,21 @@ def _stage_advance_unchecked(
             "dispatch: advance: stage %r not in pipeline for task %r",
             task.stage,
             task.ticket_id,
+        )
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": task.session_id or "",
+                "session_name": "",
+                "client": task.client,
+                "ticket_id": task.ticket_id,
+                "claude_session_id": None,
+                "paused_status": _INVALID_STAGE_REASON,
+                "breadcrumbs": "",
+                "crashed": False,
+                "lane": task.lane,
+            },
+            correlation_id=task.ticket_id,
         )
         transition_task_status(
             task, QueueItemStatus.BLOCKED_ON_USER, disposition=_INVALID_STAGE_REASON
