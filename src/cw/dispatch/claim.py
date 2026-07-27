@@ -158,7 +158,7 @@ def _emit_attempt_cap_attention_event(
             "client": client_name,
             "ticket_id": task.ticket_id,
             "claude_session_id": None,
-            "paused_status": "attempt_cap_blocked",
+            "paused_status": DispatchSkipReason.ATTEMPT_CAP_BLOCKED,
             "breadcrumbs": "",
             "crashed": False,
             "lane": lane,

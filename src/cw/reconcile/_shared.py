@@ -1749,7 +1749,7 @@ def _cleanup_timed_out_worktree(
                         "client": session.client,
                         "ticket_id": ticket_id,
                         "claude_session_id": session.claude_session_id,
-                        "paused_status": "dirty_worktree",
+                        "paused_status": _DIRTY_WORKTREE_REASON,
                         "breadcrumbs": wt_path,
                         "crashed": False,
                         "lane": session.lane,
