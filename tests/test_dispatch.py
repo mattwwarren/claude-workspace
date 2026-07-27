@@ -6999,6 +6999,8 @@ class TestApplyStagedDecision:
         _, payload = captured[0]
         assert payload["breadcrumbs"] == expected_breadcrumbs
         assert payload["paused_status"] == status
+        blocker_reason = blocker.get("reason") if isinstance(blocker, dict) else None
+        assert task.blocked_reason == blocker_reason
 
     def test_finalize_regress_self_heal_does_not_emit_attention(
         self,

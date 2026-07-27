@@ -703,7 +703,10 @@ def _route_staged_decision(
             correlation_id=task.ticket_id,
         )
         transition_task_status(
-            task, QueueItemStatus.BLOCKED_ON_USER, disposition=disposition
+            task,
+            QueueItemStatus.BLOCKED_ON_USER,
+            disposition=disposition,
+            blocked_reason=blocker_reason,
         )
     else:
         # Rule 6: None/not dict/missing status -- conservative fallback
