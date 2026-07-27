@@ -51,6 +51,16 @@ cw event tail --follow --client "$CLIENT" --dedup-terminal \
   --json \
 | python3 -u -c '
 import sys, json
+
+# Only these paused_status values put blocker.reason verbatim into
+# breadcrumbs (routing.py Rule 5, GitHub #1511); breadcrumbs is polymorphic
+# for every other paused_status producer (worktree paths, fixed
+# reason-strings, full sentences), so this is a gated allowlist, not a
+# blanket breadcrumbs fallback.
+_BLOCKER_REASON_PAUSED_STATUSES = {
+    "blocked", "awaiting_operator_availability", "merge_gate_blocked",
+}
+
 for ln in sys.stdin:
     ln = ln.strip()
     if not ln:
@@ -68,6 +78,8 @@ for ln in sys.stdin:
         bits.append("stage=" + str(p.get("stage")))
     if p.get("attempts") is not None:
         bits.append("att=" + str(p.get("attempts")))
+    if p.get("paused_status") in _BLOCKER_REASON_PAUSED_STATUSES and p.get("breadcrumbs"):
+        bits.append("reason=" + str(p.get("breadcrumbs")))
     joined = " ".join(bits)
     sess = str(p.get("session_id") or "")[:8]
     print("ATTENTION | %s | %s | %s | %s | %s" % (t, tk, why, joined, sess), flush=True)
