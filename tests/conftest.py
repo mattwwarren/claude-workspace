@@ -162,6 +162,39 @@ def _make_ticket_task(**overrides: object) -> TicketTask:
     return TicketTask.model_validate(kwargs)
 
 
+def _patch_cw_dist(
+    monkeypatch: pytest.MonkeyPatch, *, direct_url_text: str | None
+) -> None:
+    """Patch importlib.metadata.distribution() to return a FakeDist exposing
+    the given direct_url.json text.
+
+    Shared by the cw-version, cw-deps, and skills-commands-drift doctor-check
+    test suites (#1514) — all three exercise the same
+    _resolve_cw_source_path() registry-vs-local-install branching.
+    """
+    import importlib.metadata
+
+    class FakeDist:
+        def read_text(self, filename: str) -> str | None:
+            if filename == "direct_url.json":
+                return direct_url_text
+            return None
+
+    monkeypatch.setattr(importlib.metadata, "distribution", lambda _pkg: FakeDist())
+
+
+def _patch_cw_dist_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch importlib.metadata.distribution() to raise PackageNotFoundError,
+    simulating a registry/unknown install. Shared helper (#1514).
+    """
+    import importlib.metadata
+
+    def _raise(_pkg: str) -> object:
+        raise importlib.metadata.PackageNotFoundError(_pkg)
+
+    monkeypatch.setattr(importlib.metadata, "distribution", _raise)
+
+
 def _write_project_config_yaml(root: Path, content: str) -> None:
     """Write .claude/project-config.yaml under *root*.
 
