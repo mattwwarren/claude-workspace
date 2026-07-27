@@ -1206,8 +1206,13 @@ def _route_blocked_result_to_task(
     # An unparseable sentinel is evidence the *frame* was malformed, not that
     # the run is over -- a fresh transcript means killing it here would drop
     # work that is still in flight (the #1281 incident shape). Re-queue to
-    # PENDING instead, byte-identical to the _TRANSIENT_PARSE_FAILURES branch
-    # above (no last_blocked_result write: a re-queue rejects nothing).
+    # PENDING, same shape as the _TRANSIENT_PARSE_FAILURES branch above (no
+    # last_blocked_result write: a re-queue rejects nothing), plus an audit
+    # event -- unlike that branch, this one overrides what would otherwise be
+    # a terminal FAILED landing, so it needs a durable trace an operator can
+    # find later. record_event nests _inbox_lock inside dev_queue_lock here,
+    # the same safe nesting order crud.py's _emit_task_deleted and
+    # dev_queue/lifecycle.py already rely on (never the reverse -- see #765).
     #
     # The `0 <= age` floor is load-bearing, not defensive: a negative age
     # means the transcript's mtime is *after* `now` (clock skew, or a caller
@@ -1221,6 +1226,17 @@ def _route_blocked_result_to_task(
     if age is not None and 0 <= age < TRANSCRIPT_LIVENESS_WINDOW_SECONDS:
         transition_task_status(target, QueueItemStatus.PENDING)
         target.session_id = None
+        record_event(
+            OrchestratorEventType.SESSION_SENTINEL_LIVENESS_VETOED,
+            {
+                "ticket_id": target.ticket_id,
+                "client": target.client,
+                "session_id": session.id,
+                "transcript_age_seconds": age,
+                "blocker_reason": sentinel.blocker.reason,
+            },
+            correlation_id=target.ticket_id,
+        )
         return True
     # #1266: persist the rejected sentinel so an operator can tell an absent
     # sentinel (last_blocked_result stays None) from a rejected one, instead

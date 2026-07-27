@@ -323,9 +323,11 @@ class TicketTask(BaseModel):
     # (the sentinel is re-queued PENDING, not rejected). So a set value means
     # "rejected AND the worker was demonstrably done on that landing" -- not
     # merely "rejected." Not a lifetime guarantee: a --from-failed requeue
-    # (see dev_queue/lifecycle.py) doesn't clear this field, so a stale value
-    # from an earlier FAILED landing can persist on a task later revived to
-    # PENDING/RUNNING -- read it relative to the task's *current* status.
+    # (dev_queue/requeue.py's requeue_ticket, via the shared
+    # _reset_for_same_stage_requeue in dev_queue/lifecycle.py) doesn't clear
+    # this field, so a stale value from an earlier FAILED landing can persist
+    # on a task later revived to PENDING/RUNNING -- read it relative to the
+    # task's *current* status.
     last_blocked_result: dict[str, Any] | None = None
     # GitHub #1511 — the `blocker.reason` off a well-formed blocked/
     # merge_gate_blocked AutoDevResult, stamped by transition_task_status

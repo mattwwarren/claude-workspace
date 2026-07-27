@@ -2924,10 +2924,13 @@ class TestRouteBlockedResultCatchAllLivenessGuard:
     ) -> None:
         """LIVE transcript → PENDING + cleared session_id instead of FAILED.
 
-        Mirrors the ``_TRANSIENT_PARSE_FAILURES`` branch byte-for-byte,
-        including *not* writing the ``last_blocked_result`` diagnostic (#1266):
-        the veto is a re-queue, not a rejection, so there is no rejected
-        sentinel to record.
+        Mirrors the ``_TRANSIENT_PARSE_FAILURES`` branch's requeue, but
+        (unlike that branch) also emits ``SESSION_SENTINEL_LIVENESS_VETOED``
+        -- this veto overrides what would otherwise be a terminal FAILED
+        landing, so it needs a durable audit trail; a re-queue that never
+        would have been FAILED doesn't. Does NOT write the
+        ``last_blocked_result`` diagnostic (#1266): the veto is a re-queue,
+        not a rejection, so there is no rejected sentinel to record.
         """
         _write_staged_clients_yaml(tmp_config_dir, "staged-client")
         session, now = self._live_session(
@@ -2949,6 +2952,17 @@ class TestRouteBlockedResultCatchAllLivenessGuard:
         assert target.status == QueueItemStatus.PENDING
         assert target.session_id is None
         assert target.last_blocked_result is None
+        vetoed = [
+            e
+            for e in read_events()
+            if e.type == OrchestratorEventType.SESSION_SENTINEL_LIVENESS_VETOED
+        ]
+        assert len(vetoed) == 1
+        assert vetoed[0].payload["ticket_id"] == "GH-1406-live"
+        assert vetoed[0].payload["client"] == "staged-client"
+        assert vetoed[0].payload["session_id"] == session.id
+        assert vetoed[0].payload["transcript_age_seconds"] == 30
+        assert vetoed[0].payload["blocker_reason"] == self.CATCH_ALL_REASON
 
     def test_route_blocked_result_catch_all_stale_transcript_falls_through_to_failed(
         self,
@@ -2985,6 +2999,11 @@ class TestRouteBlockedResultCatchAllLivenessGuard:
         assert target.status == QueueItemStatus.FAILED
         assert target.disposition == "abandoned"
         assert target.last_blocked_result == sentinel.model_dump(mode="json")
+        assert [
+            e
+            for e in read_events()
+            if e.type == OrchestratorEventType.SESSION_SENTINEL_LIVENESS_VETOED
+        ] == []
 
     def test_apply_sentinel_catch_all_live_transcript_requeues_pending_via_apply(
         self,
@@ -2997,6 +3016,9 @@ class TestRouteBlockedResultCatchAllLivenessGuard:
         Pins the widened ``session``/``now`` threading end-to-end, and that
         ``landed_terminal`` (#1273) derives False off the vetoed ``routed=True``
         -- callers must NOT ``daemon.stop()`` a worker that is still advancing.
+        Also confirms the audit event survives the trip through
+        ``_apply_sentinel_to_task``'s own ``dev_queue_lock()`` -- record_event
+        nests _inbox_lock inside it, the established safe order (#765).
         """
         _write_staged_clients_yaml(tmp_config_dir, "staged-client")
         session, now = self._live_session(
@@ -3026,6 +3048,13 @@ class TestRouteBlockedResultCatchAllLivenessGuard:
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
         assert t.status == QueueItemStatus.PENDING
         assert t.session_id is None
+        vetoed = [
+            e
+            for e in read_events()
+            if e.type == OrchestratorEventType.SESSION_SENTINEL_LIVENESS_VETOED
+        ]
+        assert len(vetoed) == 1
+        assert vetoed[0].payload["ticket_id"] == ticket_id
 
     def test_route_blocked_result_catch_all_negative_age_falls_through_to_failed(
         self,
@@ -3064,71 +3093,77 @@ class TestRouteBlockedResultCatchAllLivenessGuard:
         assert target.status == QueueItemStatus.FAILED
         assert target.disposition == "abandoned"
         assert target.last_blocked_result == sentinel.model_dump(mode="json")
+        assert [
+            e
+            for e in read_events()
+            if e.type == OrchestratorEventType.SESSION_SENTINEL_LIVENESS_VETOED
+        ] == []
 
+    @pytest.mark.parametrize(
+        ("age_seconds", "expect_routed", "expect_status", "expect_event_count"),
+        [
+            pytest.param(
+                TRANSCRIPT_LIVENESS_WINDOW_SECONDS - 1,
+                True,
+                QueueItemStatus.PENDING,
+                1,
+                id="just_inside_window",
+            ),
+            pytest.param(
+                TRANSCRIPT_LIVENESS_WINDOW_SECONDS,
+                False,
+                QueueItemStatus.FAILED,
+                0,
+                id="exactly_at_window",
+            ),
+        ],
+    )
     def test_route_blocked_result_catch_all_window_boundary(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        age_seconds: int,
+        expect_routed: bool,
+        expect_status: QueueItemStatus,
+        expect_event_count: int,
     ) -> None:
         """The window comparison is strict ``<``: exactly at the window is DEAD.
 
         ``TRANSCRIPT_LIVENESS_WINDOW_SECONDS - 1`` (just inside) requeues to
-        PENDING; ``TRANSCRIPT_LIVENESS_WINDOW_SECONDS`` exactly (not strictly
-        less than the window) falls through to FAILED.
+        PENDING and emits the veto event; ``TRANSCRIPT_LIVENESS_WINDOW_SECONDS``
+        exactly (not strictly less than the window) falls through to FAILED
+        with no event.
         """
         _write_staged_clients_yaml(tmp_config_dir, "staged-client")
-
-        just_inside_session, just_inside_now = self._live_session(
+        session, now = self._live_session(
             tmp_path,
             monkeypatch,
-            session_id="sess-1406-just-inside",
-            age_seconds=TRANSCRIPT_LIVENESS_WINDOW_SECONDS - 1,
+            session_id="sess-1406-boundary",
+            age_seconds=age_seconds,
         )
-        just_inside_target = TicketTask(
-            ticket_id="GH-1406-just-inside",
+        target = TicketTask(
+            ticket_id="GH-1406-boundary",
             client="staged-client",
             status=QueueItemStatus.RUNNING,
-            session_id=just_inside_session.id,
+            session_id=session.id,
             stage=Stage.IMPL,
             attempts=1,
         )
-        just_inside_routed = _route_blocked_result_to_task(
-            just_inside_target,
-            just_inside_session,
-            self._catch_all_sentinel(),
-            now=just_inside_now,
-        )
+        sentinel = self._catch_all_sentinel()
 
-        assert just_inside_routed is True
-        assert just_inside_target.status == QueueItemStatus.PENDING
-        assert just_inside_target.session_id is None
+        routed = _route_blocked_result_to_task(target, session, sentinel, now=now)
 
-        at_window_session, at_window_now = self._live_session(
-            tmp_path,
-            monkeypatch,
-            session_id="sess-1406-at-window",
-            age_seconds=TRANSCRIPT_LIVENESS_WINDOW_SECONDS,
-        )
-        at_window_target = TicketTask(
-            ticket_id="GH-1406-at-window",
-            client="staged-client",
-            status=QueueItemStatus.RUNNING,
-            session_id=at_window_session.id,
-            stage=Stage.IMPL,
-            attempts=1,
-        )
-        at_window_sentinel = self._catch_all_sentinel()
-        at_window_routed = _route_blocked_result_to_task(
-            at_window_target,
-            at_window_session,
-            at_window_sentinel,
-            now=at_window_now,
-        )
-
-        assert at_window_routed is False
-        assert at_window_target.status == QueueItemStatus.FAILED
-        assert at_window_target.disposition == "abandoned"
-        assert at_window_target.last_blocked_result == at_window_sentinel.model_dump(
-            mode="json"
-        )
+        assert routed is expect_routed
+        assert target.status == expect_status
+        vetoed = [
+            e
+            for e in read_events()
+            if e.type == OrchestratorEventType.SESSION_SENTINEL_LIVENESS_VETOED
+        ]
+        assert len(vetoed) == expect_event_count
+        if expect_status == QueueItemStatus.PENDING:
+            assert target.session_id is None
+        else:
+            assert target.disposition == "abandoned"
+            assert target.last_blocked_result == sentinel.model_dump(mode="json")
