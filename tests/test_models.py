@@ -931,7 +931,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_20(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 22
+        assert DEV_QUEUE_SCHEMA_VERSION == 23
 
     def test_pr_state_defaults(self) -> None:
         state = PrState()
@@ -1357,6 +1357,20 @@ class TestConciergeAndEscalationModelSurface:
         assert (
             OrchestratorEventType.GATE_AUTO_APPROVE_FAILED
             in _DEFAULT_OPERATOR_EVENT_TYPES
+        )
+
+    # -- RFC 0011 A3 proactive finalize hold (#1160) -------------------------
+
+    def test_orchestrator_event_type_includes_gate_auto_approve_held(self) -> None:
+        assert OrchestratorEventType.GATE_AUTO_APPROVE_HELD == "gate.auto_approve_held"
+
+    def test_gate_auto_approve_held_in_default_forward_set(self) -> None:
+        """GATE_AUTO_APPROVE_HELD IS forwarded by default: it corrects a
+        GATE_AUTO_APPROVED that the A3 force hold then declined to act on."""
+        from cw.models import _DEFAULT_OPERATOR_EVENT_TYPES
+
+        assert (
+            OrchestratorEventType.GATE_AUTO_APPROVE_HELD in _DEFAULT_OPERATOR_EVENT_TYPES
         )
 
     # -- RFC 0010 P2 review-recipe act-phase surface (#1097) -----------------

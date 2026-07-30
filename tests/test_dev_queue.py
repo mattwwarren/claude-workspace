@@ -2369,7 +2369,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["pr_state"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 22
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 23
 
     def test_v8_pr_state_preserved_idempotently(self) -> None:
         """Existing pr_state survives a second migration pass (idempotent)."""
@@ -2413,7 +2413,7 @@ class TestMigrateDevQueue:
         """migrate_dev_queue bumps schema_version to current regardless of input."""
         raw: dict[str, object] = {"schema_version": 1, "tasks": []}
         migrated = migrate_dev_queue(raw)
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 22
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 23
 
     def test_v9_signoff_preserved_idempotently(self) -> None:
         """Existing signoff value survives a second migration pass."""
@@ -2448,7 +2448,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["escalation_parked_at"] is None
         assert migrated["tasks"][0]["escalation_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 22
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 23
 
     def test_v10_escalation_fields_preserved_idempotently(self) -> None:
         """Existing escalation timestamps survive a second migration pass."""
@@ -2491,7 +2491,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["false_park_recovery_count"] == 0
         assert migrated["tasks"][0]["false_park_recovery_next_eligible_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 22
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 23
 
     def test_v11_false_park_recovery_backoff_preserved_idempotently(self) -> None:
         """Existing false-park-recovery backoff state survives a second
@@ -2533,7 +2533,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["gate_recipe_failed_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 22
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 23
 
     def test_v12_gate_recipe_failed_at_preserved_idempotently(self) -> None:
         """Existing gate_recipe_failed_at timestamp survives a second
@@ -2571,7 +2571,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["escalate_merge_block_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 22
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 23
 
     def test_v14_escalate_merge_block_fired_at_preserved_idempotently(self) -> None:
         """Existing escalate_merge_block_fired_at survives a second migration."""
@@ -2608,7 +2608,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["request_reviewer_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 22
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 23
 
     def test_v16_request_reviewer_fired_at_preserved_idempotently(self) -> None:
         """Existing request_reviewer_fired_at survives a second migration."""
@@ -2645,7 +2645,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["auto_fix_ci_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 22
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 23
 
     def test_v17_auto_fix_ci_fired_at_preserved_idempotently(self) -> None:
         """Existing auto_fix_ci_fired_at survives a second migration."""
@@ -2682,7 +2682,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["address_review_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 22
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 23
 
     def test_v18_address_review_fired_at_preserved_idempotently(self) -> None:
         """Existing address_review_fired_at survives a second migration."""
@@ -2719,7 +2719,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["last_blocked_result"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 22
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 23
 
     def test_v19_last_blocked_result_preserved_idempotently(self) -> None:
         """Existing last_blocked_result survives a second migration."""
@@ -2760,7 +2760,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["cross_repo_override"] is False
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 22
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 23
 
     def test_v20_cross_repo_override_preserved_idempotently(self) -> None:
         """Existing cross_repo_override survives a second migration."""
@@ -2798,7 +2798,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["stage_high_water"] == "impl"
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 22
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 23
 
     def test_migrate_dev_queue_fills_stage_high_water_default_when_stage_also_missing(
         self,
@@ -2820,7 +2820,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["stage"] == DEFAULT_STAGE.value == "plan"
         assert migrated["tasks"][0]["stage_high_water"] == DEFAULT_STAGE.value == "plan"
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 22
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 23
 
     def test_v21_stage_high_water_preserved_idempotently(self) -> None:
         """Existing stage_high_water survives a second migration pass unchanged,
@@ -2860,14 +2860,63 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["blocked_reason"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 22
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 23
+
+    def test_migrate_dev_queue_fills_hold_finalize_default(self) -> None:
+        """migrate_dev_queue fills hold_finalize=None on tasks missing the key
+        (v23, GitHub #1160, RFC 0011 A3)."""
+        raw: dict[str, object] = {
+            "schema_version": 22,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-1160",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["hold_finalize"] is None
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 23
+
+    def test_v23_hold_finalize_preserved_idempotently(self) -> None:
+        """An existing hold_finalize value survives a second migration pass."""
+        raw: dict[str, object] = {
+            "schema_version": 22,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-1160",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                    "hold_finalize": "manual",
+                }
+            ],
+        }
+        once = migrate_dev_queue(raw)
+        twice = migrate_dev_queue(once)
+        assert twice["tasks"][0]["hold_finalize"] == "manual"
+
+    def test_ticket_task_hold_finalize_rejects_invalid_literal(self) -> None:
+        """hold_finalize is a closed Literal: an unrecognised value fails loud."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            TicketTask.model_validate(
+                {
+                    "ticket_id": "GEN-1160",
+                    "client": "test-client",
+                    "hold_finalize": "yes",
+                }
+            )
 
     def test_migrate_dev_queue_fills_watched_prs_default(self) -> None:
         """migrate_dev_queue fills watched_prs=[] on a store missing the key (v15)."""
         raw: dict[str, object] = {"schema_version": 14, "tasks": []}
         migrated = migrate_dev_queue(raw)
         assert migrated["watched_prs"] == []
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 22
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 23
 
     def test_migrate_dev_queue_preserves_existing_watched_prs(self) -> None:
         """An existing watched_prs list survives migration untouched (idempotent)."""
@@ -4441,6 +4490,209 @@ class TestApproveTicketLockedResolved:
 
 
 # ---------------------------------------------------------------------------
+# TestApproveTicketLockedForceHold — operator_initiated caller-provenance gate
+# ---------------------------------------------------------------------------
+
+
+class TestApproveTicketLockedForceHold:
+    """RFC 0011 A3 (#1160): the A3 force hold is skipped for a human
+    ``cw dev-queue approve`` (``operator_initiated=True``) and fires for every
+    automatic caller, which omits the kwarg and gets the fail-safe default."""
+
+    def _arm_force_held_review_row(
+        self, tmp_config_dir: Path, tmp_path: Path, session_id: str
+    ) -> TicketTask:
+        """Save a BLOCKED_ON_USER REVIEW row with the force hold armed, plus its
+        owning session carrying a review_pending_approval last_result."""
+        from cw.config import save_state
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.REVIEW, session_id=session_id)
+        task.hold_finalize = "manual"
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(
+                        session_id=session_id,
+                        last_result={"status": "review_pending_approval"},
+                    )
+                ]
+            )
+        )
+        return task
+
+    def test_approve_locked_force_held_review_ticket_default_kwarg_holds(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Omitting operator_initiated treats the call as automatic: the row
+        stays exactly as parked and finalize_held comes back True."""
+        from cw.dev_queue import _approve_ticket_locked, dev_queue_lock
+
+        self._arm_force_held_review_row(tmp_config_dir, tmp_path, "sess-fh-1")
+
+        with dev_queue_lock():
+            result = _approve_ticket_locked("GEN-500", "genhealth")
+
+        assert result["finalize_held"] is True
+        assert result["awaiting_signoff"] is False
+        assert result["from_stage"] == "review"
+        assert result["to_stage"] == "review"
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.stage == Stage.REVIEW
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_approve_locked_operator_initiated_true_bypasses_force_hold(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """operator_initiated=True is the human release: the force-hold check is
+        skipped entirely and the ticket advances."""
+        from cw.dev_queue import _approve_ticket_locked, dev_queue_lock
+
+        self._arm_force_held_review_row(tmp_config_dir, tmp_path, "sess-fh-2")
+
+        with dev_queue_lock():
+            result = _approve_ticket_locked(
+                "GEN-500", "genhealth", operator_initiated=True
+            )
+
+        assert result["finalize_held"] is False
+        assert result["awaiting_signoff"] is False
+        assert result["to_stage"] == "finalize"
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.stage == Stage.FINALIZE
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_approve_locked_auto_reactor_style_call_stays_held(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """The gate-recipe reactor's exact call shape (resolved_task pinned, no
+        operator_initiated) holds rather than approving."""
+        from cw.dev_queue import _approve_ticket_locked, dev_queue_lock
+
+        task = self._arm_force_held_review_row(tmp_config_dir, tmp_path, "sess-fh-3")
+
+        with dev_queue_lock():
+            result = _approve_ticket_locked(
+                "GEN-500", "genhealth", resolved_task=task
+            )
+
+        assert result["finalize_held"] is True
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.stage == Stage.REVIEW
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_approve_locked_finalize_held_key_always_present_on_other_paths(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """finalize_held is part of the return contract on every path, not only
+        the force-hold one: an unreviewed-plan requeue and an ordinary advance
+        both report False."""
+        from cw.config import save_state
+        from cw.dev_queue import _approve_ticket_locked, dev_queue_lock
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        stub_fetch_plan(
+            monkeypatch,
+            plan_body(spec=False, soundness=False),
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-fh-4")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(
+                        session_id="sess-fh-4",
+                        last_result={"status": "plan_pending_approval"},
+                    )
+                ]
+            )
+        )
+
+        with dev_queue_lock():
+            requeued = _approve_ticket_locked("GEN-500", "genhealth")
+        assert requeued["plan_requeued"] is True
+        assert requeued["finalize_held"] is False
+
+        # Now the reviewed-plan advance path.
+        stub_fetch_plan(
+            monkeypatch,
+            plan_body(),
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
+        )
+        advanced_task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-fh-5")
+        save_dev_queue(DevQueueStore(tasks=[advanced_task]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(
+                        session_id="sess-fh-5",
+                        last_result={"status": "plan_pending_approval"},
+                    )
+                ]
+            )
+        )
+        with dev_queue_lock():
+            advanced = _approve_ticket_locked("GEN-500", "genhealth")
+        assert advanced["to_stage"] == "impl"
+        assert advanced["finalize_held"] is False
+
+    def test_clear_signoff_gate_path_unaffected_by_force_hold(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """An already-signoff-parked row with the force hold armed still clears
+        via _clear_signoff_gate on the human approve path, exactly as today."""
+        from cw.dev_queue import approve_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.REVIEW,
+            session_id=None,
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        )
+        task.hold_finalize = "manual"
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["awaiting_signoff"] is False
+        assert result["finalize_held"] is False
+        assert result["from_stage"] == "review"
+        assert result["to_stage"] == "finalize"
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+        assert t.stage == Stage.FINALIZE
+
+    def test_both_gates_armed_manual_approve_hits_signoff_not_force_hold(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Human approve with both gates armed: the force-hold branch is skipped
+        (operator_initiated=True) and the unchanged signoff elif parks the row."""
+        from cw.dev_queue import approve_ticket
+
+        task = self._arm_force_held_review_row(tmp_config_dir, tmp_path, "sess-fh-6")
+        task.signoff = "operator"
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["finalize_held"] is False
+        assert result["awaiting_signoff"] is True
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+        assert t.disposition == "signoff_gate"
+        assert t.stage == Stage.REVIEW
+
+
+# ---------------------------------------------------------------------------
 # TestRequeueTicket — requeue_ticket() mutation function
 # ---------------------------------------------------------------------------
 
@@ -5295,17 +5547,21 @@ class TestDrainHeldTickets:
     def test_drain_excludes_a3_force_hold(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        """A `disposition="finalize_gate_held"` row -- placeholder for #1160's
-        not-yet-existing A3 force-hold disposition constant -- is left
-        untouched by both selection and drain (RFC 0011 A4 R11)."""
-        from cw.dev_queue import drain_held_tickets, select_held_tickets
+        """A row carrying #1160's A3 force-hold disposition is left untouched by
+        both selection and drain (RFC 0011 A4 R11)."""
+        from cw.dev_queue import (
+            FINALIZE_GATE_HELD_DISPOSITION,
+            drain_held_tickets,
+            select_held_tickets,
+        )
 
+        assert FINALIZE_GATE_HELD_DISPOSITION == "finalize_gate_held"
         _write_client_yaml(tmp_config_dir, tmp_path)
         force_held = _make_blocked_task(
             ticket_id="GEN-500",
             stage=Stage.REVIEW,
             session_id="sess-force-1",
-            disposition="finalize_gate_held",
+            disposition=FINALIZE_GATE_HELD_DISPOSITION,
         )
         save_dev_queue(DevQueueStore(tasks=[force_held]))
 
@@ -6740,7 +6996,9 @@ class TestHoldAwareDisposition:
         from cw.dev_queue import AWAITING_OPERATOR_DISPOSITION, HOLD_DISPOSITIONS
 
         assert AWAITING_OPERATOR_DISPOSITION in HOLD_DISPOSITIONS
-        assert len(HOLD_DISPOSITIONS) == 1
+        # RFC 0011 A3 (#1160) extended this frozenset in place with
+        # FINALIZE_GATE_HELD_DISPOSITION rather than adding a parallel set.
+        assert len(HOLD_DISPOSITIONS) == 2
 
     def test_awaiting_operator_disposition_value(self) -> None:
         from cw.dev_queue import AWAITING_OPERATOR_DISPOSITION
