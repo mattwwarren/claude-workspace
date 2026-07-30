@@ -281,13 +281,14 @@ def _should_force_hold_finalize(
     return resolve_hold_finalize(task, clients, config) is not None
 
 
-def _record_finalize_hold_attention(task: TicketTask) -> None:
-    """Emit the SESSION_NEEDS_ATTENTION signal for an A3 force-hold park.
+def _park_finalize_hold(task: TicketTask) -> None:
+    """Park *task* BLOCKED_ON_USER for an A3 force-hold (RFC 0011 A3, #1160).
 
-    Shared by all three REVIEW-scoped gate sites so the payload cannot drift
-    between them; the surrounding ``transition_task_status`` call stays at each
-    site because the control-flow shape (``return "parked"`` vs falling through
-    an ``if``/``elif``/``else``) differs per site. See GitHub #1160.
+    Shared by all three REVIEW-scoped gate sites so neither the attention
+    payload nor the status/disposition pairing can drift between them; the
+    surrounding control flow (``return "parked"`` vs falling through an
+    ``if``/``elif``/``else``) stays at each call site because it differs per
+    site.
     """
     record_event(
         OrchestratorEventType.SESSION_NEEDS_ATTENTION,
@@ -303,6 +304,11 @@ def _record_finalize_hold_attention(task: TicketTask) -> None:
             "lane": task.lane,
         },
         correlation_id=task.ticket_id,
+    )
+    transition_task_status(
+        task,
+        QueueItemStatus.BLOCKED_ON_USER,
+        disposition=FINALIZE_GATE_HELD_DISPOSITION,
     )
 
 
@@ -509,13 +515,12 @@ def _walk_stage_pointer_forward(
     original_session_id = task.session_id
     while stages.index(task.stage) < target_idx:
         if task.stage == Stage.REVIEW and _should_force_hold_finalize(task, clients):
-            _record_finalize_hold_attention(task)
-            transition_task_status(
-                task,
-                QueueItemStatus.BLOCKED_ON_USER,
-                disposition=FINALIZE_GATE_HELD_DISPOSITION,
-            )
+            _park_finalize_hold(task)
             return "parked"
+        # Not `elif` (ruff RET505: an elif after a `return` is redundant) --
+        # the `return` above already makes this exclusive with the force-hold
+        # branch, unlike the other two REVIEW-scoped gate sites (which have no
+        # early return and so use a real `elif` chain instead).
         if task.stage == Stage.REVIEW and _should_gate_for_signoff(task, clients):
             transition_task_status(
                 task,
@@ -629,12 +634,7 @@ def _route_scope_gated_approval(
         # second `approve` clears, whereas this park is the stop itself
         # (RFC 0011 A3, #1160). Chained as if/elif so an armed force hold never
         # double-parks the row through the signoff branch too.
-        _record_finalize_hold_attention(task)
-        transition_task_status(
-            task,
-            QueueItemStatus.BLOCKED_ON_USER,
-            disposition=FINALIZE_GATE_HELD_DISPOSITION,
-        )
+        _park_finalize_hold(task)
     elif task.stage == Stage.REVIEW and _should_gate_for_signoff(task, clients):
         # Why: the operator-signoff gate takes precedence over the small-tier
         # auto-advance -- the ticket parks for an explicit operator approval
@@ -674,12 +674,7 @@ def _route_stage_success(
     branch ceiling.
     """
     if task.stage == Stage.REVIEW and _should_force_hold_finalize(task, clients):
-        _record_finalize_hold_attention(task)
-        transition_task_status(
-            task,
-            QueueItemStatus.BLOCKED_ON_USER,
-            disposition=FINALIZE_GATE_HELD_DISPOSITION,
-        )
+        _park_finalize_hold(task)
     elif task.stage == Stage.REVIEW and _should_gate_for_signoff(task, clients):
         transition_task_status(
             task,

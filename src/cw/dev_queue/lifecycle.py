@@ -445,6 +445,16 @@ def _clear_signoff_gate(task: TicketTask, stages: list[Stage]) -> None:
     pipeline's terminal stage, otherwise advance the stage pointer -- mirrors
     ``_stage_advance_unchecked``'s branch shape. Mutates task in place.
     See GitHub #990.
+
+    Not gated by the RFC 0011 A3 force hold (#1160): the automatic gate-recipe
+    reactor can never reach this function. ``_act_auto_approve_review``'s
+    candidates are produced by ``_detect_auto_approve_review`` and re-resolved
+    by ``_find_blocked_task`` (both in ``cw.reconcile.gate_recipes``), and both
+    filter on ``task.status == QueueItemStatus.BLOCKED_ON_USER`` -- a row
+    already at ``AWAITING_OPERATOR_SIGNOFF`` (this function's precondition,
+    enforced by its only caller, ``_approve_ticket_locked``) can never be
+    selected by either filter. Only the human ``approve_ticket`` path reaches
+    here, so no ``operator_initiated`` threading is needed.
     """
     if task.stage == stages[-1]:
         transition_task_status(
