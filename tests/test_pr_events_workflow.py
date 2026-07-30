@@ -20,6 +20,7 @@ import json
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -28,25 +29,29 @@ WORKFLOW_PATH = ROOT / ".github" / "workflows" / "pr-events.yml"
 MERGED_GATE = 'if [ "$PR_MERGED" != "true" ]'
 
 
-def _workflow() -> dict:
-    return yaml.safe_load(WORKFLOW_PATH.read_text())
+def _workflow() -> dict[Any, Any]:
+    workflow: dict[Any, Any] = yaml.safe_load(WORKFLOW_PATH.read_text())
+    return workflow
 
 
-def _on_block() -> dict:
+def _on_block() -> dict[str, Any]:
     # PyYAML's SafeLoader follows YAML 1.1, which parses the bare `on` scalar
     # key as the boolean `True` rather than the string "on" -- a well-known
     # GitHub Actions YAML gotcha.
-    return _workflow()[True]
+    on_block: dict[str, Any] = _workflow()[True]
+    return on_block
 
 
-def _resolve_step() -> dict:
+def _resolve_step() -> dict[str, Any]:
     workflow = _workflow()
     steps = workflow["jobs"]["push-pr-event"]["steps"]
-    return next(step for step in steps if step.get("id") == "resolve")
+    step: dict[str, Any] = next(s for s in steps if s.get("id") == "resolve")
+    return step
 
 
 def _resolve_script() -> str:
-    return _resolve_step()["run"]
+    script: str = _resolve_step()["run"]
+    return script
 
 
 def _pull_request_arm_text() -> str:
@@ -58,7 +63,7 @@ def _pull_request_arm_text() -> str:
 
 
 def _run_resolve_step(env_overrides: dict[str, str]) -> dict[str, str]:
-    """Execute the resolve step's shell script with synthetic env, parse $GITHUB_OUTPUT."""
+    """Run the resolve step's script with synthetic env, parse $GITHUB_OUTPUT."""
     script = _resolve_script()
     base_env = {
         "EVENT_NAME": "",
@@ -80,7 +85,7 @@ def _run_resolve_step(env_overrides: dict[str, str]) -> dict[str, str]:
         output_path = Path(handle.name)
     try:
         env["GITHUB_OUTPUT"] = str(output_path)
-        result = subprocess.run(  # noqa: S603
+        result = subprocess.run(
             ["/bin/bash", "-c", script],
             env=env,
             capture_output=True,
@@ -130,7 +135,10 @@ def test_review_requested_sets_event_type_literal() -> None:
 def test_env_maps_requested_reviewer_and_team() -> None:
     env = _resolve_step()["env"]
     assert env["ACTION"] == "${{ github.event.action }}"
-    assert env["REQUESTED_REVIEWER_LOGIN"] == "${{ github.event.requested_reviewer.login }}"
+    assert (
+        env["REQUESTED_REVIEWER_LOGIN"]
+        == "${{ github.event.requested_reviewer.login }}"
+    )
     assert env["REQUESTED_TEAM_SLUG"] == "${{ github.event.requested_team.slug }}"
     assert env["REQUESTER_LOGIN"] == "${{ github.event.sender.login }}"
 
