@@ -765,6 +765,127 @@ def test_stalled_foreign_result_blocked_result_shape_routes_blocked_on_user(
     assert task.disposition == "blocked"
 
 
+def test_stalled_foreign_result_operator_unavailable_stamps_awaiting_operator(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RFC 0011 A1 (#1254): a foreign producer-emitted AutoDevResult whose
+    blocker.reason is operator-unavailable stamps the hold-class disposition
+    instead of the verbatim "blocked" status."""
+    from cw.reconcile import (
+        ProposedAction,
+        _act_on_stalled_candidates,
+        _detect_stalled_candidates,
+    )
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+    )
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    foreign_payload = _make_terminal_payload("blocked", "stalled-hold-adr")
+    foreign_payload["blocker"] = {
+        "stage": "stage1_plan",
+        "reason": "operator_unavailable",
+    }
+    session = _mk_headless_daemon_session(
+        "stalled-hold-adr", tmp_path / "wt-hold-adr", started_at
+    )
+    session.last_result = foreign_payload
+    state = CwState(sessions=[session])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="stalled-hold-adr",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="stalled-hold-adr",
+                    stage=Stage.IMPL,
+                ),
+            ]
+        )
+    )
+    task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
+    config = OrchestratorConfig()
+
+    candidates = _detect_stalled_candidates(
+        state, now=now, config=config, task_by_ticket=task_by_ticket
+    )
+    assert [c.proposed_action for c in candidates] == [
+        ProposedAction.COMPLETE_FOREIGN_RESULT
+    ]
+
+    _act_on_stalled_candidates(state, candidates, now=now, config=config)
+
+    store = load_dev_queue()
+    task = next(t for t in store.tasks if t.ticket_id == "stalled-hold-adr")
+    assert task.status == QueueItemStatus.BLOCKED_ON_USER
+    assert task.disposition == "awaiting_operator"
+
+
+def test_stalled_foreign_blocked_result_shape_operator_unavailable(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RFC 0011 A1 (#1254): the synthetic BlockedResult shape (no schema_version)
+    reaches the same hold namespace -- BlockedResult.blocker is non-optional, so
+    the reason is always readable on this arm."""
+    from cw.reconcile import (
+        ProposedAction,
+        _act_on_stalled_candidates,
+        _detect_stalled_candidates,
+    )
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+    )
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    foreign_payload = {
+        "status": "blocked",
+        "blocker": {"stage": "stage1_plan", "reason": "operator_unavailable"},
+    }
+    session = _mk_headless_daemon_session(
+        "stalled-hold-parser", tmp_path / "wt-hold-parser", started_at
+    )
+    session.last_result = foreign_payload
+    state = CwState(sessions=[session])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="stalled-hold-parser",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="stalled-hold-parser",
+                    stage=Stage.IMPL,
+                ),
+            ]
+        )
+    )
+    task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
+    config = OrchestratorConfig()
+
+    candidates = _detect_stalled_candidates(
+        state, now=now, config=config, task_by_ticket=task_by_ticket
+    )
+    assert [c.proposed_action for c in candidates] == [
+        ProposedAction.COMPLETE_FOREIGN_RESULT
+    ]
+
+    _act_on_stalled_candidates(state, candidates, now=now, config=config)
+
+    store = load_dev_queue()
+    task = next(t for t in store.tasks if t.ticket_id == "stalled-hold-parser")
+    assert task.status == QueueItemStatus.BLOCKED_ON_USER
+    assert task.disposition == "awaiting_operator"
+
+
 def test_stalled_foreign_result_unroutable_falls_through_to_drop_only(
     tmp_config_dir: Path,
     tmp_path: Path,

@@ -6205,7 +6205,8 @@ class TestHoldAwareDisposition:
     def test_hold_dispositions_contains_awaiting_operator(self) -> None:
         from cw.dev_queue import AWAITING_OPERATOR_DISPOSITION, HOLD_DISPOSITIONS
 
-        assert HOLD_DISPOSITIONS == frozenset({AWAITING_OPERATOR_DISPOSITION})
+        assert AWAITING_OPERATOR_DISPOSITION in HOLD_DISPOSITIONS
+        assert len(HOLD_DISPOSITIONS) == 1
 
     def test_awaiting_operator_disposition_value(self) -> None:
         from cw.dev_queue import AWAITING_OPERATOR_DISPOSITION

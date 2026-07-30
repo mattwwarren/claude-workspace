@@ -55,6 +55,7 @@ from cw.reconcile import (
 )
 from tests._reconcile_helpers import (
     _auto_config,
+    _make_terminal_payload,
     _mk_headless_daemon_session,
     _mk_session,
     _no_op_salvage_payload,
@@ -2832,6 +2833,54 @@ def test_act_on_stalled_salvage_completion(
     store = load_dev_queue()
     t = next(t for t in store.tasks if t.ticket_id == "act-salv-1")
     assert t.status == QueueItemStatus.COMPLETED
+
+
+def test_act_on_stalled_salvage_push_auth_failed_stamps_awaiting_operator(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RFC 0011 A1 (#1254): the salvaged-ticket arm of _apply_stalled_queue_
+    mutations reads the salvaged result's blocker.reason, so a push_auth_failed
+    merge_gate_blocked salvage stamps the hold-class disposition."""
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_stalled_candidates
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.get_native_daemon_client",
+        FakeNativeDaemonClient,
+    )
+
+    worktree = tmp_path / "wt-act-hold"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session("act-hold-1", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="act-hold-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="act-hold-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    payload = _make_terminal_payload("merge_gate_blocked", "act-hold-1")
+    payload["blocker"] = {"stage": "stage4a_merge_gate", "reason": "push_auth_failed"}
+    result = AutoDevResult.model_validate(payload)
+    candidate = ReapCandidate(
+        session_id="act-hold-1",
+        proposed_action=ProposedAction.SALVAGE_COMPLETION,
+        ticket_id="act-hold-1",
+        salvage_result=result,
+        salvage_csid="csid-act-hold",
+    )
+
+    _act_on_stalled_candidates(state, [candidate], now=now)
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "act-hold-1")
+    assert t.disposition == "awaiting_operator"
 
 
 def test_act_on_stalled_skip_parked_emits_event_no_queue_change(
