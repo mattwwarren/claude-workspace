@@ -351,6 +351,43 @@ attempt cap, then fails it. If it recurs, inspect the raw JSON with
 
 ---
 
+## 5a. Morning drain (`cw dev-queue drain --held`)
+
+RFC 0011 A4 (#1161): a batch sibling of `cw dev-queue requeue` for Rule-5
+availability parks — tickets `BLOCKED_ON_USER` with
+`disposition=awaiting_operator` because dispatch could not reach the
+operator or a dependency (RFC 0011 A1, #1254), not because anything is
+actually broken. Resuming these by hand one at a time (`requeue <T> -c
+<client>` per ticket) doesn't scale once a client accumulates several
+overnight.
+
+```bash
+# Preview what would resume, no mutation:
+cw dev-queue drain --held --client <client> --dry-run
+
+# Resume every availability-park ticket for a client, at each one's own
+# current stage:
+cw dev-queue drain --held --client <client>
+
+# Restrict to a single lane:
+cw dev-queue drain --held --client <client> --lane <lane>
+```
+
+Exit code is `0` iff every selected ticket drained (or the selection was
+empty, or `--dry-run`); nonzero iff any ticket failed (e.g. its status
+raced away from `BLOCKED_ON_USER` between the drain's selection snapshot
+and the per-ticket requeue — every outcome is still echoed individually
+before the batch-level failure is raised).
+
+**`drain --held` does NOT release A3 force-holds** (`disposition
+=finalize_gate_held`, #1160's proactive stop-before-finalize) — those
+gate on caller provenance and only release via `cw dev-queue approve
+<ticket> -c <client>`. The morning routine is therefore two commands: this
+one for availability parks, `approve` per deliberate force-hold (see §5's
+`review_pending_approval` / `plan_pending_approval` rows above).
+
+---
+
 ## 6. Cleanup after terminal (ordering matters)
 
 Wrong ordering leaves phantom PENDING orphans. Follow this sequence:
