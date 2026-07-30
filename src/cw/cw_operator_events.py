@@ -18,10 +18,13 @@ import json
 import logging
 import queue
 import urllib.parse
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel
 
+from cw.dev_queue.lifecycle import HOLD_DISPOSITIONS
 from cw.event_bus import EventBus
 from cw.models import (
     LivenessBucket,
@@ -35,6 +38,8 @@ if TYPE_CHECKING:
     from starlette.requests import Request
     from starlette.responses import Response
     from starlette.routing import BaseRoute
+
+    from cw.models import DevQueueStore, TicketTask
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +139,119 @@ def _build_operator_notification(event: OrchestratorEvent) -> dict[str, Any]:
     }
 
 
+def _find_held_task(
+    task_by_ticket: dict[tuple[str, str], TicketTask], event: OrchestratorEvent
+) -> TicketTask | None:
+    """Resolve the live ``TicketTask`` a ``session.needs_attention`` event is
+    about, or ``None`` if it isn't about any known task (RFC 0011 A6, #1162).
+
+    Joins via the event payload's ``ticket_id``/``client`` fields -- not
+    ``payload["paused_status"]`` (a distinct, disjoint-namespace string; see
+    ``AWAITING_OPERATOR_DISPOSITION``'s docstring). A fleet-wide event with no
+    owning ticket (``ticket_id`` absent/None -- e.g. ``gh_availability_outage``)
+    and a ticket_id with no matching row (resolved/deleted since) both
+    correctly return None here, which the caller treats as "not held."
+    """
+    ticket_id = event.payload.get("ticket_id")
+    client = event.payload.get("client")
+    if not isinstance(ticket_id, str) or not isinstance(client, str):
+        return None
+    return task_by_ticket.get((ticket_id, client))
+
+
+def _is_held(task: TicketTask) -> bool:
+    """True iff *task* is parked in one of the digest-eligible hold classes."""
+    return task.disposition in HOLD_DISPOSITIONS
+
+
+def _in_delivery_window(config: OrchestratorConfig, now: datetime) -> bool:
+    """True iff *now* falls inside the configured local-timezone digest
+    delivery window (R12, #1162). DST-aware: resolves *now* into the
+    configured IANA zone and compares local wall-clock hours, never a fixed
+    UTC offset.
+    """
+    local_now = now.astimezone(ZoneInfo(config.attention_digest_window_tz))
+    return (
+        config.attention_digest_window_start_hour
+        <= local_now.hour
+        < config.attention_digest_window_end_hour
+    )
+
+
+def _digest_entry(task: TicketTask) -> dict[str, Any]:
+    """Build one digest entry for *task* (the committed 3-key schema)."""
+    return {
+        "ticket_id": task.ticket_id,
+        "client": task.client,
+        "breadcrumbs": task.blocked_reason,
+    }
+
+
+def _collect_flushable_digest(
+    store: DevQueueStore, config: OrchestratorConfig, now: datetime
+) -> list[dict[str, Any]] | None:
+    """Return the digest entries to flush now, or ``None`` if nothing should
+    flush (RFC 0011 A6, #1162).
+
+    Re-derives the held set live from ``store.tasks`` at call time (R9) --
+    never from stored events -- so a ticket resolved/deleted since it was
+    buffered is excluded automatically (its
+    ``attention_digest_buffered_at`` marker was already cleared by
+    ``transition_task_status``'s unconditional-clear block). Returns ``None``
+    when the delivery window is closed, nothing is currently buffered, or the
+    most recently buffered arrival hasn't yet aged past the idle-drain floor
+    -- the debounce is anchored to the NEWEST arrival, not the oldest, so a
+    fresh held park arriving mid-batch pushes the flush back out and gives it
+    a chance to land in the same digest (R5). On a real flush, clears
+    ``attention_digest_buffered_at`` on every included task -- the caller is
+    responsible for persisting the mutated *store*.
+    """
+    if not _in_delivery_window(config, now):
+        return None
+    buffered: list[TicketTask] = []
+    arrivals: list[datetime] = []
+    for task in store.tasks:
+        arrival = task.attention_digest_buffered_at
+        if arrival is not None and _is_held(task):
+            buffered.append(task)
+            arrivals.append(arrival)
+    if not buffered:
+        return None
+    idle_elapsed = (now - max(arrivals)).total_seconds()
+    if idle_elapsed < config.attention_digest_idle_floor_seconds:
+        return None
+    entries = [_digest_entry(task) for task in buffered]
+    for task in buffered:
+        task.attention_digest_buffered_at = None
+    return entries
+
+
+def _build_operator_digest_notification(
+    entries: list[dict[str, Any]], now: datetime
+) -> dict[str, Any]:
+    """Build the SSE notification envelope for a flushed digest (#1162).
+
+    Sibling to ``_build_operator_notification``, but sources its inner
+    ``message`` from a live entries list rather than a stored
+    ``OrchestratorEvent`` -- there is no such event (R9: ephemeral, never
+    persisted), so ``id``/``correlation_id`` are deliberately omitted rather
+    than attributed to any one ticket.
+    """
+    message = {
+        "event": "session.needs_attention.digest",
+        "digest": True,
+        "count": len(entries),
+        "created_at": now.isoformat(),
+        "entries": entries,
+    }
+    title = f"Operator: {len(entries)} ticket(s) awaiting operator attention"
+    return {
+        "notification_type": _NOTIFICATION_TYPE,
+        "message": json.dumps(message),
+        "title": title,
+    }
+
+
 def poll_and_forward_operator_channel(config: OrchestratorConfig) -> None:
     """Read new orchestrator-bus events, filter, and forward to the operator channel.
 
@@ -143,7 +261,19 @@ def poll_and_forward_operator_channel(config: OrchestratorConfig) -> None:
     of whether each individually passed ``_admits`` -- the established
     orchestrator-bus consumer idiom (``dispatch.py``/``orchestrate.py``): a
     dropped event must never be re-scanned on the next tick.
+
+    RFC 0011 A6 (#1162): an admitted ``session.needs_attention`` event whose
+    ticket is currently held (``HOLD_DISPOSITIONS``) is buffered onto that
+    task's ``attention_digest_buffered_at`` instead of forwarded immediately;
+    every other admitted event (including a non-held/ticketless
+    ``session.needs_attention``) forwards exactly as before, unbatched. A
+    single ``dev_queue_lock()`` scope per tick covers both the per-event
+    classify/buffer step and the post-loop flush check -- runs even on a tick
+    with zero new events, since the flush condition (delivery window +
+    idle-drain floor) is time-based, not event-triggered; the cursor is only
+    advanced when there were events to advance past.
     """
+    from cw.dev_queue.storage import dev_queue_lock, load_dev_queue, save_dev_queue
     from cw.events import advance_cursor, read_events
 
     forward = config.operator_channel_forward
@@ -151,12 +281,33 @@ def poll_and_forward_operator_channel(config: OrchestratorConfig) -> None:
         consumer=_OPERATOR_BRIDGE_CONSUMER,
         event_types=list(forward.event_types),
     )
-    if not events:
-        return
-    for event in events:
-        if _admits(event, forward):
-            broadcast(_build_operator_notification(event))
-    advance_cursor(_OPERATOR_BRIDGE_CONSUMER, events[-1].id)
+    now = datetime.now(UTC)
+    changed = False
+    with dev_queue_lock():
+        store = load_dev_queue()
+        if events:
+            task_by_ticket = {
+                (task.ticket_id, task.client): task for task in store.tasks
+            }
+            for event in events:
+                if not _admits(event, forward):
+                    continue
+                if event.type == OrchestratorEventType.SESSION_NEEDS_ATTENTION:
+                    held_task = _find_held_task(task_by_ticket, event)
+                    if held_task is not None and _is_held(held_task):
+                        if held_task.attention_digest_buffered_at is None:
+                            held_task.attention_digest_buffered_at = now
+                            changed = True
+                        continue
+                broadcast(_build_operator_notification(event))
+        entries = _collect_flushable_digest(store, config, now)
+        if entries is not None:
+            broadcast(_build_operator_digest_notification(entries, now))
+            changed = True
+        if changed:
+            save_dev_queue(store)
+    if events:
+        advance_cursor(_OPERATOR_BRIDGE_CONSUMER, events[-1].id)
 
 
 async def handle_post_operator_ack(request: Request) -> Response:
