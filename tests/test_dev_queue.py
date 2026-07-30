@@ -5055,9 +5055,11 @@ class TestSelectHeldTickets:
     def test_selects_only_held_disposition_rows(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
-        """Selection matches disposition=awaiting_operator only -- a genuine
-        Rule-5 park (disposition=blocked) and a stale terminal row (COMPLETED
-        with a leftover awaiting_operator disposition) are both excluded."""
+        """Selection matches disposition=awaiting_operator alone -- a genuine
+        Rule-5 park (disposition=blocked) is excluded, but a stale terminal
+        row (COMPLETED with a leftover awaiting_operator disposition) is
+        still selected (Adopted Assumptions: disposition-only filter; the
+        status gate is enforced downstream by requeue_ticket, not here)."""
         from cw.dev_queue import AWAITING_OPERATOR_DISPOSITION, select_held_tickets
 
         _write_client_yaml(tmp_config_dir, tmp_path)
@@ -5078,13 +5080,11 @@ class TestSelectHeldTickets:
             stage=Stage.PLAN,
             disposition=AWAITING_OPERATOR_DISPOSITION,
         )
-        save_dev_queue(
-            DevQueueStore(tasks=[held, genuine_blocked, stale_terminal])
-        )
+        save_dev_queue(DevQueueStore(tasks=[held, genuine_blocked, stale_terminal]))
 
         selected = select_held_tickets("genhealth")
 
-        assert [t.ticket_id for t in selected] == ["GEN-500"]
+        assert {t.ticket_id for t in selected} == {"GEN-500", "GEN-502"}
 
     def test_lane_filter_restricts_selection(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -5240,9 +5240,7 @@ class TestDrainHeldTickets:
                 raise RequeueStateError(msg)
             return real_requeue_ticket(ticket_id, client_name, *args, **kwargs)
 
-        monkeypatch.setattr(
-            "cw.dev_queue.drain.requeue_ticket", _fake_requeue_ticket
-        )
+        monkeypatch.setattr("cw.dev_queue.drain.requeue_ticket", _fake_requeue_ticket)
 
         outcomes = drain_held_tickets("genhealth")
 
@@ -6152,13 +6150,9 @@ class TestCLIDevQueueDrain:
         t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
         assert t.status == QueueItemStatus.BLOCKED_ON_USER
 
-    def test_drain_missing_held_flag_is_usage_error(
-        self, tmp_config_dir: Path
-    ) -> None:
+    def test_drain_missing_held_flag_is_usage_error(self, tmp_config_dir: Path) -> None:
         runner = CliRunner()
-        result = runner.invoke(
-            main, ["dev-queue", "drain", "--client", "genhealth"]
-        )
+        result = runner.invoke(main, ["dev-queue", "drain", "--client", "genhealth"])
 
         assert result.exit_code != 0
         assert "Missing option" in result.output
@@ -6280,9 +6274,7 @@ class TestCLIDevQueueDrain:
                 raise RequeueStateError(msg)
             return real_requeue_ticket(ticket_id, client_name, *args, **kwargs)
 
-        monkeypatch.setattr(
-            "cw.dev_queue.drain.requeue_ticket", _fake_requeue_ticket
-        )
+        monkeypatch.setattr("cw.dev_queue.drain.requeue_ticket", _fake_requeue_ticket)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -6324,9 +6316,7 @@ class TestCLIDevQueueDrain:
                 raise RequeueStateError(msg)
             return real_requeue_ticket(ticket_id, client_name, *args, **kwargs)
 
-        monkeypatch.setattr(
-            "cw.dev_queue.drain.requeue_ticket", _fake_requeue_ticket
-        )
+        monkeypatch.setattr("cw.dev_queue.drain.requeue_ticket", _fake_requeue_ticket)
         events: list[tuple[OrchestratorEventType, dict[str, object], str | None]] = []
         monkeypatch.setattr(
             "cw.cli.dev_queue.crud.record_event",

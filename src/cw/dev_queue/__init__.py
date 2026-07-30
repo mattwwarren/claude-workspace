@@ -35,6 +35,11 @@ from cw.dev_queue.crud import (
     remove_ticket,
     resolve_client,
 )
+from cw.dev_queue.drain import (
+    DRAIN_DISPOSITIONS,
+    drain_held_tickets,
+    select_held_tickets,
+)
 from cw.dev_queue.lifecycle import (
     _PLAN_SOUNDNESS_MARKER,
     _PLAN_SPEC_MARKER,
@@ -50,11 +55,6 @@ from cw.dev_queue.lifecycle import (
     consume_completed_sessions,
     transition_task_status,
     wait_for_terminal,
-)
-from cw.dev_queue.drain import (
-    DRAIN_DISPOSITIONS,
-    drain_held_tickets,
-    select_held_tickets,
 )
 from cw.dev_queue.migrate import migrate_dev_queue
 from cw.dev_queue.requeue import (

@@ -38,9 +38,7 @@ if TYPE_CHECKING:
 DRAIN_DISPOSITIONS: frozenset[str] = frozenset({AWAITING_OPERATOR_DISPOSITION})
 
 
-def select_held_tickets(
-    client: str, *, lane: str | None = None
-) -> list[TicketTask]:
+def select_held_tickets(client: str, *, lane: str | None = None) -> list[TicketTask]:
     """Unlocked selection snapshot: Rule-5 availability parks for *client*.
 
     Read-only; `load_dev_queue()` takes no lock (safe for selection, per
