@@ -86,12 +86,14 @@ def review_register(pr_url: str) -> None:
     non-zero only when your identity cannot be resolved, the URL is
     unparseable, or the PR cannot be fetched.
 
-    Limitation: this uses your process gh identity directly; the
-    ``clients.yaml`` ``operator_github_login`` override is NOT honored here
-    because a PR-scoped entry point has no client context (follow-up #1171).
+    Your GitHub identity resolves via the same precedence
+    ``resolve_operator_login_for_repo`` uses everywhere else: the PR's repo
+    in ``orchestrator.yaml``'s ``operator_github_login_by_repo`` map wins when
+    set, otherwise your process gh identity (RFC 0011 follow-up #1171).
     """
+    from cw.config import load_orchestrator_config
     from cw.gh import fetch_pr_view
-    from cw.operator_identity import cached_gh_login
+    from cw.operator_identity import cached_gh_login, resolve_operator_login_for_repo
     from cw.pr_hydrate import (
         _parse_pr_url,
         resolve_and_register_review_request,
@@ -103,11 +105,10 @@ def review_register(pr_url: str) -> None:
         raise CwError(msg)
     repo, pr_number = parsed
 
-    # Why: bypass resolve_operator_login's operator_github_login override — no
-    # client context exists at this PR-scoped entry point, so there is no
-    # ClientConfig to consult. Honoring the override here is blocked on the
-    # repo->client mapping and lands via follow-up #1171.
-    operator_login = cached_gh_login()
+    config = load_orchestrator_config()
+    operator_login = resolve_operator_login_for_repo(
+        repo, config, fallback=cached_gh_login()
+    )
     if operator_login is None:
         msg = (
             "Could not resolve your GitHub identity (gh api user failed)."
