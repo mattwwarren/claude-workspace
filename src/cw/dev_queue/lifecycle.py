@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
 from cw.auto_dev_result import (
+    OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
     PAUSED_FOR_USER_INPUT_STATUSES,
     STAGE_FAILURE_STATUSES,
     STAGE_SUCCESS_STATUSES,
@@ -62,6 +63,22 @@ _TERMINAL_DISPOSITION_STATUSES: frozenset[QueueItemStatus] = frozenset(
 # a function-level import to break the dev_queue<->dispatch circularity
 # (mirrors reconcile/_shared.py's precedent for the same import shape).
 SIGNOFF_GATE_DISPOSITION = "signoff_gate"
+
+# Disposition stamped when a park is a *hold* -- "we could not reach the
+# operator or a dependency", not "this leg is broken" (RFC 0011 A1, #1254).
+# Textually distinct from dispatch.routing._AWAITING_OPERATOR_REASON
+# ("awaiting_operator_availability"): that one is a SESSION_NEEDS_ATTENTION
+# paused_status string, this one classifies TicketTask.disposition. Different
+# namespaces -- do not confuse them.
+AWAITING_OPERATOR_DISPOSITION = "awaiting_operator"
+
+# The shared hold-disposition namespace: the set of TicketTask.disposition
+# values that mean "parked pending a human/dependency, not pending a fix". This
+# is the *selection contract* consumers (attention layer, and later A4
+# auto-resume) match on, so they do not have to re-derive the hold class from
+# blocker reasons themselves. Currently spans RFC 0011 A1 only; #1160 (A3
+# force-hold) extends this frozenset in place rather than adding a parallel set.
+HOLD_DISPOSITIONS: frozenset[str] = frozenset({AWAITING_OPERATOR_DISPOSITION})
 
 # Statuses that should clear disposition/pr_url/completed_at (requeue/cancel).
 _RESET_DISPOSITION_STATUSES: frozenset[QueueItemStatus] = frozenset(
@@ -173,6 +190,27 @@ def _derive_disposition(status: str | None) -> str | None:
     if status in _VERBATIM_DISPOSITION_STATUSES:
         return status
     return "abandoned"
+
+
+def _hold_aware_disposition(
+    status: str | None, blocker_reason: str | None
+) -> str | None:
+    """Like :func:`_derive_disposition`, but classifies hold-class parks first.
+
+    A strict superset of ``_derive_disposition``: when *blocker_reason* is an
+    operator-unavailability reason (RFC 0011 A1), the park is a *hold* and gets
+    the shared ``AWAITING_OPERATOR_DISPOSITION`` instead of the verbatim status.
+    Every other input falls straight through to ``_derive_disposition``, so this
+    is a drop-in replacement at every terminal call site.
+
+    Complementary to ``blocked_reason``, not duplicative of it: ``blocked_reason``
+    records the verbatim per-park diagnostic (which reason, for the operator to
+    read), while ``disposition`` / ``HOLD_DISPOSITIONS`` is the *selection*
+    contract consumers match on to find every hold-class park at once.
+    """
+    if blocker_reason in OPERATOR_UNAVAILABLE_BLOCKER_REASONS:
+        return AWAITING_OPERATOR_DISPOSITION
+    return _derive_disposition(status)
 
 
 def _extract_pr_url(last_result: dict[str, object] | None) -> str | None:

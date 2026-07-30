@@ -6171,6 +6171,49 @@ class TestDeriveDisposition:
 
 
 # ---------------------------------------------------------------------------
+# TestHoldAwareDisposition
+# ---------------------------------------------------------------------------
+
+
+class TestHoldAwareDisposition:
+    """Unit tests for _hold_aware_disposition and the HOLD_DISPOSITIONS namespace.
+
+    RFC 0011 A1 (#1254): a strict superset of _derive_disposition -- an
+    operator-unavailable blocker reason wins over the verbatim status mapping.
+    """
+
+    def setup_method(self) -> None:
+        from cw.dev_queue import _hold_aware_disposition
+
+        self._derive = _hold_aware_disposition
+
+    def test_operator_unavailable_reason_returns_awaiting_operator(self) -> None:
+        assert self._derive("blocked", "operator_unavailable") == "awaiting_operator"
+
+    def test_push_auth_failed_reason_returns_awaiting_operator(self) -> None:
+        assert (
+            self._derive("merge_gate_blocked", "push_auth_failed")
+            == "awaiting_operator"
+        )
+
+    def test_non_hold_blocker_reason_falls_through_to_derive_disposition(self) -> None:
+        assert self._derive("blocked", "agent_block") == "blocked"
+
+    def test_none_blocker_reason_falls_through(self) -> None:
+        assert self._derive("blocked", None) == "blocked"
+
+    def test_hold_dispositions_contains_awaiting_operator(self) -> None:
+        from cw.dev_queue import AWAITING_OPERATOR_DISPOSITION, HOLD_DISPOSITIONS
+
+        assert HOLD_DISPOSITIONS == frozenset({AWAITING_OPERATOR_DISPOSITION})
+
+    def test_awaiting_operator_disposition_value(self) -> None:
+        from cw.dev_queue import AWAITING_OPERATOR_DISPOSITION
+
+        assert AWAITING_OPERATOR_DISPOSITION == "awaiting_operator"
+
+
+# ---------------------------------------------------------------------------
 # TestExtractPrUrl
 # ---------------------------------------------------------------------------
 

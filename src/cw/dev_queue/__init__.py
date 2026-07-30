@@ -37,10 +37,13 @@ from cw.dev_queue.crud import (
 from cw.dev_queue.lifecycle import (
     _PLAN_SOUNDNESS_MARKER,
     _PLAN_SPEC_MARKER,
+    AWAITING_OPERATOR_DISPOSITION,
+    HOLD_DISPOSITIONS,
     SIGNOFF_GATE_DISPOSITION,
     _advance_task_pointer,
     _derive_disposition,
     _extract_pr_url,
+    _hold_aware_disposition,
     _stage_regress,
     consume_completed_sessions,
     transition_task_status,
@@ -64,6 +67,8 @@ from cw.dev_queue.storage import (
 from cw.exceptions import LaneNotFoundError
 
 __all__ = [
+    "AWAITING_OPERATOR_DISPOSITION",
+    "HOLD_DISPOSITIONS",
     "SIGNOFF_GATE_DISPOSITION",
     "_PLAN_SOUNDNESS_MARKER",
     "_PLAN_SPEC_MARKER",
@@ -74,6 +79,7 @@ __all__ = [
     "_derive_disposition",
     "_extract_pr_url",
     "_find_ticket",
+    "_hold_aware_disposition",
     "_lock",
     "_newest_by_created_at",
     "_stage_regress",
