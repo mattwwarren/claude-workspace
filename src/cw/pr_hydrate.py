@@ -546,23 +546,35 @@ def resolve_and_register_review_request(
 
 
 def _hydrate_watched_prs(
-    watched_prs: list[WatchedPr], *, self_login: str | None
+    watched_prs: list[WatchedPr],
+    *,
+    config: OrchestratorConfig,
+    self_login: str | None,
 ) -> None:
     """Hydrate ``pr_state`` on each active watched PR, best-effort (RFC 0011 S2).
 
     Parallel to the ``TicketTask`` hydration loop: reuses ``_derive_pr_state``,
-    threading through the caller-resolved ``self_login`` (#1195) rather than
-    re-resolving it here. A ``dismissed`` watched PR is skipped (never
-    fetched). A transient fetch failure (``_derive_pr_state`` -> None) leaves
-    the prior ``pr_state`` untouched, mirroring the task path's best-effort
-    contract. Each persist re-reads the store under ``dev_queue_lock()`` and
-    matches by ``(repo, pr_number)`` on an ``active`` record, so a concurrent
-    writer that dismissed/removed the entry can't be clobbered.
+    threading through a per-watched-PR *effective* login rather than
+    re-resolving ``self_login`` here. ``self_login`` is the caller-resolved
+    (#1195) once-per-tick fallback; ``config.operator_github_login_by_repo``
+    (#1171) is consulted per ``watched.repo`` via a pure dict lookup
+    (``resolve_operator_login_for_repo``) — no extra ``gh api user`` call. A
+    ``dismissed`` watched PR is skipped (never fetched). A transient fetch
+    failure (``_derive_pr_state`` -> None) leaves the prior ``pr_state``
+    untouched, mirroring the task path's best-effort contract. Each persist
+    re-reads the store under ``dev_queue_lock()`` and matches by ``(repo,
+    pr_number)`` on an ``active`` record, so a concurrent writer that
+    dismissed/removed the entry can't be clobbered.
     """
+    from cw.operator_identity import resolve_operator_login_for_repo
+
     for watched in watched_prs:
         if watched.status != "active":
             continue
-        new_state = _derive_pr_state(watched.pr_url, self_login=self_login)
+        effective_login = resolve_operator_login_for_repo(
+            watched.repo, config, fallback=self_login
+        )
+        new_state = _derive_pr_state(watched.pr_url, self_login=effective_login)
         if new_state is None:
             continue
         with dev_queue_lock():
@@ -896,14 +908,20 @@ def hydrate_pr_states(config: OrchestratorConfig) -> None:
     ``_hydrate_watched_prs``, independently of whether any task is a candidate.
 
     The operator's own gh login (``cached_gh_login()``) is resolved at most
-    once per call, outside both hydration loops (#1195), and threaded down to
-    ``_derive_pr_state``/``_hydrate_watched_prs`` — never re-resolved per
-    candidate/watched-PR.
+    once per call, outside both hydration loops (#1195), and threaded down as
+    the *fallback* to ``_derive_pr_state``/``_hydrate_watched_prs`` — never
+    re-resolved per candidate/watched-PR. What each loop actually passes to
+    ``_derive_pr_state`` as ``self_login`` is the *effective* login: a per-PR-
+    repo override from ``config.operator_github_login_by_repo`` when present
+    (RFC 0011 follow-up #1171), else that once-resolved fallback. The #1195
+    invariant (at most one ``gh api user`` subprocess call per tick) is
+    preserved because the per-repo override lookup is a pure dict read, not a
+    subprocess call.
     """
     store = load_dev_queue()
     if _throttled(store.tasks, store.watched_prs, config.pr_hydration_interval_seconds):
         return
-    from cw.operator_identity import cached_gh_login
+    from cw.operator_identity import cached_gh_login, resolve_operator_login_for_repo
 
     candidates = [t for t in store.tasks if _is_candidate(t)]
     has_active_watched_prs = any(w.status == "active" for w in store.watched_prs)
@@ -913,7 +931,13 @@ def hydrate_pr_states(config: OrchestratorConfig) -> None:
         pr_url = task.pr_url
         if pr_url is None:  # pragma: no cover - _is_candidate guarantees non-null
             continue
-        new_state = _derive_pr_state(pr_url, self_login=self_login)
+        parsed = _parse_pr_url(pr_url)
+        effective_login = (
+            resolve_operator_login_for_repo(parsed[0], config, fallback=self_login)
+            if parsed is not None
+            else self_login
+        )
+        new_state = _derive_pr_state(pr_url, self_login=effective_login)
         if new_state is not None:
             derived.append((task, new_state))
     if derived:
@@ -921,4 +945,4 @@ def hydrate_pr_states(config: OrchestratorConfig) -> None:
     # Watched PRs hydrate on the same throttled pass but independently of task
     # candidates (RFC 0011 S2) — the early ``if not candidates: return`` was
     # removed so a watched-PR-only store still hydrates.
-    _hydrate_watched_prs(store.watched_prs, self_login=self_login)
+    _hydrate_watched_prs(store.watched_prs, config=config, self_login=self_login)

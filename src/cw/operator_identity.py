@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING
 from cw.gh import current_gh_login
 
 if TYPE_CHECKING:
-    from cw.models import ClientConfig
+    from cw.models import ClientConfig, OrchestratorConfig
 
 _GH_LOGIN_TIMEOUT_SECONDS = 10
 
@@ -91,3 +91,30 @@ def resolve_operator_login(client: ClientConfig) -> str | None:
     override and the runtime login cannot be resolved.
     """
     return client.operator_github_login or cached_gh_login()
+
+
+def resolve_operator_login_for_repo(
+    repo: str, config: OrchestratorConfig, *, fallback: str | None
+) -> str | None:
+    """Return the GitHub login to treat as "the operator" for *repo*.
+
+    RFC 0011 follow-up (#1171): honors
+    ``OrchestratorConfig.operator_github_login_by_repo`` at the client-less
+    entry points (``cw review register``, the ``review_requested`` webhook,
+    ``hydrate_pr_states``) that have no ``ClientConfig`` to consult
+    :func:`resolve_operator_login` for. *repo* is matched exactly
+    (case-sensitive "owner/repo") against the map; a miss returns *fallback*
+    unchanged.
+
+    Deliberately never calls :func:`cached_gh_login` itself, unlike
+    :func:`resolve_operator_login`'s inline fallback call -- this function is
+    called once PER PR repo (potentially many times per ``hydrate_pr_states``
+    tick), and a failed :func:`cached_gh_login` resolution is NOT memoized
+    (see ``_GhLoginUnresolvedError`` above). An inline call here would
+    reintroduce the per-candidate ``gh api user`` subprocess retry storm
+    #1195 fixed. Callers resolve the fallback once (at most one
+    :func:`cached_gh_login` call per tick) and thread it through, keeping
+    this function a pure, zero-I/O dict lookup. Do not "fix" this by calling
+    :func:`cached_gh_login` inline -- that is the bug this design avoids.
+    """
+    return config.operator_github_login_by_repo.get(repo, fallback)

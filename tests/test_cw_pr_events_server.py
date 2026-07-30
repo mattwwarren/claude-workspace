@@ -301,6 +301,66 @@ class TestReviewRequestedWebhook:
         assert resp.json() == {"registered": False, "reason": "no_reviewer"}
         assert load_dev_queue().watched_prs == []
 
+    def test_repo_override_wins_over_process_identity(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """RFC 0011 follow-up (#1171): the repo-keyed override wins over the
+        process gh identity at this client-less webhook entry point."""
+        from cw.models import OrchestratorConfig
+
+        monkeypatch.setattr(
+            "cw.operator_identity.cached_gh_login", lambda: "process-user"
+        )
+        monkeypatch.setattr(
+            "cw.config.load_orchestrator_config",
+            lambda: OrchestratorConfig(
+                operator_github_login_by_repo={"acme/widgets": "override-user"}
+            ),
+        )
+        resp = self._post(self._make_client(), {"reviewer": {"login": "override-user"}})
+        assert resp.status_code == 200
+        assert resp.json() == {"registered": True, "reason": "registered"}
+        watched = load_dev_queue().watched_prs
+        assert len(watched) == 1
+
+    def test_no_override_falls_back_to_process_identity_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression guard: default-empty-map behavior is bit-for-bit unchanged."""
+        monkeypatch.setattr(
+            "cw.operator_identity.cached_gh_login", lambda: self._OPERATOR
+        )
+        resp = self._post(self._make_client(), {"reviewer": {"login": self._OPERATOR}})
+        assert resp.status_code == 200
+        assert resp.json() == {"registered": True, "reason": "registered"}
+        watched = load_dev_queue().watched_prs
+        assert len(watched) == 1
+        assert watched[0].source == "webhook"
+
+    def test_malformed_config_does_not_crash_webhook_handler(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A malformed orchestrator.yaml must not crash the shared webhook path
+        (#1171 Stage 1 plan review) -- fails open to the process gh identity,
+        mirroring cw_queue_events_server.py._run_poller's fail-open pattern for
+        config-load failures on shared server paths."""
+        from cw.exceptions import ConfigValidationError
+
+        monkeypatch.setattr(
+            "cw.operator_identity.cached_gh_login", lambda: self._OPERATOR
+        )
+
+        def _raise() -> Any:
+            msg = "orchestrator.yaml: malformed"
+            raise ConfigValidationError(msg)
+
+        monkeypatch.setattr("cw.config.load_orchestrator_config", _raise)
+        resp = self._post(self._make_client(), {"reviewer": {"login": self._OPERATOR}})
+        assert resp.status_code == 200
+        assert resp.json() == {"registered": True, "reason": "registered"}
+        watched = load_dev_queue().watched_prs
+        assert len(watched) == 1
+
 
 class TestServe:
     def test_serve_calls_uvicorn_run(self) -> None:

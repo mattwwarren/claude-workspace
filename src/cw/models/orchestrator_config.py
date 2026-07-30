@@ -261,6 +261,19 @@ class OrchestratorConfig(BaseModel):
     per_client_max_parallel: dict[str, int] = Field(default_factory=dict)
     default_max_parallel: int = 1
     linear_prefix_map: dict[str, str] = Field(default_factory=dict)
+    # RFC 0011 follow-up (#1171) — repo-keyed operator-login override,
+    # consulted by cw.operator_identity.resolve_operator_login_for_repo at the
+    # client-less entry points that have no ClientConfig to read
+    # ClientConfig.operator_github_login from (``cw review register``, the
+    # review_requested webhook, hydrate_pr_states). Exact-string "owner/repo"
+    # key match (case-sensitive), same as linear_prefix_map's prefix keys and
+    # WatchedPr.repo/the _parse_pr_url-derived repo string — no
+    # case-normalization exists anywhere else in this precedence chain. No
+    # validator: same fail-loud-on-type-mismatch precedent as
+    # linear_prefix_map (a non-string value raises ValidationError ->
+    # ConfigValidationError at load_orchestrator_config(), same as every
+    # other typed dict field here).
+    operator_github_login_by_repo: dict[str, str] = Field(default_factory=dict)
     # Per-tier wall-clock budgets (seconds) for headless DAEMON sessions.
     # Keyed by scope.tier from the auto-dev sentinel; unknown tiers fall back
     # to HEADLESS_TIMEOUT_SECONDS. See GitHub issue #265.

@@ -143,6 +143,41 @@ class TestReviewRegisterCommand:
         assert "already_registered" in second.output
         assert len(load_dev_queue().watched_prs) == 1
 
+    def test_repo_override_wins_over_process_identity(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """RFC 0011 follow-up (#1171): the repo-keyed override wins over the
+        process gh identity at this client-less entry point."""
+        from cw.models import OrchestratorConfig
+
+        _patch_identity(monkeypatch, login="process-user")
+        monkeypatch.setattr(
+            "cw.config.load_orchestrator_config",
+            lambda: OrchestratorConfig(
+                operator_github_login_by_repo={"acme/widgets": "override-user"}
+            ),
+        )
+        _patch_fetch(monkeypatch, [{"login": "override-user"}])
+        result = runner.invoke(main, ["review", "register", _URL])
+        assert result.exit_code == 0
+        assert "Registered" in result.output
+        watched = load_dev_queue().watched_prs
+        assert len(watched) == 1
+
+    def test_no_override_falls_back_to_process_identity_unchanged(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """Regression guard: default-empty-map behavior is bit-for-bit unchanged."""
+        _patch_identity(monkeypatch)
+        _patch_fetch(monkeypatch, [{"login": _OPERATOR}])
+        result = runner.invoke(main, ["review", "register", _URL])
+        assert result.exit_code == 0
+        assert "Registered" in result.output
+        watched = load_dev_queue().watched_prs
+        assert len(watched) == 1
+        assert watched[0].source == "cli"
+        assert watched[0].requester_login is None
+
 
 class TestReviewConsolidateCommand:
     """Tests for ``cw review consolidate`` (#1241, adopting the #1237 contract)."""

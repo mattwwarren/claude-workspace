@@ -1002,6 +1002,51 @@ class TestSelfLoginResolution:
         hydrate_pr_states(OrchestratorConfig())
         assert calls == []
 
+    def test_repo_map_lookup_adds_no_subprocess_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#1171: per-repo resolution is a pure dict lookup -- populating
+        operator_github_login_by_repo for every candidate repo must not add
+        any extra cached_gh_login() (and thus no extra `gh api user`) calls
+        beyond the single hoisted resolution #1195 already guarantees."""
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(ticket_id="GEN-1", client="acme", pr_url=_URL),
+                    TicketTask(
+                        ticket_id="GEN-2",
+                        client="acme",
+                        pr_url="https://github.com/acme/widgets/pull/43",
+                    ),
+                    TicketTask(
+                        ticket_id="GEN-3",
+                        client="other",
+                        pr_url="https://github.com/other/repo/pull/1",
+                    ),
+                ],
+                watched_prs=[_watched()],
+            )
+        )
+        monkeypatch.setattr(
+            "cw.pr_hydrate.fetch_pr_view",
+            lambda *_a, **_kw: _pr_view_payload(state="OPEN"),
+        )
+        calls: list[None] = []
+
+        def _counting_login() -> str | None:
+            calls.append(None)
+            return "the-operator"
+
+        monkeypatch.setattr("cw.operator_identity.cached_gh_login", _counting_login)
+        config = OrchestratorConfig(
+            operator_github_login_by_repo={
+                "acme/widgets": "override-user",
+                "other/repo": "another-override",
+            }
+        )
+        hydrate_pr_states(config)
+        assert len(calls) <= 1
+
 
 class TestTransientFailure:
     def test_fetch_none_leaves_prior_state(
@@ -1975,7 +2020,7 @@ class TestHydrateWatchedPrs:
             "cw.pr_hydrate.fetch_pr_view",
             lambda *a, **_k: calls.append(a) or _pr_view_payload(),
         )
-        _hydrate_watched_prs([], self_login=None)
+        _hydrate_watched_prs([], config=OrchestratorConfig(), self_login=None)
         assert calls == []
 
     def test_watched_pr_only_store_second_pass_within_interval_is_throttled(
@@ -2004,6 +2049,144 @@ class TestHydrateWatchedPrs:
             frozen.tick(delta=timedelta(seconds=120))
             hydrate_pr_states(config)
             assert len(calls) == 2  # interval elapsed — fetched again
+
+
+class TestHydratePrStatesRepoOverride:
+    """Per-repo operator-login override threading (RFC 0011 follow-up, #1171).
+
+    Proves the override login -- not the once-resolved process login -- is
+    what ``_derive_pr_state`` actually uses to exclude self-authored blocking
+    comments, by making the comment author match one login but not the
+    other: a wrong effective login fails to exclude it and the derived
+    ``attention_state`` reads ``changes_requested`` instead of
+    ``ready_to_approve``.
+    """
+
+    _WIDGETS_URL = "https://github.com/acme/widgets/pull/42"
+    _OTHER_URL = "https://github.com/other/repo/pull/1"
+
+    def _blocking_comment_payload(self, author_login: str) -> dict[str, Any]:
+        return _pr_view_payload(
+            reviewDecision="",
+            mergeStateStatus="CLEAN",
+            comments=[
+                {
+                    "author": {"login": author_login},
+                    "body": "MUST_FIX: needs another pass",
+                }
+            ],
+        )
+
+    def test_task_repo_override_feeds_derive_pr_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1", client="acme", pr_url=self._WIDGETS_URL
+                    )
+                ]
+            )
+        )
+        monkeypatch.setattr(
+            "cw.pr_hydrate.fetch_pr_view",
+            lambda *_a, **_kw: self._blocking_comment_payload("override-user"),
+        )
+        monkeypatch.setattr(
+            "cw.operator_identity.cached_gh_login", lambda: "process-user"
+        )
+        config = OrchestratorConfig(
+            operator_github_login_by_repo={"acme/widgets": "override-user"}
+        )
+        hydrate_pr_states(config)
+        task = load_dev_queue().tasks[0]
+        assert task.pr_state is not None
+        # Excluded as self only if the override login (not "process-user")
+        # was actually threaded into _derive_pr_state's self_login.
+        assert task.pr_state.attention_state == "ready_to_approve"
+
+    def test_watched_pr_repo_override_feeds_derive_pr_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_dev_queue(DevQueueStore(watched_prs=[_watched()]))
+        monkeypatch.setattr(
+            "cw.pr_hydrate.fetch_pr_view",
+            lambda *_a, **_kw: self._blocking_comment_payload("override-user"),
+        )
+        monkeypatch.setattr(
+            "cw.operator_identity.cached_gh_login", lambda: "process-user"
+        )
+        config = OrchestratorConfig(
+            operator_github_login_by_repo={"acme/widgets": "override-user"}
+        )
+        hydrate_pr_states(config)
+        watched = load_dev_queue().watched_prs[0]
+        assert watched.pr_state is not None
+        assert watched.pr_state.attention_state == "ready_to_approve"
+
+    def test_repo_absent_from_map_falls_back_to_once_resolved_login(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1", client="acme", pr_url=self._WIDGETS_URL
+                    )
+                ]
+            )
+        )
+        monkeypatch.setattr(
+            "cw.pr_hydrate.fetch_pr_view",
+            lambda *_a, **_kw: self._blocking_comment_payload("process-user"),
+        )
+        monkeypatch.setattr(
+            "cw.operator_identity.cached_gh_login", lambda: "process-user"
+        )
+        hydrate_pr_states(OrchestratorConfig())
+        task = load_dev_queue().tasks[0]
+        assert task.pr_state is not None
+        assert task.pr_state.attention_state == "ready_to_approve"
+
+    def test_two_tasks_different_repos_get_different_effective_logins(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1", client="acme", pr_url=self._WIDGETS_URL
+                    ),
+                    TicketTask(
+                        ticket_id="GEN-2", client="acme", pr_url=self._OTHER_URL
+                    ),
+                ]
+            )
+        )
+
+        def _fetch(pr_url: str, *_a: object, **_kw: object) -> dict[str, Any]:
+            if pr_url == self._WIDGETS_URL:
+                # override-mapped repo: comment authored by the override login.
+                return self._blocking_comment_payload("override-user")
+            # unmapped repo: comment authored by the process (fallback) login.
+            return self._blocking_comment_payload("process-user")
+
+        monkeypatch.setattr("cw.pr_hydrate.fetch_pr_view", _fetch)
+        monkeypatch.setattr(
+            "cw.operator_identity.cached_gh_login", lambda: "process-user"
+        )
+        config = OrchestratorConfig(
+            operator_github_login_by_repo={"acme/widgets": "override-user"}
+        )
+        hydrate_pr_states(config)
+        store = load_dev_queue()
+        widgets_task = next(t for t in store.tasks if t.ticket_id == "GEN-1")
+        other_task = next(t for t in store.tasks if t.ticket_id == "GEN-2")
+        assert widgets_task.pr_state is not None
+        assert widgets_task.pr_state.attention_state == "ready_to_approve"
+        assert other_task.pr_state is not None
+        assert other_task.pr_state.attention_state == "ready_to_approve"
 
 
 class TestResolveAndRegisterReviewRequest:

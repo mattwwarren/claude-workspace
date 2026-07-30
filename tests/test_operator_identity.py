@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from cw import operator_identity
-from cw.models import ClientConfig
+from cw.models import ClientConfig, OrchestratorConfig
 from tests.test_gh import _make_run_result
 
 
@@ -129,3 +129,78 @@ class TestResolveOperatorLogin:
         result = operator_identity.resolve_operator_login(client)
 
         assert result is None
+
+
+class TestResolveOperatorLoginForRepo:
+    """resolve_operator_login_for_repo (#1171): repo-keyed override resolution.
+
+    Deliberately NEVER calls cached_gh_login() itself — see the #1195
+    per-repo-resolution-must-be-a-pure-dict-lookup rationale on the
+    function's docstring. test_never_calls_cached_gh_login is the explicit
+    regression guard for that design decision.
+    """
+
+    def test_repo_in_map_wins_over_fallback(self) -> None:
+        config = OrchestratorConfig(
+            operator_github_login_by_repo={"acme/widgets": "override-user"}
+        )
+
+        result = operator_identity.resolve_operator_login_for_repo(
+            "acme/widgets", config, fallback="runtime-user"
+        )
+
+        assert result == "override-user"
+
+    def test_repo_absent_from_map_falls_back(self) -> None:
+        config = OrchestratorConfig()
+
+        result = operator_identity.resolve_operator_login_for_repo(
+            "acme/widgets", config, fallback="runtime-user"
+        )
+
+        assert result == "runtime-user"
+
+    def test_repo_absent_and_fallback_none_returns_none(self) -> None:
+        config = OrchestratorConfig()
+
+        result = operator_identity.resolve_operator_login_for_repo(
+            "acme/widgets", config, fallback=None
+        )
+
+        assert result is None
+
+    def test_never_calls_cached_gh_login(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _fail_if_called() -> str | None:
+            msg = "resolve_operator_login_for_repo must never call cached_gh_login"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr("cw.operator_identity.cached_gh_login", _fail_if_called)
+        config = OrchestratorConfig(
+            operator_github_login_by_repo={"acme/widgets": "override-user"}
+        )
+
+        # Map hit.
+        assert (
+            operator_identity.resolve_operator_login_for_repo(
+                "acme/widgets", config, fallback="runtime-user"
+            )
+            == "override-user"
+        )
+        # Map miss.
+        assert (
+            operator_identity.resolve_operator_login_for_repo(
+                "other/repo", config, fallback="runtime-user"
+            )
+            == "runtime-user"
+        )
+
+    def test_case_sensitive_exact_match(self) -> None:
+        config = OrchestratorConfig(
+            operator_github_login_by_repo={"Acme/Widgets": "override-user"}
+        )
+
+        result = operator_identity.resolve_operator_login_for_repo(
+            "acme/widgets", config, fallback="runtime-user"
+        )
+
+        assert result == "runtime-user"
