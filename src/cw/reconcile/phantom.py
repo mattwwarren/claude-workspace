@@ -13,6 +13,7 @@ from cw.config import save_state
 from cw.dev_queue import (
     _extract_pr_url,
     _hold_aware_disposition,
+    _result_blocker_reason,
     dev_queue_lock,
     load_dev_queue,
     save_dev_queue,
@@ -646,9 +647,7 @@ def _apply_phantom_queue_mutations(
             elif task.ticket_id in salvaged_set:
                 salvaged_result = salvaged_result_by_ticket[task.ticket_id]
                 last_result = salvaged_result.model_dump(mode="json")
-                reason = (
-                    salvaged_result.blocker.reason if salvaged_result.blocker else None
-                )
+                reason = _result_blocker_reason(salvaged_result)
                 transition_task_status(
                     task,
                     _queue_status_for_salvaged(salvaged_result),

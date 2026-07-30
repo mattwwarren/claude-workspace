@@ -52,6 +52,7 @@ from cw.config import get_client, load_state, save_state
 from cw.dev_queue import (
     _extract_pr_url,
     _hold_aware_disposition,
+    _result_blocker_reason,
     dev_queue_lock,
     load_dev_queue,
     save_dev_queue,
@@ -618,9 +619,7 @@ def _route_park_marker_poison_task(
     """
     if salvage_result is not None:
         last_result = salvage_result.model_dump(mode="json")
-        blocker_reason = (
-            salvage_result.blocker.reason if salvage_result.blocker else None
-        )
+        blocker_reason = _result_blocker_reason(salvage_result)
         transition_task_status(
             task,
             _queue_status_for_salvaged(salvage_result),
@@ -645,9 +644,7 @@ def _route_park_marker_poison_task(
         # Ordering (isinstance(BlockedResult) before .status=="blocked") is
         # binding -- see _foreign_result_target_queue_status's docstring.
         target_status = _foreign_result_target_queue_status(validated_refusal)
-        refusal_reason = (
-            validated_refusal.blocker.reason if validated_refusal.blocker else None
-        )
+        refusal_reason = _result_blocker_reason(validated_refusal)
         transition_task_status(
             task,
             target_status,

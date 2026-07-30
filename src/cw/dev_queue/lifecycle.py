@@ -26,6 +26,8 @@ from cw.auto_dev_result import (
     PAUSED_FOR_USER_INPUT_STATUSES,
     STAGE_FAILURE_STATUSES,
     STAGE_SUCCESS_STATUSES,
+    AutoDevResult,
+    BlockedResult,
 )
 from cw.dev_queue.storage import load_dev_queue
 from cw.events import record_event
@@ -211,6 +213,18 @@ def _hold_aware_disposition(
     if blocker_reason in OPERATOR_UNAVAILABLE_BLOCKER_REASONS:
         return AWAITING_OPERATOR_DISPOSITION
     return _derive_disposition(status)
+
+
+def _result_blocker_reason(result: AutoDevResult | BlockedResult) -> str | None:
+    """Extract ``result.blocker.reason``, or ``None`` if *result* has no blocker.
+
+    Single accessor for the six reconcile call sites that feed
+    ``_hold_aware_disposition``'s *blocker_reason* argument from a validated
+    ``AutoDevResult``/``BlockedResult`` (RFC 0011 A1, #1254). ``dispatch.routing``'s
+    call site extracts from a raw ``last_result: dict`` instead and stays
+    separate -- its input is unvalidated, not one of these two model types.
+    """
+    return result.blocker.reason if result.blocker else None
 
 
 def _extract_pr_url(last_result: dict[str, object] | None) -> str | None:

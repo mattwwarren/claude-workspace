@@ -14,6 +14,7 @@ from cw.config import save_state
 from cw.dev_queue import (
     _extract_pr_url,
     _hold_aware_disposition,
+    _result_blocker_reason,
     dev_queue_lock,
     load_dev_queue,
     save_dev_queue,
@@ -738,7 +739,7 @@ def _apply_idle_queue_mutations(
             elif task.ticket_id in salvaged_ticket_ids_set:
                 result = salvaged_result_by_ticket[task.ticket_id]
                 last_result = result.model_dump(mode="json")
-                reason = result.blocker.reason if result.blocker else None
+                reason = _result_blocker_reason(result)
                 transition_task_status(
                     task,
                     _queue_status_for_salvaged(result),
