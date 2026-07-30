@@ -447,14 +447,25 @@ def _clear_signoff_gate(task: TicketTask, stages: list[Stage]) -> None:
     See GitHub #990.
 
     Not gated by the RFC 0011 A3 force hold (#1160): the automatic gate-recipe
-    reactor can never reach this function. ``_act_auto_approve_review``'s
-    candidates are produced by ``_detect_auto_approve_review`` and re-resolved
-    by ``_find_blocked_task`` (both in ``cw.reconcile.gate_recipes``), and both
-    filter on ``task.status == QueueItemStatus.BLOCKED_ON_USER`` -- a row
-    already at ``AWAITING_OPERATOR_SIGNOFF`` (this function's precondition,
-    enforced by its only caller, ``_approve_ticket_locked``) can never be
-    selected by either filter. Only the human ``approve_ticket`` path reaches
-    here, so no ``operator_initiated`` threading is needed.
+    reactor can never reach this function. Two independent facts combine to
+    prove it, both checkable in place (not merely asserted):
+
+    1. ``_approve_ticket_locked`` (``dev_queue/approval.py``) only calls this
+       function from its own explicit
+       ``if task.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF:`` branch
+       -- checked immediately after resolving the task, before the
+       ``operator_initiated``/force-hold branch below it is ever reached.
+    2. The automatic reactor's candidates are produced by
+       ``_detect_auto_approve_review`` and re-resolved by
+       ``_find_blocked_task`` (both in ``cw.reconcile.gate_recipes``), and both
+       filter on ``task.status == QueueItemStatus.BLOCKED_ON_USER`` -- the
+       mutually exclusive status to (1)'s precondition.
+
+    So the reactor can only ever invoke ``_approve_ticket_locked`` on a row
+    whose status is ``BLOCKED_ON_USER``, which by (1) can never take the
+    ``_clear_signoff_gate`` branch. Only the human ``approve_ticket`` path
+    (which resolves an ``AWAITING_OPERATOR_SIGNOFF`` row) reaches here, so no
+    ``operator_initiated`` threading is needed.
     """
     if task.stage == stages[-1]:
         transition_task_status(
