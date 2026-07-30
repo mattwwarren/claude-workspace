@@ -6637,6 +6637,46 @@ class TestApplyStagedDecision:
         assert task.regress_attempts == 1
         assert task.session_id is None
 
+    def test_stage_failure_operator_unavailable_stamps_awaiting_operator_disposition(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """RFC 0011 A1 (#1254): blocked + operator_unavailable blocker reason →
+        BLOCKED_ON_USER with the hold-class disposition, not the verbatim status.
+        blocked_reason still carries the verbatim per-park diagnostic."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("HOLD-1", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "s4_finalize", "reason": "operator_unavailable"},
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "awaiting_operator"
+        assert task.blocked_reason == "operator_unavailable"
+
+    def test_merge_gate_blocked_push_auth_failed_stamps_awaiting_operator_disposition(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """RFC 0011 A1 (#1254): merge_gate_blocked may optionally carry a blocker
+        (schema.py's #777 exception), so push_auth_failed on that status must also
+        reach the hold namespace."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("HOLD-2", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "merge_gate_blocked",
+            "blocker": {"stage": "s4_finalize", "reason": "push_auth_failed"},
+        }
+        apply_staged_decision(
+            task, "merge_gate_blocked", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "awaiting_operator"
+        assert task.blocked_reason == "push_auth_failed"
+
     def test_stage_advance_unchecked_unknown_client_stamps_disposition(
         self,
         tmp_dispatch_dirs: Path,

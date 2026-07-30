@@ -34,8 +34,8 @@ from cw.config import (
 from cw.dev_queue import (
     SIGNOFF_GATE_DISPOSITION,
     _advance_task_pointer,
-    _derive_disposition,
     _extract_pr_url,
+    _hold_aware_disposition,
     _stage_regress,
     transition_task_status,
 )
@@ -617,8 +617,14 @@ def _route_staged_decision(
         # the Rule 1-6 status table (the sentinel's status was never observed at
         # this stage). Routed, so callers persist the parked state (#1149).
         return True
-    disposition = _derive_disposition(status)
     pr_url = _extract_pr_url(last_result)
+    # Hoisted above the disposition computation (#1254): Rule 5's branch already
+    # read blocker/blocker_reason for the regress check and the breadcrumbs, and
+    # _hold_aware_disposition needs the same reason *before* the rule table runs.
+    # One extraction, reused by both.
+    blocker = last_result.get("blocker") if isinstance(last_result, dict) else None
+    blocker_reason = blocker.get("reason") if isinstance(blocker, dict) else None
+    disposition = _hold_aware_disposition(status, blocker_reason)
     if status in SCOPE_GATED_APPROVAL_STATUSES:
         # Rule 1: scope-gated approval; small tier auto-advances, large blocks.
         # Must fire before Rule 2 (SCOPE_GATED ⊂ PAUSED_FOR_USER_INPUT).
@@ -680,10 +686,11 @@ def _route_staged_decision(
         # Rule 5: blocked/merge_gate_blocked/scope_exceeded/forbidden_area
         # Sub-rule 5a: "blocked" at FINALIZE with a regress-eligible blocker
         # reason and attempts below cap → regress to IMPL for self-heal (#770).
-        # scope_exceeded/forbidden_area/merge_gate_blocked have no blocker field
-        # (validator enforces this) so they always fall through to BLOCKED_ON_USER.
-        blocker = last_result.get("blocker") if isinstance(last_result, dict) else None
-        blocker_reason = blocker.get("reason") if isinstance(blocker, dict) else None
+        # scope_exceeded/forbidden_area have no blocker field (validator enforces
+        # this) so they always fall through to BLOCKED_ON_USER. merge_gate_blocked
+        # MAY carry one (schema.py's #777 exception), but 5a is gated on
+        # status=="blocked" so it still cannot regress. blocker/blocker_reason are
+        # read once above, before the rule table (#1254).
         if (
             status == "blocked"
             and task.stage == Stage.FINALIZE
