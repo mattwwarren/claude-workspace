@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -556,6 +557,24 @@ class OrchestratorConfig(BaseModel):
     # needs the block on only some clients sets the one pattern that is safe
     # fleet-wide (headless Linear OAuth stalls the same way on every client).
     disallowed_mcp_tools: list[str] = Field(default_factory=list)
+    # RFC 0011 A6 (#1162) — the digest delivery window is a LOCAL wall-clock
+    # preference, not a UTC timestamp: an operator's wake/sleep hours don't move
+    # with DST, and storing them as UTC-hour integers would either page at the
+    # wrong local hour after a DST transition or (for a window that crosses UTC
+    # midnight, e.g. 08:00-20:00 EDT == 12:00-00:00 UTC) fail to open at all under
+    # a naive start<=hour<end comparison. zoneinfo is stdlib (requires-python
+    # >=3.13) so this costs no new dependency -- only the DST test coverage below.
+    # The timezone is itself a config field, not a hardcoded constant, so a
+    # relocating (or future) operator changes config, not code.
+    attention_digest_window_tz: str = "America/New_York"
+    attention_digest_window_start_hour: int = 8  # local to attention_digest_window_tz
+    attention_digest_window_end_hour: int = 20  # local to attention_digest_window_tz
+    # Idle-drain floor (seconds): a held event's age must exceed this before a
+    # flush inside the window is allowed. Prevents flushing a digest of one
+    # immediately after the very first held park of the window/night arrives --
+    # the floor gives a second (or third) held park a chance to land before the
+    # first digest goes out. See RFC 0011 A6 resolution 5.
+    attention_digest_idle_floor_seconds: int = 60
 
     @field_validator("disallowed_mcp_tools")
     @classmethod
@@ -582,6 +601,24 @@ class OrchestratorConfig(BaseModel):
                     "comma-join delimiter); use one list entry per pattern"
                 )
                 raise ValueError(msg)
+        return value
+
+    @field_validator("attention_digest_window_tz")
+    @classmethod
+    def _validate_attention_digest_window_tz(cls, value: str) -> str:
+        """Fail loud on an unresolvable IANA zone (fail-loud, mirrors default_signoff).
+
+        A silent fallback to UTC here reproduces exactly the 4am-page failure
+        this field exists to prevent -- an operator who mistypes their zone must
+        see a config-load error, not a digest window that silently opens at the
+        wrong local hour. Mirrors _validate_disallowed_mcp_tools's raise-on-bad-
+        value shape.
+        """
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError:
+            msg = f"attention_digest_window_tz: unknown IANA zone {value!r}"
+            raise ValueError(msg) from None
         return value
 
     @field_validator("concierge_recoveries")
