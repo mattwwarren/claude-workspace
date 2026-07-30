@@ -157,6 +157,8 @@ For a wave of tickets, the `/cw-fanout` skill wraps this whole table — pre-fli
 
 **Operator signoff gate** (RFC 0007 Phase 3): configure `--signoff operator` on `cw dev-queue add`, a lane, or the global default to force a ship checkpoint a ticket can't clear on its own. A gated ticket parks as `AWAITING_OPERATOR_SIGNOFF` at the REVIEW→FINALIZE boundary; `cw dev-queue approve` clears it forward (large-tier tickets need it twice — once for the ordinary review gate, once for signoff), and `cw dev-queue requeue --stage <earlier> --regress` sends it backward instead.
 
+**Proactive finalize hold** (RFC 0011 A3): configure `--hold-finalize` on `cw dev-queue add`, `finalize_gate: manual` on a lane, or `default_finalize_gate: manual` globally to stop a ticket before an *unattended* finalize. A held ticket parks as `BLOCKED_ON_USER` with disposition `finalize_gate_held` at the REVIEW→FINALIZE boundary, wins outright over the signoff gate when both are armed, and is released only by a human `cw dev-queue approve` — an automatic gate-recipe approve declines and emits `gate.auto_approve_held` instead. `cw dev-queue drain` deliberately does not batch-release it.
+
 ### Orchestrator
 
 | Command | Description |

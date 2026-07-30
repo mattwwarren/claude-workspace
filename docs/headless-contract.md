@@ -564,6 +564,55 @@ re-dispatch and must not be double-counted as free capacity.
 **`cw dev-queue wait` exit code:** `4` (distinct from `2` for an ordinary
 `BLOCKED_ON_USER` block) — see the exit-code table in `cw dev-queue wait --help`.
 
+## The `finalize_gate_held` Hold Disposition (RFC 0011 A3, GitHub #1160)
+
+The **proactive finalize hold** stops a ticket before an *unattended* finalize.
+It is not a `blocker.reason` — no producer ever emits it, and it will never
+appear in an `AutoDevResult`. It is a **`disposition`** stamped by `cw` itself
+onto a `BLOCKED_ON_USER` row, sitting in the same namespace as the ordinary
+status-derived dispositions (`review_pending_approval`, `blocked`, …) and the
+RFC 0011 A1 `awaiting_operator` hold.
+
+**Status landed:** `BLOCKED_ON_USER` (NOT `AWAITING_OPERATOR_SIGNOFF` — see
+below for why the two gates are different things).
+
+**Resolution (3-tier precedence, highest first)** via `resolve_hold_finalize`,
+exactly mirroring `resolve_signoff`:
+
+1. **Per-ticket** — `TicketTask.hold_finalize` (`cw dev-queue add --hold-finalize`).
+2. **Per-lane** — `LaneConfig.finalize_gate` on the ticket's declared lane.
+3. **Global default** — `OrchestratorConfig.default_finalize_gate` (`"auto"` or `"manual"`).
+
+**Where the hold fires:** the same three REVIEW→FINALIZE checkpoints the
+signoff gate covers, and only those — a small-tier `review_pending_approval`
+advance, a `stage_complete` fired at `Stage.REVIEW`, and a multi-hop
+stage-pointer walk crossing the REVIEW rung. Mid-pipeline advances
+(HARDEN→PLAN, PLAN→IMPL, IMPL→REVIEW) are never held.
+
+**Precedence:**
+
+- flag on (any config / probe / tier) → **HELD** (the force hold wins outright,
+  including Small-scope)
+- flag off, lane/global `finalize_gate: manual` → **HELD** (including Small-scope)
+- flag off, config `auto`/unset, availability probe unavailable → held via the
+  RFC 0011 A5 probe's own mechanism, not this one
+- flag off, config `auto`/unset, probe available → **unchanged** (Large blocks at
+  the approval/signoff gate exactly as today; Small auto-advances as today)
+- hold armed **and** signoff configured → a single park, `BLOCKED_ON_USER` /
+  `finalize_gate_held`. The hold is checked first and the signoff branch is
+  `elif`-chained behind it, so the row is never double-parked.
+
+**Releasing the hold:** release via `cw dev-queue approve`. That command is the
+only caller permitted to clear it — it passes `operator_initiated=True` into
+`_approve_ticket_locked`, which skips the hold check entirely. Every *automatic*
+caller (today: the RFC 0009 auto-approve gate recipe) omits that flag, gets the
+fail-safe default, and its approve degrades to a no-op that mutates nothing and
+emits a `gate.auto_approve_held` correction instead.
+
+**Not batch-drainable:** `cw dev-queue drain` deliberately selects only the RFC
+0011 A1 `awaiting_operator` subset of `HOLD_DISPOSITIONS` (RFC 0011 A4 R11), so
+a force hold is never released en masse — only one ticket at a time, by hand.
+
 ### queue.session_reaped Bus Event (GitHub #380)
 
 Emitted on the **queue-events channel** (the `cw-queue-events` MCP/SSE server, event string `queue.session_reaped`) whenever reconcile disposes of a session. The channel server polls `session.reap_reason` off the state snapshot and fires exactly once per new reason stamp. Note: this is a channel-server event, NOT written to the orchestrator inbox — it does **not** appear in `cw event tail` (the inbox carries the related `session.reap_proposed` / `session.timed_out` / `session.needs_attention` events instead).

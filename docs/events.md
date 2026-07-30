@@ -1117,6 +1117,40 @@ latch clears itself once the condition resolves.
 
 `correlation_id` is the `ticket_id`.
 
+### `gate.auto_approve_held`
+
+**Emitter:** `_act_auto_approve_review` (`cw.reconcile.gate_recipes`, dispatched by `run_gate_recipes`)
+**Payload:**
+```json
+{
+  "ticket_id": "<str>",
+  "client": "<str>",
+  "lane": "<str>",
+  "session_id": "<str>",
+  "recipe": "auto_approve_clean_review"
+}
+```
+**Semantics:** RFC 0011 A3 (#1160). Second companion correction to
+`gate.auto_approved`, alongside `gate.auto_approve_failed`. Emitted when the
+act-phase `_approve_ticket_locked` call *declines* to approve — because the row
+carries an armed proactive finalize hold (`--hold-finalize` /
+`finalize_gate: manual`) and this caller is automatic, not the human
+`cw dev-queue approve`. Distinct from `gate.auto_approve_failed`: nothing
+raised and nothing is broken, the gate deliberately held, and no
+`TicketTask.gate_recipe_failed_at` latch is stamped. The ticket is left exactly
+as parked (`BLOCKED_ON_USER` / `finalize_gate_held`), is not reported as
+approved, and gets no audit comment. Forwarded to the operator-attention
+channel by default alongside `gate.auto_approved`, for the same reason: without
+it, `gate.auto_approved` would stand alone on that channel as an uncorrected
+"approved" signal.
+
+Note: a *persistently* armed hold (as opposed to one armed inside the
+detect→act race window) re-emits this pair on every reconcile tick — there is
+deliberately no anti-noise latch, since reusing the failure latch would
+conflate a deliberate hold with a broken mutation.
+
+`correlation_id` is the `ticket_id`.
+
 ### `pr.action_taken`
 
 **Emitter:** `_act_address_review` (`cw.reconcile.review_recipes`, dispatched by `run_review_recipes`)
@@ -1179,7 +1213,8 @@ of this bus — `task.transition` (only for terminal/attention-worthy
 `session.needs_attention`, all seven `pr.*` types (the five PR-lifecycle
 events plus `pr.action_taken`/`pr.action_failed`), `session.liveness_changed`
 (only at `new_bucket >= stale_30m`), `operator.escalation`,
-`gate.auto_approved`, and `gate.auto_approve_failed` — onto a distinct
+`gate.auto_approved`, `gate.auto_approve_failed`, and
+`gate.auto_approve_held` — onto a distinct
 `cw-operator` SSE topic on the existing `cw_queue_events_server`, consumed
 with cursor name `"operator-channel-bridge"`. `concierge.recovered` and
 `concierge.recovery_backoff_armed` are deliberately excluded (audit-only).

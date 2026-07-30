@@ -49,7 +49,7 @@ operator channel.
 ```bash
 cw dev-queue add <TICKET-ID> [<TICKET-ID> ...] --client <client> \
   [--scope small|large] [--priority <n>] [--timeout <seconds>] \
-  [--lane <lane>] [--signoff operator]
+  [--lane <lane>] [--signoff operator] [--hold-finalize]
 ```
 
 - `-s/--scope` sets `TicketTask.scope_hint` (default `None`). Two effects:
@@ -69,6 +69,8 @@ cw dev-queue add <TICKET-ID> [<TICKET-ID> ...] --client <client> \
   <client> --to <lane>`.
 - `--signoff operator` — require an explicit operator signoff before this
   ticket ships (see below).
+- `--hold-finalize` — stop this ticket before an unattended finalize (see
+  below). A boolean switch, not a value option.
 
 ### The operator-signoff gate (RFC 0007 Phase 3, #990)
 
@@ -85,6 +87,42 @@ instead of advancing unattended. Resolution precedence: per-ticket
 - `cw dev-queue wait` exits **4** for a signoff-parked ticket (§4).
 - A signoff-parked row is escalation-eligible (§11.2) but is NOT eligible
   for re-dispatch until approved.
+
+### The proactive finalize hold (RFC 0011 A3, #1160)
+
+A ticket with the hold armed stops at the same ship checkpoint — the
+REVIEW→FINALIZE transition — but parks in queue status `BLOCKED_ON_USER` with
+disposition `finalize_gate_held`, rather than `AWAITING_OPERATOR_SIGNOFF`.
+Resolution precedence: per-ticket (`add --hold-finalize`) > per-lane
+(`LaneConfig.finalize_gate`) > global (`default_finalize_gate` in
+`orchestrator.yaml`, default `"auto"` = no hold).
+
+Use it when you want a ticket to reach a reviewable state and then *stop*,
+full stop — as opposed to `--signoff`, which is a second signature slot on a
+ticket you already intend to ship.
+
+Precedence, exactly:
+
+- flag on (any config / probe / tier) → **HELD**, including Small-scope
+- flag off, lane/global `finalize_gate: manual` → **HELD**, including Small-scope
+- flag off, config `auto`/unset, availability probe unavailable → held by the
+  RFC 0011 A5 probe's own mechanism, not this one
+- flag off, config `auto`/unset, probe available → **unchanged** (Large blocks
+  at the approval/signoff gate as today; Small auto-advances as today)
+- hold armed **and** `--signoff operator` set → a single park,
+  `BLOCKED_ON_USER` / `finalize_gate_held`; the hold wins outright and the row
+  is never double-parked
+
+Operating notes:
+
+- Release via `cw dev-queue approve <T> -c <client>`. That is the only command
+  that clears it — a *human* approve is permitted to release the hold, while
+  any automatic approve (the RFC 0009 auto-approve gate recipe) declines,
+  changes nothing, and emits `gate.auto_approve_held` instead.
+- `cw dev-queue drain` will NOT release it: drain deliberately covers only the
+  RFC 0011 A1 `awaiting_operator` availability parks (RFC 0011 A4 R11).
+- To reject rather than release, `cw dev-queue requeue --stage <earlier>
+  --regress` moves the row backward as usual.
 
 ### After you enqueue — monitor with the skills, not raw status
 
