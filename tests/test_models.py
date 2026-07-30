@@ -930,8 +930,8 @@ def test_session_last_result_source_round_trips() -> None:
 class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
-    def test_dev_queue_schema_version_is_20(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 23
+    def test_dev_queue_schema_version_is_current(self) -> None:
+        assert DEV_QUEUE_SCHEMA_VERSION == 24
 
     def test_pr_state_defaults(self) -> None:
         state = PrState()
