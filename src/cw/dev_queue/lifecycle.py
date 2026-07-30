@@ -453,8 +453,9 @@ def _clear_signoff_gate(task: TicketTask, stages: list[Stage]) -> None:
     1. ``_approve_ticket_locked`` (``dev_queue/approval.py``) only calls this
        function from its own explicit
        ``if task.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF:`` branch
-       -- checked immediately after resolving the task, before the
-       ``operator_initiated``/force-hold branch below it is ever reached.
+       -- checked after task resolution and the approvability/stage guard
+       clauses, but still before the ``operator_initiated``/force-hold branch
+       below it is ever reached.
     2. The automatic reactor's candidates are produced by
        ``_detect_auto_approve_review`` and re-resolved by
        ``_find_blocked_task`` (both in ``cw.reconcile.gate_recipes``), and both
