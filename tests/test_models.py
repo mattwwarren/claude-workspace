@@ -1158,6 +1158,7 @@ class TestOperatorChannelForward:
                 OrchestratorEventType.OPERATOR_ESCALATION,
                 OrchestratorEventType.GATE_AUTO_APPROVED,
                 OrchestratorEventType.GATE_AUTO_APPROVE_FAILED,
+                OrchestratorEventType.GATE_AUTO_APPROVE_HELD,
                 OrchestratorEventType.PR_ACTION_TAKEN,
                 OrchestratorEventType.PR_ACTION_FAILED,
                 OrchestratorEventType.SSH_KEY_GATE_BYPASSED,
@@ -1370,7 +1371,8 @@ class TestConciergeAndEscalationModelSurface:
         from cw.models import _DEFAULT_OPERATOR_EVENT_TYPES
 
         assert (
-            OrchestratorEventType.GATE_AUTO_APPROVE_HELD in _DEFAULT_OPERATOR_EVENT_TYPES
+            OrchestratorEventType.GATE_AUTO_APPROVE_HELD
+            in _DEFAULT_OPERATOR_EVENT_TYPES
         )
 
     # -- RFC 0010 P2 review-recipe act-phase surface (#1097) -----------------

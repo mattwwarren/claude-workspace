@@ -83,6 +83,18 @@ _PLAN_APPROVED_MARKER = "<!-- auto-dev-plan-approved -->"
         " overriding the lane/global default (RFC 0007 Phase 3)."
     ),
 )
+@click.option(
+    "--hold-finalize",
+    "hold_finalize",
+    is_flag=True,
+    default=False,
+    help=(
+        "Stop this ticket before an unattended finalize, overriding the"
+        " lane/global default. Parks it BLOCKED_ON_USER with disposition"
+        " 'finalize_gate_held'; release with `cw dev-queue approve`"
+        " (RFC 0011 A3)."
+    ),
+)
 @handle_errors
 def dev_queue_add(
     tickets: tuple[str, ...],
@@ -92,9 +104,14 @@ def dev_queue_add(
     scope_hint: str | None,
     lane_name: str,
     signoff: Literal["operator"] | None,
+    hold_finalize: bool,
 ) -> None:
     """Enqueue one or more tickets for dispatch."""
     config = load_orchestrator_config()
+    # The flag has exactly one "on" value, so it is a boolean switch at the CLI
+    # (the --post-marker shape) rather than a click.Choice like --signoff;
+    # translate it to the model's Literal here, at the single call site.
+    hold_finalize_value: Literal["manual"] | None = "manual" if hold_finalize else None
     for ticket_id in tickets:
         resolved = resolve_client(ticket_id, config, client)
         try:
@@ -106,6 +123,7 @@ def dev_queue_add(
                 scope_hint=scope_hint,
                 lane=lane_name,
                 signoff=signoff,
+                hold_finalize=hold_finalize_value,
             )
         except ValidationError as exc:
             msg = f"Invalid ticket '{ticket_id}': {exc.errors()[0]['msg']}"

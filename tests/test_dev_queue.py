@@ -4576,9 +4576,7 @@ class TestApproveTicketLockedForceHold:
         task = self._arm_force_held_review_row(tmp_config_dir, tmp_path, "sess-fh-3")
 
         with dev_queue_lock():
-            result = _approve_ticket_locked(
-                "GEN-500", "genhealth", resolved_task=task
-            )
+            result = _approve_ticket_locked("GEN-500", "genhealth", resolved_task=task)
 
         assert result["finalize_held"] is True
         store = load_dev_queue()
