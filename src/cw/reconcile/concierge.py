@@ -50,8 +50,9 @@ from typing import TYPE_CHECKING
 
 from cw.config import get_client, load_state, save_state
 from cw.dev_queue import (
-    _derive_disposition,
     _extract_pr_url,
+    _hold_aware_disposition,
+    _result_blocker_reason,
     dev_queue_lock,
     load_dev_queue,
     save_dev_queue,
@@ -618,10 +619,11 @@ def _route_park_marker_poison_task(
     """
     if salvage_result is not None:
         last_result = salvage_result.model_dump(mode="json")
+        blocker_reason = _result_blocker_reason(salvage_result)
         transition_task_status(
             task,
             _queue_status_for_salvaged(salvage_result),
-            disposition=_derive_disposition(salvage_result.status),
+            disposition=_hold_aware_disposition(salvage_result.status, blocker_reason),
             pr_url=_extract_pr_url(last_result),
         )
         return
@@ -642,10 +644,13 @@ def _route_park_marker_poison_task(
         # Ordering (isinstance(BlockedResult) before .status=="blocked") is
         # binding -- see _foreign_result_target_queue_status's docstring.
         target_status = _foreign_result_target_queue_status(validated_refusal)
+        refusal_reason = _result_blocker_reason(validated_refusal)
         transition_task_status(
             task,
             target_status,
-            disposition=_derive_disposition(validated_refusal.status),
+            disposition=_hold_aware_disposition(
+                validated_refusal.status, refusal_reason
+            ),
             pr_url=_extract_pr_url(dumped),
         )
         return

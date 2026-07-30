@@ -51,6 +51,7 @@ from cw.reconcile import (
 )
 from tests._reconcile_helpers import (
     _auto_config,
+    _make_terminal_payload,
     _mk_daemon_completed_session,
     _mk_headless_daemon_session,
     _mk_live_idle_daemon_session,
@@ -4376,6 +4377,34 @@ def test_idle_queue_mutations_salvage_stamps_disposition(
     t = next(t for t in load_dev_queue().tasks if t.ticket_id == "idle-salv-disp-1")
     assert t.status == QueueItemStatus.COMPLETED
     assert t.disposition == "shipped"
+
+
+def test_idle_salvage_merge_gate_blocked_push_auth_failed_stamps_awaiting_operator(
+    tmp_config_dir: Path,
+) -> None:
+    """RFC 0011 A1 (#1254): idle.py's salvaged-ticket queue arm reads the salvaged
+    result's blocker.reason, so a push_auth_failed merge_gate_blocked salvage
+    stamps the hold-class disposition instead of the verbatim status."""
+    from cw.reconcile._shared import ProposedAction, ReapCandidate
+    from cw.reconcile.idle import _apply_idle_queue_mutations
+
+    _mk_running_task("idle-hold-1")
+
+    payload = _make_terminal_payload("merge_gate_blocked", "idle-hold-1")
+    payload["blocker"] = {"stage": "stage4a_merge_gate", "reason": "push_auth_failed"}
+    result = AutoDevResult.model_validate(payload)
+
+    candidate = ReapCandidate(
+        session_id="idle-hold-1",
+        proposed_action=ProposedAction.SALVAGE_COMPLETION,
+        ticket_id="idle-hold-1",
+        salvage_result=result,
+    )
+
+    _apply_idle_queue_mutations([], [], [], [], [candidate], {"idle-hold-1": result})
+
+    t = next(t for t in load_dev_queue().tasks if t.ticket_id == "idle-hold-1")
+    assert t.disposition == "awaiting_operator"
 
 
 # ---------------------------------------------------------------------------

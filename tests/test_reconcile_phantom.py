@@ -52,6 +52,7 @@ from cw.reconcile._shared import _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
 from tests._reconcile_helpers import (
     _auto_config,
     _client_with_lane,
+    _make_terminal_payload,
     _mk_headless_daemon_session,
     _mk_phantom_daemon_session,
     _mk_session,
@@ -1974,6 +1975,58 @@ def test_act_on_phantom_salvage_completion_routes_queue_and_emits_event(
     assert len(events) == 1
     assert events[0].payload["salvaged"] is True
     assert events[0].payload["crashed"] is False
+
+
+def test_phantom_salvage_operator_unavailable_stamps_awaiting_operator(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RFC 0011 A1 (#1254): phantom.py's salvaged-ticket queue arm reads the
+    salvaged result's blocker.reason, so an operator-unavailable merge_gate_blocked
+    salvage stamps the hold-class disposition."""
+    from cw.reconcile import ProposedAction, ReapCandidate, _act_on_phantom_candidates
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.get_native_daemon_client",
+        FakeNativeDaemonClient,
+    )
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)
+
+    sess = _mk_phantom_daemon_session("phantom-hold-1", started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="phantom-hold-1",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="phantom-hold-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    payload = _make_terminal_payload("merge_gate_blocked", "phantom-hold-1")
+    payload["blocker"] = {
+        "stage": "stage4a_merge_gate",
+        "reason": "operator_unavailable",
+    }
+    result = AutoDevResult.model_validate(payload)
+    candidate = ReapCandidate(
+        session_id="phantom-hold-1",
+        proposed_action=ProposedAction.SALVAGE_COMPLETION,
+        ticket_id="phantom-hold-1",
+        salvage_result=result,
+        salvage_csid="csid-phantom-hold",
+        client="client-a",
+        worktree_path=None,
+    )
+
+    _act_on_phantom_candidates(state, [candidate], now=now)
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "phantom-hold-1")
+    assert t.disposition == "awaiting_operator"
 
 
 def test_act_on_phantom_sentinel_mismatch_veto_persists_consecutive_count(

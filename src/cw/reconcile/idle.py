@@ -12,8 +12,9 @@ from typing import TYPE_CHECKING
 from cw.auto_dev_result import INTERMEDIATE_ADVANCE_STATUSES, AutoDevResult
 from cw.config import save_state
 from cw.dev_queue import (
-    _derive_disposition,
     _extract_pr_url,
+    _hold_aware_disposition,
+    _result_blocker_reason,
     dev_queue_lock,
     load_dev_queue,
     save_dev_queue,
@@ -738,10 +739,11 @@ def _apply_idle_queue_mutations(
             elif task.ticket_id in salvaged_ticket_ids_set:
                 result = salvaged_result_by_ticket[task.ticket_id]
                 last_result = result.model_dump(mode="json")
+                reason = _result_blocker_reason(result)
                 transition_task_status(
                     task,
                     _queue_status_for_salvaged(result),
-                    disposition=_derive_disposition(result.status),
+                    disposition=_hold_aware_disposition(result.status, reason),
                     pr_url=_extract_pr_url(last_result),
                 )
                 changed = True

@@ -1194,6 +1194,9 @@ class TestParkMarkerPoisonClearDoorRefusal:
         refusal = self._refusal(blocked_autodev)
         requeued = self._run(monkeypatch, refusal)
         assert requeued.status == QueueItemStatus.BLOCKED_ON_USER
+        # Regression pin (#1254): a non-hold blocker reason keeps the verbatim
+        # status disposition -- _hold_aware_disposition is a strict superset.
+        assert requeued.disposition == "blocked"
 
     def test_routes_blocked_result_shape_to_blocked_on_user(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
@@ -1207,6 +1210,23 @@ class TestParkMarkerPoisonClearDoorRefusal:
         refusal = self._refusal(blocked_result)
         requeued = self._run(monkeypatch, refusal)
         assert requeued.status == QueueItemStatus.BLOCKED_ON_USER
+        # Regression pin (#1254): see sibling above.
+        assert requeued.disposition == "blocked"
+
+    def test_routes_refused_operator_unavailable_blocked_result(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """RFC 0011 A1 (#1254): the door-refused foreign-result arm reads
+        blocker.reason, so a push_auth_failed BlockedResult refusal parks with the
+        hold-class disposition instead of the verbatim "blocked"."""
+        blocked_result = {
+            "status": "blocked",
+            "blocker": {"stage": "s4", "reason": "push_auth_failed", "details": "x"},
+        }
+        refusal = self._refusal(blocked_result)
+        requeued = self._run(monkeypatch, refusal)
+        assert requeued.status == QueueItemStatus.BLOCKED_ON_USER
+        assert requeued.disposition == "awaiting_operator"
 
     def test_unroutable_foreign_shape_falls_through_to_pending(
         self,
@@ -1228,6 +1248,50 @@ class TestParkMarkerPoisonClearDoorRefusal:
             "unroutable" in r.getMessage() and "stop_hook_harvest" in r.getMessage()
             for r in caplog.records
         )
+
+
+def test_park_marker_poison_salvage_operator_unavailable_stamps_awaiting_operator(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RFC 0011 A1 (#1254): recipe 2's *salvage* arm (door accepted a fresh
+    salvage) also reads blocker.reason. merge_gate_blocked may optionally carry a
+    blocker per schema.py's #777 exception, so operator_unavailable on that status
+    reaches the hold namespace. The queue status itself stays whatever
+    _queue_status_for_salvaged maps merge_gate_blocked to -- unchanged here."""
+    from cw.reconcile.concierge import (
+        ConciergeCandidate,
+        _act_on_park_marker_poison_candidates,
+    )
+
+    task = _make_task(disposition=None, attempts=1, session_id="sess-1")
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    save_state(CwState(sessions=[]))
+
+    payload = _make_terminal_payload("merge_gate_blocked", "GEN-1")
+    payload["blocker"] = {
+        "stage": "stage4a_merge_gate",
+        "reason": "operator_unavailable",
+        "details": "x",
+    }
+    salvage_result = AutoDevResult.model_validate(payload)
+    monkeypatch.setattr(
+        "cw.reconcile.concierge._close_confirmed_dead_session",
+        lambda *_a, **_kw: (True, salvage_result, None),
+    )
+
+    candidate = ConciergeCandidate(
+        ticket_id="GEN-1",
+        client="acme",
+        recipe=RECIPE_PARK_MARKER_POISON_CLEAR,
+        evidence={},
+        session_id="sess-1",
+        refused_ceiling=False,
+    )
+    recovered = _act_on_park_marker_poison_candidates([candidate], now=_NOW)
+
+    assert recovered == ["GEN-1"]
+    requeued = load_dev_queue().tasks[0]
+    assert requeued.disposition == "awaiting_operator"
 
 
 def test_close_confirmed_dead_session_returns_refusal_outcome_on_door_refusal(
