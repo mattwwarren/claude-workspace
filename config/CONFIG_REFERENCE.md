@@ -357,6 +357,11 @@ linear_prefix_map: {}
 # ADR-0013 (../docs/adr/0013-agent-delegated-ticket-work.md) for the full
 # boundary.
 
+operator_github_login_by_repo: {}
+# ^ repo-keyed override for the GitHub login treated as "the operator" at
+# client-less entry points (RFC 0011 follow-up, #1171) — see "Operator
+# GitHub Login Override" below.
+
 # Per-tier headless timeout budgets (seconds). Sessions whose scope.tier is
 # known (from the auto-dev sentinel scope field) are budgeted by this map.
 # Sessions without a known tier fall back to the global HEADLESS_TIMEOUT_SECONDS.
@@ -793,6 +798,41 @@ handle is missing is surfaced by `cw doctor` as a **warning** (not a hard fail),
 and the recipe's act phase records a `PR_ACTION_FAILED` correction rather than
 requesting a bogus reviewer. For `claude-workspace` itself the key is set to
 `mode: ci`, so `request_reviewer` is a documented no-op here.
+
+## Operator GitHub Login Override (RFC 0011 follow-up, #1171)
+
+`ClientConfig.operator_github_login` (see [Client Fields](#client-fields)
+above) overrides the GitHub login treated as "the operator" — but it only
+applies at call sites that have a `ClientConfig` in hand. Three call sites are
+client-less by construction (a PR-scoped or webhook entry point with no
+client context to resolve): `cw review register <pr>`, the `review_requested`
+webhook, and `hydrate_pr_states`'s serve-tick PR poll. For these,
+`orchestrator.yaml`'s `operator_github_login_by_repo` (a `dict[str, str]`
+keyed by exact-string `"owner/repo"`, case-sensitive, default `{}`) fills the
+same role, keyed by the PR's repo instead of by client.
+
+Precedence (highest to lowest):
+
+1. `ClientConfig.operator_github_login` — wins when a `ClientConfig` exists
+   and sets it. Not consulted by the three client-less call sites above (no
+   `ClientConfig` exists for them to read).
+2. `orchestrator.yaml`'s `operator_github_login_by_repo[repo]` — consulted
+   only by the three client-less call sites, via
+   `cw.operator_identity.resolve_operator_login_for_repo`.
+3. `cached_gh_login()` — the runtime-resolved, process-cached `gh api user`
+   login. Final fallback when neither of the above applies.
+
+```yaml
+# orchestrator.yaml
+operator_github_login_by_repo:
+  acme/widgets: alice-alt-account
+```
+
+`resolve_operator_login_for_repo` is a pure dict lookup — it never calls
+`cached_gh_login()` itself, so populating this map adds no extra `gh api
+user` subprocess calls even though `hydrate_pr_states` may call it once per
+candidate PR repo per tick (see the #1195 RISK note on
+`cw.pr_hydrate.hydrate_pr_states`).
 
 ## Sprint Buildout Config
 

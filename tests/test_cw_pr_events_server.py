@@ -317,9 +317,7 @@ class TestReviewRequestedWebhook:
                 operator_github_login_by_repo={"acme/widgets": "override-user"}
             ),
         )
-        resp = self._post(
-            self._make_client(), {"reviewer": {"login": "override-user"}}
-        )
+        resp = self._post(self._make_client(), {"reviewer": {"login": "override-user"}})
         assert resp.status_code == 200
         assert resp.json() == {"registered": True, "reason": "registered"}
         watched = load_dev_queue().watched_prs

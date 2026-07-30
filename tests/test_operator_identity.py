@@ -169,16 +169,12 @@ class TestResolveOperatorLoginForRepo:
 
         assert result is None
 
-    def test_never_calls_cached_gh_login(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_never_calls_cached_gh_login(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _fail_if_called() -> str | None:
             msg = "resolve_operator_login_for_repo must never call cached_gh_login"
             raise AssertionError(msg)
 
-        monkeypatch.setattr(
-            "cw.operator_identity.cached_gh_login", _fail_if_called
-        )
+        monkeypatch.setattr("cw.operator_identity.cached_gh_login", _fail_if_called)
         config = OrchestratorConfig(
             operator_github_login_by_repo={"acme/widgets": "override-user"}
         )
