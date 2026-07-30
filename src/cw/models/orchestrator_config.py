@@ -121,6 +121,10 @@ class LaneConfig(BaseModel):
     # Lane-level operator-signoff override (RFC 0007 Phase 3). None defers to
     # OrchestratorConfig.default_signoff. See GitHub #990.
     signoff: Literal["operator"] | None = None
+    # Lane-level proactive finalize-hold override (RFC 0011 A3, #1160). None
+    # defers to OrchestratorConfig.default_finalize_gate. Overridden by
+    # TicketTask.hold_finalize -- see resolve_hold_finalize (dispatch/routing.py).
+    finalize_gate: Literal["manual"] | None = None
     # Lane-level gate-recipe enablement map (RFC 0009 P4, #1067). Middle tier in
     # resolve_gate_recipe_enabled's 3-tier precedence: consulted when the ticket
     # carries no override for the recipe, and itself overridden by
@@ -196,6 +200,12 @@ _DEFAULT_OPERATOR_EVENT_TYPES: frozenset[OrchestratorEventType] = frozenset(
         # the operator channel as an uncorrected false-positive "approved"
         # signal.
         OrchestratorEventType.GATE_AUTO_APPROVE_FAILED,
+        # RFC 0011 A3 (#1160): forwarded alongside GATE_AUTO_APPROVED for the
+        # same reason as GATE_AUTO_APPROVE_FAILED above -- an A3 force hold
+        # declining the mutation would otherwise leave GATE_AUTO_APPROVED
+        # standing alone on the operator channel as an uncorrected "approved"
+        # signal. Declined rather than raised, but the correction is identical.
+        OrchestratorEventType.GATE_AUTO_APPROVE_HELD,
         # RFC 0010 P2 (#1097): a review recipe dispatching an /address-review
         # action with no human in the loop is operator-attention-worthy —
         # forwarded by default (contrast CONCIERGE_RECOVERED, excluded above as
@@ -457,6 +467,18 @@ class OrchestratorConfig(BaseModel):
     # guarantee. Pydantic's Literal validation already raises loudly on an
     # invalid value, which is the correct fail-closed behavior here.
     default_signoff: Literal["none", "operator"] = "none"
+    # Global default for the proactive finalize hold (RFC 0011 A3), used when
+    # neither the ticket (TicketTask.hold_finalize) nor its lane
+    # (LaneConfig.finalize_gate) sets an override. "auto" == no hold (today's
+    # behavior); "manual" stops every ticket at the REVIEW->FINALIZE checkpoint
+    # with disposition `finalize_gate_held`, released by an explicit
+    # ``cw dev-queue approve``.
+    # Why no coercion validator: same asymmetry with reap_policy that
+    # default_signoff documents above -- a config typo silently coercing to
+    # "auto" would silently DISABLE an operator's ship gate, the one thing this
+    # field exists to guarantee. Pydantic's Literal validation already raises
+    # loudly on an invalid value, which is the correct fail-closed behavior.
+    default_finalize_gate: Literal["auto", "manual"] = "auto"
     # RFC 0008 W2 — global ladder of transcript-staleness thresholds (minutes),
     # ordered [stale_15m, stale_30m, stale_45m]. A session's transcript-mtime
     # age is compared against these to classify Session.liveness_bucket.

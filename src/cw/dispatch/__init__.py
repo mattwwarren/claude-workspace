@@ -80,6 +80,7 @@ from cw.dispatch.loop import (
 from cw.dispatch.routing import (
     _APPROVAL_GATE_REASON,
     _AWAITING_OPERATOR_REASON,
+    _FINALIZE_HOLD_REASON,
     _INVALID_STAGE_REASON,
     _PLAN_PARKED_REASON,
     _STAGE_REACHED_TO_STAGE,
@@ -93,11 +94,13 @@ from cw.dispatch.routing import (
     _route_scope_gated_approval,
     _route_stage_success,
     _route_staged_decision,
+    _should_force_hold_finalize,
     _should_gate_for_signoff,
     _stage_advance_unchecked,
     _StagePosition,
     _walk_stage_pointer_forward,
     apply_staged_decision,
+    resolve_hold_finalize,
     resolve_signoff,
 )
 from cw.dispatch.tick import (
@@ -126,6 +129,7 @@ __all__ = [
     "_CODEX_CAPABILITY_PROBE_TTL_SECONDS",
     "_CW_PACKAGE_NAME",
     "_DISPATCH_CONSUMER",
+    "_FINALIZE_HOLD_REASON",
     "_INVALID_STAGE_REASON",
     "_LANE_PAUSE_SOURCE_CIRCUIT_BREAKER",
     "_LOADED_VERSION",
@@ -184,6 +188,7 @@ __all__ = [
     "_route_scope_gated_approval",
     "_route_stage_success",
     "_route_staged_decision",
+    "_should_force_hold_finalize",
     "_should_gate_for_signoff",
     "_spawn_claimed_task",
     "_stage_advance_unchecked",
@@ -192,6 +197,7 @@ __all__ = [
     "apply_staged_decision",
     "consume_completed_sessions",
     "dispatch_tick",
+    "resolve_hold_finalize",
     "resolve_signoff",
     "run_dispatch_loop",
 ]

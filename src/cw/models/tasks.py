@@ -55,7 +55,8 @@ from cw.models.events import PrState, WatchedPr
 #      a well-formed blocked/merge_gate_blocked AutoDevResult, stamped by
 #      transition_task_status alongside disposition so it reaches `cw
 #      dev-queue tasks` and the attention-event formatter.
-DEV_QUEUE_SCHEMA_VERSION = 22
+# v23: added TicketTask.hold_finalize (GitHub #1160, RFC 0011 A3).
+DEV_QUEUE_SCHEMA_VERSION = 23
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -226,6 +227,19 @@ class TicketTask(BaseModel):
     # override -- fall through to lane/global". Set via
     # ``cw dev-queue add --signoff operator``. See GitHub #990.
     signoff: Literal["operator"] | None = None
+    # Ticket-level proactive finalize-hold override (RFC 0011 A3). Takes
+    # precedence over LaneConfig.finalize_gate and
+    # OrchestratorConfig.default_finalize_gate in resolve_hold_finalize's
+    # 3-tier resolution. None means "no ticket-level override -- fall through
+    # to lane/global". Set via ``cw dev-queue add --hold-finalize``.
+    #
+    # Sibling to `signoff` above, not a duplicate of it: signoff parks the row
+    # AWAITING_OPERATOR_SIGNOFF (an authorization state a second `approve`
+    # clears), whereas this force hold parks it BLOCKED_ON_USER with the
+    # `finalize_gate_held` hold disposition and wins outright when both are
+    # armed -- a proactive stop-before-unattended-finalize, not a second
+    # signature slot. See GitHub #1160.
+    hold_finalize: Literal["manual"] | None = None
     # Ticket-level gate-recipe enablement override (RFC 0009 P4, #1067). Highest
     # tier in resolve_gate_recipe_enabled's 3-tier precedence: a recipe present
     # here wins over LaneConfig.gate_recipes and the hardcoded default-off. None

@@ -74,13 +74,27 @@ SIGNOFF_GATE_DISPOSITION = "signoff_gate"
 # namespaces -- do not confuse them.
 AWAITING_OPERATOR_DISPOSITION = "awaiting_operator"
 
+# Disposition stamped when a park is a *proactive* hold -- "an operator asked
+# this ticket to stop before an unattended finalize", not "we could not reach
+# anyone" (RFC 0011 A3, #1160). Textually distinct from
+# dispatch.routing._FINALIZE_HOLD_REASON ("finalize_hold"): that one is a
+# SESSION_NEEDS_ATTENTION paused_status string, this one classifies
+# TicketTask.disposition. Different namespaces -- do not confuse them. Released
+# by an explicit ``cw dev-queue approve``.
+FINALIZE_GATE_HELD_DISPOSITION = "finalize_gate_held"
+
 # The shared hold-disposition namespace: the set of TicketTask.disposition
 # values that mean "parked pending a human/dependency, not pending a fix". This
 # is the *selection contract* consumers (attention layer, and later A4
 # auto-resume) match on, so they do not have to re-derive the hold class from
-# blocker reasons themselves. Currently spans RFC 0011 A1 only; #1160 (A3
-# force-hold) extends this frozenset in place rather than adding a parallel set.
-HOLD_DISPOSITIONS: frozenset[str] = frozenset({AWAITING_OPERATOR_DISPOSITION})
+# blocker reasons themselves. Spans RFC 0011 A1 (the availability park) and A3
+# (the proactive force hold, #1160) -- A3 extended this frozenset in place
+# rather than adding a parallel set. Note that not every consumer wants both
+# members: `drain`'s DRAIN_DISPOSITIONS deliberately selects the A1 subset only
+# (RFC 0011 A4 R11), so a force hold is never batch-released.
+HOLD_DISPOSITIONS: frozenset[str] = frozenset(
+    {AWAITING_OPERATOR_DISPOSITION, FINALIZE_GATE_HELD_DISPOSITION}
+)
 
 # Statuses that should clear disposition/pr_url/completed_at (requeue/cancel).
 _RESET_DISPOSITION_STATUSES: frozenset[QueueItemStatus] = frozenset(
@@ -431,6 +445,28 @@ def _clear_signoff_gate(task: TicketTask, stages: list[Stage]) -> None:
     pipeline's terminal stage, otherwise advance the stage pointer -- mirrors
     ``_stage_advance_unchecked``'s branch shape. Mutates task in place.
     See GitHub #990.
+
+    Not gated by the RFC 0011 A3 force hold (#1160): the automatic gate-recipe
+    reactor can never reach this function. Two independent facts combine to
+    prove it, both checkable in place (not merely asserted):
+
+    1. ``_approve_ticket_locked`` (``dev_queue/approval.py``) only calls this
+       function from its own explicit
+       ``if task.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF:`` branch
+       -- checked after task resolution and the approvability/stage guard
+       clauses, but still before the ``operator_initiated``/force-hold branch
+       below it is ever reached.
+    2. The automatic reactor's candidates are produced by
+       ``_detect_auto_approve_review`` and re-resolved by
+       ``_find_blocked_task`` (both in ``cw.reconcile.gate_recipes``), and both
+       filter on ``task.status == QueueItemStatus.BLOCKED_ON_USER`` -- the
+       mutually exclusive status to (1)'s precondition.
+
+    So the reactor can only ever invoke ``_approve_ticket_locked`` on a row
+    whose status is ``BLOCKED_ON_USER``, which by (1) can never take the
+    ``_clear_signoff_gate`` branch. Only the human ``approve_ticket`` path
+    (which resolves an ``AWAITING_OPERATOR_SIGNOFF`` row) reaches here, so no
+    ``operator_initiated`` threading is needed.
     """
     if task.stage == stages[-1]:
         transition_task_status(

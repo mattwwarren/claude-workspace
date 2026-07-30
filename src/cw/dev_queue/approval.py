@@ -7,8 +7,9 @@ and the physical-row resolver (``_resolve_approval_target``).
 
 Layering: imports ``crud`` (``_find_ticket`` / ``_APPROVABLE_STATUSES``) and
 ``lifecycle`` (the transition + stage-advance helpers) at module level. The
-``dev_queue ↔ dispatch`` cycle break — ``_should_gate_for_signoff`` — stays a
-function-level deferred import inside ``_approve_ticket_locked``.
+``dev_queue ↔ dispatch`` cycle break — ``_should_gate_for_signoff`` and
+``_should_force_hold_finalize`` — stays a function-level deferred import
+inside ``_approve_ticket_locked``.
 """
 
 from __future__ import annotations
@@ -49,10 +50,12 @@ def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str | bool]:
 
     Returns dict with from_stage, to_stage, ticket_id, client, awaiting_signoff
     (True iff *this* call parked the ticket at AWAITING_OPERATOR_SIGNOFF
-    rather than advancing/completing it), and plan_requeued (True iff *this*
+    rather than advancing/completing it), plan_requeued (True iff *this*
     call re-parked a PLAN-stage ticket at Stage.PLAN/PENDING instead of
     advancing to IMPL, because the plan-of-record was not yet quality-
-    reviewed -- see GitHub #968; always present, False on every other path).
+    reviewed -- see GitHub #968; always present, False on every other path),
+    and finalize_held (RFC 0011 A3, #1160; always False on this entry point,
+    which is the human release path -- see ``_approve_ticket_locked``).
 
     Raises:
         ApproveGateError: if ticket is not at either gate, session is missing,
@@ -60,7 +63,10 @@ def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str | bool]:
         CwError: if no matching task is found.
     """
     with _lock():
-        return _approve_ticket_locked(ticket_id, client_name)
+        # operator_initiated=True: this entry point IS the human `cw dev-queue
+        # approve` path, the one caller authorised to release an RFC 0011 A3
+        # force hold (#1160).
+        return _approve_ticket_locked(ticket_id, client_name, operator_initiated=True)
 
 
 def _resolve_approval_target(
@@ -120,6 +126,7 @@ def _approve_ticket_locked(
     *,
     resolved_task: TicketTask | None = None,
     plan_reviewed: bool | None = None,
+    operator_initiated: bool = False,
 ) -> dict[str, str | bool]:
     """Lock-free body of :func:`approve_ticket`.
 
@@ -145,6 +152,24 @@ def _approve_ticket_locked(
     preserving the no-refetch guarantee ``test_fetch_not_recalled_during_act``
     enforces.
 
+    ``operator_initiated`` (RFC 0011 A3, GitHub #1160) records caller
+    provenance for the proactive finalize hold. ``True`` means "a human typed
+    ``cw dev-queue approve``" -- the one caller authorised to RELEASE an armed
+    hold, so the force-hold check is skipped entirely and the call falls
+    through to the unchanged signoff/plan/advance chain. Every automatic caller
+    (the RFC 0009 gate-recipe reactor, and any future one) simply omits the
+    kwarg.
+
+    The default direction is deliberately the fail-safe one, mirroring
+    ``plan_reviewed``'s "trusted caller passes explicitly" shape but inverted:
+    a caller that FORGETS the kwarg is treated as automatic and the ticket
+    stays held. The opposite default would let a new call site silently ship a
+    ticket its operator had explicitly asked to stop.
+
+    When the hold fires, this function performs NO mutation at all -- the row
+    is already parked and stays exactly as it is -- and reports
+    ``finalize_held=True`` so the caller can emit its own correction event.
+
     Raises:
         ApproveGateError: if ticket is not at either gate, session is missing,
             last_result is absent, last_result status is not an approval gate,
@@ -154,7 +179,7 @@ def _approve_ticket_locked(
     """
     from cw.auto_dev_result import SCOPE_GATED_APPROVAL_STATUSES
     from cw.config import load_state
-    from cw.dispatch import _should_gate_for_signoff
+    from cw.dispatch import _should_force_hold_finalize, _should_gate_for_signoff
 
     store = load_dev_queue()
     task = _resolve_approval_target(store, ticket_id, client_name, resolved_task)
@@ -189,6 +214,7 @@ def _approve_ticket_locked(
             "client": client_name,
             "awaiting_signoff": False,
             "plan_requeued": False,
+            "finalize_held": False,
         }
 
     state = load_state()
@@ -227,7 +253,12 @@ def _approve_ticket_locked(
     from_stage = task.stage.value
     awaiting_signoff = False
     plan_requeued = False
-    # Two independent gates share this branch (#968):
+    finalize_held = False
+    # Three independent gates share this branch (#968, #1160):
+    #  - REVIEW-scoped A3 force hold: a proactive "do not ship this
+    #    unattended", checked FIRST and only for an automatic caller. It makes
+    #    no mutation -- the row stays parked exactly as it is -- so an
+    #    automatic approve degrades to a no-op instead of shipping the ticket.
     #  - REVIEW-scoped signoff gate: reroutes the review->FINALIZE advance to
     #    AWAITING_OPERATOR_SIGNOFF (RFC 0007's "gate a ticket before it
     #    ships"). Never touches the plan_pending_approval->IMPL advance.
@@ -237,7 +268,13 @@ def _approve_ticket_locked(
     #    for scope approval before the ambiguity scan / quality review /
     #    persistence steps run) -- prevents Stage 2 from spawning against an
     #    empty .cw/plan.md with no signoff markers.
-    if task.stage == Stage.REVIEW and _should_gate_for_signoff(
+    if (
+        task.stage == Stage.REVIEW
+        and not operator_initiated
+        and _should_force_hold_finalize(task, {client_name: client_cfg})
+    ):
+        finalize_held = True
+    elif task.stage == Stage.REVIEW and _should_gate_for_signoff(
         task, {client_name: client_cfg}
     ):
         transition_task_status(
@@ -264,4 +301,5 @@ def _approve_ticket_locked(
         "client": client_name,
         "awaiting_signoff": awaiting_signoff,
         "plan_requeued": plan_requeued,
+        "finalize_held": finalize_held,
     }

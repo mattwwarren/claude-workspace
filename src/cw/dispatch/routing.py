@@ -32,6 +32,7 @@ from cw.config import (
     load_state,
 )
 from cw.dev_queue import (
+    FINALIZE_GATE_HELD_DISPOSITION,
     SIGNOFF_GATE_DISPOSITION,
     _advance_task_pointer,
     _extract_pr_url,
@@ -94,6 +95,16 @@ _INVALID_STAGE_REASON = "invalid_stage_config"
 # unavailability, an unrelated concept that happens to share the "awaiting
 # operator" phrase. See GitHub #1155.
 _AWAITING_OPERATOR_REASON = "awaiting_operator_availability"
+
+
+# paused_status written to SESSION_NEEDS_ATTENTION when the RFC 0011 A3
+# proactive finalize hold parks a ticket at the REVIEW->FINALIZE checkpoint.
+# Deliberately distinct from dev_queue.lifecycle.FINALIZE_GATE_HELD_DISPOSITION
+# ("finalize_gate_held") -- that constant classifies TicketTask.disposition,
+# this one is a paused_status string. Different namespaces, same event. Follows
+# the _APPROVAL_GATE_REASON / _UNKNOWN_CLIENT_REASON convention above. See
+# GitHub #1160.
+_FINALIZE_HOLD_REASON = "finalize_hold"
 
 
 def _accumulate_task_cost(task: TicketTask, session_id: str | None) -> None:
@@ -223,6 +234,82 @@ def _should_gate_for_signoff(
     """
     config = load_effective_config()
     return resolve_signoff(task, clients, config) is not None
+
+
+def resolve_hold_finalize(
+    task: TicketTask,
+    clients: dict[str, ClientConfig],
+    config: OrchestratorConfig,
+) -> Literal["manual"] | None:
+    """Resolve the effective proactive finalize-hold policy for *task*.
+
+    Precedence (highest to lowest), mirroring ``resolve_signoff`` above:
+      1. ``TicketTask.hold_finalize`` -- per-ticket override (``cw dev-queue
+         add --hold-finalize``).
+      2. ``LaneConfig.finalize_gate`` in the task's client config.
+      3. ``OrchestratorConfig.default_finalize_gate`` -- global default;
+         ``"auto"`` resolves to ``None`` (no hold).
+
+    A task whose client is absent from *clients*, or whose lane name is not
+    declared in that client's lanes, falls through to the global default --
+    identical fall-through semantics to ``resolve_signoff``. See GitHub #1160
+    (RFC 0011 A3).
+    """
+    if task.hold_finalize is not None:
+        return task.hold_finalize
+    client_cfg = clients.get(task.client)
+    if client_cfg is not None:
+        for lane_cfg in client_cfg.effective_lanes:
+            if lane_cfg.name == task.lane and lane_cfg.finalize_gate is not None:
+                return lane_cfg.finalize_gate
+    default = config.default_finalize_gate
+    return default if default != "auto" else None
+
+
+def _should_force_hold_finalize(
+    task: TicketTask, clients: dict[str, ClientConfig]
+) -> bool:
+    """True iff *task* must stop before an unattended finalize (RFC 0011 A3).
+
+    Lazily loads ``OrchestratorConfig`` itself -- the single call site for that
+    load -- so the three REVIEW-scoped gate sites and ``_approve_ticket_locked``
+    keep their existing signatures unchanged. Exact sibling of
+    ``_should_gate_for_signoff`` above, including the two-arg shape. See GitHub
+    #1160.
+    """
+    config = load_effective_config()
+    return resolve_hold_finalize(task, clients, config) is not None
+
+
+def _park_finalize_hold(task: TicketTask) -> None:
+    """Park *task* BLOCKED_ON_USER for an A3 force-hold (RFC 0011 A3, #1160).
+
+    Shared by all three REVIEW-scoped gate sites so neither the attention
+    payload nor the status/disposition pairing can drift between them; the
+    surrounding control flow (``return "parked"`` vs falling through an
+    ``if``/``elif``/``else``) stays at each call site because it differs per
+    site.
+    """
+    record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {
+            "session_id": task.session_id or "",
+            "session_name": "",
+            "client": task.client,
+            "ticket_id": task.ticket_id,
+            "claude_session_id": None,
+            "paused_status": _FINALIZE_HOLD_REASON,
+            "breadcrumbs": "",
+            "crashed": False,
+            "lane": task.lane,
+        },
+        correlation_id=task.ticket_id,
+    )
+    transition_task_status(
+        task,
+        QueueItemStatus.BLOCKED_ON_USER,
+        disposition=FINALIZE_GATE_HELD_DISPOSITION,
+    )
 
 
 def _stage_advance_unchecked(
@@ -407,10 +494,15 @@ def _walk_stage_pointer_forward(
 
     Each rung advances through ``_advance_task_pointer`` (the shared
     ``TASK_STAGE_CHANGED`` chokepoint, dev_queue.py), so every real stage move
-    emits exactly one event. Before crossing a REVIEW rung, the operator-signoff
-    gate is checked -- if it applies, the walk stops at REVIEW and parks the
-    task ``AWAITING_OPERATOR_SIGNOFF`` (signoff is the ship checkpoint,
-    REVIEW->FINALIZE; RFC 0007 Phase 3, #990).
+    emits exactly one event. Before crossing a REVIEW rung two gates are
+    checked, in order:
+
+      1. The RFC 0011 A3 proactive finalize hold (#1160). It runs FIRST and
+         wins outright: the walk stops at REVIEW and parks the task
+         ``BLOCKED_ON_USER``/``finalize_gate_held``.
+      2. Otherwise the operator-signoff gate -- if it applies, the walk stops
+         at REVIEW and parks the task ``AWAITING_OPERATOR_SIGNOFF`` (signoff is
+         the ship checkpoint, REVIEW->FINALIZE; RFC 0007 Phase 3, #990).
 
     ``_advance_task_pointer`` unconditionally clears ``task.session_id`` on
     every hop ("R6: clear session_id on advance"). That is correct for a genuine
@@ -422,6 +514,13 @@ def _walk_stage_pointer_forward(
     """
     original_session_id = task.session_id
     while stages.index(task.stage) < target_idx:
+        if task.stage == Stage.REVIEW and _should_force_hold_finalize(task, clients):
+            _park_finalize_hold(task)
+            return "parked"
+        # Not `elif` (ruff RET505: an elif after a `return` is redundant) --
+        # the `return` above already makes this exclusive with the force-hold
+        # branch, unlike the other two REVIEW-scoped gate sites (which have no
+        # early return and so use a real `elif` chain instead).
         if task.stage == Stage.REVIEW and _should_gate_for_signoff(task, clients):
             transition_task_status(
                 task,
@@ -491,12 +590,19 @@ def _route_scope_gated_approval(
 ) -> None:
     """Rule 1 body: scope-gated approval -- small tier auto-advances, large blocks.
 
-    Small tier additionally checks the operator-signoff gate before advancing,
-    but ONLY at Stage.REVIEW -- signoff is the ship checkpoint (REVIEW->FINALIZE),
-    not a per-stage checkpoint, so a small-tier `plan_pending_approval` at
-    Stage.PLAN must advance unattended exactly as it did before #990. Mirrors
-    ``_route_stage_success``'s identical REVIEW-scoping. Tier resolution is
-    escalate-only -- see ``_resolve_scope_tier`` docstring (#696, #926).
+    Small tier additionally checks two REVIEW-scoped gates before advancing:
+    first the RFC 0011 A3 proactive finalize hold (#1160), then the
+    operator-signoff gate. Both are checked ONLY at Stage.REVIEW -- they are
+    ship checkpoints (REVIEW->FINALIZE), not per-stage checkpoints, so a
+    small-tier `plan_pending_approval` at Stage.PLAN must advance unattended
+    exactly as it did before #990/#1160. Mirrors ``_route_stage_success``'s
+    identical REVIEW-scoping.
+
+    The non-small (large) arm returns *before* either gate is reached: a large
+    ticket already parks BLOCKED_ON_USER at the approval gate, so it keeps the
+    status-derived disposition rather than being restamped ``finalize_gate_held``
+    -- the hold changes nothing about where that ticket stops. Tier resolution
+    is escalate-only -- see ``_resolve_scope_tier`` docstring (#696, #926).
     Extracted from ``_route_staged_decision`` to keep that function under the
     PLR0912 branch ceiling.
     """
@@ -521,7 +627,15 @@ def _route_scope_gated_approval(
             task, QueueItemStatus.BLOCKED_ON_USER, disposition=disposition
         )
         return
-    if task.stage == Stage.REVIEW and _should_gate_for_signoff(task, clients):
+    if task.stage == Stage.REVIEW and _should_force_hold_finalize(task, clients):
+        # Why first: the A3 force hold is an operator's explicit "do not ship
+        # this unattended" and outranks both the small-tier auto-advance AND
+        # the signoff gate below -- a signoff park is an authorization slot a
+        # second `approve` clears, whereas this park is the stop itself
+        # (RFC 0011 A3, #1160). Chained as if/elif so an armed force hold never
+        # double-parks the row through the signoff branch too.
+        _park_finalize_hold(task)
+    elif task.stage == Stage.REVIEW and _should_gate_for_signoff(task, clients):
         # Why: the operator-signoff gate takes precedence over the small-tier
         # auto-advance -- the ticket parks for an explicit operator approval
         # before continuing the pipeline, rather than advancing unattended
@@ -544,6 +658,10 @@ def _route_stage_success(
 ) -> None:
     """Rule 3 body: shipped/stage_complete -- advance or complete.
 
+    Two REVIEW-scoped gates run ahead of the advance, in order: the RFC 0011 A3
+    proactive finalize hold (#1160), then the operator-signoff gate. The hold
+    wins outright when both are armed -- see ``_route_scope_gated_approval``.
+
     Why REVIEW-scoped: STAGE_SUCCESS_STATUSES fires at every pipeline stage as
     the ordinary staged-advance signal (each of HARDEN/PLAN/IMPL/REVIEW's
     "stage_complete", plus terminal "shipped"); gating every one of those
@@ -555,7 +673,9 @@ def _route_stage_success(
     ``_route_staged_decision`` to keep that function under the PLR0912
     branch ceiling.
     """
-    if task.stage == Stage.REVIEW and _should_gate_for_signoff(task, clients):
+    if task.stage == Stage.REVIEW and _should_force_hold_finalize(task, clients):
+        _park_finalize_hold(task)
+    elif task.stage == Stage.REVIEW and _should_gate_for_signoff(task, clients):
         transition_task_status(
             task,
             QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
@@ -588,8 +708,9 @@ def _route_staged_decision(
     -- and ``SENTINEL_STAGE_MISMATCH`` is emitted for observability. A *later*-
     stage sentinel (a legitimate self-escalation the row lags behind) walks
     ``task.stage`` forward one rung at a time to the sentinel's stage, then the
-    Rule 1-6 table applies at the now-matching stage; if a REVIEW signoff gate
-    intervenes the walk parks the task and returns without applying the table.
+    Rule 1-6 table applies at the now-matching stage; if a REVIEW gate (the A3
+    finalize hold, #1160, or the signoff gate) intervenes the walk parks the
+    task and returns without applying the table.
     Same-stage and no-``stage_reached`` sentinels route through Rule 1-6 exactly
     as before. Returns ``False`` on refusal, ``True`` for every routed path.
     """
@@ -612,8 +733,9 @@ def _route_staged_decision(
         return False
     _persist_carried_context(task, last_result)
     if walk_outcome == "parked":
-        # A later-stage sentinel that stopped at a REVIEW signoff gate: the task
-        # is already parked AWAITING_OPERATOR_SIGNOFF by the walk. Do not apply
+        # A later-stage sentinel that stopped at a REVIEW gate: the task is
+        # already parked (BLOCKED_ON_USER/finalize_gate_held for the A3 force
+        # hold, else AWAITING_OPERATOR_SIGNOFF) by the walk. Do not apply
         # the Rule 1-6 status table (the sentinel's status was never observed at
         # this stage). Routed, so callers persist the parked state (#1149).
         return True

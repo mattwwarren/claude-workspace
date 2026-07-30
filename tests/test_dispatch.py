@@ -7800,6 +7800,420 @@ class TestApplyStagedDecision:
             "clients",
         ]
 
+    # -- Proactive finalize hold (RFC 0011 A3, #1160) ------------------------
+
+    def test_resolve_hold_finalize_ticket_beats_lane_beats_global(
+        self, tmp_path: Path
+    ) -> None:
+        """3-tier resolution: ticket > lane > global default (#1160)."""
+        from cw.dispatch import resolve_hold_finalize
+
+        client_with_lane_hold = ClientConfig(
+            name="test-client",
+            workspace_path=tmp_path,
+            lanes=[LaneConfig(name=DEFAULT_LANE, finalize_gate="manual")],
+        )
+        clients_lane = {"test-client": client_with_lane_hold}
+        config_auto = OrchestratorConfig(default_finalize_gate="auto")
+        config_manual = OrchestratorConfig(default_finalize_gate="manual")
+
+        # Tier 1: ticket-level override wins even when lane/global say "auto".
+        task_ticket = TicketTask(
+            ticket_id="H1",
+            client="test-client",
+            lane=DEFAULT_LANE,
+            hold_finalize="manual",
+        )
+        assert resolve_hold_finalize(task_ticket, clients_lane, config_auto) == "manual"
+
+        # Tier 2: lane wins when the ticket itself has no override.
+        task_lane = TicketTask(ticket_id="H2", client="test-client", lane=DEFAULT_LANE)
+        assert resolve_hold_finalize(task_lane, clients_lane, config_auto) == "manual"
+
+        # Tier 3: global default applies when neither ticket nor lane set it.
+        client_no_lane_hold = ClientConfig(
+            name="test-client",
+            workspace_path=tmp_path,
+            lanes=[LaneConfig(name=DEFAULT_LANE)],
+        )
+        clients_no_lane = {"test-client": client_no_lane_hold}
+        task_global = TicketTask(
+            ticket_id="H3", client="test-client", lane=DEFAULT_LANE
+        )
+        assert resolve_hold_finalize(task_global, clients_no_lane, config_manual) == (
+            "manual"
+        )
+        assert resolve_hold_finalize(task_global, clients_no_lane, config_auto) is None
+
+    def test_resolve_hold_finalize_falls_through_for_unknown_client_or_lane(
+        self, tmp_path: Path
+    ) -> None:
+        """Unresolvable client/lane falls through to the global default (#1160)."""
+        from cw.dispatch import resolve_hold_finalize
+
+        config = OrchestratorConfig(default_finalize_gate="manual")
+
+        task_unknown_client = TicketTask(
+            ticket_id="HU1", client="ghost-client", lane=DEFAULT_LANE
+        )
+        assert resolve_hold_finalize(task_unknown_client, {}, config) == "manual"
+
+        client_cfg = ClientConfig(name="test-client", workspace_path=tmp_path)
+        task_unknown_lane = TicketTask(
+            ticket_id="HU2", client="test-client", lane="no-such-lane"
+        )
+        assert (
+            resolve_hold_finalize(
+                task_unknown_lane, {"test-client": client_cfg}, config
+            )
+            == "manual"
+        )
+
+    def test_should_force_hold_finalize_loads_config_without_signature_change(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """_should_force_hold_finalize is reachable via (task, clients) and the
+        staged-decision signatures stay unchanged (#1160)."""
+        import inspect
+
+        from cw.dispatch import (
+            _route_staged_decision,
+            _should_force_hold_finalize,
+            apply_staged_decision,
+        )
+
+        task = self._make_running_task("FH-SIG-1", stage=Stage.REVIEW)
+        task.hold_finalize = "manual"
+        assert _should_force_hold_finalize(task, self._clients(tmp_path)) is True
+
+        no_hold_task = self._make_running_task("FH-SIG-2", stage=Stage.REVIEW)
+        assert _should_force_hold_finalize(no_hold_task, self._clients(tmp_path)) is (
+            False
+        )
+
+        assert list(inspect.signature(_should_force_hold_finalize).parameters) == [
+            "task",
+            "clients",
+        ]
+        assert list(inspect.signature(apply_staged_decision).parameters) == [
+            "task",
+            "status",
+            "last_result",
+            "clients",
+        ]
+        assert list(inspect.signature(_route_staged_decision).parameters) == [
+            "task",
+            "status",
+            "last_result",
+            "clients",
+        ]
+
+    def test_small_tier_force_hold_flag_parks_instead_of_advancing(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Rule 1 small tier at REVIEW + --hold-finalize -> BLOCKED_ON_USER park.
+
+        The force hold wins outright over the small-tier auto-advance: the
+        ticket stops before an unattended finalize (#1160).
+        """
+        from cw.dev_queue import FINALIZE_GATE_HELD_DISPOSITION
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("FH-SMALL-1", stage=Stage.REVIEW)
+        task.hold_finalize = "manual"
+        last_result: dict[str, object] = {
+            "status": "review_pending_approval",
+            "scope": {"tier": "small"},
+        }
+        apply_staged_decision(
+            task, "review_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == FINALIZE_GATE_HELD_DISPOSITION
+        assert task.stage == Stage.REVIEW  # not advanced to FINALIZE
+
+    def test_small_tier_force_hold_ignored_at_plan_stage(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """The force hold is REVIEW-scoped: a small-tier plan_pending_approval at
+        Stage.PLAN still advances PLAN->IMPL unattended (#1160)."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("FH-PLAN-1", stage=Stage.PLAN)
+        task.hold_finalize = "manual"
+        last_result: dict[str, object] = {
+            "status": "plan_pending_approval",
+            "scope": {"tier": "small"},
+        }
+        apply_staged_decision(
+            task, "plan_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.IMPL
+
+    def test_large_tier_review_pending_approval_unaffected_by_force_hold(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """A large-tier scope gate parks before the force-hold check is reached.
+
+        Rule 1's non-small arm returns early, so the disposition stays the
+        status-derived ``review_pending_approval`` -- NOT the force-hold
+        disposition (#1160).
+        """
+        from cw.dev_queue import FINALIZE_GATE_HELD_DISPOSITION
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("FH-LARGE-1", stage=Stage.REVIEW)
+        task.hold_finalize = "manual"
+        last_result: dict[str, object] = {
+            "status": "review_pending_approval",
+            "scope": {"tier": "large"},
+        }
+        apply_staged_decision(
+            task, "review_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "review_pending_approval"
+        assert task.disposition != FINALIZE_GATE_HELD_DISPOSITION
+        assert task.stage == Stage.REVIEW
+
+    def test_stage_complete_at_review_with_force_hold_parks(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Rule 3 stage_complete at REVIEW + force hold -> parks before FINALIZE."""
+        from cw.dev_queue import FINALIZE_GATE_HELD_DISPOSITION
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("FH-SC-1", stage=Stage.REVIEW)
+        task.hold_finalize = "manual"
+        apply_staged_decision(task, "stage_complete", None, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == FINALIZE_GATE_HELD_DISPOSITION
+        assert task.stage == Stage.REVIEW  # not advanced to FINALIZE
+
+    def test_stage_complete_at_non_review_stage_ignores_force_hold(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Rule 3 stage_complete at a non-REVIEW stage ignores the force hold.
+
+        The hold is the ship checkpoint (REVIEW->FINALIZE); ordinary
+        mid-pipeline stage_complete advances (IMPL->REVIEW here) unattended.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("FH-SC-2", stage=Stage.IMPL)
+        task.hold_finalize = "manual"
+        apply_staged_decision(task, "stage_complete", None, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.REVIEW
+
+    def test_force_hold_takes_precedence_over_signoff(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Both gates armed -> the force hold wins; the row lands
+        BLOCKED_ON_USER/finalize_gate_held, never AWAITING_OPERATOR_SIGNOFF."""
+        from cw.dev_queue import FINALIZE_GATE_HELD_DISPOSITION
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("FH-PREC-1", stage=Stage.REVIEW)
+        task.hold_finalize = "manual"
+        task.signoff = "operator"
+        apply_staged_decision(task, "stage_complete", None, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.status != QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+        assert task.disposition == FINALIZE_GATE_HELD_DISPOSITION
+        assert task.stage == Stage.REVIEW
+
+    def test_lane_finalize_gate_manual_parks_without_per_ticket_flag(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """``finalize_gate: manual`` on the lane holds with no ticket flag set."""
+        from cw.dev_queue import FINALIZE_GATE_HELD_DISPOSITION
+        from cw.dispatch import apply_staged_decision
+
+        clients = {
+            "test-client": ClientConfig(
+                name="test-client",
+                workspace_path=tmp_path,
+                lanes=[LaneConfig(name=DEFAULT_LANE, finalize_gate="manual")],
+            )
+        }
+        task = self._make_running_task("FH-LANE-1", stage=Stage.REVIEW)
+        assert task.hold_finalize is None
+        apply_staged_decision(task, "stage_complete", None, clients)
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == FINALIZE_GATE_HELD_DISPOSITION
+        assert task.stage == Stage.REVIEW
+
+    def test_global_default_finalize_gate_manual_parks_as_fallback(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``default_finalize_gate: manual`` holds with no ticket/lane override."""
+        from cw.dev_queue import FINALIZE_GATE_HELD_DISPOSITION
+        from cw.dispatch import apply_staged_decision
+
+        monkeypatch.setattr(
+            "cw.dispatch.routing.load_effective_config",
+            lambda: OrchestratorConfig(default_finalize_gate="manual"),
+        )
+        task = self._make_running_task("FH-GLOBAL-1", stage=Stage.REVIEW)
+        assert task.hold_finalize is None
+        apply_staged_decision(task, "stage_complete", None, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == FINALIZE_GATE_HELD_DISPOSITION
+        assert task.stage == Stage.REVIEW
+
+    def test_later_stage_stops_at_review_force_hold_gate(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """A force hold stops the multi-hop walk at REVIEW (#1160, extends #1149)."""
+        from cw.dev_queue import FINALIZE_GATE_HELD_DISPOSITION
+        from cw.dispatch import apply_staged_decision
+
+        stage_changed = capture_events(
+            "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_STAGE_CHANGED
+        )
+
+        task = self._make_running_task("FH-WALK-1", stage=Stage.IMPL)
+        task.session_id = "sess-fh-walk-1"
+        task.hold_finalize = "manual"
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "stage_reached": "stage4b_pr_create",
+        }
+        routed = apply_staged_decision(
+            task, "blocked", last_result, self._clients(tmp_path)
+        )
+
+        assert routed is True
+        assert task.stage == Stage.REVIEW
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == FINALIZE_GATE_HELD_DISPOSITION
+        advances = [p for _, p, _ in stage_changed if p.get("direction") == "advance"]
+        assert len(advances) == 1
+        assert advances[0]["old_stage"] == Stage.IMPL
+        assert advances[0]["new_stage"] == Stage.REVIEW
+        # Park outcome must not leak the per-hop session_id clear.
+        assert task.session_id == "sess-fh-walk-1"
+
+    def test_finalize_gate_held_disposition_in_hold_dispositions(self) -> None:
+        """The A3 force-hold disposition joins the shared hold namespace in
+        place, rather than forming a parallel set (#1160)."""
+        from cw.dev_queue import FINALIZE_GATE_HELD_DISPOSITION, HOLD_DISPOSITIONS
+
+        assert FINALIZE_GATE_HELD_DISPOSITION == "finalize_gate_held"
+        assert FINALIZE_GATE_HELD_DISPOSITION in HOLD_DISPOSITIONS
+
+    def test_finalize_gate_held_disposition_never_in_finalize_regress_reasons(
+        self,
+    ) -> None:
+        """A proactive hold is not a FINALIZE-regress blocker reason: it must
+        never trip Rule 5a's self-heal regress (#1160)."""
+        from cw.auto_dev_result import FINALIZE_REGRESS_BLOCKER_REASONS
+        from cw.dev_queue import FINALIZE_GATE_HELD_DISPOSITION
+
+        assert FINALIZE_GATE_HELD_DISPOSITION not in FINALIZE_REGRESS_BLOCKER_REASONS
+
+    def test_force_hold_without_flag_or_config_unchanged(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Regression: no ticket flag and no lane/global config -> pre-#1160
+        behaviour exactly (small auto-advances, large still blocks)."""
+        from cw.dispatch import apply_staged_decision
+
+        small = self._make_running_task("FH-OFF-1", stage=Stage.REVIEW)
+        small_result: dict[str, object] = {
+            "status": "review_pending_approval",
+            "scope": {"tier": "small"},
+        }
+        apply_staged_decision(
+            small, "review_pending_approval", small_result, self._clients(tmp_path)
+        )
+        assert small.status == QueueItemStatus.PENDING
+        assert small.stage == Stage.FINALIZE
+
+        large = self._make_running_task("FH-OFF-2", stage=Stage.REVIEW)
+        large_result: dict[str, object] = {
+            "status": "review_pending_approval",
+            "scope": {"tier": "large"},
+        }
+        apply_staged_decision(
+            large, "review_pending_approval", large_result, self._clients(tmp_path)
+        )
+        assert large.status == QueueItemStatus.BLOCKED_ON_USER
+        assert large.disposition == "review_pending_approval"
+
+    def test_force_hold_park_emits_session_needs_attention(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """Every one of the three force-hold park sites emits exactly one
+        SESSION_NEEDS_ATTENTION carrying paused_status=finalize_hold (#1160)."""
+        from cw.dispatch import _FINALIZE_HOLD_REASON, apply_staged_decision
+
+        attention = capture_events(
+            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+        clients = self._clients(tmp_path)
+
+        # Site 1: Rule 1's small-tier arm (_route_scope_gated_approval).
+        scope_gated = self._make_running_task("FH-ATTN-1", stage=Stage.REVIEW)
+        scope_gated.hold_finalize = "manual"
+        scope_gated.session_id = "sess-fh-attn-1"
+        scope_gated.lane = "bugs"
+        apply_staged_decision(
+            scope_gated,
+            "review_pending_approval",
+            {"status": "review_pending_approval", "scope": {"tier": "small"}},
+            clients,
+        )
+
+        # Site 2: Rule 3's stage-success arm (_route_stage_success).
+        stage_success = self._make_running_task("FH-ATTN-2", stage=Stage.REVIEW)
+        stage_success.hold_finalize = "manual"
+        stage_success.session_id = "sess-fh-attn-2"
+        apply_staged_decision(stage_success, "stage_complete", None, clients)
+
+        # Site 3: the multi-hop walk (_walk_stage_pointer_forward).
+        walked = self._make_running_task("FH-ATTN-3", stage=Stage.IMPL)
+        walked.hold_finalize = "manual"
+        walked.session_id = "sess-fh-attn-3"
+        apply_staged_decision(
+            walked,
+            "blocked",
+            {"status": "blocked", "stage_reached": "stage4b_pr_create"},
+            clients,
+        )
+
+        assert len(attention) == 3
+        for (_event_type, payload, correlation_id), ticket_id in zip(
+            attention, ["FH-ATTN-1", "FH-ATTN-2", "FH-ATTN-3"], strict=True
+        ):
+            assert payload["paused_status"] == _FINALIZE_HOLD_REASON
+            assert payload["ticket_id"] == ticket_id
+            assert payload["client"] == "test-client"
+            assert payload["crashed"] is False
+            assert correlation_id == ticket_id
+        assert attention[0][1]["session_id"] == "sess-fh-attn-1"
+        assert attention[0][1]["lane"] == "bugs"
+        assert attention[2][1]["session_id"] == "sess-fh-attn-3"
+
     def test_matching_stage_reached_routes_normally(
         self, tmp_dispatch_dirs: Path, tmp_path: Path
     ) -> None:

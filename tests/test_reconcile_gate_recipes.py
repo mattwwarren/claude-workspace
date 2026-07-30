@@ -836,6 +836,54 @@ class TestActApproveFailure:
         assert stub_gh_comment == []
         assert any("GEN-1" in rec.message for rec in caplog.records)
 
+    def test_force_hold_armed_between_detect_and_act_emits_held_event(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        stub_gh_comment: list[list[str]],
+    ) -> None:
+        """RFC 0011 A3 (#1160): when the row carries an armed force hold, the
+        reactor's automatic _approve_ticket_locked call declines to approve.
+        GATE_AUTO_APPROVED is already durable by then, so a GATE_AUTO_APPROVE_HELD
+        correction is emitted, the row is left exactly as parked, the ticket is
+        NOT reported as approved, and no audit comment is posted for an approval
+        that never landed."""
+        from cw.events import read_events
+
+        _write_acme_clients_yaml(tmp_config_dir, tmp_path)
+        task = _make_task()
+        task.hold_finalize = "manual"
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[_make_session(last_result=_clean_result())]))
+
+        recovered = run_gate_recipes(now=_NOW, config=_config())
+
+        assert recovered == []
+        store = load_dev_queue()
+        assert store.tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+        assert store.tasks[0].stage == Stage.REVIEW
+        events = read_events(
+            consumer="test-gate-approve-held",
+            event_types=[
+                OrchestratorEventType.GATE_AUTO_APPROVED,
+                OrchestratorEventType.GATE_AUTO_APPROVE_HELD,
+            ],
+        )
+        approved_events = [
+            e for e in events if e.type == OrchestratorEventType.GATE_AUTO_APPROVED
+        ]
+        held_events = [
+            e for e in events if e.type == OrchestratorEventType.GATE_AUTO_APPROVE_HELD
+        ]
+        assert len(approved_events) == 1
+        assert len(held_events) == 1
+        held_payload = held_events[0].payload
+        assert held_payload["ticket_id"] == "GEN-1"
+        assert held_payload["client"] == "acme"
+        assert held_payload["recipe"] == RECIPE_AUTO_APPROVE_REVIEW
+        assert held_events[0].correlation_id == "GEN-1"
+        assert stub_gh_comment == []
+
     def test_latched_failure_does_not_refire_on_the_next_tick(
         self,
         tmp_config_dir: Path,

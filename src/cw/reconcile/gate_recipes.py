@@ -646,6 +646,23 @@ def _act_auto_approve_review(
     sources come from the re-loaded row/session, never the (possibly stale)
     detect-time candidate. The audit comment is posted after the lock releases,
     best-effort — a comment-write failure never undoes the approve.
+
+    A third outcome exists alongside "approved" and "raised" (RFC 0011 A3,
+    #1160): the row may carry an armed proactive finalize hold, in which case
+    :func:`_approve_ticket_locked` — called here WITHOUT ``operator_initiated``,
+    i.e. as the automatic caller it is — declines to mutate and returns
+    ``finalize_held=True``. That is not a failure, so it does not stamp the
+    ``gate_recipe_failed_at`` latch; but ``GATE_AUTO_APPROVED`` is already
+    durable by then, so a ``GATE_AUTO_APPROVE_HELD`` correction is emitted and
+    the ticket is neither reported approved nor commented on.
+
+    Known noise (deliberate, flagged for a follow-up ticket): a *persistently*
+    armed hold — as opposed to one armed in the detect→act race window — re-runs
+    this whole path on every reconcile tick, emitting a fresh
+    GATE_AUTO_APPROVED/GATE_AUTO_APPROVE_HELD pair each time. No anti-noise latch
+    is built here: reusing ``gate_recipe_failed_at`` would conflate a deliberate
+    hold with a broken mutation (and would be cleared by the same transitions),
+    and a second latch field is out of this ticket's scope.
     """
     if not candidates:
         return []
@@ -698,7 +715,9 @@ def _act_auto_approve_review(
                 # identity so _approve_ticket_locked cannot re-resolve to a
                 # newer AWAITING_OPERATOR_SIGNOFF duplicate and clear a signoff
                 # gate this recipe never checked.
-                _approve_ticket_locked(task.ticket_id, task.client, resolved_task=task)
+                result = _approve_ticket_locked(
+                    task.ticket_id, task.client, resolved_task=task
+                )
             except CwError as exc:
                 # The GATE_AUTO_APPROVED event above is already durable, but
                 # the mutation didn't land (e.g. a duplicate row resolved to a
@@ -735,6 +754,29 @@ def _act_auto_approve_review(
                     correlation_id=task.ticket_id,
                 )
                 _stamp_gate_recipe_failure(task.ticket_id, task.client, now=now)
+                continue
+            if result["finalize_held"]:
+                # RFC 0011 A3 (#1160): the row's proactive finalize hold
+                # declined this automatic approve. Nothing was mutated and
+                # nothing is broken, so no failure latch is stamped -- but the
+                # already-durable GATE_AUTO_APPROVED needs a correction, or it
+                # stands alone on the operator channel as a false "approved".
+                _log.info(
+                    "gate_recipe_approve_held ticket=%s client=%s",
+                    task.ticket_id,
+                    task.client,
+                )
+                record_event(
+                    OrchestratorEventType.GATE_AUTO_APPROVE_HELD,
+                    {
+                        "ticket_id": task.ticket_id,
+                        "client": task.client,
+                        "lane": task.lane,
+                        "session_id": session.id,
+                        "recipe": RECIPE_AUTO_APPROVE_REVIEW,
+                    },
+                    correlation_id=task.ticket_id,
+                )
                 continue
             approved.append(task.ticket_id)
             comment_jobs.append((task.ticket_id, task.client, snapshot))

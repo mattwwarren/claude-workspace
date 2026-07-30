@@ -5525,6 +5525,53 @@ class TestDevQueueAddSignoff:
         assert task.signoff is None
 
 
+class TestDevQueueAddHoldFinalize:
+    """Tests for ``--hold-finalize`` on ``cw dev-queue add`` (RFC 0011 A3, #1160)."""
+
+    def test_dev_queue_add_hold_finalize_flag_sets_manual(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """--hold-finalize translates the boolean flag to hold_finalize='manual'."""
+        from cw.dev_queue import load_dev_queue
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "add",
+                "GEN-1160",
+                "--client",
+                "client-a",
+                "--hold-finalize",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        store = load_dev_queue()
+        task = next((t for t in store.tasks if t.ticket_id == "GEN-1160"), None)
+        assert task is not None
+        assert task.hold_finalize == "manual"
+
+    def test_dev_queue_add_default_hold_finalize_none(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Without the flag, TicketTask.hold_finalize defaults to None."""
+        from cw.dev_queue import load_dev_queue
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "add", "GEN-1161", "--client", "client-a"],
+        )
+        assert result.exit_code == 0, result.output
+
+        store = load_dev_queue()
+        task = next((t for t in store.tasks if t.ticket_id == "GEN-1161"), None)
+        assert task is not None
+        assert task.hold_finalize is None
+
+
 # ---------------------------------------------------------------------------
 # TestOrchestratorStart (GitHub issue #295)
 # ---------------------------------------------------------------------------
