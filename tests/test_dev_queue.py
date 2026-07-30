@@ -5049,6 +5049,29 @@ class TestRequeueTicket:
 # ---------------------------------------------------------------------------
 
 
+def _requeue_that_fails_for(
+    failing_ticket_id: str,
+) -> Callable[..., dict[str, str | bool | int]]:
+    """Build a requeue_ticket fake that raises RequeueStateError for one ticket.
+
+    Delegates to the real requeue_ticket for every other ticket id. Shared by
+    the drain partial-failure tests (TestDrainHeldTickets, TestCLIDevQueueDrain)
+    so the three call sites can't drift out of sync (#1161 review).
+    """
+    from cw.dev_queue.requeue import requeue_ticket as real_requeue_ticket
+    from cw.exceptions import RequeueStateError
+
+    def _fake_requeue_ticket(
+        ticket_id: str, client_name: str, *args: object, **kwargs: object
+    ) -> dict[str, str | bool | int]:
+        if ticket_id == failing_ticket_id:
+            msg = "status raced away from BLOCKED_ON_USER"
+            raise RequeueStateError(msg)
+        return real_requeue_ticket(ticket_id, client_name, *args, **kwargs)
+
+    return _fake_requeue_ticket
+
+
 class TestSelectHeldTickets:
     """Tests for select_held_tickets()."""
 
@@ -5216,8 +5239,6 @@ class TestDrainHeldTickets:
         batch; the first ticket's mutation still persists and both outcomes
         are reported."""
         from cw.dev_queue import AWAITING_OPERATOR_DISPOSITION, drain_held_tickets
-        from cw.dev_queue.requeue import requeue_ticket as real_requeue_ticket
-        from cw.exceptions import RequeueStateError
 
         _write_client_yaml(tmp_config_dir, tmp_path)
         first = _make_blocked_task(
@@ -5232,15 +5253,9 @@ class TestDrainHeldTickets:
         )
         save_dev_queue(DevQueueStore(tasks=[first, second]))
 
-        def _fake_requeue_ticket(
-            ticket_id: str, client_name: str, *args: object, **kwargs: object
-        ) -> dict[str, str | bool | int]:
-            if ticket_id == "GEN-501":
-                msg = "status raced away from BLOCKED_ON_USER"
-                raise RequeueStateError(msg)
-            return real_requeue_ticket(ticket_id, client_name, *args, **kwargs)
-
-        monkeypatch.setattr("cw.dev_queue.drain.requeue_ticket", _fake_requeue_ticket)
+        monkeypatch.setattr(
+            "cw.dev_queue.drain.requeue_ticket", _requeue_that_fails_for("GEN-501")
+        )
 
         outcomes = drain_held_tickets("genhealth")
 
@@ -6250,8 +6265,6 @@ class TestCLIDevQueueDrain:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from cw.dev_queue import AWAITING_OPERATOR_DISPOSITION
-        from cw.dev_queue.requeue import requeue_ticket as real_requeue_ticket
-        from cw.exceptions import RequeueStateError
 
         _write_client_yaml(tmp_config_dir, tmp_path)
         first = _make_blocked_task(
@@ -6266,15 +6279,9 @@ class TestCLIDevQueueDrain:
         )
         save_dev_queue(DevQueueStore(tasks=[first, second]))
 
-        def _fake_requeue_ticket(
-            ticket_id: str, client_name: str, *args: object, **kwargs: object
-        ) -> dict[str, str | bool | int]:
-            if ticket_id == "GEN-501":
-                msg = "status raced away from BLOCKED_ON_USER"
-                raise RequeueStateError(msg)
-            return real_requeue_ticket(ticket_id, client_name, *args, **kwargs)
-
-        monkeypatch.setattr("cw.dev_queue.drain.requeue_ticket", _fake_requeue_ticket)
+        monkeypatch.setattr(
+            "cw.dev_queue.drain.requeue_ticket", _requeue_that_fails_for("GEN-501")
+        )
 
         runner = CliRunner()
         result = runner.invoke(
@@ -6292,12 +6299,11 @@ class TestCLIDevQueueDrain:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from cw.dev_queue import AWAITING_OPERATOR_DISPOSITION
-        from cw.dev_queue.requeue import requeue_ticket as real_requeue_ticket
-        from cw.exceptions import RequeueStateError
 
         _write_client_yaml(tmp_config_dir, tmp_path)
         first = _make_blocked_task(
             ticket_id="GEN-500",
+            stage=Stage.PLAN,
             session_id="sess-cli-evt-1",
             disposition=AWAITING_OPERATOR_DISPOSITION,
         )
@@ -6308,15 +6314,9 @@ class TestCLIDevQueueDrain:
         )
         save_dev_queue(DevQueueStore(tasks=[first, second]))
 
-        def _fake_requeue_ticket(
-            ticket_id: str, client_name: str, *args: object, **kwargs: object
-        ) -> dict[str, str | bool | int]:
-            if ticket_id == "GEN-501":
-                msg = "status raced away from BLOCKED_ON_USER"
-                raise RequeueStateError(msg)
-            return real_requeue_ticket(ticket_id, client_name, *args, **kwargs)
-
-        monkeypatch.setattr("cw.dev_queue.drain.requeue_ticket", _fake_requeue_ticket)
+        monkeypatch.setattr(
+            "cw.dev_queue.drain.requeue_ticket", _requeue_that_fails_for("GEN-501")
+        )
         events: list[tuple[OrchestratorEventType, dict[str, object], str | None]] = []
         monkeypatch.setattr(
             "cw.cli.dev_queue.crud.record_event",
@@ -6338,6 +6338,8 @@ class TestCLIDevQueueDrain:
         _, payload, _ = requeued_events[0]
         assert payload["ticket_id"] == "GEN-500"
         assert payload["reason"] == "cli_drain_held"
+        assert payload["from_stage"] == "plan"
+        assert payload["to_stage"] == "plan"
 
 
 # ---------------------------------------------------------------------------

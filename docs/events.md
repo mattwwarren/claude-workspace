@@ -465,7 +465,7 @@ CLI commands emit thin audit events; payloads carry the obvious fields:
 | `ticket.enqueued` | `cw dev-queue add` | `{ticket_id, client, priority}` (see top of file) |
 | `ticket.moved` | `cw dev-queue move` | `{ticket_id, client, from_lane, to_lane}` |
 | `ticket.approved` | `cw dev-queue approve` | `{ticket_id, client, from_stage, to_stage}` |
-| `ticket.requeued` | `cw dev-queue requeue`, `cw dev-queue drain --held` (RFC 0011 A4, #1161), and dispatch's automatic FINALIZE→IMPL regress path (#770) | `{ticket_id, client, from_stage, to_stage, reason}` |
+| `ticket.requeued` | `cw dev-queue requeue`, `cw dev-queue drain --held` (RFC 0011 A4, #1161), and dispatch's automatic FINALIZE→IMPL regress path (#770) | `{ticket_id, client, from_stage, to_stage, reason, regressed}` |
 | `ticket.unblocked` | `cw dev-queue unblock` | `{ticket_id, client}` |
 
 See the "Known legacy gap" note under `task.deleted`: the `ticket.*` family

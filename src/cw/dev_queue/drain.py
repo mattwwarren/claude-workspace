@@ -15,7 +15,7 @@ OUT of scope -- see DRAIN_DISPOSITIONS below and RFC 0011 A4 R11.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, TypedDict
 
 from cw.dev_queue.lifecycle import AWAITING_OPERATOR_DISPOSITION
 from cw.dev_queue.requeue import requeue_ticket
@@ -24,6 +24,25 @@ from cw.exceptions import CwError
 
 if TYPE_CHECKING:
     from cw.models import TicketTask
+
+DrainStatus = Literal["requeued", "failed", "would_requeue"]
+
+
+class DrainOutcome(TypedDict):
+    """Structured per-ticket result from `drain_held_tickets`.
+
+    `from_stage`/`to_stage` are populated only when `status == "requeued"`
+    (`None` otherwise) so callers consume the stage transition directly
+    instead of re-parsing it out of `detail`, which is a display string.
+    """
+
+    ticket_id: str
+    client: str
+    status: DrainStatus
+    detail: str
+    from_stage: str | None
+    to_stage: str | None
+
 
 # RFC 0011 A4 R11 (2026-07-30): drain's selection is the Rule-5 availability-
 # park subset of HOLD_DISPOSITIONS, EXCLUDING the A3 force-hold disposition
@@ -59,7 +78,7 @@ def select_held_tickets(client: str, *, lane: str | None = None) -> list[TicketT
 
 def drain_held_tickets(
     client: str, *, lane: str | None = None, dry_run: bool = False
-) -> list[dict[str, str]]:
+) -> list[DrainOutcome]:
     """Batch-requeue every Rule-5 availability park for *client*.
 
     Continue-on-error (R5): reads the selection snapshot unlocked, then loops
@@ -74,15 +93,16 @@ def drain_held_tickets(
     between the snapshot and this call) does not abort the batch; it is
     recorded as a per-ticket "failed" outcome and the loop proceeds.
 
-    Returns one outcome dict per selected ticket:
-    {"ticket_id", "client", "status": "requeued"|"failed"|"would_requeue",
-     "detail": <from_stage -> to_stage, or the error message>}.
+    Returns one `DrainOutcome` per selected ticket. `detail` is always a
+    human-readable message (the stage transition, the target stage for a
+    dry-run preview, or the error string); `from_stage`/`to_stage` are the
+    structured transition fields, populated only for `status == "requeued"`.
     Empty selection returns an empty list (no-op, no side effects).
     dry_run=True performs no mutation and reports every selected row as
     "would_requeue".
     """
     selected = select_held_tickets(client, lane=lane)
-    outcomes: list[dict[str, str]] = []
+    outcomes: list[DrainOutcome] = []
     for task in selected:
         if dry_run:
             outcomes.append(
@@ -91,6 +111,8 @@ def drain_held_tickets(
                     "client": client,
                     "status": "would_requeue",
                     "detail": task.stage.value,
+                    "from_stage": None,
+                    "to_stage": None,
                 }
             )
             continue
@@ -103,15 +125,21 @@ def drain_held_tickets(
                     "client": client,
                     "status": "failed",
                     "detail": str(exc),
+                    "from_stage": None,
+                    "to_stage": None,
                 }
             )
             continue
+        from_stage = str(result["from_stage"])
+        to_stage = str(result["to_stage"])
         outcomes.append(
             {
                 "ticket_id": task.ticket_id,
                 "client": client,
                 "status": "requeued",
-                "detail": f"{result['from_stage']} -> {result['to_stage']}",
+                "detail": f"{from_stage} -> {to_stage}",
+                "from_stage": from_stage,
+                "to_stage": to_stage,
             }
         )
     return outcomes

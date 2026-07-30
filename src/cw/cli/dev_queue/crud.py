@@ -432,8 +432,8 @@ def dev_queue_drain(
                 {
                     "ticket_id": outcome["ticket_id"],
                     "client": client,
-                    "from_stage": outcome["detail"].split(" -> ")[0],
-                    "to_stage": outcome["detail"].split(" -> ")[1],
+                    "from_stage": outcome["from_stage"],
+                    "to_stage": outcome["to_stage"],
                     "reason": "cli_drain_held",
                     "regressed": False,
                 },
