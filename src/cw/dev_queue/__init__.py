@@ -12,6 +12,7 @@ module is now a package of focused submodules:
   and the ticket-resolution helpers (resolve/list/find).
 * ``approval`` — the plan/review approval + operator-signoff-clearing gates.
 * ``requeue`` — re-run a stage, regress, or clear a salvage park.
+* ``drain`` — batch-resume every Rule-5 availability park (RFC 0011 A4).
 
 This ``__init__`` re-exports the full historical public + private surface so
 every ``from cw.dev_queue import X`` import site and downstream call path keeps
@@ -33,6 +34,11 @@ from cw.dev_queue.crud import (
     register_watched_pr,
     remove_ticket,
     resolve_client,
+)
+from cw.dev_queue.drain import (
+    DRAIN_DISPOSITIONS,
+    drain_held_tickets,
+    select_held_tickets,
 )
 from cw.dev_queue.lifecycle import (
     _PLAN_SOUNDNESS_MARKER,
@@ -69,6 +75,7 @@ from cw.exceptions import LaneNotFoundError
 
 __all__ = [
     "AWAITING_OPERATOR_DISPOSITION",
+    "DRAIN_DISPOSITIONS",
     "HOLD_DISPOSITIONS",
     "SIGNOFF_GATE_DISPOSITION",
     "_PLAN_SOUNDNESS_MARKER",
@@ -92,6 +99,7 @@ __all__ = [
     "clear_tickets",
     "consume_completed_sessions",
     "dev_queue_lock",
+    "drain_held_tickets",
     "list_tickets",
     "load_dev_queue",
     "load_plan",
@@ -104,6 +112,7 @@ __all__ = [
     "resolve_client",
     "save_dev_queue",
     "save_plan",
+    "select_held_tickets",
     "transition_task_status",
     "unblock_ticket",
     "wait_for_terminal",

@@ -141,6 +141,7 @@ Use the `/cw-session-watch` skill to read a session's exit status without hand-g
 | `cw dev-queue wait <ticket>` | Block until terminal; structured JSON exit codes |
 | `cw dev-queue approve <ticket>` | Approve a plan/review gate, or clear an operator-signoff hold |
 | `cw dev-queue requeue <ticket>` | Requeue a `BLOCKED_ON_USER` ticket back to pending |
+| `cw dev-queue drain --held -c <client>` | Resume every held (Rule-5 availability-park) ticket back to PENDING at its own stage |
 | `cw dev-queue unblock <ticket>` | Clear salvage/park markers and requeue a `SALVAGE_PARKED` ticket |
 | `cw dev-queue move <ticket> --to <lane>` | Re-lane a ticket |
 | `cw dev-queue cancel <ticket>` | Cancel a pending ticket and stop any running session |

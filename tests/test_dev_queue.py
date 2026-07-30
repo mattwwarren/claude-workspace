@@ -3667,6 +3667,7 @@ def _make_blocked_task(
     stage: Stage = Stage.PLAN,
     session_id: str | None = "sess1234",
     status: QueueItemStatus = QueueItemStatus.BLOCKED_ON_USER,
+    disposition: str | None = None,
 ) -> TicketTask:
     return _make_ticket_task(
         ticket_id=ticket_id,
@@ -3674,6 +3675,7 @@ def _make_blocked_task(
         status=status,
         stage=stage,
         session_id=session_id,
+        disposition=disposition,
     )
 
 
@@ -5043,6 +5045,306 @@ class TestRequeueTicket:
 
 
 # ---------------------------------------------------------------------------
+# TestSelectHeldTickets / TestDrainHeldTickets — RFC 0011 A4 (#1161)
+# ---------------------------------------------------------------------------
+
+
+def _requeue_that_fails_for(
+    failing_ticket_id: str,
+) -> Callable[..., dict[str, str | bool | int]]:
+    """Build a requeue_ticket fake that raises RequeueStateError for one ticket.
+
+    Delegates to the real requeue_ticket for every other ticket id. Shared by
+    the drain partial-failure tests (TestDrainHeldTickets, TestCLIDevQueueDrain)
+    so the three call sites can't drift out of sync (#1161 review).
+    """
+    from cw.dev_queue.requeue import requeue_ticket as real_requeue_ticket
+    from cw.exceptions import RequeueStateError
+
+    def _fake_requeue_ticket(
+        ticket_id: str, client_name: str, *args: object, **kwargs: object
+    ) -> dict[str, str | bool | int]:
+        if ticket_id == failing_ticket_id:
+            msg = "status raced away from BLOCKED_ON_USER"
+            raise RequeueStateError(msg)
+        return real_requeue_ticket(ticket_id, client_name, *args, **kwargs)
+
+    return _fake_requeue_ticket
+
+
+class TestSelectHeldTickets:
+    """Tests for select_held_tickets()."""
+
+    def test_selects_only_held_disposition_rows(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Selection matches disposition=awaiting_operator alone -- a genuine
+        Rule-5 park (disposition=blocked) is excluded, but a stale terminal
+        row (COMPLETED with a leftover awaiting_operator disposition) is
+        still selected (Adopted Assumptions: disposition-only filter; the
+        status gate is enforced downstream by requeue_ticket, not here)."""
+        from cw.dev_queue import AWAITING_OPERATOR_DISPOSITION, select_held_tickets
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        held = _make_blocked_task(
+            ticket_id="GEN-500",
+            session_id="sess-held-1",
+            disposition=AWAITING_OPERATOR_DISPOSITION,
+        )
+        genuine_blocked = _make_blocked_task(
+            ticket_id="GEN-501",
+            session_id="sess-held-2",
+            disposition="blocked",
+        )
+        stale_terminal = _make_ticket_task(
+            ticket_id="GEN-502",
+            client="genhealth",
+            status=QueueItemStatus.COMPLETED,
+            stage=Stage.PLAN,
+            disposition=AWAITING_OPERATOR_DISPOSITION,
+        )
+        save_dev_queue(DevQueueStore(tasks=[held, genuine_blocked, stale_terminal]))
+
+        selected = select_held_tickets("genhealth")
+
+        assert {t.ticket_id for t in selected} == {"GEN-500", "GEN-502"}
+
+    def test_lane_filter_restricts_selection(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """lane= restricts selection to the matching lane's held row only."""
+        from cw.dev_queue import AWAITING_OPERATOR_DISPOSITION, select_held_tickets
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        lane_a = _make_blocked_task(
+            ticket_id="GEN-500",
+            session_id="sess-lane-a",
+            disposition=AWAITING_OPERATOR_DISPOSITION,
+        )
+        lane_a.lane = "a"
+        lane_b = _make_blocked_task(
+            ticket_id="GEN-501",
+            session_id="sess-lane-b",
+            disposition=AWAITING_OPERATOR_DISPOSITION,
+        )
+        lane_b.lane = "b"
+        save_dev_queue(DevQueueStore(tasks=[lane_a, lane_b]))
+
+        selected = select_held_tickets("genhealth", lane="a")
+
+        assert [t.ticket_id for t in selected] == ["GEN-500"]
+
+    def test_empty_queue_returns_empty_list(self, tmp_config_dir: Path) -> None:
+        from cw.dev_queue import select_held_tickets
+
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        assert select_held_tickets("genhealth") == []
+
+
+class TestDrainHeldTickets:
+    """Tests for drain_held_tickets()."""
+
+    def test_drains_all_held_rows_for_client(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Two held rows both requeue to PENDING at their own current stage."""
+        from cw.dev_queue import AWAITING_OPERATOR_DISPOSITION, drain_held_tickets
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        first = _make_blocked_task(
+            ticket_id="GEN-500",
+            stage=Stage.PLAN,
+            session_id="sess-drain-1",
+            disposition=AWAITING_OPERATOR_DISPOSITION,
+        )
+        second = _make_blocked_task(
+            ticket_id="GEN-501",
+            stage=Stage.REVIEW,
+            session_id="sess-drain-2",
+            disposition=AWAITING_OPERATOR_DISPOSITION,
+        )
+        save_dev_queue(DevQueueStore(tasks=[first, second]))
+
+        outcomes = drain_held_tickets("genhealth")
+
+        assert {o["ticket_id"] for o in outcomes} == {"GEN-500", "GEN-501"}
+        assert all(o["status"] == "requeued" for o in outcomes)
+        store = load_dev_queue()
+        by_id = {t.ticket_id: t for t in store.tasks}
+        assert by_id["GEN-500"].status == QueueItemStatus.PENDING
+        assert by_id["GEN-500"].stage == Stage.PLAN
+        assert by_id["GEN-500"].session_id is None
+        assert by_id["GEN-501"].status == QueueItemStatus.PENDING
+        assert by_id["GEN-501"].stage == Stage.REVIEW
+        assert by_id["GEN-501"].session_id is None
+
+    def test_mixed_held_and_blocked_queue_leaves_blocked_untouched(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """A genuine disposition=blocked park is left BLOCKED_ON_USER
+        untouched while the held row drains."""
+        from cw.dev_queue import AWAITING_OPERATOR_DISPOSITION, drain_held_tickets
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        held = _make_blocked_task(
+            ticket_id="GEN-500",
+            session_id="sess-mix-1",
+            disposition=AWAITING_OPERATOR_DISPOSITION,
+        )
+        genuine_blocked = _make_blocked_task(
+            ticket_id="GEN-501",
+            session_id="sess-mix-2",
+            disposition="blocked",
+        )
+        save_dev_queue(DevQueueStore(tasks=[held, genuine_blocked]))
+
+        outcomes = drain_held_tickets("genhealth")
+
+        assert [o["ticket_id"] for o in outcomes] == ["GEN-500"]
+        store = load_dev_queue()
+        by_id = {t.ticket_id: t for t in store.tasks}
+        assert by_id["GEN-500"].status == QueueItemStatus.PENDING
+        assert by_id["GEN-501"].status == QueueItemStatus.BLOCKED_ON_USER
+        assert by_id["GEN-501"].disposition == "blocked"
+
+    def test_empty_held_set_is_a_noop(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """No held rows -> empty outcome list, queue snapshot unchanged."""
+        from cw.dev_queue import drain_held_tickets
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        genuine_blocked = _make_blocked_task(
+            ticket_id="GEN-501",
+            session_id="sess-noop-1",
+            disposition="blocked",
+        )
+        save_dev_queue(DevQueueStore(tasks=[genuine_blocked]))
+        before = load_dev_queue()
+
+        outcomes = drain_held_tickets("genhealth")
+
+        assert outcomes == []
+        after = load_dev_queue()
+        assert after == before
+
+    def test_partial_failure_continues_and_reports_both(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A RequeueStateError on one selected ticket does not abort the
+        batch; the first ticket's mutation still persists and both outcomes
+        are reported."""
+        from cw.dev_queue import AWAITING_OPERATOR_DISPOSITION, drain_held_tickets
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        first = _make_blocked_task(
+            ticket_id="GEN-500",
+            session_id="sess-fail-1",
+            disposition=AWAITING_OPERATOR_DISPOSITION,
+        )
+        second = _make_blocked_task(
+            ticket_id="GEN-501",
+            session_id="sess-fail-2",
+            disposition=AWAITING_OPERATOR_DISPOSITION,
+        )
+        save_dev_queue(DevQueueStore(tasks=[first, second]))
+
+        monkeypatch.setattr(
+            "cw.dev_queue.drain.requeue_ticket", _requeue_that_fails_for("GEN-501")
+        )
+
+        outcomes = drain_held_tickets("genhealth")
+
+        by_id = {o["ticket_id"]: o for o in outcomes}
+        assert by_id["GEN-500"]["status"] == "requeued"
+        assert by_id["GEN-501"]["status"] == "failed"
+        assert "status raced away" in by_id["GEN-501"]["detail"]
+        store = load_dev_queue()
+        by_ticket = {t.ticket_id: t for t in store.tasks}
+        assert by_ticket["GEN-500"].status == QueueItemStatus.PENDING
+        assert by_ticket["GEN-501"].status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_dry_run_reports_without_mutating(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """dry_run=True reports would_requeue and performs no mutation."""
+        from cw.dev_queue import AWAITING_OPERATOR_DISPOSITION, drain_held_tickets
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        held = _make_blocked_task(
+            ticket_id="GEN-500",
+            stage=Stage.IMPL,
+            session_id="sess-dry-1",
+            disposition=AWAITING_OPERATOR_DISPOSITION,
+        )
+        save_dev_queue(DevQueueStore(tasks=[held]))
+
+        outcomes = drain_held_tickets("genhealth", dry_run=True)
+
+        assert len(outcomes) == 1
+        assert outcomes[0]["status"] == "would_requeue"
+        assert outcomes[0]["detail"] == "impl"
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_drain_excludes_a3_force_hold(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """A `disposition="finalize_gate_held"` row -- placeholder for #1160's
+        not-yet-existing A3 force-hold disposition constant -- is left
+        untouched by both selection and drain (RFC 0011 A4 R11)."""
+        from cw.dev_queue import drain_held_tickets, select_held_tickets
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        force_held = _make_blocked_task(
+            ticket_id="GEN-500",
+            stage=Stage.REVIEW,
+            session_id="sess-force-1",
+            disposition="finalize_gate_held",
+        )
+        save_dev_queue(DevQueueStore(tasks=[force_held]))
+
+        assert select_held_tickets("genhealth") == []
+        assert drain_held_tickets("genhealth") == []
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert t.disposition == "finalize_gate_held"
+
+    def test_no_outer_lock_held_during_batch(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Regression guard for R4: two held rows, real (unmocked)
+        requeue_ticket, must both complete without hanging -- proves
+        drain_held_tickets holds no outer lock across the per-ticket calls
+        (each of which takes dev_queue_lock() internally)."""
+        from cw.dev_queue import AWAITING_OPERATOR_DISPOSITION, drain_held_tickets
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        first = _make_blocked_task(
+            ticket_id="GEN-500",
+            session_id="sess-lock-1",
+            disposition=AWAITING_OPERATOR_DISPOSITION,
+        )
+        second = _make_blocked_task(
+            ticket_id="GEN-501",
+            session_id="sess-lock-2",
+            disposition=AWAITING_OPERATOR_DISPOSITION,
+        )
+        save_dev_queue(DevQueueStore(tasks=[first, second]))
+
+        outcomes = drain_held_tickets("genhealth")
+
+        assert {o["ticket_id"] for o in outcomes} == {"GEN-500", "GEN-501"}
+        assert all(o["status"] == "requeued" for o in outcomes)
+
+
+# ---------------------------------------------------------------------------
 # TestUnblockTicket — unblock_ticket() mutation function
 # ---------------------------------------------------------------------------
 
@@ -5806,6 +6108,238 @@ class TestCLIRequeue:
         assert len(captured) == 1
         payload = captured[0]
         assert payload["reason"] == "cli_requeue"
+
+
+# ---------------------------------------------------------------------------
+# TestCLIDevQueueDrain — cw dev-queue drain --held (RFC 0011 A4, #1161)
+# ---------------------------------------------------------------------------
+
+
+class TestCLIDevQueueDrain:
+    """CLI tests for `cw dev-queue drain --held`."""
+
+    def test_drain_held_requeues_matching_rows(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.dev_queue import AWAITING_OPERATOR_DISPOSITION
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            ticket_id="GEN-500",
+            session_id="sess-cli-1",
+            disposition=AWAITING_OPERATOR_DISPOSITION,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "drain", "--held", "--client", "genhealth"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "GEN-500" in result.output
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_drain_missing_client_is_usage_error(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.dev_queue import AWAITING_OPERATOR_DISPOSITION
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            ticket_id="GEN-500",
+            session_id="sess-cli-2",
+            disposition=AWAITING_OPERATOR_DISPOSITION,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "drain", "--held"])
+
+        assert result.exit_code != 0
+        assert "Missing option" in result.output
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_drain_missing_held_flag_is_usage_error(self, tmp_config_dir: Path) -> None:
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "drain", "--client", "genhealth"])
+
+        assert result.exit_code != 0
+        assert "Missing option" in result.output
+
+    def test_drain_empty_selection_exits_zero(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "drain", "--held", "--client", "genhealth"]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "No held tickets to drain" in result.output
+
+    def test_drain_lane_filter(self, tmp_config_dir: Path, tmp_path: Path) -> None:
+        from cw.dev_queue import AWAITING_OPERATOR_DISPOSITION
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        lane_a = _make_blocked_task(
+            ticket_id="GEN-500",
+            session_id="sess-cli-lane-a",
+            disposition=AWAITING_OPERATOR_DISPOSITION,
+        )
+        lane_a.lane = "a"
+        lane_b = _make_blocked_task(
+            ticket_id="GEN-501",
+            session_id="sess-cli-lane-b",
+            disposition=AWAITING_OPERATOR_DISPOSITION,
+        )
+        lane_b.lane = "b"
+        save_dev_queue(DevQueueStore(tasks=[lane_a, lane_b]))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "drain",
+                "--held",
+                "--client",
+                "genhealth",
+                "--lane",
+                "a",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "GEN-500" in result.output
+        assert "GEN-501" not in result.output
+        store = load_dev_queue()
+        by_id = {t.ticket_id: t for t in store.tasks}
+        assert by_id["GEN-500"].status == QueueItemStatus.PENDING
+        assert by_id["GEN-501"].status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_drain_dry_run_no_mutation(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        from cw.dev_queue import AWAITING_OPERATOR_DISPOSITION
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            ticket_id="GEN-500",
+            session_id="sess-cli-dry-1",
+            disposition=AWAITING_OPERATOR_DISPOSITION,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "drain",
+                "--held",
+                "--client",
+                "genhealth",
+                "--dry-run",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Would drain" in result.output
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_drain_partial_failure_nonzero_exit(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.dev_queue import AWAITING_OPERATOR_DISPOSITION
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        first = _make_blocked_task(
+            ticket_id="GEN-500",
+            session_id="sess-cli-fail-1",
+            disposition=AWAITING_OPERATOR_DISPOSITION,
+        )
+        second = _make_blocked_task(
+            ticket_id="GEN-501",
+            session_id="sess-cli-fail-2",
+            disposition=AWAITING_OPERATOR_DISPOSITION,
+        )
+        save_dev_queue(DevQueueStore(tasks=[first, second]))
+
+        monkeypatch.setattr(
+            "cw.dev_queue.drain.requeue_ticket", _requeue_that_fails_for("GEN-501")
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "drain", "--held", "--client", "genhealth"]
+        )
+
+        assert result.exit_code != 0
+        assert "Drained GEN-500" in result.output
+        assert "Failed to drain GEN-501" in result.output
+
+    def test_drain_events_emitted_per_success(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.dev_queue import AWAITING_OPERATOR_DISPOSITION
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        first = _make_blocked_task(
+            ticket_id="GEN-500",
+            stage=Stage.PLAN,
+            session_id="sess-cli-evt-1",
+            disposition=AWAITING_OPERATOR_DISPOSITION,
+        )
+        second = _make_blocked_task(
+            ticket_id="GEN-501",
+            session_id="sess-cli-evt-2",
+            disposition=AWAITING_OPERATOR_DISPOSITION,
+        )
+        save_dev_queue(DevQueueStore(tasks=[first, second]))
+
+        monkeypatch.setattr(
+            "cw.dev_queue.drain.requeue_ticket", _requeue_that_fails_for("GEN-501")
+        )
+        events: list[tuple[OrchestratorEventType, dict[str, object], str | None]] = []
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.crud.record_event",
+            lambda etype, payload=None, **kw: events.append(
+                (etype, payload or {}, kw.get("correlation_id"))
+            ),
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "drain", "--held", "--client", "genhealth"]
+        )
+
+        assert result.exit_code != 0
+        requeued_events = [
+            e for e in events if e[0] == OrchestratorEventType.TICKET_REQUEUED
+        ]
+        assert len(requeued_events) == 1
+        _, payload, _ = requeued_events[0]
+        assert payload["ticket_id"] == "GEN-500"
+        assert payload["reason"] == "cli_drain_held"
+        assert payload["from_stage"] == "plan"
+        assert payload["to_stage"] == "plan"
 
 
 # ---------------------------------------------------------------------------

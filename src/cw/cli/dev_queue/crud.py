@@ -15,6 +15,7 @@ from cw.dev_queue import (
     approve_ticket,
     cancel_ticket,
     clear_tickets,
+    drain_held_tickets,
     move_ticket,
     remove_ticket,
     requeue_ticket,
@@ -380,6 +381,83 @@ def dev_queue_requeue(
         f"Requeued {ticket_id} ({resolved}):"
         f" {result['from_stage']} -> {result['to_stage']} (PENDING)"
     )
+
+
+@dev_queue.command(name="drain")
+@click.option(
+    "--held",
+    "held_flag",
+    is_flag=True,
+    required=True,
+    help=(
+        "Required. Drains every Rule-5 availability-park ticket"
+        " (disposition=awaiting_operator) back to PENDING at its own"
+        " current stage. Does NOT release A3 force-holds"
+        " (proactive stop-before-finalize) -- those release only via"
+        " `cw dev-queue approve <ticket>`, since their gate checks caller"
+        " provenance. Morning routine is two commands: this one for"
+        " availability parks, `approve` per deliberate force-hold."
+    ),
+)
+@click.option("--client", "-c", "client", required=True, help="Client name.")
+@click.option("--lane", "lane_name", default=None, help="Restrict to a single lane.")
+@click.option(
+    "--dry-run",
+    "dry_run",
+    is_flag=True,
+    default=False,
+    help="List what would be drained without mutating anything.",
+)
+@handle_errors
+def dev_queue_drain(
+    held_flag: bool, client: str, lane_name: str | None, dry_run: bool
+) -> None:
+    """Resume every held (Rule-5 availability-park) ticket for CLIENT.
+
+    Re-fires each selected ticket through requeue_ticket at its own current
+    stage (RFC 0011 A4). A3 force-holds are out of scope -- release those with
+    `cw dev-queue approve <ticket>` instead. See docs/dispatch-runbook.md.
+    """
+    del held_flag  # required flag; no other mode exists yet (R6)
+    outcomes = drain_held_tickets(client, lane=lane_name, dry_run=dry_run)
+    if not outcomes:
+        suffix = f" (lane={lane_name})" if lane_name else ""
+        click.echo(f"No held tickets to drain for {client}{suffix}.")
+        return
+    failed = 0
+    for outcome in outcomes:
+        if outcome["status"] == "requeued":
+            record_event(
+                OrchestratorEventType.TICKET_REQUEUED,
+                {
+                    "ticket_id": outcome["ticket_id"],
+                    "client": client,
+                    "from_stage": outcome["from_stage"],
+                    "to_stage": outcome["to_stage"],
+                    "reason": "cli_drain_held",
+                    "regressed": False,
+                },
+            )
+            click.echo(
+                f"Drained {outcome['ticket_id']} ({client}): {outcome['detail']}"
+            )
+        elif outcome["status"] == "would_requeue":
+            click.echo(
+                f"[dry-run] Would drain {outcome['ticket_id']} ({client})"
+                f" at {outcome['detail']}."
+            )
+        else:
+            failed += 1
+            click.echo(
+                f"Failed to drain {outcome['ticket_id']} ({client}):"
+                f" {outcome['detail']}",
+                err=True,
+            )
+    if failed:
+        msg = (
+            f"{failed} of {len(outcomes)} held ticket(s) failed to drain for {client}."
+        )
+        raise click.ClickException(msg)
 
 
 @dev_queue.command(name="unblock")
