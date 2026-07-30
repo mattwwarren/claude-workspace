@@ -115,15 +115,36 @@ def _handle_review_requested_sync(
     Payload contract (adopted #2): ``{"reviewer": {<node>},
     "requester_login": "<optional>"}`` — one reviewer node per delivery,
     mirroring one element of ``gh pr view --json reviewRequests``.
+
+    Honors ``OrchestratorConfig.operator_github_login_by_repo`` (RFC 0011
+    follow-up #1171) via ``resolve_operator_login_for_repo``. The config load
+    is wrapped fail-open (deliberate choice, not a copy of the CLI call
+    site's unguarded shape): this webhook is a shared, multi-repo/
+    multi-client path with no caller-side exception handler
+    (``handle_post_pr_event`` only catches ``(ValueError, TypeError)``), so a
+    malformed ``orchestrator.yaml`` must not crash every delivery -- it falls
+    back to the process gh identity alone, mirroring
+    ``cw_queue_events_server.py._run_poller``'s established fail-open pattern
+    for config-load failures on shared server paths (RFC 0008 W3, #1002).
     """
-    from cw.operator_identity import cached_gh_login
+    from cw.config import load_orchestrator_config
+    from cw.exceptions import ConfigValidationError
+    from cw.operator_identity import cached_gh_login, resolve_operator_login_for_repo
     from cw.pr_hydrate import resolve_and_register_review_request
 
-    # Why: bypass resolve_operator_login's operator_github_login override — no
-    # client context exists at this PR-scoped webhook entry point, so there is
-    # no ClientConfig to consult. Honoring the override here is blocked on the
-    # repo->client mapping and lands via follow-up #1171.
-    operator_login = cached_gh_login()
+    self_login = cached_gh_login()
+    try:
+        config = load_orchestrator_config()
+    except ConfigValidationError:
+        logger.exception(
+            "orchestrator config load failed for review_requested webhook,"
+            " falling back to process gh identity"
+        )
+        operator_login = self_login
+    else:
+        operator_login = resolve_operator_login_for_repo(
+            repo, config, fallback=self_login
+        )
     reviewer = payload.get("reviewer")
     reviewer_nodes = [reviewer] if isinstance(reviewer, dict) else []
     requester = payload.get("requester_login")
