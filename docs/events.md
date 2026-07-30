@@ -592,6 +592,18 @@ paused_status (verified: its `_emit_stalled_events` call site does not call
 before this ticket for that pre-existing case; only the two new values'
 qualifier is in scope here.
 
+**Operator-channel forward may be buffered (RFC 0011 A6, #1162):** the event
+itself is always recorded exactly as above, on every emission — the
+recording behavior on this page is unchanged. Its forward onto the
+`cw-operator` SSE channel (`cw.cw_operator_events`), however, is buffered
+into a single digest push instead of forwarded immediately when the event
+resolves to a ticket currently parked in a hold-class disposition
+(`awaiting_operator`/`finalize_gate_held` — distinct from the
+`"awaiting_operator_availability"` `paused_status` value above, a different
+namespace). Every other `paused_status` still forwards immediately,
+unbatched. See `docs/operator-channel.md`'s "Digest coalescing" section for
+the full buffer/window/flush contract.
+
 ### `session.salvage_skipped`
 
 **Emitter:** `revert_stalled_headless_sessions` in `cw.reconcile`

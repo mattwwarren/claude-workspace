@@ -621,6 +621,24 @@ operator_channel_forward:
     - cancelled
   liveness_min_bucket: stale_30m
 
+# Attention Digest Window (RFC 0011 A6, #1162) -- shown with its defaults;
+# omit these fields entirely to use them. A held (awaiting_operator /
+# finalize_gate_held) session.needs_attention park buffers on the
+# cw-operator SSE channel instead of paging immediately; the buffer flushes
+# to one digest push per batch once BOTH the local-timezone delivery window
+# below is open AND attention_digest_idle_floor_seconds has elapsed since
+# the most recently buffered arrival. See docs/operator-channel.md's
+# "Digest coalescing" section for the full contract.
+#
+# attention_digest_window_tz is fail-loud (like default_signoff, not
+# reap_policy): an unresolvable IANA zone raises ValidationError at config
+# load rather than silently falling back to UTC -- a typo here would
+# otherwise silently open the window at the wrong local hour.
+attention_digest_window_tz: America/New_York
+attention_digest_window_start_hour: 8   # local to attention_digest_window_tz
+attention_digest_window_end_hour: 20    # local to attention_digest_window_tz
+attention_digest_idle_floor_seconds: 60
+
 # Tool-name patterns denied to EVERY DAEMON worker spawn, forwarded as a single
 # `--disallowed-tools=<comma-joined>` token (GitHub #726/#733). Default empty:
 # cw imposes no tool restriction on workers. Global by design — one fleet-wide
