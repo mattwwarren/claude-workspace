@@ -2006,6 +2006,33 @@ class TestOrchestratorConfigLivenessFirstBucketByStage:
         assert config.liveness_first_bucket_by_stage == {Stage.IMPL: 35}
 
 
+class TestOrchestratorConfigOperatorGithubLoginByRepo:
+    """OrchestratorConfig.operator_github_login_by_repo field (RFC 0011, #1171)."""
+
+    def test_defaults_to_empty_dict(self) -> None:
+        from cw.models import OrchestratorConfig
+
+        assert OrchestratorConfig().operator_github_login_by_repo == {}
+
+    def test_round_trips_via_model_validate(self) -> None:
+        from cw.models import OrchestratorConfig
+
+        config = OrchestratorConfig.model_validate(
+            {"operator_github_login_by_repo": {"acme/widgets": "alice"}}
+        )
+        assert config.operator_github_login_by_repo == {"acme/widgets": "alice"}
+
+    def test_wrong_value_type_raises_validation_error(self) -> None:
+        from pydantic import ValidationError
+
+        from cw.models import OrchestratorConfig
+
+        with pytest.raises(ValidationError):
+            OrchestratorConfig.model_validate(
+                {"operator_github_login_by_repo": {"acme/widgets": 123}}
+            )
+
+
 # ---------------------------------------------------------------------------
 # TestDispatchStateLock
 # ---------------------------------------------------------------------------
