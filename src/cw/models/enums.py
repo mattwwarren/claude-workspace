@@ -234,6 +234,14 @@ class OrchestratorEventType(StrEnum):
     # be a false "approved" signal on the operator channel. Forwarded by
     # default alongside GATE_AUTO_APPROVED for the same reason.
     GATE_AUTO_APPROVE_FAILED = "gate.auto_approve_failed"
+    # RFC 0011 A3 (#1160) — second companion to GATE_AUTO_APPROVED. Emitted when
+    # the act-phase mutation *declines* to approve, after GATE_AUTO_APPROVED was
+    # already recorded, because the row carries an armed proactive finalize hold
+    # (``--hold-finalize`` / ``finalize_gate: manual``). Distinct from
+    # GATE_AUTO_APPROVE_FAILED: nothing raised and nothing is broken — the gate
+    # deliberately held. Same correction rationale, so it is forwarded by
+    # default alongside GATE_AUTO_APPROVED for the same reason.
+    GATE_AUTO_APPROVE_HELD = "gate.auto_approve_held"
     # RFC 0010 P2 (#1097) — review-recipe act phase. Emitted by
     # cw.reconcile.review_recipes._act_address_review BEFORE dispatching an
     # /address-review session in response to a PR whose review came back

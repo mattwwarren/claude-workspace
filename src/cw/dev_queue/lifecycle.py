@@ -74,13 +74,27 @@ SIGNOFF_GATE_DISPOSITION = "signoff_gate"
 # namespaces -- do not confuse them.
 AWAITING_OPERATOR_DISPOSITION = "awaiting_operator"
 
+# Disposition stamped when a park is a *proactive* hold -- "an operator asked
+# this ticket to stop before an unattended finalize", not "we could not reach
+# anyone" (RFC 0011 A3, #1160). Textually distinct from
+# dispatch.routing._FINALIZE_HOLD_REASON ("finalize_hold"): that one is a
+# SESSION_NEEDS_ATTENTION paused_status string, this one classifies
+# TicketTask.disposition. Different namespaces -- do not confuse them. Released
+# by an explicit ``cw dev-queue approve``.
+FINALIZE_GATE_HELD_DISPOSITION = "finalize_gate_held"
+
 # The shared hold-disposition namespace: the set of TicketTask.disposition
 # values that mean "parked pending a human/dependency, not pending a fix". This
 # is the *selection contract* consumers (attention layer, and later A4
 # auto-resume) match on, so they do not have to re-derive the hold class from
-# blocker reasons themselves. Currently spans RFC 0011 A1 only; #1160 (A3
-# force-hold) extends this frozenset in place rather than adding a parallel set.
-HOLD_DISPOSITIONS: frozenset[str] = frozenset({AWAITING_OPERATOR_DISPOSITION})
+# blocker reasons themselves. Spans RFC 0011 A1 (the availability park) and A3
+# (the proactive force hold, #1160) -- A3 extended this frozenset in place
+# rather than adding a parallel set. Note that not every consumer wants both
+# members: `drain`'s DRAIN_DISPOSITIONS deliberately selects the A1 subset only
+# (RFC 0011 A4 R11), so a force hold is never batch-released.
+HOLD_DISPOSITIONS: frozenset[str] = frozenset(
+    {AWAITING_OPERATOR_DISPOSITION, FINALIZE_GATE_HELD_DISPOSITION}
+)
 
 # Statuses that should clear disposition/pr_url/completed_at (requeue/cancel).
 _RESET_DISPOSITION_STATUSES: frozenset[QueueItemStatus] = frozenset(
