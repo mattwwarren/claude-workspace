@@ -206,6 +206,12 @@ cites one of these.
     change goes through `transition_task_status()`; direct `task.status =
     ...` assignment is disallowed. — Source:
     `docs/adr/0011-ticket-status-transitions-through-one-seam.md`
+11. Complete call-site enumeration: a plan that changes what a shared helper
+    returns covers every call site of that helper, or classifies the
+    exceptions with evidence; the call-site set is established by grep, not
+    by reading. Where the set exceeds two or three, the change routes
+    through one shared seam rather than N patched sites. — Source:
+    `.claude/skills/harden-ticket/SKILL.md`
 
 ## §8 Anti-patterns
 
@@ -256,6 +262,13 @@ principle, grounded in the same source document.
     routing through the seam, re-scattering transition logic across the
     codebase. — Source:
     `docs/adr/0011-ticket-status-transitions-through-one-seam.md`
+11. A touch-point list enumerated by reading rather than grepping — a plan
+    or ticket naming a subset of a helper's call sites, then patching only
+    those. The specificity of a partial `file:line` list is what makes a
+    worker trust it, and the unnamed sites keep the old behavior as a
+    silent bypass. Equally: N independent conditionals where one shared
+    seam belongs, which regresses on the N+1th call site. — Source:
+    `.claude/skills/harden-ticket/SKILL.md`
 
 ## Reference Table
 

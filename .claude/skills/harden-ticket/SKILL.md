@@ -107,6 +107,12 @@ function signatures + the run-site wiring; None/empty handling for every new
 field; public --json schema shape; idempotency / lock-ordering.
 
 Confirm the file set and flag any temptation to touch code outside it.
+
+If the ticket names specific call sites, symbols, or touch points, GREP FOR
+THE FULL SET and report any the ticket missed. Report the grep you ran and
+its complete output. A ticket that names 2 of 7 call sites is the single most
+common cause of a plan bouncing on plan_unreviewable.
+
 Order findings by how likely they are to actually block/mislead the worker.
 If a category is genuinely clean, say so. Only REAL implementation-determining
 issues — no style nits. End with a one-line verdict.
@@ -116,6 +122,41 @@ If the ticket has explicit scope constraints (e.g. "4 fixtures only, the 5th is
 out of scope"), state them in the prompt and tell the agent to treat a plan
 that violates them as wrong — reviewers and workers both drift toward the
 ticket body otherwise.
+
+#### Enumerate call sites by grep, never by reading
+
+**Before writing or accepting any touch-point list, grep for the full set.
+Paste the grep output into the ticket.** Never enumerate call sites from having
+read some of the code — a partial read produces a confident, specific, wrong
+list, and its specificity is exactly what makes a worker trust it.
+
+This is the highest-frequency hardening defect there is, and it fails in a
+particularly expensive way: the ticket looks *more* rigorous for naming exact
+`file:line` touch points, the plan faithfully implements the subset it was
+given, and the Plan Reviewer blocks with `plan_unreviewable` — burning a full
+plan round per missed site. It also survives rewrites: a rescope that fixes
+every stale line number while preserving the original's incomplete enumeration
+inherits the bug.
+
+Concretely, when hardening:
+
+- Grep the symbol, not the module. `grep -rn '_derive_disposition(' src/` finds
+  seven call sites; reading `dispatch/` finds the one you were already looking at.
+- Re-grep after any repackaging. A `git mv` into a package moves call sites into
+  submodules that a stale path-based enumeration silently misses.
+- Count out loud in the ticket ("seven call sites, listed below"), so a plan
+  covering four is visibly short rather than plausibly complete.
+- When the set is larger than two or three, **require a shared helper** rather
+  than N patched sites. N conditionals means the N+1th call site silently
+  regresses; one seam means it inherits the behavior. Say so in the ticket —
+  a plan proposing N independent edits should be treated as wrong.
+- A site that genuinely cannot hit the new path is a fine outcome. Make the plan
+  say which ones those are and why. Unreachable-by-construction is acceptable;
+  unconsidered is not.
+
+Codified as `ARCHITECTURE.md` §7 principle 11 / §8 anti-pattern 11 in repos that
+carry that document, so a Plan Soundness Reviewer can cite it as a Tier-1
+violation rather than raise it as an opinion.
 
 ### 2. Triage — resolve vs escalate
 
