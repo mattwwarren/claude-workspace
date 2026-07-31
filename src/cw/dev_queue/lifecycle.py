@@ -164,6 +164,14 @@ def transition_task_status(
     # including a same-status re-park by a new review session) always starts
     # with a clean latch. See cw.reconcile.gate_recipes for what stamps it.
     task.gate_recipe_failed_at = None
+    # GitHub #1162 (RFC 0011 A6): same unconditional-clear treatment for the
+    # attention-digest buffer marker -- a status transition means the row's
+    # SESSION_NEEDS_ATTENTION episode (if any) has ended, so any pending
+    # digest buffer membership for it is stale and must not survive into the
+    # next episode. This is what satisfies R9's "re-derive live state" digest
+    # requirement structurally: cw.cw_operator_events._peek_flushable_digest
+    # only ever sees tasks whose marker is still set.
+    task.attention_digest_buffered_at = None
     if old_status != new_status:
         # Why: emit inline while callers still hold dev_queue_lock. record_event
         # takes the events-inbox lock (_inbox_lock) *inside* dev_queue_lock; the

@@ -56,7 +56,10 @@ from cw.models.events import PrState, WatchedPr
 #      transition_task_status alongside disposition so it reaches `cw
 #      dev-queue tasks` and the attention-event formatter.
 # v23: added TicketTask.hold_finalize (GitHub #1160, RFC 0011 A3).
-DEV_QUEUE_SCHEMA_VERSION = 23
+# v24: added TicketTask.attention_digest_buffered_at (GitHub #1162, RFC 0011
+#      A6) — durable buffer-membership marker for the operator-channel
+#      session.needs_attention digest coalescer (cw.cw_operator_events).
+DEV_QUEUE_SCHEMA_VERSION = 24
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -240,6 +243,18 @@ class TicketTask(BaseModel):
     # armed -- a proactive stop-before-unattended-finalize, not a second
     # signature slot. See GitHub #1160.
     hold_finalize: Literal["manual"] | None = None
+    # GitHub #1162 (RFC 0011 A6) — durable buffer-membership marker for the
+    # operator-channel session.needs_attention digest coalescer
+    # (cw.cw_operator_events). Stamped (only if unset) the first time this
+    # task's held disposition (HOLD_DISPOSITIONS) admits a
+    # session.needs_attention event that gets buffered instead of forwarded
+    # immediately; None means "not currently buffered." Cleared to None both
+    # by a real digest flush (poll_and_forward_operator_channel) and
+    # unconditionally by transition_task_status on every status transition
+    # (alongside escalation_parked_at/gate_recipe_failed_at above) — the
+    # latter is what satisfies R9's "re-derive live state, never replay a
+    # resolved episode" requirement for free, via the same mutation seam.
+    attention_digest_buffered_at: datetime | None = None
     # Ticket-level gate-recipe enablement override (RFC 0009 P4, #1067). Highest
     # tier in resolve_gate_recipe_enabled's 3-tier precedence: a recipe present
     # here wins over LaneConfig.gate_recipes and the hardcoded default-off. None

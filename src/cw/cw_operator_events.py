@@ -18,10 +18,13 @@ import json
 import logging
 import queue
 import urllib.parse
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel
 
+from cw.dev_queue.lifecycle import HOLD_DISPOSITIONS
 from cw.event_bus import EventBus
 from cw.models import (
     LivenessBucket,
@@ -35,6 +38,8 @@ if TYPE_CHECKING:
     from starlette.requests import Request
     from starlette.responses import Response
     from starlette.routing import BaseRoute
+
+    from cw.models import DevQueueStore, TicketTask
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +139,160 @@ def _build_operator_notification(event: OrchestratorEvent) -> dict[str, Any]:
     }
 
 
+def _find_held_task(
+    task_by_ticket: dict[tuple[str, str], TicketTask], event: OrchestratorEvent
+) -> TicketTask | None:
+    """Resolve the live ``TicketTask`` a ``session.needs_attention`` event is
+    about, or ``None`` if it isn't about any known task (RFC 0011 A6, #1162).
+
+    Joins via the event payload's ``ticket_id``/``client`` fields -- not
+    ``payload["paused_status"]`` (a distinct, disjoint-namespace string; see
+    ``AWAITING_OPERATOR_DISPOSITION``'s docstring). A fleet-wide event with no
+    owning ticket (``ticket_id`` absent/None -- e.g. ``gh_availability_outage``)
+    and a ticket_id with no matching row (resolved/deleted since) both
+    correctly return None here, which the caller treats as "not held."
+    """
+    ticket_id = event.payload.get("ticket_id")
+    client = event.payload.get("client")
+    if not isinstance(ticket_id, str) or not isinstance(client, str):
+        return None
+    return task_by_ticket.get((ticket_id, client))
+
+
+def _is_held(task: TicketTask) -> bool:
+    """True iff *task* is parked in one of the digest-eligible hold classes."""
+    return task.disposition in HOLD_DISPOSITIONS
+
+
+def _in_delivery_window(config: OrchestratorConfig, now: datetime) -> bool:
+    """True iff *now* falls inside the configured local-timezone digest
+    delivery window (R12, #1162). DST-aware: resolves *now* into the
+    configured IANA zone and compares local wall-clock hours, never a fixed
+    UTC offset.
+    """
+    local_now = now.astimezone(ZoneInfo(config.attention_digest_window_tz))
+    return (
+        config.attention_digest_window_start_hour
+        <= local_now.hour
+        < config.attention_digest_window_end_hour
+    )
+
+
+def _digest_entry(task: TicketTask) -> dict[str, Any]:
+    """Build one digest entry for *task* (the committed 3-key schema)."""
+    return {
+        "ticket_id": task.ticket_id,
+        "client": task.client,
+        "breadcrumbs": task.blocked_reason,
+    }
+
+
+def _peek_flushable_digest(
+    store: DevQueueStore, config: OrchestratorConfig, now: datetime
+) -> list[dict[str, Any]] | None:
+    """Return the digest entries to flush now, or ``None`` if nothing should
+    flush (RFC 0011 A6, #1162). Pure read -- does NOT mutate *store*; pair
+    with :func:`_clear_digest_buffer` to actually clear the buffer markers
+    once the caller has confirmed the broadcast succeeded (see
+    ``poll_and_forward_operator_channel``'s broadcast-before-persist
+    ordering).
+
+    Re-derives the held set live from ``store.tasks`` at call time (R9) --
+    never from stored events -- so a ticket resolved/deleted since it was
+    buffered is excluded automatically (its
+    ``attention_digest_buffered_at`` marker was already cleared by
+    ``transition_task_status``'s unconditional-clear block). Returns ``None``
+    when the delivery window is closed, nothing is currently buffered, or the
+    most recently buffered arrival hasn't yet aged past the idle-drain floor
+    -- the debounce is anchored to the NEWEST arrival, not the oldest, so a
+    fresh held park arriving mid-batch pushes the flush back out and gives it
+    a chance to land in the same digest (R5).
+    """
+    if not _in_delivery_window(config, now):
+        return None
+    buffered: list[tuple[TicketTask, datetime]] = []
+    for task in store.tasks:
+        arrival = task.attention_digest_buffered_at
+        if arrival is not None and _is_held(task):
+            buffered.append((task, arrival))
+    if not buffered:
+        return None
+    newest_arrival = max(arrival for _, arrival in buffered)
+    idle_elapsed = (now - newest_arrival).total_seconds()
+    if idle_elapsed < config.attention_digest_idle_floor_seconds:
+        return None
+    return [_digest_entry(task) for task, _ in buffered]
+
+
+def _clear_digest_buffer(
+    store: DevQueueStore, ticket_keys: set[tuple[str, str]]
+) -> None:
+    """Clear ``attention_digest_buffered_at`` on every task in *store* whose
+    ``(ticket_id, client)`` is in *ticket_keys* (RFC 0011 A6, #1162).
+
+    Called with a freshly-loaded *store* AFTER a digest broadcast has already
+    gone out, per :func:`poll_and_forward_operator_channel`'s
+    broadcast-before-persist ordering -- a crash before this runs just means
+    the same tickets flush again (harmless duplicate) instead of a silently
+    dropped digest (R8).
+    """
+    for task in store.tasks:
+        if (task.ticket_id, task.client) in ticket_keys:
+            task.attention_digest_buffered_at = None
+
+
+def _classify_event(
+    event: OrchestratorEvent,
+    task_by_ticket: dict[tuple[str, str], TicketTask],
+    now: datetime,
+) -> bool | None:
+    """Classify one already-``_admits``-passed event (RFC 0011 A6, #1162).
+
+    Returns ``True`` if the event was buffered and its marker was newly
+    stamped (the store changed), ``False`` if it was buffered but already had
+    a marker set (idempotent no-op, no change), or ``None`` if the event
+    should be forwarded immediately instead -- either it isn't a
+    ``session.needs_attention`` event, or it is but doesn't resolve to a
+    currently-held task (no matching row, or a row not in
+    ``HOLD_DISPOSITIONS``).
+    """
+    if event.type != OrchestratorEventType.SESSION_NEEDS_ATTENTION:
+        return None
+    held_task = _find_held_task(task_by_ticket, event)
+    if held_task is None or not _is_held(held_task):
+        return None
+    if held_task.attention_digest_buffered_at is None:
+        held_task.attention_digest_buffered_at = now
+        return True
+    return False
+
+
+def _build_operator_digest_notification(
+    entries: list[dict[str, Any]], now: datetime
+) -> dict[str, Any]:
+    """Build the SSE notification envelope for a flushed digest (#1162).
+
+    Sibling to ``_build_operator_notification``, but sources its inner
+    ``message`` from a live entries list rather than a stored
+    ``OrchestratorEvent`` -- there is no such event (R9: ephemeral, never
+    persisted), so ``id``/``correlation_id`` are deliberately omitted rather
+    than attributed to any one ticket.
+    """
+    message = {
+        "event": "session.needs_attention.digest",
+        "digest": True,
+        "count": len(entries),
+        "created_at": now.isoformat(),
+        "entries": entries,
+    }
+    title = f"Operator: {len(entries)} ticket(s) awaiting operator attention"
+    return {
+        "notification_type": _NOTIFICATION_TYPE,
+        "message": json.dumps(message),
+        "title": title,
+    }
+
+
 def poll_and_forward_operator_channel(config: OrchestratorConfig) -> None:
     """Read new orchestrator-bus events, filter, and forward to the operator channel.
 
@@ -143,7 +302,28 @@ def poll_and_forward_operator_channel(config: OrchestratorConfig) -> None:
     of whether each individually passed ``_admits`` -- the established
     orchestrator-bus consumer idiom (``dispatch.py``/``orchestrate.py``): a
     dropped event must never be re-scanned on the next tick.
+
+    RFC 0011 A6 (#1162): an admitted ``session.needs_attention`` event whose
+    ticket is currently held (``HOLD_DISPOSITIONS``) is buffered onto that
+    task's ``attention_digest_buffered_at`` instead of forwarded immediately;
+    every other admitted event (including a non-held/ticketless
+    ``session.needs_attention``) forwards exactly as before, unbatched. Every
+    ``broadcast()`` call happens AFTER its ``dev_queue_lock()`` scope has
+    released: forwarding has no dependency on dev-queue store state, so it
+    must not serialize behind the same lock dispatch/reconcile contend for.
+
+    The digest-flush path additionally broadcasts BEFORE persisting the
+    cleared buffer markers (two short lock scopes, one before and one after
+    the broadcast) rather than the single-scope save-then-broadcast order a
+    naive read/mutate/save/broadcast sequence would produce: if the process
+    crashes between persisting "flushed" and actually broadcasting it, R9's
+    live re-derivation would find nothing buffered on the next tick and the
+    digest would be silently lost forever. Broadcast-then-persist means the
+    same crash instead produces a harmless duplicate digest on the next tick
+    (R8: never silently drop a held ticket's attention signal). The cursor is
+    only advanced when there were events to advance past.
     """
+    from cw.dev_queue.storage import dev_queue_lock, load_dev_queue, save_dev_queue
     from cw.events import advance_cursor, read_events
 
     forward = config.operator_channel_forward
@@ -151,12 +331,37 @@ def poll_and_forward_operator_channel(config: OrchestratorConfig) -> None:
         consumer=_OPERATOR_BRIDGE_CONSUMER,
         event_types=list(forward.event_types),
     )
-    if not events:
-        return
-    for event in events:
-        if _admits(event, forward):
-            broadcast(_build_operator_notification(event))
-    advance_cursor(_OPERATOR_BRIDGE_CONSUMER, events[-1].id)
+    now = datetime.now(UTC)
+    to_forward: list[OrchestratorEvent] = []
+    with dev_queue_lock():
+        store = load_dev_queue()
+        changed = False
+        if events:
+            task_by_ticket = {
+                (task.ticket_id, task.client): task for task in store.tasks
+            }
+            for event in events:
+                if not _admits(event, forward):
+                    continue
+                classified = _classify_event(event, task_by_ticket, now)
+                if classified is None:
+                    to_forward.append(event)
+                elif classified:
+                    changed = True
+        if changed:
+            save_dev_queue(store)
+        digest_entries = _peek_flushable_digest(store, config, now)
+    for event in to_forward:
+        broadcast(_build_operator_notification(event))
+    if digest_entries is not None:
+        broadcast(_build_operator_digest_notification(digest_entries, now))
+        ticket_keys = {(e["ticket_id"], e["client"]) for e in digest_entries}
+        with dev_queue_lock():
+            fresh_store = load_dev_queue()
+            _clear_digest_buffer(fresh_store, ticket_keys)
+            save_dev_queue(fresh_store)
+    if events:
+        advance_cursor(_OPERATOR_BRIDGE_CONSUMER, events[-1].id)
 
 
 async def handle_post_operator_ack(request: Request) -> Response:

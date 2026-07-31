@@ -99,6 +99,77 @@ This mirrors `default_signoff`'s asymmetry with `reap_policy`
 operator-facing regression, so a config typo must fail loudly rather than
 quietly dropping events an operator is relying on.
 
+## Digest coalescing (RFC 0011 A6, #1162)
+
+A `session.needs_attention` event whose ticket is currently parked in a
+*hold* class (`TicketTask.disposition` in `HOLD_DISPOSITIONS` --
+`awaiting_operator` or `finalize_gate_held`) is **buffered** instead of
+forwarded immediately: "we could not reach the operator or a dependency"
+parks pile up quietly overnight rather than paging once per park. Every
+other admitted event -- a genuine `blocked`/broken park (any other
+disposition), a ticketless fleet-wide event (e.g. `gh_availability_outage`,
+no owning ticket), or a ticket the bridge can't resolve to a known row --
+still forwards immediately, unbatched, exactly as before. Classification
+joins the event's `ticket_id`/`client` payload fields against the live
+dev-queue store; it does **not** match `payload["paused_status"]` against
+`HOLD_DISPOSITIONS` -- those are two disjoint string namespaces (see
+`AWAITING_OPERATOR_DISPOSITION`'s docstring in
+`cw.dev_queue.lifecycle`), so the classification always resolves the actual
+`TicketTask.disposition`.
+
+The buffer is durable, not in-memory: the first held event for a ticket
+stamps `TicketTask.attention_digest_buffered_at` (idempotently -- a later
+re-fire of the same episode does not reset it), which survives a daemon
+restart and is cleared unconditionally by `transition_task_status` on any
+subsequent status transition. A ticket resolved between buffering and flush
+therefore drops out of the digest automatically -- the flush always
+re-derives live held state from the dev-queue store, never replays a
+buffered event.
+
+The buffer flushes to a single digest SSE push once two gates both pass:
+
+- **Delivery window** -- a local-timezone daily window
+  (`attention_digest_window_tz` / `_start_hour` / `_end_hour`, default
+  `America/New_York` 08:00-20:00), resolved via `zoneinfo` so it tracks DST
+  correctly. Outside the window, held parks keep buffering indefinitely --
+  nothing flushes overnight.
+- **Idle-drain floor** (`attention_digest_idle_floor_seconds`, default 60) --
+  inside the window, a flush additionally waits until this many seconds
+  have elapsed since the **most recently buffered arrival** in the current
+  batch, not the oldest. A fresh held park arriving mid-wait pushes the
+  flush back out, giving it a chance to land in the same digest instead of
+  triggering a second push moments later.
+
+When the window opens after a quiet overnight buildup, every currently
+buffered held ticket flushes together in one digest -- there is no
+additional per-ticket wait once the window is open and the idle floor has
+already elapsed for all of them.
+
+The digest notification shares the same three-key outer envelope as every
+other `cw-operator` push (`notification_type`, `message`, `title`); only the
+inner `message` differs:
+
+```json
+{
+  "event": "session.needs_attention.digest",
+  "digest": true,
+  "count": 2,
+  "created_at": "2026-07-30T12:00:00+00:00",
+  "entries": [
+    {"ticket_id": "GEN-123", "client": "acme", "breadcrumbs": "operator unavailable"},
+    {"ticket_id": "GEN-456", "client": "acme", "breadcrumbs": null}
+  ]
+}
+```
+
+`entries` carries exactly `ticket_id` / `client` / `breadcrumbs` per held
+ticket -- `breadcrumbs` is `TicketTask.blocked_reason` verbatim (`null` when
+the park carried no reason). `"event"` is a literal string, not a registered
+`OrchestratorEventType` -- the digest is never persisted as an
+`OrchestratorEvent` (it has no single owning ticket to attribute one to);
+it exists only as this one ephemeral SSE push. `count` is uncapped: a large
+overnight batch flushes in full, every ticket listed.
+
 ## Cadence
 
 The bridge (`cw.cw_operator_events.poll_and_forward_operator_channel`) runs
