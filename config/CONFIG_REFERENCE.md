@@ -331,7 +331,7 @@ tick_interval_seconds: 30
 # max_parallel_clients caps how many clients are eligible per tick
 # (null = no limit). The legacy names default_max_parallel /
 # per_client_max_parallel are deprecated aliases, still read on load.
-default_ceiling: 2
+default_ceiling: 1
 per_client_ceiling: {}
 max_parallel_clients: null
 
@@ -590,6 +590,20 @@ inbox_line_count_warn: 15000
 # gate an operator is relying on. See Operator Signoff Gates below.
 default_signoff: none
 
+# Global default for the proactive finalize hold (RFC 0011 A3, GitHub
+# #1160), used when neither the ticket (hold_finalize) nor its lane
+# (finalize_gate) sets an override. "auto" (default): no hold. "manual":
+# every ticket stops at the REVIEW->FINALIZE checkpoint with disposition
+# `finalize_gate_held`, released by an explicit `cw dev-queue approve`.
+# Invalid values raise loudly (same fail-closed rationale as
+# default_signoff above).
+default_finalize_gate: auto
+
+# Retention window (hours) for per-session executor-diagnostics bundles;
+# dispatch_tick's cleanup pass removes older bundles (GitHub #1239 — see
+# docs/diagnostics-retention.md).
+diagnostics_retention_hours: 24
+
 # Operator-attention forward-set for the cw-operator SSE channel (RFC 0008
 # W3, GitHub #1002) -- a declarative filter over the orchestrator event bus.
 # Shown here with its defaults; omit this block entirely to use them.
@@ -611,8 +625,10 @@ operator_channel_forward:
     - operator.escalation
     - gate.auto_approved        # RFC 0009 — a gate recipe approved with no human review
     - gate.auto_approve_failed
+    - gate.auto_approve_held    # RFC 0011 A3 — a finalize hold declined an auto-approval
     - pr.action_taken           # RFC 0010 — a review recipe acted on a PR
     - pr.action_failed
+    - gate.ssh_key_bypassed     # GitHub #1437 — operator bypassed the ssh-key gate probe
   task_transition_statuses:
     - blocked_on_user
     - awaiting_operator_signoff
