@@ -49,7 +49,7 @@ def _bootstrap_sys_path() -> None:
 
 _bootstrap_sys_path()
 
-from cw._util import _iter_sentinel_text_blocks
+from cw._util import _iter_sentinel_text_blocks, claude_project_dir
 from cw.auto_dev_result import (
     AutoDevResult,
     BlockedResult,
@@ -102,8 +102,9 @@ def _transcript_path_for_session(session: dict[str, Any]) -> Path | None:
     cwd = session.get("worktree_path")
     if not claude_session_id or not cwd:
         return None
-    encoded = str(cwd).replace("/", "-").replace(".", "-")
-    return Path.home() / ".claude" / "projects" / encoded / f"{claude_session_id}.jsonl"
+    # cw._util.claude_project_dir owns the path-encoding rule (#463 fixed a
+    # single-replace bug there once) — do not reimplement it here.
+    return claude_project_dir(Path(cwd)) / f"{claude_session_id}.jsonl"
 
 
 def _result_to_dict(result: AutoDevResult | BlockedResult) -> dict[str, Any]:

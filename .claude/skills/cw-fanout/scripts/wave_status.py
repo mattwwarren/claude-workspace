@@ -26,11 +26,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
 
-DEV_QUEUE = Path.home() / ".local/share/cw/dev_queue.json"
+# Mirrors cw.config.STATE_DIR's XDG_DATA_HOME branch (the source of truth for
+# this path) without importing cw — this script stays import-free by design.
+# Without the branch, an operator with XDG_DATA_HOME set silently got an
+# empty wave status (the file "didn't exist" at the hardcoded default).
+_xdg_data = os.environ.get("XDG_DATA_HOME", "")
+_STATE_DIR = Path(_xdg_data) / "cw" if _xdg_data else Path.home() / ".local/share/cw"
+DEV_QUEUE = _STATE_DIR / "dev_queue.json"
 
 # Terminal dev-queue states: the dispatcher will not advance these on its own.
 # blocked_on_user means a session paused for operator input (needs attention);
