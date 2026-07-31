@@ -9,7 +9,7 @@ local-timezone delivery window (``OrchestratorConfig.attention_digest_window_
 tz``/``_start_hour``/``_end_hour``) and an idle-drain floor
 (``attention_digest_idle_floor_seconds``) anchored to the most recent
 arrival in the currently-buffered batch, not the oldest -- see
-``_collect_flushable_digest``'s docstring.
+``_flush_digest_entries``'s docstring.
 
 Sibling to ``tests/test_cw_operator_events.py`` (RFC 0008 W3, #1002), split
 into its own file per R2/R3's corrected anchor -- the digest logic lives in
@@ -463,6 +463,42 @@ class TestDigestWindowAndIdleFloor:
         assert by_id["T-2"]["breadcrumbs"] is None
         assert by_id["T-3"]["client"] == "acme"
 
+    def test_is_held_recheck_excludes_task_without_marker_clear(
+        self, tmp_events_dir: Path
+    ) -> None:
+        """R9's live _is_held() recheck inside _flush_digest_entries fires
+        independent of transition_task_status's marker-clear side effect --
+        distinguishes this from test_ticket_resolved_before_flush_excluded_
+        from_digest above, which goes through transition_task_status and so
+        cannot tell whether the exclusion comes from the recheck or from the
+        marker simply being zeroed. Here disposition is flipped directly
+        (bypassing transition_task_status entirely) while
+        attention_digest_buffered_at is left set, so the only thing that can
+        explain T-1's exclusion below is _flush_digest_entries's own
+        _is_held(task) check at flush time."""
+        save_dev_queue(DevQueueStore(tasks=[_held_task("T-1"), _held_task("T-2")]))
+        with freezegun.freeze_time(_INSIDE_WINDOW) as frozen:
+            _attention_event("T-1")
+            _attention_event("T-2")
+            poll_and_forward_operator_channel(OrchestratorConfig())
+
+            store = load_dev_queue()
+            t1 = next(t for t in store.tasks if t.ticket_id == "T-1")
+            t1.disposition = "scope_exceeded"
+            assert t1.attention_digest_buffered_at is not None
+            save_dev_queue(store)
+
+            q = subscribe()
+            try:
+                frozen.tick(delta=timedelta(seconds=61))
+                poll_and_forward_operator_channel(OrchestratorConfig())
+                items = _drain(q)
+            finally:
+                unsubscribe(q)
+        assert len(items) == 1
+        data = json.loads(items[0]["message"])
+        assert {e["ticket_id"] for e in data["entries"]} == {"T-2"}
+
 
 # ---------------------------------------------------------------------------
 # TestDeliveryWindowDST -- R12 local-timezone window resolution
@@ -497,8 +533,45 @@ class TestDeliveryWindowDST:
         assert _in_delivery_window(config, just_before) is False
         assert _in_delivery_window(config, just_after) is False
 
+    def test_localized_hour_diverges_from_raw_utc_hour(self) -> None:
+        """A regression that silently dropped the .astimezone(tz) call and
+        compared the bare UTC hour instead would NOT be caught by
+        test_dst_flush_inside_window_edt/test_dst_same_wall_clock_hour_est/
+        test_dst_boundary_flush_decision_each_side above -- every instant
+        those tests use happens to land on the same side of the 8-20 window
+        whether or not real timezone conversion occurs. This test picks an
+        instant where the two disagree: 23:30 UTC on 2026-07-15 is 19:30 EDT
+        -- raw UTC hour 23 is OUTSIDE the 8-20 window, but the correctly
+        localized hour 19 is INSIDE it. Only a real astimezone(tz) conversion
+        passes this."""
+        config = OrchestratorConfig()
+        now = datetime.fromisoformat("2026-07-15T23:30:00+00:00")  # 19:30 EDT
+        assert _in_delivery_window(config, now) is True
+
     def test_invalid_timezone_fails_loud_at_config_load(self) -> None:
         """R12c: an unresolvable IANA zone raises ValidationError at config
         construction -- never a silent fallback to UTC."""
         with pytest.raises(ValidationError):
             OrchestratorConfig(attention_digest_window_tz="Not/AZone")
+
+    def test_start_hour_gte_end_hour_fails_loud_at_config_load(self) -> None:
+        """A start_hour >= end_hour window can never open -- _in_delivery_
+        window's start <= hour < end predicate would be false for every hour
+        of every day, silently dropping every digest forever. Must fail loud
+        at config construction, same fail-loud stance as the timezone
+        validator above, not ship as a silently-dead window."""
+        with pytest.raises(ValidationError):
+            OrchestratorConfig(
+                attention_digest_window_start_hour=20,
+                attention_digest_window_end_hour=8,
+            )
+
+    def test_start_hour_equal_end_hour_fails_loud_at_config_load(self) -> None:
+        """The equal-bounds edge case (start == end) is just as dead as
+        start > end -- also must fail loud, not silently construct a
+        zero-width window."""
+        with pytest.raises(ValidationError):
+            OrchestratorConfig(
+                attention_digest_window_start_hour=8,
+                attention_digest_window_end_hour=8,
+            )

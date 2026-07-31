@@ -169,6 +169,7 @@ class LaneConfig(BaseModel):
 
 
 _USAGE_LIMIT_BACKOFF_SECONDS = 3600
+_HOURS_PER_DAY = 24
 
 # RFC 0008 W3 (#1002) default operator-attention forward-set. task.transition
 # is admitted only for the terminal/attention-worthy statuses below (narrowed
@@ -620,6 +621,34 @@ class OrchestratorConfig(BaseModel):
             msg = f"attention_digest_window_tz: unknown IANA zone {value!r}"
             raise ValueError(msg) from None
         return value
+
+    @model_validator(mode="after")
+    def _validate_attention_digest_window_hours(self) -> OrchestratorConfig:
+        """Fail loud on a start/end pair that can never open (fail-loud, same
+        reasoning as ``_validate_attention_digest_window_tz``).
+
+        ``_in_delivery_window`` (``cw.cw_operator_events``) compares
+        ``start_hour <= local_hour < end_hour``. Unlike a UTC-hour design, this
+        field pair intentionally does not support an overnight wraparound (see
+        the field's own why-comment above) -- so a config with
+        ``start_hour >= end_hour`` isn't an alternate valid shape, it is a typo
+        that makes the predicate false for every hour of every day, forever.
+        The digest would then buffer every held ticket and never flush it,
+        silently -- exactly the missed-signal failure R8 exists to prevent.
+        """
+        start, end = (
+            self.attention_digest_window_start_hour,
+            self.attention_digest_window_end_hour,
+        )
+        if not (0 <= start < end <= _HOURS_PER_DAY):
+            msg = (
+                "attention_digest_window_start_hour/end_hour must satisfy "
+                f"0 <= start < end <= 24 (got start={start}, end={end}) -- a "
+                "start >= end window can never open and would silently drop "
+                "every digest"
+            )
+            raise ValueError(msg)
+        return self
 
     @field_validator("concierge_recoveries")
     @classmethod
