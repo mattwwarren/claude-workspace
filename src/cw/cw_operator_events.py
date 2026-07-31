@@ -187,12 +187,15 @@ def _digest_entry(task: TicketTask) -> dict[str, Any]:
     }
 
 
-def _flush_digest_entries(
+def _peek_flushable_digest(
     store: DevQueueStore, config: OrchestratorConfig, now: datetime
 ) -> list[dict[str, Any]] | None:
     """Return the digest entries to flush now, or ``None`` if nothing should
-    flush (RFC 0011 A6, #1162). MUTATES *store*: clears
-    ``attention_digest_buffered_at`` on every task it returns an entry for.
+    flush (RFC 0011 A6, #1162). Pure read -- does NOT mutate *store*; pair
+    with :func:`_clear_digest_buffer` to actually clear the buffer markers
+    once the caller has confirmed the broadcast succeeded (see
+    ``poll_and_forward_operator_channel``'s broadcast-before-persist
+    ordering).
 
     Re-derives the held set live from ``store.tasks`` at call time (R9) --
     never from stored events -- so a ticket resolved/deleted since it was
@@ -203,27 +206,39 @@ def _flush_digest_entries(
     most recently buffered arrival hasn't yet aged past the idle-drain floor
     -- the debounce is anchored to the NEWEST arrival, not the oldest, so a
     fresh held park arriving mid-batch pushes the flush back out and gives it
-    a chance to land in the same digest (R5). The caller is responsible for
-    persisting the mutated *store* (this function never calls save_dev_queue).
+    a chance to land in the same digest (R5).
     """
     if not _in_delivery_window(config, now):
         return None
-    buffered: list[TicketTask] = []
-    arrivals: list[datetime] = []
+    buffered: list[tuple[TicketTask, datetime]] = []
     for task in store.tasks:
         arrival = task.attention_digest_buffered_at
         if arrival is not None and _is_held(task):
-            buffered.append(task)
-            arrivals.append(arrival)
+            buffered.append((task, arrival))
     if not buffered:
         return None
-    idle_elapsed = (now - max(arrivals)).total_seconds()
+    newest_arrival = max(arrival for _, arrival in buffered)
+    idle_elapsed = (now - newest_arrival).total_seconds()
     if idle_elapsed < config.attention_digest_idle_floor_seconds:
         return None
-    entries = [_digest_entry(task) for task in buffered]
-    for task in buffered:
-        task.attention_digest_buffered_at = None
-    return entries
+    return [_digest_entry(task) for task, _ in buffered]
+
+
+def _clear_digest_buffer(
+    store: DevQueueStore, ticket_keys: set[tuple[str, str]]
+) -> None:
+    """Clear ``attention_digest_buffered_at`` on every task in *store* whose
+    ``(ticket_id, client)`` is in *ticket_keys* (RFC 0011 A6, #1162).
+
+    Called with a freshly-loaded *store* AFTER a digest broadcast has already
+    gone out, per :func:`poll_and_forward_operator_channel`'s
+    broadcast-before-persist ordering -- a crash before this runs just means
+    the same tickets flush again (harmless duplicate) instead of a silently
+    dropped digest (R8).
+    """
+    for task in store.tasks:
+        if (task.ticket_id, task.client) in ticket_keys:
+            task.attention_digest_buffered_at = None
 
 
 def _classify_event(
@@ -292,15 +307,21 @@ def poll_and_forward_operator_channel(config: OrchestratorConfig) -> None:
     ticket is currently held (``HOLD_DISPOSITIONS``) is buffered onto that
     task's ``attention_digest_buffered_at`` instead of forwarded immediately;
     every other admitted event (including a non-held/ticketless
-    ``session.needs_attention``) forwards exactly as before, unbatched. A
-    single ``dev_queue_lock()`` scope per tick covers the per-event
-    classify/buffer step and the post-loop flush check -- runs even on a tick
-    with zero new events, since the flush condition (delivery window +
-    idle-drain floor) is time-based, not event-triggered -- but every
-    ``broadcast()`` call happens AFTER the lock is released: forwarding has no
-    dependency on dev-queue store state, so it must not serialize behind the
-    same lock dispatch/reconcile contend for. The cursor is only advanced when
-    there were events to advance past.
+    ``session.needs_attention``) forwards exactly as before, unbatched. Every
+    ``broadcast()`` call happens AFTER its ``dev_queue_lock()`` scope has
+    released: forwarding has no dependency on dev-queue store state, so it
+    must not serialize behind the same lock dispatch/reconcile contend for.
+
+    The digest-flush path additionally broadcasts BEFORE persisting the
+    cleared buffer markers (two short lock scopes, one before and one after
+    the broadcast) rather than the single-scope save-then-broadcast order a
+    naive read/mutate/save/broadcast sequence would produce: if the process
+    crashes between persisting "flushed" and actually broadcasting it, R9's
+    live re-derivation would find nothing buffered on the next tick and the
+    digest would be silently lost forever. Broadcast-then-persist means the
+    same crash instead produces a harmless duplicate digest on the next tick
+    (R8: never silently drop a held ticket's attention signal). The cursor is
+    only advanced when there were events to advance past.
     """
     from cw.dev_queue.storage import dev_queue_lock, load_dev_queue, save_dev_queue
     from cw.events import advance_cursor, read_events
@@ -311,10 +332,10 @@ def poll_and_forward_operator_channel(config: OrchestratorConfig) -> None:
         event_types=list(forward.event_types),
     )
     now = datetime.now(UTC)
-    changed = False
     to_forward: list[OrchestratorEvent] = []
     with dev_queue_lock():
         store = load_dev_queue()
+        changed = False
         if events:
             task_by_ticket = {
                 (task.ticket_id, task.client): task for task in store.tasks
@@ -327,15 +348,18 @@ def poll_and_forward_operator_channel(config: OrchestratorConfig) -> None:
                     to_forward.append(event)
                 elif classified:
                     changed = True
-        digest_entries = _flush_digest_entries(store, config, now)
-        if digest_entries is not None:
-            changed = True
         if changed:
             save_dev_queue(store)
+        digest_entries = _peek_flushable_digest(store, config, now)
     for event in to_forward:
         broadcast(_build_operator_notification(event))
     if digest_entries is not None:
         broadcast(_build_operator_digest_notification(digest_entries, now))
+        ticket_keys = {(e["ticket_id"], e["client"]) for e in digest_entries}
+        with dev_queue_lock():
+            fresh_store = load_dev_queue()
+            _clear_digest_buffer(fresh_store, ticket_keys)
+            save_dev_queue(fresh_store)
     if events:
         advance_cursor(_OPERATOR_BRIDGE_CONSUMER, events[-1].id)
 

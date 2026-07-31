@@ -9,7 +9,7 @@ local-timezone delivery window (``OrchestratorConfig.attention_digest_window_
 tz``/``_start_hour``/``_end_hour``) and an idle-drain floor
 (``attention_digest_idle_floor_seconds``) anchored to the most recent
 arrival in the currently-buffered batch, not the oldest -- see
-``_flush_digest_entries``'s docstring.
+``_peek_flushable_digest``'s docstring.
 
 Sibling to ``tests/test_cw_operator_events.py`` (RFC 0008 W3, #1002), split
 into its own file per R2/R3's corrected anchor -- the digest logic lives in
@@ -466,7 +466,7 @@ class TestDigestWindowAndIdleFloor:
     def test_is_held_recheck_excludes_task_without_marker_clear(
         self, tmp_events_dir: Path
     ) -> None:
-        """R9's live _is_held() recheck inside _flush_digest_entries fires
+        """R9's live _is_held() recheck inside _peek_flushable_digest fires
         independent of transition_task_status's marker-clear side effect --
         distinguishes this from test_ticket_resolved_before_flush_excluded_
         from_digest above, which goes through transition_task_status and so
@@ -474,7 +474,7 @@ class TestDigestWindowAndIdleFloor:
         marker simply being zeroed. Here disposition is flipped directly
         (bypassing transition_task_status entirely) while
         attention_digest_buffered_at is left set, so the only thing that can
-        explain T-1's exclusion below is _flush_digest_entries's own
+        explain T-1's exclusion below is _peek_flushable_digest's own
         _is_held(task) check at flush time."""
         save_dev_queue(DevQueueStore(tasks=[_held_task("T-1"), _held_task("T-2")]))
         with freezegun.freeze_time(_INSIDE_WINDOW) as frozen:
