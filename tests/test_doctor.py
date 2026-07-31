@@ -1284,14 +1284,10 @@ class TestCheckSshKeyLoaded:
         assert result.ok is True
         assert result.warn is False
 
-    def test_key_not_loaded_ok_and_warns(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_key_not_loaded_ok_and_warns(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from cw.doctor.versions import _check_ssh_key_loaded
 
-        monkeypatch.setattr(
-            "cw.doctor.versions.check_ssh_key_available", lambda: False
-        )
+        monkeypatch.setattr("cw.doctor.versions.check_ssh_key_available", lambda: False)
         result = _check_ssh_key_loaded()
         assert result.ok is True
         assert result.warn is True

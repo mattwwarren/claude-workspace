@@ -48,6 +48,7 @@ from cw.doctor.versions import (
     _check_cw_deps,
     _check_cw_version,
     _check_daemon_reachable,
+    _check_ssh_key_loaded,
 )
 from cw.doctor.wedge import (
     _check_wedge_active_no_daemon_entry,
@@ -102,6 +103,7 @@ def run_doctor(*, reap: bool = False) -> DoctorReport:
     report.checks.append(_check_skills_commands_drift())
     report.checks.append(_check_codex_capability())
     report.checks.append(_check_daemon_reachable())
+    report.checks.append(_check_ssh_key_loaded())
     report.checks.extend(_check_loop_health())
     report.checks.extend(_check_loop_liveness())
     report.checks.append(_check_inbox_size())

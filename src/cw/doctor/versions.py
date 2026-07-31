@@ -23,6 +23,7 @@ from cw.executor import (
     codex_capability_diagnosis,
 )
 from cw.native_daemon import _ROSTER_PATH
+from cw.ssh import check_ssh_key_available
 
 # Path to Claude Code user settings — read for the disclaimer-acceptance flag.
 _CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
@@ -427,4 +428,30 @@ def _check_daemon_reachable() -> CheckResult:
         ok=True,
         warn=True,
         detail="supervisorPid absent or zero — daemon may not be running",
+    )
+
+
+def _check_ssh_key_loaded() -> CheckResult:
+    """Check whether an ED25519/RSA key is loaded in the ssh-agent (#1400).
+
+    Diagnostic surfacing of the same condition #927's dev-queue dispatch
+    SSH-key preflight gate (``check_ssh_key_available``, ``cw.ssh``) blocks
+    on before spawning workers. Soft/non-blocking here: ``cw doctor`` only
+    reports, it never gates.
+    """
+    if check_ssh_key_available():
+        return CheckResult(
+            "ssh-key-loaded",
+            ok=True,
+            warn=False,
+            detail="ED25519/RSA key loaded in ssh-agent",
+        )
+    return CheckResult(
+        "ssh-key-loaded",
+        ok=True,
+        warn=True,
+        detail=(
+            "no ED25519/RSA key loaded in ssh-agent — run `ssh-add` to unlock"
+            " (same condition the dev-queue dispatch SSH-key preflight gates on)"
+        ),
     )

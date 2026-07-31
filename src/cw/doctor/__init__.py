@@ -69,6 +69,7 @@ from cw.doctor.versions import (
     _check_codex_capability,
     _check_cw_deps,
     _check_cw_version,
+    _check_ssh_key_loaded,
     _dep_distribution_name,
 )
 from cw.doctor.wedge import (
@@ -104,6 +105,7 @@ __all__ = [
     "_check_review_recipe_liveness",
     "_check_review_strategy",
     "_check_skills_commands_drift",
+    "_check_ssh_key_loaded",
     "_check_timed_out_merged",
     "_check_wedge_repo_ahead",
     "_check_wedge_task_running_completed_session",
