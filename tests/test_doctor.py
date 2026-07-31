@@ -902,12 +902,14 @@ class TestRunDoctor10Checks:
         monkeypatch.setattr("cw.doctor.wedge._ROSTER_PATH", roster_path)
         monkeypatch.setattr("cw.doctor.versions._ROSTER_PATH", roster_path)
         monkeypatch.setattr("cw.doctor.versions._sp.run", _make_fake_run_version())
+        monkeypatch.setattr("cw.doctor.versions.check_ssh_key_available", lambda: True)
 
         report = run_doctor()
         names = {c.name for c in report.checks}
         assert "bypass-disclaimer" in names
         assert "claude-version" in names
         assert "daemon-reachable" in names
+        assert "ssh-key-loaded" in names
 
     def test_bypass_disclaimer_warns_when_not_accepted(
         self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
@@ -1257,6 +1259,43 @@ class TestCheckCodexCapability:
         assert len(codex_checks) == 1
         assert codex_checks[0].ok is True
         assert codex_checks[0].detail == "0.144.5"
+
+
+# ---------------------------------------------------------------------------
+# _check_ssh_key_loaded: diagnostic surfacing of #927's SSH-key preflight
+# gate (#1400)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckSshKeyLoaded:
+    """_check_ssh_key_loaded reports ssh-agent key state, never fails (#1400).
+
+    Monkeypatches ``cw.doctor.versions.check_ssh_key_available`` directly —
+    the ssh-add/IdentityAgent subprocess mechanics are covered in
+    test_ssh.py.
+    """
+
+    def test_key_loaded_ok_no_warn(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cw.doctor.versions import _check_ssh_key_loaded
+
+        monkeypatch.setattr("cw.doctor.versions.check_ssh_key_available", lambda: True)
+        result = _check_ssh_key_loaded()
+        assert result.name == "ssh-key-loaded"
+        assert result.ok is True
+        assert result.warn is False
+
+    def test_key_not_loaded_ok_and_warns(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.doctor.versions import _check_ssh_key_loaded
+
+        monkeypatch.setattr(
+            "cw.doctor.versions.check_ssh_key_available", lambda: False
+        )
+        result = _check_ssh_key_loaded()
+        assert result.ok is True
+        assert result.warn is True
+        assert "ssh-add" in result.detail
 
 
 # ---------------------------------------------------------------------------
