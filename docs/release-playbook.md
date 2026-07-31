@@ -90,7 +90,9 @@ to `False` — it takes effect on the next reconcile tick, no redeploy.
 ## Release mechanics
 
 - `scripts/release.sh <version>` creates and pushes the release tag; the
-  version bump in `pyproject.toml` + `src/cw/__init__.py` precedes it.
+  version bump in `pyproject.toml` precedes it (`cw.__version__` is resolved
+  dynamically from the installed distribution — there is no separate version
+  literal to edit).
 - **Before cutting a release, ensure `uv.lock` is re-locked to the new version**
   (see #1101). The v1.18.0 cut left `uv.lock` lagging at the prior version,
   which later shows up as a dirty main checkout that trips `main_checkout_drift`
