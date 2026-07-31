@@ -26,7 +26,7 @@ import hashlib
 import json
 import logging
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, get_args
 
 from pydantic import ValidationError
 
@@ -38,6 +38,8 @@ from cw.auto_dev_result.schema import (
     AutoDevResult,
     BlockedResult,
     Blocker,
+    SchemaVersion,
+    Status,
     _has_usable_premise_text,
     _has_usable_question,
     _is_blank,
@@ -56,7 +58,9 @@ _log = logging.getLogger("cw.auto_dev_result")
 # `review.agents_run` count (reviewer agents that ran) alongside the
 # executor-neutral review-verdict contract (issue #1237). All are accepted
 # during the rollout window — see docs/headless-contract.md §8.
-SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2, 3, 4, 5})
+# Derived from schema.SchemaVersion so this pre-Pydantic gate cannot drift
+# from the model's Literal (#1535 drift class).
+SUPPORTED_SCHEMA_VERSIONS: frozenset[int] = frozenset(get_args(SchemaVersion))
 AUTO_DEV_RESULT_CURRENT_SCHEMA_VERSION: int = max(SUPPORTED_SCHEMA_VERSIONS)
 
 _OPEN_SENTINEL = "<<<AUTO_DEV_RESULT"
@@ -206,22 +210,11 @@ def extract_block(text: str) -> str | None:
     return matches[-1].group(1)
 
 
-_KNOWN_STATUSES: frozenset[str] = frozenset(
-    {
-        "shipped",
-        "stage_complete",
-        "plan_pending_approval",
-        "review_pending_approval",
-        "merge_gate_blocked",
-        "merge_pending",
-        "scope_exceeded",
-        "forbidden_area",
-        "blocked",
-        "no_op",
-        "ambiguities_pending_resolution",
-        "premises_pending_verification",
-    }
-)
+# Derived from schema.Status so this pre-Pydantic gate cannot drift from the
+# model's Literal (#1535 drift class): a hand-typed copy here would silently
+# short-circuit a schema-valid status into BlockedResult before the model
+# ever saw it.
+_KNOWN_STATUSES: frozenset[str] = frozenset(get_args(Status))
 _PRE_IMPL_STAGES: frozenset[str] = frozenset({"stage1_pre_flight", "stage1_plan"})
 
 
