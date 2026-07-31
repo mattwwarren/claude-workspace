@@ -169,7 +169,7 @@ def transition_task_status(
     # SESSION_NEEDS_ATTENTION episode (if any) has ended, so any pending
     # digest buffer membership for it is stale and must not survive into the
     # next episode. This is what satisfies R9's "re-derive live state" digest
-    # requirement structurally: cw.cw_operator_events._collect_flushable_digest
+    # requirement structurally: cw.cw_operator_events._flush_digest_entries
     # only ever sees tasks whose marker is still set.
     task.attention_digest_buffered_at = None
     if old_status != new_status:

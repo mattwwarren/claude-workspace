@@ -1993,7 +1993,7 @@ class TestCancelTicket:
         """cancel_ticket clears attention_digest_buffered_at (#1162, RFC 0011
         A6) -- same unconditional-clear treatment as the escalation and
         gate-recipe-failure latches above; this is what lets
-        cw.cw_operator_events._collect_flushable_digest re-derive live held
+        cw.cw_operator_events._flush_digest_entries re-derive live held
         state (R9) for free instead of replaying stored events."""
         task = TicketTask(
             ticket_id="TKT-DIGEST",
