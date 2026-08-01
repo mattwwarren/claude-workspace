@@ -7,10 +7,9 @@ symlink into ``global-claude`` and are what an *interactive* skill/command
 invocation resolves instead. This check re-derives the git-tracked file list
 via ``git ls-files`` inside the local source repo (resolved through
 ``_resolve_cw_source_path``), maps each tracked path to its ``~/.claude/``
-counterpart, and classifies each into missing / content-differs /
-counterpart-is-a-symlink, aggregating the result into one non-fatal
-``CheckResult``. Detection only — no sync. Leaf module — no cross-``doctor``
-dependencies.
+counterpart, and classifies each into missing / content-differs / wrong-target
+symlink, aggregating the result into one non-fatal ``CheckResult``. Detection
+only — no sync. Leaf module — no cross-``doctor`` dependencies.
 """
 
 from __future__ import annotations
@@ -28,6 +27,9 @@ class _DriftCategory(StrEnum):
 
     MISSING = "missing"
     DIFFERS = "differs"
+    # Counterpart is a symlink whose resolved target is NOT the tracked repo
+    # path (a symlink resolving TO the tracked repo path is the expected
+    # steady state under a symlink install and is not drift — see _classify).
     SYMLINK = "symlink"
 
 
@@ -51,6 +53,23 @@ _MAX_EXAMPLES = 3
 
 # Timeout (seconds) for the git subprocess call.
 _GIT_TIMEOUT = 10
+
+# Repo-relative path to the installer's project-scoped exclusion list.
+# Both scripts/install-skills.sh and this check read the same file — see #1535.
+_EXCLUDED_COMMANDS_RELPATH = "scripts/excluded-commands.txt"
+
+
+def _load_excluded_commands(source_path: Path) -> set[str]:
+    """Read the installer's excluded-commands file; fail open to empty set."""
+    try:
+        lines = (
+            (source_path / _EXCLUDED_COMMANDS_RELPATH)
+            .read_text(encoding="utf-8")
+            .splitlines()
+        )
+    except OSError:
+        return set()
+    return {line for line in lines if line}
 
 
 def _git_tracked_paths(source_path: Path) -> list[str] | None:
@@ -94,10 +113,14 @@ def _counterpart_path(repo_relpath: str) -> Path:
 def _classify(repo_path: Path, counterpart: Path) -> _DriftCategory | None:
     """Classify one tracked file's drift state, or None when it matches.
 
-    Leaf-symlink check comes first — a symlinked counterpart is a special
-    case of "exists" that still warrants a flag before we compare bytes.
+    Symlink resolution comes first: a counterpart symlink whose resolved
+    target equals the tracked repo path is the expected steady state under
+    a symlink install and is not drift. A symlink resolving anywhere else
+    (including a broken link) is drift, classified SYMLINK ("wrong target").
     """
     if counterpart.is_symlink():
+        if counterpart.resolve() == repo_path.resolve():
+            return None
         return _DriftCategory.SYMLINK
     if not counterpart.exists():
         return _DriftCategory.MISSING
@@ -128,8 +151,11 @@ def _check_skills_commands_drift() -> CheckResult:
     local source repo to diff against — same skip condition as
     _check_cw_version/_check_cw_deps), and when _CLAUDE_HOME/skills doesn't
     exist at all. Warns (ok=True, warn=True) when git ls-files fails, or when
-    one or more tracked files are missing, content-differs, or have an
-    abnormal per-file symlink on the global side.
+    one or more tracked files are missing, content-differs, or is a symlink
+    pointing somewhere other than the tracked repo path. Commands listed in
+    scripts/excluded-commands.txt (the installer's project-scoped exclusion
+    list) are never installed globally, so they are excluded from tracking
+    before classification.
     """
     source_path = _resolve_cw_source_path()
     if isinstance(source_path, CheckResult):
@@ -157,6 +183,16 @@ def _check_skills_commands_drift() -> CheckResult:
             warn=True,
             detail=f"could not list git-tracked files under {source_path}",
         )
+
+    excluded_commands = _load_excluded_commands(source_path)
+    tracked = [
+        relpath
+        for relpath in tracked
+        if not (
+            relpath.startswith(".claude/commands/")
+            and Path(relpath).name in excluded_commands
+        )
+    ]
 
     missing: list[str] = []
     differs: list[str] = []

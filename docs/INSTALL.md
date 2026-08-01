@@ -55,7 +55,7 @@ Expected output for a healthy setup:
 - `[WARN] bypass-disclaimer — ...` — disclaimer not yet accepted; run `claude --dangerously-skip-permissions` interactively.
 - `[OK] claude-version` — `claude` binary found and responsive.
 - `[WARN] daemon-reachable` — the Claude native daemon has not been started yet; this resolves automatically when `cw` first spawns a worker session.
-- `[OK/WARN] skills-commands-drift` — repo-tracked `.claude/skills`/`.claude/commands` files compared against `~/.claude`; `[WARN]` means at least one file is missing, differs, or is an abnormal per-file symlink on the global side.
+- `[OK/WARN] skills-commands-drift` — repo-tracked `.claude/skills`/`.claude/commands` files compared against `~/.claude`; `[WARN]` means at least one tracked file is missing, content differs, or its `~/.claude` counterpart is a symlink pointing somewhere other than this checkout.
 
 ## Installation
 
@@ -80,6 +80,16 @@ cd claude-workspace
 ```
 
 The install script runs `uv tool install --from "$PROJECT_DIR" --force --reinstall --no-cache "claude-workspace[mcp]"`, making `cw` globally available, and then syncs cw's bundled skills and commands into `~/.claude/` via `scripts/install-skills.sh`.
+
+### How skills/commands stay in sync
+
+`~/.claude/skills/<name>` and `~/.claude/commands/<name>` are **symlinks** into this checkout's `.claude/` tree, not copies — one copy of each file exists on disk, so drift between the two trees is structurally impossible.
+
+Re-running `scripts/install-skills.sh` (directly, or via `./scripts/install.sh`) migrates an existing copy-based install automatically: a stale regular file or directory at the destination is replaced with a symlink, and a symlink already pointing at the wrong target is repointed. No manual `rm` is required.
+
+**Trade-off, stated plainly, not as a free win:** once installed as a symlink, an "edit to a local skill" *is* an edit to this repo's working tree. It shows up in `git status`, can be committed from any directory, and can be clobbered by a `git checkout`, `git stash`, or branch switch performed in this repo. Dispatched (`cw`-spawned) workers are unaffected — they resolve skills from their own worktree's committed state — but any interactive session running elsewhere sees uncommitted edits to this checkout live.
+
+Agents (`~/.claude/agents`) are unaffected by this — they are still copied (not symlinked), and on a typical setup the destination itself is a symlink into the `global-claude` repo. That layout is unchanged and out of scope for this doc.
 
 ### For Development
 

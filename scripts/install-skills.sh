@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Install cw slash commands, skill directories, and subagents to ~/.claude/
+# Symlink cw slash commands and skill directories, and copy subagents, into
+# ~/.claude/
 #
 # SAFETY INVARIANT (manifest-scoped prune):
 #   This script tracks every path it installs in ~/.claude/.cw-skills-manifest.
@@ -41,7 +42,19 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 # .claude/commands/auto-dev-finalize.md).  A global copy would make every other
 # repo look like it has one, then ship it with claude-workspace's conventions —
 # origin/main base, this repo's test plan, its finalize scripts.
-EXCLUDED_COMMANDS=("ship-it.md")
+#
+# scripts/excluded-commands.txt is the single source of truth for this list —
+# both this script and cw doctor's skills-commands-drift check (which must
+# not flag an excluded command as "missing" on the global side) read it. See
+# src/cw/doctor/skills_drift.py's _load_excluded_commands (#1535).
+EXCLUDED_COMMANDS_FILE="$SCRIPT_DIR/excluded-commands.txt"
+EXCLUDED_COMMANDS=()
+if [ -f "$EXCLUDED_COMMANDS_FILE" ]; then
+    while IFS= read -r excluded_name || [ -n "$excluded_name" ]; do
+        [ -n "$excluded_name" ] || continue
+        EXCLUDED_COMMANDS+=("$excluded_name")
+    done < "$EXCLUDED_COMMANDS_FILE"
+fi
 
 # Throwaway / experiment-scoped agents that must NEVER be installed globally.
 #
@@ -99,7 +112,7 @@ for src_file in "$COMMANDS_SRC"/*.md; do
         excluded_count=$((excluded_count + 1))
         continue
     fi
-    cp "$src_file" "$COMMANDS_DST/$name"
+    ln -sf "$src_file" "$COMMANDS_DST/$name"
     new_entries+=("commands/$name")
     cmd_count=$((cmd_count + 1))
 done
@@ -125,17 +138,21 @@ if [ -d "$SKILLS_SRC" ]; then
     for src_dir in "$SKILLS_SRC"/*/; do
         [ -d "$src_dir" ] || continue
         skill_name="$(basename "$src_dir")"
+        src_dir_abs="${src_dir%/}"
         dst_dir="$SKILLS_DST/$skill_name"
 
-        # Use rsync if available for efficient recursive copy; fall back to
-        # cp -r.  --delete only applies within this one skill's subtree, never
-        # to the parent skills/ dir, so foreign skills are untouched.
-        if command -v rsync >/dev/null 2>&1; then
-            rsync -a --delete "$src_dir" "$dst_dir/"
-        else
+        # Steady-state correctness (not just migration): ln -sf alone silently
+        # fails to replace a regular directory (places the link *inside* it) or
+        # an existing symlink pointing at the wrong directory (follows it and
+        # drops the new link inside THAT dir — readlink still shows the stale
+        # target, nothing errors). -e alone also misses a *broken* existing
+        # symlink (dangling because its old target vanished) — bare ln -s
+        # would then refuse outright since the directory entry still exists.
+        # -L catches that case too. Clear first, then link, every run.
+        if { [ -e "$dst_dir" ] || [ -L "$dst_dir" ]; } && { [ ! -L "$dst_dir" ] || [ "$(readlink "$dst_dir")" != "$src_dir_abs" ]; }; then
             rm -rf "$dst_dir"
-            cp -r "$src_dir" "$dst_dir"
         fi
+        ln -s "$src_dir_abs" "$dst_dir"
 
         new_entries+=("skills/$skill_name")
         skill_count=$((skill_count + 1))
@@ -163,11 +180,16 @@ if [ -f "$MANIFEST" ]; then
 
         if [ "$found" -eq 0 ]; then
             target="$CLAUDE_HOME/$old_entry"
-            if [ -f "$target" ]; then
-                rm -f "$target"
-                prune_count=$((prune_count + 1))
-                pruned_names+=("$old_entry")
-            elif [ -d "$target" ]; then
+            # -e alone misses a broken symlink: once a command/skill's source
+            # is removed from the repo, its ~/.claude symlink from a prior
+            # run still resolves to nothing, so -e (which follows the link)
+            # reports false and the orphan would never be pruned. -L catches
+            # that case. rm -rf then safely removes a plain file, a real
+            # directory (a pre-symlink-era copy), a symlink-to-file, a
+            # symlink-to-dir (unlinks only the link — see the SAFETY
+            # INVARIANT header), or a broken symlink, so one branch covers
+            # every shape a prior install could have left behind.
+            if [ -e "$target" ] || [ -L "$target" ]; then
                 rm -rf "$target"
                 prune_count=$((prune_count + 1))
                 pruned_names+=("$old_entry")

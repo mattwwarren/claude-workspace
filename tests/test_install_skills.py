@@ -149,7 +149,7 @@ class TestInstallSkillsFirstRun:
         # Commands are symlinked, not copied — one copy on disk.
         assert installed.is_symlink()
         src = script.parent.parent / ".claude" / "commands" / "auto-dev.md"
-        assert os.readlink(installed) == str(src.resolve())
+        assert installed.readlink() == src.resolve()
 
     def test_skill_dir_copied(self, script: Path, fake_home: Path) -> None:
         result = _run(script, fake_home)
@@ -161,7 +161,7 @@ class TestInstallSkillsFirstRun:
         # Skill dirs are symlinked, not recursively copied.
         assert skill_dir.is_symlink()
         src = script.parent.parent / ".claude" / "skills" / "cw-fanout"
-        assert os.readlink(skill_dir) == str(src.resolve())
+        assert skill_dir.readlink() == src.resolve()
 
     def test_manifest_written(self, script: Path, fake_home: Path) -> None:
         result = _run(script, fake_home)
@@ -217,7 +217,7 @@ class TestInstallSkillsSymlinkMigration:
         installed = commands_dst / "auto-dev.md"
         assert installed.is_symlink()
         src = script.parent.parent / ".claude" / "commands" / "auto-dev.md"
-        assert os.readlink(installed) == str(src.resolve())
+        assert installed.readlink() == src.resolve()
         assert installed.read_text() == "# auto-dev\n"
 
     def test_skill_dir_migrated_from_copy_to_symlink(
@@ -235,7 +235,7 @@ class TestInstallSkillsSymlinkMigration:
         installed = skills_dst / "cw-fanout"
         assert installed.is_symlink()
         src = script.parent.parent / ".claude" / "skills" / "cw-fanout"
-        assert os.readlink(installed) == str(src.resolve())
+        assert installed.readlink() == src.resolve()
         assert (installed / "SKILL.md").read_text() == "# cw-fanout skill\n"
 
     def test_skill_dir_symlink_wrong_target_repointed(
@@ -254,7 +254,7 @@ class TestInstallSkillsSymlinkMigration:
         installed = skills_dst / "cw-fanout"
         assert installed.is_symlink()
         src = script.parent.parent / ".claude" / "skills" / "cw-fanout"
-        assert os.readlink(installed) == str(src.resolve())
+        assert installed.readlink() == src.resolve()
         assert (installed / "SKILL.md").read_text() == "# cw-fanout skill\n"
 
     def test_command_symlink_wrong_target_repointed(
@@ -272,7 +272,7 @@ class TestInstallSkillsSymlinkMigration:
         installed = commands_dst / "auto-dev.md"
         assert installed.is_symlink()
         src = script.parent.parent / ".claude" / "commands" / "auto-dev.md"
-        assert os.readlink(installed) == str(src.resolve())
+        assert installed.readlink() == src.resolve()
         assert installed.read_text() == "# auto-dev\n"
 
 
