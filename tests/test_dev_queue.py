@@ -4143,6 +4143,45 @@ class TestApproveTicket:
         assert t.disposition == "signoff_gate"
         assert t.stage == Stage.REVIEW
 
+    def test_approve_signoff_park_emits_session_needs_attention(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """The `approve` CLI path's own signoff-park site (approval.py) emits
+        SESSION_NEEDS_ATTENTION too, via the shared _park_signoff_gate helper
+        (#1552). The emit executes inside cw.dispatch.routing (where
+        _park_signoff_gate is defined) regardless of the calling module."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.dispatch import _SIGNOFF_GATE_REASON
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        attention = capture_events(
+            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+        task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess-signoff-attn")
+        task.signoff = "operator"
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess-signoff-attn",
+            last_result={"status": "review_pending_approval"},
+        )
+        save_state(CwState(sessions=[session]))
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["awaiting_signoff"] is True
+        assert len(attention) == 1
+        _, payload, correlation_id = attention[0]
+        assert payload["paused_status"] == _SIGNOFF_GATE_REASON
+        assert payload["breadcrumbs"] == ""
+        assert payload["ticket_id"] == "GEN-500"
+        assert payload["client"] == "genhealth"
+        assert correlation_id == "GEN-500"
+
     def test_approve_large_signoff_second_approve_releases_to_pending(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:

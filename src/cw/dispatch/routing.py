@@ -107,6 +107,16 @@ _AWAITING_OPERATOR_REASON = "awaiting_operator_availability"
 _FINALIZE_HOLD_REASON = "finalize_hold"
 
 
+# paused_status written to SESSION_NEEDS_ATTENTION when the RFC 0007
+# Phase 3 operator-signoff gate parks a ticket at the REVIEW->FINALIZE
+# ship checkpoint (GitHub #990, #1552). Shares its literal string value
+# with dev_queue.lifecycle.SIGNOFF_GATE_DISPOSITION (task.disposition) by
+# deliberate choice on this ticket -- unlike the _FINALIZE_HOLD_REASON /
+# FINALIZE_GATE_HELD_DISPOSITION pair, which uses distinct strings across
+# the two namespaces. See GitHub #1552.
+_SIGNOFF_GATE_REASON = "signoff_gate"
+
+
 def _accumulate_task_cost(task: TicketTask, session_id: str | None) -> None:
     """Add the session's cost_usd to task.total_cost_usd, if available.
 
@@ -309,6 +319,49 @@ def _park_finalize_hold(task: TicketTask) -> None:
         task,
         QueueItemStatus.BLOCKED_ON_USER,
         disposition=FINALIZE_GATE_HELD_DISPOSITION,
+    )
+
+
+def _park_signoff_gate(task: TicketTask) -> None:
+    """Park *task* AWAITING_OPERATOR_SIGNOFF for the RFC 0007 Phase 3 ship
+    checkpoint (REVIEW->FINALIZE, #990, #1552).
+
+    Shared by all four signoff-park sites -- three in this module's staged
+    -decision routing table, plus dev_queue.approval's `approve` CLI path
+    -- so neither the attention payload nor the status/disposition pairing
+    can drift between them (mirrors _park_finalize_hold above). Before
+    #1552 none of the four sites emitted SESSION_NEEDS_ATTENTION at park
+    time; the gap was only latency, not permanent silence -- the durable
+    escalation sweep (cw.reconcile.escalation) still fires OPERATOR_
+    ESCALATION once, ESCALATION_PARK_MINUTES later, for any park this
+    helper does not reach (e.g. one already parked before this shipped).
+    """
+    # Why: emits before transition_task_status, matching _park_finalize_hold's
+    # existing order above -- a #1552 review pass flagged the resulting crash
+    # window (event durably logged before the caller's save_dev_queue()
+    # persists the status change) but this ordering is an established,
+    # unchanged pattern across every _park_* helper in this module, not new
+    # risk introduced here; diverging just for this one helper would break
+    # the field-for-field mirroring this ticket was explicitly scoped to do.
+    record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {
+            "session_id": task.session_id or "",
+            "session_name": "",
+            "client": task.client,
+            "ticket_id": task.ticket_id,
+            "claude_session_id": None,
+            "paused_status": _SIGNOFF_GATE_REASON,
+            "breadcrumbs": "",
+            "crashed": False,
+            "lane": task.lane,
+        },
+        correlation_id=task.ticket_id,
+    )
+    transition_task_status(
+        task,
+        QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        disposition=SIGNOFF_GATE_DISPOSITION,
     )
 
 
@@ -522,11 +575,7 @@ def _walk_stage_pointer_forward(
         # branch, unlike the other two REVIEW-scoped gate sites (which have no
         # early return and so use a real `elif` chain instead).
         if task.stage == Stage.REVIEW and _should_gate_for_signoff(task, clients):
-            transition_task_status(
-                task,
-                QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
-                disposition=SIGNOFF_GATE_DISPOSITION,
-            )
+            _park_signoff_gate(task)
             return "parked"
         _advance_task_pointer(task, stages)
         task.session_id = original_session_id
@@ -641,11 +690,7 @@ def _route_scope_gated_approval(
         # before continuing the pipeline, rather than advancing unattended
         # (RFC 0007 Phase 3, #990). REVIEW-scoped for the same reason as
         # _route_stage_success: signoff is the ship checkpoint only.
-        transition_task_status(
-            task,
-            QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
-            disposition=SIGNOFF_GATE_DISPOSITION,
-        )
+        _park_signoff_gate(task)
     else:
         _stage_advance_unchecked(task, clients, disposition=disposition, pr_url=pr_url)
 
@@ -676,11 +721,7 @@ def _route_stage_success(
     if task.stage == Stage.REVIEW and _should_force_hold_finalize(task, clients):
         _park_finalize_hold(task)
     elif task.stage == Stage.REVIEW and _should_gate_for_signoff(task, clients):
-        transition_task_status(
-            task,
-            QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
-            disposition=SIGNOFF_GATE_DISPOSITION,
-        )
+        _park_signoff_gate(task)
     else:
         _stage_advance_unchecked(task, clients, disposition=disposition, pr_url=pr_url)
 

@@ -7315,18 +7315,19 @@ class TestApplyStagedDecision:
         assert payload["lane"] == "bugs"
         assert correlation_id == "SG-ATTN-1"
 
-    def test_scope_gated_small_tier_park_does_not_emit_attention(
+    def test_scope_gated_small_tier_plan_advance_does_not_emit_attention(
         self,
         tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
-        """Small-tier scope-gated statuses never touch the attention channel (#1302).
-
-        Small tier auto-advances (Stage.PLAN) or parks on the unrelated
-        AWAITING_OPERATOR_SIGNOFF status (Stage.REVIEW with signoff active) --
-        neither is the BLOCKED_ON_USER park this ticket's fix targets, so
-        SESSION_NEEDS_ATTENTION must stay silent for both.
+        """Small-tier scope-gated auto-advance never touches the attention
+        channel (#1302) -- unlike the REVIEW-stage signoff park sibling case,
+        which as of #1552 DOES emit (see
+        test_signoff_gate_park_emits_session_needs_attention). A PLAN-stage
+        auto-advance is neither a BLOCKED_ON_USER park (#1302's original
+        target) nor a signoff-gate park (#1552's), so SESSION_NEEDS_ATTENTION
+        must stay silent here.
         """
         from cw.dispatch import apply_staged_decision
 
@@ -7348,20 +7349,6 @@ class TestApplyStagedDecision:
         )
         assert plan_task.status == QueueItemStatus.PENDING
         assert plan_task.stage == Stage.IMPL
-
-        review_task = self._make_running_task("SG-SMALL-ATTN-2", stage=Stage.REVIEW)
-        review_task.signoff = "operator"
-        review_last_result: dict[str, object] = {
-            "status": "review_pending_approval",
-            "scope": {"tier": "small"},
-        }
-        apply_staged_decision(
-            review_task,
-            "review_pending_approval",
-            review_last_result,
-            self._clients(tmp_path),
-        )
-        assert review_task.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
 
         assert len(attention) == 0
 
@@ -8213,6 +8200,65 @@ class TestApplyStagedDecision:
         assert attention[0][1]["session_id"] == "sess-fh-attn-1"
         assert attention[0][1]["lane"] == "bugs"
         assert attention[2][1]["session_id"] == "sess-fh-attn-3"
+
+    def test_signoff_gate_park_emits_session_needs_attention(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """Every one of the three signoff-gate park sites emits exactly one
+        SESSION_NEEDS_ATTENTION carrying paused_status=signoff_gate (#1552)."""
+        from cw.dispatch import _SIGNOFF_GATE_REASON, apply_staged_decision
+
+        attention = capture_events(
+            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+        clients = self._clients(tmp_path)
+
+        # Site 1: Rule 1's small-tier arm (_route_scope_gated_approval).
+        small_signoff = self._make_running_task("SIGNOFF-ATTN-1", stage=Stage.REVIEW)
+        small_signoff.signoff = "operator"
+        small_signoff.session_id = "sess-signoff-attn-1"
+        small_signoff.lane = "bugs"
+        apply_staged_decision(
+            small_signoff,
+            "review_pending_approval",
+            {"status": "review_pending_approval", "scope": {"tier": "small"}},
+            clients,
+        )
+
+        # Site 2: Rule 3's stage-success arm (_route_stage_success).
+        stage_success = self._make_running_task("SIGNOFF-ATTN-2", stage=Stage.REVIEW)
+        stage_success.signoff = "operator"
+        stage_success.session_id = "sess-signoff-attn-2"
+        apply_staged_decision(stage_success, "stage_complete", None, clients)
+
+        # Site 3: the multi-hop walk (_walk_stage_pointer_forward).
+        walked = self._make_running_task("SIGNOFF-ATTN-3", stage=Stage.IMPL)
+        walked.signoff = "operator"
+        walked.session_id = "sess-signoff-attn-3"
+        apply_staged_decision(
+            walked,
+            "blocked",
+            {"status": "blocked", "stage_reached": "stage4b_pr_create"},
+            clients,
+        )
+
+        assert len(attention) == 3
+        for (_event_type, payload, correlation_id), ticket_id in zip(
+            attention,
+            ["SIGNOFF-ATTN-1", "SIGNOFF-ATTN-2", "SIGNOFF-ATTN-3"],
+            strict=True,
+        ):
+            assert payload["paused_status"] == _SIGNOFF_GATE_REASON
+            assert payload["breadcrumbs"] == ""
+            assert payload["ticket_id"] == ticket_id
+            assert payload["client"] == "test-client"
+            assert payload["crashed"] is False
+            assert correlation_id == ticket_id
+        assert attention[0][1]["session_id"] == "sess-signoff-attn-1"
+        assert attention[0][1]["lane"] == "bugs"
 
     def test_matching_stage_reached_routes_normally(
         self, tmp_dispatch_dirs: Path, tmp_path: Path
