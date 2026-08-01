@@ -36,10 +36,12 @@ jobs:
           # literally named "EOF" would terminate a fixed-delimiter heredoc
           # early and could smuggle extra key=value pairs into this job's
           # outputs. GitHub's own hardening guidance is to randomize instead.
-          # Built from bash builtins ($RANDOM, $$) rather than an external
-          # binary (e.g. uuidgen) so delimiter generation itself can never
-          # fail this step, consistent with the job's fail-open invariant.
-          DELIM="EOF_${RANDOM}${RANDOM}_$$"
+          # Prefer uuidgen's full CSPRNG entropy; fall back to bash builtins
+          # ($RANDOM, $$) only if uuidgen is unavailable, so delimiter
+          # generation itself can never fail this step (consistent with the
+          # job's fail-open invariant) without giving up entropy in the
+          # common case where uuidgen is present.
+          DELIM="EOF_$(uuidgen 2>/dev/null || echo "${RANDOM}${RANDOM}_$$")"
 
           # Fail open. Because there is no `paths:` filter this step runs on
           # every PR, so a `gh api` hiccup (5xx, rate limit, network flake,
