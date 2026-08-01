@@ -59,7 +59,22 @@ _OUTPUT_INSTRUCTIONS = (
     "ReviewerFindingsDocument schema to the output file (`-o`): `reviewer_role`, "
     "`status` (ok/degraded/failed), `detail`, and a `findings` array. Every "
     "finding's `evidence` MUST be a verbatim substring of the claimed file's "
-    "changed lines. Report no prose outside the JSON object."
+    "changed lines. Report no prose outside the JSON object.\n\n"
+    "The inlined Agent Specification section above was authored for a "
+    "different execution environment (a tool-using Claude subagent). Any "
+    "tool-invocation syntax or search/verification precondition it names is "
+    "advisory here, not blocking — treat it as guidance for what to look for, "
+    "not as a gate on whether to report. If a finding is groundable in the "
+    "inlined diff but the spec's own verification step could not be "
+    "performed in this environment, report the finding anyway: emit it at "
+    '`confidence: "LOW"` and name the unperformed check explicitly in the '
+    "finding's `consequence` field (not `evidence`, which must stay a clean "
+    "verbatim quote from the diff). Never suppress a diff-groundable finding "
+    "solely because a verification precondition from that spec went "
+    "unperformed. Likewise, the spec's own prose output conventions — "
+    "including any literal sentinel value it defines for a no-findings "
+    "result — are void for this invocation; this instruction block's JSON "
+    "ReviewerFindingsDocument contract governs exclusively."
 )
 
 
