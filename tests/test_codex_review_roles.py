@@ -24,7 +24,13 @@ from cw.codex_review import (
 from cw.codex_runner import CodexRunResult
 from cw.config import state_dir
 from cw.executor_diagnostics import ExecutorFailure, diagnostics_bundle_dir
-from tests._codex_review_helpers import _Clock, _finding_json, _ok_result, _SequencedRunner
+from cw.review_findings import ReviewerFindingsDocument, ReviewerRunFailure
+from tests._codex_review_helpers import (
+    _Clock,
+    _finding_json,
+    _ok_result,
+    _SequencedRunner,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -400,7 +406,7 @@ def _run_one_role(
     *,
     session_id: str = "sess-diag",
     role: str = "Code Quality Reviewer",
-) -> tuple[object, object]:
+) -> tuple[ReviewerFindingsDocument | None, ReviewerRunFailure | None]:
     scratch = tmp_path / "scratch"
     scratch.mkdir(exist_ok=True)
     return _run_codex_role(
