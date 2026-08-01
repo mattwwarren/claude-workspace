@@ -252,7 +252,7 @@ Triggered by: `cw session show --json` reporting `status: completed` AND a null
 `claude_session_id` AND no `last_result`.
 
 **Root cause (regression as of 2026-05-26):** the reconcile sweep in
-`src/cw/reconcile.py` uses `claude agents --json` as its sole liveness
+`src/cw/reconcile/` uses `claude agents --json` as its sole liveness
 oracle (post-#269 multiplexer removal). A `claude --bg` spawn has a
 register-with-daemon window of >1 second. If reconcile runs in the same
 dispatch tick that just spawned a session, the daemon hasn't yet

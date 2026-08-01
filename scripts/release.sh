@@ -19,18 +19,21 @@ if [ "$PYPROJECT_VERSION" != "$VERSION" ]; then
     exit 1
 fi
 
-# Verify __version__ matches
+# Verify the installed package version matches (cw.__version__ is resolved
+# dynamically from the installed distribution metadata — pyproject.toml is
+# the single source of truth; there is no version literal in __init__.py).
 PKG_VERSION=$(uv run python -c "import cw; print(cw.__version__)")
 if [ "$PKG_VERSION" != "$VERSION" ]; then
-    echo "Error: src/cw/__init__.py version ($PKG_VERSION) does not match $VERSION"
-    echo "Update __init__.py first, then re-run."
+    echo "Error: installed package version ($PKG_VERSION) does not match $VERSION"
+    echo "Bump pyproject.toml, run 'uv sync', then re-run."
     exit 1
 fi
 
 # Run quality gates
 echo "Running quality gates..."
 uv run ruff check src/ tests/
-uv run mypy src/
+uv run ruff format --check src/ tests/
+uv run mypy --strict src/
 uv run pytest tests/ -v
 
 echo ""

@@ -198,7 +198,7 @@ Epics: I, II
 Tickets: S1, S2, A1, ... (13 total: #1153–#1165 once filed)
 
 Pull-in candidates:
-  #1149 — "reap decision path" fix. Overlaps src/cw/reconcile.py:<line>
+  #1149 — "reap decision path" fix. Overlaps src/cw/reconcile/<module>:<line>
   (same path RFC 0011's A1/B1 build on). Recommend: pull in.
 
 Approve to file 2 epics + 13 tickets under this milestone, or Abort?

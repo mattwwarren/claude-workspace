@@ -229,9 +229,9 @@ rules below are tracker-aware.
 
    `next_actions` **must** be `["manual_intervention"]` — `sync_local_main` is
    the only other legal member of `_PRE_FLIGHT_BLOCKED_NEXT_ACTIONS`
-   (`auto_dev_result.py`) and is semantically wrong here (that's the Origin
+   (`auto_dev_result/schema.py`) and is semantically wrong here (that's the Origin
    Sync surface). `reason: "operator_unavailable"` is already a member of
-   `OPERATOR_UNAVAILABLE_BLOCKER_REASONS` (`auto_dev_result.py`) — no schema
+   `OPERATOR_UNAVAILABLE_BLOCKER_REASONS` (`auto_dev_result/schema.py`) — no schema
    change required.
 
    A fetch failure that matches no signature (unrecognized error text) is not

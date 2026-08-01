@@ -54,7 +54,7 @@ uv run pytest tests/ --cov=cw      # Coverage report
 ## Quality Gates
 
 Before committing, run **every** gate CI enforces (`.github/workflows/ci.yml`),
-in order. The first five mirror CI exactly; passing only a subset is the #1
+in order. The first six mirror CI exactly; passing only a subset is the #1
 cause of a green local run that fails CI (see #436):
 
 ```bash
@@ -62,23 +62,28 @@ uv lock --check                                                  # 1. Lockfile i
 uv run ruff check src/ tests/                                    # 2. Lint
 uv run ruff format --check src/ tests/                           # 3. Format
 uv run mypy --strict src/                                        # 4. Type check
-uv run pre-commit run --all-files                                # 5. Hooks
+uv run python .claude/scripts/check_imports.py                   # 5. Smoke-import .claude scripts
+uv run pre-commit run --all-files                                # 6. Hooks
 uv run --extra mcp pytest tests/ -m 'not integration' \
-  --cov=cw --cov-report=xml --cov-fail-under=88                  # 6. Unit + total cov ≥88%
-uv run pytest tests/ -m integration                              # 7. tmux integration
+  --cov=cw --cov-report=xml --cov-fail-under=88                  # 7. Unit + total cov ≥88%
+uv run pytest tests/ -m integration                              # 8. tmux integration
 uv run diff-cover coverage.xml --compare-branch=origin/main \
-  --fail-under=90                                                # 8. Patch coverage ≥90%
+  --fail-under=90                                                # 9. Patch coverage ≥90%
 ```
+
+(CI additionally runs a separate `package-smoke` job — wheel build +
+`cw --version` / `cw guide` — that has no local equivalent in this list.)
 
 Gate 1 must run **standalone and first**, exactly as in CI. `uv run` locks-and-
 syncs implicitly, so any later gate silently repairs a stale `uv.lock` on disk —
 leaving the drift uncommitted and CI red. Do not fold it into a `uv run …`
 invocation.
 
-Pre-commit hooks enforce gates 1–5 automatically on `git commit`
-(`uv run pre-commit install`) — git invokes them directly, with no `uv run`
-wrapper, so gate 1 is genuine on that path. Only running gate 5 **by hand**
-via `uv run pre-commit run` masks it.
+Pre-commit hooks enforce gates 1–4 (gate 6 *is* the hook suite) automatically
+on `git commit` (`uv run pre-commit install`) — git invokes them directly,
+with no `uv run` wrapper, so gate 1 is genuine on that path. Only running
+gate 6 **by hand** via `uv run pre-commit run` masks it. Gate 5 has no hook:
+it runs only in CI and this list.
 
 **Requirements:**
 - `uv lock --check` - **ZERO drift**. Any `pyproject.toml` edit that moves the
@@ -456,7 +461,7 @@ When spawning agents to write code, this same process applies. Agents will:
 ### Theorizing Before Grepping the Mechanism
 
 **Problem**: When a system behaves unexpectedly (a queue ticket won't dispatch despite seemingly-free slots, a log stops updating, a counter looks wrong), constructing hypotheses — phantoms, buffering, caches, stale state — and acting on them (restarts, reaps) before reading the code that implements the behavior.
-**Why it hurts**: Hypothesis-driven flailing burns time and can trigger destructive moves (an unnecessary restart, a reap) chasing a "bug" that is actually documented behavior. Real incident: ~12 tool calls plus an unneeded loop restart spent on a "lane-cap phantom" that one `grep` of `dispatch.py` resolved instantly — `running_in_lane = RUNNING + BLOCKED_ON_USER`, i.e. blocked tasks hold lane slots **by design**.
+**Why it hurts**: Hypothesis-driven flailing burns time and can trigger destructive moves (an unnecessary restart, a reap) chasing a "bug" that is actually documented behavior. Real incident: ~12 tool calls plus an unneeded loop restart spent on a "lane-cap phantom" that one `grep` of the dispatch module (now `src/cw/dispatch/`) resolved instantly — `running_in_lane = RUNNING + BLOCKED_ON_USER`, i.e. blocked tasks hold lane slots **by design**.
 **Solution**: Grep the actual mechanism FIRST — the cheap, definitive code-read comes before the theory. If you catch yourself theorizing about *why* a system does X across more than one step without having read the code path that produces X, that IS the cue — stop and grep it. Sibling of **No Unverified Claims**.
 
 ## Scope and Commit Flow

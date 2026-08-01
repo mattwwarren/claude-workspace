@@ -11,7 +11,11 @@ from datetime import UTC, datetime
 
 import click
 
-from cw.auto_dev_result import AutoDevResult, BlockedResult
+from cw.auto_dev_result import (
+    INTERMEDIATE_ADVANCE_STATUSES,
+    AutoDevResult,
+    BlockedResult,
+)
 from cw.cli._base import _complete_client, handle_errors
 from cw.cli._sentinels import _parse_sentinel_from_transcript
 from cw.config import load_orchestrator_config, load_state
@@ -50,7 +54,15 @@ _WAIT_DEFAULT_TIMEOUT: int = 300
 # Poll interval for the sentinel-aware wait loop (seconds).
 _WAIT_SENTINEL_POLL_INTERVAL: float = 5.0
 
-# Exit-code mapping from AutoDevResult.status to wait exit codes.
+# Exit-code mapping from AutoDevResult.status to wait exit codes. Keys must
+# cover every schema.Status value except INTERMEDIATE_ADVANCE_STATUSES (those
+# never reach _handle_sentinel_terminal — the ticket advances to its next
+# stage, so the wait loop keeps polling). Guarded by
+# test_wait_status_exit_covers_status_vocabulary; a new Status value must be
+# mapped here (or added to INTERMEDIATE_ADVANCE_STATUSES) before it ships.
+# "validation_failed"/"failed" were removed as dead keys: they are
+# Blocker.reason values, not Status values, and sentinel.status is typed to
+# the Status Literal so they could never match.
 _WAIT_STATUS_EXIT: dict[str, int] = {
     "shipped": 0,
     "no_op": 0,
@@ -60,10 +72,12 @@ _WAIT_STATUS_EXIT: dict[str, int] = {
     "plan_pending_approval": _WAIT_EXIT_BLOCKED,
     "review_pending_approval": _WAIT_EXIT_BLOCKED,
     "merge_gate_blocked": _WAIT_EXIT_BLOCKED,
+    # PR created, awaiting CI/merge — dispatch routes the task to
+    # BLOCKED_ON_USER (#899), so the sentinel path must agree with the
+    # queue-status path instead of misreporting FAILED.
+    "merge_pending": _WAIT_EXIT_BLOCKED,
     "scope_exceeded": _WAIT_EXIT_FAILED,
     "forbidden_area": _WAIT_EXIT_FAILED,
-    "validation_failed": _WAIT_EXIT_FAILED,
-    "failed": _WAIT_EXIT_FAILED,
 }
 
 
@@ -373,10 +387,15 @@ def dev_queue_wait(
     eliminates false-timeout (exit 124) for long-running healthy workers
     whose reconcile cycle hasn't fired yet.
 
+    A ``stage_complete`` sentinel is a successful intermediate hand-off, not
+    a terminal outcome — the wait keeps polling while dispatch advances the
+    ticket to its next stage.
+
     Exit codes:
       0   shipped / no_op (or COMPLETED queue status)
-      1   scope_exceeded / forbidden_area / failed / FAILED / CANCELLED
-      2   blocked / *_pending_* family / BLOCKED_ON_USER (no reap proposal)
+      1   scope_exceeded / forbidden_area / FAILED / CANCELLED
+      2   blocked / merge_pending / *_pending_* family / BLOCKED_ON_USER
+          (no reap proposal)
       3   ATTENTION — transcript stale past idle budget, worker not in roster;
           or BLOCKED_ON_USER caused by a reap proposal (reap_proposed_at set);
           or a mid-wait session_id clear confirmed by reap_proposed_at on the
@@ -473,7 +492,14 @@ def dev_queue_wait(
 
         # BlockedResult means framing present but payload unusable — treat as
         # not-yet-terminal (could be a partial write); keep polling.
-        if isinstance(sentinel, AutoDevResult):
+        # INTERMEDIATE_ADVANCE_STATUSES (stage_complete) is a successful
+        # stage hand-off, not a ticket-terminal outcome: dispatch advances the
+        # ticket to its next stage, so keep polling instead of exiting FAILED
+        # (previously stage_complete fell through .get()'s FAILED default).
+        if (
+            isinstance(sentinel, AutoDevResult)
+            and sentinel.status not in INTERMEDIATE_ADVANCE_STATUSES
+        ):
             # TERMINAL: emit and raise the mapped exit code.
             _handle_sentinel_terminal(sentinel, task, ticket_id, resolved, output_json)
 

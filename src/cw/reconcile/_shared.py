@@ -691,41 +691,6 @@ _TRANSIENT_PARSE_FAILURES: frozenset[str] = frozenset(
 _TERMINAL_NO_RETRY_STATUSES: frozenset[str] = SALVAGE_TERMINAL_STATUSES
 
 
-def _assistant_text_from_transcript(path: Path) -> str:
-    """Concatenate the text of every assistant message in a jsonl transcript.
-
-    The AUTO_DEV_RESULT sentinel block is emitted inside an assistant text
-    message, so joining assistant text reconstructs the input ``parse_stdout``
-    would have seen on the worker's stdout. Returns "" on any read error.
-    """
-    parts: list[str] = []
-    try:
-        with path.open() as handle:
-            for line in handle:
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if record.get("type") != "assistant":
-                    continue
-                message = record.get("message")
-                if not isinstance(message, dict):
-                    continue
-                content = message.get("content")
-                if not isinstance(content, list):
-                    continue
-                parts.extend(
-                    block["text"]
-                    for block in content
-                    if isinstance(block, dict)
-                    and block.get("type") == "text"
-                    and isinstance(block.get("text"), str)
-                )
-    except OSError:
-        return ""
-    return "\n".join(parts)
-
-
 class UsageLimitDetection(NamedTuple):
     """Outcome of scanning a session transcript for a usage-limit message (#1345).
 
@@ -762,8 +727,7 @@ def _iter_assistant_records(path: Path) -> Iterator[tuple[datetime | None, str]]
     :func:`_parse_iso_timestamp`, or ``None`` when absent/malformed — the
     record is still yielded, because its text may match even without a usable
     anchor. ``text`` concatenates every text block of the assistant message.
-    Mirrors :func:`_assistant_text_from_transcript`'s per-record content guard
-    and the top-level-``"timestamp"`` convention of
+    Follows the top-level-``"timestamp"`` convention of
     :func:`_last_content_entry_timestamp`. Yields nothing on any read error.
     """
     try:
