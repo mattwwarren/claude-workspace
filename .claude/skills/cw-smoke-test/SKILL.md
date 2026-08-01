@@ -80,7 +80,7 @@ Until that returns a row, or a reasonable timeout (default 30 minutes — match 
 
 While waiting, surface progress sparingly. Print one line on `session.spawned` (with the worker id + worktree path), then go silent until completion. The user can `cw event tail` themselves if they want intermediate noise.
 
-If completion never arrives within the timeout, surface the worker id + `cw status` snapshot and stop. Do not auto-retry — that's the user's call.
+If completion never arrives within the timeout, surface the worker id + `cw status` snapshot and stop. Do not auto-retry on a bare interactive invocation — that's the user's call. Inside an `orchestrate-sprint` or `cw-fanout` loop, the orchestrator is the caller and decides.
 
 ### Step 4 — validate
 
@@ -132,7 +132,7 @@ smoke-test: #999 → no_sentinel — worker session 4f44d145 exited without emit
 - Continuous-loop dispatching (use `cw dev-queue run` without `--once`).
 - Multi-ticket batch dispatch — use `/cw-fanout` for parallel N-way (pre-flight + enqueue + dispatch loop + monitoring handoff).
 - Phase A stage-transition events. This skill works without them; with them, monitoring becomes more informative.
-- Re-dispatching after a failure. The user owns the dispatch trigger; the smoke test is one-shot.
+- Re-dispatching after a failure on a bare interactive invocation. The user owns the dispatch trigger in that mode; the smoke test is one-shot. Inside an `orchestrate-sprint` or `cw-fanout` loop, the orchestrator is the caller and dispatches itself.
 
 ## Related
 
