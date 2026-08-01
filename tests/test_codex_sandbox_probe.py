@@ -169,6 +169,10 @@ class TestCodexSandboxReadOnlyProbe:
             sentinel_returned,
             doc.detail,
         )
+        # Why: intentionally well-formedness-only, not falsifiable against a
+        # specific value -- ticket #1561's binding resolution requires never
+        # asserting what these environment-dependent values equal, only that
+        # they're present and well-formed (see ticket comment 1, point 2).
         assert doc.status in ("ok", "degraded", "failed")
         assert isinstance(doc.findings, list)
         assert isinstance(sentinel_returned, bool)
