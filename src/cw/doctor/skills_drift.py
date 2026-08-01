@@ -60,14 +60,19 @@ _EXCLUDED_COMMANDS_RELPATH = "scripts/excluded-commands.txt"
 
 
 def _load_excluded_commands(source_path: Path) -> set[str]:
-    """Read the installer's excluded-commands file; fail open to empty set."""
+    """Read the installer's excluded-commands file; fail open to empty set.
+
+    Only a missing file fails open — the expected case when the file hasn't
+    been created yet. Other OSError subtypes (permissions, I/O errors)
+    propagate rather than silently disabling the ship-it.md-style exclusion.
+    """
     try:
         lines = (
             (source_path / _EXCLUDED_COMMANDS_RELPATH)
             .read_text(encoding="utf-8")
             .splitlines()
         )
-    except OSError:
+    except FileNotFoundError:
         return set()
     return {line for line in lines if line}
 

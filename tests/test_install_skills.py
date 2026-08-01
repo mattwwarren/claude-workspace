@@ -275,6 +275,42 @@ class TestInstallSkillsSymlinkMigration:
         assert installed.readlink() == src.resolve()
         assert installed.read_text() == "# auto-dev\n"
 
+    def test_skill_dir_reinstall_over_already_correct_symlink_is_idempotent(
+        self, script: Path, fake_home: Path
+    ) -> None:
+        """Re-running the installer when nothing changed must succeed and
+        must not plant a stray symlink inside the source skill directory.
+
+        Regression test: `ln -s` alone, run unconditionally after a guard
+        that (correctly) skips clearing an already-correct symlink, still
+        has an existing destination to contend with. Since the destination
+        resolves through the symlink to an existing directory, `ln -s`
+        silently installs a new link *inside* that directory instead of
+        erroring — corrupting the tracked source tree on the second and
+        every subsequent run (#1535 review).
+        """
+        skills_dst = fake_home / ".claude" / "skills"
+        skill_src = script.parent.parent / ".claude" / "skills" / "cw-fanout"
+
+        # Run 1: fresh install.
+        r1 = _run(script, fake_home)
+        assert r1.returncode == 0, r1.stderr
+        installed = skills_dst / "cw-fanout"
+        assert installed.is_symlink()
+        assert installed.readlink() == skill_src.resolve()
+
+        # Run 2: nothing changed — must still succeed, symlink must be
+        # unchanged, and no stray entry may appear inside the real source
+        # skill directory.
+        r2 = _run(script, fake_home)
+        assert r2.returncode == 0, r2.stderr
+        assert installed.is_symlink()
+        assert installed.readlink() == skill_src.resolve()
+        assert sorted(p.name for p in skill_src.iterdir()) == ["SKILL.md"], (
+            "install-skills.sh planted an unexpected entry inside the real "
+            "source skill directory on a steady-state re-run"
+        )
+
 
 class TestInstallSkillsPruneSafety:
     """KEY SAFETY TEST: foreign skills are never pruned.
@@ -308,9 +344,10 @@ class TestInstallSkillsPruneSafety:
         assert r2.returncode == 0, r2.stderr
 
         # --- THE KEY SAFETY ASSERTION ---
-        # Also proves prune leaves a foreign entry untouched under the symlink
-        # layout: rm -rf on a symlinked skill dir unlinks only the link, and
-        # this scenario's prune target (review.md) exercises that path.
+        # This scenario's prune target (review.md) is a command file, so it
+        # exercises the symlink-to-file prune path only. The prune block's
+        # rm -rf on a symlinked skill DIRECTORY (unlinks only the link, never
+        # recurses into the real target) is not exercised by this test.
         assert foreign_skill_md.exists(), (
             "Foreign skill peon-ping-fake/SKILL.md was deleted by cw prune — "
             "this violates the manifest-scoped prune safety invariant: cw must "

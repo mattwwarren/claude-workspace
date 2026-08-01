@@ -149,10 +149,22 @@ if [ -d "$SKILLS_SRC" ]; then
         # symlink (dangling because its old target vanished) — bare ln -s
         # would then refuse outright since the directory entry still exists.
         # -L catches that case too. Clear first, then link, every run.
-        if { [ -e "$dst_dir" ] || [ -L "$dst_dir" ]; } && { [ ! -L "$dst_dir" ] || [ "$(readlink "$dst_dir")" != "$src_dir_abs" ]; }; then
-            rm -rf "$dst_dir"
+        #
+        # Already-correct is a THIRD state, not just "no clear needed": if
+        # dst_dir is already a symlink resolving to src_dir_abs, `ln -s` must
+        # be skipped entirely, not just the `rm -rf`. dst_dir still exists at
+        # that point, and ln -s treats an existing destination that resolves
+        # to a directory as "install inside that directory" rather than
+        # replacing it — silently planting a self-referential symlink inside
+        # the real source tree on every steady-state re-run (#1535 review).
+        if [ -L "$dst_dir" ] && [ "$(readlink "$dst_dir")" = "$src_dir_abs" ]; then
+            : # already correctly linked — nothing to do
+        else
+            if [ -e "$dst_dir" ] || [ -L "$dst_dir" ]; then
+                rm -rf "$dst_dir"
+            fi
+            ln -s "$src_dir_abs" "$dst_dir"
         fi
-        ln -s "$src_dir_abs" "$dst_dir"
 
         new_entries+=("skills/$skill_name")
         skill_count=$((skill_count + 1))
