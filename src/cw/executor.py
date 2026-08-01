@@ -16,7 +16,7 @@ from cw.codex_review import (
     render_verdict_comment,
 )
 from cw.codex_runner import CodexRunner, RealCodexRunner
-from cw.config import load_state, save_state, sessions_lock
+from cw.config import load_effective_config, load_state, save_state, sessions_lock
 from cw.events import record_event as _record_orchestrator_event
 from cw.exceptions import EmitSessionNotFoundError
 from cw.executor_diagnostics import (
@@ -49,6 +49,7 @@ from cw.models import (
     ClientConfig,
     LastResultSource,
     LocalLivenessHandle,
+    OrchestratorConfig,
     OrchestratorEventType,
     Session,
     SessionOrigin,
@@ -575,6 +576,25 @@ def _complete_session_via_door(
         save_state(state)
 
 
+def _resolve_codex_fix_loop_enabled(
+    client: ClientConfig, task: TicketTask, config: OrchestratorConfig
+) -> bool:
+    """Resolve the effective codex_fix_loop_enabled gate for *task* (#1553).
+
+    Precedence (highest to lowest):
+      1. Lane-level LaneConfig.codex_fix_loop_enabled in *client*'s config.
+      2. Global OrchestratorConfig.default_codex_fix_loop_enabled.
+
+    A task whose lane name is not declared in the client's lanes falls
+    through to the global default. Mirrors resolve_reap_policy's lane-then-
+    global fallthrough shape (cw.reconcile._shared).
+    """
+    for lane_cfg in client.effective_lanes:
+        if lane_cfg.name == task.lane and lane_cfg.codex_fix_loop_enabled is not None:
+            return lane_cfg.codex_fix_loop_enabled
+    return config.default_codex_fix_loop_enabled
+
+
 class CodexExecutor:
     """StageExecutor backed by prompt-driven ``codex exec`` reviewers (#1236).
 
@@ -652,7 +672,13 @@ class CodexExecutor:
         try:
             if result is None:
                 # Step 3: Run the per-role review pass + bounded fix loop
-                # (delegated to codex_fix_loop, #1392).
+                # (delegated to codex_fix_loop, #1392). Lazily loaded here
+                # (not threaded through the StageExecutor Protocol) so the
+                # lane-scoped fix_loop_enabled gate (#1553) resolves without
+                # widening spawn()'s signature -- mirrors the ad hoc
+                # load_effective_config() calls already made in
+                # dispatch/routing.py.
+                config = load_effective_config()
                 result, verdict = run_review_with_fix_loop(
                     runner=self._runner,
                     task=task,
@@ -661,7 +687,9 @@ class CodexExecutor:
                     model=self._config.model,
                     wall_clock_budget_seconds=wall_clock_budget_seconds,
                     session_id=sid,
-                    fix_loop_enabled=client.codex_fix_loop_enabled,
+                    fix_loop_enabled=_resolve_codex_fix_loop_enabled(
+                        client, task, config
+                    ),
                 )
 
             # Step 4: Persist result under sessions_lock.
