@@ -319,6 +319,33 @@ must separately set `codex_fix_loop_enabled: true` on the `claude-workspace`
 client block in `~/.config/cw/clients.yaml` — not a repo file, so this change
 alone does not flip it.
 
+**Cost posture for metered plans:** each selected reviewer role costs one
+codex invocation per review pass (`_select_reviewer_roles` picks at most 4
+roles on a small-tier pass — Code Quality, SysAdmin, Data Safety, Product
+Manager — and at most 9 on a large-tier pass, adding Architecture, Test,
+Performance, API Contract Validator, and Deployment). With the fix loop
+enabled, a ticket that blocks on cycle 0 runs up to 5 more cycles, each one
+fix invocation plus another full re-review pass, on top of the cycle-0
+review: `6 × review_pass_size + 5` codex calls in the worst case — **29 calls
+for a small-tier ticket, 59 for a large-tier ticket** — before the loop gives
+up. On a metered GPT plan (e.g. a $20/mo trial), that is the number to check
+against remaining quota before enabling the loop.
+
+**Recommended posture:** for operators on a metered codex/GPT plan, leave
+`codex_fix_loop_enabled: false`. This is already the schema default
+(`ClientConfig.codex_fix_loop_enabled`), but the recommendation here is
+about invocation cost, not just accidental-commit safety — with the gate
+off, a blocking cycle-0 review parks on `CODEX_MUST_FIX_FINDINGS` at 1×
+review_pass_size codex calls instead of up to `6 × review_pass_size + 5`.
+Only enable the loop once the worst-case call count above has been checked
+against the plan's remaining quota for the billing period.
+
+**Design option, not implemented:** a per-lane cap on codex invocations per
+ticket (e.g. a hypothetical `codex_invocation_ceiling` on the lane config)
+could hard-stop the fix loop before it reaches the worst case above,
+independent of `_MAX_FIX_CYCLES`. No such field exists today — this is
+flagged as a possible follow-up, not a commitment.
+
 ## Orchestrator Configuration (`~/.claude-workspace/orchestrator.yaml`)
 
 Controls the autonomous dispatch loop. Created with defaults on first run.
