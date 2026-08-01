@@ -179,6 +179,17 @@ class ReviewerFindingsDocument(BaseModel):
             raise ValueError(msg)
         return self
 
+    @model_validator(mode="after")
+    def _check_ok_empty_findings_has_justification(self) -> ReviewerFindingsDocument:
+        if self.status == "ok" and not self.findings and _is_blank(self.detail):
+            msg = (
+                "a reviewer with status='ok' and no findings must state what "
+                "it checked in `detail` (or use status='degraded' if a "
+                "required check could not be performed)"
+            )
+            raise ValueError(msg)
+        return self
+
 
 class RejectedFinding(BaseModel):
     """A finding that failed validation, with its raw payload preserved."""
