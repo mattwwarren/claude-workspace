@@ -336,6 +336,13 @@ def _park_signoff_gate(task: TicketTask) -> None:
     ESCALATION once, ESCALATION_PARK_MINUTES later, for any park this
     helper does not reach (e.g. one already parked before this shipped).
     """
+    # Why: emits before transition_task_status, matching _park_finalize_hold's
+    # existing order above -- a #1552 review pass flagged the resulting crash
+    # window (event durably logged before the caller's save_dev_queue()
+    # persists the status change) but this ordering is an established,
+    # unchanged pattern across every _park_* helper in this module, not new
+    # risk introduced here; diverging just for this one helper would break
+    # the field-for-field mirroring this ticket was explicitly scoped to do.
     record_event(
         OrchestratorEventType.SESSION_NEEDS_ATTENTION,
         {
