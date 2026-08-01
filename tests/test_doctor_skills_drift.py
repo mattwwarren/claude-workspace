@@ -143,6 +143,37 @@ def test_counterpart_is_symlink(
     assert ".claude/skills/foo/SKILL.md" in result.detail
 
 
+def test_symlink_resolves_to_tracked_path_is_ok(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Counterpart symlink resolving to the tracked repo path is NOT drift.
+
+    This is the expected steady state under a symlink install (#1535) —
+    the previous behavior flagged this as SYMLINK unconditionally, a false
+    positive this test guards against regressing.
+    """
+    repo = tmp_path / "repo"
+    claude_home = tmp_path / ".claude"
+
+    _write(repo / ".claude/skills/foo/SKILL.md", "skill content")
+    (claude_home / "skills/foo").mkdir(parents=True)
+    (claude_home / "skills/foo/SKILL.md").symlink_to(
+        repo / ".claude/skills/foo/SKILL.md"
+    )
+
+    monkeypatch.setattr("cw.doctor.skills_drift._CLAUDE_HOME", claude_home)
+    monkeypatch.setattr("cw.doctor.skills_drift._resolve_cw_source_path", lambda: repo)
+    tracked = ".claude/skills/foo/SKILL.md\n"
+    monkeypatch.setattr(
+        "cw.doctor.skills_drift._sp.run", lambda *_a, **_kw: _mk_proc(tracked)
+    )
+
+    result = _check_skills_commands_drift()
+    assert result.ok is True
+    assert result.warn is False
+    assert "match" in result.detail
+
+
 def test_mixed_drift_aggregates_one_result(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -283,3 +314,84 @@ def test_examples_bounded_not_all_39(
     assert "6 missing" in result.detail
     present = sum(1 for i in range(6) if f"missing-{i}.md" in result.detail)
     assert present < 6
+
+
+class TestExcludedCommands:
+    """Installer-excluded commands (e.g. ship-it.md) must not be reported
+    drifting — they are deliberately never installed globally, so a git-tracked
+    but absent-on-the-global-side entry for one of them is not drift.
+    """
+
+    def test_excluded_command_not_reported_missing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        repo = tmp_path / "repo"
+        claude_home = tmp_path / ".claude"
+
+        _write(repo / ".claude/commands/ship-it.md", "# ship-it\n")
+        _write(repo / "scripts/excluded-commands.txt", "ship-it.md\n")
+        (claude_home / "skills").mkdir(parents=True)
+
+        monkeypatch.setattr("cw.doctor.skills_drift._CLAUDE_HOME", claude_home)
+        monkeypatch.setattr(
+            "cw.doctor.skills_drift._resolve_cw_source_path", lambda: repo
+        )
+        tracked = ".claude/commands/ship-it.md\n"
+        monkeypatch.setattr(
+            "cw.doctor.skills_drift._sp.run", lambda *_a, **_kw: _mk_proc(tracked)
+        )
+
+        result = _check_skills_commands_drift()
+        assert result.ok is True
+        assert result.warn is False
+        assert "ship-it.md" not in result.detail
+
+    def test_excluded_commands_file_missing_fails_open(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """No scripts/excluded-commands.txt at all -> degrades to 'nothing
+        excluded' (ship-it.md-style entries report MISSING), not a crash.
+        """
+        repo = tmp_path / "repo"
+        claude_home = tmp_path / ".claude"
+
+        _write(repo / ".claude/commands/ship-it.md", "# ship-it\n")
+        (claude_home / "skills").mkdir(parents=True)
+
+        monkeypatch.setattr("cw.doctor.skills_drift._CLAUDE_HOME", claude_home)
+        monkeypatch.setattr(
+            "cw.doctor.skills_drift._resolve_cw_source_path", lambda: repo
+        )
+        tracked = ".claude/commands/ship-it.md\n"
+        monkeypatch.setattr(
+            "cw.doctor.skills_drift._sp.run", lambda *_a, **_kw: _mk_proc(tracked)
+        )
+
+        result = _check_skills_commands_drift()
+        assert result.ok is True
+        assert result.warn is True
+        assert "missing" in result.detail
+
+    def test_excluded_commands_file_blank_lines_skipped(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        repo = tmp_path / "repo"
+        claude_home = tmp_path / ".claude"
+
+        _write(repo / ".claude/commands/ship-it.md", "# ship-it\n")
+        _write(repo / "scripts/excluded-commands.txt", "ship-it.md\n\n\n")
+        (claude_home / "skills").mkdir(parents=True)
+
+        monkeypatch.setattr("cw.doctor.skills_drift._CLAUDE_HOME", claude_home)
+        monkeypatch.setattr(
+            "cw.doctor.skills_drift._resolve_cw_source_path", lambda: repo
+        )
+        tracked = ".claude/commands/ship-it.md\n"
+        monkeypatch.setattr(
+            "cw.doctor.skills_drift._sp.run", lambda *_a, **_kw: _mk_proc(tracked)
+        )
+
+        result = _check_skills_commands_drift()
+        assert result.ok is True
+        assert result.warn is False
+        assert "ship-it.md" not in result.detail

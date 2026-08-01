@@ -18,6 +18,9 @@ import pytest
 # ---------------------------------------------------------------------------
 
 _REAL_SCRIPT = Path(__file__).parent.parent / "scripts" / "install-skills.sh"
+_REAL_EXCLUDED_COMMANDS_FILE = (
+    Path(__file__).parent.parent / "scripts" / "excluded-commands.txt"
+)
 
 
 def _scaffold_fake_install(tmp_path: Path, fake_repo: Path) -> Path:
@@ -26,7 +29,10 @@ def _scaffold_fake_install(tmp_path: Path, fake_repo: Path) -> Path:
     install-skills.sh derives PROJECT_DIR as dirname(dirname(BASH_SOURCE[0])).
     We place a copy of the script at <fake_repo>/scripts/install-skills.sh so
     that PROJECT_DIR resolves to <fake_repo>, which already has .claude/ set up
-    by the fake_repo fixture.
+    by the fake_repo fixture. The real excluded-commands.txt is copied
+    alongside it so EXCLUDED_COMMANDS reads the same data the real installer
+    would — without this, every fixture run installs ship-it.md (the array
+    reads empty) and TestProjectScopedCommandsExcluded breaks.
 
     Returns the path to the executable script copy.
     """
@@ -37,6 +43,11 @@ def _scaffold_fake_install(tmp_path: Path, fake_repo: Path) -> Path:
     script_copy = scripts_dir / "install-skills.sh"
     shutil.copy2(str(_REAL_SCRIPT), str(script_copy))
     script_copy.chmod(0o755)
+    if _REAL_EXCLUDED_COMMANDS_FILE.exists():
+        shutil.copy2(
+            str(_REAL_EXCLUDED_COMMANDS_FILE),
+            str(scripts_dir / "excluded-commands.txt"),
+        )
     return script_copy
 
 
@@ -130,15 +141,27 @@ class TestInstallSkillsFirstRun:
     def test_commands_copied(self, script: Path, fake_home: Path) -> None:
         result = _run(script, fake_home)
         assert result.returncode == 0, result.stderr
-        assert (fake_home / ".claude" / "commands" / "auto-dev.md").exists()
+        installed = fake_home / ".claude" / "commands" / "auto-dev.md"
+        assert installed.exists()
         assert (fake_home / ".claude" / "commands" / "review.md").exists()
         assert "commands synced : 2" in result.stdout
+
+        # Commands are symlinked, not copied — one copy on disk.
+        assert installed.is_symlink()
+        src = script.parent.parent / ".claude" / "commands" / "auto-dev.md"
+        assert installed.readlink() == src.resolve()
 
     def test_skill_dir_copied(self, script: Path, fake_home: Path) -> None:
         result = _run(script, fake_home)
         assert result.returncode == 0, result.stderr
-        skill_md = fake_home / ".claude" / "skills" / "cw-fanout" / "SKILL.md"
+        skill_dir = fake_home / ".claude" / "skills" / "cw-fanout"
+        skill_md = skill_dir / "SKILL.md"
         assert skill_md.exists()
+
+        # Skill dirs are symlinked, not recursively copied.
+        assert skill_dir.is_symlink()
+        src = script.parent.parent / ".claude" / "skills" / "cw-fanout"
+        assert skill_dir.readlink() == src.resolve()
 
     def test_manifest_written(self, script: Path, fake_home: Path) -> None:
         result = _run(script, fake_home)
@@ -159,8 +182,8 @@ class TestInstallSkillsFirstRun:
 class TestInstallSkillsNestedFiles:
     """Generic skill-install loop recurses into nested subdirectories.
 
-    rsync -a already recurses, so this is a characterization test proving
-    the mechanism, not a bugfix.
+    The skill directory is a single symlink, so nested files are visible for
+    free without any recursive copy step.
     """
 
     def test_nested_subdirectory_file_installed(
@@ -173,6 +196,120 @@ class TestInstallSkillsNestedFiles:
             fake_home / ".claude" / "skills" / "some-skill" / "scripts" / "helper.sh"
         )
         assert nested.exists()
+
+
+class TestInstallSkillsSymlinkMigration:
+    """A prior copy-based install (regular file/dir, or a stale symlink) is
+    corrected in place on the next run — no manual cleanup required.
+    """
+
+    def test_command_migrated_from_copy_to_symlink(
+        self, script: Path, fake_home: Path
+    ) -> None:
+        commands_dst = fake_home / ".claude" / "commands"
+        commands_dst.mkdir(parents=True, exist_ok=True)
+        stale = commands_dst / "auto-dev.md"
+        stale.write_text("# stale copy content\n")
+
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+
+        installed = commands_dst / "auto-dev.md"
+        assert installed.is_symlink()
+        src = script.parent.parent / ".claude" / "commands" / "auto-dev.md"
+        assert installed.readlink() == src.resolve()
+        assert installed.read_text() == "# auto-dev\n"
+
+    def test_skill_dir_migrated_from_copy_to_symlink(
+        self, script: Path, fake_home: Path
+    ) -> None:
+        skills_dst = fake_home / ".claude" / "skills"
+        skills_dst.mkdir(parents=True, exist_ok=True)
+        stale_dir = skills_dst / "cw-fanout"
+        stale_dir.mkdir()
+        (stale_dir / "SKILL.md").write_text("# stale skill content\n")
+
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+
+        installed = skills_dst / "cw-fanout"
+        assert installed.is_symlink()
+        src = script.parent.parent / ".claude" / "skills" / "cw-fanout"
+        assert installed.readlink() == src.resolve()
+        assert (installed / "SKILL.md").read_text() == "# cw-fanout skill\n"
+
+    def test_skill_dir_symlink_wrong_target_repointed(
+        self, script: Path, fake_home: Path, tmp_path: Path
+    ) -> None:
+        skills_dst = fake_home / ".claude" / "skills"
+        skills_dst.mkdir(parents=True, exist_ok=True)
+        decoy = tmp_path / "decoy-skill"
+        decoy.mkdir()
+        (decoy / "SKILL.md").write_text("# decoy content\n")
+        (skills_dst / "cw-fanout").symlink_to(decoy)
+
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+
+        installed = skills_dst / "cw-fanout"
+        assert installed.is_symlink()
+        src = script.parent.parent / ".claude" / "skills" / "cw-fanout"
+        assert installed.readlink() == src.resolve()
+        assert (installed / "SKILL.md").read_text() == "# cw-fanout skill\n"
+
+    def test_command_symlink_wrong_target_repointed(
+        self, script: Path, fake_home: Path, tmp_path: Path
+    ) -> None:
+        commands_dst = fake_home / ".claude" / "commands"
+        commands_dst.mkdir(parents=True, exist_ok=True)
+        decoy = tmp_path / "decoy.md"
+        decoy.write_text("# decoy\n")
+        (commands_dst / "auto-dev.md").symlink_to(decoy)
+
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+
+        installed = commands_dst / "auto-dev.md"
+        assert installed.is_symlink()
+        src = script.parent.parent / ".claude" / "commands" / "auto-dev.md"
+        assert installed.readlink() == src.resolve()
+        assert installed.read_text() == "# auto-dev\n"
+
+    def test_skill_dir_reinstall_over_already_correct_symlink_is_idempotent(
+        self, script: Path, fake_home: Path
+    ) -> None:
+        """Re-running the installer when nothing changed must succeed and
+        must not plant a stray symlink inside the source skill directory.
+
+        Regression test: `ln -s` alone, run unconditionally after a guard
+        that (correctly) skips clearing an already-correct symlink, still
+        has an existing destination to contend with. Since the destination
+        resolves through the symlink to an existing directory, `ln -s`
+        silently installs a new link *inside* that directory instead of
+        erroring — corrupting the tracked source tree on the second and
+        every subsequent run (#1535 review).
+        """
+        skills_dst = fake_home / ".claude" / "skills"
+        skill_src = script.parent.parent / ".claude" / "skills" / "cw-fanout"
+
+        # Run 1: fresh install.
+        r1 = _run(script, fake_home)
+        assert r1.returncode == 0, r1.stderr
+        installed = skills_dst / "cw-fanout"
+        assert installed.is_symlink()
+        assert installed.readlink() == skill_src.resolve()
+
+        # Run 2: nothing changed — must still succeed, symlink must be
+        # unchanged, and no stray entry may appear inside the real source
+        # skill directory.
+        r2 = _run(script, fake_home)
+        assert r2.returncode == 0, r2.stderr
+        assert installed.is_symlink()
+        assert installed.readlink() == skill_src.resolve()
+        assert sorted(p.name for p in skill_src.iterdir()) == ["SKILL.md"], (
+            "install-skills.sh planted an unexpected entry inside the real "
+            "source skill directory on a steady-state re-run"
+        )
 
 
 class TestInstallSkillsPruneSafety:
@@ -207,6 +344,10 @@ class TestInstallSkillsPruneSafety:
         assert r2.returncode == 0, r2.stderr
 
         # --- THE KEY SAFETY ASSERTION ---
+        # This scenario's prune target (review.md) is a command file, so it
+        # exercises the symlink-to-file prune path only. The prune block's
+        # rm -rf on a symlinked skill DIRECTORY (unlinks only the link, never
+        # recurses into the real target) is not exercised by this test.
         assert foreign_skill_md.exists(), (
             "Foreign skill peon-ping-fake/SKILL.md was deleted by cw prune — "
             "this violates the manifest-scoped prune safety invariant: cw must "
@@ -392,3 +533,31 @@ class TestProjectScopedCommandsExcluded:
         # refactor would silently lose the foreign-file safety invariant).
         assert "orphans pruned  : 1" in result.stdout
         assert "commands/ship-it.md" not in manifest.read_text().splitlines()
+
+
+class TestInstallSkillsExclusionFile:
+    """The installer's project-scoped exclusion list is data, not code — a
+    hardcoded EXCLUDED_COMMANDS array would pass TestProjectScopedCommandsExcluded
+    but fail this test, since it only ever excludes ship-it.md regardless of
+    what the data file says.
+    """
+
+    def test_installer_reads_exclusion_file_not_hardcoded(
+        self, script: Path, fake_home: Path
+    ) -> None:
+        exclusion_file = script.parent / "excluded-commands.txt"
+        exclusion_file.write_text("review.md\n")
+
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+
+        commands_dst = fake_home / ".claude" / "commands"
+        assert not (commands_dst / "review.md").exists(), (
+            "review.md was listed in the fixture's excluded-commands.txt and "
+            "must not be installed"
+        )
+        assert (commands_dst / "ship-it.md").exists(), (
+            "ship-it.md is only excluded via the data file; overwriting the "
+            "fixture's excluded-commands.txt to list review.md instead proves "
+            "the installer reads the file rather than a hardcoded array"
+        )
