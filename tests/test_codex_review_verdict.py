@@ -182,12 +182,83 @@ class TestSynthesizeCodexReviewResult:
         assert result.status == "stage_complete"
         assert result.stage_reached == "stage3_review"
         assert result.health.recommendation == "PROCEED"
+        # Pinned against _derive_health (#1551): a single status="ok" document
+        # (the default from _make_reviewer_doc) is the "nothing degraded"
+        # input, so health must derive to the strongest signal, not just
+        # happen to match a hardcoded literal.
+        assert result.health.lowest_agent_confidence == "HIGH"
+        assert result.health.any_incomplete_risk is False
         assert result.review.should_fix == 1
         # Fully-documented review (no failures) → unchanged, and agents_run
         # counts exactly the one role that produced a document.
         assert result.review.agents_run == 1
         assert verdict is not None
         assert verdict.blocking is False
+
+
+# ---------------------------------------------------------------------------
+# synthesize_codex_review_result — health derivation from document status
+# ---------------------------------------------------------------------------
+
+
+class TestSynthesizeCodexReviewResultHealth:
+    @pytest.mark.parametrize("status", ["degraded", "failed"])
+    def test_non_ok_document_status_downgrades_health(
+        self, make_git_repo: Callable[[str], Path], status: str
+    ) -> None:
+        # #1551: a reviewer document that is not status="ok" means that
+        # role's coverage was reduced (degraded) or it self-reported failure
+        # (failed) even though it still parsed into a document — neither case
+        # produced a MUST_FIX finding or a ReviewerRunFailure, so the old
+        # hardcoded HIGH/PROCEED silently reported full confidence over a
+        # review that wasn't actually clean. status="failed" requires empty
+        # findings (_check_failed_has_no_findings), so both branches share
+        # the same no-findings, no-failures shape here.
+        worktree = make_git_repo(f"wt-synth-health-{status}")
+        doc = _make_reviewer_doc(status=status)
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-synth",
+        )
+        assert result.status == "stage_complete"
+        assert result.health.lowest_agent_confidence == "MEDIUM"
+        assert result.health.any_incomplete_risk is True
+        assert result.health.recommendation == "EXIT_FOR_HUMAN_REVIEW"
+        assert verdict is not None
+
+    def test_multiple_ok_documents_stay_high_confidence(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        # Document *count* alone is not a valid degraded-health signal: both
+        # real call sites run roles via run_codex_roles, whose contract
+        # guarantees exactly one of {document, ReviewerRunFailure} per
+        # selected role. So at those call sites, failures == [] already means
+        # every selected role produced a document — the document list's
+        # length carries no additional information about coverage. What
+        # actually degrades health is a document's own `status`, independent
+        # of how many documents are present.
+        worktree = make_git_repo("wt-synth-health-two-ok")
+        doc_a = _make_reviewer_doc(reviewer_role="Role A")
+        doc_b = _make_reviewer_doc(reviewer_role="Role B")
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc_a, doc_b],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-synth",
+        )
+        assert result.status == "stage_complete"
+        assert result.health.lowest_agent_confidence == "HIGH"
+        assert result.health.any_incomplete_risk is False
+        assert result.health.recommendation == "PROCEED"
+        assert verdict is not None
 
 
 # ---------------------------------------------------------------------------
