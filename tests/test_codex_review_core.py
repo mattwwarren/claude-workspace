@@ -8,7 +8,13 @@ from typing import TYPE_CHECKING
 import pytest
 
 from cw.codex_review import _prepare_review_pass, run_review
-from tests._codex_review_helpers import _git, _ok_result, _SequencedRunner, _task
+from tests._codex_review_helpers import (
+    _finding_json,
+    _git,
+    _ok_result,
+    _SequencedRunner,
+    _task,
+)
 from tests.conftest import _make_reviewer_doc
 
 if TYPE_CHECKING:
@@ -49,7 +55,9 @@ class TestPrepareReviewPass:
         self, make_git_repo: Callable[[str], Path]
     ) -> None:
         # run_review's output is unchanged by the extraction: a clean per-role
-        # pass over the prepared inputs still yields stage_complete.
+        # pass over the prepared inputs still yields stage_complete, and a
+        # real non-empty (non-blocking) finding survives diff-based validation
+        # and is reflected in the consolidated verdict.
         repo = make_git_repo("wt-prepare-run")
         _git(repo, "checkout", "-b", "feature")
         (repo / "mod.py").write_text("def broken():\n", encoding="utf-8")
@@ -57,7 +65,15 @@ class TestPrepareReviewPass:
         _git(repo, "commit", "-m", "add mod.py")
 
         prepared = _prepare_review_pass(_task(), repo, "main")
-        runner = _SequencedRunner([_ok_result() for _ in prepared.roles])
+        results = [_ok_result() for _ in prepared.roles]
+        results[0] = _ok_result(
+            findings=[
+                _finding_json(
+                    severity="SHOULD_FIX", file="mod.py", line_start=1, line_end=1
+                )
+            ]
+        )
+        runner = _SequencedRunner(results)
         result, verdict = run_review(
             runner=runner,
             task=_task(),
@@ -70,4 +86,5 @@ class TestPrepareReviewPass:
         assert result.status == "stage_complete"
         assert verdict is not None
         assert verdict.blocking is False
+        assert verdict.review.should_fix == 1
         assert len(runner.calls) == len(prepared.roles)
