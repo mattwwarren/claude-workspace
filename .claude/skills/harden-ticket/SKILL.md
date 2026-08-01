@@ -209,8 +209,12 @@ by hand before re-dispatch.
 ### 4. Hand off
 
 Report what you resolved, what the operator decided, and that the ticket is
-ready to dispatch. **Do not dispatch** — that's the caller's job (queue-issues,
-cw dev-queue, or the orchestrate-sprint flow). This skill's contract is "ticket
+ready to dispatch. **Do not dispatch** — that's the caller's job. When a human
+runs `/harden-ticket` directly, dispatch is the operator's next move. When the
+caller is an `orchestrate-sprint` session, the orchestrator dispatches
+immediately per its decision-ownership taxonomy — this skill's contract ends
+at "hardened and ready," not at "a human has been asked." This skill's
+contract is "ticket
 hardened, resolutions posted, ready to enqueue."
 
 ## Notes
