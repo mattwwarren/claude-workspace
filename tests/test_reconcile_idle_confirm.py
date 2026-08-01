@@ -544,7 +544,9 @@ def test_confirm_before_reap_liveness_recovery_resets_counter(
     )
 
     # Liveness check returns True (worker is alive this tick).
-    with patch("cw.reconcile.idle._transcript_recently_active", return_value=True):
+    with patch(
+        "cw.reconcile.idle._detect._transcript_recently_active", return_value=True
+    ):
         blocked, salvage_git = flag_silently_idle_daemon_sessions(
             state,
             now=now,
@@ -560,7 +562,9 @@ def test_confirm_before_reap_liveness_recovery_resets_counter(
     assert reloaded.idle_observation_count == 0
 
     # A new idle observation now starts the count at 1 (not 2).
-    with patch("cw.reconcile.idle._transcript_recently_active", return_value=False):
+    with patch(
+        "cw.reconcile.idle._detect._transcript_recently_active", return_value=False
+    ):
         blocked2, _ = flag_silently_idle_daemon_sessions(
             state,
             now=now,
@@ -618,8 +622,10 @@ def test_confirm_before_reap_sentinel_salvage_not_deferred(
     mock_daemon = MagicMock()
     with (
         patch("cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon),
-        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
-        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
+        patch(
+            "cw.reconcile.idle._detect._transcript_recently_active", return_value=False
+        ),
+        patch("cw.reconcile.idle._detect._awaiting_subagent", return_value=False),
     ):
         blocked, _salvage_git = flag_silently_idle_daemon_sessions(
             state=CwState(sessions=[sess]),
@@ -685,10 +691,11 @@ def test_confirm_before_reap_git_salvage_deferred(
         "cw.reconcile._shared.salvage_terminal_result", lambda *_a, **_kw: None
     )
     monkeypatch.setattr(
-        "cw.reconcile.idle._transcript_recently_active", lambda *_a, **_kw: False
+        "cw.reconcile.idle._detect._transcript_recently_active",
+        lambda *_a, **_kw: False,
     )
     monkeypatch.setattr(
-        "cw.reconcile.idle._awaiting_subagent", lambda *_a, **_kw: False
+        "cw.reconcile.idle._detect._awaiting_subagent", lambda *_a, **_kw: False
     )
 
     state = CwState(sessions=[sess])

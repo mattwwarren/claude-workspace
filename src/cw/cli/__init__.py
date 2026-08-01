@@ -21,6 +21,7 @@ from cw.cli import (
     review,
     session_inspect,
     sprint,
+    stop_hook,
     watchdog,
     worktree,
 )
@@ -97,6 +98,7 @@ __all__ = [
     "session_group",
     "session_inspect",
     "sprint",
+    "stop_hook",
     "watchdog",
     "worktree",
 ]
