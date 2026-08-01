@@ -24,7 +24,13 @@ from cw.codex_review import (
 from cw.codex_runner import CodexRunResult
 from cw.config import state_dir
 from cw.executor_diagnostics import ExecutorFailure, diagnostics_bundle_dir
-from tests._codex_review_helpers import _Clock, _ok_result, _SequencedRunner
+from cw.review_findings import ReviewerFindingsDocument, ReviewerRunFailure
+from tests._codex_review_helpers import (
+    _Clock,
+    _finding_payload,
+    _ok_result,
+    _SequencedRunner,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -85,7 +91,9 @@ class TestBuildGenericCodexArgv:
 
 class TestRunCodexRoles:
     def test_all_complete_within_budget(self, tmp_path: Path) -> None:
-        runner = _SequencedRunner([_ok_result(), _ok_result()])
+        runner = _SequencedRunner(
+            [_ok_result(findings=[_finding_payload()]), _ok_result()]
+        )
         docs, failures = run_codex_roles(
             runner=runner,
             worktree=tmp_path,
@@ -100,6 +108,8 @@ class TestRunCodexRoles:
         )
         assert len(docs) == 2
         assert failures == []
+        assert len(docs[0].findings) == 1
+        assert docs[0].findings[0].severity == "MUST_FIX"
 
     def test_none_budget_gives_none_timeout(self, tmp_path: Path) -> None:
         runner = _SequencedRunner([_ok_result(), _ok_result()])
@@ -396,7 +406,7 @@ def _run_one_role(
     *,
     session_id: str = "sess-diag",
     role: str = "Code Quality Reviewer",
-) -> tuple[object, object]:
+) -> tuple[ReviewerFindingsDocument | None, ReviewerRunFailure | None]:
     scratch = tmp_path / "scratch"
     scratch.mkdir(exist_ok=True)
     return _run_codex_role(

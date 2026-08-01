@@ -40,7 +40,7 @@ jobs:
         run: |
           uv run ruff check src/ tests/
           uv run ruff format --check src/ tests/
-          uv run mypy src/
+          uv run mypy --strict src/
           uv run pytest tests/ -v
 
   release:

@@ -11,7 +11,11 @@ from datetime import UTC, datetime
 
 import click
 
-from cw.auto_dev_result import AutoDevResult, BlockedResult
+from cw.auto_dev_result import (
+    INTERMEDIATE_ADVANCE_STATUSES,
+    AutoDevResult,
+    BlockedResult,
+)
 from cw.cli._base import _complete_client, handle_errors
 from cw.cli._sentinels import _parse_sentinel_from_transcript
 from cw.config import load_orchestrator_config, load_state
@@ -50,7 +54,15 @@ _WAIT_DEFAULT_TIMEOUT: int = 300
 # Poll interval for the sentinel-aware wait loop (seconds).
 _WAIT_SENTINEL_POLL_INTERVAL: float = 5.0
 
-# Exit-code mapping from AutoDevResult.status to wait exit codes.
+# Exit-code mapping from AutoDevResult.status to wait exit codes. Keys must
+# cover every schema.Status value except INTERMEDIATE_ADVANCE_STATUSES (those
+# never reach _handle_sentinel_terminal — the ticket advances to its next
+# stage, so the wait loop keeps polling). Guarded by
+# test_wait_status_exit_covers_status_vocabulary; a new Status value must be
+# mapped here (or added to INTERMEDIATE_ADVANCE_STATUSES) before it ships.
+# "validation_failed"/"failed" were removed as dead keys: they are
+# Blocker.reason values, not Status values, and sentinel.status is typed to
+# the Status Literal so they could never match.
 _WAIT_STATUS_EXIT: dict[str, int] = {
     "shipped": 0,
     "no_op": 0,
@@ -60,10 +72,12 @@ _WAIT_STATUS_EXIT: dict[str, int] = {
     "plan_pending_approval": _WAIT_EXIT_BLOCKED,
     "review_pending_approval": _WAIT_EXIT_BLOCKED,
     "merge_gate_blocked": _WAIT_EXIT_BLOCKED,
+    # PR created, awaiting CI/merge — dispatch routes the task to
+    # BLOCKED_ON_USER (#899), so the sentinel path must agree with the
+    # queue-status path instead of misreporting FAILED.
+    "merge_pending": _WAIT_EXIT_BLOCKED,
     "scope_exceeded": _WAIT_EXIT_FAILED,
     "forbidden_area": _WAIT_EXIT_FAILED,
-    "validation_failed": _WAIT_EXIT_FAILED,
-    "failed": _WAIT_EXIT_FAILED,
 }
 
 
@@ -83,6 +97,20 @@ def _blocked_on_user_exit_code(task: TicketTask) -> int:
         if session is not None and session.reap_proposed_at is not None:
             return _WAIT_EXIT_ATTENTION
     return _WAIT_EXIT_BLOCKED
+
+
+def _session_has_reap_evidence(session_id: str) -> bool:
+    """True iff *session_id* exists in state with ``reap_proposed_at`` set.
+
+    Mirrors ``_blocked_on_user_exit_code``'s check-else-fall-through: absence
+    of evidence (session pruned from state, or found with reap_proposed_at
+    still None) is a deliberate fail-toward-non-alarming default (#1557) —
+    the caller falls through to spawn-window grace rather than firing
+    ATTENTION on a bare row sample that a normal stage handoff also produces.
+    """
+    state = load_state()
+    session = next((s for s in state.sessions if s.id == session_id), None)
+    return session is not None and session.reap_proposed_at is not None
 
 
 def _handle_terminal_task(
@@ -267,9 +295,13 @@ def _handle_reaped_mid_wait(
 ) -> None:
     """Emit ATTENTION output when a session is reaped during the wait loop.
 
-    Called when session_id transitions from non-None to None mid-wait, which
-    means reconcile has reaped the owning session and reverted the task to
-    PENDING.  The operator must decide whether to re-dispatch (#542).
+    Called only when session_id has transitioned from non-None to None
+    mid-wait AND the prior session carries ``reap_proposed_at`` evidence
+    (checked by the caller via ``_session_has_reap_evidence``, #1557) —
+    together confirming reconcile reaped the owning session and reverted the
+    task to PENDING.  A bare non-None→None transition alone is not sufficient
+    evidence: a normal inter-stage handoff clears session_id the same way.
+    The operator must decide whether to re-dispatch (#542).
     """
     if output_json:
         click.echo(
@@ -355,12 +387,20 @@ def dev_queue_wait(
     eliminates false-timeout (exit 124) for long-running healthy workers
     whose reconcile cycle hasn't fired yet.
 
+    A ``stage_complete`` sentinel is a successful intermediate hand-off, not
+    a terminal outcome — the wait keeps polling while dispatch advances the
+    ticket to its next stage.
+
     Exit codes:
       0   shipped / no_op (or COMPLETED queue status)
-      1   scope_exceeded / forbidden_area / failed / FAILED / CANCELLED
-      2   blocked / *_pending_* family / BLOCKED_ON_USER (no reap proposal)
+      1   scope_exceeded / forbidden_area / FAILED / CANCELLED
+      2   blocked / merge_pending / *_pending_* family / BLOCKED_ON_USER
+          (no reap proposal)
       3   ATTENTION — transcript stale past idle budget, worker not in roster;
-          or BLOCKED_ON_USER caused by a reap proposal (reap_proposed_at set)
+          or BLOCKED_ON_USER caused by a reap proposal (reap_proposed_at set);
+          or a mid-wait session_id clear confirmed by reap_proposed_at on the
+          prior session (#1557 — a bare clear during a normal stage handoff
+          does NOT fire this; it falls through to spawn-window grace/timeout)
       4   AWAITING_OPERATOR_SIGNOFF — ticket parked for an explicit operator
           signoff before it ships (RFC 0007 Phase 3, #990)
       124 hard timeout ceiling (--timeout) with no terminal or attention signal
@@ -408,14 +448,20 @@ def dev_queue_wait(
         # --- Step 2: resolve the session ---
         session_id = task.session_id
         if session_id is None:
-            if observed_session_id is not None:
-                # session_id was non-None on a prior poll and is now None.
-                # Reconcile reaped the session and reverted the task to PENDING;
-                # spawn-window grace does not apply — surface ATTENTION (#542).
+            if observed_session_id is not None and _session_has_reap_evidence(
+                observed_session_id
+            ):
+                # session_id was non-None on a prior poll and is now None, AND
+                # the prior session carries reap_proposed_at — reconcile
+                # reaped the session and reverted the task to PENDING; surface
+                # ATTENTION (#542).
                 _handle_reaped_mid_wait(
                     task, ticket_id, resolved, observed_session_id, output_json
                 )
-            # Spawn-window grace: session hasn't registered yet — keep polling.
+            # Spawn-window grace: session hasn't registered yet, OR the
+            # non-None→None transition has no corresponding reap evidence
+            # (#1557 — a normal inter-stage handoff clears session_id the
+            # same way a reap does) — keep polling.
             _raise_if_deadline_exceeded(
                 deadline, ticket_id, resolved, timeout_seconds, output_json
             )
@@ -446,7 +492,14 @@ def dev_queue_wait(
 
         # BlockedResult means framing present but payload unusable — treat as
         # not-yet-terminal (could be a partial write); keep polling.
-        if isinstance(sentinel, AutoDevResult):
+        # INTERMEDIATE_ADVANCE_STATUSES (stage_complete) is a successful
+        # stage hand-off, not a ticket-terminal outcome: dispatch advances the
+        # ticket to its next stage, so keep polling instead of exiting FAILED
+        # (previously stage_complete fell through .get()'s FAILED default).
+        if (
+            isinstance(sentinel, AutoDevResult)
+            and sentinel.status not in INTERMEDIATE_ADVANCE_STATUSES
+        ):
             # TERMINAL: emit and raise the mapped exit code.
             _handle_sentinel_terminal(sentinel, task, ticket_id, resolved, output_json)
 

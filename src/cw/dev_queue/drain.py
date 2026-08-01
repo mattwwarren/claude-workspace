@@ -17,7 +17,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal, TypedDict
 
-from cw.dev_queue.lifecycle import AWAITING_OPERATOR_DISPOSITION
+from cw.dev_queue.lifecycle import (
+    FINALIZE_GATE_HELD_DISPOSITION,
+    HOLD_DISPOSITIONS,
+)
 from cw.dev_queue.requeue import requeue_ticket
 from cw.dev_queue.storage import load_dev_queue
 from cw.exceptions import CwError
@@ -44,17 +47,17 @@ class DrainOutcome(TypedDict):
     to_stage: str | None
 
 
-# RFC 0011 A4 R11 (2026-07-30): drain's selection is the Rule-5 availability-
-# park subset of HOLD_DISPOSITIONS, EXCLUDING the A3 force-hold disposition
-# (#1160's FINALIZE_GATE_HELD_DISPOSITION, which extends HOLD_DISPOSITIONS in
-# place per lifecycle.py:82's comment). That constant does not exist on main
-# yet (verified 2026-07-30) -- pinning DRAIN_DISPOSITIONS to the single known
-# Rule-5 member directly is arithmetically identical to `HOLD_DISPOSITIONS -
-# {force_hold_disposition}` both today and after #1160 lands, and avoids
-# importing a symbol that isn't importable yet. Follow-up when #1160 merges:
-# no code change needed here; just confirm test_drain_excludes_a3_force_hold
-# (tests/test_dev_queue.py) still asserts against the real constant name/value.
-DRAIN_DISPOSITIONS: frozenset[str] = frozenset({AWAITING_OPERATOR_DISPOSITION})
+# RFC 0011 A4 R11: drain's selection is the Rule-5 availability-park subset
+# of HOLD_DISPOSITIONS, EXCLUDING the A3 force-hold disposition (#1160's
+# FINALIZE_GATE_HELD_DISPOSITION) -- a force hold is never batch-released.
+# Derived by subtraction now that #1160 has landed (the original hand-pin
+# existed only because the constant wasn't importable yet); a future hold
+# disposition added to HOLD_DISPOSITIONS therefore flows into drain's
+# selection automatically -- exclude it here explicitly if it must not be
+# batch-releasable, mirroring the A3 exclusion.
+DRAIN_DISPOSITIONS: frozenset[str] = HOLD_DISPOSITIONS - frozenset(
+    {FINALIZE_GATE_HELD_DISPOSITION}
+)
 
 
 def select_held_tickets(client: str, *, lane: str | None = None) -> list[TicketTask]:

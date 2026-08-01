@@ -81,6 +81,7 @@ from cw.codex_review._roles import (
     run_codex_roles,
 )
 from cw.codex_review._verdict import (
+    _CONFIDENCE_ANNOTATION,
     _format_failures_detail,
     _render_findings,
     render_verdict_comment,
@@ -99,6 +100,7 @@ __all__ = [
     "STAGE3_REVIEW",
     "_CATEGORY_TO_REASON",
     "_COMMAND_NOT_FOUND_RETURNCODE",
+    "_CONFIDENCE_ANNOTATION",
     "_DIFF_GIT_HEADER_RE",
     "_HUNK_RE",
     "_MIN_ROLE_TIMEOUT_SECONDS",

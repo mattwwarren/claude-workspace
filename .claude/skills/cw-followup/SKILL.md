@@ -138,7 +138,7 @@ cat /tmp/decisions.md >> /tmp/body.md
 gh issue edit "$TICKET" --repo mattwwarren/claude-workspace --body-file /tmp/body.md
 ```
 
-After append, suggest re-dispatch: `cw dev-queue add <TICKET>` (add `-c <CLIENT>` only for a multi-client setup); if the dispatch loop is idle, also run `cw dev-queue run --once` to kick it. Do not auto-dispatch — re-dispatch belongs to the user.
+After append, suggest re-dispatch: `cw dev-queue add <TICKET>` (add `-c <CLIENT>` only for a multi-client setup); if the dispatch loop is idle, also run `cw dev-queue run --once` to kick it. Do not auto-dispatch on a bare interactive invocation — re-dispatch belongs to the user. Inside an `orchestrate-sprint` or `cw-fanout` loop, the orchestrator is the caller and dispatches itself.
 
 #### `blocked` (validated, real `AutoDevResult` with `status=blocked`)
 
@@ -224,7 +224,7 @@ Recipe (validated 4× in the 1.1 waves — #387, #552, #554, #558):
 
 ## Out of scope
 
-- Re-dispatching to `/auto-dev`. The skill prepares the ground (decisions appended, branch rebased) but the user owns the dispatch trigger. Pair with `/cw-fanout` (#187) when re-dispatching at N>1.
+- Re-dispatching to `/auto-dev` on a bare interactive invocation. The skill prepares the ground (decisions appended, branch rebased) but the user owns the dispatch trigger in that mode. Inside an `orchestrate-sprint` or `cw-fanout` loop, the orchestrator is the caller and dispatches itself — see `/cw-fanout` (#187) for re-dispatching at N>1.
 - Creating new tickets. `/cw-followup` acts on the existing one only.
 - Mutating the sentinel schema. Schema drift surfaces as `validation_failed`; fixing it is a separate ticket.
 

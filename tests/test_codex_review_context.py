@@ -22,7 +22,13 @@ from cw.codex_review import (
     _read_sensitive_manifest,
     _select_reviewer_roles,
 )
-from tests._codex_review_helpers import _doc_json, _git, _task, _write
+from tests._codex_review_helpers import (
+    _doc_json,
+    _finding_payload,
+    _git,
+    _task,
+    _write,
+)
 from tests.conftest import _make_diff
 
 if TYPE_CHECKING:
@@ -291,10 +297,12 @@ class TestParseReviewerDocument:
         assert _parse_reviewer_document(payload) is None
 
     def test_valid_document(self) -> None:
-        payload = _doc_json()
+        payload = _doc_json(findings=[_finding_payload()])
         doc = _parse_reviewer_document(payload)
         assert doc is not None
         assert doc.status == "ok"
+        assert len(doc.findings) == 1
+        assert doc.findings[0].severity == "MUST_FIX"
 
 
 # ---------------------------------------------------------------------------
@@ -412,6 +420,123 @@ class TestBuildReviewerPrompt:
         override_substring = "advisory here, not blocking"
         assert override_substring in prompt
         assert prompt.index("AGENT SPEC BODY") < prompt.index(override_substring)
+
+    # --- item 1: dangling-reference supplement (#1548) ---
+
+    @pytest.mark.parametrize(
+        "role",
+        [
+            "Architecture Reviewer",
+            "Test Reviewer",
+            "Performance Reviewer",
+            "API Contract Validator",
+            "Deployment Reviewer",
+        ],
+    )
+    def test_output_format_roles_get_severity_taxonomy_supplement(
+        self, role: str
+    ) -> None:
+        """The 5 roles whose spec points at output-formats.md (codex cannot open
+        it — no live filesystem access) get the MUST_FIX/SHOULD_FIX/NIT mapping
+        inlined instead (#1548 item 1)."""
+        prompt = _build_reviewer_prompt(
+            role,
+            agent_spec_text="AGENT SPEC BODY",
+            diff=_make_diff(),
+            changed_files=["src/cw/foo.py"],
+            plan_text=None,
+            ticket_text=None,
+            project_rubrics=None,
+            repo_policy_section=None,
+            sensitive_hits=[],
+        )
+        assert "MUST_FIX" in prompt
+        assert "SHOULD_FIX" in prompt
+        assert "NIT" in prompt
+        assert "Critical" in prompt
+        assert "Major" in prompt
+
+    def test_code_quality_reviewer_prompt_inlines_tone_guide(self) -> None:
+        prompt = _build_reviewer_prompt(
+            "Code Quality Reviewer",
+            agent_spec_text="AGENT SPEC BODY",
+            diff=_make_diff(),
+            changed_files=["src/cw/foo.py"],
+            plan_text=None,
+            ticket_text=None,
+            project_rubrics=None,
+            repo_policy_section=None,
+            sensitive_hits=[],
+        )
+        assert "No Praise" in prompt or "no praise" in prompt.lower()
+        assert "SHOULD_FIX" not in prompt
+
+    def test_test_reviewer_prompt_inlines_testing_checklist(self) -> None:
+        prompt = _build_reviewer_prompt(
+            "Test Reviewer",
+            agent_spec_text="AGENT SPEC BODY",
+            diff=_make_diff(),
+            changed_files=["src/cw/foo.py"],
+            plan_text=None,
+            ticket_text=None,
+            project_rubrics=None,
+            repo_policy_section=None,
+            sensitive_hits=[],
+        )
+        assert "AAA" in prompt
+        assert "MUST_FIX" in prompt
+
+    @pytest.mark.parametrize(
+        "role",
+        ["SysAdmin Reviewer", "Data Safety Reviewer", "Product Manager Reviewer"],
+    )
+    def test_roles_without_dangling_refs_get_no_supplement(self, role: str) -> None:
+        """Roles whose spec has its own complete inline output format (no dangling
+        file reference) must not have the supplement injected."""
+        prompt = _build_reviewer_prompt(
+            role,
+            agent_spec_text="AGENT SPEC BODY",
+            diff=_make_diff(),
+            changed_files=["src/cw/foo.py"],
+            plan_text=None,
+            ticket_text=None,
+            project_rubrics=None,
+            repo_policy_section=None,
+            sensitive_hits=[],
+        )
+        assert "Severity Taxonomy" not in prompt
+
+    def test_supplement_appears_before_output_instructions(self) -> None:
+        """The new supplement must sit before _OUTPUT_INSTRUCTIONS (last-wins
+        precedence, #1543) — never after."""
+        prompt = _build_reviewer_prompt(
+            "Deployment Reviewer",
+            agent_spec_text="AGENT SPEC BODY",
+            diff=_make_diff(),
+            changed_files=["src/cw/foo.py"],
+            plan_text=None,
+            ticket_text=None,
+            project_rubrics=None,
+            repo_policy_section=None,
+            sensitive_hits=[],
+        )
+        assert prompt.index("MUST_FIX") < prompt.index("advisory here, not blocking")
+
+    # --- item 2: regression-lock (#1548, expected to pass immediately) ---
+
+    def test_output_instructions_states_degraded_and_low_confidence_cases_distinctly(
+        self,
+    ) -> None:
+        """Locks #1544's already-correct wording distinguishing document-level
+        status="degraded" (a check could not run at all) from per-finding
+        confidence="LOW" (groundable finding, verification step unperformed) —
+        ticket #1548's item 2. Expected GREEN before any Phase 2 change."""
+        from cw.codex_review._context import _OUTPUT_INSTRUCTIONS
+
+        assert 'status="degraded"' in _OUTPUT_INSTRUCTIONS
+        assert 'confidence: "LOW"' in _OUTPUT_INSTRUCTIONS
+        assert "report the finding anyway" in _OUTPUT_INSTRUCTIONS
+        assert "Never suppress a diff-groundable finding" in _OUTPUT_INSTRUCTIONS
 
 
 # ---------------------------------------------------------------------------

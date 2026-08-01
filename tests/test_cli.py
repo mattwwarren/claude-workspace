@@ -8278,6 +8278,7 @@ class TestDevQueueWaitSentinelAware:
         claude_session_id: str | None = None,
         surface_ref: str = "abcd1234",
         started_at: datetime | None = None,
+        reap_proposed_at: datetime | None = None,
     ) -> Session:
         """Build an ACTIVE Session pointing at *worktree*."""
         return _make_daemon_session(
@@ -8289,6 +8290,7 @@ class TestDevQueueWaitSentinelAware:
             surface_ref=surface_ref,
             claude_session_id=claude_session_id,
             started_at=started_at or datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+            reap_proposed_at=reap_proposed_at,
         )
 
     def test_terminal_shipped_csid_set(
@@ -8335,6 +8337,139 @@ class TestDevQueueWaitSentinelAware:
         assert payload["sentinel_status"] == "shipped"
         assert payload["pr_url"] == "https://github.com/foo/bar/pull/535"
         assert payload["ticket_id"] == "GEN-535"
+
+    def test_terminal_merge_pending_exits_blocked_not_failed(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A ``merge_pending`` sentinel exits 2 (blocked family), not 1.
+
+        Dispatch routes a merge_pending sentinel's task to BLOCKED_ON_USER
+        (#899), so the sentinel-aware path must agree with the queue-status
+        path. Before the _WAIT_STATUS_EXIT drift fix, merge_pending was
+        missing from the map and fell through .get()'s FAILED default.
+        """
+        import json as _json
+
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw._util.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "auto-dev-mp"
+        worktree.mkdir(parents=True)
+
+        session_id = "sessmp1"
+        csid = "uuid-mp-csid-set-1234"
+        sentinel_text = self._SHIPPED_SENTINEL.replace(
+            '"status": "shipped"', '"status": "merge_pending"'
+        )
+        self._write_transcript(worktree, csid, sentinel_text, fake_home)
+        self._seed_running_task("GEN-899", session_id)
+
+        session = self._make_running_session(
+            session_id, worktree, claude_session_id=csid
+        )
+        from cw.config import save_state as _save_state
+
+        _save_state(CwState(sessions=[session]))
+
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.monotonic", lambda: 0.0)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "wait", "GEN-899", "--client", "genhealth", "--json"],
+        )
+        assert result.exit_code == 2, result.output
+        payload = _json.loads(result.output.strip())
+        assert payload["state"] == "terminal"
+        assert payload["sentinel_status"] == "merge_pending"
+
+    def test_stage_complete_sentinel_keeps_polling(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A ``stage_complete`` sentinel is not terminal — the wait keeps polling.
+
+        stage_complete is a successful intermediate hand-off (the ticket
+        advances to its next stage), so the loop must poll on toward the
+        ticket's real terminal state instead of exiting FAILED. With no
+        further transition the wait runs to its hard ceiling (exit 124) —
+        which proves the sentinel was not treated as terminal.
+        """
+        fake_home = tmp_path / "fake-home"
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
+        monkeypatch.setattr("cw._util.Path.home", lambda: fake_home)
+
+        worktree = tmp_path / "wt" / "auto-dev-sc"
+        worktree.mkdir(parents=True)
+
+        session_id = "sesssc1"
+        csid = "uuid-sc-csid-set-1234"
+        sentinel_text = (
+            self._SHIPPED_SENTINEL.replace(
+                '"status": "shipped"', '"status": "stage_complete"'
+            )
+            .replace(
+                '"stage_reached": "stage5_post_create"',
+                '"stage_reached": "stage2_impl"',
+            )
+            .replace(
+                '"pr": {"number": 535, '
+                '"url": "https://github.com/foo/bar/pull/535", '
+                '"auto_merge": true, "base": "main"}',
+                '"pr": null',
+            )
+        )
+        self._write_transcript(worktree, csid, sentinel_text, fake_home)
+        self._seed_running_task("GEN-699", session_id)
+
+        # Non-native surface_ref keeps Step 5's roster probe out of play.
+        session = self._make_running_session(
+            session_id, worktree, claude_session_id=csid, surface_ref="win-1"
+        )
+        from cw.config import save_state as _save_state
+
+        _save_state(CwState(sessions=[session]))
+
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
+        # First monotonic() sets the deadline; the next poll's deadline check
+        # is already past it, so a non-terminal first pass exits 124.
+        clock = iter([0.0, 1000.0, 2000.0])
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.monotonic", lambda: next(clock))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "wait", "GEN-699", "--client", "genhealth"],
+        )
+        assert result.exit_code == 124, result.output
+        assert "FAILED" not in result.output
+
+    def test_wait_status_exit_covers_status_vocabulary(self) -> None:
+        """Drift guard: _WAIT_STATUS_EXIT tracks the schema Status vocabulary.
+
+        Every Status value must either have an explicit exit-code mapping or
+        be an intermediate advance status (handled by continuing to poll).
+        A new Status value fails here until it is classified — preventing the
+        silent fall-through-to-FAILED drift this table had for
+        stage_complete/merge_pending (#1535 drift class).
+        """
+        from typing import get_args
+
+        from cw.auto_dev_result import INTERMEDIATE_ADVANCE_STATUSES, Status
+        from cw.cli.dev_queue.wait import _WAIT_STATUS_EXIT
+
+        vocabulary = set(get_args(Status))
+        assert set(_WAIT_STATUS_EXIT) | set(INTERMEDIATE_ADVANCE_STATUSES) == (
+            vocabulary
+        )
+        assert not set(_WAIT_STATUS_EXIT) & set(INTERMEDIATE_ADVANCE_STATUSES)
 
     def test_terminal_shipped_csid_none_resolved_via_glob(
         self,
@@ -8687,13 +8822,15 @@ class TestDevQueueWaitSentinelAware:
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
-        """Reap mid-wait: session_id transitions non-None→None → exit 3 (#542).
+        """Reap mid-wait: session_id transitions non-None→None → exit 3
+        (#542, #1557: now requires reap_proposed_at evidence).
 
         First poll sees RUNNING task with session_id set (spawn-window grace
         does NOT apply — session is registered).  Between polls, reconcile
         reverts the task to PENDING and clears session_id.  The wait must
-        detect the non-None→None transition and surface ATTENTION rather than
-        riding to the --timeout ceiling.
+        detect the non-None→None transition, confirm it against
+        ``reap_proposed_at`` on the prior session, and surface ATTENTION
+        rather than riding to the --timeout ceiling.
         """
         import json as _json
 
@@ -8708,7 +8845,11 @@ class TestDevQueueWaitSentinelAware:
         worktree = tmp_path / "wt" / "auto-dev-542"
         worktree.mkdir(parents=True)
         session = self._make_running_session(
-            session_id, worktree, claude_session_id="uuid-542", surface_ref=surface_ref
+            session_id,
+            worktree,
+            claude_session_id="uuid-542",
+            surface_ref=surface_ref,
+            reap_proposed_at=datetime(2026, 1, 1, tzinfo=UTC),
         )
         from cw.config import save_state as _save_state
 
@@ -8779,6 +8920,144 @@ class TestDevQueueWaitSentinelAware:
         assert payload["status"] == "pending"
         assert payload["elapsed_seconds"] is None
         assert payload["transcript_age_seconds"] is None
+
+    def test_reaped_mid_wait_no_evidence_keeps_polling(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """session_id non-None→None with NO reap_proposed_at → keep polling (#1557).
+
+        This is the normal inter-stage handoff shape: a stage boundary clears
+        session_id without reconcile ever having proposed a reap.  Absent
+        ``reap_proposed_at`` evidence on the prior session, the wait must NOT
+        fire ATTENTION — it should fall through to spawn-window grace and
+        ultimately hit the --timeout ceiling rather than raising Exit(3).
+        """
+        from cw.cli import _WAIT_EXIT_TIMEOUT
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+
+        ticket_id = "GEN-1557"
+        session_id = "sess1557-normal"
+        surface_ref = "abcd1557"
+
+        worktree = tmp_path / "wt" / "auto-dev-1557"
+        worktree.mkdir(parents=True)
+        session = self._make_running_session(
+            session_id, worktree, claude_session_id="uuid-1557", surface_ref=surface_ref
+        )
+        from cw.config import save_state as _save_state
+
+        _save_state(CwState(sessions=[session]))
+
+        call_count = [0]
+
+        def _fake_load() -> DevQueueStore:
+            call_count[0] += 1
+            first = call_count[0] <= 1
+            status = QueueItemStatus.RUNNING if first else QueueItemStatus.PENDING
+            sid = session_id if first else None
+            return DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="genhealth",
+                        status=status,
+                        session_id=sid,
+                    )
+                ]
+            )
+
+        monkeypatch.setattr("cw.cli.dev_queue.wait.load_dev_queue", _fake_load)
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.wait._parse_sentinel_from_transcript",
+            lambda *_a, **_kw: None,
+        )
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.wait._transcript_age_seconds", lambda *_a, **_kw: 10.0
+        )
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        fake_daemon = FakeNativeDaemonClient()
+        fake_daemon._live.add(surface_ref)
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.wait.get_native_daemon_client", lambda: fake_daemon
+        )
+
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
+        # deadline init, first-poll check (alive), second-poll spawn-window
+        # check (expired) — same shape as test_reaped_mid_wait_exit_attention,
+        # but reached here because there is no reap evidence to gate on.
+        monotonic_calls = iter([0.0, 0.0, 9999.0])
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.wait.time.monotonic",
+            lambda: next(monotonic_calls, 9999.0),
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "wait", ticket_id, "--client", "genhealth", "--json"],
+        )
+        assert result.exit_code == _WAIT_EXIT_TIMEOUT, result.output
+
+    def test_reaped_mid_wait_old_session_absent_keeps_polling(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """session_id non-None→None with the old session pruned from state
+        entirely → keep polling (#1557).
+
+        No ``Session`` row exists for the observed old session_id at all
+        (not merely one with ``reap_proposed_at=None``).  Absence of evidence
+        must fail toward the non-alarming default, same as the sibling test.
+        """
+        from cw.cli import _WAIT_EXIT_TIMEOUT
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+
+        ticket_id = "GEN-1557B"
+        session_id = "sess1557-absent"
+
+        from cw.config import save_state as _save_state
+
+        _save_state(CwState(sessions=[]))
+
+        call_count = [0]
+
+        def _fake_load() -> DevQueueStore:
+            call_count[0] += 1
+            first = call_count[0] <= 1
+            status = QueueItemStatus.RUNNING if first else QueueItemStatus.PENDING
+            sid = session_id if first else None
+            return DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="genhealth",
+                        status=status,
+                        session_id=sid,
+                    )
+                ]
+            )
+
+        monkeypatch.setattr("cw.cli.dev_queue.wait.load_dev_queue", _fake_load)
+        monkeypatch.setattr("cw.cli.dev_queue.wait.time.sleep", lambda _: None)
+        # deadline init, first-poll "session not in state yet" grace check
+        # (alive), second-poll spawn-window check (expired).
+        monotonic_calls = iter([0.0, 0.0, 9999.0])
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.wait.time.monotonic",
+            lambda: next(monotonic_calls, 9999.0),
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "wait", ticket_id, "--client", "genhealth", "--json"],
+        )
+        assert result.exit_code == _WAIT_EXIT_TIMEOUT, result.output
 
     def test_wait_attention_exit_code_constant(self) -> None:
         """_WAIT_EXIT_ATTENTION constant equals 3."""

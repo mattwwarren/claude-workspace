@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`dev-queue wait` no longer fires false ATTENTION during a normal
+  inter-stage handoff (#1557):** mid-wait-reap detection previously fired
+  exit `3` (`reaped_awaiting_redispatch`) on the bare observation that
+  `session_id` went non-None→None — exactly what a normal stage-boundary
+  advance also produces. Detection now requires `reap_proposed_at` evidence
+  on the prior session, matching the existing `BLOCKED_ON_USER` reap-detection
+  pattern (#542).
+
 ## [1.24.0] - 2026-07-27
 
 ### Added

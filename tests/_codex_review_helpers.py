@@ -22,15 +22,68 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _doc_json(*, role: str = "Code Quality Reviewer", status: str = "ok") -> str:
+def _finding_payload(
+    *,
+    severity: str = "MUST_FIX",
+    file: str = "src/cw/foo.py",
+    line_start: int | None = None,
+    line_end: int | None = None,
+    summary: str = "Bug here",
+    consequence: str = "It breaks",
+    suggested_fix: str = "Fix it",
+    evidence: str = "def broken():",
+    confidence: str = "HIGH",
+) -> dict[str, object]:
+    """Minimal valid Finding payload (JSON-dict shape).
+
+    line_start/line_end default to None (a file-level finding, no line
+    anchor) -- pass both when the caller's document must survive
+    diff-based evidence validation (review_findings._classify_finding),
+    which schema-only callers (_parse_reviewer_document, run_codex_roles)
+    never reach.
+    """
+    payload: dict[str, object] = {
+        "severity": severity,
+        "file": file,
+        "summary": summary,
+        "consequence": consequence,
+        "suggested_fix": suggested_fix,
+        "evidence": evidence,
+        "confidence": confidence,
+    }
+    if line_start is not None:
+        payload["line_start"] = line_start
+    if line_end is not None:
+        payload["line_end"] = line_end
+    return payload
+
+
+def _doc_json(
+    *,
+    role: str = "Code Quality Reviewer",
+    status: str = "ok",
+    findings: list[dict[str, object]] | None = None,
+) -> str:
     return json.dumps(
-        {"reviewer_role": role, "status": status, "detail": "", "findings": []}
+        {
+            "reviewer_role": role,
+            "status": status,
+            "detail": "reviewed; no issues found.",
+            "findings": findings if findings is not None else [],
+        }
     )
 
 
-def _ok_result(role: str = "Code Quality Reviewer") -> CodexRunResult:
+def _ok_result(
+    role: str = "Code Quality Reviewer",
+    *,
+    findings: list[dict[str, object]] | None = None,
+) -> CodexRunResult:
     return CodexRunResult(
-        returncode=0, stdout="", stderr="", output_file_content=_doc_json(role=role)
+        returncode=0,
+        stdout="",
+        stderr="",
+        output_file_content=_doc_json(role=role, findings=findings),
     )
 
 

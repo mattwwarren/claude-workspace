@@ -57,7 +57,14 @@ _OUTPUT_INSTRUCTIONS = (
     "Evaluate the diff strictly from the material inlined above — do not rely "
     "on filesystem access. Emit a single JSON object conforming to the provided "
     "ReviewerFindingsDocument schema to the output file (`-o`): `reviewer_role`, "
-    "`status` (ok/degraded/failed), `detail`, and a `findings` array. Every "
+    "`status` (ok/degraded/failed), `detail`, and a `findings` array. When "
+    'returning `status="ok"` with an empty `findings` array, `detail` MUST '
+    "briefly state what was checked (a blank `detail` on that combination is "
+    "rejected by the schema) — do not emit the trivial empty case without "
+    "saying what you verified. If a rubric-mandated check from the inlined "
+    "agent specification could not actually be performed in this "
+    'environment, use `status="degraded"` (naming the unperformed check in '
+    '`detail`) rather than silently reporting `"ok"`. Every '
     "finding's `evidence` MUST be a verbatim substring of the claimed file's "
     "changed lines. Report no prose outside the JSON object.\n\n"
     "The inlined Agent Specification section above was authored for a "
@@ -76,6 +83,69 @@ _OUTPUT_INSTRUCTIONS = (
     "result — are void for this invocation; this instruction block's JSON "
     "ReviewerFindingsDocument contract governs exclusively."
 )
+
+_CODEX_OUTPUT_FORMAT_ROLES: frozenset[str] = frozenset(
+    {
+        "Architecture Reviewer",
+        "Test Reviewer",
+        "Performance Reviewer",
+        "API Contract Validator",
+        "Deployment Reviewer",
+    }
+)
+
+_CODEX_SEVERITY_TAXONOMY = (
+    "## Severity Taxonomy (inlined — the agent specification above references "
+    "`output-formats.md`, which is unreachable in this environment)\n"
+    "The categorization above maps onto the JSON `severity` field as follows: "
+    '"(Critical)" -> `MUST_FIX` (must fix before merge: security, correctness, '
+    'test failures); "(Major)" -> `SHOULD_FIX` (should fix: performance, '
+    'maintainability, technical debt); "(Low)" -> `NIT` (nice to fix: style, '
+    "minor improvements). Only report actionable problems — no praise, "
+    "summaries, or fluff."
+)
+
+_CODEX_TONE_GUIDE_SUPPLEMENT = (
+    "## Tone Conventions (inlined — the agent specification above references "
+    "`review-tone-guide.md`, which is unreachable in this environment)\n"
+    "Include specific file paths and line numbers, clear problem descriptions, "
+    "concrete fixes, and impact/why it matters. Do not include praise, general "
+    'assessments ("code is mostly good"), or hedging ("maybe", "might want to '
+    'consider"). No Praise, No Summaries, No Fluff — reviews are technical '
+    "specifications, not performance evaluations."
+)
+
+_CODEX_TESTING_CHECKLIST_SUPPLEMENT = (
+    "## Testing Checklist (inlined — the agent specification above references "
+    "`testing-philosophy.md`, which is unreachable in this environment)\n"
+    "When reviewing tests, check: AAA Pattern (clear Arrange-Act-Assert), "
+    "Independence (tests don't depend on each other), Naming, Single Concept, "
+    "Can Fail, Edge Cases, Error Cases, Mocking (external deps mocked "
+    "appropriately, not over-mocked), Async Handled, Fast, Deterministic, "
+    "Clean Up."
+)
+
+
+def _codex_output_format_supplement(role: str) -> str | None:
+    """Return inlined replacement content for *role*'s dangling doc references,
+    or ``None`` if *role*'s spec carries no such reference (#1548).
+
+    Why: "Code Quality Reviewer" gets only the tone-guide supplement, never
+    the severity taxonomy, even though its own .claude/agents/code-reviewer.md
+    dangles a reference to output-formats.md like the other five roles. Its
+    Output Format section already spells out "(Must Fix)"/"(Should Fix)"/
+    "(Nice to Fix)" inline (code-reviewer.md:181,187,193), so the shared
+    Critical/Major/Low taxonomy translation would be redundant there — unlike
+    the other five roles, whose specs have no inline categorization at all.
+    """
+    if role == "Code Quality Reviewer":
+        return _CODEX_TONE_GUIDE_SUPPLEMENT
+    if role not in _CODEX_OUTPUT_FORMAT_ROLES:
+        return None
+    parts = [_CODEX_SEVERITY_TAXONOMY]
+    if role == "Test Reviewer":
+        parts.append(_CODEX_TESTING_CHECKLIST_SUPPLEMENT)
+    return "\n\n".join(parts)
 
 
 class _FileCategories(NamedTuple):
@@ -348,6 +418,9 @@ def _build_reviewer_prompt(
         f"# Reviewer Role: {role}",
         f"## Agent Specification\n{agent_spec_text}",
     ]
+    supplement = _codex_output_format_supplement(role)
+    if supplement:
+        parts.append(supplement)
     if ticket_text:
         parts.append(f"## Ticket Context\n{ticket_text}")
     if plan_text:

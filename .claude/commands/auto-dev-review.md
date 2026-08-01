@@ -120,7 +120,12 @@ Dispatch shape depends on mode (see issues #175 / #176 in claude-workspace for t
 REVIEW_FINDINGS>>>
 ```
 
-`NO_ISSUES` (a clean review) maps to `status="ok", findings=[]`. `evidence` MUST be a verbatim substring of the diff text at the claimed lines — `cw review consolidate` (Checkpoint 3a) rejects any finding whose evidence doesn't literally appear there. This block, plus the Friction Protocol and Health Check blocks, is the reviewer's entire structured output — this instruction **supersedes** the reviewer agent spec's own prose "## Output Format" section (MUST_FIX/SHOULD_FIX headings). The Codex adapter (#1236) applies the same override — see `cw.codex_review._context`'s `_OUTPUT_INSTRUCTIONS`, which inlines each agent spec verbatim then appends its own final JSON-schema instruction last so it takes precedence.
+`NO_ISSUES` (a clean review) maps to `status="ok", findings=[]` — `detail`
+MUST briefly state what was checked (e.g. "reviewed diff for X, Y, Z; no
+issues found") since a blank `detail` on a clean `status="ok"` review is
+rejected by the schema. If a rubric-mandated check could not be performed
+in this pass, use `status="degraded"` (with `detail` naming what was
+skipped) rather than reporting `"ok"`. `evidence` MUST be a verbatim substring of the diff text at the claimed lines — `cw review consolidate` (Checkpoint 3a) rejects any finding whose evidence doesn't literally appear there. This block, plus the Friction Protocol and Health Check blocks, is the reviewer's entire structured output — this instruction **supersedes** the reviewer agent spec's own prose "## Output Format" section (MUST_FIX/SHOULD_FIX headings). The Codex adapter (#1236) applies the same override — see `cw.codex_review._context`'s `_OUTPUT_INSTRUCTIONS`, which inlines each agent spec verbatim then appends its own final JSON-schema instruction last so it takes precedence.
 
 ### Checkpoint 3a: Adjudicate every finding
 
@@ -339,7 +344,7 @@ git status --porcelain
 ```
 If the output is non-empty (staged or unstaged changes exist), you MUST either:
 - **Commit and push** the staged changes (if they represent completed work), then emit the sentinel as normal, OR
-- **Emit a `blocked` sentinel** using the full sentinel template from Stage 3 Completion (scroll down to it), with `blocker.reason: "dirty_tree_no_sentinel"`, `scope.tier: "small"` (required by the schema validator even on blocked — `auto_dev_result.py:561-563` rejects null at stage3_review), `blocker.details: "staged or unstaged changes exist but could not be committed and pushed before session end — emitting blocked rather than exiting silently with a dirty index and no sentinel"`, and `health.lowest_agent_confidence` set to a non-null value (the same validator at `auto_dev_result.py:566-570` requires it for stage3_review; omitting it causes schema rejection → `validation_failed` retries rather than `BLOCKED_ON_USER`).
+- **Emit a `blocked` sentinel** using the full sentinel template from Stage 3 Completion (scroll down to it), with `blocker.reason: "dirty_tree_no_sentinel"`, `scope.tier: "small"` (required by the schema validator even on blocked — `auto_dev_result/schema.py`'s §3.3 validator rejects null at stage3_review), `blocker.details: "staged or unstaged changes exist but could not be committed and pushed before session end — emitting blocked rather than exiting silently with a dirty index and no sentinel"`, and `health.lowest_agent_confidence` set to a non-null value (the same §3.3 validator in `auto_dev_result/schema.py` requires it for stage3_review; omitting it causes schema rejection → `validation_failed` retries rather than `BLOCKED_ON_USER`).
 
 Never exit with a dirty tree and no sentinel. A session exit with no sentinel looks identical to "never ran" to the dispatcher — it resets the task to the plan stage and discards origin commits, causing an infinite plan→impl→review→silent-exit loop.
 
@@ -362,7 +367,7 @@ To resolve the tier:
    - If the condition does not hold (marker shows `forbidden_touched: false` already, or a reviewer disagrees with the downgrade, or the ticket exceeds 10 files / 500 lines), skip this step and fall through to step 2 unchanged.
 2. Fallback: read `.claude/cw-context.json` → `queue_metadata.scope_hint`.
 3. Fallback: re-derive from the diff itself using the canonical Stage-1c thresholds — run `git diff --stat $FORK_POINT...origin/<branch-name>` and count changed files and lines. **Small** = ≤10 files AND ≤500 lines AND no forbidden-area touches; **Large** otherwise. (Account for any Step 3b scope growth.)
-4. If no source yields `"small"` or `"large"`, **do NOT emit a `stage_complete` or `review_pending_approval` sentinel** — emit `blocked` instead with `blocker.reason: "scope_tier_unresolvable"`, `scope.tier: "small"` (required by the schema validator even on blocked — `auto_dev_result.py:561-563` rejects null at stage3_review), and `blocker.details: "scope.tier unresolvable — .cw/plan.md has no tier marker, .claude/cw-context.json queue_metadata.scope_hint is null, and diff stat was unavailable. Sentinel emitted with tier=null would fail schema validation and cause validation_failed retries rather than BLOCKED_ON_USER."`.
+4. If no source yields `"small"` or `"large"`, **do NOT emit a `stage_complete` or `review_pending_approval` sentinel** — emit `blocked` instead with `blocker.reason: "scope_tier_unresolvable"`, `scope.tier: "small"` (required by the schema validator even on blocked — `auto_dev_result/schema.py`'s §3.3 validator rejects null at stage3_review), and `blocker.details: "scope.tier unresolvable — .cw/plan.md has no tier marker, .claude/cw-context.json queue_metadata.scope_hint is null, and diff stat was unavailable. Sentinel emitted with tier=null would fail schema validation and cause validation_failed retries rather than BLOCKED_ON_USER."`.
 
 > **Maintenance note:** the `**Scope tier:** ...` marker format and its single-canonical-location convention are shared across 4 files: `auto-dev-plan.md` Step 1g (writer), `auto-dev-impl.md:61` (reader), this file's step 1.5 above (reader + conditional in-place rewriter), and `auto-dev-finalize.md:31` (reader). If the marker format is tuned, update all four locations atomically.
 

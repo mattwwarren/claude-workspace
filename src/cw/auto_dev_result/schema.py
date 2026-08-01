@@ -27,6 +27,11 @@ from pydantic import (
 _log = logging.getLogger("cw.auto_dev_result")
 
 
+# Accepted sentinel schema versions. Single source of truth: parse.py derives
+# SUPPORTED_SCHEMA_VERSIONS (its pre-Pydantic gate) from this Literal via
+# get_args, so a version bump edits exactly one place (#1535 drift class).
+SchemaVersion = Literal[1, 2, 3, 4, 5]
+
 Status = Literal[
     "shipped",
     # RFC 0005 B2 intermediate stage-success status (#699). PR-less: IMPL
@@ -457,7 +462,7 @@ def _is_blank(s: str) -> bool:
 class AutoDevResult(BaseModel):
     """Parsed sentinel block. All cross-field invariants from §3-§5 enforced."""
 
-    schema_version: Literal[1, 2, 3, 4, 5]
+    schema_version: SchemaVersion
     ticket_id: str
     status: Status
     stage_reached: StageReached

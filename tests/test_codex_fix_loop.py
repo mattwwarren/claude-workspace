@@ -129,7 +129,7 @@ def _doc(findings: list[dict[str, object]]) -> str:
         {
             "reviewer_role": "Code Quality Reviewer",
             "status": "ok",
-            "detail": "",
+            "detail": "reviewed; no issues found.",
             "findings": findings,
         }
     )

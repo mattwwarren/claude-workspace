@@ -36,6 +36,13 @@ if TYPE_CHECKING:
     )
 
 
+# Confidence values other than HIGH render an inline annotation on their
+# finding line so a reader can weight it — confidence is display-only and
+# must never gate/filter/reorder findings (R0, #1555). HIGH is the common
+# case and stays unmarked to keep the common path uncluttered.
+_CONFIDENCE_ANNOTATION = " _({confidence} confidence)_"
+
+
 def _format_failures_detail(
     failures: list[ReviewerRunFailure], *, session_id: str
 ) -> str:
@@ -46,6 +53,36 @@ def _format_failures_detail(
     """
     summary = "; ".join(f"{f.role} ({f.reason})" for f in failures)
     return append_diagnostics_pointer(summary, session_id=session_id)
+
+
+def _derive_health(documents: list[ReviewerFindingsDocument]) -> Health:
+    """Derive the clean-review ``Health`` signal from reviewer document status.
+
+    Reached only after the caller has already established there is no
+    MUST_FIX finding and no :class:`ReviewerRunFailure` — i.e. "clean" here
+    means "nothing wrong was found," not "full coverage was achieved."
+    ``failures`` is deliberately not a parameter: every call site reaches
+    this helper only after ``if failures: ...`` has already returned, so
+    ``failures == []`` is already an established invariant here.
+
+    Any document whose ``status`` is not ``"ok"`` — a ``degraded`` role that
+    could not complete a required check, or a self-reported ``failed``
+    document that still parsed — means that role's coverage was reduced even
+    though it produced neither a MUST_FIX finding nor a run failure. Reporting
+    that as full HIGH-confidence PROCEED would be exactly the "spuriously
+    clean sentinel" risk the surrounding disposition logic exists to catch.
+    """
+    if any(doc.status != "ok" for doc in documents):
+        return Health(
+            lowest_agent_confidence="MEDIUM",
+            any_incomplete_risk=True,
+            recommendation="EXIT_FOR_HUMAN_REVIEW",
+        )
+    return Health(
+        lowest_agent_confidence="HIGH",
+        any_incomplete_risk=False,
+        recommendation="PROCEED",
+    )
 
 
 def synthesize_codex_review_result(
@@ -128,11 +165,7 @@ def synthesize_codex_review_result(
         fork_point_sha=None,
         commits=[],
         review=verdict.review,
-        health=Health(
-            lowest_agent_confidence="HIGH",
-            any_incomplete_risk=False,
-            recommendation="PROCEED",
-        ),
+        health=_derive_health(documents),
         worktree_path=str(worktree),
     )
     return result, verdict
@@ -151,7 +184,12 @@ def _render_findings(
         loc = finding.file
         if finding.line_start is not None:
             loc = f"{loc}:{finding.line_start}"
-        lines.append(f"- **{loc}** — {finding.summary}")
+        annotation = (
+            ""
+            if finding.confidence == "HIGH"
+            else _CONFIDENCE_ANNOTATION.format(confidence=finding.confidence)
+        )
+        lines.append(f"- **{loc}**{annotation} — {finding.summary}")
     lines.append("")
     return lines
 

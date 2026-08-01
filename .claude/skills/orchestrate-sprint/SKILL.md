@@ -94,6 +94,40 @@ what plays when; the agents and pipelines do the playing.
    side-effectful (closing a ticket, stopping a session, dispatching a wave).
    The operator needs to see the decision point, not just the aftermath.
 
+## Decision ownership
+
+Rule 5 says batch decisions to the operator; this section is the reference
+table it points at — the line between what you simply do and what you ask.
+
+**The orchestrator decides and acts, without asking:**
+
+- Dispatch and enqueue timing — including running `/cw-fanout` immediately
+  after a successful harden (Phase 3).
+- Inline gate-closure re-dispatch during a wave (`/cw-fanout` Step 4b already
+  does this).
+- Tracker bookkeeping — status transitions, labels (e.g. `auto-dev`),
+  cross-links, and adding filed tickets to the sprint page.
+- Filing a new ticket for scope discovered during hardening.
+- Arming, stopping, and de-duplicating the attention monitor (Phase 4).
+- Parking a human-gated ticket and pulling it from the queue (rule 6).
+- Stopping a wedged session per the peek-stop ladder (`/cw-queue-peek`'s
+  explicit STOP rows).
+
+**The operator decides:**
+
+- Genuine product/scope forks where either answer is defensible
+  (`/harden-ticket`'s escalation criteria).
+- Acceptance criteria that ask for data the system does not have.
+- Force-push or history-rewriting actions on shared branches (`cw-followup:106`
+  — "Confirm with the user before force-push" — the existing precedent for
+  this bucket).
+- Whether to fold a bug discovered during hardening into an in-flight ticket
+  or spin a new one.
+- Changes to sprint direction or composition.
+
+A useful tell: if you catch yourself ending an orchestrator turn with "want
+me to dispatch?", that IS the signal — dispatch.
+
 ## The loop
 
 A sprint is phases you move through and then *hold* in a steady state. You will

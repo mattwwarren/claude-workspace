@@ -4,8 +4,8 @@ on:
   push:
     branches: [main]
     paths:
-      - src/cw/dispatch.py
-      - src/cw/reconcile.py
+      - "src/cw/dispatch/**"
+      - "src/cw/reconcile/**"
       - src/cw/spawn.py
 
 jobs:
@@ -40,8 +40,8 @@ jobs:
           fi
 
           CHANGED=$(git diff --name-only "${LAST_TAG}..HEAD" -- \
-            src/cw/dispatch.py \
-            src/cw/reconcile.py \
+            src/cw/dispatch/ \
+            src/cw/reconcile/ \
             src/cw/spawn.py)
 
           if [ -n "$CHANGED" ]; then
