@@ -151,7 +151,7 @@ Use the `/cw-session-watch` skill to read a session's exit status without hand-g
 | `cw dev-queue refresh-all` | Fast-forward all client repos to origin/main |
 | `cw queue peek` | In-flight inspection of RUNNING dev-queue sessions (age, idle gap, sentinel, PR state) |
 
-`cw dev-queue wait` exit codes: `0`=shipped/no_op · `1`=failed/cancelled · `2`=blocked/pending-human · `3`=attention (stale transcript) · `4`=parked awaiting operator signoff · `124`=timeout
+`cw dev-queue wait` exit codes: `0`=shipped/no_op · `1`=failed/cancelled · `2`=blocked/pending-human · `3`=attention (stale transcript, or a mid-wait reap confirmed by `reap_proposed_at`) · `4`=parked awaiting operator signoff · `124`=timeout
 
 For a wave of tickets, the `/cw-fanout` skill wraps this whole table — pre-flight, enqueue, dispatch, and monitor — into one orchestrated motion, using the `/cw-queue-peek` skill's WAIT/PEEK/STOP ladder to decide whether to keep a long-running session alive.
 
