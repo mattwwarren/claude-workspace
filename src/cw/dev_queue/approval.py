@@ -19,12 +19,10 @@ from typing import TYPE_CHECKING
 from cw.config import get_client
 from cw.dev_queue.crud import _APPROVABLE_STATUSES, _find_ticket
 from cw.dev_queue.lifecycle import (
-    SIGNOFF_GATE_DISPOSITION,
     _advance_task_pointer,
     _clear_signoff_gate,
     _plan_is_reviewed,
     _reset_for_same_stage_requeue,
-    transition_task_status,
 )
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.exceptions import ApproveGateError
@@ -179,7 +177,11 @@ def _approve_ticket_locked(
     """
     from cw.auto_dev_result import SCOPE_GATED_APPROVAL_STATUSES
     from cw.config import load_state
-    from cw.dispatch import _should_force_hold_finalize, _should_gate_for_signoff
+    from cw.dispatch import (
+        _park_signoff_gate,
+        _should_force_hold_finalize,
+        _should_gate_for_signoff,
+    )
 
     store = load_dev_queue()
     task = _resolve_approval_target(store, ticket_id, client_name, resolved_task)
@@ -277,11 +279,7 @@ def _approve_ticket_locked(
     elif task.stage == Stage.REVIEW and _should_gate_for_signoff(
         task, {client_name: client_cfg}
     ):
-        transition_task_status(
-            task,
-            QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
-            disposition=SIGNOFF_GATE_DISPOSITION,
-        )
+        _park_signoff_gate(task)
         awaiting_signoff = True
     elif task.stage == Stage.PLAN and not (
         plan_reviewed if plan_reviewed is not None else _plan_is_reviewed(task)
