@@ -487,7 +487,9 @@ def test_resolve_codex_fix_loop_enabled_lane_unset_global_default_false() -> Non
     assert _resolve_codex_fix_loop_enabled(client, task, config) is False
 
 
-def test_resolve_codex_fix_loop_enabled_unmatched_lane_falls_through_to_global() -> None:
+def test_resolve_codex_fix_loop_enabled_unmatched_lane_falls_through_to_global() -> (
+    None
+):
     client = ClientConfig(
         name="test",
         workspace_path=Path("/tmp/x"),
