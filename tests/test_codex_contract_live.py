@@ -72,10 +72,10 @@ def _git(repo: Path, *args: str) -> None:
 
 
 class _RecordingCodexRunner(RealCodexRunner):
-    """RealCodexRunner that stashes the last result so secrets can be scanned."""
+    """RealCodexRunner that stashes every result so secrets can be scanned."""
 
     def __init__(self) -> None:
-        self.last: CodexRunResult | None = None
+        self.results: list[CodexRunResult] = []
 
     def run(
         self,
@@ -86,18 +86,15 @@ class _RecordingCodexRunner(RealCodexRunner):
         stdin: str | None = None,
     ) -> CodexRunResult:
         result = super().run(worktree, argv, timeout_seconds, stdin=stdin)
-        self.last = result
+        self.results.append(result)
         return result
 
     def assert_clean(self) -> None:
-        """Scan the last captured subprocess output for leaked secrets."""
-        if self.last is None:
-            return
-        _assert_no_secrets_leaked(
-            self.last.stdout,
-            self.last.stderr,
-            self.last.output_file_content or "",
-        )
+        """Scan every captured subprocess output for leaked secrets."""
+        for result in self.results:
+            _assert_no_secrets_leaked(
+                result.stdout, result.stderr, result.output_file_content or ""
+            )
 
 
 @pytest.fixture(scope="module")
