@@ -67,7 +67,7 @@ _OUTPUT_INSTRUCTIONS = (
     "not as a gate on whether to report. If a finding is groundable in the "
     "inlined diff but the spec's own verification step could not be "
     "performed in this environment, report the finding anyway: emit it at "
-    "`confidence: \"LOW\"` and name the unperformed check explicitly in the "
+    '`confidence: "LOW"` and name the unperformed check explicitly in the '
     "finding's `consequence` field (not `evidence`, which must stay a clean "
     "verbatim quote from the diff). Never suppress a diff-groundable finding "
     "solely because a verification precondition from that spec went "
