@@ -7315,18 +7315,19 @@ class TestApplyStagedDecision:
         assert payload["lane"] == "bugs"
         assert correlation_id == "SG-ATTN-1"
 
-    def test_scope_gated_small_tier_park_does_not_emit_attention(
+    def test_scope_gated_small_tier_plan_advance_does_not_emit_attention(
         self,
         tmp_dispatch_dirs: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
-        """Small-tier scope-gated statuses never touch the attention channel (#1302).
-
-        Small tier auto-advances (Stage.PLAN) or parks on the unrelated
-        AWAITING_OPERATOR_SIGNOFF status (Stage.REVIEW with signoff active) --
-        neither is the BLOCKED_ON_USER park this ticket's fix targets, so
-        SESSION_NEEDS_ATTENTION must stay silent for both.
+        """Small-tier scope-gated auto-advance never touches the attention
+        channel (#1302) -- unlike the REVIEW-stage signoff park sibling case,
+        which as of #1552 DOES emit (see
+        test_signoff_gate_park_emits_session_needs_attention). A PLAN-stage
+        auto-advance is neither a BLOCKED_ON_USER park (#1302's original
+        target) nor a signoff-gate park (#1552's), so SESSION_NEEDS_ATTENTION
+        must stay silent here.
         """
         from cw.dispatch import apply_staged_decision
 
@@ -7348,20 +7349,6 @@ class TestApplyStagedDecision:
         )
         assert plan_task.status == QueueItemStatus.PENDING
         assert plan_task.stage == Stage.IMPL
-
-        review_task = self._make_running_task("SG-SMALL-ATTN-2", stage=Stage.REVIEW)
-        review_task.signoff = "operator"
-        review_last_result: dict[str, object] = {
-            "status": "review_pending_approval",
-            "scope": {"tier": "small"},
-        }
-        apply_staged_decision(
-            review_task,
-            "review_pending_approval",
-            review_last_result,
-            self._clients(tmp_path),
-        )
-        assert review_task.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
 
         assert len(attention) == 0
 
