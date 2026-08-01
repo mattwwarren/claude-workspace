@@ -8,6 +8,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Release PRs no longer get titled after a `docs(...)` fixup commit
+  (#1531):** `/ship-it`'s title ladder skipped `chore` outright, so on a
+  release branch the sibling `docs(release): ...` commit won the PR title and
+  the version bump became invisible in the merge history. A new tier ahead of
+  the ladder matches `^chore\(release\):` and wins outright regardless of
+  commit order; ordinary non-release `chore:` commits are still excluded, so
+  the substantive-commit tier is unaffected. Relatedly,
+  `release-tag.yml` now emits a `::warning::` when a push to `main` whose
+  subject was *not* recognized as a release commit nevertheless carries a
+  `pyproject.toml` version that differs from the latest `vX.Y.Z` tag on
+  `origin` — the silent-skip arm of the tagging guard is now observable
+  instead of failing quietly.
 - **`dev-queue wait` no longer fires false ATTENTION during a normal
   inter-stage handoff (#1557):** mid-wait-reap detection previously fired
   exit `3` (`reaped_awaiting_redispatch`) on the bare observation that

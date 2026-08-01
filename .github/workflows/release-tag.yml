@@ -77,6 +77,22 @@ jobs:
             echo "Not a release commit — skipping remaining steps."
           fi
 
+      - name: Warn if a version bump landed without tagging firing
+        id: version-drift-warning
+        if: steps.guard.outputs.match == 'false'
+        run: |
+          PYPROJECT_VERSION=$(grep -m1 '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')
+          LATEST_TAG=$(git ls-remote --tags origin 'v*' \
+            | awk '{print $2}' | sed 's#refs/tags/##; s/\^{}$//' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          if [ -z "$LATEST_TAG" ]; then
+            echo "No existing vX.Y.Z tag found on origin — skipping version-drift check."
+          elif [ "$PYPROJECT_VERSION" != "${LATEST_TAG#v}" ]; then
+            echo "::warning::pyproject.toml version ($PYPROJECT_VERSION) differs from the latest tag ($LATEST_TAG) on a push whose commit subject was NOT recognized as a release commit. If this was meant to be a release, tagging did not fire — verify manually."
+          else
+            echo "pyproject.toml version ($PYPROJECT_VERSION) matches the latest tag ($LATEST_TAG) — no drift detected."
+          fi
+
       - name: Verify version matches pyproject.toml
         if: steps.guard.outputs.match == 'true'
         run: |

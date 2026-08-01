@@ -46,20 +46,29 @@ LAST_RESORT_TITLE=""
 if [ -n "$EXPLICIT_TITLE" ]; then
   TITLE="$EXPLICIT_TITLE"
 else
-  # Tier 2: First substantive conventional-commit (excludes chore/style/revert/test/docs)
+  # Tier 2: chore(release) commit always wins outright — a release branch's
+  # docs(...)/other fixup commits must never out-rank the version-bump
+  # commit itself, regardless of commit order (#1531)
   TITLE=$(git log --reverse --format='%s' origin/main..HEAD \
-    | grep -E '^(feat|fix|refactor|build|perf|ci)(\(.*\))?:' \
+    | grep -E '^chore\(release\):' \
     | head -1)
 
   if [ -z "$TITLE" ]; then
-    # Tier 3: First test/docs conventional-commit (test/docs-only branches)
+    # Tier 3: First substantive conventional-commit (excludes chore/style/revert/test/docs)
+    TITLE=$(git log --reverse --format='%s' origin/main..HEAD \
+      | grep -E '^(feat|fix|refactor|build|perf|ci)(\(.*\))?:' \
+      | head -1)
+  fi
+
+  if [ -z "$TITLE" ]; then
+    # Tier 4: First test/docs conventional-commit (test/docs-only branches)
     TITLE=$(git log --reverse --format='%s' origin/main..HEAD \
       | grep -E '^(test|docs)(\(.*\))?:' \
       | head -1)
   fi
 
   if [ -z "$TITLE" ]; then
-    # Tier 4: Ticket title fallback (reuses existing CLOSES_TRAILER jq/cw-context pattern)
+    # Tier 5: Ticket title fallback (reuses existing CLOSES_TRAILER jq/cw-context pattern)
     if [ -f .claude/cw-context.json ]; then
       TICKET_ID=$(jq -r '.ticket_id // empty' .claude/cw-context.json 2>/dev/null)
       if printf '%s' "$TICKET_ID" | grep -qE '^[0-9]+$'; then
@@ -69,7 +78,7 @@ else
   fi
 
   if [ -z "$TITLE" ]; then
-    # Tier 5: Last resort — HEAD subject (pre-fix behavior)
+    # Tier 6: Last resort — HEAD subject (pre-fix behavior)
     TITLE=$(git log --format='%s' -1)
     LAST_RESORT_TITLE=true
   fi
