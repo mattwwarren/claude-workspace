@@ -400,6 +400,9 @@ def test_synthesize_git_result_stage_complete(
     assert len(result.commits) >= 1
     assert result.scope.lines_actual is not None
     assert result.scope.tier == "small"
+    assert result.health.lowest_agent_confidence == "MEDIUM"
+    assert result.health.any_incomplete_risk is True
+    assert result.health.recommendation == "EXIT_FOR_HUMAN_REVIEW"
     AutoDevResult.model_validate(result.model_dump(mode="json"))
 
 
