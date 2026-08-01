@@ -1089,6 +1089,36 @@ class TestOperatorSignoffGates:
             OrchestratorConfig(default_signoff="bogus")  # type: ignore[arg-type]
 
 
+class TestCodexFixLoopEnabledGate:
+    """Lane-scoped codex_fix_loop_enabled with client/global fallback (#1553)."""
+
+    def test_lane_config_codex_fix_loop_enabled_defaults_none(self) -> None:
+        assert LaneConfig(name="default").codex_fix_loop_enabled is None
+
+    def test_lane_config_carries_codex_fix_loop_enabled_true(self) -> None:
+        lane = LaneConfig(name="default", codex_fix_loop_enabled=True)
+        assert lane.codex_fix_loop_enabled is True
+
+    def test_lane_config_rejects_codex_fix_loop_enabled_false(self) -> None:
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError):
+            LaneConfig(name="default", codex_fix_loop_enabled=False)  # type: ignore[arg-type]
+
+    def test_orchestrator_config_default_codex_fix_loop_enabled_is_false(self) -> None:
+        assert OrchestratorConfig().default_codex_fix_loop_enabled is False
+
+    def test_orchestrator_config_accepts_default_codex_fix_loop_enabled_true(
+        self,
+    ) -> None:
+        assert (
+            OrchestratorConfig(
+                default_codex_fix_loop_enabled=True
+            ).default_codex_fix_loop_enabled
+            is True
+        )
+
+
 class TestConsecutiveSkipLatches:
     """RFC 0007 Phase 4 (W2) + #974: consecutive-skip attention latches."""
 

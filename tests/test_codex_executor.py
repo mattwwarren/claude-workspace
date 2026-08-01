@@ -31,6 +31,7 @@ from cw.executor import (
     CodexExecutor,
     StageExecutor,
     _post_review_comment,
+    _resolve_codex_fix_loop_enabled,
     codex_capability_diagnosis,
     resolve_executor,
 )
@@ -38,7 +39,9 @@ from cw.local_runner import UNEXPECTED_ERROR, make_blocked
 from cw.models import (
     CODEX_BACKEND,
     ClientConfig,
+    LaneConfig,
     LastResultSource,
+    OrchestratorConfig,
     SessionStatus,
     Stage,
     StageExecutorConfig,
@@ -238,10 +241,10 @@ def test_codex_executor_must_fix_blocked(
     finding recorded in BOTH ``must_fix_initial`` (cycle-0 snapshot) and
     ``deferred`` (the cross-cycle survivor set).
 
-    ``codex_fix_loop_enabled=True`` is required here (#1465): the default is
-    False, which would park at cycle 0 instead of running the loop to cap —
-    that default-off path is covered by ``TestFixLoopDisabledGate`` in
-    ``test_codex_fix_loop.py``.
+    A lane-scoped ``codex_fix_loop_enabled=True`` (#1553) is required here:
+    the resolved default is False, which would park at cycle 0 instead of
+    running the loop to cap — that default-off path is covered by
+    ``TestFixLoopDisabledGate`` in ``test_codex_fix_loop.py``.
     """
     worktree = _worktree_with_change(
         make_git_repo, "wt-codex-mf", filename="new.py", content="def broken():\n"
@@ -256,9 +259,11 @@ def test_codex_executor_must_fix_blocked(
         name="test",
         workspace_path=worktree,
         default_branch="main",
-        codex_fix_loop_enabled=True,
+        lanes=[LaneConfig(name="mf-lane", codex_fix_loop_enabled=True)],
     )
-    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
+    task = TicketTask(
+        ticket_id="T-1", client="test", stage=Stage.REVIEW, lane="mf-lane"
+    )
 
     with (
         patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
@@ -397,16 +402,18 @@ def test_spawn_delegates_to_fix_loop_not_bare_run_review(
     result = _persisted_result()
     assert result.blocker is not None
     assert result.blocker.reason == CODEX_REVIEW_UNPARSEABLE
-    # #1465: default (omitted) codex_fix_loop_enabled is False — the gate is
-    # threaded through as the fix_loop_enabled kwarg.
+    # #1553: client has no lanes, so effective_lanes synthesizes the default
+    # lane with codex_fix_loop_enabled=None; the resolver falls through to
+    # OrchestratorConfig()'s default (default_codex_fix_loop_enabled=False),
+    # giving fix_loop_enabled=False here.
     assert fix_loop_mock.call_args.kwargs["fix_loop_enabled"] is False
 
 
-def test_spawn_threads_codex_fix_loop_enabled_true_from_client(
+def test_spawn_threads_codex_fix_loop_enabled_true_from_lane(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """#1465: client.codex_fix_loop_enabled=True threads fix_loop_enabled=True."""
+    """#1553: LaneConfig.codex_fix_loop_enabled=True threads fix_loop_enabled=True."""
     worktree = make_git_repo("wt-codex-wiring-enabled")
     runner = FakeCodexRunner(returncode=0)
     config = StageExecutorConfig(backend=CODEX_BACKEND)
@@ -415,9 +422,11 @@ def test_spawn_threads_codex_fix_loop_enabled_true_from_client(
         name="test",
         workspace_path=worktree,
         default_branch="main",
-        codex_fix_loop_enabled=True,
+        lanes=[LaneConfig(name="mf-lane", codex_fix_loop_enabled=True)],
     )
-    task = TicketTask(ticket_id="T-wire-2", client="test", stage=Stage.REVIEW)
+    task = TicketTask(
+        ticket_id="T-wire-2", client="test", stage=Stage.REVIEW, lane="mf-lane"
+    )
 
     blocked = make_blocked(
         ticket_id="T-wire-2",
@@ -435,6 +444,61 @@ def test_spawn_threads_codex_fix_loop_enabled_true_from_client(
 
     fix_loop_mock.assert_called_once()
     assert fix_loop_mock.call_args.kwargs["fix_loop_enabled"] is True
+
+
+# ---------------------------------------------------------------------------
+# _resolve_codex_fix_loop_enabled precedence (#1553)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_codex_fix_loop_enabled_lane_true_wins_regardless_of_global() -> None:
+    client = ClientConfig(
+        name="test",
+        workspace_path=Path("/tmp/x"),
+        lanes=[LaneConfig(name="trial", codex_fix_loop_enabled=True)],
+    )
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW, lane="trial")
+    config = OrchestratorConfig(default_codex_fix_loop_enabled=False)
+
+    assert _resolve_codex_fix_loop_enabled(client, task, config) is True
+
+
+def test_resolve_codex_fix_loop_enabled_lane_unset_global_true() -> None:
+    client = ClientConfig(
+        name="test",
+        workspace_path=Path("/tmp/x"),
+        lanes=[LaneConfig(name="trial")],
+    )
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW, lane="trial")
+    config = OrchestratorConfig(default_codex_fix_loop_enabled=True)
+
+    assert _resolve_codex_fix_loop_enabled(client, task, config) is True
+
+
+def test_resolve_codex_fix_loop_enabled_lane_unset_global_default_false() -> None:
+    client = ClientConfig(
+        name="test",
+        workspace_path=Path("/tmp/x"),
+        lanes=[LaneConfig(name="trial")],
+    )
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW, lane="trial")
+    config = OrchestratorConfig()
+
+    assert _resolve_codex_fix_loop_enabled(client, task, config) is False
+
+
+def test_resolve_codex_fix_loop_enabled_unmatched_lane_falls_through_to_global() -> None:
+    client = ClientConfig(
+        name="test",
+        workspace_path=Path("/tmp/x"),
+        lanes=[LaneConfig(name="trial", codex_fix_loop_enabled=True)],
+    )
+    task = TicketTask(
+        ticket_id="T-1", client="test", stage=Stage.REVIEW, lane="no-such-lane"
+    )
+    config = OrchestratorConfig(default_codex_fix_loop_enabled=True)
+
+    assert _resolve_codex_fix_loop_enabled(client, task, config) is True
 
 
 def test_resolve_executor_returns_codex_executor(
