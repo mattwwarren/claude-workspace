@@ -129,6 +129,14 @@ _CODEX_TESTING_CHECKLIST_SUPPLEMENT = (
 def _codex_output_format_supplement(role: str) -> str | None:
     """Return inlined replacement content for *role*'s dangling doc references,
     or ``None`` if *role*'s spec carries no such reference (#1548).
+
+    Why: "Code Quality Reviewer" gets only the tone-guide supplement, never
+    the severity taxonomy, even though its own .claude/agents/code-reviewer.md
+    dangles a reference to output-formats.md like the other five roles. Its
+    Output Format section already spells out "(Must Fix)"/"(Should Fix)"/
+    "(Nice to Fix)" inline (code-reviewer.md:181,187,193), so the shared
+    Critical/Major/Low taxonomy translation would be redundant there — unlike
+    the other five roles, whose specs have no inline categorization at all.
     """
     if role == "Code Quality Reviewer":
         return _CODEX_TONE_GUIDE_SUPPLEMENT
