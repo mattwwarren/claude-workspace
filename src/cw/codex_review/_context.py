@@ -58,13 +58,13 @@ _OUTPUT_INSTRUCTIONS = (
     "on filesystem access. Emit a single JSON object conforming to the provided "
     "ReviewerFindingsDocument schema to the output file (`-o`): `reviewer_role`, "
     "`status` (ok/degraded/failed), `detail`, and a `findings` array. When "
-    "returning `status=\"ok\"` with an empty `findings` array, `detail` MUST "
+    'returning `status="ok"` with an empty `findings` array, `detail` MUST '
     "briefly state what was checked (a blank `detail` on that combination is "
     "rejected by the schema) — do not emit the trivial empty case without "
     "saying what you verified. If a rubric-mandated check from the inlined "
     "agent specification could not actually be performed in this "
-    "environment, use `status=\"degraded\"` (naming the unperformed check in "
-    "`detail`) rather than silently reporting `\"ok\"`. Every "
+    'environment, use `status="degraded"` (naming the unperformed check in '
+    '`detail`) rather than silently reporting `"ok"`. Every '
     "finding's `evidence` MUST be a verbatim substring of the claimed file's "
     "changed lines. Report no prose outside the JSON object.\n\n"
     "The inlined Agent Specification section above was authored for a "
