@@ -425,7 +425,9 @@ class TestBuildReviewerPrompt:
             "Deployment Reviewer",
         ],
     )
-    def test_output_format_roles_get_severity_taxonomy_supplement(self, role: str) -> None:
+    def test_output_format_roles_get_severity_taxonomy_supplement(
+        self, role: str
+    ) -> None:
         """The 5 roles whose spec points at output-formats.md (codex cannot open
         it — no live filesystem access) get the MUST_FIX/SHOULD_FIX/NIT mapping
         inlined instead (#1548 item 1)."""
@@ -443,7 +445,8 @@ class TestBuildReviewerPrompt:
         assert "MUST_FIX" in prompt
         assert "SHOULD_FIX" in prompt
         assert "NIT" in prompt
-        assert "Critical" in prompt and "Major" in prompt
+        assert "Critical" in prompt
+        assert "Major" in prompt
 
     def test_code_quality_reviewer_prompt_inlines_tone_guide(self) -> None:
         prompt = _build_reviewer_prompt(
@@ -476,7 +479,8 @@ class TestBuildReviewerPrompt:
         assert "MUST_FIX" in prompt
 
     @pytest.mark.parametrize(
-        "role", ["SysAdmin Reviewer", "Data Safety Reviewer", "Product Manager Reviewer"]
+        "role",
+        ["SysAdmin Reviewer", "Data Safety Reviewer", "Product Manager Reviewer"],
     )
     def test_roles_without_dangling_refs_get_no_supplement(self, role: str) -> None:
         """Roles whose spec has its own complete inline output format (no dangling

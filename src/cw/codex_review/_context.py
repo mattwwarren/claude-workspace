@@ -84,6 +84,61 @@ _OUTPUT_INSTRUCTIONS = (
     "ReviewerFindingsDocument contract governs exclusively."
 )
 
+_CODEX_OUTPUT_FORMAT_ROLES: frozenset[str] = frozenset(
+    {
+        "Architecture Reviewer",
+        "Test Reviewer",
+        "Performance Reviewer",
+        "API Contract Validator",
+        "Deployment Reviewer",
+    }
+)
+
+_CODEX_SEVERITY_TAXONOMY = (
+    "## Severity Taxonomy (inlined — the agent specification above references "
+    "`output-formats.md`, which is unreachable in this environment)\n"
+    "The categorization above maps onto the JSON `severity` field as follows: "
+    '"(Critical)" -> `MUST_FIX` (must fix before merge: security, correctness, '
+    'test failures); "(Major)" -> `SHOULD_FIX` (should fix: performance, '
+    'maintainability, technical debt); "(Low)" -> `NIT` (nice to fix: style, '
+    "minor improvements). Only report actionable problems — no praise, "
+    "summaries, or fluff."
+)
+
+_CODEX_TONE_GUIDE_SUPPLEMENT = (
+    "## Tone Conventions (inlined — the agent specification above references "
+    "`review-tone-guide.md`, which is unreachable in this environment)\n"
+    "Include specific file paths and line numbers, clear problem descriptions, "
+    "concrete fixes, and impact/why it matters. Do not include praise, general "
+    'assessments ("code is mostly good"), or hedging ("maybe", "might want to '
+    'consider"). No Praise, No Summaries, No Fluff — reviews are technical '
+    "specifications, not performance evaluations."
+)
+
+_CODEX_TESTING_CHECKLIST_SUPPLEMENT = (
+    "## Testing Checklist (inlined — the agent specification above references "
+    "`testing-philosophy.md`, which is unreachable in this environment)\n"
+    "When reviewing tests, check: AAA Pattern (clear Arrange-Act-Assert), "
+    "Independence (tests don't depend on each other), Naming, Single Concept, "
+    "Can Fail, Edge Cases, Error Cases, Mocking (external deps mocked "
+    "appropriately, not over-mocked), Async Handled, Fast, Deterministic, "
+    "Clean Up."
+)
+
+
+def _codex_output_format_supplement(role: str) -> str | None:
+    """Return inlined replacement content for *role*'s dangling doc references,
+    or ``None`` if *role*'s spec carries no such reference (#1548).
+    """
+    if role == "Code Quality Reviewer":
+        return _CODEX_TONE_GUIDE_SUPPLEMENT
+    if role not in _CODEX_OUTPUT_FORMAT_ROLES:
+        return None
+    parts = [_CODEX_SEVERITY_TAXONOMY]
+    if role == "Test Reviewer":
+        parts.append(_CODEX_TESTING_CHECKLIST_SUPPLEMENT)
+    return "\n\n".join(parts)
+
 
 class _FileCategories(NamedTuple):
     """Boolean file-category flags for reviewer selection (per /review Step 2)."""
@@ -355,6 +410,9 @@ def _build_reviewer_prompt(
         f"# Reviewer Role: {role}",
         f"## Agent Specification\n{agent_spec_text}",
     ]
+    supplement = _codex_output_format_supplement(role)
+    if supplement:
+        parts.append(supplement)
     if ticket_text:
         parts.append(f"## Ticket Context\n{ticket_text}")
     if plan_text:
