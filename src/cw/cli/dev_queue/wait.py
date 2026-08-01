@@ -85,6 +85,20 @@ def _blocked_on_user_exit_code(task: TicketTask) -> int:
     return _WAIT_EXIT_BLOCKED
 
 
+def _session_has_reap_evidence(session_id: str) -> bool:
+    """True iff *session_id* exists in state with ``reap_proposed_at`` set.
+
+    Mirrors ``_blocked_on_user_exit_code``'s check-else-fall-through: absence
+    of evidence (session pruned from state, or found with reap_proposed_at
+    still None) is a deliberate fail-toward-non-alarming default (#1557) —
+    the caller falls through to spawn-window grace rather than firing
+    ATTENTION on a bare row sample that a normal stage handoff also produces.
+    """
+    state = load_state()
+    session = next((s for s in state.sessions if s.id == session_id), None)
+    return session is not None and session.reap_proposed_at is not None
+
+
 def _handle_terminal_task(
     task: TicketTask,
     ticket_id: str,
@@ -267,9 +281,13 @@ def _handle_reaped_mid_wait(
 ) -> None:
     """Emit ATTENTION output when a session is reaped during the wait loop.
 
-    Called when session_id transitions from non-None to None mid-wait, which
-    means reconcile has reaped the owning session and reverted the task to
-    PENDING.  The operator must decide whether to re-dispatch (#542).
+    Called only when session_id has transitioned from non-None to None
+    mid-wait AND the prior session carries ``reap_proposed_at`` evidence
+    (checked by the caller via ``_session_has_reap_evidence``, #1557) —
+    together confirming reconcile reaped the owning session and reverted the
+    task to PENDING.  A bare non-None→None transition alone is not sufficient
+    evidence: a normal inter-stage handoff clears session_id the same way.
+    The operator must decide whether to re-dispatch (#542).
     """
     if output_json:
         click.echo(
@@ -360,7 +378,10 @@ def dev_queue_wait(
       1   scope_exceeded / forbidden_area / failed / FAILED / CANCELLED
       2   blocked / *_pending_* family / BLOCKED_ON_USER (no reap proposal)
       3   ATTENTION — transcript stale past idle budget, worker not in roster;
-          or BLOCKED_ON_USER caused by a reap proposal (reap_proposed_at set)
+          or BLOCKED_ON_USER caused by a reap proposal (reap_proposed_at set);
+          or a mid-wait session_id clear confirmed by reap_proposed_at on the
+          prior session (#1557 — a bare clear during a normal stage handoff
+          does NOT fire this; it falls through to spawn-window grace/timeout)
       4   AWAITING_OPERATOR_SIGNOFF — ticket parked for an explicit operator
           signoff before it ships (RFC 0007 Phase 3, #990)
       124 hard timeout ceiling (--timeout) with no terminal or attention signal
@@ -408,14 +429,20 @@ def dev_queue_wait(
         # --- Step 2: resolve the session ---
         session_id = task.session_id
         if session_id is None:
-            if observed_session_id is not None:
-                # session_id was non-None on a prior poll and is now None.
-                # Reconcile reaped the session and reverted the task to PENDING;
-                # spawn-window grace does not apply — surface ATTENTION (#542).
+            if observed_session_id is not None and _session_has_reap_evidence(
+                observed_session_id
+            ):
+                # session_id was non-None on a prior poll and is now None, AND
+                # the prior session carries reap_proposed_at — reconcile
+                # reaped the session and reverted the task to PENDING; surface
+                # ATTENTION (#542).
                 _handle_reaped_mid_wait(
                     task, ticket_id, resolved, observed_session_id, output_json
                 )
-            # Spawn-window grace: session hasn't registered yet — keep polling.
+            # Spawn-window grace: session hasn't registered yet, OR the
+            # non-None→None transition has no corresponding reap evidence
+            # (#1557 — a normal inter-stage handoff clears session_id the
+            # same way a reap does) — keep polling.
             _raise_if_deadline_exceeded(
                 deadline, ticket_id, resolved, timeout_seconds, output_json
             )
