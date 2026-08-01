@@ -500,10 +500,16 @@ def synthesize_git_result(
         fork_point_sha=facts["fork_point"] or None,
         commits=facts["commits"],
         review=Review(must_fix_initial=0, should_fix=0, fix_cycles_used=0),
+        # Why: at this point synthesize_git_result knows only that commits exist
+        # and how many files/lines changed — it has no reviewer, no test run, no
+        # vetting of any kind. Claiming HIGH/PROCEED asserted a review that never
+        # happened (#1580, sibling of #1551's codex-producer fix). Mirrors
+        # _FIXED_HEALTH's pessimistic-default posture (`:67-71`): a producer that
+        # cannot vouch for the work should not claim it can.
         health=Health(
-            lowest_agent_confidence="HIGH",
-            any_incomplete_risk=False,
-            recommendation="PROCEED",
+            lowest_agent_confidence="MEDIUM",
+            any_incomplete_risk=True,
+            recommendation="EXIT_FOR_HUMAN_REVIEW",
         ),
         worktree_path=str(worktree),
     )
