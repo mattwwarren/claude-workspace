@@ -305,3 +305,52 @@ class TestDefaultNow:
 
         store = load_dev_queue()
         assert store.tasks[0].escalation_parked_at == fixed
+
+
+class TestSignoffParkAttentionVsEscalation:
+    def test_park_time_attention_does_not_collide_with_escalation_fire(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """The park-time session.needs_attention (#1552) and the 45-minute
+        operator.escalation latch both land in the same window without
+        duplicating or suppressing each other -- different event types,
+        no dedup-key collision (cli/queues.py keys on
+        (type, session_id, paused_status))."""
+        from cw.dispatch import _park_signoff_gate
+        from cw.dev_queue.lifecycle import SIGNOFF_GATE_DISPOSITION
+
+        task = _make_task(
+            ticket_id="GEN-SIGNOFF-1",
+            status=QueueItemStatus.RUNNING,
+            disposition=None,
+        )
+        task.session_id = "sess-signoff-escalation-1"
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with freezegun.freeze_time(_NOW):
+            _park_signoff_gate(task)
+            save_dev_queue(DevQueueStore(tasks=[task]))
+            run_escalation_sweep(now=_NOW)  # stamps escalation_parked_at
+
+        with freezegun.freeze_time(_NOW + timedelta(minutes=ESCALATION_PARK_MINUTES)):
+            fired = run_escalation_sweep(
+                now=_NOW + timedelta(minutes=ESCALATION_PARK_MINUTES)
+            )
+
+        assert fired == ["GEN-SIGNOFF-1"]
+        assert task.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+        assert task.disposition == SIGNOFF_GATE_DISPOSITION
+
+        attention_events = read_events(
+            consumer="test-signoff-attn-vs-escalation-1",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        escalation_events = read_events(
+            consumer="test-signoff-attn-vs-escalation-2",
+            event_types=[OrchestratorEventType.OPERATOR_ESCALATION],
+        )
+        assert len(attention_events) == 1
+        assert attention_events[0].payload["paused_status"] == "signoff_gate"
+        assert attention_events[0].correlation_id == "GEN-SIGNOFF-1"
+        assert len(escalation_events) == 1
+        assert escalation_events[0].correlation_id == "GEN-SIGNOFF-1"
