@@ -27,7 +27,7 @@ from cw.executor_diagnostics import ExecutorFailure, diagnostics_bundle_dir
 from cw.review_findings import ReviewerFindingsDocument, ReviewerRunFailure
 from tests._codex_review_helpers import (
     _Clock,
-    _finding_json,
+    _finding_payload,
     _ok_result,
     _SequencedRunner,
 )
@@ -92,7 +92,7 @@ class TestBuildGenericCodexArgv:
 class TestRunCodexRoles:
     def test_all_complete_within_budget(self, tmp_path: Path) -> None:
         runner = _SequencedRunner(
-            [_ok_result(findings=[_finding_json()]), _ok_result()]
+            [_ok_result(findings=[_finding_payload()]), _ok_result()]
         )
         docs, failures = run_codex_roles(
             runner=runner,

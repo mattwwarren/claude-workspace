@@ -9,7 +9,7 @@ import pytest
 
 from cw.codex_review import _prepare_review_pass, run_review
 from tests._codex_review_helpers import (
-    _finding_json,
+    _finding_payload,
     _git,
     _ok_result,
     _SequencedRunner,
@@ -68,7 +68,7 @@ class TestPrepareReviewPass:
         results = [_ok_result() for _ in prepared.roles]
         results[0] = _ok_result(
             findings=[
-                _finding_json(
+                _finding_payload(
                     severity="SHOULD_FIX", file="mod.py", line_start=1, line_end=1
                 )
             ]

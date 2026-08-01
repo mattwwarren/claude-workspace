@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _finding_json(
+def _finding_payload(
     *,
     severity: str = "MUST_FIX",
     file: str = "src/cw/foo.py",
