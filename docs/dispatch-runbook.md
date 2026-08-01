@@ -327,9 +327,11 @@ Exit codes:
 - `2` — `blocked` / any `*_pending_*` status / `BLOCKED_ON_USER` **not**
   caused by a reap proposal
 - `3` — ATTENTION: transcript stale past idle budget, worker not in daemon
-  roster; a mid-wait reap (`session_id` observed then cleared, #542); or a
-  `BLOCKED_ON_USER` park that originated from a reap proposal
-  (`reap_proposed_at` set on the owning session)
+  roster; a mid-wait reap confirmed by `reap_proposed_at` on the prior
+  session (#542, hardened #1557 — a bare `session_id` clear during a normal
+  stage handoff no longer fires this); or a `BLOCKED_ON_USER` park that
+  originated from a reap proposal (`reap_proposed_at` set on the owning
+  session)
 - `4` — `AWAITING_OPERATOR_SIGNOFF`: ticket parked for an explicit operator
   signoff before it ships (§2; clear with `cw dev-queue approve`)
 - `124` — hard timeout ceiling reached with no terminal or attention signal
@@ -353,14 +355,18 @@ the transcript (i.e., the sentinel fired before reconcile updated queue
 status). `state=terminal` from a queue-status fast-path leaves
 `sentinel_status: null`.
 
-**Mid-wait reap handling (#542, fixed):** the wait loop tracks the first
-non-None `session_id` it observes; if a later poll sees `session_id` cleared
-(reconcile reaped the session and reverted the task), it surfaces ATTENTION
-(exit `3`) immediately instead of riding to the `--timeout` ceiling. The
-spawn-window grace (re-poll while `session_id` has *never* been set) still
-applies to fresh spawns. If wait does return `124`, inspect `cw dev-queue
-status` (or `cw board` for a live view) and the transcript directly (see §6
-in [`session-disposition.md`](session-disposition.md)).
+**Mid-wait reap handling (#542, hardened #1557):** the wait loop tracks the
+first non-None `session_id` it observes; if a later poll sees `session_id`
+cleared, it does **not** treat that bare transition as proof of a reap — a
+normal inter-stage handoff clears `session_id` the same way. It surfaces
+ATTENTION (exit `3`) only when the prior session also carries
+`reap_proposed_at` (looked up in state on the old session id), confirming
+reconcile actually reaped the session and reverted the task. Otherwise (no
+evidence, or the old session has been pruned from state entirely) it falls
+through to the same spawn-window grace used for fresh spawns and continues
+polling toward the `--timeout` ceiling. If wait does return `124`, inspect
+`cw dev-queue status` (or `cw board` for a live view) and the transcript
+directly (see §6 in [`session-disposition.md`](session-disposition.md)).
 
 ---
 
