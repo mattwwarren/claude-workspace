@@ -53,11 +53,10 @@ State is stored at `~/.local/share/cw/` (or `$XDG_DATA_HOME/cw/`).
 | `notifications` | bool | `false` | Desktop notifications on session events. A top-level `notifications: true` key in `clients.yaml` (sibling of `clients:`) turns it on for every client that doesn't set it explicitly |
 | `auto_background_threshold` | int \| null | `null` | Auto-background the session after N conversation turns |
 | `worker_model` | string \| null | `null` | Pin the model for DAEMON-origin worker spawns (auto-dev). Forwarded as `--model <id>` to `claude --bg` from both initial spawn and DAEMON-origin resume. USER-origin sessions (interactive `cw start` / `cw resume`) always inherit the operator's logged-in default model. Opaque string — no validation. |
-| `codex_fix_loop_enabled` | bool | `false` | Master switch for the codex backend's autonomous MUST_FIX fix loop (#1465). When `false` (default), a blocking cycle-0 codex review parks on `CODEX_MUST_FIX_FINDINGS` with zero autonomous fix commits — the pre-#1392 behavior. Set `true` to let `CodexExecutor` run up to the bounded fix-cycle loop and commit fixes autonomously. See [Codex Fix-Loop Gate](#codex-fix-loop-gate-1465) below. |
 | `operator_github_login` | string \| null | `null` | Override the runtime-resolved GitHub login used for counterparty/self-identity resolution (RFC 0011 S1). Rare multi-account case; the runtime `gh api user` login is authoritative when unset. |
 | `repo_path` | path | *none** | Shared repo path (worktree mode) |
 | `branch` | string | *none** | Branch name (worktree mode) |
-| `lanes` | list[LaneConfig] | `[]` | Named dispatch lanes (a scheduling boundary for dev-queue tickets; manage with `cw lane add/ls/pause/resume/rm`, target with `cw dev-queue add --lane` / `cw dev-queue move`). Each lane has `name` (required), `max_parallel: int = 1`, `priority: int = 0`, `paused: bool = false`, `description: str = ""`, `reap_policy: "signal_only" | "auto" | null = null` (null inherits the global `reap_policy` from `orchestrator.yaml`), `pipeline: PipelineConfig | null = null` (per-lane per-stage executor override — see [Pipeline Configuration](#pipeline-configuration--per-stage-model-pinning) below), `signoff: "operator" | null = null` (RFC 0007 Phase 3 — see [Operator Signoff Gates](#operator-signoff-gates-rfc-0007-phase-3) below), `gate_recipes: dict[str,bool] | null = null` (RFC 0009 Phase 4 — per-lane gate-recipe enablement; see [Gate Recipe Enablement](#gate-recipe-enablement-rfc-0009-phase-4) below), `review_recipes: dict[str,bool] | null = null` (RFC 0010 Phase 3 — per-lane review-recipe enablement; see [Review Recipe Enablement](#review-recipe-enablement-rfc-0010-phase-3) below). When no lanes are declared, a single implicit `default` lane is synthesized. |
+| `lanes` | list[LaneConfig] | `[]` | Named dispatch lanes (a scheduling boundary for dev-queue tickets; manage with `cw lane add/ls/pause/resume/rm`, target with `cw dev-queue add --lane` / `cw dev-queue move`). Each lane has `name` (required), `max_parallel: int = 1`, `priority: int = 0`, `paused: bool = false`, `description: str = ""`, `reap_policy: "signal_only" | "auto" | null = null` (null inherits the global `reap_policy` from `orchestrator.yaml`), `pipeline: PipelineConfig | null = null` (per-lane per-stage executor override — see [Pipeline Configuration](#pipeline-configuration--per-stage-model-pinning) below), `signoff: "operator" | null = null` (RFC 0007 Phase 3 — see [Operator Signoff Gates](#operator-signoff-gates-rfc-0007-phase-3) below), `gate_recipes: dict[str,bool] | null = null` (RFC 0009 Phase 4 — per-lane gate-recipe enablement; see [Gate Recipe Enablement](#gate-recipe-enablement-rfc-0009-phase-4) below), `review_recipes: dict[str,bool] | null = null` (RFC 0010 Phase 3 — per-lane review-recipe enablement; see [Review Recipe Enablement](#review-recipe-enablement-rfc-0010-phase-3) below), `codex_fix_loop_enabled: true | null = null` (#1553 — lane override for the codex backend's autonomous MUST_FIX fix loop; `null` defers to the global `default_codex_fix_loop_enabled` in `orchestrator.yaml`; see [Codex Fix-Loop Gate](#codex-fix-loop-gate-1465) below). When no lanes are declared, a single implicit `default` lane is synthesized. |
 | `pipeline` | PipelineConfig | standard 4-stage pipeline, no per-stage models | Per-stage executor configuration (RFC 0005): `stages` (default `[plan, impl, review, finalize]`) and `executors` (default `{}`). See [Pipeline Configuration](#pipeline-configuration--per-stage-model-pinning) below. |
 
 \* Either `workspace_path` OR both `repo_path` + `branch` must be set.
@@ -298,26 +297,40 @@ Recommended models per stage:
 `CodexExecutor.spawn`'s Step 3 (`review` stage, `backend: codex`) delegates to
 `run_review_with_fix_loop`, which runs a bounded, autonomous fix-cycle loop
 (codex writes to the worktree and commits) whenever cycle 0's review blocks on
-a MUST_FIX finding. `client.codex_fix_loop_enabled` gates that loop and
-defaults to `false` as a fail-safe: turning on `review: {backend: codex}`
-should not implicitly grant codex the ability to commit fixes to the
-worktree on its own. With the gate off, a blocking cycle-0 review parks on
-`CODEX_MUST_FIX_FINDINGS` immediately — the pre-#1392 park-on-MUST_FIX
-behavior — with zero fix cycles attempted.
+a MUST_FIX finding. The lane-scoped `codex_fix_loop_enabled` gates that loop
+(#1553; see the `lanes` field above), falling through to the global
+`default_codex_fix_loop_enabled` in `orchestrator.yaml` when the lane sets no
+override. Both default to `false` as a fail-safe: turning on `review:
+{backend: codex}` should not implicitly grant codex the ability to commit
+fixes to the worktree on its own. With the gate off, a blocking cycle-0
+review parks on `CODEX_MUST_FIX_FINDINGS` immediately — the pre-#1392
+park-on-MUST_FIX behavior — with zero fix cycles attempted.
 
 ```yaml
 clients:
   my-project:
     workspace_path: /home/user/projects/my-project
-    codex_fix_loop_enabled: true
+    lanes:
+      - name: codex-trial
+        codex_fix_loop_enabled: true
 ```
 
-**Operator callout:** this repo change does not itself re-enable the
-codex-trial lane's fix loop. To restore the prior (pre-gate) fix-loop
-behavior for the `claude-workspace` client's codex-trial lane, the operator
-must separately set `codex_fix_loop_enabled: true` on the `claude-workspace`
-client block in `~/.config/cw/clients.yaml` — not a repo file, so this change
-alone does not flip it.
+```yaml
+# orchestrator.yaml — flip the loop on for every lane that sets no override
+default_codex_fix_loop_enabled: true
+```
+
+**Operator callout (#1553 migration):** `ClientConfig.codex_fix_loop_enabled`
+no longer exists — the gate moved to the lane-scoped
+`LaneConfig.codex_fix_loop_enabled` shown above, with
+`OrchestratorConfig.default_codex_fix_loop_enabled` as the global fallback.
+Delete any `codex_fix_loop_enabled: <bool>` line set directly on a client
+block in `~/.config/cw/clients.yaml` — not a repo file, so this change does
+not touch it automatically. A client whose value was already `false` (the
+prior schema default, and also `default_codex_fix_loop_enabled`'s default)
+needs no lane entry — deleting the line is a no-op change in effective
+behavior. A client that relied on `codex_fix_loop_enabled: true` must move
+it onto the relevant lane instead, per the first `yaml` block above.
 
 **Cost posture for metered plans:** each selected reviewer role costs one
 codex invocation per review pass (`_select_reviewer_roles` picks at most 4
@@ -333,10 +346,11 @@ against remaining quota before enabling the loop.
 
 **Recommended posture:** for operators on a metered codex/GPT plan, leave
 `codex_fix_loop_enabled: false`. This is already the schema default
-(`ClientConfig.codex_fix_loop_enabled`), but the recommendation here is
-about invocation cost, not just accidental-commit safety — with the gate
-off, a blocking cycle-0 review parks on `CODEX_MUST_FIX_FINDINGS` at 1×
-review_pass_size codex calls instead of up to `6 × review_pass_size + 5`.
+(`LaneConfig.codex_fix_loop_enabled` / `default_codex_fix_loop_enabled`),
+but the recommendation here is about invocation cost, not just
+accidental-commit safety — with the gate off, a blocking cycle-0 review
+parks on `CODEX_MUST_FIX_FINDINGS` at 1× review_pass_size codex calls
+instead of up to `6 × review_pass_size + 5`.
 Only enable the loop once the worst-case call count above has been checked
 against the plan's remaining quota for the billing period.
 
