@@ -40,11 +40,14 @@ from cw.codex_review import (
     CODEX_REVIEW_UNPARSEABLE,
     CODEX_TIMEOUT,
     _capture_diff,
+    _prepare_review_pass,
     _run_codex_role,
     _slug,
+    run_codex_roles,
 )
 from cw.codex_runner import CodexRunResult, RealCodexRunner
-from cw.review_findings import ReviewerFindingsDocument
+from cw.review_findings import ReviewerFindingsDocument, consolidate_verdict
+from tests._codex_review_helpers import _task
 from tests.conftest import _clean_git_env
 from tests.test_codex_contract_secrets import _assert_no_secrets_leaked
 
@@ -69,10 +72,10 @@ def _git(repo: Path, *args: str) -> None:
 
 
 class _RecordingCodexRunner(RealCodexRunner):
-    """RealCodexRunner that stashes the last result so secrets can be scanned."""
+    """RealCodexRunner that stashes every result so secrets can be scanned."""
 
     def __init__(self) -> None:
-        self.last: CodexRunResult | None = None
+        self.results: list[CodexRunResult] = []
 
     def run(
         self,
@@ -83,18 +86,15 @@ class _RecordingCodexRunner(RealCodexRunner):
         stdin: str | None = None,
     ) -> CodexRunResult:
         result = super().run(worktree, argv, timeout_seconds, stdin=stdin)
-        self.last = result
+        self.results.append(result)
         return result
 
     def assert_clean(self) -> None:
-        """Scan the last captured subprocess output for leaked secrets."""
-        if self.last is None:
-            return
-        _assert_no_secrets_leaked(
-            self.last.stdout,
-            self.last.stderr,
-            self.last.output_file_content or "",
-        )
+        """Scan every captured subprocess output for leaked secrets."""
+        for result in self.results:
+            _assert_no_secrets_leaked(
+                result.stdout, result.stderr, result.output_file_content or ""
+            )
 
 
 @pytest.fixture(scope="module")
@@ -151,6 +151,21 @@ def _seed_repo(
     _git(repo, "add", filename)
     _git(repo, "commit", "-m", f"add {filename}")
     return repo
+
+
+def _install_agent_specs(repo: Path) -> None:
+    """Copy the real .claude/agents/ tree into *repo* verbatim (R6).
+
+    Wholesale copytree (not a hand-picked subset) so the fixture cannot
+    drift from _REVIEWER_ROLE_AGENT_FILES. The tree is git-tracked, so a
+    fresh worker worktree has it; same off-checkout read location as
+    tests/test_orchestrator_skill.py:5.
+
+    Module-level (not conftest.py): only this class consumes it today;
+    promote to conftest.py if a second consumer appears.
+    """
+    source = Path(__file__).parent.parent / ".claude" / "agents"
+    shutil.copytree(source, repo / ".claude" / "agents")
 
 
 @pytest.mark.skipif(not _CODEX_LIVE, reason="INTEGRATION_CODEX_LIVE not set")
@@ -438,3 +453,71 @@ class TestCodexContractDiagnostics:
         # the nightly run red instead of passing silently (#1238 review).
         assert probe.diagnosis is None, probe.detail
         runner.assert_clean()
+
+
+_CANARY_SESSION_ID = "live-contract-canary"
+
+
+@pytest.mark.skipif(not _CODEX_LIVE, reason="INTEGRATION_CODEX_LIVE not set")
+class TestCodexContractProductionPromptCanary:
+    """Seeded defect must survive consolidate_verdict under the REAL
+    production prompt chain (#1546) -- _prepare_review_pass ->
+    run_codex_roles -- not this file's self-authored _reviewer_prompt().
+
+    Sequencing (ticket body): meaningful only after #1543's
+    _OUTPUT_INSTRUCTIONS precedence fix landed (377a576f, ancestor of the
+    base this ticket branches from) -- against the raw pre-#1543 prompt
+    this canary would fail for the already-diagnosed reason and prove
+    nothing new.
+    """
+
+    def test_seeded_defect_survives_production_prompt_chain(
+        self,
+        make_git_repo: Callable[..., Path],
+        live_base: Callable[[], Path],
+    ) -> None:
+        base = live_base()
+        defect = "def ratio(n: int) -> float:\n    return n / 0\n"
+        repo = _seed_repo(
+            make_git_repo,
+            base,
+            "production-prompt-canary",
+            filename="math_util.py",
+            content=defect,
+        )
+        _install_agent_specs(repo)
+
+        prepared = _prepare_review_pass(_task(), repo, "main")
+        # R2: a seeded .py defect under small-scope (_task()'s default
+        # scope_hint=None) selects Code Quality + SysAdmin (mandatory)
+        # plus Data Safety (categories.python forces
+        # mutates_persisted_state) -- three live codex exec calls, the
+        # intended consequence of routing through real selection logic.
+        assert prepared.roles == [
+            "Code Quality Reviewer",
+            "SysAdmin Reviewer",
+            "Data Safety Reviewer",
+        ]
+
+        runner = _RecordingCodexRunner()
+        documents, failures = run_codex_roles(
+            runner=runner,
+            worktree=repo,
+            roles=prepared.roles,
+            prompts_by_role=prepared.prompts_by_role,
+            model=None,
+            wall_clock_budget_seconds=None,
+            session_id=_CANARY_SESSION_ID,
+        )
+        runner.assert_clean()
+
+        verdict = consolidate_verdict(
+            documents,
+            prepared.diff,
+            prepared.reviewed_sha,
+            failed_reviewers=failures,
+        )
+        assert len(verdict.accepted) >= 1, (
+            "no finding survived consolidate_verdict under the production "
+            f"prompt chain; documents={documents!r} failures={failures!r}"
+        )
