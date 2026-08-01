@@ -242,6 +242,52 @@ class TestRenderVerdictComment:
         assert "minor nit" in body
         assert body.index("### MUST_FIX") < body.index("### SHOULD_FIX")
 
+    def test_low_confidence_finding_renders_confidence_label(self) -> None:
+        diff = _make_diff()
+        doc = _make_reviewer_doc(
+            _make_finding(severity="MUST_FIX", confidence="LOW", summary="bad thing")
+        )
+        verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        body = render_verdict_comment(verdict)
+        assert "LOW confidence" in body
+        assert "bad thing" in body
+
+    def test_high_confidence_finding_renders_no_confidence_label(self) -> None:
+        diff = _make_diff()
+        doc = _make_reviewer_doc(
+            _make_finding(severity="MUST_FIX", confidence="HIGH", summary="bad thing")
+        )
+        verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        body = render_verdict_comment(verdict)
+        assert "confidence" not in body.lower()
+
+    def test_medium_confidence_finding_renders_confidence_label(self) -> None:
+        diff = _make_diff()
+        doc = _make_reviewer_doc(
+            _make_finding(severity="MUST_FIX", confidence="MEDIUM", summary="bad thing")
+        )
+        verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        body = render_verdict_comment(verdict)
+        assert "MEDIUM confidence" in body
+
+    def test_confidence_does_not_affect_blocking_or_partition(self) -> None:
+        # Regression (#1555): confidence is display-only. Two SEPARATE
+        # verdicts, not two findings in one doc — _dedup_key excludes
+        # confidence and would merge same-key findings.
+        diff = _make_diff()
+        doc_high = _make_reviewer_doc(
+            _make_finding(severity="MUST_FIX", confidence="HIGH")
+        )
+        doc_low = _make_reviewer_doc(
+            _make_finding(severity="MUST_FIX", confidence="LOW")
+        )
+        verdict_high = consolidate_verdict([doc_high], diff, reviewed_sha="sha")
+        verdict_low = consolidate_verdict([doc_low], diff, reviewed_sha="sha")
+        assert verdict_high.blocking is True
+        assert verdict_low.blocking is True
+        assert len(verdict_high.must_fix) == len(verdict_low.must_fix) == 1
+        assert "### MUST_FIX" in render_verdict_comment(verdict_low)
+
 
 def test_format_failures_detail_includes_diagnostics_path() -> None:
     failures = [ReviewerRunFailure(role="Code Quality Reviewer", reason=CODEX_TIMEOUT)]

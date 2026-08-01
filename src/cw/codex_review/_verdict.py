@@ -36,6 +36,13 @@ if TYPE_CHECKING:
     )
 
 
+# Confidence values other than HIGH render an inline annotation on their
+# finding line so a reader can weight it — confidence is display-only and
+# must never gate/filter/reorder findings (R0, #1555). HIGH is the common
+# case and stays unmarked to keep the common path uncluttered.
+_CONFIDENCE_ANNOTATION = " _({confidence} confidence)_"
+
+
 def _format_failures_detail(
     failures: list[ReviewerRunFailure], *, session_id: str
 ) -> str:
@@ -151,7 +158,12 @@ def _render_findings(
         loc = finding.file
         if finding.line_start is not None:
             loc = f"{loc}:{finding.line_start}"
-        lines.append(f"- **{loc}** — {finding.summary}")
+        annotation = (
+            ""
+            if finding.confidence == "HIGH"
+            else _CONFIDENCE_ANNOTATION.format(confidence=finding.confidence)
+        )
+        lines.append(f"- **{loc}**{annotation} — {finding.summary}")
     lines.append("")
     return lines
 
