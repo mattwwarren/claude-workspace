@@ -393,6 +393,26 @@ class TestBuildReviewerPrompt:
         assert "## Project Rubrics" not in prompt
         assert "ELEVATED SCRUTINY" not in prompt
 
+    def test_output_instructions_override_agent_spec_preconditions(self) -> None:
+        """_OUTPUT_INSTRUCTIONS must countermand the inlined agent spec's own
+        tool/verification preconditions and output conventions (#1543) — and
+        must appear positionally after the inlined spec so it wins as the
+        last word in the assembled prompt."""
+        prompt = _build_reviewer_prompt(
+            "Code Quality Reviewer",
+            agent_spec_text="AGENT SPEC BODY",
+            diff=_make_diff(),
+            changed_files=["src/cw/foo.py"],
+            plan_text=None,
+            ticket_text=None,
+            project_rubrics=None,
+            repo_policy_section=None,
+            sensitive_hits=[],
+        )
+        override_substring = "advisory here, not blocking"
+        assert override_substring in prompt
+        assert prompt.index("AGENT SPEC BODY") < prompt.index(override_substring)
+
 
 # ---------------------------------------------------------------------------
 # _prepare_review_pass extraction (#1392)
