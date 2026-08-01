@@ -22,7 +22,13 @@ from cw.codex_review import (
     _read_sensitive_manifest,
     _select_reviewer_roles,
 )
-from tests._codex_review_helpers import _doc_json, _git, _task, _write
+from tests._codex_review_helpers import (
+    _doc_json,
+    _finding_payload,
+    _git,
+    _task,
+    _write,
+)
 from tests.conftest import _make_diff
 
 if TYPE_CHECKING:
@@ -291,10 +297,12 @@ class TestParseReviewerDocument:
         assert _parse_reviewer_document(payload) is None
 
     def test_valid_document(self) -> None:
-        payload = _doc_json()
+        payload = _doc_json(findings=[_finding_payload()])
         doc = _parse_reviewer_document(payload)
         assert doc is not None
         assert doc.status == "ok"
+        assert len(doc.findings) == 1
+        assert doc.findings[0].severity == "MUST_FIX"
 
 
 # ---------------------------------------------------------------------------
