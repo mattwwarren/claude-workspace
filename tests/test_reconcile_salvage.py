@@ -1194,10 +1194,11 @@ class TestSalvageCommittedNoPrSessions:
             "cw.reconcile._shared.salvage_terminal_result", lambda *_a, **_kw: None
         )
         monkeypatch.setattr(
-            "cw.reconcile.idle._transcript_recently_active", lambda *_a, **_kw: False
+            "cw.reconcile.idle._detect._transcript_recently_active",
+            lambda *_a, **_kw: False,
         )
         monkeypatch.setattr(
-            "cw.reconcile.idle._awaiting_subagent", lambda *_a, **_kw: False
+            "cw.reconcile.idle._detect._awaiting_subagent", lambda *_a, **_kw: False
         )
 
         state = CwState(sessions=[sess])

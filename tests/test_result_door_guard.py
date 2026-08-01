@@ -36,46 +36,52 @@ _DOOR_MODULE = "result.py"
 # any new write site trips TestNoLastResultAssignmentOutsideDoor until it is
 # individually classified and added here.
 _ALLOWLIST: dict[str, dict[str, str]] = {
-    "reconcile/idle.py": {
+    "reconcile/idle/_mutations.py": {
         (
             "session.last_result = {\n"
             "_PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON\n"
             "}"
         ): (
-            "idle.py:562 — park marker, stage-mismatch-refused; no 'status' "
-            "key so has_terminal_result() stays False"
+            "idle/_mutations.py (_apply_idle_routed_mutations) — park marker, "
+            "stage-mismatch-refused; no 'status' key so has_terminal_result() "
+            "stays False"
         ),
         'session.last_result = candidate.routed_sentinel.model_dump(mode="json")': (
-            "idle.py:570 — routed-sentinel advance; a real terminal sentinel "
-            "routed via _apply_sentinel_to_task, carries 'status'"
+            "idle/_mutations.py (_apply_idle_routed_mutations) — routed-"
+            "sentinel advance; a real terminal sentinel routed via "
+            "_apply_sentinel_to_task, carries 'status'"
         ),
         'session.last_result = {"paused_status": _SILENTLY_IDLE_REASON}': (
-            "idle.py:661 — park marker, silently-idle; no 'status' key so "
-            "has_terminal_result() stays False"
+            "idle/_mutations.py (_apply_idle_state_mutations) — park marker, "
+            "silently-idle; no 'status' key so has_terminal_result() stays "
+            "False"
         ),
     },
-    "reconcile/phantom.py": {
+    "reconcile/phantom/_mutations.py": {
         (
             "session.last_result = {\n"
             "**existing,\n"
             "_SENTINEL_ADVANCE_REFUSED_KEY: True,\n"
             "}"
         ): (
-            "phantom.py:721 — park marker, stage-mismatch-refused (merge "
-            "branch: preserves the caller's existing paused_status under "
-            "its own key); no 'status' key added"
+            "phantom/_mutations.py (_apply_phantom_routed_mutations) — park "
+            "marker, stage-mismatch-refused (merge branch: preserves the "
+            "caller's existing paused_status under its own key); no 'status' "
+            "key added"
         ),
         (
             "session.last_result = {\n"
             "_PAUSED_STATUS_KEY: _SENTINEL_STAGE_MISMATCH_REFUSED_REASON\n"
             "}"
         ): (
-            "phantom.py:726 — park marker, stage-mismatch-refused (fresh "
-            "branch: no pre-existing dict to merge into); no 'status' key"
+            "phantom/_mutations.py (_apply_phantom_routed_mutations) — park "
+            "marker, stage-mismatch-refused (fresh branch: no pre-existing "
+            "dict to merge into); no 'status' key"
         ),
         'session.last_result = candidate.routed_sentinel.model_dump(mode="json")': (
-            "phantom.py:734 — routed-sentinel advance; a real terminal "
-            "sentinel routed via _apply_sentinel_to_task, carries 'status'"
+            "phantom/_mutations.py (_apply_phantom_routed_mutations) — "
+            "routed-sentinel advance; a real terminal sentinel routed via "
+            "_apply_sentinel_to_task, carries 'status'"
         ),
     },
     "reconcile/salvage.py": {

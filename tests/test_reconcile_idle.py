@@ -431,7 +431,9 @@ def test_flag_silently_idle_watchdog_does_not_stop_working_worker(
 
     mock_daemon = MagicMock()
     with (
-        patch("cw.reconcile.idle._transcript_recently_active", return_value=True),
+        patch(
+            "cw.reconcile.idle._detect._transcript_recently_active", return_value=True
+        ),
         patch("cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon),
     ):
         result, _salvage = flag_silently_idle_daemon_sessions(
@@ -717,8 +719,10 @@ def test_flag_silently_idle_salvages_shipped_sentinel(
         patch("cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon),
         # Transcript mtime is real-time (May 2026) but now is fake (Jan 2026);
         # negative diff < window_seconds would falsely mark the worker alive.
-        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
-        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
+        patch(
+            "cw.reconcile.idle._detect._transcript_recently_active", return_value=False
+        ),
+        patch("cw.reconcile.idle._detect._awaiting_subagent", return_value=False),
     ):
         state = load_state()
         blocked, _salvage = flag_silently_idle_daemon_sessions(
@@ -775,8 +779,10 @@ def test_flag_silently_idle_salvages_no_op_sentinel(
     mock_daemon = MagicMock()
     with (
         patch("cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon),
-        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
-        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
+        patch(
+            "cw.reconcile.idle._detect._transcript_recently_active", return_value=False
+        ),
+        patch("cw.reconcile.idle._detect._awaiting_subagent", return_value=False),
     ):
         state = load_state()
         blocked, _salvage = flag_silently_idle_daemon_sessions(
@@ -1025,8 +1031,10 @@ def test_silently_idle_parked_session_salvaged_on_next_pass(
     mock_daemon = MagicMock()
     with (
         patch("cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon),
-        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
-        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
+        patch(
+            "cw.reconcile.idle._detect._transcript_recently_active", return_value=False
+        ),
+        patch("cw.reconcile.idle._detect._awaiting_subagent", return_value=False),
     ):
         state = load_state()
         blocked, _salvage = flag_silently_idle_daemon_sessions(
@@ -1174,7 +1182,7 @@ def test_flag_silently_idle_daemon_sessions_external_counterparty_escalates(
     from cw.reconcile._shared import _EXTERNAL_COUNTERPARTY_IDLE_REASON
 
     monkeypatch.setattr(
-        "cw.reconcile.idle.derive_counterparty", lambda _task, **_kw: "external"
+        "cw.reconcile.idle._detect.derive_counterparty", lambda _task, **_kw: "external"
     )
 
     started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -1283,7 +1291,9 @@ def test_flag_silently_idle_daemon_sessions_unchanged_no_merged_param(
         "cw.reconcile._deps.checked_out_branch",
         lambda _p: "auto-dev/unchanged-sgit-branch",
     )
-    monkeypatch.setattr("cw.reconcile.idle._detect_post_review_clean", lambda _s: False)
+    monkeypatch.setattr(
+        "cw.reconcile.idle._detect._detect_post_review_clean", lambda _s: False
+    )
     monkeypatch.setattr(
         "cw.reconcile._shared.worktree_dirty_by_path", lambda _c, _p: False
     )
@@ -1905,8 +1915,10 @@ def test_flag_silently_idle_skips_worker_awaiting_subagent(
     )
 
     with (
-        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
-        patch("cw.reconcile.idle._awaiting_subagent", return_value=True),
+        patch(
+            "cw.reconcile.idle._detect._transcript_recently_active", return_value=False
+        ),
+        patch("cw.reconcile.idle._detect._awaiting_subagent", return_value=True),
         patch("cw.reconcile._deps.fire_push_notification") as mock_notify,
     ):
         blocked, _salvage = flag_silently_idle_daemon_sessions(
@@ -1989,8 +2001,10 @@ def test_flag_silently_idle_auto_recovers_under_cap(
 
     mock_daemon = MagicMock()
     with (
-        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
-        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
+        patch(
+            "cw.reconcile.idle._detect._transcript_recently_active", return_value=False
+        ),
+        patch("cw.reconcile.idle._detect._awaiting_subagent", return_value=False),
         patch("cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon),
         patch("cw.reconcile._deps.fire_push_notification") as mock_notify,
     ):
@@ -2055,8 +2069,10 @@ def test_flag_silently_idle_recover_cleans_up_worktree(
 
     removed: list[tuple[str, str, bool]] = []
     with (
-        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
-        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
+        patch(
+            "cw.reconcile.idle._detect._transcript_recently_active", return_value=False
+        ),
+        patch("cw.reconcile.idle._detect._awaiting_subagent", return_value=False),
         patch("cw.reconcile._deps.get_native_daemon_client", return_value=MagicMock()),
         patch("cw.reconcile._deps.fire_push_notification"),
         patch(
@@ -2123,8 +2139,10 @@ def test_flag_silently_idle_recover_skips_cleanup_when_no_branch(
         return ClientConfig(name=name, workspace_path=tmp_path / "ws")
 
     with (
-        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
-        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
+        patch(
+            "cw.reconcile.idle._detect._transcript_recently_active", return_value=False
+        ),
+        patch("cw.reconcile.idle._detect._awaiting_subagent", return_value=False),
         patch("cw.reconcile._deps.get_native_daemon_client", return_value=MagicMock()),
         patch("cw.reconcile._deps.fire_push_notification"),
         patch("cw.reconcile._shared.get_client", record_get_client),
@@ -2190,8 +2208,10 @@ def test_flag_silently_idle_usage_limit_emits_distinct_cause(
 
     mock_daemon = MagicMock()
     with (
-        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
-        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
+        patch(
+            "cw.reconcile.idle._detect._transcript_recently_active", return_value=False
+        ),
+        patch("cw.reconcile.idle._detect._awaiting_subagent", return_value=False),
         patch("cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon),
         patch("cw.reconcile._deps.fire_push_notification"),
     ):
@@ -2254,8 +2274,10 @@ def test_flag_silently_idle_no_usage_limit_emits_idle_stall_cause(
 
     mock_daemon = MagicMock()
     with (
-        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
-        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
+        patch(
+            "cw.reconcile.idle._detect._transcript_recently_active", return_value=False
+        ),
+        patch("cw.reconcile.idle._detect._awaiting_subagent", return_value=False),
         patch("cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon),
         patch("cw.reconcile._deps.fire_push_notification"),
     ):
@@ -2310,8 +2332,10 @@ def test_flag_silently_idle_parks_when_cap_exhausted(
 
     mock_daemon = MagicMock()
     with (
-        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
-        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
+        patch(
+            "cw.reconcile.idle._detect._transcript_recently_active", return_value=False
+        ),
+        patch("cw.reconcile.idle._detect._awaiting_subagent", return_value=False),
         patch("cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon),
         patch("cw.reconcile._deps.fire_push_notification") as mock_notify,
     ):
@@ -2476,7 +2500,9 @@ def test_classify_idle_threshold_merged_different_client_not_routed(
         "cw.reconcile._deps.checked_out_branch",
         lambda _p: "auto-dev/collide-1",
     )
-    monkeypatch.setattr("cw.reconcile.idle._detect_post_review_clean", lambda _s: False)
+    monkeypatch.setattr(
+        "cw.reconcile.idle._detect._detect_post_review_clean", lambda _s: False
+    )
     monkeypatch.setattr(
         "cw.reconcile._shared.worktree_dirty_by_path", lambda _c, _p: False
     )
@@ -2536,7 +2562,9 @@ def test_classify_idle_threshold_non_finalize_worktree_still_salvage_git(
         "cw.reconcile._deps.checked_out_branch",
         lambda _p: "auto-dev/idle-nonfinalize-1",
     )
-    monkeypatch.setattr("cw.reconcile.idle._detect_post_review_clean", lambda _s: False)
+    monkeypatch.setattr(
+        "cw.reconcile.idle._detect._detect_post_review_clean", lambda _s: False
+    )
     monkeypatch.setattr(
         "cw.reconcile._shared.worktree_dirty_by_path", lambda _c, _p: False
     )
@@ -2747,8 +2775,10 @@ def test_flag_silently_idle_recover_skips_non_running_task(
 
     mock_daemon = MagicMock()
     with (
-        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
-        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
+        patch(
+            "cw.reconcile.idle._detect._transcript_recently_active", return_value=False
+        ),
+        patch("cw.reconcile.idle._detect._awaiting_subagent", return_value=False),
         patch("cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon),
         patch("cw.reconcile._deps.checked_out_branch", return_value=None),
     ):
@@ -2825,8 +2855,10 @@ def test_reap_reason_idle_stall(
     )
 
     with (
-        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
-        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
+        patch(
+            "cw.reconcile.idle._detect._transcript_recently_active", return_value=False
+        ),
+        patch("cw.reconcile.idle._detect._awaiting_subagent", return_value=False),
         patch(
             "cw.reconcile._shared.detect_usage_limit",
             return_value=UsageLimitDetection(
@@ -2885,8 +2917,10 @@ def test_reap_reason_usage_limit_cutoff(
     )
 
     with (
-        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
-        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
+        patch(
+            "cw.reconcile.idle._detect._transcript_recently_active", return_value=False
+        ),
+        patch("cw.reconcile.idle._detect._awaiting_subagent", return_value=False),
         patch(
             "cw.reconcile._shared.detect_usage_limit",
             return_value=UsageLimitDetection(
@@ -2958,8 +2992,10 @@ def _run_idle_recover_with_transcript(
     os.utime(str(transcript), (after_ts, after_ts))
 
     with (
-        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
-        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
+        patch(
+            "cw.reconcile.idle._detect._transcript_recently_active", return_value=False
+        ),
+        patch("cw.reconcile.idle._detect._awaiting_subagent", return_value=False),
         patch("cw.reconcile._deps.get_native_daemon_client", return_value=MagicMock()),
         patch("cw.reconcile._deps.fire_push_notification"),
     ):
@@ -3053,8 +3089,10 @@ def test_reap_reason_retry_cap_parked(
     )
 
     with (
-        patch("cw.reconcile.idle._transcript_recently_active", return_value=False),
-        patch("cw.reconcile.idle._awaiting_subagent", return_value=False),
+        patch(
+            "cw.reconcile.idle._detect._transcript_recently_active", return_value=False
+        ),
+        patch("cw.reconcile.idle._detect._awaiting_subagent", return_value=False),
         patch("cw.reconcile._deps.fire_push_notification"),
     ):
         flag_silently_idle_daemon_sessions(
@@ -3256,9 +3294,12 @@ def test_detect_idle_candidates_recover_counter_when_liveness_restored(
 
     # Patch transcript recently active → True
     monkeypatch.setattr(
-        "cw.reconcile.idle._transcript_recently_active", lambda _s, _n, **_kw: True
+        "cw.reconcile.idle._detect._transcript_recently_active",
+        lambda _s, _n, **_kw: True,
     )
-    monkeypatch.setattr("cw.reconcile.idle._awaiting_subagent", lambda _s, _n: False)
+    monkeypatch.setattr(
+        "cw.reconcile.idle._detect._awaiting_subagent", lambda _s, _n: False
+    )
 
     candidates = _detect_idle_candidates(
         state,
@@ -3377,7 +3418,9 @@ def test_detect_idle_candidates_salvage_git(
     monkeypatch.setattr(
         "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/idle-sgit-1"
     )
-    monkeypatch.setattr("cw.reconcile.idle._detect_post_review_clean", lambda _s: False)
+    monkeypatch.setattr(
+        "cw.reconcile.idle._detect._detect_post_review_clean", lambda _s: False
+    )
     monkeypatch.setattr(
         "cw.reconcile._shared.worktree_dirty_by_path", lambda _c, _p: False
     )
@@ -3467,7 +3510,9 @@ def test_idle_advance_sentinel_backstop_prevents_salvage_git(
     monkeypatch.setattr(
         "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/idle-adv-1"
     )
-    monkeypatch.setattr("cw.reconcile.idle._detect_post_review_clean", lambda _s: False)
+    monkeypatch.setattr(
+        "cw.reconcile.idle._detect._detect_post_review_clean", lambda _s: False
+    )
     monkeypatch.setattr(
         "cw.reconcile._shared.worktree_dirty_by_path", lambda _c, _p: False
     )
@@ -3565,7 +3610,9 @@ def test_idle_advance_sentinel_backstop_earlier_stage_falls_through(
     monkeypatch.setattr(
         "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/idle-adv-earlier"
     )
-    monkeypatch.setattr("cw.reconcile.idle._detect_post_review_clean", lambda _s: False)
+    monkeypatch.setattr(
+        "cw.reconcile.idle._detect._detect_post_review_clean", lambda _s: False
+    )
     monkeypatch.setattr(
         "cw.reconcile._shared.worktree_dirty_by_path", lambda _c, _p: False
     )
@@ -3620,7 +3667,9 @@ def test_idle_advance_sentinel_backstop_no_transcript_falls_through(
     monkeypatch.setattr(
         "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/idle-adv-notx"
     )
-    monkeypatch.setattr("cw.reconcile.idle._detect_post_review_clean", lambda _s: False)
+    monkeypatch.setattr(
+        "cw.reconcile.idle._detect._detect_post_review_clean", lambda _s: False
+    )
     monkeypatch.setattr(
         "cw.reconcile._shared.worktree_dirty_by_path", lambda _c, _p: False
     )
@@ -3670,7 +3719,9 @@ def test_idle_advance_sentinel_backstop_finalize_stage_deferred(
     monkeypatch.setattr(
         "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/idle-adv-finalize"
     )
-    monkeypatch.setattr("cw.reconcile.idle._detect_post_review_clean", lambda _s: False)
+    monkeypatch.setattr(
+        "cw.reconcile.idle._detect._detect_post_review_clean", lambda _s: False
+    )
     monkeypatch.setattr(
         "cw.reconcile._shared.worktree_dirty_by_path", lambda _c, _p: False
     )
@@ -3719,7 +3770,9 @@ def test_stage_complete_git_salvage_candidate_not_produced_end_to_end(
     monkeypatch.setattr(
         "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/idle-adv-e2e"
     )
-    monkeypatch.setattr("cw.reconcile.idle._detect_post_review_clean", lambda _s: False)
+    monkeypatch.setattr(
+        "cw.reconcile.idle._detect._detect_post_review_clean", lambda _s: False
+    )
     monkeypatch.setattr(
         "cw.reconcile._shared.worktree_dirty_by_path", lambda _c, _p: False
     )
@@ -3782,7 +3835,9 @@ def test_detect_idle_candidates_finalize_yields_zero_candidates(
     monkeypatch.setattr(
         "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/idle-finalize-2"
     )
-    monkeypatch.setattr("cw.reconcile.idle._detect_post_review_clean", lambda _s: False)
+    monkeypatch.setattr(
+        "cw.reconcile.idle._detect._detect_post_review_clean", lambda _s: False
+    )
     monkeypatch.setattr(
         "cw.reconcile._shared.worktree_dirty_by_path", lambda _c, _p: False
     )
