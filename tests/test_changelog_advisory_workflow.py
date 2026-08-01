@@ -76,6 +76,34 @@ def _run_check_step(changed_files: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _run_list_step(
+    tmp_path: Path, *, gh_exit_code: int
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    """Run the list-files step's script against a stubbed `gh` binary."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_gh = fake_bin / "gh"
+    fake_gh.write_text(f"#!/bin/sh\nexit {gh_exit_code}\n")
+    fake_gh.chmod(0o755)
+    output_file = tmp_path / "github_output"
+    output_file.write_text("")
+    env = {
+        "REPO": "example-org/example-repo",
+        "PR_NUMBER": "1",
+        "GITHUB_OUTPUT": str(output_file),
+        "PATH": f"{fake_bin}:/usr/bin:/bin",
+    }
+    result = subprocess.run(
+        ["/bin/bash", "-c", _list_script()],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    return result, output_file
+
+
 # --- Group A: YAML-level structural assertions ---
 
 
@@ -110,10 +138,31 @@ def test_list_pr_files_step_fails_open() -> None:
     eventually being marked "required" in branch protection.
     """
     script = _list_script()
-    guard_index = script.index("||")
+    # Anchor on the actual guard operator, not the first bare "||" -- the
+    # script's own explanatory comment ("Mirrors dispatch-guard.yml's
+    # `|| true` fail-open idiom") contains a literal "||" earlier in the
+    # string than the real `FILES=$(...) || {` guard.
+    guard_index = script.index(") || {")
     guard_branch = script[guard_index:]
     assert "exit 0" in guard_branch
     assert WARNING_IDIOM in guard_branch
+
+
+def test_list_pr_files_step_fails_open_on_gh_api_error(tmp_path: Path) -> None:
+    """Executed regression guard: a real failing `gh api` call must not fail the job.
+
+    `test_list_pr_files_step_fails_open` above only inspects the script's
+    text; this actually runs the step's shell against a stubbed `gh` that
+    exits non-zero, the way Group B exercises the check step's real logic.
+    """
+    result, output_file = _run_list_step(tmp_path, gh_exit_code=1)
+    assert result.returncode == 0, result.stderr
+    assert WARNING_IDIOM in result.stdout
+
+    lines = output_file.read_text().splitlines()
+    assert lines[0].startswith("files<<")
+    delim = lines[0].removeprefix("files<<")
+    assert lines[1] == delim, "expected an empty multiline value between the delimiters"
 
 
 # --- Group B: literal shell exercise of the check logic ---

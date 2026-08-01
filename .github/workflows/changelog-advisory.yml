@@ -31,6 +31,13 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Random per-run delimiter. $FILES/$GITHUB_OUTPUT below is populated
+          # from PR filenames, which a fork-PR author fully controls — a file
+          # literally named "EOF" would terminate a fixed-delimiter heredoc
+          # early and could smuggle extra key=value pairs into this job's
+          # outputs. GitHub's own hardening guidance is to randomize instead.
+          DELIM="EOF_$(uuidgen)"
+
           # Fail open. Because there is no `paths:` filter this step runs on
           # every PR, so a `gh api` hiccup (5xx, rate limit, network flake,
           # auth misconfig) must degrade to "skip the advisory this run",
@@ -40,16 +47,16 @@ jobs:
             --paginate --jq '.[].filename') || {
             echo "::warning::changelog-advisory: could not list PR files (exit $?) — skipping check for this run"
             {
-              echo "files<<EOF"
-              echo "EOF"
+              echo "files<<$DELIM"
+              echo "$DELIM"
             } >> "$GITHUB_OUTPUT"
             exit 0
           }
 
           {
-            echo "files<<EOF"
+            echo "files<<$DELIM"
             echo "$FILES"
-            echo "EOF"
+            echo "$DELIM"
           } >> "$GITHUB_OUTPUT"
 
       - name: Warn if src/cw changed without a CHANGELOG entry
