@@ -81,10 +81,10 @@ jobs:
         id: version-drift-warning
         if: steps.guard.outputs.match == 'false'
         run: |
-          PYPROJECT_VERSION=$(grep -m1 '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')
+          PYPROJECT_VERSION=$(grep -m1 '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/' || true)
           LATEST_TAG=$(git ls-remote --tags origin 'v*' \
             | awk '{print $2}' | sed 's#refs/tags/##; s/\^{}$//' \
-            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+            | { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true; } | sort -V | tail -1)
           if [ -z "$LATEST_TAG" ]; then
             echo "No existing vX.Y.Z tag found on origin — skipping version-drift check."
           elif [ "$PYPROJECT_VERSION" != "${LATEST_TAG#v}" ]; then

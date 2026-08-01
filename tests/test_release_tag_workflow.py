@@ -126,7 +126,11 @@ def _run_step(
     try:
         env = {**_clean_git_env(), "GITHUB_OUTPUT": str(output_path)}
         result = subprocess.run(
-            ["/bin/bash", "-c", script],
+            # -eo pipefail matches GitHub Actions' actual default `run:` shell
+            # (`bash --noprofile --norc -eo pipefail {0}`) -- without it, a
+            # grep-no-match mid-pipeline is silently swallowed here even
+            # though it aborts the step for real on the runner (#1531).
+            ["/bin/bash", "-eo", "pipefail", "-c", script],
             cwd=str(repo),
             env=env,
             capture_output=True,
@@ -196,6 +200,29 @@ def test_guard_chore_release_bad_version_still_hard_fails(
     assert result.returncode == 1
     assert ERROR_PREFIX in result.stdout + result.stderr
     assert "match" not in outputs
+
+
+def test_guard_non_release_subject_match_false(
+    make_git_repo: Callable[..., Path],
+    tmp_path: Path,
+) -> None:
+    """R7 item 5's other half: the guard itself, not just the warn step.
+
+    The warn-step tests below prove the warn script stays silent on an
+    ordinary merge, but none of them ever invoke the guard step itself for
+    that subject -- so a regression that made the guard start matching
+    ordinary commits would go undetected. Close that loop directly.
+    """
+    repo = _repo_with_remote(
+        make_git_repo,
+        tmp_path,
+        head_subject="merge widget refactor",
+        pyproject_version="1.24.0",
+        remote_tags=["v1.24.0"],
+    )
+    result, outputs = _run_step(GUARD_STEP_ID, repo)
+    assert result.returncode == 0, result.stderr
+    assert outputs["match"] == "false"
 
 
 def test_warn_no_warning_when_pyproject_matches_latest_tag(
