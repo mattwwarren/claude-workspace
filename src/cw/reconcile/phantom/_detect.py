@@ -311,3 +311,36 @@ def _detect_phantom_candidates(
             )
         )
     return candidates
+
+
+def _split_crash_candidates(
+    candidates: list[ReapCandidate],
+    merged_ticket_ids: frozenset[str],
+    gh_blocked_ticket_ids: frozenset[str],
+) -> tuple[list[ReapCandidate], list[ReapCandidate], list[ReapCandidate]]:
+    """Partition CRASH_COMPLETE candidates by world-state check results (#637).
+
+    Returns (crash_candidates, merged_crash_candidates, gh_blocked_crash_candidates).
+    merged_ticket_ids / gh_blocked_ticket_ids come from a pre-pass in reconcile()
+    that runs BEFORE sessions_lock, so no gh subprocess executes here. Candidates
+    with no ticket_id fall through to the normal crash path.
+    """
+    all_crash_candidates = [
+        c for c in candidates if c.proposed_action == ProposedAction.CRASH_COMPLETE
+    ]
+    merged_crash_candidates = [
+        c
+        for c in all_crash_candidates
+        if c.ticket_id and c.ticket_id in merged_ticket_ids
+    ]
+    gh_blocked_crash_candidates = [
+        c
+        for c in all_crash_candidates
+        if c.ticket_id and c.ticket_id in gh_blocked_ticket_ids
+    ]
+    crash_candidates = [
+        c
+        for c in all_crash_candidates
+        if c not in merged_crash_candidates and c not in gh_blocked_crash_candidates
+    ]
+    return crash_candidates, merged_crash_candidates, gh_blocked_crash_candidates

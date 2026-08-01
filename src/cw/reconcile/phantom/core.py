@@ -27,6 +27,7 @@ from cw.reconcile._shared import (
     _apply_queue_mutations,
     resolve_reap_policy,
 )
+from cw.reconcile.phantom._detect import _split_crash_candidates
 from cw.reconcile.phantom._events import (
     _emit_phantom_routed_events,
     _emit_phantom_terminal_events,
@@ -36,7 +37,6 @@ from cw.reconcile.phantom._mutations import (
     _apply_phantom_queue_mutations,
     _apply_phantom_routed_mutations,
     _apply_phantom_salvage_mutations,
-    _split_crash_candidates,
 )
 
 if TYPE_CHECKING:

@@ -30,6 +30,7 @@ from cw.reconcile.phantom._detect import (
     _detect_phantom_candidates,
     _phantom_advance_sentinel_candidate,
     _sentinel_mismatch_veto_candidate,
+    _split_crash_candidates,
 )
 from cw.reconcile.phantom._events import (
     _SENTINEL_MISMATCH_VETO_CAP_EXHAUSTED_REASON,
@@ -41,7 +42,6 @@ from cw.reconcile.phantom._mutations import (
     _apply_phantom_queue_mutations,
     _apply_phantom_routed_mutations,
     _apply_phantom_salvage_mutations,
-    _split_crash_candidates,
 )
 from cw.reconcile.phantom.core import (
     _act_on_phantom_candidates,
