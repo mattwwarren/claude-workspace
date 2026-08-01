@@ -24,7 +24,12 @@ if TYPE_CHECKING:
 
 def _doc_json(*, role: str = "Code Quality Reviewer", status: str = "ok") -> str:
     return json.dumps(
-        {"reviewer_role": role, "status": status, "detail": "", "findings": []}
+        {
+            "reviewer_role": role,
+            "status": status,
+            "detail": "reviewed; no issues found.",
+            "findings": [],
+        }
     )
 
 

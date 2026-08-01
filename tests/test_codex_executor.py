@@ -89,7 +89,7 @@ def _reviewer_doc(
         {
             "reviewer_role": role,
             "status": "ok",
-            "detail": "",
+            "detail": "reviewed; no issues found.",
             "findings": findings or [],
         }
     )
