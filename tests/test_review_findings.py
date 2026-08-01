@@ -183,9 +183,71 @@ class TestReviewerFindingsDocument:
 
     def test_ok_clean_review_round_trips(self) -> None:
         doc = ReviewerFindingsDocument(
-            reviewer_role="R", status="ok", detail="", findings=[]
+            reviewer_role="R", status="ok", detail="checked X; no issues.", findings=[]
         )
         assert doc.findings == []
+
+    def test_make_reviewer_doc_default_still_valid(self) -> None:
+        # Tripwire for the conftest fixture-default fix (#1544): the zero-arg
+        # _make_reviewer_doc() call (status="ok", findings=[]) must keep
+        # validating cleanly once the new ok/empty-findings justification
+        # validator lands — if the conftest default regresses to a blank
+        # detail, this fails immediately instead of scattering failures
+        # across the ~56 other call sites that rely on it.
+        doc = _make_reviewer_doc()
+        assert doc.status == "ok"
+        assert doc.findings == []
+
+
+class TestReviewerFindingsDocumentOkJustification:
+    """R6 (#1544): status='ok' + empty findings requires a non-blank detail."""
+
+    def test_ok_empty_findings_blank_detail_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="degraded"):
+            ReviewerFindingsDocument(
+                reviewer_role="R", status="ok", detail="", findings=[]
+            )
+
+    def test_ok_empty_findings_whitespace_detail_rejected(self) -> None:
+        # Proves _is_blank's .strip() semantics are actually invoked, not a
+        # naive falsy/empty-string check.
+        with pytest.raises(ValidationError, match="degraded"):
+            ReviewerFindingsDocument(
+                reviewer_role="R", status="ok", detail="   ", findings=[]
+            )
+
+    def test_ok_empty_findings_nonblank_detail_passes(self) -> None:
+        doc = ReviewerFindingsDocument(
+            reviewer_role="R",
+            status="ok",
+            detail="Checked X, Y, Z; no issues.",
+            findings=[],
+        )
+        assert doc.detail == "Checked X, Y, Z; no issues."
+
+    def test_ok_nonempty_findings_blank_detail_passes(self) -> None:
+        # The justification rule only applies when findings is empty.
+        doc = ReviewerFindingsDocument(
+            reviewer_role="R", status="ok", detail="", findings=[_make_finding()]
+        )
+        assert doc.detail == ""
+
+    def test_degraded_empty_findings_blank_detail_passes(self) -> None:
+        # Regression lock for R2: degraded is exempt from the justification
+        # requirement entirely, even with empty findings and blank detail.
+        doc = ReviewerFindingsDocument(
+            reviewer_role="R", status="degraded", detail="", findings=[]
+        )
+        assert doc.detail == ""
+
+    def test_failed_status_unaffected_by_justification_check(self) -> None:
+        # The new validator doesn't newly constrain "failed" — existing
+        # _check_failed_has_no_findings behavior (failed + findings rejected)
+        # is covered separately by test_failed_status_with_findings_rejected.
+        doc = ReviewerFindingsDocument(
+            reviewer_role="R", status="failed", detail="", findings=[]
+        )
+        assert doc.detail == ""
 
 
 class TestReviewerFindingsDocumentNullNormalization:
@@ -195,7 +257,13 @@ class TestReviewerFindingsDocumentNullNormalization:
     """
 
     def test_null_detail_normalizes_to_empty_string(self) -> None:
-        doc = _make_reviewer_doc(detail=None)
+        # Decoupled from status="ok" (#1544): the new ok/empty-findings
+        # justification validator rejects a blank detail on that combination,
+        # but the null->"" coercion this test verifies is a field-level
+        # concern orthogonal to that cross-field rule, so it moves off
+        # status="ok" to status="degraded" (exempt from the justification
+        # rule) to keep testing exactly what it intends.
+        doc = _make_reviewer_doc(detail=None, status="degraded")
         assert doc.detail == ""
 
     def test_null_findings_normalizes_to_empty_list(self) -> None:

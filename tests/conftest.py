@@ -270,7 +270,7 @@ def _make_reviewer_doc(
     kwargs: dict[str, object] = {
         "reviewer_role": "Test Reviewer",
         "status": "ok",
-        "detail": "",
+        "detail": "reviewed; no issues found.",
         "findings": list(findings),
     }
     kwargs.update(overrides)

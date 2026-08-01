@@ -118,9 +118,12 @@ class TestTransformProperties:
 
 class TestRoundTripValidation:
     def test_round_trip_model_validate_null_detail(self) -> None:
+        # status="degraded" (#1544): these fixtures exist to verify null->""
+        # detail coercion, orthogonal to the ok/empty-findings justification
+        # rule, which would otherwise reject the resulting blank detail.
         payload = {
             "reviewer_role": "R",
-            "status": "ok",
+            "status": "degraded",
             "detail": None,
             "findings": [],
         }
@@ -130,7 +133,7 @@ class TestRoundTripValidation:
     def test_round_trip_model_validate_null_findings(self) -> None:
         payload = {
             "reviewer_role": "R",
-            "status": "ok",
+            "status": "degraded",
             "detail": "",
             "findings": None,
         }
@@ -140,7 +143,7 @@ class TestRoundTripValidation:
     def test_round_trip_model_validate_both_null(self) -> None:
         payload = {
             "reviewer_role": "R",
-            "status": "ok",
+            "status": "degraded",
             "detail": None,
             "findings": None,
         }
