@@ -245,9 +245,7 @@ class TestRenderVerdictComment:
     def test_low_confidence_finding_renders_confidence_label(self) -> None:
         diff = _make_diff()
         doc = _make_reviewer_doc(
-            _make_finding(
-                severity="MUST_FIX", confidence="LOW", summary="bad thing"
-            )
+            _make_finding(severity="MUST_FIX", confidence="LOW", summary="bad thing")
         )
         verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
         body = render_verdict_comment(verdict)
@@ -257,9 +255,7 @@ class TestRenderVerdictComment:
     def test_high_confidence_finding_renders_no_confidence_label(self) -> None:
         diff = _make_diff()
         doc = _make_reviewer_doc(
-            _make_finding(
-                severity="MUST_FIX", confidence="HIGH", summary="bad thing"
-            )
+            _make_finding(severity="MUST_FIX", confidence="HIGH", summary="bad thing")
         )
         verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
         body = render_verdict_comment(verdict)
@@ -268,9 +264,7 @@ class TestRenderVerdictComment:
     def test_medium_confidence_finding_renders_confidence_label(self) -> None:
         diff = _make_diff()
         doc = _make_reviewer_doc(
-            _make_finding(
-                severity="MUST_FIX", confidence="MEDIUM", summary="bad thing"
-            )
+            _make_finding(severity="MUST_FIX", confidence="MEDIUM", summary="bad thing")
         )
         verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
         body = render_verdict_comment(verdict)
