@@ -126,6 +126,15 @@ class LaneConfig(BaseModel):
     # defers to OrchestratorConfig.default_finalize_gate. Overridden by
     # TicketTask.hold_finalize -- see resolve_hold_finalize (dispatch/routing.py).
     finalize_gate: Literal["manual"] | None = None
+    # Lane-level override for the codex backend's autonomous MUST_FIX fix loop
+    # (#1553, superseding the removed ClientConfig.codex_fix_loop_enabled from
+    # #1465). None defers to OrchestratorConfig.default_codex_fix_loop_enabled.
+    # Resolved by cw.executor._resolve_codex_fix_loop_enabled, mirroring
+    # resolve_reap_policy's lane-then-global fallthrough shape. Literal[True]
+    # (not bool): a lane can only opt IN to the fix loop, never opt a client's
+    # global-True default back OUT -- the same asymmetry finalize_gate/signoff
+    # already encode for their own gates.
+    codex_fix_loop_enabled: Literal[True] | None = None
     # Lane-level gate-recipe enablement map (RFC 0009 P4, #1067). Middle tier in
     # resolve_gate_recipe_enabled's 3-tier precedence: consulted when the ticket
     # carries no override for the recipe, and itself overridden by
@@ -481,6 +490,14 @@ class OrchestratorConfig(BaseModel):
     # field exists to guarantee. Pydantic's Literal validation already raises
     # loudly on an invalid value, which is the correct fail-closed behavior.
     default_finalize_gate: Literal["auto", "manual"] = "auto"
+    # Global default for the codex backend's autonomous MUST_FIX fix loop
+    # (#1553), used when the ticket's lane (LaneConfig.codex_fix_loop_enabled)
+    # sets no override. Default False, mirroring gate_recipes_enabled's and
+    # concierge_enabled's fail-safe defaults: enabling `review: {backend:
+    # codex}` must not implicitly enable autonomous fix commits. Superseded
+    # the removed ClientConfig.codex_fix_loop_enabled (#1465) with a 2-tier
+    # (lane -> global) resolver -- see cw.executor._resolve_codex_fix_loop_enabled.
+    default_codex_fix_loop_enabled: bool = False
     # RFC 0008 W2 — global ladder of transcript-staleness thresholds (minutes),
     # ordered [stale_15m, stale_30m, stale_45m]. A session's transcript-mtime
     # age is compared against these to classify Session.liveness_bucket.
