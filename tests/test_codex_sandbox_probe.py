@@ -134,7 +134,6 @@ class TestCodexSandboxReadOnlyProbe:
         self,
         make_git_repo: Callable[..., Path],
         live_base: Callable[[], Path],
-        caplog: pytest.LogCaptureFixture,
     ) -> None:
         base = live_base()
         sentinel_token = f"SENTINEL-{uuid.uuid4().hex}"
@@ -146,17 +145,16 @@ class TestCodexSandboxReadOnlyProbe:
             content=sentinel_token + "\n",
         )
         runner = _RecordingCodexRunner()
-        with caplog.at_level(logging.INFO, logger=__name__):
-            doc, failure = _run_codex_role(
-                runner=runner,
-                worktree=repo,
-                role="Sandbox Probe",
-                prompt=_sandbox_probe_prompt(sentinel_token),
-                model=None,
-                timeout_seconds=120,
-                scratch_dir=_scratch(base),
-                session_id="sandbox-probe-suite",
-            )
+        doc, failure = _run_codex_role(
+            runner=runner,
+            worktree=repo,
+            role="Sandbox Probe",
+            prompt=_sandbox_probe_prompt(sentinel_token),
+            model=None,
+            timeout_seconds=120,
+            scratch_dir=_scratch(base),
+            session_id="sandbox-probe-suite",
+        )
         # Structural contract ONLY -- the run completed and the document
         # parsed. Never assert on whether codex could read the file.
         assert failure is None
@@ -171,5 +169,7 @@ class TestCodexSandboxReadOnlyProbe:
             sentinel_returned,
             doc.detail,
         )
-        assert any("codex_sandbox_probe" in r.getMessage() for r in caplog.records)
+        assert doc.status in ("ok", "degraded", "failed")
+        assert isinstance(doc.findings, list)
+        assert isinstance(sentinel_returned, bool)
         runner.assert_clean()
