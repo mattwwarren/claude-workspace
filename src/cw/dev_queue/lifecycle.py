@@ -105,13 +105,65 @@ _RESET_DISPOSITION_STATUSES: frozenset[QueueItemStatus] = frozenset(
 )
 
 # The two signoff markers auto-dev-plan appends to the plan-of-record body.
-# Local copy of cw.reconcile.gate_recipes._PLAN_SPEC_MARKER /
-# _PLAN_SOUNDNESS_MARKER -- importing gate_recipes from here would create an
-# import cycle (gate_recipes already imports from dev_queue), so this module
-# keeps its own copy. Keep the two pairs in sync; drift is caught by
-# test_approve_plan_reviewed_marker_constants_match_gate_recipes. See #968.
+# Canonical home (#1567): this module, not cw.reconcile.gate_recipes. Why
+# here and not there: gate_recipes already imports from cw.dev_queue (for
+# _approve_ticket_locked et al.), so dev_queue -> gate_recipes would be a
+# cycle; gate_recipes -> dev_queue is the only cycle-safe direction. Both
+# constants, _marker_version, and _plan_body_signoff_ok live here;
+# gate_recipes imports all four from cw.dev_queue instead of defining its own
+# copies. See #968 for the original duplication and #1567 for the unification.
 _PLAN_SPEC_MARKER = "<!-- plan-spec-reviewed"
 _PLAN_SOUNDNESS_MARKER = "<!-- plan-soundness-reviewed"
+
+
+def _marker_version(body: str, *, marker: str) -> str | None:
+    """Extract the ``<date> <vN>`` version string that follows *marker*.
+
+    Fails closed (returns None) both when *marker* is absent from *body* and
+    when its comment is never closed with ``-->`` — the caller currently
+    always pre-checks marker presence, but this function defends its own
+    fail-closed contract rather than depending on that discipline, since a
+    future caller (or refactor) skipping the pre-check would otherwise hit an
+    uncaught ``IndexError`` instead of failing closed. Substring split only —
+    no regex or date parser (R3): the marker line is
+    ``<!-- plan-spec-reviewed: D vN -->``, so we take everything between the
+    marker and the ``-->`` close, strip the leading ``:`` and surrounding
+    whitespace. The closure check specifically prevents ``str.split`` from
+    silently returning the rest of *body* verbatim, which would leak raw
+    plan-of-record text into the predicate_snapshot, the GATE_AUTO_APPROVED
+    event payload, and the public audit comment.
+    """
+    if marker not in body:
+        return None
+    rest = body.split(marker, 1)[1]
+    if "-->" not in rest:
+        return None
+    return rest.split("-->", 1)[0].lstrip(":").strip()
+
+
+def _plan_body_signoff_ok(body: str) -> bool:
+    """True iff *body* carries both signoff markers, each properly closed.
+
+    The single shared predicate for "is this plan-of-record body reviewed" —
+    composes :func:`_marker_version` (fail-closed on absent-or-unclosed
+    marker) over both markers rather than a bare ``marker in body`` substring
+    check, which a merely-opened, never-closed marker comment would
+    incorrectly satisfy (#1567). Shared by :func:`_plan_is_reviewed` here and
+    ``cw.reconcile.gate_recipes._clean_plan_snapshot``'s presence pre-check.
+
+    Distinct from ``cw.gh._comment_has_marker``: that helper selects *which*
+    GitHub comment on a ticket is the plan-of-record (matching a marker
+    substring across many comments); this predicate instead validates the
+    signoff state of a single already-selected body. Deliberately does not
+    validate the marker's version-string *format* (e.g. that it matches a
+    date/vN shape) — presence of a well-closed marker is the whole contract;
+    a malformed version string inside a validly-closed marker is out of scope
+    for "is this reviewed".
+    """
+    return (
+        _marker_version(body, marker=_PLAN_SPEC_MARKER) is not None
+        and _marker_version(body, marker=_PLAN_SOUNDNESS_MARKER) is not None
+    )
 
 
 def transition_task_status(
@@ -413,7 +465,10 @@ def _plan_is_reviewed(task: TicketTask) -> bool:
     worktree's ``.cw/plan.md`` if the tracker read returns ``None``. A row
     with no materialized worktree, or a read failure between ``.exists()``
     and ``.read_text()``, degrades to "not reviewed" (fail-closed) rather
-    than raising. See GitHub #968.
+    than raising. See GitHub #968. The reviewed-check itself delegates to
+    :func:`_plan_body_signoff_ok` (#1567), which fails closed on a marker that
+    is present but never closed with ``-->`` — a bare substring check would
+    incorrectly accept that malformed body as reviewed.
     """
     body = fetch_approved_plan_comment(task.ticket_id)
     if body is None:
@@ -426,7 +481,7 @@ def _plan_is_reviewed(task: TicketTask) -> bool:
             body = plan_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             return False
-    return _PLAN_SPEC_MARKER in body and _PLAN_SOUNDNESS_MARKER in body
+    return _plan_body_signoff_ok(body)
 
 
 def _reset_for_same_stage_requeue(task: TicketTask) -> None:
