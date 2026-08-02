@@ -35,6 +35,7 @@ from cw.executor_diagnostics import (
 )
 from cw.gh import fetch_approved_plan_comment
 from cw.models import CONTEXT_JSON_RELATIVE_PATH
+from cw.worktree import _parse_numstat_totals
 
 if TYPE_CHECKING:
     from cw.models import TicketTask
@@ -42,7 +43,6 @@ if TYPE_CHECKING:
 _SCHEMA_VERSION: Literal[4] = 4
 
 # --- Reason-string constants (exported for tests and callers) ---
-_NUMSTAT_MIN_COLS = 3  # git diff --numstat lines: <added> \t <removed> \t <file>
 _AIDER_LOG_RELATIVE_PATH: Path = Path(".cw", "aider.log")
 _AIDER_LOG_TAIL_CHARS = 4000  # matches codex_runner.py's stderr[-4000:] convention
 
@@ -356,12 +356,9 @@ def _git_facts(worktree: Path, default_branch: str) -> _GitFacts:
         commits = [c for c in commits_out.splitlines() if c]
 
         numstat_out = _git("diff", "--numstat", f"{fork_point}..HEAD")
-        for line in numstat_out.splitlines():
-            parts = line.split("\t")
-            if len(parts) >= _NUMSTAT_MIN_COLS:
-                with contextlib.suppress(ValueError):  # binary files show '-'
-                    lines_actual += int(parts[0]) + int(parts[1])
-                    files += 1
+        # Shared with worktree.compute_branch_diff_scope so every producer of
+        # scope.files / scope.lines_actual counts a diff the same way (#1487).
+        files, lines_actual = _parse_numstat_totals(numstat_out)
 
     return _GitFacts(
         branch=branch,

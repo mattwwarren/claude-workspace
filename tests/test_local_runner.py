@@ -805,3 +805,65 @@ def test_synthesize_git_result_threads_plan_source(tmp_path: Path) -> None:
 
     assert result.status == "stage_complete"
     assert result.plan_source == "github_issue_existing"
+
+
+# ----------------------------------------------------------------------
+# #1487 — _git_facts delegates numstat parsing to cw.worktree
+# ----------------------------------------------------------------------
+
+
+def _git_run(repo: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_git_facts_counts_files_and_lines_via_shared_parser(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Regression pin: _git_facts still totals numstat after the parser extraction."""
+    from cw.local_runner import _git_facts
+
+    worktree = make_git_repo("wt-1487-facts")
+    _git_run(worktree, "remote", "add", "origin", str(worktree))
+    _git_run(worktree, "fetch", "origin", "main")
+    _git_run(worktree, "checkout", "-b", "dev/1487-facts")
+    for i in range(2):
+        (worktree / f"f{i}.txt").write_text("a\nb\nc\n", encoding="utf-8")
+    _git_run(worktree, "add", "-A")
+    _git_run(worktree, "commit", "-m", "two files")
+
+    facts = _git_facts(worktree, "main")
+
+    assert facts["files"] == 2
+    assert facts["lines_actual"] == 6
+    assert facts["fork_point"]
+
+
+def test_git_facts_and_compute_branch_diff_scope_agree(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Both scope producers must report identical numbers for the same repo state."""
+    from cw.local_runner import _git_facts
+    from cw.worktree import compute_branch_diff_scope
+
+    worktree = make_git_repo("wt-1487-agree")
+    _git_run(worktree, "remote", "add", "origin", str(worktree))
+    _git_run(worktree, "fetch", "origin", "main")
+    _git_run(worktree, "checkout", "-b", "dev/1487-agree")
+    (worktree / "only.txt").write_text("x\ny\n", encoding="utf-8")
+    _git_run(worktree, "add", "-A")
+    _git_run(worktree, "commit", "-m", "one file")
+
+    facts = _git_facts(worktree, "main")
+    measured = compute_branch_diff_scope(worktree, "main")
+
+    assert measured is not None
+    assert (facts["files"], facts["lines_actual"]) == (
+        measured["files"],
+        measured["lines_actual"],
+    )
