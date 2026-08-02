@@ -2826,22 +2826,60 @@ class TestComputeBranchDiffScope:
 
         assert compute_branch_diff_scope(tmp_path / "nope", "main") is None
 
-    def test_oserror_returns_none(
+    def test_merge_base_oserror_returns_none(
         self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """git vanishes between the branch probe and merge-base → None, no raise."""
         from cw import worktree as wt_mod
 
         repo = _make_self_origin_repo(make_git_repo, "wt-1487-oserror")
-
-        real_checked_out = wt_mod._checked_out_branch
 
         def boom(*args: str, cwd: object, check: bool = True) -> None:
             msg = "git not found"
             raise OSError(msg)
 
-        monkeypatch.setattr(wt_mod, "_checked_out_branch", real_checked_out)
+        monkeypatch.setattr(wt_mod, "_checked_out_branch", lambda _p: "dev/x")
         monkeypatch.setattr(wt_mod, "_run_git", boom)
         assert wt_mod.compute_branch_diff_scope(repo, "main") is None
+
+    def test_numstat_oserror_returns_none(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """merge-base resolves but the numstat call raises → None, no raise."""
+        from cw import worktree as wt_mod
+
+        repo = _make_diverged_repo(make_git_repo, "wt-1487-numstat-oserror")
+
+        def boom_on_diff(*args: str, cwd: object, check: bool = True) -> None:
+            msg = "git not found"
+            raise OSError(msg)
+
+        monkeypatch.setattr(wt_mod, "_checked_out_branch", lambda _p: "dev/x")
+        monkeypatch.setattr(wt_mod, "_resolve_merge_base", lambda _p, _b: "deadbeef")
+        monkeypatch.setattr(wt_mod, "_run_git", boom_on_diff)
+        assert wt_mod.compute_branch_diff_scope(repo, "main") is None
+
+    def test_numstat_nonzero_returncode_returns_none(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unresolvable merge-base ref makes git diff exit non-zero → None."""
+        from cw import worktree as wt_mod
+
+        repo = _make_diverged_repo(make_git_repo, "wt-1487-numstat-rc")
+
+        monkeypatch.setattr(
+            wt_mod, "_resolve_merge_base", lambda _p, _b: "0000000000000000000000000000"
+        )
+        assert wt_mod.compute_branch_diff_scope(repo, "main") is None
+
+
+class TestScopeMismatchIsGross:
+    def test_equal_values_are_not_gross(self) -> None:
+        """Guards the 0-vs-0 case, where the ratio test has no meaningful answer."""
+        from cw.worktree import _scope_mismatch_is_gross
+
+        assert _scope_mismatch_is_gross(0, 0) is False
+        assert _scope_mismatch_is_gross(7, 7) is False
 
 
 def _result_with_scope(files: int, lines_actual: int) -> AutoDevResult:

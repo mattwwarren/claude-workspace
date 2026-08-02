@@ -6,6 +6,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Self-reported `scope.files` / `scope.lines_actual` are now verified against
+  real git facts (#1487):** a worker computing its diff against a stale
+  merge-base could report 18 files / 1567 lines for a branch that actually
+  changed 3 files / 152 lines (#1393), and nothing downstream noticed. A new
+  `cw.worktree.compute_branch_diff_scope` resolves the merge-base against
+  `origin/<default_branch>` fresh and measures the branch's own diff;
+  `reconcile_result_scope` compares that measurement against the self-report and
+  overwrites both fields when they disagree, logging a WARNING on a gross
+  divergence (zero-vs-non-zero either way, or a ratio past 2x). It is wired into
+  all three producer families: reconcile-sweep salvage
+  (`_parse_any_sentinel_from_transcript`, covering all eight call sites across
+  idle / phantom / stalled / concierge), the headless Stop-hook parse
+  (`_parse_headless_sentinel`), and codex-review synthesis — where
+  `synthesize_codex_review_result`'s hardcoded `files=0, lines_actual=0`
+  placeholder is replaced by a real measurement. Every path fails open: a
+  pre-impl exit, a missing worktree, or an unverifiable git state leaves the
+  result untouched and never raises. `local_runner._git_facts` now shares the
+  same numstat parser, so the two scope producers cannot drift.
+
 ## [1.25.0] - 2026-08-02
 
 ### Added
