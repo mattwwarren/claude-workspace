@@ -6,6 +6,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.26.0] - 2026-08-02
+
+### Added
+
+- **Cycle-0 MUST_FIX findings are persisted for every codex fix-loop exit
+  (#1485):** a fix loop that converged cleanly previously reported
+  "Non-blocking — no MUST_FIX findings," discarding the content of the
+  findings it had just fixed and leaving no record that anything was wrong.
+  The cycle-0 `ReviewVerdict` is now captured once before the loop begins and
+  written via `write_review_verdict` into
+  `diagnostics_bundle_dir(<session_id>)/cycle0-findings.json`, so the snapshot
+  survives every exit path — clean convergence, cap or budget exhaustion,
+  scope violation, fix-invocation failure, and an unparseable mid-loop
+  re-review. A pointer to the file is appended to the sentinel's
+  `friction_highlights` on each of those paths, since a clean exit carries no
+  `Blocker` for the usual diagnostics pointer to attach to and the artifact
+  would otherwise be undiscoverable without knowing the session id. Retention
+  follows the existing `diagnostics_retention_hours` sweep (default 24h); a
+  write failure logs a WARNING and never interrupts the loop. This is the
+  auditable record named as a precondition for re-enabling
+  `codex_fix_loop_enabled` on a supervised lane.
+
 ### Fixed
 
 - **Self-reported `scope.files` / `scope.lines_actual` are now verified against
