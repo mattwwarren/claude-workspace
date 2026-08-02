@@ -641,8 +641,9 @@ def _route_park_marker_poison_task(
             refusal.existing_source if refusal is not None else None,
         )
         dumped = validated_refusal.model_dump(mode="json")
-        # Ordering (isinstance(BlockedResult) before .status=="blocked") is
-        # binding -- see _foreign_result_target_queue_status's docstring.
+        # Ordering (isinstance(BlockedResult) before the delegated classifier
+        # call) is binding for mypy --strict narrowing -- see
+        # _foreign_result_target_queue_status's docstring (#1566).
         target_status = _foreign_result_target_queue_status(validated_refusal)
         refusal_reason = _result_blocker_reason(validated_refusal)
         transition_task_status(

@@ -28,7 +28,6 @@ from cw.auto_dev_result import (
     BLOCKER_REASON_NO_RESULT_EMITTED,
     BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED,
     BLOCKER_REASON_VALIDATION_FAILED,
-    PAUSED_FOR_USER_INPUT_STATUSES,
     SALVAGE_TERMINAL_STATUSES,
     AutoDevResult,
     BlockedResult,
@@ -36,6 +35,7 @@ from cw.auto_dev_result import (
     extract_block,
     is_documented_example,
     parse_stdout,
+    queue_status_for_terminal_sentinel,
 )
 from cw.config import (
     get_client,
@@ -448,10 +448,12 @@ def _claude_agents_json() -> list[dict[str, object]]:
 
 
 def _queue_status_for_salvaged(result: AutoDevResult) -> QueueItemStatus:
-    """Map a salvaged AutoDevResult to the appropriate QueueItemStatus."""
-    if result.status in PAUSED_FOR_USER_INPUT_STATUSES:
-        return QueueItemStatus.BLOCKED_ON_USER
-    return QueueItemStatus.COMPLETED
+    """Map a salvaged AutoDevResult to the appropriate QueueItemStatus.
+
+    Delegates to the shared dispatch/salvage classifier (#1566) so this path
+    cannot drift from live dispatch's Rule 1/2/5/3b hold routing again.
+    """
+    return queue_status_for_terminal_sentinel(result.status)
 
 
 def _validate_existing_result_for_routing(
@@ -492,19 +494,16 @@ def _foreign_result_target_queue_status(
     concierge.py's park-marker-poison routing and stalled.py's
     COMPLETE_FOREIGN_RESULT routing share one mapping.
 
-    isinstance(BlockedResult) MUST precede the .status=="blocked" elif:
-    "blocked" is a valid AutoDevResult.status too, so the status-only
-    discriminant does not narrow away AutoDevResult for mypy --strict -- the
-    isinstance check is what proves the else branch's operand is an
-    AutoDevResult (RFC 0012 A3 #1459).
+    isinstance(BlockedResult) MUST precede the delegated
+    ``_queue_status_for_salvaged`` call: ``BlockedResult`` has no
+    ``AutoDevResult`` fields, so the isinstance check is what proves the else
+    branch's operand is an ``AutoDevResult`` for mypy --strict (RFC 0012 A3
+    #1459). The former ``status == "blocked"`` special case (#1470's "round-3
+    bug fix") is gone: "blocked" is in ``STAGE_FAILURE_STATUSES``, so
+    ``queue_status_for_terminal_sentinel`` now routes it to BLOCKED_ON_USER
+    without a special case (#1566).
     """
     if isinstance(validated, BlockedResult):
-        return QueueItemStatus.BLOCKED_ON_USER
-    if validated.status == "blocked":
-        # A foreign AutoDevResult with status=blocked would otherwise be
-        # mis-routed to COMPLETED by _queue_status_for_salvaged (which does
-        # not treat "blocked" as paused-for-user) -- special-case it to
-        # BLOCKED_ON_USER (round-3 bug fix).
         return QueueItemStatus.BLOCKED_ON_USER
     return _queue_status_for_salvaged(validated)
 
