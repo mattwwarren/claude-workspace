@@ -751,6 +751,41 @@ class TestFixLoopCapAndEscalation:
         assert (bundle / _CYCLE0_SNAPSHOT_FILENAME).exists()
         assert any("[diagnostics:" in h for h in out.friction_highlights)
 
+    def test_cycle0_snapshot_write_failure_does_not_block_loop(
+        self,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """``_persist_cycle0_snapshot`` never-raises: an ``OSError`` during the
+        write is logged and swallowed, and the loop still returns its normal
+        parked result with the pointer text in ``friction_highlights`` (the
+        pointer is returned unconditionally per the plan's Adopted
+        Assumption #1 — never-raise takes priority over pointer-text
+        precision on this rare write-failure path)."""
+        worktree = _worktree(make_git_repo, "wt-snapshot-write-fail")
+
+        def _boom(*_a: object, **_k: object) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.codex_fix_loop.write_review_verdict", _boom)
+        runner = _FixLoopRunner([_MF_DOC])
+
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            out, _verdict = _run_loop(
+                runner, worktree, session_id="s-snapshot-write-fail"
+            )
+
+        assert out.status == "blocked"
+        assert any("[diagnostics:" in h for h in out.friction_highlights)
+        assert any(
+            "cycle-0 findings snapshot write failed" in r.getMessage()
+            for r in caplog.records
+        )
+
 
 # ---------------------------------------------------------------------------
 # TestFixLoopReviewParity
