@@ -3593,3 +3593,187 @@ class TestSalvageTerminalResultTwoLayerFallback:
         result = _salvage_terminal_result(sess)
 
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# #1487 — salvaged sentinels get their self-reported scope verified against
+# real git facts before any consumer sees them.
+# ---------------------------------------------------------------------------
+
+_SCOPE_GUARD_BRANCH = "dev/1487-salvage"
+
+
+def _scope_guard_git(repo: Path, *args: str) -> None:
+    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        env=clean_env,
+    )
+
+
+def _make_scope_guard_repo(
+    make_git_repo: Any, name: str, *, default_branch: str = "main"
+) -> Path:
+    """Git repo on a feature branch whose base ref advanced after the fork.
+
+    The branch itself carries 3 files / 15 lines; the base branch gains
+    8 files / 320 lines afterwards, so a self-report computed against the
+    stale merge-base would be grossly inflated (the #1393 shape).
+    """
+    repo = make_git_repo(name)
+    if default_branch != "main":
+        _scope_guard_git(repo, "branch", "-m", "main", default_branch)
+    _scope_guard_git(repo, "remote", "add", "origin", str(repo))
+    _scope_guard_git(repo, "fetch", "origin", default_branch)
+    _scope_guard_git(repo, "checkout", "-b", _SCOPE_GUARD_BRANCH)
+    for i in range(3):
+        (repo / f"branch_{i}.txt").write_text("l\n" * 5, encoding="utf-8")
+    _scope_guard_git(repo, "add", "-A")
+    _scope_guard_git(repo, "commit", "-m", "branch work")
+    _scope_guard_git(repo, "checkout", default_branch)
+    for i in range(8):
+        (repo / f"base_{i}.txt").write_text("l\n" * 40, encoding="utf-8")
+    _scope_guard_git(repo, "add", "-A")
+    _scope_guard_git(repo, "commit", "-m", "base churn")
+    _scope_guard_git(repo, "fetch", "origin", default_branch)
+    _scope_guard_git(repo, "checkout", _SCOPE_GUARD_BRANCH)
+    return repo
+
+
+def _inflated_stage_complete_payload() -> dict[str, Any]:
+    payload = _stage_complete_payload()
+    payload["scope"] = {
+        "tier": "small",
+        "files": 18,
+        "lines_estimate": 60,
+        "lines_actual": 1567,
+        "forbidden_touched": False,
+    }
+    return payload
+
+
+def _write_scope_guard_clients_yaml(
+    tmp_config_dir: Path, *, default_branch: str
+) -> None:
+    config_dir = tmp_config_dir / ".config" / "cw"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "clients.yaml").write_text(
+        "clients:\n"
+        "  client-a:\n"
+        "    workspace_path: /tmp/ws-scope-guard\n"
+        f"    default_branch: {default_branch}\n"
+    )
+
+
+def _parse_scope_guard_sentinel(
+    home: Path, worktree: Path, payload: dict[str, Any]
+) -> AutoDevResult:
+    from cw.reconcile._shared import _parse_any_sentinel_from_transcript
+
+    sess = _mk_headless_daemon_session(
+        "scope-guard", worktree, datetime(2026, 1, 1, tzinfo=UTC)
+    )
+    _write_salvage_transcript(home, worktree, "claude-uuid-scope", payload)
+    parsed = _parse_any_sentinel_from_transcript(sess)
+    assert parsed is not None
+    result, _csid = parsed
+    assert isinstance(result, AutoDevResult)
+    return result
+
+
+def test_salvaged_sentinel_scope_corrected_against_git_facts(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_git_repo: Any,
+) -> None:
+    """Inflated self-report from a stale merge-base → corrected to real numbers."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = _make_scope_guard_repo(make_git_repo, "wt-scope-guard")
+
+    result = _parse_scope_guard_sentinel(
+        home, worktree, _inflated_stage_complete_payload()
+    )
+
+    assert result.scope.files == 3
+    assert result.scope.lines_actual == 15
+    # Untouched fields ride through unchanged.
+    assert result.scope.lines_estimate == 60
+    assert result.scope.tier == "small"
+    assert result.status == "stage_complete"
+
+
+def test_salvaged_sentinel_scope_honours_client_default_branch(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_git_repo: Any,
+) -> None:
+    """The measurement resolves the client's configured default_branch, not 'main'."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = _make_scope_guard_repo(
+        make_git_repo, "wt-scope-trunk", default_branch="trunk"
+    )
+    _write_scope_guard_clients_yaml(tmp_config_dir, default_branch="trunk")
+
+    result = _parse_scope_guard_sentinel(
+        home, worktree, _inflated_stage_complete_payload()
+    )
+
+    assert result.scope.files == 3
+    assert result.scope.lines_actual == 15
+
+
+def test_salvaged_sentinel_scope_unverifiable_worktree_left_alone(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-git worktree → measurement unavailable, self-report preserved."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-scope-nogit"
+    worktree.mkdir()
+
+    result = _parse_scope_guard_sentinel(
+        home, worktree, _inflated_stage_complete_payload()
+    )
+
+    assert result.scope.files == 18
+    assert result.scope.lines_actual == 1567
+
+
+def test_salvaged_sentinel_scope_survives_unresolvable_client_config(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_git_repo: Any,
+) -> None:
+    """A broken clients.yaml must not lose the sentinel — fall back to 'main'."""
+    from cw.exceptions import CwError
+    from cw.reconcile import _deps
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = _make_scope_guard_repo(make_git_repo, "wt-scope-badcfg")
+
+    def _boom() -> dict[str, ClientConfig]:
+        msg = "clients.yaml is unreadable"
+        raise CwError(msg)
+
+    monkeypatch.setattr(_deps, "load_effective_clients", _boom)
+
+    result = _parse_scope_guard_sentinel(
+        home, worktree, _inflated_stage_complete_payload()
+    )
+
+    assert result.scope.files == 3
+    assert result.scope.lines_actual == 15
