@@ -86,6 +86,7 @@ from cw.dispatch.routing import (
     _SIGNOFF_GATE_REASON,
     _STAGE_REACHED_TO_STAGE,
     _UNKNOWN_CLIENT_REASON,
+    BREADCRUMB_ELIGIBLE_PAUSED_STATUSES,
     _accumulate_task_cost,
     _classify_sentinel_stage_position,
     _extract_scope_tier,
@@ -115,6 +116,7 @@ from cw.dispatch.tick import (
 )
 
 __all__ = [
+    "BREADCRUMB_ELIGIBLE_PAUSED_STATUSES",
     "FRESHNESS_MAIN_BEHIND",
     "FRESHNESS_MAIN_DETACHED",
     "FRESHNESS_MAIN_DIRTY_CHECKOUT",
