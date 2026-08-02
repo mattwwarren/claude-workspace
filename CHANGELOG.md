@@ -6,8 +6,221 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.25.0] - 2026-08-02
+
+### Added
+
+- **`operator_github_login_by_repo` config field (#1171):** a repo-keyed
+  operator-login override on `OrchestratorConfig`, consulted at the
+  client-less entry points that have no `ClientConfig` to read the existing
+  `operator_github_login` override from — `cw review register`, the
+  `review_requested` webhook handler, and `hydrate_pr_states`. The new
+  `resolve_operator_login_for_repo` resolver never calls `cached_gh_login()`
+  itself (per-repo resolution runs many times per hydrate tick; an inline
+  call would reintroduce the #1195 subprocess retry storm) — callers thread
+  a caller-resolved fallback through instead.
+- **`review_requested` events now relay through `pr-events.yml` (#1169):**
+  the workflow adds `review_requested` to its `pull_request` trigger types
+  and builds a payload from `requested_reviewer`/`requested_team` +
+  `sender.login`, closing the producer side of RFC 0011 S2 (the server-side
+  consumer, `_handle_review_requested_sync`, already existed). The
+  `pull_request` case now dispatches on `github.event.action` before the
+  merged-gate, since a `review_requested` delivery always has `merged=false`
+  and would otherwise be silently swallowed as "PR closed without merge."
+- **`cw dev-queue drain --held` (RFC 0011 A4, #1161):** batch-requeues every
+  operator-availability-park (`disposition=awaiting_operator`)
+  `BLOCKED_ON_USER` ticket for a client back to its own current stage in one
+  command, continuing past a per-ticket failure instead of aborting the
+  batch (`--client` required, `--lane`/`--dry-run` optional). Emits
+  `TICKET_REQUEUED` per drained ticket and exits nonzero iff any selected
+  ticket failed to drain. A3 force-holds (finalize-gate holds, #1160) are
+  explicitly excluded — only Rule-5 availability parks are batch-drainable.
+- **Proactive finalize hold — `hold_finalize` field, `finalize_gate` config,
+  `gate.auto_approve_held` event (RFC 0011 A3, #1160):** schema v23 adds
+  `TicketTask.hold_finalize` (`Literal["manual"] | None`) plus
+  `LaneConfig.finalize_gate` / `OrchestratorConfig.default_finalize_gate`,
+  letting an operator force a ticket to park at
+  `BLOCKED_ON_USER`/`finalize_gate_held` ahead of an otherwise-unattended
+  ship instead of finalizing automatically. Set per-ticket via
+  `cw dev-queue add --hold-finalize`; released only by an
+  operator-initiated `cw dev-queue approve` (any automatic caller that
+  hits an armed hold now emits `GATE_AUTO_APPROVE_HELD` as a correction
+  instead of silently shipping). Not batch-drainable via `dev-queue drain
+  --held` (see above).
+- **Attention-digest coalescing (RFC 0011 A6, #1162):** schema v24 adds
+  `TicketTask.attention_digest_buffered_at`; three new `OrchestratorConfig`
+  fields — `attention_digest_window_tz` (default `America/New_York`),
+  `attention_digest_window_start_hour`/`_end_hour` (default `8`/`20`), and
+  `attention_digest_idle_floor_seconds` (default `60`) — govern when a held
+  (`HOLD_DISPOSITIONS`) `session.needs_attention` park gets buffered into a
+  single digest push instead of forwarded immediately. The digest flushes
+  once the local-timezone delivery window is open AND the idle-drain floor
+  has elapsed since the most recent buffered arrival; every non-held event
+  (genuine blocked/broken parks, ticketless fleet-wide events) still
+  forwards unbatched, exactly as before. **Operator-visible by default:**
+  a held attention park that arrives outside 8am–8pm America/New_York no
+  longer pushes immediately — it waits for the window to open.
+- **`ssh-key-loaded` diagnostic in `cw doctor` (#1400):** surfaces whether
+  an ED25519/RSA key is loaded in the ssh-agent — the same condition the
+  dev-queue dispatch SSH-key preflight gate (#927) already blocks on, now
+  visible as a non-blocking warn-only check in `cw doctor` output too.
+- **Advisory CHANGELOG check on pull requests (#1532):** a new
+  `changelog-advisory.yml` workflow emits a non-blocking `::warning::`
+  annotation when a PR touches `src/cw/**` without touching `CHANGELOG.md`.
+  Advisory only — it never fails the job, since docs-only, test-only, and
+  default-off "dark release" plumbing PRs legitimately have nothing to
+  document. Evaluated per-PR rather than accumulated since the last tag, so
+  a single existing `[Unreleased]` entry cannot mask any number of PRs that
+  added none. The file list is read via `gh api ... --paginate`, not
+  `gh pr view --json files`, which silently caps at 100 entries.
+- **`dispatch-guard.yml` watches the real dispatch/reconcile paths for the
+  first time (#1565):** the workflow's push-path filter and in-job
+  `git diff` both targeted `src/cw/dispatch.py` and `src/cw/reconcile.py` —
+  flat modules that have never existed in this repo's history; both were
+  born as packages. The unreleased-changes safety net has therefore been
+  inert since the workflow was authored. Repointed at `src/cw/dispatch/**`
+  and `src/cw/reconcile/`; confirmed live by issue #1583, opened
+  automatically the same day once real dispatch/reconcile changes landed
+  post-release.
+
+### Changed
+
+- **BREAKING — `codex_fix_loop_enabled` moves from `ClientConfig` to
+  lane/global scope (#1553):** `ClientConfig.codex_fix_loop_enabled` is
+  removed outright. `ClientConfig` is `extra="forbid"`, so any
+  `~/.config/cw/clients.yaml` that still sets `codex_fix_loop_enabled` on a
+  client block — `true` or `false` — now fails config validation and
+  breaks every `cw` command until fixed. Replaced by the new
+  `LaneConfig.codex_fix_loop_enabled` (`Literal[True] | None` — a lane can
+  only opt IN, never opt a `True` global default back out) with
+  `OrchestratorConfig.default_codex_fix_loop_enabled` (default `false`) as
+  the global fallback. **Migration:** delete the client-level
+  `codex_fix_loop_enabled` line. If it was `false`, deleting it is a no-op
+  (matches the new default) and no replacement is needed. If it was `true`,
+  add `codex_fix_loop_enabled: true` to the relevant lane block instead (or
+  set `default_codex_fix_loop_enabled: true` in `orchestrator.yaml` to
+  restore it fleet-wide).
+- **`TicketTask.disposition` distinguishes hold-class parks from other
+  terminal parks (RFC 0011 A1, #1254):** a park caused by operator/
+  dependency unavailability now stamps the shared `awaiting_operator`
+  disposition (visible in `cw dev-queue list` / JSON output) instead of the
+  verbatim status it previously carried, via the new
+  `_hold_aware_disposition` helper and `HOLD_DISPOSITIONS` namespace
+  threaded through both the dispatch staged-decision table and all six
+  reconcile salvage/foreign-result call sites. Building block for the new
+  `dev-queue drain --held` command (above); `_derive_disposition` itself is
+  unchanged for every other case.
+- **`install-skills.sh` symlinks commands and skill dirs instead of copying
+  them (#1535):** `~/.claude/commands/<name>` and `~/.claude/skills/<name>`
+  now point directly into the checkout's `.claude/` tree — one copy on
+  disk, so drift between the tracked repo and the global install is
+  structurally impossible (the exact class of bug `skills-commands-drift`
+  in `cw doctor`, added in 1.24.0, exists to catch). The installer
+  self-migrates a prior copy-based install and repoints a stale symlink on
+  the next run; the excluded-commands list also moves from a hardcoded
+  array to `scripts/excluded-commands.txt`, shared with `cw doctor`'s drift
+  check.
+- **Release gate strictness matched to CI (#1565):** `release.yml` and
+  `scripts/release.sh` ran `mypy src/` while CI and CLAUDE.md gate 4 require
+  `mypy --strict src/` — a weaker duplicate of the quality-gate list that
+  could let a `--strict`-failing change through a release build.
+  `release.sh` also gained the missing `ruff format --check` step. Both
+  release surfaces' version-mismatch guidance was corrected: it told the
+  operator to edit a version literal in `src/cw/__init__.py` that no longer
+  exists (`cw.__version__` resolves dynamically from installed distribution
+  metadata) — now points at `pyproject.toml` + `uv sync`, matching
+  `docs/release-playbook.md`'s corrected release-mechanics section.
+- **`cw-fanout`/`cw-followup` monitoring scripts stop re-deriving cw-owned
+  paths (#1565):** `wave_status.py` hardcoded
+  `~/.local/share/cw/dev_queue.json` without `cw.config.STATE_DIR`'s
+  `XDG_DATA_HOME` branch — an operator with `XDG_DATA_HOME` set silently got
+  an empty wave status, since `_load_tasks` treats the missing hardcoded
+  path as "no tasks." The script stays import-free by design and now
+  mirrors the 3-line XDG branch. `parse_sentinel.py` inlined the transcript
+  project-dir path encoding (`replace('/','-').replace('.','-')`) instead of
+  calling `cw._util.claude_project_dir` — the exact single-replace encoding
+  bug #463 fixed there once would not have propagated to this copy; it now
+  imports and calls the canonical helper.
+- **`_KNOWN_STATUSES`, `SUPPORTED_SCHEMA_VERSIONS`, and `DRAIN_DISPOSITIONS`
+  now derive from their schema home instead of re-enumerating it (#1565):**
+  three hand-typed vocabularies that could silently drift from
+  `schema.py`'s `Status`/`SchemaVersion` Literals. `parse.py`'s
+  `_KNOWN_STATUSES` is now `frozenset(get_args(Status))` — a divergence
+  previously could have short-circuited a schema-valid status into
+  `BlockedResult` before Pydantic ever saw it. `SUPPORTED_SCHEMA_VERSIONS`
+  is now derived from a new single-source `schema.SchemaVersion` Literal.
+  `drain.py`'s `DRAIN_DISPOSITIONS` is now
+  `HOLD_DISPOSITIONS - {FINALIZE_GATE_HELD_DISPOSITION}` instead of a
+  hand-pinned set whose own comment admitted the excluded constant "does
+  not exist on main yet" — stale within a day of being written, since
+  #1160 had already landed. No behavior change: all derived values are
+  byte-identical to what they replace.
+- **Dead `_assistant_text_from_transcript` removed from `cw.reconcile`
+  (#1565):** zero call sites in `src/` or `tests/`, superseded by
+  `_iter_assistant_records`, which reimplements the same per-record content
+  guard with timestamps. Removed the function and its stale re-export from
+  `cw.reconcile.__init__`'s `__all__`.
+
 ### Fixed
 
+- **Codex review prompts no longer send dangling doc references (#1548):**
+  6 of the 9 large-tier reviewer specs told codex to consult
+  `output-formats.md`, `review-tone-guide.md`, or `testing-philosophy.md` —
+  files codex has no filesystem access to read. The severity taxonomy,
+  tone guide, and (for Test Reviewer) the 13-item testing checklist are now
+  inlined directly into the prompt instead, ahead of `_OUTPUT_INSTRUCTIONS`.
+- **Codex reviewer tool preconditions no longer suppress diff-groundable
+  findings (#1543):** the inlined Agent Specification section was authored
+  for a tool-using Claude subagent; codex was silently dropping any finding
+  whose spec-defined verification step it had no tool access to perform.
+  `_OUTPUT_INSTRUCTIONS` now overrides those preconditions explicitly — an
+  unperformed verification step gets reported as a `LOW`-confidence finding
+  (naming the unperformed check in `consequence`) instead of being
+  suppressed.
+- **Reviewer documents must justify a clean `status="ok"` verdict (#1544):**
+  `{"status": "ok", "detail": "", "findings": []}` — indistinguishable from
+  a reviewer that never actually looked — is now rejected. A clean pass
+  with no findings must state what was checked in `detail`;
+  `status="degraded"` is the correct signal when a rubric-mandated check
+  could not actually be performed. Applies to both the native Claude
+  subagent and codex review paths.
+- **Review verdict comments surface finding confidence (#1555):** a
+  non-`HIGH`-confidence finding now renders an inline `_(LOW confidence)_`-
+  style annotation on its line in the rendered PR verdict comment.
+  Display-only — confidence still never affects dedup, blocking, or
+  partition logic.
+- **Codex review health is no longer hardcoded to HIGH/PROCEED on a clean
+  pass (#1551):** `synthesize_codex_review_result`'s clean-review branch
+  previously reported `Health(HIGH, False, PROCEED)` regardless of what the
+  reviewer documents actually said. It now derives health from document
+  status — any `degraded` or self-reported `failed` document (no MUST_FIX
+  finding, no run failure, but reduced coverage) downgrades health to
+  `MEDIUM`/`EXIT_FOR_HUMAN_REVIEW` instead of reporting a spuriously clean
+  signal.
+- **Local-runner health is no longer hardcoded to HIGH/PROCEED on a clean
+  git result (#1580):** `synthesize_git_result`'s clean `stage_complete`
+  path claimed `Health(HIGH, False, PROCEED)` on nothing more than "commits
+  exist" — no review, no test run, no vetting of any kind. Now reports the
+  honest pessimistic default (`MEDIUM`/`True`/`EXIT_FOR_HUMAN_REVIEW`),
+  mirroring the fixed-review path's posture. Sibling of #1551 above.
+- **`signoff_gate` parks now emit `session.needs_attention` immediately
+  (#1552):** all four signoff-gate park sites (three in
+  `dispatch.routing`'s staged-decision table, one in `dev_queue.approval`'s
+  `approve` CLI path) previously transitioned a task to
+  `AWAITING_OPERATOR_SIGNOFF` with no attention push, so an operator only
+  learned about the park up to 45 minutes later via the escalation sweep.
+  Each now emits `SESSION_NEEDS_ATTENTION` (`paused_status=signoff_gate`)
+  before the transition.
+- **`cw dev-queue wait` no longer misreports `stage_complete`/
+  `merge_pending` sentinels as FAILED (#1565):** `_WAIT_STATUS_EXIT` was a
+  hand-typed re-enumeration of `schema.Status` that had drifted — a
+  `stage_complete` sentinel (a successful intermediate stage hand-off) fell
+  through to the FAILED default instead of being treated as non-terminal,
+  and `merge_pending` misreported FAILED instead of the `BLOCKED_ON_USER`
+  exit code dispatch already used for the same sentinel. A drift-guard test
+  now pins every `Status` value to an explicit mapping or an
+  intermediate-advance classification so a future addition fails loudly
+  instead of silently exiting FAILED.
 - **Release PRs no longer get titled after a `docs(...)` fixup commit
   (#1531):** `/ship-it`'s title ladder skipped `chore` outright, so on a
   release branch the sibling `docs(release): ...` commit won the PR title and
@@ -27,6 +240,46 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   advance also produces. Detection now requires `reap_proposed_at` evidence
   on the prior session, matching the existing `BLOCKED_ON_USER` reap-detection
   pattern (#542).
+
+### Documentation
+
+- **Codex fix-loop cost posture for metered plans (#1549):** documents the
+  worst-case codex-invocation count with the fix loop enabled — up to
+  `6 × review_pass_size + 5` calls (29 for a small-tier ticket, 59 for
+  large-tier) — versus `1 × review_pass_size` with it off, and recommends
+  operators on a metered codex/GPT plan leave the fix loop disabled
+  (already the default) until that worst case is checked against remaining
+  billing-period quota.
+- **CLAUDE.md's quality-gate list was missing CI's smoke-import step
+  (#1565):** the list claimed to mirror "the first five" CI gates, but CI's
+  `.claude/scripts/check_imports.py` smoke-import step wasn't listed at
+  all — a contributor following the list verbatim could go green locally
+  and red in CI with no documented reproduction command. Added as gate 5
+  (CI order, gates renumbered 6-9), with a new note on the separate
+  `package-smoke` CI job that has no local equivalent. Also corrected: the
+  pre-commit-hooks claim said hooks enforce "gates 1-5"; it's actually
+  gates 1-4 (gate 6, the hook suite itself, enforces those) — gate 5 has no
+  hook and runs only in CI and this list.
+- **`CONFIG_REFERENCE.md` corrected against the code it documents (#1565):**
+  `orchestrator.default_ceiling` was shown as `2` inside a block explicitly
+  framed "created with defaults" — the actual code default is `1`. The
+  `operator_channel_forward` default event list — also framed as showing
+  defaults — was missing `gate.auto_approve_held` (#1160) and
+  `gate.ssh_key_bypassed` (#1437), telling operators those events do *not*
+  forward by default when they do. `default_finalize_gate` (#1160) and
+  `diagnostics_retention_hours` (#1239) existed in `OrchestratorConfig` but
+  were entirely undocumented; both are now included with their defaults and
+  semantics.
+- **Stale flat-module citations retargeted across commands, skills, and
+  CLAUDE.md (#1565):** nine citations in
+  `.claude/commands/auto-dev-finalize.md`, `auto-dev-intake.md`,
+  `auto-dev-review.md`, plus `.claude/skills/cw-session-watch/SKILL.md`,
+  `sprint-buildout/SKILL.md`, and CLAUDE.md still pointed at flat modules
+  that no longer exist (`auto_dev_result.py`, `dispatch.py`,
+  `reconcile.py`) — retargeted to the real package paths
+  (`auto_dev_result/schema.py`, `dispatch/routing.py`,
+  `dispatch/gating.py`, `reconcile/`), with brittle line-number citations
+  replaced by symbol/section anchors.
 
 ## [1.24.0] - 2026-07-27
 
