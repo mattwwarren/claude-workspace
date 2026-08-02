@@ -405,6 +405,20 @@ def _make_terminal_payload(status: str, ticket_id: str) -> dict[str, Any]:
     elif status == "premises_pending_verification":
         base["premises"] = [{"claim": "PR #42 codified a deliberate decision"}]
         base["next_actions"] = ["user_verify_premises"]
+    elif status == "merge_pending":
+        # merge_pending requires a non-null pr (#899) -- PR created,
+        # CI/merge gate pending.
+        base["stage_reached"] = "stage5_post_create"
+        base["scope"]["lines_actual"] = 8
+        base["branch"] = f"dev/{ticket_id}"
+        base["fork_point_sha"] = "abc123"
+        base["commits"] = ["sha1"]
+        base["pr"] = {
+            "number": 101,
+            "url": "https://github.com/org/repo/pull/101",
+            "auto_merge": True,
+            "base": "main",
+        }
     return base
 
 

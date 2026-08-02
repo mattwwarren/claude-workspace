@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 from pydantic import ValidationError
@@ -17,6 +17,7 @@ from cw.auto_dev_result import (
     FINALIZE_REGRESS_BLOCKER_REASONS,
     OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
     PAUSED_FOR_USER_INPUT_STATUSES,
+    SALVAGE_HOLD_STATUSES,
     SALVAGE_TERMINAL_STATUSES,
     SCOPE_GATED_APPROVAL_STATUSES,
     SCOPE_TIER_SMALL,
@@ -28,11 +29,14 @@ from cw.auto_dev_result import (
     BlockedResult,
     Health,
     Review,
+    Status,
     _is_placeholder_sentinel_text,
     extract_block,
     is_documented_example,
     parse_stdout,
+    queue_status_for_terminal_sentinel,
 )
+from cw.models import QueueItemStatus
 
 # ---------------------------------------------------------------------------
 # Package-split import guard (#1321)
@@ -3396,6 +3400,30 @@ class TestB2StatusSets:
         # Both plan_pending_approval and review_pending_approval must be in PAUSED
         assert "plan_pending_approval" in PAUSED_FOR_USER_INPUT_STATUSES
         assert "review_pending_approval" in PAUSED_FOR_USER_INPUT_STATUSES
+
+
+class TestQueueStatusForTerminalSentinel:
+    """#1566: shared dispatch/salvage classifier for terminal sentinels."""
+
+    def test_salvage_hold_statuses_composition(self) -> None:
+        assert SALVAGE_HOLD_STATUSES == (
+            STAGE_FAILURE_STATUSES
+            | PAUSED_FOR_USER_INPUT_STATUSES
+            | frozenset({"merge_pending"})
+        )
+
+    @pytest.mark.parametrize("status", sorted(SALVAGE_HOLD_STATUSES))
+    def test_hold_statuses_route_to_blocked_on_user(self, status: str) -> None:
+        assert (
+            queue_status_for_terminal_sentinel(status)
+            == QueueItemStatus.BLOCKED_ON_USER
+        )
+
+    @pytest.mark.parametrize(
+        "status", sorted(set(get_args(Status)) - SALVAGE_HOLD_STATUSES)
+    )
+    def test_non_hold_statuses_route_to_completed(self, status: str) -> None:
+        assert queue_status_for_terminal_sentinel(status) == QueueItemStatus.COMPLETED
 
 
 # ---------------------------------------------------------------------------

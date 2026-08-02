@@ -1081,12 +1081,15 @@ def test_salvage_all_terminal_statuses_from_phantom(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Phantom session whose transcript emits each non-retry terminal status must be
-    salvaged (COMPLETED), NOT reverted to PENDING (#431).
+    salvaged and routed to BLOCKED_ON_USER, NOT reverted to PENDING and NOT
+    silently marked COMPLETED (#431, #1566).
 
     Covers the bug where _SALVAGE_TERMINAL_STATUSES was {"shipped", "no_op"} and
     missed scope_exceeded, forbidden_area, plan_pending_approval,
     review_pending_approval, merge_gate_blocked, and the PAUSED_FOR_USER_INPUT
-    statuses.
+    statuses. scope_exceeded/forbidden_area/merge_gate_blocked additionally must
+    NOT be marked COMPLETED (#1566): live dispatch routes them to
+    BLOCKED_ON_USER, so salvage must agree.
     """
     home = tmp_path / "home"
     home.mkdir()
@@ -1137,8 +1140,9 @@ def test_salvage_all_terminal_statuses_from_phantom(
     )
     assert reloaded.completed_reason == CompletionReason.NORMAL
     task = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
-    assert task.status == QueueItemStatus.COMPLETED, (
-        f"status={status!r}: queue task must be COMPLETED, not re-dispatched"
+    assert task.status == QueueItemStatus.BLOCKED_ON_USER, (
+        f"status={status!r}: queue task must be BLOCKED_ON_USER, not "
+        "silently marked COMPLETED (#1566)"
     )
 
 
@@ -1215,6 +1219,69 @@ def test_salvage_paused_statuses_from_phantom_route_to_blocked_on_user(
     )
 
 
+def test_salvage_merge_pending_from_phantom_routes_to_blocked_on_user(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phantom session whose transcript emits merge_pending must be salvaged
+    to BLOCKED_ON_USER, matching dispatch Rule 3b (#899, #1566). No existing
+    coverage exercised this status through the salvage path before #1566."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    status = "merge_pending"
+    ticket_id = "899p-merge_pending"
+    worktree = tmp_path / f"wt-{status}"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    # Past the spawn grace window but well under headless budget (phantom path).
+    now = started_at + timedelta(seconds=SPAWN_GRACE_SECONDS + 60)
+
+    sess = _mk_headless_daemon_session(
+        ticket_id, worktree, started_at, surface_ref="gone-ref"
+    )
+    payload = _make_terminal_payload(status, ticket_id)
+    _write_salvage_transcript(
+        home, worktree, f"uuid-{status}", payload, surface_ref="gone-ref"
+    )
+
+    alive = _mk_session("alive-899", surface_ref="live-ref")
+    save_state(CwState(sessions=[sess, alive]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=ticket_id,
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=ticket_id,
+                )
+            ]
+        )
+    )
+
+    monkeypatch.setattr(
+        "cw.reconcile.core._claude_agents_json",
+        lambda: [{"sessionId": "live-ref"}],
+    )
+    with freezegun.freeze_time(now):
+        report = reconcile()
+
+    assert ticket_id not in report.reverted_ticket_ids, (
+        "merge_pending ticket must NOT be reverted to PENDING (salvaged terminal)"
+    )
+    reloaded = next(s for s in load_state().sessions if s.id == ticket_id)
+    assert reloaded.status == SessionStatus.COMPLETED, (
+        "session must be COMPLETED after salvage"
+    )
+    assert reloaded.completed_reason == CompletionReason.NORMAL
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+    assert task.status == QueueItemStatus.BLOCKED_ON_USER, (
+        "merge_pending queue task must be BLOCKED_ON_USER, matching dispatch Rule 3b"
+    )
+
+
 @pytest.mark.parametrize(
     "status",
     [
@@ -1230,7 +1297,8 @@ def test_salvage_all_terminal_statuses_from_stalled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Stalled (wall-clock expired) headless session with each non-retry terminal
-    status in transcript must be salvaged, NOT reverted to PENDING (#431)."""
+    status in transcript must be salvaged and routed to BLOCKED_ON_USER, NOT
+    reverted to PENDING and NOT silently marked COMPLETED (#431, #1566)."""
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -1271,8 +1339,9 @@ def test_salvage_all_terminal_statuses_from_stalled(
         f"status={status!r}: session must be COMPLETED after salvage"
     )
     task = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
-    assert task.status == QueueItemStatus.COMPLETED, (
-        f"status={status!r}: queue task must be COMPLETED, not re-dispatched"
+    assert task.status == QueueItemStatus.BLOCKED_ON_USER, (
+        f"status={status!r}: queue task must be BLOCKED_ON_USER, not "
+        "silently marked COMPLETED (#1566)"
     )
 
 
@@ -1338,6 +1407,59 @@ def test_salvage_paused_statuses_from_stalled_route_to_blocked_on_user(
     )
 
 
+def test_salvage_merge_pending_from_stalled_routes_to_blocked_on_user(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stalled headless session emitting merge_pending must be salvaged to
+    BLOCKED_ON_USER via revert_stalled_headless_sessions (#899, #1566)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    status = "merge_pending"
+    ticket_id = "899s-merge_pending"
+    worktree = tmp_path / f"wts-{status}"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 5, 0, tzinfo=UTC)  # past HEADLESS_TIMEOUT_SECONDS
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session(ticket_id, worktree, started_at)
+    payload = _make_terminal_payload(status, ticket_id)
+    _write_salvage_transcript(home, worktree, f"uuid-s-{status}", payload)
+
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=ticket_id,
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=ticket_id,
+                )
+            ]
+        )
+    )
+
+    reverted = revert_stalled_headless_sessions(
+        state=load_state(), now=now, config=_auto_config()
+    )
+
+    assert ticket_id not in reverted, (
+        "merge_pending ticket must NOT be reverted to PENDING (salvaged terminal)"
+    )
+    reloaded = next(s for s in load_state().sessions if s.id == ticket_id)
+    assert reloaded.status == SessionStatus.COMPLETED, (
+        "session must be COMPLETED after salvage"
+    )
+    task = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+    assert task.status == QueueItemStatus.BLOCKED_ON_USER, (
+        "merge_pending queue task must be BLOCKED_ON_USER, matching dispatch Rule 3b"
+    )
+
+
 def test_salvage_terminal_statuses_constant_is_single_source_of_truth() -> None:
     """Drift guard: _SALVAGE_TERMINAL_STATUSES in reconcile.py must equal
     SALVAGE_TERMINAL_STATUSES from auto_dev_result.py (#431).
@@ -1354,6 +1476,37 @@ def test_salvage_terminal_statuses_constant_is_single_source_of_truth() -> None:
         "SALVAGE_TERMINAL_STATUSES in auto_dev_result.py. "
         f"reconcile has {_RECONCILE!r}, shared has {_SHARED!r}"
     )
+
+
+def test_salvage_dispatch_hold_membership_is_single_source_of_truth() -> None:
+    """Drift guard (#1566): queue_status_for_terminal_sentinel's hold set must
+    agree with live dispatch's Rule 1/2/5/3b hold-triggering status sets for
+    every Status value. Full output equivalence is NOT asserted: Rule 3
+    (STAGE_SUCCESS_STATUSES) advances the pipeline stage rather than returning
+    a fixed QueueItemStatus -- salvage cannot do that (no live task to
+    advance), so only BLOCKED_ON_USER-membership is compared, per R4.
+    """
+    from typing import get_args
+
+    from cw.auto_dev_result import SALVAGE_HOLD_STATUSES, Status
+    from cw.dispatch.routing import (
+        PAUSED_FOR_USER_INPUT_STATUSES as _DISPATCH_PAUSED,
+    )
+    from cw.dispatch.routing import (
+        SCOPE_GATED_APPROVAL_STATUSES as _DISPATCH_SCOPE_GATED,
+    )
+    from cw.dispatch.routing import STAGE_FAILURE_STATUSES as _DISPATCH_STAGE_FAILURE
+
+    dispatch_hold_statuses = (
+        _DISPATCH_SCOPE_GATED
+        | _DISPATCH_PAUSED
+        | _DISPATCH_STAGE_FAILURE
+        | frozenset({"merge_pending"})
+    )
+    for status in get_args(Status):
+        assert (status in SALVAGE_HOLD_STATUSES) == (
+            status in dispatch_hold_statuses
+        ), f"status={status!r}: salvage classifier vs dispatch Rule 1/2/5/3b diverge"
 
 
 # Frozen time for backfill tests: session started_at is 60s before frozen now
