@@ -34,7 +34,15 @@ from cw.reconcile.concierge import (
     resolve_concierge_recipe_enabled,
     run_concierge_recoveries,
 )
-from tests._reconcile_helpers import _make_terminal_payload, _shipped_salvage_payload
+from tests._reconcile_helpers import (
+    SCOPE_GUARD_FILES,
+    SCOPE_GUARD_LINES,
+    _inflate_scope,
+    _make_stale_base_repo,
+    _make_terminal_payload,
+    _shipped_salvage_payload,
+    _write_salvage_transcript,
+)
 from tests.conftest import _make_daemon_session, _make_ticket_task
 
 _NOW = datetime(2026, 7, 6, 12, 0, 0, tzinfo=UTC)
@@ -78,6 +86,7 @@ def _make_session(
     last_result: dict[str, Any] | None = None,
     consecutive_salvage_skips: int = 0,
     started_at: datetime = _NOW,
+    worktree_path: Path | None = None,
     **kwargs: Any,
 ) -> Session:
     return _make_daemon_session(
@@ -85,7 +94,7 @@ def _make_session(
         name=f"{client}/auto-dev/{ticket_id}",
         client=client,
         surface_ref=surface_ref,
-        worktree_path=None,
+        worktree_path=worktree_path,
         last_result=last_result,
         consecutive_salvage_skips=consecutive_salvage_skips,
         started_at=started_at,
@@ -1352,3 +1361,40 @@ def test_validate_existing_result_for_routing_invalid_shape_returns_none() -> No
     # status=="blocked", no schema_version -> BlockedResult branch, but missing
     # the required blocker field -> EmitValidationError -> None.
     assert _validate_existing_result_for_routing({"status": "blocked"}) is None
+
+
+def test_close_confirmed_dead_session_corrects_salvaged_scope(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_git_repo: Any,
+) -> None:
+    """#1487: the concierge's pre-close salvage returns git-verified scope numbers."""
+    from cw.reconcile.concierge import _close_confirmed_dead_session
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = _make_stale_base_repo(make_git_repo, "wt-concierge-scope")
+    _write_acme_clients_yaml(tmp_config_dir, worktree)
+
+    session = _make_session(
+        session_id="sess-scope",
+        surface_ref="fake-short-id",
+        worktree_path=worktree,
+    )
+    save_state(CwState(sessions=[session]))
+    _write_salvage_transcript(
+        home,
+        worktree,
+        "claude-uuid-concierge",
+        _inflate_scope(_shipped_salvage_payload()),
+    )
+
+    changed, salvage_result, refusal = _close_confirmed_dead_session("sess-scope", _NOW)
+
+    assert changed is True
+    assert refusal is None
+    assert salvage_result is not None
+    assert salvage_result.scope.files == SCOPE_GUARD_FILES
+    assert salvage_result.scope.lines_actual == SCOPE_GUARD_LINES

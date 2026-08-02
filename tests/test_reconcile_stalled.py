@@ -11,6 +11,7 @@ import json
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import freezegun
@@ -53,8 +54,16 @@ from cw.reconcile import (
     resolve_headless_budget,
     revert_stalled_headless_sessions,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 from tests._reconcile_helpers import (
+    SCOPE_GUARD_FILES,
+    SCOPE_GUARD_LINES,
     _auto_config,
+    _inflate_scope,
+    _make_stale_base_repo,
     _make_terminal_payload,
     _mk_headless_daemon_session,
     _mk_session,
@@ -3045,3 +3054,46 @@ def test_stalled_cap_park_candidate_stamps_disposition(
         if c.proposed_action == ProposedAction.PARK_BLOCKED_ON_USER
     )
     assert park.paused_status == _STALLED_CAP_PARKED_REASON
+
+
+def test_revert_stalled_salvage_corrects_inflated_scope(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_git_repo: Callable[..., Path],
+) -> None:
+    """#1487: a salvaged shipped sentinel lands with git-verified scope numbers."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = _make_stale_base_repo(make_git_repo, "wt-stalled-scope")
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+
+    sess = _mk_headless_daemon_session("salv-scope", worktree, started_at)
+    _write_salvage_transcript(
+        home,
+        worktree,
+        "claude-uuid-scope",
+        _inflate_scope(_shipped_salvage_payload()),
+    )
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="salv-1",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="salv-scope",
+                )
+            ]
+        )
+    )
+
+    revert_stalled_headless_sessions(state=load_state(), now=now, config=_auto_config())
+
+    reloaded = next(s for s in load_state().sessions if s.id == "salv-scope")
+    assert reloaded.last_result is not None
+    assert reloaded.last_result["scope"]["files"] == SCOPE_GUARD_FILES
+    assert reloaded.last_result["scope"]["lines_actual"] == SCOPE_GUARD_LINES

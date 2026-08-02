@@ -59,7 +59,11 @@ from cw.reconcile import (
     revert_timed_out_tasks,
 )
 from tests._reconcile_helpers import (
+    SCOPE_GUARD_FILES,
+    SCOPE_GUARD_LINES,
     _auto_config,
+    _inflate_scope,
+    _make_stale_base_repo,
     _make_terminal_payload,
     _mk_daemon_session_with_worktree,
     _mk_headless_daemon_session,
@@ -3600,59 +3604,6 @@ class TestSalvageTerminalResultTwoLayerFallback:
 # real git facts before any consumer sees them.
 # ---------------------------------------------------------------------------
 
-_SCOPE_GUARD_BRANCH = "dev/1487-salvage"
-
-
-def _scope_guard_git(repo: Path, *args: str) -> None:
-    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    subprocess.run(
-        ["git", "-C", str(repo), *args],
-        check=True,
-        capture_output=True,
-        env=clean_env,
-    )
-
-
-def _make_scope_guard_repo(
-    make_git_repo: Any, name: str, *, default_branch: str = "main"
-) -> Path:
-    """Git repo on a feature branch whose base ref advanced after the fork.
-
-    The branch itself carries 3 files / 15 lines; the base branch gains
-    8 files / 320 lines afterwards, so a self-report computed against the
-    stale merge-base would be grossly inflated (the #1393 shape).
-    """
-    repo = make_git_repo(name)
-    if default_branch != "main":
-        _scope_guard_git(repo, "branch", "-m", "main", default_branch)
-    _scope_guard_git(repo, "remote", "add", "origin", str(repo))
-    _scope_guard_git(repo, "fetch", "origin", default_branch)
-    _scope_guard_git(repo, "checkout", "-b", _SCOPE_GUARD_BRANCH)
-    for i in range(3):
-        (repo / f"branch_{i}.txt").write_text("l\n" * 5, encoding="utf-8")
-    _scope_guard_git(repo, "add", "-A")
-    _scope_guard_git(repo, "commit", "-m", "branch work")
-    _scope_guard_git(repo, "checkout", default_branch)
-    for i in range(8):
-        (repo / f"base_{i}.txt").write_text("l\n" * 40, encoding="utf-8")
-    _scope_guard_git(repo, "add", "-A")
-    _scope_guard_git(repo, "commit", "-m", "base churn")
-    _scope_guard_git(repo, "fetch", "origin", default_branch)
-    _scope_guard_git(repo, "checkout", _SCOPE_GUARD_BRANCH)
-    return repo
-
-
-def _inflated_stage_complete_payload() -> dict[str, Any]:
-    payload = _stage_complete_payload()
-    payload["scope"] = {
-        "tier": "small",
-        "files": 18,
-        "lines_estimate": 60,
-        "lines_actual": 1567,
-        "forbidden_touched": False,
-    }
-    return payload
-
 
 def _write_scope_guard_clients_yaml(
     tmp_config_dir: Path, *, default_branch: str
@@ -3693,14 +3644,14 @@ def test_salvaged_sentinel_scope_corrected_against_git_facts(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    worktree = _make_scope_guard_repo(make_git_repo, "wt-scope-guard")
+    worktree = _make_stale_base_repo(make_git_repo, "wt-scope-guard")
 
     result = _parse_scope_guard_sentinel(
-        home, worktree, _inflated_stage_complete_payload()
+        home, worktree, _inflate_scope(_stage_complete_payload())
     )
 
-    assert result.scope.files == 3
-    assert result.scope.lines_actual == 15
+    assert result.scope.files == SCOPE_GUARD_FILES
+    assert result.scope.lines_actual == SCOPE_GUARD_LINES
     # Untouched fields ride through unchanged.
     assert result.scope.lines_estimate == 60
     assert result.scope.tier == "small"
@@ -3717,17 +3668,17 @@ def test_salvaged_sentinel_scope_honours_client_default_branch(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    worktree = _make_scope_guard_repo(
+    worktree = _make_stale_base_repo(
         make_git_repo, "wt-scope-trunk", default_branch="trunk"
     )
     _write_scope_guard_clients_yaml(tmp_config_dir, default_branch="trunk")
 
     result = _parse_scope_guard_sentinel(
-        home, worktree, _inflated_stage_complete_payload()
+        home, worktree, _inflate_scope(_stage_complete_payload())
     )
 
-    assert result.scope.files == 3
-    assert result.scope.lines_actual == 15
+    assert result.scope.files == SCOPE_GUARD_FILES
+    assert result.scope.lines_actual == SCOPE_GUARD_LINES
 
 
 def test_salvaged_sentinel_scope_unverifiable_worktree_left_alone(
@@ -3743,7 +3694,7 @@ def test_salvaged_sentinel_scope_unverifiable_worktree_left_alone(
     worktree.mkdir()
 
     result = _parse_scope_guard_sentinel(
-        home, worktree, _inflated_stage_complete_payload()
+        home, worktree, _inflate_scope(_stage_complete_payload())
     )
 
     assert result.scope.files == 18
@@ -3763,7 +3714,7 @@ def test_salvaged_sentinel_scope_survives_unresolvable_client_config(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    worktree = _make_scope_guard_repo(make_git_repo, "wt-scope-badcfg")
+    worktree = _make_stale_base_repo(make_git_repo, "wt-scope-badcfg")
 
     def _boom() -> dict[str, ClientConfig]:
         msg = "clients.yaml is unreadable"
@@ -3772,8 +3723,8 @@ def test_salvaged_sentinel_scope_survives_unresolvable_client_config(
     monkeypatch.setattr(_deps, "load_effective_clients", _boom)
 
     result = _parse_scope_guard_sentinel(
-        home, worktree, _inflated_stage_complete_payload()
+        home, worktree, _inflate_scope(_stage_complete_payload())
     )
 
-    assert result.scope.files == 3
-    assert result.scope.lines_actual == 15
+    assert result.scope.files == SCOPE_GUARD_FILES
+    assert result.scope.lines_actual == SCOPE_GUARD_LINES

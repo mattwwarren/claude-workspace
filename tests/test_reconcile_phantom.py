@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import freezegun
 import pytest
@@ -49,9 +50,17 @@ from cw.reconcile import (
     reconcile,
 )
 from cw.reconcile._shared import _SENTINEL_STAGE_MISMATCH_REFUSED_REASON
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 from tests._reconcile_helpers import (
+    SCOPE_GUARD_FILES,
+    SCOPE_GUARD_LINES,
     _auto_config,
     _client_with_lane,
+    _inflate_scope,
+    _make_stale_base_repo,
     _make_terminal_payload,
     _mk_headless_daemon_session,
     _mk_phantom_daemon_session,
@@ -2978,3 +2987,52 @@ class TestActOnPhantomCandidatesPerLane:
         store = load_dev_queue()
         t = next(t for t in store.tasks if t.ticket_id == "lane-sig-ph-1")
         assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+def test_reconcile_crashed_phantom_salvage_corrects_inflated_scope(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_git_repo: Callable[..., Path],
+) -> None:
+    """#1487: the phantom sweep's salvage lands git-verified scope numbers."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = _make_stale_base_repo(make_git_repo, "wt-phantom-scope")
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(seconds=SPAWN_GRACE_SECONDS + 60)
+
+    sess = _mk_headless_daemon_session(
+        "salv-scope", worktree, started_at, surface_ref="gone-ref"
+    )
+    payload = _inflate_scope(_shipped_salvage_payload())
+    payload["ticket_id"] = "salv-scope"
+    _write_salvage_transcript(
+        home, worktree, "claude-uuid-scope", payload, surface_ref="gone-ref"
+    )
+    alive = _mk_session("alive", surface_ref="live-ref")
+    save_state(CwState(sessions=[sess, alive]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="salv-scope",
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id="salv-scope",
+                )
+            ]
+        )
+    )
+    monkeypatch.setattr(
+        "cw.reconcile.core._claude_agents_json",
+        lambda: [{"sessionId": "live-ref"}],
+    )
+    with freezegun.freeze_time(now):
+        reconcile()
+
+    reloaded = next(s for s in load_state().sessions if s.id == "salv-scope")
+    assert reloaded.last_result is not None
+    assert reloaded.last_result["scope"]["files"] == SCOPE_GUARD_FILES
+    assert reloaded.last_result["scope"]["lines_actual"] == SCOPE_GUARD_LINES

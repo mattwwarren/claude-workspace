@@ -10,6 +10,9 @@ each helper.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -525,3 +528,77 @@ def _write_staged_clients_yaml(tmp_config_dir: Path, client_name: str) -> None:
         f"    pipeline:\n"
         f"      stages: [plan, impl, review, finalize]\n"
     )
+
+
+# ---------------------------------------------------------------------------
+# #1487 — stale-merge-base scope fixtures
+#
+# Shared by every test that needs the #1393 shape: a branch whose base ref
+# advanced *after* it forked, so a self-report computed against the stale
+# merge-base is grossly inflated relative to the branch's own churn.
+# ---------------------------------------------------------------------------
+
+SCOPE_GUARD_BRANCH = "dev/1487-scope"
+SCOPE_GUARD_FILES = 3
+SCOPE_GUARD_LINES = 15
+_SCOPE_GUARD_LINES_PER_FILE = 5
+_SCOPE_GUARD_BASE_FILES = 8
+_SCOPE_GUARD_BASE_LINES_PER_FILE = 40
+
+
+def _scope_guard_git(repo: Path, *args: str) -> None:
+    """Run git in *repo* with a GIT_*-stripped env."""
+    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        env=clean_env,
+    )
+
+
+def _write_lines(repo: Path, prefix: str, count: int, lines_each: int) -> None:
+    for i in range(count):
+        (repo / f"{prefix}_{i}.txt").write_text("l\n" * lines_each, encoding="utf-8")
+    _scope_guard_git(repo, "add", "-A")
+    _scope_guard_git(repo, "commit", "-m", f"{prefix} work")
+
+
+def _make_stale_base_repo(
+    make_git_repo: Callable[..., Path],
+    name: str,
+    *,
+    default_branch: str = "main",
+) -> Path:
+    """Return a repo checked out on a branch whose base advanced after the fork.
+
+    The branch carries exactly ``SCOPE_GUARD_FILES`` files /
+    ``SCOPE_GUARD_LINES`` lines of its own; the base branch gains far more
+    afterwards, so measuring against a stale merge-base would over-count.
+    """
+    repo = make_git_repo(name)
+    if default_branch != "main":
+        _scope_guard_git(repo, "branch", "-m", "main", default_branch)
+    _scope_guard_git(repo, "remote", "add", "origin", str(repo))
+    _scope_guard_git(repo, "fetch", "origin", default_branch)
+    _scope_guard_git(repo, "checkout", "-b", SCOPE_GUARD_BRANCH)
+    _write_lines(repo, "branchwork", SCOPE_GUARD_FILES, _SCOPE_GUARD_LINES_PER_FILE)
+    _scope_guard_git(repo, "checkout", default_branch)
+    _write_lines(
+        repo, "basechurn", _SCOPE_GUARD_BASE_FILES, _SCOPE_GUARD_BASE_LINES_PER_FILE
+    )
+    _scope_guard_git(repo, "fetch", "origin", default_branch)
+    _scope_guard_git(repo, "checkout", SCOPE_GUARD_BRANCH)
+    return repo
+
+
+def _inflate_scope(payload: dict[str, Any]) -> dict[str, Any]:
+    """Overwrite *payload*'s scope with the #1393 inflated self-report."""
+    payload["scope"] = {
+        "tier": "small",
+        "files": 18,
+        "lines_estimate": 60,
+        "lines_actual": 1567,
+        "forbidden_touched": False,
+    }
+    return payload
