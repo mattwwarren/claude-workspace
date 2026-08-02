@@ -79,9 +79,9 @@ from cw.models import OrchestratorEventType, QueueItemStatus
 from cw.reconcile.tasks import _client_cwd, _is_dangling_client
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from datetime import datetime
     from pathlib import Path
+    from typing import Protocol
 
     from cw.models import (
         ClientConfig,
@@ -91,6 +91,24 @@ if TYPE_CHECKING:
         Session,
         TicketTask,
     )
+
+    class _CommentPostFn(Protocol):
+        """Shape shared by ``_post_auto_approve_comment``/``_post_auto_adopt_comment``.
+
+        A plain ``Callable[[str, dict[str, object]], None]`` can't express the
+        keyword-only ``cwd`` parameter both functions share, so mypy --strict
+        wouldn't catch a signature drift at the ``_flush_gate_recipe_comment_jobs``
+        call site (GitHub #1570).
+        """
+
+        def __call__(
+            self,
+            ticket_id: str,
+            snapshot: dict[str, object],
+            *,
+            cwd: Path | None = None,
+        ) -> None: ...
+
 
 _log = logging.getLogger(__name__)
 
@@ -609,11 +627,20 @@ def _handle_gate_recipe_approve_failure(
     """Log, emit a durable GATE_AUTO_APPROVE_FAILED correction, and stamp the
     one-shot failure latch (GitHub #1065/#1570).
 
-    Shared body of both act phases' ``except CwError`` blocks — the
-    GATE_AUTO_APPROVED event already recorded before the mutation is durable,
-    but without this correction it would stand alone on the operator channel
-    as an uncorrected false-positive "approved" signal. Caller keeps its own
-    ``continue``; this helper performs no control-flow.
+    Shared body of both act phases' ``except CwError`` blocks. The mutation
+    is caught and swallowed here, rather than left to propagate, because an
+    uncaught raise would abort the rest of this reconcile tick (including
+    ``run_escalation_sweep`` and every other still-valid candidate) and, via
+    callers that don't wrap ``reconcile()`` in a broad except (e.g. ``cw
+    status``), surface as a crash to unrelated CLI commands.
+
+    The GATE_AUTO_APPROVED event already recorded before the mutation is
+    durable, but without this correction it would stand alone on the
+    operator channel as an uncorrected false-positive "approved" signal (a
+    log line alone isn't queryable via the event stream). Stamping the
+    one-shot failure latch then keeps a persisting failure from re-detecting
+    and re-emitting both events every reconcile tick forever. Caller keeps
+    its own ``continue``; this helper performs no control-flow.
     """
     _log.warning(
         "gate_recipe_approve_failed ticket=%s client=%s",
@@ -654,7 +681,7 @@ def _log_gate_recipe_comment_skipped(ticket_id: str, client: str) -> None:
 def _flush_gate_recipe_comment_jobs(
     comment_jobs: list[tuple[str, str, dict[str, object]]],
     clients: dict[str, ClientConfig] | None,
-    post_fn: Callable[..., None],
+    post_fn: _CommentPostFn,
 ) -> None:
     """Post-lock, dangling-client-guarded best-effort comment flush.
 
