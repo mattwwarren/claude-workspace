@@ -659,6 +659,7 @@ def _rereview(
         diff=prepared.diff,
         reviewed_sha=prepared.reviewed_sha,
         session_id=session_id,
+        default_branch=default_branch,
     )
 
 

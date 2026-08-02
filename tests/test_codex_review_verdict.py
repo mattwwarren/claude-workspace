@@ -21,6 +21,12 @@ from cw.codex_review import (
 from cw.executor_diagnostics import diagnostics_bundle_dir
 from cw.review_findings import ReviewerRunFailure, consolidate_verdict
 from tests._codex_review_helpers import _task
+from tests._reconcile_helpers import (
+    SCOPE_GUARD_BRANCH,
+    SCOPE_GUARD_FILES,
+    SCOPE_GUARD_LINES,
+    _make_stale_base_repo,
+)
 from tests.conftest import _make_diff, _make_finding, _make_reviewer_doc
 
 if TYPE_CHECKING:
@@ -46,6 +52,7 @@ class TestSynthesizeCodexReviewResult:
             diff=_make_diff(),
             reviewed_sha="sha",
             session_id="s-synth",
+            default_branch="main",
         )
         assert result.status == "blocked"
         assert result.blocker is not None
@@ -79,6 +86,7 @@ class TestSynthesizeCodexReviewResult:
             diff=_make_diff(),
             reviewed_sha="sha",
             session_id="s-synth",
+            default_branch="main",
         )
         assert result.blocker is not None
         assert result.blocker.retry_eligible == expect_retry
@@ -96,6 +104,7 @@ class TestSynthesizeCodexReviewResult:
             diff=_make_diff(),
             reviewed_sha="sha",
             session_id="s-synth",
+            default_branch="main",
         )
         assert result.status == "blocked"
         assert result.blocker is not None
@@ -127,6 +136,7 @@ class TestSynthesizeCodexReviewResult:
             diff=_make_diff(),
             reviewed_sha="sha",
             session_id="s-synth",
+            default_branch="main",
         )
         assert result.status == "blocked"
         assert result.blocker is not None
@@ -158,6 +168,7 @@ class TestSynthesizeCodexReviewResult:
             diff=_make_diff(),
             reviewed_sha="sha",
             session_id="s-synth",
+            default_branch="main",
         )
         assert result.status == "blocked"
         assert result.blocker is not None
@@ -178,6 +189,7 @@ class TestSynthesizeCodexReviewResult:
             diff=_make_diff(),
             reviewed_sha="sha",
             session_id="s-synth",
+            default_branch="main",
         )
         assert result.status == "stage_complete"
         assert result.stage_reached == "stage3_review"
@@ -224,6 +236,7 @@ class TestSynthesizeCodexReviewResultHealth:
             diff=_make_diff(),
             reviewed_sha="sha",
             session_id="s-synth",
+            default_branch="main",
         )
         assert result.status == "stage_complete"
         assert result.health.lowest_agent_confidence == "MEDIUM"
@@ -253,6 +266,7 @@ class TestSynthesizeCodexReviewResultHealth:
             diff=_make_diff(),
             reviewed_sha="sha",
             session_id="s-synth",
+            default_branch="main",
         )
         assert result.status == "stage_complete"
         assert result.health.lowest_agent_confidence == "HIGH"
@@ -369,3 +383,102 @@ def test_format_failures_detail_includes_diagnostics_path() -> None:
     # pointer is exactly "[diagnostics: <absolute bundle dir>]".
     bundle = diagnostics_bundle_dir("sess-fmt")
     assert detail == f"Code Quality Reviewer (codex_timeout) [diagnostics: {bundle}]"
+
+
+# ---------------------------------------------------------------------------
+# #1487 — clean-review scope is measured, not hardcoded zero
+# ---------------------------------------------------------------------------
+
+
+class TestCleanReviewScopeMeasurement:
+    def test_clean_review_reports_measured_scope(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """stage_complete now carries the branch's real files/lines, not 0/0."""
+        worktree = _make_stale_base_repo(make_git_repo, "wt-verdict-scope")
+        doc = _make_reviewer_doc(_make_finding(severity="SHOULD_FIX"))
+
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-scope",
+            default_branch="main",
+        )
+
+        assert result.status == "stage_complete"
+        assert result.scope.files == SCOPE_GUARD_FILES
+        assert result.scope.lines_actual == SCOPE_GUARD_LINES
+        # lines_estimate stays 0 — out of scope for #1487.
+        assert result.scope.lines_estimate == 0
+        assert verdict is not None
+
+    def test_clean_review_honours_default_branch(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """The caller's default_branch selects the base ref for the measurement."""
+        worktree = _make_stale_base_repo(
+            make_git_repo, "wt-verdict-trunk", default_branch="trunk"
+        )
+        doc = _make_reviewer_doc(_make_finding(severity="SHOULD_FIX"))
+
+        result, _verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-scope-trunk",
+            default_branch="trunk",
+        )
+
+        assert result.scope.files == SCOPE_GUARD_FILES
+        assert result.scope.lines_actual == SCOPE_GUARD_LINES
+
+    def test_unmeasurable_worktree_falls_back_to_zero(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """No origin/<default_branch> ref → today's 0/0 behavior is preserved."""
+        worktree = make_git_repo("wt-verdict-noorigin")
+        doc = _make_reviewer_doc(_make_finding(severity="SHOULD_FIX"))
+
+        result, _verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-scope-none",
+            default_branch="main",
+        )
+
+        assert result.scope.files == 0
+        assert result.scope.lines_actual == 0
+
+    def test_health_and_branch_are_untouched_by_the_scope_change(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """Regression pin for #1551/#1580: health and branch stay as derived."""
+        worktree = _make_stale_base_repo(make_git_repo, "wt-verdict-health")
+        doc = _make_reviewer_doc(_make_finding(severity="SHOULD_FIX"))
+
+        result, _verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-scope-health",
+            default_branch="main",
+        )
+
+        assert result.branch == SCOPE_GUARD_BRANCH
+        assert result.health.lowest_agent_confidence == "HIGH"
+        assert result.health.any_incomplete_risk is False
+        assert result.health.recommendation == "PROCEED"

@@ -22,6 +22,7 @@ from cw.codex_review._const import (
 from cw.executor_diagnostics import append_diagnostics_pointer
 from cw.local_runner import _SCHEMA_VERSION, make_blocked, resolve_tier
 from cw.review_findings import consolidate_verdict
+from cw.worktree import compute_branch_diff_scope
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -94,6 +95,7 @@ def synthesize_codex_review_result(
     diff: CapturedDiff,
     reviewed_sha: str,
     session_id: str,
+    default_branch: str,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Map consolidated review documents to a typed AutoDevResult.
 
@@ -148,6 +150,13 @@ def synthesize_codex_review_result(
     branch = subprocess.check_output(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=worktree, text=True
     ).strip()
+    # Why: files/lines_actual were hardcoded 0/0 — a code-level placeholder that
+    # reported "this review covered nothing" for every clean pass (#1487). Measure
+    # them instead. compute_branch_diff_scope is called directly rather than
+    # reconcile_result_scope because there is no self-report here to reconcile
+    # against, so the mismatch-warning layer would fire on every clean review.
+    # None (unverifiable git state) keeps today's 0/0 behavior.
+    measured = compute_branch_diff_scope(worktree, default_branch)
     result = AutoDevResult(
         schema_version=_SCHEMA_VERSION,
         ticket_id=task.ticket_id,
@@ -155,9 +164,11 @@ def synthesize_codex_review_result(
         stage_reached=STAGE3_REVIEW,
         scope=Scope(
             tier=resolve_tier(task.scope_hint),
-            files=0,
+            files=measured["files"] if measured is not None else 0,
+            # lines_estimate stays 0: a plan/scope_hint line-count mapping is a
+            # follow-on, same as synthesize_git_result's own precedent.
             lines_estimate=0,
-            lines_actual=0,
+            lines_actual=measured["lines_actual"] if measured is not None else 0,
             forbidden_touched=False,
         ),
         plan_source="none",

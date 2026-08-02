@@ -415,6 +415,7 @@ class TestSessionResult:
             diff=_make_diff(),
             reviewed_sha="sha",
             session_id="abcd1234",
+            default_branch="main",
         )
         session = _make_session(tmp_path, last_result=result.model_dump(mode="json"))
         _seed(session)

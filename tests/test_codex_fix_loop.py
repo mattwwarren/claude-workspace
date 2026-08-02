@@ -363,6 +363,7 @@ def _stage_complete(worktree: Path) -> tuple[AutoDevResult, ReviewVerdict]:
         diff=diff,
         reviewed_sha="sha-clean",
         session_id="s-stage-complete",
+        default_branch="main",
     )
     assert verdict is not None
     return result, verdict
