@@ -1,0 +1,89 @@
+name: Changelog Advisory
+
+# Emits a non-blocking `::warning::` annotation when a PR's diff touches
+# `src/cw/**` without touching `CHANGELOG.md` (GitHub #1532).
+#
+# ADVISORY ONLY — this job must never fail. Docs-only, test-only, and
+# dark-release plumbing PRs legitimately have nothing to document, so a
+# missing CHANGELOG entry is a prompt for the author, not a merge blocker.
+# Do not add this check to branch protection's required set.
+#
+# There is deliberately no trigger-level `paths:` filter — this follows
+# pr-events.yml's established "always trigger, decide inside the script"
+# idiom, which keeps the decision logic in one greppable place.
+
+on:
+  pull_request:
+
+jobs:
+  check-changelog:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: List PR files
+        id: list-files
+        env:
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          # Random per-run delimiter. $FILES/$GITHUB_OUTPUT below is populated
+          # from PR filenames, which a fork-PR author fully controls — a file
+          # literally named "EOF" would terminate a fixed-delimiter heredoc
+          # early and could smuggle extra key=value pairs into this job's
+          # outputs. GitHub's own hardening guidance is to randomize instead.
+          # Prefer uuidgen's full CSPRNG entropy; fall back to bash builtins
+          # ($RANDOM, $$) only if uuidgen is unavailable, so delimiter
+          # generation itself can never fail this step (consistent with the
+          # job's fail-open invariant) without giving up entropy in the
+          # common case where uuidgen is present.
+          DELIM="EOF_$(uuidgen 2>/dev/null || echo "${RANDOM}${RANDOM}_$$")"
+
+          # Fail open. Because there is no `paths:` filter this step runs on
+          # every PR, so a `gh api` hiccup (5xx, rate limit, network flake,
+          # auth misconfig) must degrade to "skip the advisory this run",
+          # never to a red check. Mirrors dispatch-guard.yml's `|| true`
+          # fail-open idiom.
+          FILES=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/files" \
+            --paginate --jq '.[].filename') || {
+            echo "::warning::changelog-advisory: could not list PR files (exit $?) — skipping check for this run"
+            {
+              echo "files<<$DELIM"
+              echo "$DELIM"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          {
+            echo "files<<$DELIM"
+            echo "$FILES"
+            echo "$DELIM"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Warn if src/cw changed without a CHANGELOG entry
+        id: check
+        env:
+          CHANGED_FILES: ${{ steps.list-files.outputs.files }}
+        run: |
+          set -euo pipefail
+
+          # Both greps MUST stay inside `if` conditions. Under `set -e` a bare
+          # `grep` pipeline that matches nothing exits non-zero and would fail
+          # the job — which is exactly the empty-diff / docs-only case this
+          # check is supposed to stay quiet on. Do not "simplify" these into an
+          # unguarded chain.
+          if printf '%s\n' "$CHANGED_FILES" | grep -q '^src/cw/'; then
+            if printf '%s\n' "$CHANGED_FILES" | grep -qFx 'CHANGELOG.md'; then
+              echo "changelog-advisory: src/cw/** changed and CHANGELOG.md was updated."
+            else
+              echo "::warning::src/cw/** changed in this PR but CHANGELOG.md was not updated — consider adding an entry."
+            fi
+          else
+            echo "changelog-advisory: no src/cw/** changes in this PR — nothing to check."
+          fi
+
+          exit 0
