@@ -62,8 +62,12 @@ from typing import TYPE_CHECKING
 
 from cw.config import load_effective_clients, load_state
 from cw.dev_queue import (
+    _PLAN_SOUNDNESS_MARKER,
+    _PLAN_SPEC_MARKER,
     _approve_ticket_locked,
+    _marker_version,
     _newest_by_created_at,
+    _plan_body_signoff_ok,
     dev_queue_lock,
     load_dev_queue,
     save_dev_queue,
@@ -189,11 +193,10 @@ See event `GATE_AUTO_APPROVED` for the full audit trail.
 _PLAN_PENDING_APPROVAL = "plan_pending_approval"
 
 # The two signoff markers auto-dev-plan appends to the plan-of-record body.
-# _PLAN_SPEC_MARKER mirrors gh._PLAN_MARKER — a local copy avoids importing a
-# private cross-module constant; keep the two in sync (see
-# test_plan_spec_marker_matches_gh_marker for a drift guard).
-_PLAN_SPEC_MARKER = "<!-- plan-spec-reviewed"
-_PLAN_SOUNDNESS_MARKER = "<!-- plan-soundness-reviewed"
+# Canonical definition now lives in cw.dev_queue.lifecycle (#1567) — imported
+# above rather than redefined here. _PLAN_SPEC_MARKER still mirrors
+# gh._PLAN_MARKER, a genuinely separate definition in a different module;
+# test_plan_spec_marker_matches_gh_marker continues to guard that drift.
 
 # predicate_snapshot dict keys (R3) — named once so the producer
 # (_clean_plan_snapshot) and consumer (_post_auto_adopt_comment) can't drift
@@ -301,31 +304,6 @@ def _predicate_holds(snapshot: dict[str, object]) -> bool:
     )
 
 
-def _marker_version(body: str, *, marker: str) -> str | None:
-    """Extract the ``<date> <vN>`` version string that follows *marker*.
-
-    Fails closed (returns None) both when *marker* is absent from *body* and
-    when its comment is never closed with ``-->`` — the caller currently
-    always pre-checks marker presence, but this function defends its own
-    fail-closed contract rather than depending on that discipline, since a
-    future caller (or refactor) skipping the pre-check would otherwise hit an
-    uncaught ``IndexError`` instead of failing closed. Substring split only —
-    no regex or date parser (R3): the marker line is
-    ``<!-- plan-spec-reviewed: D vN -->``, so we take everything between the
-    marker and the ``-->`` close, strip the leading ``:`` and surrounding
-    whitespace. The closure check specifically prevents ``str.split`` from
-    silently returning the rest of *body* verbatim, which would leak raw
-    plan-of-record text into the predicate_snapshot, the GATE_AUTO_APPROVED
-    event payload, and the public audit comment.
-    """
-    if marker not in body:
-        return None
-    rest = body.split(marker, 1)[1]
-    if "-->" not in rest:
-        return None
-    return rest.split("-->", 1)[0].lstrip(":").strip()
-
-
 def _plan_of_record_body(task: TicketTask) -> str | None:
     """Return the plan-of-record body, tracker-first with a `.cw/plan.md` fallback.
 
@@ -379,10 +357,15 @@ def _clean_plan_snapshot(
     body = _plan_of_record_body(task)
     if body is None:
         return None
-    if _PLAN_SPEC_MARKER not in body or _PLAN_SOUNDNESS_MARKER not in body:
+    if not _plan_body_signoff_ok(body):
         return None
     spec_version = _marker_version(body, marker=_PLAN_SPEC_MARKER)
     soundness_version = _marker_version(body, marker=_PLAN_SOUNDNESS_MARKER)
+    # Defense-in-depth (#1567): _plan_body_signoff_ok already proved both
+    # calls below return non-None, since it composes the identical
+    # _marker_version checks over the same body. This guard is kept anyway so
+    # mypy sees the narrowed str type and so a future divergence between the
+    # two predicates fails closed here rather than raising on a None key.
     if spec_version is None or soundness_version is None:
         return None
     return {

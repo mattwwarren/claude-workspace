@@ -2110,7 +2110,7 @@ def test_plan_spec_marker_matches_gh_marker() -> None:
     changes, this recipe's predicate would silently stop matching (fails
     closed, but silently) — this test converts the comment-only invariant
     into a real assertion."""
-    from cw.reconcile.gate_recipes import _PLAN_SPEC_MARKER
+    from cw.dev_queue.lifecycle import _PLAN_SPEC_MARKER
 
     assert _PLAN_SPEC_MARKER == _PLAN_MARKER
 
