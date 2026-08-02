@@ -4438,6 +4438,44 @@ class TestApproveTicket:
         assert result["plan_requeued"] is True
         assert result["to_stage"] == "plan"
 
+    def test_approve_plan_pending_unclosed_marker_requeues(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A plan body whose soundness marker is present but never closed with
+        ``-->`` must NOT be treated as reviewed -- regression test for the
+        unified predicate (#1567). Before the fix, ``_plan_is_reviewed`` did a
+        bare ``marker in body`` check, so an unclosed marker satisfied it and
+        approve incorrectly advanced the ticket to impl. Mirrors the unclosed-
+        marker fixture in test_reconcile_gate_recipes.py's
+        test_unclosed_marker_yields_none."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        unclosed_body = (
+            "# Plan\n\n"
+            "<!-- plan-spec-reviewed: 2026-07-08 v2 -->\n"
+            "<!-- plan-soundness-reviewed: 2026-07-08 v1 unterminated, no close"
+        )
+        stub_fetch_plan(
+            monkeypatch,
+            unclosed_body,
+            target="cw.dev_queue.lifecycle.fetch_approved_plan_comment",
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-unclosed1")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess-unclosed1",
+            last_result={"status": "plan_pending_approval"},
+        )
+        save_state(CwState(sessions=[session]))
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["plan_requeued"] is True
+        assert result["to_stage"] == "plan"
+
     def test_approve_plan_pending_plan_md_read_error_requeues(
         self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -4469,20 +4507,6 @@ class TestApproveTicket:
 
         assert result["plan_requeued"] is True
         assert result["to_stage"] == "plan"
-
-    def test_approve_plan_reviewed_marker_constants_match_gate_recipes(self) -> None:
-        """Drift guard: dev_queue's locally-duplicated marker constants must
-        stay byte-identical to gate_recipes' pair (#968)."""
-        from cw.dev_queue import _PLAN_SOUNDNESS_MARKER, _PLAN_SPEC_MARKER
-        from cw.reconcile.gate_recipes import (
-            _PLAN_SOUNDNESS_MARKER as GR_SOUNDNESS,
-        )
-        from cw.reconcile.gate_recipes import (
-            _PLAN_SPEC_MARKER as GR_SPEC,
-        )
-
-        assert _PLAN_SPEC_MARKER == GR_SPEC
-        assert _PLAN_SOUNDNESS_MARKER == GR_SOUNDNESS
 
 
 # ---------------------------------------------------------------------------
