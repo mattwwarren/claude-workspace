@@ -209,8 +209,7 @@ def test_list_files_step_captures_full_paginated_output(tmp_path: Path) -> None:
     delim = lines[0].removeprefix("files<<")
     assert lines[-1] == delim
     captured = lines[1:-1]
-    assert "src/cw/late.py" in captured
-    assert len(captured) == len(filenames)
+    assert captured == filenames
 
 
 # --- Group B: literal shell exercise of the check logic ---
