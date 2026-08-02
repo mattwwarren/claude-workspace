@@ -48,6 +48,7 @@ from cw.reconcile import (
     resolve_headless_budget,
 )
 from cw.result import emit_result_locked
+from cw.worktree import reconcile_result_scope, resolve_scope_guard_default_branch
 
 if TYPE_CHECKING:
     from cw.auto_dev_result import BlockedResult
@@ -117,7 +118,28 @@ def _parse_headless_sentinel(
     parsed = _parse_sentinel_from_transcript(cwd_value, csid)
     if parsed is None and session.worktree_path is not None:
         parsed = _parse_sentinel_from_transcript(str(session.worktree_path), csid)
+    if isinstance(parsed, AutoDevResult):
+        parsed = _verify_headless_scope(parsed, session)
     return parsed
+
+
+def _verify_headless_scope(result: AutoDevResult, session: Session) -> AutoDevResult:
+    """Correct a headless sentinel's self-reported scope against git facts (#1487).
+
+    This is the last point before ``signal_stop`` writes ``last_result``, so a
+    fabricated or stale-merge-base scope corrected here never reaches the queue.
+    An unresolvable client falls back to ``main`` — the Stop hook must never
+    raise, and losing the sentinel would cost far more than measuring against
+    the wrong base.
+    """
+    default_branch = resolve_scope_guard_default_branch(
+        session.client, log_context=f"session={session.id}"
+    )
+    return reconcile_result_scope(
+        result,
+        worktree_path=session.worktree_path,
+        default_branch=default_branch,
+    )
 
 
 def _reconstruct_emitted_sentinel(session: Session) -> AutoDevResult | None:

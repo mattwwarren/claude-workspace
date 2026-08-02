@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import freezegun
@@ -49,8 +50,16 @@ from cw.reconcile import (
     reconcile,
     resolve_idle_watchdog_budget,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 from tests._reconcile_helpers import (
+    SCOPE_GUARD_FILES,
+    SCOPE_GUARD_LINES,
     _auto_config,
+    _inflate_scope,
+    _make_stale_base_repo,
     _make_terminal_payload,
     _mk_daemon_completed_session,
     _mk_headless_daemon_session,
@@ -4465,3 +4474,69 @@ def test_idle_salvage_merge_gate_blocked_push_auth_failed_stamps_awaiting_operat
 # ---------------------------------------------------------------------------
 # _parse_any_sentinel_from_transcript — two-layer fallthrough (#892)
 # ---------------------------------------------------------------------------
+
+
+def test_idle_advance_sentinel_corrects_inflated_scope(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_git_repo: Callable[..., Path],
+) -> None:
+    """#1487: the idle advance-sentinel route carries git-verified scope numbers."""
+    from cw.reconcile import ProposedAction, _detect_idle_candidates
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = started_at + timedelta(minutes=20)
+    config = _auto_config(idle_confirm_observations=2)
+    worktree = _make_stale_base_repo(make_git_repo, "wt-idle-scope")
+    sess = _setup_idle_stage_complete_session(
+        home,
+        worktree,
+        sid="idle-scope",
+        started_at=started_at,
+        write_transcript=False,
+    )
+    payload = _inflate_scope(_stage_complete_payload())
+    payload["ticket_id"] = "idle-scope"
+    path = _write_salvage_transcript(home, worktree, "claude-idle-scope", payload)
+    ts = (started_at + timedelta(seconds=60)).timestamp()
+    os.utime(path, (ts, ts))
+    state = CwState(sessions=[sess])
+    save_state(state)
+    task = TicketTask(
+        ticket_id="idle-scope",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="idle-scope",
+        stage=Stage.IMPL,
+        attempts=0,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/idle-scope"
+    )
+    monkeypatch.setattr(
+        "cw.reconcile.idle._detect._detect_post_review_clean", lambda _s: False
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_dirty_by_path", lambda _c, _p: False
+    )
+
+    candidates = _detect_idle_candidates(
+        state,
+        now=now,
+        native_live={"fake-short-id"},
+        config=config,
+        task_by_ticket={"idle-scope": task},
+    )
+
+    assert len(candidates) == 1
+    routed = candidates[0].routed_sentinel
+    assert candidates[0].proposed_action == ProposedAction.ROUTE_EMITTED_SENTINEL
+    assert routed is not None
+    assert routed.scope.files == SCOPE_GUARD_FILES
+    assert routed.scope.lines_actual == SCOPE_GUARD_LINES

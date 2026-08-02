@@ -8,6 +8,7 @@ _detect_post_review_clean (R6).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 from datetime import UTC, datetime, timedelta
@@ -59,7 +60,11 @@ from cw.reconcile import (
     revert_timed_out_tasks,
 )
 from tests._reconcile_helpers import (
+    SCOPE_GUARD_FILES,
+    SCOPE_GUARD_LINES,
     _auto_config,
+    _inflate_scope,
+    _make_stale_base_repo,
     _make_terminal_payload,
     _mk_daemon_session_with_worktree,
     _mk_headless_daemon_session,
@@ -3593,3 +3598,175 @@ class TestSalvageTerminalResultTwoLayerFallback:
         result = _salvage_terminal_result(sess)
 
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# #1487 — salvaged sentinels get their self-reported scope verified against
+# real git facts before any consumer sees them.
+# ---------------------------------------------------------------------------
+
+
+def _write_scope_guard_clients_yaml(
+    tmp_config_dir: Path, *, default_branch: str
+) -> None:
+    config_dir = tmp_config_dir / ".config" / "cw"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "clients.yaml").write_text(
+        "clients:\n"
+        "  client-a:\n"
+        "    workspace_path: /tmp/ws-scope-guard\n"
+        f"    default_branch: {default_branch}\n"
+    )
+
+
+def _parse_scope_guard_sentinel(
+    home: Path, worktree: Path, payload: dict[str, Any]
+) -> AutoDevResult:
+    from cw.reconcile._shared import _parse_any_sentinel_from_transcript
+
+    sess = _mk_headless_daemon_session(
+        "scope-guard", worktree, datetime(2026, 1, 1, tzinfo=UTC)
+    )
+    _write_salvage_transcript(home, worktree, "claude-uuid-scope", payload)
+    parsed = _parse_any_sentinel_from_transcript(sess)
+    assert parsed is not None
+    result, _csid = parsed
+    assert isinstance(result, AutoDevResult)
+    return result
+
+
+def test_salvaged_sentinel_scope_corrected_against_git_facts(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_git_repo: Any,
+) -> None:
+    """Inflated self-report from a stale merge-base → corrected to real numbers."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = _make_stale_base_repo(make_git_repo, "wt-scope-guard")
+
+    result = _parse_scope_guard_sentinel(
+        home, worktree, _inflate_scope(_stage_complete_payload())
+    )
+
+    assert result.scope.files == SCOPE_GUARD_FILES
+    assert result.scope.lines_actual == SCOPE_GUARD_LINES
+    # Untouched fields ride through unchanged.
+    assert result.scope.lines_estimate == 60
+    assert result.scope.tier == "small"
+    assert result.status == "stage_complete"
+
+
+def test_salvaged_sentinel_scope_honours_client_default_branch(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_git_repo: Any,
+) -> None:
+    """The measurement resolves the client's configured default_branch, not 'main'."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = _make_stale_base_repo(
+        make_git_repo, "wt-scope-trunk", default_branch="trunk"
+    )
+    _write_scope_guard_clients_yaml(tmp_config_dir, default_branch="trunk")
+
+    result = _parse_scope_guard_sentinel(
+        home, worktree, _inflate_scope(_stage_complete_payload())
+    )
+
+    assert result.scope.files == SCOPE_GUARD_FILES
+    assert result.scope.lines_actual == SCOPE_GUARD_LINES
+
+
+def test_salvaged_sentinel_scope_unknown_client_key_logs_warning(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_git_repo: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A well-formed clients.yaml missing the session's client key now warns.
+
+    Regression pin for #1487's fix loop: before the shared
+    resolve_scope_guard_default_branch helper existed, _verify_salvaged_scope
+    resolved this case via a silent dict.get() miss with no WARNING, diverging
+    from the Stop-hook family's logged get_client()-raises path.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = _make_stale_base_repo(make_git_repo, "wt-scope-unknown-client")
+    config_dir = tmp_config_dir / ".config" / "cw"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "clients.yaml").write_text(
+        "clients:\n  some-other-client:\n    workspace_path: /tmp/ws-other\n"
+    )
+
+    with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+        result = _parse_scope_guard_sentinel(
+            home, worktree, _inflate_scope(_stage_complete_payload())
+        )
+
+    assert result.scope.files == SCOPE_GUARD_FILES
+    assert result.scope.lines_actual == SCOPE_GUARD_LINES
+    assert "scope_verification_client_unresolved" in caplog.text
+    assert "client=client-a" in caplog.text
+
+
+def test_salvaged_sentinel_scope_unverifiable_worktree_left_alone(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-git worktree → measurement unavailable, self-report preserved."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = tmp_path / "wt-scope-nogit"
+    worktree.mkdir()
+
+    result = _parse_scope_guard_sentinel(
+        home, worktree, _inflate_scope(_stage_complete_payload())
+    )
+
+    assert result.scope.files == 18
+    assert result.scope.lines_actual == 1567
+
+
+def test_salvaged_sentinel_scope_survives_unresolvable_client_config(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_git_repo: Any,
+) -> None:
+    """A broken clients.yaml must not lose the sentinel — fall back to 'main'.
+
+    _verify_salvaged_scope now resolves default_branch via the shared
+    cw.worktree.resolve_scope_guard_default_branch helper (#1487 fix loop),
+    which calls cw.worktree.load_effective_clients directly rather than the
+    reconcile-cluster _deps indirection.
+    """
+    from cw import worktree as wt_mod
+    from cw.exceptions import CwError
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = _make_stale_base_repo(make_git_repo, "wt-scope-badcfg")
+
+    def _boom() -> dict[str, ClientConfig]:
+        msg = "clients.yaml is unreadable"
+        raise CwError(msg)
+
+    monkeypatch.setattr(wt_mod, "load_effective_clients", _boom)
+
+    result = _parse_scope_guard_sentinel(
+        home, worktree, _inflate_scope(_stage_complete_payload())
+    )
+
+    assert result.scope.files == SCOPE_GUARD_FILES
+    assert result.scope.lines_actual == SCOPE_GUARD_LINES
