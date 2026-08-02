@@ -3,6 +3,7 @@ rendering (#1236, #1239)."""
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import pytest
@@ -459,6 +460,31 @@ class TestCleanReviewScopeMeasurement:
 
         assert result.scope.files == 0
         assert result.scope.lines_actual == 0
+
+    def test_unmeasurable_worktree_logs_scope_verification_unavailable(
+        self, make_git_repo: Callable[..., Path], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """#1487 fix loop: the 0/0 fallback now warns, distinguishing it from a
+        genuine zero-diff clean review — previously silent, unlike the other
+        two ingestion families' scope_verification_unavailable WARNING."""
+        worktree = make_git_repo("wt-verdict-noorigin-warns")
+        doc = _make_reviewer_doc(_make_finding(severity="SHOULD_FIX"))
+
+        with caplog.at_level(logging.WARNING, logger="cw.codex_review._verdict"):
+            result, _verdict = synthesize_codex_review_result(
+                task=_task(),
+                worktree=worktree,
+                documents=[doc],
+                failures=[],
+                diff=_make_diff(),
+                reviewed_sha="sha",
+                session_id="s-scope-warns",
+                default_branch="main",
+            )
+
+        assert result.scope.files == 0
+        assert result.scope.lines_actual == 0
+        assert "scope_verification_unavailable" in caplog.text
 
     def test_health_and_branch_are_untouched_by_the_scope_change(
         self, make_git_repo: Callable[..., Path]

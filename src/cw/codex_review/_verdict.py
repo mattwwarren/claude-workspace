@@ -8,6 +8,7 @@ GitHub-issue-comment markdown body. Consumed by ``core`` (result synthesis).
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from typing import TYPE_CHECKING
 
@@ -35,6 +36,8 @@ if TYPE_CHECKING:
         ReviewVerdict,
         Severity,
     )
+
+_log = logging.getLogger(__name__)
 
 
 # Confidence values other than HIGH render an inline annotation on their
@@ -157,6 +160,14 @@ def synthesize_codex_review_result(
     # against, so the mismatch-warning layer would fire on every clean review.
     # None (unverifiable git state) keeps today's 0/0 behavior.
     measured = compute_branch_diff_scope(worktree, default_branch)
+    if measured is None:
+        _log.warning(
+            "scope_verification_unavailable: ticket=%s worktree=%s could not be "
+            "measured against origin/%s; reporting files=0 lines_actual=0",
+            task.ticket_id,
+            worktree,
+            default_branch,
+        )
     result = AutoDevResult(
         schema_version=_SCHEMA_VERSION,
         ticket_id=task.ticket_id,

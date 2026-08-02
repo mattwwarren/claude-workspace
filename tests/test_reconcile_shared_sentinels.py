@@ -8,6 +8,7 @@ _detect_post_review_clean (R6).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 from datetime import UTC, datetime, timedelta
@@ -3681,6 +3682,41 @@ def test_salvaged_sentinel_scope_honours_client_default_branch(
     assert result.scope.lines_actual == SCOPE_GUARD_LINES
 
 
+def test_salvaged_sentinel_scope_unknown_client_key_logs_warning(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_git_repo: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A well-formed clients.yaml missing the session's client key now warns.
+
+    Regression pin for #1487's fix loop: before the shared
+    resolve_scope_guard_default_branch helper existed, _verify_salvaged_scope
+    resolved this case via a silent dict.get() miss with no WARNING, diverging
+    from the Stop-hook family's logged get_client()-raises path.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    worktree = _make_stale_base_repo(make_git_repo, "wt-scope-unknown-client")
+    config_dir = tmp_config_dir / ".config" / "cw"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "clients.yaml").write_text(
+        "clients:\n  some-other-client:\n    workspace_path: /tmp/ws-other\n"
+    )
+
+    with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+        result = _parse_scope_guard_sentinel(
+            home, worktree, _inflate_scope(_stage_complete_payload())
+        )
+
+    assert result.scope.files == SCOPE_GUARD_FILES
+    assert result.scope.lines_actual == SCOPE_GUARD_LINES
+    assert "scope_verification_client_unresolved" in caplog.text
+    assert "client=client-a" in caplog.text
+
+
 def test_salvaged_sentinel_scope_unverifiable_worktree_left_alone(
     tmp_config_dir: Path,
     tmp_path: Path,
@@ -3707,9 +3743,15 @@ def test_salvaged_sentinel_scope_survives_unresolvable_client_config(
     monkeypatch: pytest.MonkeyPatch,
     make_git_repo: Any,
 ) -> None:
-    """A broken clients.yaml must not lose the sentinel — fall back to 'main'."""
+    """A broken clients.yaml must not lose the sentinel — fall back to 'main'.
+
+    _verify_salvaged_scope now resolves default_branch via the shared
+    cw.worktree.resolve_scope_guard_default_branch helper (#1487 fix loop),
+    which calls cw.worktree.load_effective_clients directly rather than the
+    reconcile-cluster _deps indirection.
+    """
+    from cw import worktree as wt_mod
     from cw.exceptions import CwError
-    from cw.reconcile import _deps
 
     home = tmp_path / "home"
     home.mkdir()
@@ -3720,7 +3762,7 @@ def test_salvaged_sentinel_scope_survives_unresolvable_client_config(
         msg = "clients.yaml is unreadable"
         raise CwError(msg)
 
-    monkeypatch.setattr(_deps, "load_effective_clients", _boom)
+    monkeypatch.setattr(wt_mod, "load_effective_clients", _boom)
 
     result = _parse_scope_guard_sentinel(
         home, worktree, _inflate_scope(_stage_complete_payload())

@@ -77,6 +77,7 @@ from cw.result import (
 from cw.worktree import (
     reconcile_result_scope,
     remove_worktree,
+    resolve_scope_guard_default_branch,
     worktree_has_unsaved_work,
     worktree_path_for,
 )
@@ -880,18 +881,9 @@ def _verify_salvaged_scope(result: AutoDevResult, session: Session) -> AutoDevRe
     config failure must not cost us the sentinel, so an unresolvable client
     falls back to the ``main`` default rather than propagating.
     """
-    try:
-        clients = _deps.load_effective_clients()
-    except CwError:
-        _log.warning(
-            "scope_verification_client_unresolved: session=%s client=%s; "
-            "measuring against 'main'",
-            session.id,
-            session.client,
-        )
-        clients = {}
-    client_cfg = clients.get(session.client)
-    default_branch = client_cfg.default_branch if client_cfg is not None else "main"
+    default_branch = resolve_scope_guard_default_branch(
+        session.client, log_context=f"session={session.id}"
+    )
     return reconcile_result_scope(
         result,
         worktree_path=session.worktree_path,

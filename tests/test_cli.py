@@ -1481,6 +1481,33 @@ class TestSignalStop:
         assert updated.last_result["scope"]["files"] == SCOPE_GUARD_FILES
         assert updated.last_result["scope"]["lines_actual"] == SCOPE_GUARD_LINES
 
+    def test_signal_stop_scope_guard_survives_malformed_clients_yaml(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        make_git_repo: Callable[..., Path],
+    ) -> None:
+        """#1487 fix loop: a real YAML syntax error must not crash signal-stop.
+
+        Regression pin: before the fix, _verify_headless_scope caught only
+        CwError around get_client(), which does not cover yaml.YAMLError —
+        a malformed clients.yaml crashed the Stop hook outright.
+        """
+        worktree = _make_stale_base_repo(make_git_repo, "wt-hook-badyaml")
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text("clients: [\n  unterminated\n")
+
+        updated = self._run_scope_guard_signal_stop(
+            tmp_path, monkeypatch, worktree, session_id="sess-1487-badyaml"
+        )
+
+        assert updated.last_result is not None
+        assert updated.last_result["scope"]["files"] == SCOPE_GUARD_FILES
+        assert updated.last_result["scope"]["lines_actual"] == SCOPE_GUARD_LINES
+        assert updated.last_result_source == LastResultSource.STOP_HOOK_HARVEST
+
     def test_signal_stop_defers_under_budget_no_sentinel(
         self,
         tmp_config_dir: Path,

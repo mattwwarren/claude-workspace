@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypedDict
 
 from cw.auto_dev_result import _PRE_IMPL_STAGES
+from cw.config import load_effective_clients
 from cw.exceptions import (
     MissingWorkspaceError,
     StaleWorktreeError,
@@ -334,9 +335,9 @@ def _scope_mismatch_is_gross(reported: int, measured: int) -> bool:
 
 def _reconcile_scope_field(
     field: str,
+    *,
     reported: int,
     measured: int,
-    *,
     result: AutoDevResult,
     measured_branch: str,
 ) -> int | None:
@@ -403,8 +404,8 @@ def reconcile_result_scope(
     updates: dict[str, int] = {}
     corrected_files = _reconcile_scope_field(
         "files",
-        result.scope.files,
-        measured["files"],
+        reported=result.scope.files,
+        measured=measured["files"],
         result=result,
         measured_branch=measured["branch"],
     )
@@ -416,8 +417,8 @@ def reconcile_result_scope(
     if reported_lines is not None:
         corrected_lines = _reconcile_scope_field(
             "lines_actual",
-            reported_lines,
-            measured["lines_actual"],
+            reported=reported_lines,
+            measured=measured["lines_actual"],
             result=result,
             measured_branch=measured["branch"],
         )
@@ -427,6 +428,31 @@ def reconcile_result_scope(
     if not updates:
         return result
     return result.model_copy(update={"scope": result.scope.model_copy(update=updates)})
+
+
+def resolve_scope_guard_default_branch(client_name: str, *, log_context: str) -> str:
+    """Resolve *client_name*'s ``default_branch`` for scope verification (#1487).
+
+    Falls back to ``"main"`` on any resolution failure — the client key is
+    absent from an otherwise-valid ``clients.yaml`` (a silent ``dict.get()``
+    miss) and a config-load failure (malformed YAML, unreadable file, etc. —
+    any exception from :func:`cw.config.load_effective_clients`) are both
+    logged identically here, so every scope-guard caller gets the same
+    diagnostic breadcrumb regardless of which failure occurred. This guard
+    must never cost a caller its sentinel over a client-config problem.
+    """
+    try:
+        client_cfg = load_effective_clients().get(client_name)
+    except Exception:  # noqa: BLE001 — fail-safe: any config-load error falls back to "main"
+        client_cfg = None
+    if client_cfg is not None:
+        return client_cfg.default_branch
+    _log.warning(
+        "scope_verification_client_unresolved: %s client=%s; measuring against 'main'",
+        log_context,
+        client_name,
+    )
+    return "main"
 
 
 def _register_cw_exclude(git_cwd: Path) -> None:

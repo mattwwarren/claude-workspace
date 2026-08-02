@@ -20,7 +20,6 @@ from cw.cli._base import handle_errors, main
 from cw.cli._hook_io import _read_cw_context, _read_hook_stdin_json
 from cw.cli._sentinels import _parse_sentinel_from_transcript
 from cw.config import (
-    get_client,
     load_orchestrator_config,
     load_state,
     save_state,
@@ -33,7 +32,7 @@ from cw.dev_queue import (
     transition_task_status,
 )
 from cw.events import record_event
-from cw.exceptions import CwError, EmitSessionNotFoundError, EmitValidationError
+from cw.exceptions import EmitSessionNotFoundError, EmitValidationError
 from cw.models import (
     CompletionReason,
     LastResultSource,
@@ -49,7 +48,7 @@ from cw.reconcile import (
     resolve_headless_budget,
 )
 from cw.result import emit_result_locked
-from cw.worktree import reconcile_result_scope
+from cw.worktree import reconcile_result_scope, resolve_scope_guard_default_branch
 
 if TYPE_CHECKING:
     from cw.auto_dev_result import BlockedResult
@@ -133,16 +132,9 @@ def _verify_headless_scope(result: AutoDevResult, session: Session) -> AutoDevRe
     raise, and losing the sentinel would cost far more than measuring against
     the wrong base.
     """
-    try:
-        default_branch = get_client(session.client).default_branch
-    except CwError:
-        logger.warning(
-            "scope_verification_client_unresolved: session=%s client=%s; "
-            "measuring against 'main'",
-            session.id,
-            session.client,
-        )
-        default_branch = "main"
+    default_branch = resolve_scope_guard_default_branch(
+        session.client, log_context=f"session={session.id}"
+    )
     return reconcile_result_scope(
         result,
         worktree_path=session.worktree_path,

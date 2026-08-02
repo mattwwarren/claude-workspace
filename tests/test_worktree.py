@@ -28,6 +28,7 @@ from cw.worktree import (
     is_main_behind_origin,
     is_main_checkout_dirty,
     remove_worktree,
+    resolve_scope_guard_default_branch,
     resolve_worktree_base,
     slugify_branch,
     worktree_has_unsaved_work,
@@ -3073,3 +3074,87 @@ class TestReconcileResultScope:
         assert out is result
         assert out.scope.files == 18
         assert "scope_verification_unavailable" in caplog.text
+
+
+# ----------------------------------------------------------------------
+# #1487 (fix loop) — resolve_scope_guard_default_branch: the shared
+# client-resolution helper both cli.stop_hook and reconcile._shared now call,
+# replacing two independently-written try/except wrappers.
+# ----------------------------------------------------------------------
+
+
+def _write_clients_yaml(
+    tmp_config_dir: Path, name: str, *, default_branch: str
+) -> None:
+    config_dir = tmp_config_dir / ".config" / "cw"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "clients.yaml").write_text(
+        "clients:\n"
+        f"  {name}:\n"
+        f"    workspace_path: /tmp/ws-{name}\n"
+        f"    default_branch: {default_branch}\n"
+    )
+
+
+class TestResolveScopeGuardDefaultBranch:
+    def test_configured_client_resolves_its_own_default_branch(
+        self, tmp_config_dir: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _write_clients_yaml(tmp_config_dir, "acme", default_branch="trunk")
+
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            branch = resolve_scope_guard_default_branch("acme", log_context="ctx")
+
+        assert branch == "trunk"
+        assert caplog.text == ""
+
+    def test_no_clients_yaml_falls_back_to_main_and_warns(
+        self, tmp_config_dir: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            branch = resolve_scope_guard_default_branch("acme", log_context="ctx")
+
+        assert branch == "main"
+        assert "scope_verification_client_unresolved" in caplog.text
+        assert "client=acme" in caplog.text
+
+    def test_unknown_client_key_in_valid_yaml_falls_back_and_warns(
+        self, tmp_config_dir: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A well-formed clients.yaml missing the requested key is a logged fallback.
+
+        This is the case the two independent pre-fix wrappers diverged on:
+        stop_hook.py's get_client() raised CwError here (logged), but
+        _shared.py's dict.get() silently returned None (unlogged). The shared
+        helper must log in both cases.
+        """
+        _write_clients_yaml(tmp_config_dir, "beta", default_branch="develop")
+
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            branch = resolve_scope_guard_default_branch("acme", log_context="ctx")
+
+        assert branch == "main"
+        assert "scope_verification_client_unresolved" in caplog.text
+        assert "client=acme" in caplog.text
+
+    def test_malformed_yaml_falls_back_to_main_and_never_raises(
+        self, tmp_config_dir: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A real YAML syntax error must not propagate past this guard (#1487)."""
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text("clients: [\n  unterminated\n")
+
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            branch = resolve_scope_guard_default_branch("acme", log_context="ctx")
+
+        assert branch == "main"
+        assert "scope_verification_client_unresolved" in caplog.text
+
+    def test_log_context_rides_along_in_the_warning(
+        self, tmp_config_dir: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING, logger="cw.worktree"):
+            resolve_scope_guard_default_branch("acme", log_context="session=sess-42")
+
+        assert "session=sess-42" in caplog.text
