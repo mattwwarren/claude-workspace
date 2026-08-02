@@ -19,7 +19,7 @@ Runtime split (R2): push sites (``auto-dev-finalize.md``) and intake fetch
 (``auto-dev-intake.md``) run inside the worker LLM session with no Python
 import available, so those two skill files carry a PROSE MIRROR of the
 signature list below with an explicit comment pointing back here (pattern:
-``cw.reconcile.gate_recipes._PLAN_SPEC_MARKER`` mirroring ``gh._PLAN_MARKER``).
+``cw.dev_queue.lifecycle._PLAN_SPEC_MARKER`` mirroring ``gh._PLAN_MARKER``).
 Keep the three copies in sync — see
 ``test_unavailability_signatures_mirrored_in_prose`` for the drift guard.
 """

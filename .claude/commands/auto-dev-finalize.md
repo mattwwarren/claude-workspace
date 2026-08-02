@@ -270,7 +270,7 @@ Spawn a **general-purpose** agent (`model: "sonnet"`) scoped to run `/prep-pr`, 
 returned text can reflect, in the order a single run hits them: (1) this
 Step 4c.2 post-merge push [new, #1414], (2) `/prep-pr`'s own Step 1
 sync-with-base push [new, #1414], (3) the delegated project's `ship-it.md`
-initial `git push -u origin "$BRANCH"` (pre-existing, #1049). Match any of these signatures verbatim — this list is a PROSE MIRROR of `src/cw/unavailability.py`'s `UNAVAILABILITY_SIGNATURES` (mirror-comment pattern: `cw.reconcile.gate_recipes._PLAN_SPEC_MARKER` mirroring `gh._PLAN_MARKER`); keep the two copies in sync, see `test_unavailability_signatures_mirrored_in_prose` for the drift guard:
+initial `git push -u origin "$BRANCH"` (pre-existing, #1049). Match any of these signatures verbatim — this list is a PROSE MIRROR of `src/cw/unavailability.py`'s `UNAVAILABILITY_SIGNATURES` (mirror-comment pattern: `cw.dev_queue.lifecycle._PLAN_SPEC_MARKER` mirroring `gh._PLAN_MARKER`); keep the two copies in sync, see `test_unavailability_signatures_mirrored_in_prose` for the drift guard:
 
 - Auth-failure (#1049's original four, unchanged):
   - `Permission denied (publickey)`

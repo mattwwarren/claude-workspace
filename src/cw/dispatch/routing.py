@@ -117,6 +117,22 @@ _FINALIZE_HOLD_REASON = "finalize_hold"
 _SIGNOFF_GATE_REASON = "signoff_gate"
 
 
+# Paused-status values that carry a non-empty breadcrumbs string derived
+# verbatim from blocker.reason in Rule 5's SESSION_NEEDS_ATTENTION payload
+# below (GitHub #1511) -- every STAGE_FAILURE_STATUSES member for which the
+# schema allows a non-null blocker (schema.py's #777 exception:
+# "blocked"/"merge_gate_blocked" only -- scope_exceeded/forbidden_area never
+# carry one, by design), plus the _AWAITING_OPERATOR_REASON substitute the
+# ternary below writes when that blocker's reason is in
+# OPERATOR_UNAVAILABLE_BLOCKER_REASONS. Named + anchored so
+# .claude/skills/orchestrate-sprint/scripts/attention_monitor.sh's
+# hand-transcribed Python set (which runs outside src/cw and cannot import
+# this constant) has one file:line to keep in sync against. See #1597.
+BREADCRUMB_ELIGIBLE_PAUSED_STATUSES: frozenset[str] = (
+    STAGE_FAILURE_STATUSES - {"scope_exceeded", "forbidden_area"}
+) | {_AWAITING_OPERATOR_REASON}
+
+
 def _accumulate_task_cost(task: TicketTask, session_id: str | None) -> None:
     """Add the session's cost_usd to task.total_cost_usd, if available.
 

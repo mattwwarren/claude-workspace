@@ -180,7 +180,7 @@ rules below are tracker-aware.
    returns error text instead of issue data, match that error text against the
    signature table below before doing anything else. This list is a PROSE MIRROR
    of `src/cw/unavailability.py`'s `UNAVAILABILITY_SIGNATURES` (mirror-comment
-   pattern: `cw.reconcile.gate_recipes._PLAN_SPEC_MARKER` mirroring
+   pattern: `cw.dev_queue.lifecycle._PLAN_SPEC_MARKER` mirroring
    `gh._PLAN_MARKER`); keep the two copies in sync, see
    `test_unavailability_signatures_mirrored_in_prose` for the drift guard:
 
