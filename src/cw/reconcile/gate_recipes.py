@@ -79,6 +79,7 @@ from cw.models import OrchestratorEventType, QueueItemStatus
 from cw.reconcile.tasks import _client_cwd, _is_dangling_client
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from datetime import datetime
     from pathlib import Path
 
@@ -87,6 +88,7 @@ if TYPE_CHECKING:
         CwState,
         DevQueueStore,
         OrchestratorConfig,
+        Session,
         TicketTask,
     )
 
@@ -596,6 +598,44 @@ def _stamp_gate_recipe_failure(ticket_id: str, client: str, *, now: datetime) ->
     save_dev_queue(store)
 
 
+def _handle_gate_recipe_approve_failure(
+    task: TicketTask,
+    session: Session,
+    recipe: str,
+    exc: CwError,
+    *,
+    now: datetime,
+) -> None:
+    """Log, emit a durable GATE_AUTO_APPROVE_FAILED correction, and stamp the
+    one-shot failure latch (GitHub #1065/#1570).
+
+    Shared body of both act phases' ``except CwError`` blocks — the
+    GATE_AUTO_APPROVED event already recorded before the mutation is durable,
+    but without this correction it would stand alone on the operator channel
+    as an uncorrected false-positive "approved" signal. Caller keeps its own
+    ``continue``; this helper performs no control-flow.
+    """
+    _log.warning(
+        "gate_recipe_approve_failed ticket=%s client=%s",
+        task.ticket_id,
+        task.client,
+        exc_info=True,
+    )
+    record_event(
+        OrchestratorEventType.GATE_AUTO_APPROVE_FAILED,
+        {
+            "ticket_id": task.ticket_id,
+            "client": task.client,
+            "lane": task.lane,
+            "session_id": session.id,
+            "recipe": recipe,
+            "error": str(exc),
+        },
+        correlation_id=task.ticket_id,
+    )
+    _stamp_gate_recipe_failure(task.ticket_id, task.client, now=now)
+
+
 def _log_gate_recipe_comment_skipped(ticket_id: str, client: str) -> None:
     """Log a dangling-client audit-comment skip (GitHub #1269/#1279 R7).
 
@@ -609,6 +649,26 @@ def _log_gate_recipe_comment_skipped(ticket_id: str, client: str) -> None:
         ticket_id,
         client,
     )
+
+
+def _flush_gate_recipe_comment_jobs(
+    comment_jobs: list[tuple[str, str, dict[str, object]]],
+    clients: dict[str, ClientConfig] | None,
+    post_fn: Callable[..., None],
+) -> None:
+    """Post-lock, dangling-client-guarded best-effort comment flush.
+
+    Shared loop body of both act phases' post-``dev_queue_lock()`` comment
+    posting loop (GitHub #1570) — see the dangling-client skip rationale on
+    :func:`_log_gate_recipe_comment_skipped` (#1269/#1279 R7). Caller keeps
+    its own ``return approved``; this helper performs no control-flow beyond
+    its own loop.
+    """
+    for ticket_id, client, snapshot in comment_jobs:
+        if _is_dangling_client(client, clients or {}):
+            _log_gate_recipe_comment_skipped(ticket_id, client)
+            continue
+        post_fn(ticket_id, snapshot, cwd=_client_cwd(client, clients or {}))
 
 
 def _act_auto_approve_review(
