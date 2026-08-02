@@ -727,7 +727,7 @@ Every backend has a designated harvest authority that pushes `Session.last_resul
 | Authority mechanism | `LastResultSource` value | Backend(s) | Call site |
 |---|---|---|---|
 | Manual CLI push | `emit_cli` | operator / scripted | `cw.result.result_emit` |
-| Stop-hook harvest | `stop_hook_harvest` | detached Claude daemon | `cw.cli.sessions` |
+| Stop-hook harvest | `stop_hook_harvest` | detached Claude daemon | `cw.cli.stop_hook` |
 | Executor-direct | `executor_direct` | codex, aider/local (supervised-child, synchronous) | `cw.executor` |
 | Git-facts synthesis | `git_synthesis` | aider/local (no sentinel emitted) | `cw.reconcile.local` |
 | Salvage-transcript | `salvage_transcript` | idle/phantom/stalled sweeps (supervising worker died mid-run) | `cw.reconcile._shared` |
