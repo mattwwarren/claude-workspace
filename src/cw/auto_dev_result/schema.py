@@ -158,11 +158,15 @@ def queue_status_for_terminal_sentinel(status: Status) -> QueueItemStatus:
     """Classify a terminal sentinel status as a hold or a completion.
 
     Single source of truth for "does this status need a human before the
-    ticket can move again," consumed by both live dispatch's Rule 1/2/5/3b
-    (``cw.dispatch.routing._route_staged_decision``) and the reconcile
-    salvage path (``cw.reconcile._shared._queue_status_for_salvaged``), so a
-    worker that dies mid-sentinel is dispositioned the same way a live
-    observer would have routed it (#1566).
+    ticket can move again," consumed by the reconcile salvage path
+    (``cw.reconcile._shared._queue_status_for_salvaged``) so a worker that
+    dies mid-sentinel is dispositioned the same way a live observer would
+    have routed it (#1566). Live dispatch's Rule 1/2/5/3b
+    (``cw.dispatch.routing._route_staged_decision``) does not call this
+    function -- it has its own independent branch that reads the same
+    underlying frozensets. The two are kept in sync by
+    ``test_salvage_dispatch_hold_membership_is_single_source_of_truth``, not
+    by a shared call site.
 
     Deliberately narrower than dispatch's routing table -- it answers only
     "is this a hold," not how to get there. It does NOT reproduce Rule 3 /
