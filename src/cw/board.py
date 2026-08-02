@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args
 
 from rich.console import Console, Group
 from rich.live import Live
@@ -46,6 +46,7 @@ from cw.orchestrate import (
     summarise_session,
     summarise_ticket,
 )
+from cw.pr_hydrate import PrAttentionState
 from cw.session_groups import (
     CONTENTION_THRESHOLD,
     group_by_client,
@@ -86,16 +87,24 @@ _SECONDS_PER_DAY = 86400
 
 _PR_CI_OK = "CI-OK"
 _PR_CI_FAIL = "CI-FAIL"
-# Why: keys must mirror pr_hydrate._compute_attention_state's literal return
-# values exactly ("merge_blocked"/"ci_failing"/"changes_requested"/
-# "no_reviewer"/"ready_to_approve") — update both sites together if that
-# function's contract changes.
-_PR_ATTENTION_LABELS: dict[str, str] = {
+
+# Human-facing label text, keyed by pr_hydrate.PrAttentionState. Only the KEY
+# SET derives from PrAttentionState (via get_args below, GitHub #1571 /
+# #1535 drift-class instance 2) -- these display strings are board.py's own
+# concern (R5) and are NOT auto-generated. A stale key here (removed from
+# PrAttentionState) fails mypy --strict at this literal (Literal-typed dict
+# key); a missing key (added to PrAttentionState, not yet here) fails at
+# import time below via KeyError -- loud in both directions, replacing
+# _PR_ATTENTION_LABELS.get(state, state)'s previous silent degrade.
+_PR_ATTENTION_LABEL_TEXT: dict[PrAttentionState, str] = {
     "merge_blocked": "MERGE-BLOCKED",
     "ci_failing": "CI-FAILING",
     "changes_requested": "CHANGES-REQUESTED",
     "no_reviewer": "NO-REVIEWER",
     "ready_to_approve": "READY-TO-APPROVE",
+}
+_PR_ATTENTION_LABELS: dict[str, str] = {
+    state: _PR_ATTENTION_LABEL_TEXT[state] for state in get_args(PrAttentionState)
 }
 
 _BADGE_REAP = "REAP"

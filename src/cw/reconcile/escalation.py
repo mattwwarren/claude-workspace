@@ -36,8 +36,8 @@ from datetime import UTC, datetime
 from cw.auto_dev_result import PAUSED_FOR_USER_INPUT_STATUSES
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
-from cw.models import OrchestratorEventType, QueueItemStatus, ReapReason
-from cw.reconcile._shared import _SILENTLY_IDLE_REASON, _STALLED_CAP_PARKED_REASON
+from cw.models import OrchestratorEventType, QueueItemStatus
+from cw.reconcile._shared import _REAP_ELIGIBLE_DISPOSITIONS_BASE
 
 # P1 (round-4 binding decision): a flat threshold, NOT per-stage. This is
 # distinct from park-marker-poison's OWN transcript-staleness check inside
@@ -70,16 +70,16 @@ ESCALATION_PARK_MINUTES = 45
 # dispositions or escalation coverage regresses for those park classes —
 # a ceiling-refused row with one of these reasons is exactly the "silent
 # stuck row" case `None` was already included here to catch.
+#
+# GitHub #1571: the 6-member reap-eligible base now lives in
+# _shared._REAP_ELIGIBLE_DISPOSITIONS_BASE (imported above) -- it was
+# hand-typed identically here and in concierge.py's
+# _FALSE_PARK_ELIGIBLE_DISPOSITIONS, synced only by a comment telling the
+# reader to update both. Only the value moved; this module's own addition
+# (PAUSED_FOR_USER_INPUT_STATUSES minus the named exclusion) is unchanged.
 _ELIGIBLE_DISPOSITIONS: frozenset[str | None] = frozenset(
     (PAUSED_FOR_USER_INPUT_STATUSES - {"premises_pending_verification"})
-    | {
-        _STALLED_CAP_PARKED_REASON,
-        _SILENTLY_IDLE_REASON,
-        ReapReason.IDLE_STALL.value,
-        ReapReason.WALL_CLOCK_BUDGET.value,
-        ReapReason.PHANTOM_SURFACE.value,
-        None,
-    }
+    | _REAP_ELIGIBLE_DISPOSITIONS_BASE
 )
 
 # Status branch: disposition is irrelevant for these two statuses.

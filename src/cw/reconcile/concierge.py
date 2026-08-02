@@ -65,7 +65,6 @@ from cw.models import (
     LivenessBucket,
     OrchestratorEventType,
     QueueItemStatus,
-    ReapReason,
     SessionOrigin,
     SessionStatus,
 )
@@ -73,7 +72,6 @@ from cw.reconcile._shared import (
     _LIVE_STATUSES,
     _NEEDS_SALVAGE_REASON,
     _SILENTLY_IDLE_REASON,
-    _STALLED_CAP_PARKED_REASON,
     TRANSCRIPT_LIVENESS_WINDOW_SECONDS,
     _apply_salvaged_completion,
     _foreign_result_target_queue_status,
@@ -82,6 +80,9 @@ from cw.reconcile._shared import (
     _validate_existing_result_for_routing,
     salvage_terminal_result,
     ticket_id_for_session,
+)
+from cw.reconcile._shared import (
+    _REAP_ELIGIBLE_DISPOSITIONS_BASE as _FALSE_PARK_ELIGIBLE_DISPOSITIONS,
 )
 from cw.reconcile.liveness import _classify_liveness_bucket
 from cw.worktree import _has_commits_beyond_base
@@ -290,16 +291,13 @@ def _compute_dead_on_arrival(
 # phantom-surface values above would have. The `_has_park_marker` guard below
 # still excludes any row whose session record *does* exist and carries the
 # marker, so recipe 2's domain is unaffected.
-_FALSE_PARK_ELIGIBLE_DISPOSITIONS: frozenset[str | None] = frozenset(
-    {
-        _STALLED_CAP_PARKED_REASON,
-        _SILENTLY_IDLE_REASON,
-        ReapReason.IDLE_STALL.value,
-        ReapReason.WALL_CLOCK_BUDGET.value,
-        ReapReason.PHANTOM_SURFACE.value,
-        None,
-    }
-)
+#
+# GitHub #1571: the 6-member frozenset itself now lives in
+# _shared._REAP_ELIGIBLE_DISPOSITIONS_BASE (imported above, aliased to this
+# name) -- it was hand-typed identically here and in escalation.py's
+# _ELIGIBLE_DISPOSITIONS, synced only by a comment telling the reader to
+# update both. The per-member reasoning above is recipe-1-specific and stays
+# here; only the value moved.
 
 # Session-level park markers (recipe 2's own domain — see _has_park_marker
 # below). A null-disposition BLOCKED_ON_USER row behind one of these markers
