@@ -8891,6 +8891,44 @@ class TestApplyStagedDecision:
 
         assert _AWAITING_OPERATOR_REASON == "awaiting_operator_availability"
 
+    def test_breadcrumb_eligible_paused_statuses_composition(self) -> None:
+        """#1597 Item A: BREADCRUMB_ELIGIBLE_PAUSED_STATUSES composition drift
+        guard. Anchors attention_monitor.sh's hand-transcribed
+        _BLOCKER_REASON_PAUSED_STATUSES (outside src/cw, cannot import this
+        constant) against its derivation: the STAGE_FAILURE_STATUSES members
+        that can carry a non-null blocker (schema.py's #777 exception --
+        'blocked'/'merge_gate_blocked' only) plus the _AWAITING_OPERATOR_REASON
+        substitute Rule 5 writes when blocker_reason is in
+        OPERATOR_UNAVAILABLE_BLOCKER_REASONS.
+        """
+        from cw.auto_dev_result import (
+            OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
+            STAGE_FAILURE_STATUSES,
+        )
+        from cw.dispatch import (
+            _AWAITING_OPERATOR_REASON,
+            BREADCRUMB_ELIGIBLE_PAUSED_STATUSES,
+        )
+
+        assert {
+            "blocked",
+            "merge_gate_blocked",
+            "awaiting_operator_availability",
+        } == BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+        # every non-substitute member is drawn from STAGE_FAILURE_STATUSES
+        assert (
+            BREADCRUMB_ELIGIBLE_PAUSED_STATUSES - {_AWAITING_OPERATOR_REASON}
+        ) <= STAGE_FAILURE_STATUSES
+        # scope_exceeded/forbidden_area excluded by design (#777: never carry a
+        # blocker), not oversight
+        assert not (
+            {"scope_exceeded", "forbidden_area"} & BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+        )
+        # the awaiting-operator substitute is only reachable because this reason
+        # set is non-empty
+        assert OPERATOR_UNAVAILABLE_BLOCKER_REASONS
+        assert _AWAITING_OPERATOR_REASON in BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+
 
 # ---------------------------------------------------------------------------
 # TestPersistCarriedContext

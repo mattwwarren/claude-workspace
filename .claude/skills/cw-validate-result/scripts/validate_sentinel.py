@@ -52,7 +52,27 @@ _bootstrap_sys_path()
 # `Status` grew two v4 members in issue #191 (ambiguities_pending_resolution,
 # premises_pending_verification); deriving the set keeps this validator in
 # lockstep with the parser instead of drifting behind it.
-from cw.auto_dev_result import Status
+from cw.auto_dev_result import Health, Status
+
+# Explicit required-field allowlist for the health_present check, guarded
+# against cw.auto_dev_result.Health's actual field names (never hardcode --
+# see the get_args(Status) sibling above). Not a full derivation from
+# Health.model_fields: lowest_agent_confidence carries a pydantic default
+# (None) so FieldInfo.is_required() reports False for it, yet
+# AutoDevResult's stage-coupled invariant (schema.py
+# _check_stage_invariants) still requires it non-null at every stage past
+# pre-impl -- this check intentionally keeps a fixed allowlist and only
+# guards against the fields being renamed/removed out from under it (#1597).
+_EXPECTED_HEALTH_FIELDS = frozenset(
+    {"lowest_agent_confidence", "any_incomplete_risk", "recommendation"}
+)
+if not _EXPECTED_HEALTH_FIELDS.issubset(Health.model_fields):
+    _drift_msg = (
+        f"_EXPECTED_HEALTH_FIELDS {sorted(_EXPECTED_HEALTH_FIELDS)} references "
+        f"a field absent from cw.auto_dev_result.Health.model_fields "
+        f"{sorted(Health.model_fields)} -- validate_sentinel.py drifted"
+    )
+    raise AssertionError(_drift_msg)
 
 _SKILL_DIR = Path(__file__).resolve().parents[1]
 # cw-followup's parse_sentinel lives in a sibling skill — it owns transcript
@@ -148,11 +168,7 @@ def _build_checks(parser_output: dict[str, Any], outcome: str) -> list[dict[str,
     )
 
     health = raw.get("health") or {}
-    expected_health = {
-        "lowest_agent_confidence",
-        "any_incomplete_risk",
-        "recommendation",
-    }
+    expected_health = _EXPECTED_HEALTH_FIELDS
     health_keys = set(health) if isinstance(health, dict) else set()
     checks.append(
         _check(
