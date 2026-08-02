@@ -3406,11 +3406,11 @@ class TestQueueStatusForTerminalSentinel:
     """#1566: shared dispatch/salvage classifier for terminal sentinels."""
 
     def test_salvage_hold_statuses_composition(self) -> None:
-        assert SALVAGE_HOLD_STATUSES == (
+        assert (
             STAGE_FAILURE_STATUSES
             | PAUSED_FOR_USER_INPUT_STATUSES
             | frozenset({"merge_pending"})
-        )
+        ) == SALVAGE_HOLD_STATUSES
 
     @pytest.mark.parametrize("status", sorted(SALVAGE_HOLD_STATUSES))
     def test_hold_statuses_route_to_blocked_on_user(self, status: str) -> None:

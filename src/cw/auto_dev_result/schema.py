@@ -24,6 +24,8 @@ from pydantic import (
     model_validator,
 )
 
+from cw.models import QueueItemStatus
+
 _log = logging.getLogger("cw.auto_dev_result")
 
 
@@ -137,6 +139,44 @@ SALVAGE_TERMINAL_STATUSES: frozenset[str] = (
 INTERMEDIATE_ADVANCE_STATUSES: frozenset[str] = (
     STAGE_SUCCESS_STATUSES - SALVAGE_TERMINAL_STATUSES
 )
+
+# Salvage-routing hold set (#1566): every status whose live dispatch
+# Rule 1/2/5/3b routes to BLOCKED_ON_USER rather than completing the task.
+# SCOPE_GATED_APPROVAL_STATUSES is not its own term here -- it is already a
+# subset of PAUSED_FOR_USER_INPUT_STATUSES (see test_paused_is_superset_of_
+# scope_gated). Composed from the SAME frozensets dispatch/routing.py's Rule
+# 1/2/5 membership tests read, and the "merge_pending" literal Rule 3b
+# matches, so a status added to one side cannot silently drift the other.
+SALVAGE_HOLD_STATUSES: frozenset[str] = (
+    STAGE_FAILURE_STATUSES
+    | PAUSED_FOR_USER_INPUT_STATUSES
+    | frozenset({"merge_pending"})
+)
+
+
+def queue_status_for_terminal_sentinel(status: Status) -> QueueItemStatus:
+    """Classify a terminal sentinel status as a hold or a completion.
+
+    Single source of truth for "does this status need a human before the
+    ticket can move again," consumed by both live dispatch's Rule 1/2/5/3b
+    (``cw.dispatch.routing._route_staged_decision``) and the reconcile
+    salvage path (``cw.reconcile._shared._queue_status_for_salvaged``), so a
+    worker that dies mid-sentinel is dispositioned the same way a live
+    observer would have routed it (#1566).
+
+    Deliberately narrower than dispatch's routing table -- it answers only
+    "is this a hold," not how to get there. It does NOT reproduce Rule 3 /
+    ``_route_stage_success``'s stage-advance semantics or its
+    ``_park_finalize_hold`` / ``_park_signoff_gate`` branches (salvage has no
+    live task to advance -- the worker is dead), nor Rule 5a's FINALIZE-regress
+    branch (salvage never regresses). Disposition computation
+    (``_hold_aware_disposition``) and event emission stay dispatch/salvage-
+    caller concerns.
+    """
+    if status in SALVAGE_HOLD_STATUSES:
+        return QueueItemStatus.BLOCKED_ON_USER
+    return QueueItemStatus.COMPLETED
+
 
 # NOTE: stage1_pre_flight (StageReached) and "none" (PlanSource) are NOT
 # gated by schema_version. Spec §8 says enum additions require a version

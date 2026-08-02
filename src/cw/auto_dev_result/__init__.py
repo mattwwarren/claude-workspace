@@ -83,6 +83,7 @@ from cw.auto_dev_result.schema import (
     OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
     PAUSED_FOR_USER_INPUT_STATUSES,
     PLAN_SOURCE_NONE,
+    SALVAGE_HOLD_STATUSES,
     SALVAGE_TERMINAL_STATUSES,
     SCOPE_GATED_APPROVAL_STATUSES,
     SCOPE_TIER_LARGE,
@@ -108,6 +109,7 @@ from cw.auto_dev_result.schema import (
     _is_blank,
     _is_resolved_premise,
     _reject_empty_string_items,
+    queue_status_for_terminal_sentinel,
 )
 
 __all__ = [
@@ -124,6 +126,7 @@ __all__ = [
     "OPERATOR_UNAVAILABLE_BLOCKER_REASONS",
     "PAUSED_FOR_USER_INPUT_STATUSES",
     "PLAN_SOURCE_NONE",
+    "SALVAGE_HOLD_STATUSES",
     "SALVAGE_TERMINAL_STATUSES",
     "SCOPE_GATED_APPROVAL_STATUSES",
     "SCOPE_TIER_LARGE",
@@ -200,4 +203,5 @@ __all__ = [
     "extract_block",
     "is_documented_example",
     "parse_stdout",
+    "queue_status_for_terminal_sentinel",
 ]
