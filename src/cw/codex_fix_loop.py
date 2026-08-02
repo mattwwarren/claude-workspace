@@ -114,6 +114,11 @@ def _persist_cycle0_snapshot(verdict: ReviewVerdict, *, session_id: str) -> str:
     )
 
 
+def _with_snapshot_pointer(highlights: list[str], snapshot_pointer: str) -> list[str]:
+    """Append *snapshot_pointer* to a copy of *highlights*."""
+    return [*highlights, snapshot_pointer]
+
+
 def _build_fix_codex_argv(*, model: str | None) -> list[str]:
     """Return the ``codex exec`` argv for a fix invocation (write-capable).
 
@@ -405,7 +410,11 @@ def _park_fix_failure(
         stage_reached=STAGE3_REVIEW,
     )
     blocked = blocked.model_copy(
-        update={"friction_highlights": [*blocked.friction_highlights, snapshot_pointer]}
+        update={
+            "friction_highlights": _with_snapshot_pointer(
+                blocked.friction_highlights, snapshot_pointer
+            )
+        }
     )
     return blocked, verdict
 
@@ -450,7 +459,9 @@ def _park_survivors(
         update={
             "review": review,
             "health": health,
-            "friction_highlights": [*blocked.friction_highlights, snapshot_pointer],
+            "friction_highlights": _with_snapshot_pointer(
+                blocked.friction_highlights, snapshot_pointer
+            ),
         }
     )
     return patched, survivors
@@ -508,7 +519,9 @@ def _park_scope_violation(
         update={
             "review": review,
             "health": health,
-            "friction_highlights": [*blocked.friction_highlights, snapshot_pointer],
+            "friction_highlights": _with_snapshot_pointer(
+                blocked.friction_highlights, snapshot_pointer
+            ),
         }
     )
     return patched, verdict
@@ -534,7 +547,9 @@ def _clean_exit(
         update={
             "review": review,
             "health": health,
-            "friction_highlights": [*result.friction_highlights, snapshot_pointer],
+            "friction_highlights": _with_snapshot_pointer(
+                result.friction_highlights, snapshot_pointer
+            ),
         }
     )
     return patched, verdict
@@ -739,10 +754,9 @@ def run_review_with_fix_loop(
             return (
                 result.model_copy(
                     update={
-                        "friction_highlights": [
-                            *result.friction_highlights,
-                            snapshot_pointer,
-                        ]
+                        "friction_highlights": _with_snapshot_pointer(
+                            result.friction_highlights, snapshot_pointer
+                        )
                     }
                 ),
                 None,
