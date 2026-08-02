@@ -20,6 +20,7 @@ from cw.cli._base import handle_errors, main
 from cw.cli._hook_io import _read_cw_context, _read_hook_stdin_json
 from cw.cli._sentinels import _parse_sentinel_from_transcript
 from cw.config import (
+    get_client,
     load_orchestrator_config,
     load_state,
     save_state,
@@ -32,7 +33,7 @@ from cw.dev_queue import (
     transition_task_status,
 )
 from cw.events import record_event
-from cw.exceptions import EmitSessionNotFoundError, EmitValidationError
+from cw.exceptions import CwError, EmitSessionNotFoundError, EmitValidationError
 from cw.models import (
     CompletionReason,
     LastResultSource,
@@ -48,6 +49,7 @@ from cw.reconcile import (
     resolve_headless_budget,
 )
 from cw.result import emit_result_locked
+from cw.worktree import reconcile_result_scope
 
 if TYPE_CHECKING:
     from cw.auto_dev_result import BlockedResult
@@ -117,7 +119,35 @@ def _parse_headless_sentinel(
     parsed = _parse_sentinel_from_transcript(cwd_value, csid)
     if parsed is None and session.worktree_path is not None:
         parsed = _parse_sentinel_from_transcript(str(session.worktree_path), csid)
+    if isinstance(parsed, AutoDevResult):
+        parsed = _verify_headless_scope(parsed, session)
     return parsed
+
+
+def _verify_headless_scope(result: AutoDevResult, session: Session) -> AutoDevResult:
+    """Correct a headless sentinel's self-reported scope against git facts (#1487).
+
+    This is the last point before ``signal_stop`` writes ``last_result``, so a
+    fabricated or stale-merge-base scope corrected here never reaches the queue.
+    An unresolvable client falls back to ``main`` — the Stop hook must never
+    raise, and losing the sentinel would cost far more than measuring against
+    the wrong base.
+    """
+    try:
+        default_branch = get_client(session.client).default_branch
+    except CwError:
+        logger.warning(
+            "scope_verification_client_unresolved: session=%s client=%s; "
+            "measuring against 'main'",
+            session.id,
+            session.client,
+        )
+        default_branch = "main"
+    return reconcile_result_scope(
+        result,
+        worktree_path=session.worktree_path,
+        default_branch=default_branch,
+    )
 
 
 def _reconstruct_emitted_sentinel(session: Session) -> AutoDevResult | None:

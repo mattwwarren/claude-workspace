@@ -43,6 +43,12 @@ from cw.models import (
     TicketTask,
 )
 from cw.sprint import AppliedBuildout, BuildoutPlan
+from tests._reconcile_helpers import (
+    SCOPE_GUARD_FILES,
+    SCOPE_GUARD_LINES,
+    _inflate_scope,
+    _make_stale_base_repo,
+)
 from tests.conftest import (
     _make_daemon_session,
     _write_project_config_yaml,
@@ -1355,6 +1361,125 @@ class TestSignalStop:
         assert updated.last_result["ticket_id"] == "214"
         assert updated.last_result["stage_reached"] == "stage1_plan"
         assert updated.last_result_source == LastResultSource.STOP_HOOK_HARVEST
+
+    def _run_scope_guard_signal_stop(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        worktree: Path,
+        *,
+        session_id: str,
+    ) -> Session:
+        """Drive signal-stop over an inflated sentinel; return the reloaded session."""
+        import datetime as dt
+
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        started_at = dt.datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        hook_time = dt.datetime(2026, 1, 1, 0, 31, 0, tzinfo=UTC)
+        workspace = tmp_path / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+
+        session = Session(
+            id=session_id,
+            name="test-client/auto-dev/1487",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=workspace,
+            worktree_path=worktree,
+            status=SessionStatus.ACTIVE,
+            started_at=started_at,
+        )
+        state = load_state()
+        state.sessions.append(session)
+        save_state(state)
+        self._write_headless_context(worktree, session_id=session.id)
+
+        payload = _inflate_scope(_valid_payload())
+        frame = "<<<AUTO_DEV_RESULT\n" + json.dumps(payload) + "\nAUTO_DEV_RESULT>>>"
+        claude_session_id = "uuid-1487"
+        fake_home = tmp_path / "fake-home"
+        encoded = str(worktree).replace("/", "-").replace(".", "-")
+        project_dir = fake_home / ".claude" / "projects" / encoded
+        project_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": frame}],
+            },
+        }
+        (project_dir / f"{claude_session_id}.jsonl").write_text(
+            json.dumps(record) + "\n"
+        )
+        monkeypatch.setattr("cw.cli.sessions.Path.home", lambda: fake_home)
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.cli.stop_hook.get_native_daemon_client", lambda: daemon)
+
+        hook_stdin = json.dumps(
+            {
+                "session_id": claude_session_id,
+                "cwd": str(worktree),
+                "hook_event_name": "Stop",
+            }
+        )
+        runner = CliRunner()
+        with freeze_time(hook_time):
+            result = runner.invoke(main, ["signal-stop"], input=hook_stdin)
+        assert result.exit_code == 0, result.output
+        return next(s for s in load_state().sessions if s.id == session_id)
+
+    def test_signal_stop_corrects_inflated_scope_against_git_facts(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        make_git_repo: Callable[..., Path],
+    ) -> None:
+        """#1487: the Stop-hook parse verifies scope before writing last_result.
+
+        No clients.yaml on disk, so the client is unresolvable and the guard
+        falls back to measuring against ``main`` — the correction still lands.
+        """
+        worktree = _make_stale_base_repo(make_git_repo, "wt-hook-scope")
+        updated = self._run_scope_guard_signal_stop(
+            tmp_path, monkeypatch, worktree, session_id="sess-1487"
+        )
+
+        assert updated.last_result is not None
+        assert updated.last_result["scope"]["files"] == SCOPE_GUARD_FILES
+        assert updated.last_result["scope"]["lines_actual"] == SCOPE_GUARD_LINES
+        assert updated.last_result_source == LastResultSource.STOP_HOOK_HARVEST
+
+    def test_signal_stop_scope_guard_uses_client_default_branch(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        make_git_repo: Callable[..., Path],
+    ) -> None:
+        """#1487: a configured client's default_branch drives the measurement."""
+        worktree = _make_stale_base_repo(
+            make_git_repo, "wt-hook-trunk", default_branch="trunk"
+        )
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            "clients:\n"
+            "  test-client:\n"
+            "    workspace_path: /tmp/ws-test\n"
+            "    default_branch: trunk\n"
+        )
+
+        updated = self._run_scope_guard_signal_stop(
+            tmp_path, monkeypatch, worktree, session_id="sess-1487-trunk"
+        )
+
+        assert updated.last_result is not None
+        assert updated.last_result["scope"]["files"] == SCOPE_GUARD_FILES
+        assert updated.last_result["scope"]["lines_actual"] == SCOPE_GUARD_LINES
 
     def test_signal_stop_defers_under_budget_no_sentinel(
         self,
