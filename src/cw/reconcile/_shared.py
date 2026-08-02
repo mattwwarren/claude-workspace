@@ -190,6 +190,25 @@ _GH_CHECK_BLOCKED_REASON = "gh_check_blocked"
 # Paused-status written to SESSION_NEEDS_ATTENTION events when the stalled
 # watchdog parks a session after exhausting its wall-clock retry cap (GitHub #756).
 _STALLED_CAP_PARKED_REASON = "stalled_retry_cap_parked"
+# The 6-member reap-eligible disposition base shared verbatim by
+# concierge.py's _FALSE_PARK_ELIGIBLE_DISPOSITIONS (recipe 1: false-park
+# requeue) and escalation.py's _ELIGIBLE_DISPOSITIONS (BLOCKED_ON_USER
+# branch) -- GitHub #1571 (#1535 drift-class instance 1). Both modules
+# previously hand-typed this same 6-member frozenset independently, synced
+# only by a comment telling the reader to update both sites together. See
+# concierge.py's module comment for the per-member reasoning (#976
+# dispositions, pre-#976 None-disposition legacy rows) -- that reasoning is
+# recipe-1-specific and stays with that consumer.
+_REAP_ELIGIBLE_DISPOSITIONS_BASE: frozenset[str | None] = frozenset(
+    {
+        _STALLED_CAP_PARKED_REASON,
+        _SILENTLY_IDLE_REASON,
+        ReapReason.IDLE_STALL.value,
+        ReapReason.WALL_CLOCK_BUDGET.value,
+        ReapReason.PHANTOM_SURFACE.value,
+        None,
+    }
+)
 # Paused-status written to SESSION_NEEDS_ATTENTION events when a FINALIZE-stage
 # session times out with commits pushed but no PR (GitHub #812). The worktree is
 # preserved; rescue_finalize_blocked_sessions opens the PR on the next tick.
