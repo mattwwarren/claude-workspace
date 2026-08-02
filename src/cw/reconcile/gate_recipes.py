@@ -81,14 +81,34 @@ from cw.reconcile.tasks import _client_cwd, _is_dangling_client
 if TYPE_CHECKING:
     from datetime import datetime
     from pathlib import Path
+    from typing import Protocol
 
     from cw.models import (
         ClientConfig,
         CwState,
         DevQueueStore,
         OrchestratorConfig,
+        Session,
         TicketTask,
     )
+
+    class _CommentPostFn(Protocol):
+        """Shape shared by ``_post_auto_approve_comment``/``_post_auto_adopt_comment``.
+
+        A plain ``Callable[[str, dict[str, object]], None]`` can't express the
+        keyword-only ``cwd`` parameter both functions share, so mypy --strict
+        wouldn't catch a signature drift at the ``_flush_gate_recipe_comment_jobs``
+        call site (GitHub #1570).
+        """
+
+        def __call__(
+            self,
+            ticket_id: str,
+            snapshot: dict[str, object],
+            *,
+            cwd: Path | None = None,
+        ) -> None: ...
+
 
 _log = logging.getLogger(__name__)
 
@@ -596,6 +616,53 @@ def _stamp_gate_recipe_failure(ticket_id: str, client: str, *, now: datetime) ->
     save_dev_queue(store)
 
 
+def _handle_gate_recipe_approve_failure(
+    task: TicketTask,
+    session: Session,
+    recipe: str,
+    exc: CwError,
+    *,
+    now: datetime,
+) -> None:
+    """Log, emit a durable GATE_AUTO_APPROVE_FAILED correction, and stamp the
+    one-shot failure latch (GitHub #1065/#1570).
+
+    Shared body of both act phases' ``except CwError`` blocks. The mutation
+    is caught and swallowed here, rather than left to propagate, because an
+    uncaught raise would abort the rest of this reconcile tick (including
+    ``run_escalation_sweep`` and every other still-valid candidate) and, via
+    callers that don't wrap ``reconcile()`` in a broad except (e.g. ``cw
+    status``), surface as a crash to unrelated CLI commands.
+
+    The GATE_AUTO_APPROVED event already recorded before the mutation is
+    durable, but without this correction it would stand alone on the
+    operator channel as an uncorrected false-positive "approved" signal (a
+    log line alone isn't queryable via the event stream). Stamping the
+    one-shot failure latch then keeps a persisting failure from re-detecting
+    and re-emitting both events every reconcile tick forever. Caller keeps
+    its own ``continue``; this helper performs no control-flow.
+    """
+    _log.warning(
+        "gate_recipe_approve_failed ticket=%s client=%s",
+        task.ticket_id,
+        task.client,
+        exc_info=True,
+    )
+    record_event(
+        OrchestratorEventType.GATE_AUTO_APPROVE_FAILED,
+        {
+            "ticket_id": task.ticket_id,
+            "client": task.client,
+            "lane": task.lane,
+            "session_id": session.id,
+            "recipe": recipe,
+            "error": str(exc),
+        },
+        correlation_id=task.ticket_id,
+    )
+    _stamp_gate_recipe_failure(task.ticket_id, task.client, now=now)
+
+
 def _log_gate_recipe_comment_skipped(ticket_id: str, client: str) -> None:
     """Log a dangling-client audit-comment skip (GitHub #1269/#1279 R7).
 
@@ -609,6 +676,26 @@ def _log_gate_recipe_comment_skipped(ticket_id: str, client: str) -> None:
         ticket_id,
         client,
     )
+
+
+def _flush_gate_recipe_comment_jobs(
+    comment_jobs: list[tuple[str, str, dict[str, object]]],
+    clients: dict[str, ClientConfig] | None,
+    post_fn: _CommentPostFn,
+) -> None:
+    """Post-lock, dangling-client-guarded best-effort comment flush.
+
+    Shared loop body of both act phases' post-``dev_queue_lock()`` comment
+    posting loop (GitHub #1570) — see the dangling-client skip rationale on
+    :func:`_log_gate_recipe_comment_skipped` (#1269/#1279 R7). Caller keeps
+    its own ``return approved``; this helper performs no control-flow beyond
+    its own loop.
+    """
+    for ticket_id, client, snapshot in comment_jobs:
+        if _is_dangling_client(client, clients or {}):
+            _log_gate_recipe_comment_skipped(ticket_id, client)
+            continue
+        post_fn(ticket_id, snapshot, cwd=_client_cwd(client, clients or {}))
 
 
 def _act_auto_approve_review(
@@ -702,41 +789,9 @@ def _act_auto_approve_review(
                     task.ticket_id, task.client, resolved_task=task
                 )
             except CwError as exc:
-                # The GATE_AUTO_APPROVED event above is already durable, but
-                # the mutation didn't land (e.g. a duplicate row resolved to a
-                # different task, or the client's pipeline config changed
-                # between detect and here). Skip rather than let this escape
-                # uncaught: an uncaught raise here would abort the rest of
-                # this reconcile tick (including run_escalation_sweep and
-                # every other still-valid candidate) and, via callers that
-                # don't wrap reconcile() in a broad except (e.g. cw status),
-                # surface as a crash to unrelated CLI commands. Also emit a
-                # durable, operator-forwarded correction: without it,
-                # GATE_AUTO_APPROVED would stand alone on the operator
-                # channel as an uncorrected false-positive "approved" signal
-                # (a log line alone isn't queryable via the event stream).
-                # Then stamp the one-shot failure latch so a persisting
-                # failure doesn't re-detect and re-emit both events every
-                # reconcile tick forever.
-                _log.warning(
-                    "gate_recipe_approve_failed ticket=%s client=%s",
-                    task.ticket_id,
-                    task.client,
-                    exc_info=True,
+                _handle_gate_recipe_approve_failure(
+                    task, session, RECIPE_AUTO_APPROVE_REVIEW, exc, now=now
                 )
-                record_event(
-                    OrchestratorEventType.GATE_AUTO_APPROVE_FAILED,
-                    {
-                        "ticket_id": task.ticket_id,
-                        "client": task.client,
-                        "lane": task.lane,
-                        "session_id": session.id,
-                        "recipe": RECIPE_AUTO_APPROVE_REVIEW,
-                        "error": str(exc),
-                    },
-                    correlation_id=task.ticket_id,
-                )
-                _stamp_gate_recipe_failure(task.ticket_id, task.client, now=now)
                 continue
             if result["finalize_held"]:
                 # RFC 0011 A3 (#1160): the row's proactive finalize hold
@@ -763,19 +818,7 @@ def _act_auto_approve_review(
                 continue
             approved.append(task.ticket_id)
             comment_jobs.append((task.ticket_id, task.client, snapshot))
-    for ticket_id, client, snapshot in comment_jobs:
-        if _is_dangling_client(client, clients or {}):
-            # Config drift: the client was in clients.yaml at detect/approve
-            # time but is absent from the act phase's clients dict now. Skip
-            # the fire-and-forget audit comment rather than post it with an
-            # unscoped cwd (GitHub #1269/#1279 R7). Best-effort-logged, matching
-            # this helper's own comment-failure shape — there is no downstream
-            # disposition list for an audit comment to route to.
-            _log_gate_recipe_comment_skipped(ticket_id, client)
-            continue
-        _post_auto_approve_comment(
-            ticket_id, snapshot, cwd=_client_cwd(client, clients or {})
-        )
+    _flush_gate_recipe_comment_jobs(comment_jobs, clients, _post_auto_approve_comment)
     return approved
 
 
@@ -862,37 +905,13 @@ def _act_auto_adopt_plan(
                     task.ticket_id, task.client, resolved_task=task, plan_reviewed=True
                 )
             except CwError as exc:
-                _log.warning(
-                    "gate_recipe_approve_failed ticket=%s client=%s",
-                    task.ticket_id,
-                    task.client,
-                    exc_info=True,
+                _handle_gate_recipe_approve_failure(
+                    task, session, RECIPE_AUTO_ADOPT_PLAN, exc, now=now
                 )
-                record_event(
-                    OrchestratorEventType.GATE_AUTO_APPROVE_FAILED,
-                    {
-                        "ticket_id": task.ticket_id,
-                        "client": task.client,
-                        "lane": task.lane,
-                        "session_id": session.id,
-                        "recipe": RECIPE_AUTO_ADOPT_PLAN,
-                        "error": str(exc),
-                    },
-                    correlation_id=task.ticket_id,
-                )
-                _stamp_gate_recipe_failure(task.ticket_id, task.client, now=now)
                 continue
             approved.append(task.ticket_id)
             comment_jobs.append((task.ticket_id, task.client, snapshot))
-    for ticket_id, client, snapshot in comment_jobs:
-        if _is_dangling_client(client, clients or {}):
-            # See _act_auto_approve_review: skip the audit comment for a
-            # config-drifted client rather than post it unscoped (#1269/#1279).
-            _log_gate_recipe_comment_skipped(ticket_id, client)
-            continue
-        _post_auto_adopt_comment(
-            ticket_id, snapshot, cwd=_client_cwd(client, clients or {})
-        )
+    _flush_gate_recipe_comment_jobs(comment_jobs, clients, _post_auto_adopt_comment)
     return approved
 
 
