@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
+from typing import get_args
 
 from rich.console import Console
 
@@ -26,6 +27,7 @@ from cw.models import (
     TicketTask,
 )
 from cw.orchestrate import SessionSummary, TicketSummary
+from cw.pr_hydrate import PrAttentionState
 
 
 def _render(
@@ -640,6 +642,22 @@ class TestPrCell:
             _state_with_task(pr_state=PrState(attention_state="changes_requested"))
         )
         assert "CHANGES-REQUESTED" in output
+
+    def test_pr_attention_labels_cover_every_attention_state(self) -> None:
+        from cw.board import _PR_ATTENTION_LABELS
+
+        assert set(_PR_ATTENTION_LABELS) == set(get_args(PrAttentionState))
+
+    def test_pr_attention_labels_render_unchanged(self) -> None:
+        from cw.board import _PR_ATTENTION_LABELS
+
+        assert _PR_ATTENTION_LABELS == {
+            "merge_blocked": "MERGE-BLOCKED",
+            "ci_failing": "CI-FAILING",
+            "changes_requested": "CHANGES-REQUESTED",
+            "no_reviewer": "NO-REVIEWER",
+            "ready_to_approve": "READY-TO-APPROVE",
+        }
 
 
 class TestBadges:

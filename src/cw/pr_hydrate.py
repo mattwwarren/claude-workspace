@@ -77,6 +77,18 @@ _REMOTE_SLUG_RE = re.compile(r"github\.com[:/]([^/]+/[^/]+?)(?:\.git)?/?$")
 # alias living in the module that owns its derivation function.
 Counterparty = Literal["self", "external"]
 
+# GitHub #1571 (#1535 drift-class instance 2) — the only non-None values
+# _compute_attention_state's #929 decision table can return. Canonical home:
+# this module owns the decision table. board.py derives its label-map key
+# set from get_args(PrAttentionState) instead of hand-typing a duplicate copy.
+PrAttentionState = Literal[
+    "merge_blocked",
+    "ci_failing",
+    "changes_requested",
+    "no_reviewer",
+    "ready_to_approve",
+]
+
 # RFC 0011 S2 — a watched PR is, by construction, someone else's review
 # request, so its counterparty axis is always "external". A parallel module
 # constant to the ``derive_counterparty`` function (which stays TicketTask-typed
@@ -202,7 +214,7 @@ def _compute_attention_state(
     is_draft: bool,
     reviewer_count: int,
     has_blocking_comment_review: bool = False,
-) -> str | None:
+) -> PrAttentionState | None:
     """Derive the operator attention-state via the #929 decision table.
 
     Precedence chain + unconditional draft-gate ported from
@@ -268,7 +280,9 @@ def _compute_attention_state(
     )
 
 
-def _blocked_attention_state(*, pending_count: int, review_decision: str) -> str | None:
+def _blocked_attention_state(
+    *, pending_count: int, review_decision: str
+) -> PrAttentionState | None:
     """Rows 5a-5c: attention state for ``mergeStateStatus == BLOCKED``.
 
     5a — a required check is still running: waiting on CI, no attention state.
