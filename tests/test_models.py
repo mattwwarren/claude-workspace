@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from cw.models import (
@@ -1283,6 +1284,37 @@ class TestOperatorChannelForward:
         )
         assert cfg.operator_channel_forward.event_types == frozenset(
             {OrchestratorEventType.TASK_DELETED}
+        )
+
+    def test_config_reference_operator_channel_forward_event_types_match_default(
+        self,
+    ) -> None:
+        """Drift guard (#1597 Item C): CONFIG_REFERENCE.md's documented
+        operator_channel_forward.event_types example must equal
+        _DEFAULT_OPERATOR_EVENT_TYPES. The doc is prose and cannot import/derive
+        from the constant, so this asserts equality instead of relying on eyeball
+        review to catch drift (mirrors
+        test_salvage_terminal_statuses_constant_is_single_source_of_truth,
+        tests/test_reconcile_shared_sentinels.py:1341).
+        """
+        from cw.models import _DEFAULT_OPERATOR_EVENT_TYPES
+
+        doc = (
+            Path(__file__).resolve().parent.parent / "config" / "CONFIG_REFERENCE.md"
+        ).read_text(encoding="utf-8")
+        fences = re.findall(r"```yaml\n(.*?)\n```", doc, re.DOTALL)
+        matching = [f for f in fences if "operator_channel_forward" in f]
+        assert len(matching) == 1, (
+            f"expected exactly one fenced yaml block containing "
+            f"'operator_channel_forward', found {len(matching)}"
+        )
+        parsed = yaml.safe_load(matching[0])
+        documented = set(parsed["operator_channel_forward"]["event_types"])
+        canonical = {e.value for e in _DEFAULT_OPERATOR_EVENT_TYPES}
+        assert documented == canonical, (
+            "CONFIG_REFERENCE.md's operator_channel_forward.event_types example "
+            f"drifted from _DEFAULT_OPERATOR_EVENT_TYPES. doc has "
+            f"{sorted(documented)}, constant has {sorted(canonical)}"
         )
 
 
