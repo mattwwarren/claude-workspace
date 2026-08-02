@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from cw.codex_fix_loop import (
+    _CYCLE0_SNAPSHOT_FILENAME,
     _ESCALATE_AT_CYCLE,
     _FIX_CYCLE_FLOOR_SECONDS,
     _MAX_FIX_CYCLES,
@@ -31,7 +32,12 @@ from cw.codex_runner import CodexRunResult
 from cw.executor_diagnostics import diagnostics_bundle_dir
 from cw.local_runner import make_blocked
 from cw.models import Stage, TicketTask
-from cw.review_findings import AcceptedFinding, _dedup_key, consolidate_verdict
+from cw.review_findings import (
+    AcceptedFinding,
+    ReviewVerdict,
+    _dedup_key,
+    consolidate_verdict,
+)
 from tests._codex_review_helpers import _Clock, _SequencedRunner, _write
 from tests.conftest import (
     _make_diff,
@@ -46,7 +52,7 @@ if TYPE_CHECKING:
 
     from cw.auto_dev_result import AutoDevResult
     from cw.codex_runner import CodexRunner
-    from cw.review_findings import ReviewerFindingsDocument, ReviewVerdict
+    from cw.review_findings import ReviewerFindingsDocument
 
     _FixBehavior = CodexRunResult | Callable[[Path, list[str]], CodexRunResult]
 
@@ -431,6 +437,21 @@ class TestFixInvocation:
         bundle = diagnostics_bundle_dir("s-fix-error")
         assert list(bundle.glob("fix-cycle-1-nonzero_exit-*.json"))
 
+    def test_fix_failure_persists_cycle0_snapshot(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-fix-error-snapshot")
+        runner = _FixLoopRunner(
+            [_MF_DOC],
+            fix_behaviors=[CodexRunResult(returncode=1, stdout="", stderr="boom")],
+        )
+        out, _ = _run_loop(runner, worktree, session_id="s-fix-error-snapshot")
+
+        assert out.status == "blocked"
+        bundle = diagnostics_bundle_dir("s-fix-error-snapshot")
+        assert (bundle / _CYCLE0_SNAPSHOT_FILENAME).exists()
+        assert any("[diagnostics:" in h for h in out.friction_highlights)
+
     def test_successful_fix_with_change_commits_with_conventional_message(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
@@ -671,6 +692,99 @@ class TestFixLoopCapAndEscalation:
         assert out.review.must_fix_initial == 1
         assert out.review.deferred == 1
         assert out.review.fix_cycles_used == 5
+
+    def test_clean_exit_persists_cycle0_snapshot(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-clean2-snapshot")
+        runner = _FixLoopRunner([_MF_DOC, _MF_DOC, _CLEAN_DOC])
+        out, _verdict = _run_loop(runner, worktree, session_id="s-clean2-snapshot")
+
+        assert out.status == "stage_complete"
+        bundle = diagnostics_bundle_dir("s-clean2-snapshot")
+        assert (bundle / _CYCLE0_SNAPSHOT_FILENAME).exists()
+        assert any("[diagnostics:" in h for h in out.friction_highlights)
+
+    def test_capped_run_persists_cycle0_snapshot(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-cap-snapshot")
+        runner = _FixLoopRunner([_MF_DOC])
+        out, _verdict = _run_loop(runner, worktree, session_id="s-cap-snapshot")
+
+        assert out.status == "blocked"
+        bundle = diagnostics_bundle_dir("s-cap-snapshot")
+        assert (bundle / _CYCLE0_SNAPSHOT_FILENAME).exists()
+        assert any("[diagnostics:" in h for h in out.friction_highlights)
+
+    def test_cycle0_snapshot_content_matches_original_findings_after_fix(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-snapshot-content")
+        runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor()])
+        out, verdict = _run_loop(runner, worktree, session_id="s-snapshot-content")
+
+        assert out.status == "stage_complete"
+        assert verdict is not None
+        assert not verdict.must_fix  # terminal state cleared the finding
+
+        bundle = diagnostics_bundle_dir("s-snapshot-content")
+        snapshot_path = bundle / _CYCLE0_SNAPSHOT_FILENAME
+        snapshot = ReviewVerdict.model_validate_json(snapshot_path.read_text())
+        assert any(f.summary == "MFA" for f in snapshot.must_fix)
+        assert any(af.finding.summary == "MFA" for af in snapshot.accepted)
+
+    def test_unparseable_rereview_persists_cycle0_snapshot(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-rereview-fail-snapshot")
+        runner = _FixLoopRunner([_MF_DOC, "not json{{"])
+        out, verdict = _run_loop(
+            runner, worktree, session_id="s-rereview-fail-snapshot"
+        )
+
+        assert out.status == "blocked"
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_REVIEW_UNPARSEABLE
+        assert verdict is None
+        bundle = diagnostics_bundle_dir("s-rereview-fail-snapshot")
+        assert (bundle / _CYCLE0_SNAPSHOT_FILENAME).exists()
+        assert any("[diagnostics:" in h for h in out.friction_highlights)
+
+    def test_cycle0_snapshot_write_failure_does_not_block_loop(
+        self,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """``_persist_cycle0_snapshot`` never-raises: an ``OSError`` during the
+        write is logged and swallowed, and the loop still returns its normal
+        parked result with the pointer text in ``friction_highlights`` (the
+        pointer is returned unconditionally per the plan's Adopted
+        Assumption #1 — never-raise takes priority over pointer-text
+        precision on this rare write-failure path)."""
+        worktree = _worktree(make_git_repo, "wt-snapshot-write-fail")
+
+        def _boom(*_a: object, **_k: object) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.codex_fix_loop.write_review_verdict", _boom)
+        runner = _FixLoopRunner([_MF_DOC])
+
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            out, _verdict = _run_loop(
+                runner, worktree, session_id="s-snapshot-write-fail"
+            )
+
+        assert out.status == "blocked"
+        assert any("[diagnostics:" in h for h in out.friction_highlights)
+        assert any(
+            "cycle-0 findings snapshot write failed" in r.getMessage()
+            for r in caplog.records
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -928,6 +1042,32 @@ class TestScopeViolationGate:
         assert out.status == "blocked"
         assert out.blocker is not None
         assert out.blocker.reason == CODEX_FIX_SCOPE_VIOLATION
+
+    def test_scope_violation_persists_cycle0_snapshot(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(
+            make_git_repo,
+            "wt-scope-outsens-snapshot",
+            manifest={
+                ".claude/sensitive-files.yml": _MANIFEST,
+                "pyproject.toml": _PYPROJECT_CONTENT,
+            },
+        )
+        runner = _FixLoopRunner(
+            [_MF_DOC],
+            fix_behaviors=[
+                _editor(filename="pyproject.toml", content='[project]\nname = "z"\n')
+            ],
+        )
+        out, _ = _run_loop(runner, worktree, session_id="s-scope-outsens-snapshot")
+
+        assert out.status == "blocked"
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_FIX_SCOPE_VIOLATION
+        bundle = diagnostics_bundle_dir("s-scope-outsens-snapshot")
+        assert (bundle / _CYCLE0_SNAPSHOT_FILENAME).exists()
+        assert any("[diagnostics:" in h for h in out.friction_highlights)
 
     def test_untracked_sensitive_addition_parks_small_tier(
         self, make_git_repo: Callable[..., Path]
