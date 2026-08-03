@@ -7629,12 +7629,15 @@ class TestDevQueueTasksPrState:
         from cw.dev_queue import add_ticket
         from cw.models import TicketTask
 
-        add_ticket(TicketTask(ticket_id="GEN-407", client="attn-client"))
+        add_ticket(
+            TicketTask(ticket_id="GEN-407", client="attn-client", scope_hint="large")
+        )
         runner = CliRunner()
         result = runner.invoke(main, ["dev-queue", "tasks"])
         assert result.exit_code == 0, result.output
         for header in ("SCOPE_HINT", "COMPUTED_SCOPE_TIER", "STAGE"):
             assert header in result.output
+        assert "large" in result.output
 
 
 # ---------------------------------------------------------------------------
