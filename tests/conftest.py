@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 import pytest
+import yaml
 
 from cw.config import save_state
 from cw.models import (
@@ -50,6 +51,32 @@ _SRC_ROOT = _REPO_ROOT / "src"
 def _iter_src_files() -> list[Path]:
     """Return every ``*.py`` file under ``src/``, sorted for determinism."""
     return sorted(_SRC_ROOT.rglob("*.py"))
+
+
+def _load_workflow(path: Path) -> dict[Any, Any]:
+    """Parse a GitHub Actions workflow YAML file at *path* (#1612).
+
+    Parameterized hoist of the byte-identical private ``_workflow()`` helpers
+    in test_changelog_advisory_workflow.py and test_pr_events_workflow.py,
+    which differ only in the module-level ``WORKFLOW_PATH`` each closes over.
+    Those two private copies are deliberately left unmodified; this is the
+    canonical version a new workflow-guard test should import rather than
+    adding a third copy. Each file's step/script accessors stay file-local —
+    they are coupled to a specific job and step id, not generic.
+    """
+    workflow: dict[Any, Any] = yaml.safe_load(path.read_text())
+    return workflow
+
+
+def _on_block(workflow: dict[Any, Any]) -> dict[str, Any]:
+    """Return the trigger block of a parsed *workflow* (#1612).
+
+    PyYAML's SafeLoader follows YAML 1.1, which parses the bare ``on`` scalar
+    key as the boolean ``True`` rather than the string "on" -- a well-known
+    GitHub Actions YAML gotcha. Callers must not index ``workflow["on"]``.
+    """
+    on_block: dict[str, Any] = workflow[True]
+    return on_block
 
 
 def _seed_daemon_session(
