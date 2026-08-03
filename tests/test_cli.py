@@ -7608,7 +7608,7 @@ class TestDevQueueTasksPrState:
         assert data[0]["scope_hint"] == "large"
 
     def test_tasks_json_field_drift_guard(self, tmp_config_dir: Path) -> None:
-        """_task_to_dict's JSON output must not silently drop TicketTask fields (#1618)."""
+        """_task_to_dict's JSON output must not silently drop fields (#1618)."""
         import json as _json
 
         from cw.dev_queue import add_ticket
