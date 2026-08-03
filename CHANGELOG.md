@@ -6,6 +6,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Salvaged sessions no longer mark failed tickets as done (#1566):**
+  reconcile's salvage path and live dispatch classified the same terminal
+  `AutoDevResult` status oppositely — dispatch held `scope_exceeded`,
+  `forbidden_area`, `merge_gate_blocked`, and `merge_pending` at
+  `BLOCKED_ON_USER`, while salvage routed all four to `COMPLETED`, so a ticket
+  whose worker had actually stopped short was silently closed out. Both paths
+  now read a single classifier, `queue_status_for_terminal_sentinel` (with its
+  `SALVAGE_HOLD_STATUSES` set) in `cw.auto_dev_result.schema`, and a drift-guard
+  test pins dispatch's own status sets against it.
+
+### Changed
+
+- **Plan signoff markers have one canonical home (#1567):** `_marker_version`
+  moved from `cw.reconcile.gate_recipes` to `cw.dev_queue.lifecycle`, joined
+  there by a new `_plan_body_signoff_ok` that composes it over both signoff
+  markers. `_plan_is_reviewed` now delegates to that shared predicate instead of
+  a bare `marker in body` substring check, so an unclosed marker comment is no
+  longer accepted as a reviewed plan. `gate_recipes` imports the marker helpers
+  and constants from `cw.dev_queue` rather than keeping its own copies.
+
 ## [1.26.0] - 2026-08-02
 
 ### Added
