@@ -9,8 +9,13 @@ push transport — the emit target is the orchestrator bus (``record_event`` ->
 The CI-summary and attention-state derivation logic is ported from
 ``.claude/scripts/review_monitor.py`` (``_summarize_status_checks`` and
 ``_compute_attention_state``), which lives outside ``src/`` and cannot be
-imported. See the ticket's Attention-State Decision Table for the precedence
-chain re-implemented in ``_compute_attention_state``.
+imported: every real invocation execs the script directly via its shebang
+under a bare system interpreter with none of this project's dependencies
+installed, and the script is cross-repo by design (state keyed
+``owner/repo``, invoked from outside any single checkout) so there is no
+one venv to bind it to (#1598). See the ticket's Attention-State Decision
+Table for the precedence chain re-implemented in
+``_compute_attention_state``.
 """
 
 from __future__ import annotations

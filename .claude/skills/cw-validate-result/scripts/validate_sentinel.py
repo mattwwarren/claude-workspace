@@ -28,7 +28,15 @@ from typing import Any, get_args
 
 
 def _bootstrap_sys_path() -> None:
-    """Add repo src/ to sys.path so cw imports work under bare python3.
+    """Defensive only -- NOT what makes ``cw`` imports work.
+
+    This script's documented invocation (``cw-validate-result/SKILL.md``)
+    runs via ``uv run --project "$(git rev-parse --show-toplevel)" python
+    ...`` -- inside the repo venv, where ``cw`` is editable-installed and
+    its compiled deps (e.g. ``pydantic_core``) are ABI-matched to that
+    interpreter. Under a bare ``/usr/bin/python3`` this bootstrap does NOT
+    make ``cw`` importable: the failure is missing dependencies, not
+    ``sys.path`` reachability (``import pydantic`` fails there too, #1598).
 
     # Why: this cannot be extracted to a shared module — it must run BEFORE any cw
     # import, so there is no shared cw path yet to import it from. Each standalone
