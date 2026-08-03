@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING
 from cw.dev_queue import _newest_by_created_at
 from cw.events import record_event
 from cw.models import OrchestratorEventType
-from cw.pr_hydrate import _is_candidate
+from cw.pr_hydrate import PrAttentionState, _is_candidate
 from cw.reconcile._shared import _PAUSED_STATUS_KEY
 
 if TYPE_CHECKING:
@@ -62,10 +62,18 @@ RECIPE_ESCALATE_MERGE_BLOCK = "escalate_merge_block"
 # The attention_state each recipe fires on (1:1 with a recipe). A row whose PR
 # is at any other attention state (or None, e.g. a draft) is never a candidate
 # for that recipe. See cw.pr_hydrate._compute_attention_state's decision table.
-_ATTENTION_CHANGES_REQUESTED = "changes_requested"  # Row 3 -> address_review
-_ATTENTION_CI_FAILING = "ci_failing"  # Row 2 -> auto_fix_ci
-_ATTENTION_NO_REVIEWER = "no_reviewer"  # Row 4 -> request_reviewer
-_ATTENTION_MERGE_BLOCKED = "merge_blocked"  # Row 1 -> escalate_merge_block
+# Only four of PrAttentionState's five members have a recipe here --
+# ready_to_approve is a clean PR with nothing to auto-fix, so it has no
+# _ATTENTION_* constant (verified: zero `ready_to_approve` hits under
+# review_recipes/).
+_ATTENTION_CHANGES_REQUESTED: PrAttentionState = (
+    "changes_requested"  # Row 3 -> address_review
+)
+_ATTENTION_CI_FAILING: PrAttentionState = "ci_failing"  # Row 2 -> auto_fix_ci
+_ATTENTION_NO_REVIEWER: PrAttentionState = "no_reviewer"  # Row 4 -> request_reviewer
+_ATTENTION_MERGE_BLOCKED: PrAttentionState = (
+    "merge_blocked"  # Row 1 -> escalate_merge_block
+)
 
 # PR_ACTION_TAKEN / PR_ACTION_FAILED payload keys (RFC 0010 P2) — named once so
 # the producer (_act_address_review) and the docs/consumers can't drift via a
