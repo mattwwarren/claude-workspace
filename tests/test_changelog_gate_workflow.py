@@ -18,6 +18,7 @@ cannot pass by agreeing with itself.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
@@ -198,6 +199,20 @@ def test_ensure_label_step_self_heals_and_fails_open() -> None:
     assert "gh label create" in script
     assert NO_CHANGELOG_LABEL in script
     assert "|| true" in script
+
+
+def test_label_name_is_identical_between_creation_and_gate_waiver() -> None:
+    """Drift guard: the label name is a hardcoded literal in two places (#1612 review).
+
+    `ensure-label` creates it; the `gate` step's jq comparison waives on it.
+    Nothing else ties the two together, so a rename of one without the other
+    would silently break the opt-out on this blocking check.
+    """
+    created = re.search(r'gh label create "([^"]+)"', _script(LABEL_STEP_ID))
+    waived = re.search(r"--arg want '([^']+)'", _script(GATE_STEP_ID))
+    assert created is not None, "could not find the label name in the create step"
+    assert waived is not None, "could not find the label name in the gate's jq check"
+    assert created.group(1) == waived.group(1) == NO_CHANGELOG_LABEL
 
 
 def test_gate_step_fails_with_the_exact_operator_message() -> None:
