@@ -3763,6 +3763,7 @@ def _make_blocked_task(
     session_id: str | None = "sess1234",
     status: QueueItemStatus = QueueItemStatus.BLOCKED_ON_USER,
     disposition: str | None = None,
+    scope_hint: str | None = None,
 ) -> TicketTask:
     return _make_ticket_task(
         ticket_id=ticket_id,
@@ -3771,6 +3772,7 @@ def _make_blocked_task(
         stage=stage,
         session_id=session_id,
         disposition=disposition,
+        scope_hint=scope_hint,
     )
 
 
@@ -4609,7 +4611,11 @@ class TestApproveTicketLockedForceHold:
     automatic caller, which omits the kwarg and gets the fail-safe default."""
 
     def _arm_force_held_review_row(
-        self, tmp_config_dir: Path, tmp_path: Path, session_id: str
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        session_id: str,
+        scope_hint: str | None = None,
     ) -> TicketTask:
         """Save a BLOCKED_ON_USER REVIEW row with the force hold armed, plus its
         owning session carrying a review_pending_approval last_result."""
@@ -4617,7 +4623,9 @@ class TestApproveTicketLockedForceHold:
         from cw.models import CwState
 
         _write_client_yaml(tmp_config_dir, tmp_path)
-        task = _make_blocked_task(stage=Stage.REVIEW, session_id=session_id)
+        task = _make_blocked_task(
+            stage=Stage.REVIEW, session_id=session_id, scope_hint=scope_hint
+        )
         task.hold_finalize = "manual"
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(
@@ -4797,6 +4805,67 @@ class TestApproveTicketLockedForceHold:
         assert t.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
         assert t.disposition == "signoff_gate"
         assert t.stage == Stage.REVIEW
+
+    def test_approve_locked_operator_initiated_true_bypasses_force_hold_with_large_scope_hint(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """D4 (#1617): a scope_hint == 'large' task still advances via the human
+        release path -- _approve_ticket_locked is a gate-release site, excluded
+        from the new scope_hint gate (item 1), so it must not regress the
+        force-hold bypass this class otherwise verifies."""
+        from cw.dev_queue import _approve_ticket_locked, dev_queue_lock
+
+        self._arm_force_held_review_row(
+            tmp_config_dir, tmp_path, "sess-fh-scope-1", scope_hint="large"
+        )
+
+        with dev_queue_lock():
+            result = _approve_ticket_locked(
+                "GEN-500", "genhealth", operator_initiated=True
+            )
+
+        assert result["finalize_held"] is False
+        assert result["awaiting_signoff"] is False
+        assert result["to_stage"] == "finalize"
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.stage == Stage.FINALIZE
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_approve_locked_emits_scope_routing_decision_event(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """_approve_ticket_locked logs the #1617 scope-routing audit event on
+        the gate-release path too (D4) -- rule='gate_release', and the
+        disposition field reflects which branch actually fired, distinct from
+        task.disposition (this branch performs no mutation of its own when the
+        force hold is bypassed by operator_initiated=True)."""
+        from cw.dev_queue import _approve_ticket_locked, dev_queue_lock
+        from cw.models import OrchestratorEventType
+
+        events = capture_events(
+            "cw.dev_queue.approval", OrchestratorEventType.SCOPE_ROUTING_DECISION
+        )
+        self._arm_force_held_review_row(
+            tmp_config_dir, tmp_path, "sess-fh-scope-2", scope_hint="large"
+        )
+
+        with dev_queue_lock():
+            _approve_ticket_locked("GEN-500", "genhealth", operator_initiated=True)
+
+        assert len(events) == 1
+        _etype, payload, correlation_id = events[0]
+        assert payload["ticket_id"] == "GEN-500"
+        assert payload["client"] == "genhealth"
+        assert payload["scope_hint"] == "large"
+        assert payload["sentinel_tier"] is None
+        assert payload["resolved_tier"] == "large"
+        assert payload["rule"] == "gate_release"
+        assert payload["disposition"] == "advanced"
+        assert correlation_id == "GEN-500"
 
 
 # ---------------------------------------------------------------------------

@@ -7,9 +7,10 @@ and the physical-row resolver (``_resolve_approval_target``).
 
 Layering: imports ``crud`` (``_find_ticket`` / ``_APPROVABLE_STATUSES``) and
 ``lifecycle`` (the transition + stage-advance helpers) at module level. The
-``dev_queue ↔ dispatch`` cycle break — ``_should_gate_for_signoff`` and
-``_should_force_hold_finalize`` — stays a function-level deferred import
-inside ``_approve_ticket_locked``.
+``dev_queue ↔ dispatch`` cycle break — ``_should_gate_for_signoff``,
+``_should_force_hold_finalize``, and (#1617) ``_resolve_scope_tier`` /
+``_extract_scope_tier`` — stays a function-level deferred import inside
+``_approve_ticket_locked``.
 """
 
 from __future__ import annotations
@@ -25,11 +26,12 @@ from cw.dev_queue.lifecycle import (
     _reset_for_same_stage_requeue,
 )
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
+from cw.events import record_event
 from cw.exceptions import ApproveGateError
-from cw.models import QueueItemStatus, Stage
+from cw.models import OrchestratorEventType, QueueItemStatus, Stage
 
 if TYPE_CHECKING:
-    from cw.models import DevQueueStore, TicketTask
+    from cw.models import DevQueueStore, Session, TicketTask
 
 
 def approve_ticket(ticket_id: str, client_name: str) -> dict[str, str | bool]:
@@ -116,6 +118,53 @@ def _resolve_approval_target(
         " present in the dev queue."
     )
     raise ApproveGateError(msg)
+
+
+def _record_approve_scope_routing_decision(
+    ticket_id: str,
+    client_name: str,
+    task: TicketTask,
+    session: Session,
+    *,
+    finalize_held: bool,
+    awaiting_signoff: bool,
+    plan_requeued: bool,
+) -> None:
+    """Emit the #1617 scope-routing audit event for the gate-release site (D4).
+
+    Extracted from ``_approve_ticket_locked`` to keep that function under the
+    PLR0912/PLR0915 branch/statement ceilings. This site has no ``last_result``
+    parameter and no ``_resolve_scope_tier`` call of its own (unlike the three
+    ``routing.py`` park-decision sites), so both the sentinel's ``scope.tier``
+    and the resolved tier are sourced from the owning session's
+    ``last_result`` here. ``disposition`` is a literal describing which of the
+    caller's four branches actually fired -- NOT ``task.disposition``, since
+    the ``finalize_held`` branch performs no mutation at all (the row stays
+    parked exactly as it is), so ``task.disposition`` would not reflect it.
+    """
+    from cw.dispatch import _extract_scope_tier, _resolve_scope_tier
+
+    if finalize_held:
+        disposition = "finalize_held"
+    elif awaiting_signoff:
+        disposition = "awaiting_signoff"
+    elif plan_requeued:
+        disposition = "plan_requeued"
+    else:
+        disposition = "advanced"
+    record_event(
+        OrchestratorEventType.SCOPE_ROUTING_DECISION,
+        {
+            "ticket_id": ticket_id,
+            "client": client_name,
+            "scope_hint": task.scope_hint,
+            "sentinel_tier": _extract_scope_tier(session.last_result),
+            "resolved_tier": _resolve_scope_tier(session.last_result, task),
+            "rule": "gate_release",
+            "disposition": disposition,
+        },
+        correlation_id=ticket_id,
+    )
 
 
 def _approve_ticket_locked(
@@ -289,6 +338,19 @@ def _approve_ticket_locked(
     else:
         _advance_task_pointer(task, stages)
     to_stage = task.stage.value
+
+    # #1617 (D4): _approve_ticket_locked is a gate-release site, excluded from
+    # the scope_hint park-decision gate (Scope item 1) but still covered by
+    # the scope-routing audit trail (Scope item 2).
+    _record_approve_scope_routing_decision(
+        ticket_id,
+        client_name,
+        task,
+        session,
+        finalize_held=finalize_held,
+        awaiting_signoff=awaiting_signoff,
+        plan_requeued=plan_requeued,
+    )
 
     save_dev_queue(store)
 
