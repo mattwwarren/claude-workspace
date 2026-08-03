@@ -118,14 +118,22 @@ def _repo_with_remote(
 
 
 def _run_step(
-    step_id: str, repo: Path
+    step_id: str, repo: Path, extra_env: dict[str, str] | None = None
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
-    """Run a step's literal `run:` block in `repo`; return result + outputs."""
+    """Run a step's literal `run:` block in `repo`; return result + outputs.
+
+    `extra_env` stands in for the step's `env:` block, which the literal
+    `run:` text cannot supply on its own (see the checkpoint tests below).
+    """
     script = _script(step_id)
     with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".env") as handle:
         output_path = Path(handle.name)
     try:
-        env = {**_clean_git_env(), "GITHUB_OUTPUT": str(output_path)}
+        env = {
+            **_clean_git_env(),
+            "GITHUB_OUTPUT": str(output_path),
+            **(extra_env or {}),
+        }
         result = subprocess.run(
             # -eo pipefail matches GitHub Actions' actual default `run:` shell
             # (`bash --noprofile --norc -eo pipefail {0}`) -- without it, a

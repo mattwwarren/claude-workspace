@@ -173,14 +173,29 @@ jobs:
           fi
 
       - name: Release notes checkpoint
+        id: notes-checkpoint
         if: steps.guard.outputs.match == 'true' && inputs.dry_run != true
+        env:
+          VERSION: ${{ steps.guard.outputs.version }}
+          EXISTS: ${{ steps.release.outputs.exists }}
+          NOTES_FOUND: ${{ steps.changelog.outputs.notes_found }}
         run: |
-          VERSION="${{ steps.guard.outputs.version }}"
-          EXISTS="${{ steps.release.outputs.exists }}"
-          NOTES_FOUND="${{ steps.changelog.outputs.notes_found }}"
           echo "### Release notes checkpoint: v$VERSION" >> "$GITHUB_STEP_SUMMARY"
           if [ "$EXISTS" == "true" ] && [ "$NOTES_FOUND" == "true" ]; then
             echo "The release already existed when this run reached release creation, so the CHANGELOG-derived notes this run extracted were not applied to the release body. Verify the published notes for v$VERSION match CHANGELOG.md." >> "$GITHUB_STEP_SUMMARY"
+            # The extracted notes only ever lived in $RUNNER_TEMP, which is gone
+            # once the run ends — so land the text itself here or it is
+            # unrecoverable. `-s` covers both "absent" and "empty" (#1609).
+            if [ -s "$RUNNER_TEMP/changelog-notes.txt" ]; then
+              {
+                echo ""
+                echo "#### Discarded CHANGELOG notes for v$VERSION"
+                echo ""
+                echo '```'
+                cat "$RUNNER_TEMP/changelog-notes.txt"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
             echo "::warning::Release v$VERSION already existed when this run reached release creation. The CHANGELOG-derived notes this run extracted were not applied to the release body — verify the published notes for v$VERSION."
           elif [ "$EXISTS" == "true" ]; then
             echo "The release already existed when this run reached release creation, so this run took no release-creation action. No CHANGELOG section was found for v$VERSION either — verify the published release notes directly." >> "$GITHUB_STEP_SUMMARY"
