@@ -7591,6 +7591,51 @@ class TestDevQueueTasksPrState:
         assert "REASON" in human_result.output
         assert "plan_unreviewable" in human_result.output
 
+    def test_tasks_json_includes_scope_hint_large(self, tmp_config_dir: Path) -> None:
+        """_task_to_dict carries scope_hint through the JSON contract (#1618)."""
+        import json as _json
+
+        from cw.dev_queue import add_ticket
+        from cw.models import TicketTask
+
+        add_ticket(
+            TicketTask(ticket_id="GEN-405", client="attn-client", scope_hint="large")
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "tasks", "--json"])
+        assert result.exit_code == 0, result.output
+        data = _json.loads(result.output)
+        assert data[0]["scope_hint"] == "large"
+
+    def test_tasks_json_field_drift_guard(self, tmp_config_dir: Path) -> None:
+        """_task_to_dict's JSON output must not silently drop TicketTask fields (#1618)."""
+        import json as _json
+
+        from cw.dev_queue import add_ticket
+        from cw.models import TicketTask
+
+        add_ticket(TicketTask(ticket_id="GEN-406", client="attn-client"))
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "tasks", "--json"])
+        assert result.exit_code == 0, result.output
+        data = _json.loads(result.output)
+        missing = set(TicketTask.model_fields.keys()) - set(data[0].keys())
+        assert not missing, f"tasks --json is missing fields: {sorted(missing)}"
+
+    def test_tasks_human_table_operator_relevant_fields_present(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Human table surfaces scope_hint/computed_scope_tier/stage (#1618)."""
+        from cw.dev_queue import add_ticket
+        from cw.models import TicketTask
+
+        add_ticket(TicketTask(ticket_id="GEN-407", client="attn-client"))
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "tasks"])
+        assert result.exit_code == 0, result.output
+        for header in ("SCOPE_HINT", "COMPUTED_SCOPE_TIER", "STAGE"):
+            assert header in result.output
+
 
 # ---------------------------------------------------------------------------
 # TestDevQueueWait (GitHub issue #474)
