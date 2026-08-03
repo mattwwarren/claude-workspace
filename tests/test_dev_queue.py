@@ -4806,7 +4806,7 @@ class TestApproveTicketLockedForceHold:
         assert t.disposition == "signoff_gate"
         assert t.stage == Stage.REVIEW
 
-    def test_approve_locked_operator_initiated_true_bypasses_force_hold_with_large_scope_hint(
+    def test_approve_locked_operator_initiated_bypasses_hold_with_scope_hint(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """D4 (#1617): a scope_hint == 'large' task still advances via the human
