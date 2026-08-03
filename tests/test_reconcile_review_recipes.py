@@ -69,6 +69,7 @@ from cw.reconcile.review_recipes import (
     _detect_repeat_fire_counts,
     _detect_request_reviewer,
     _record_pr_action_taken,
+    _shared,
     resolve_outbound_consent_allowed,
     resolve_review_recipe_enabled,
     run_review_recipes,
@@ -76,7 +77,6 @@ from cw.reconcile.review_recipes import (
 from cw.reconcile.review_recipes import (
     _detect_repeat_fire_counts as _real_detect_repeat_fire_counts,
 )
-from cw.reconcile.review_recipes import _shared
 from cw.review_strategy import ReviewStrategy
 
 # Reuse the sibling test helpers rather than re-deriving TicketTask / PrState
