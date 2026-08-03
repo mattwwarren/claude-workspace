@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import fcntl
 import subprocess
+import typing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 from freezegun import freeze_time
@@ -45,6 +46,7 @@ from cw.models import (
     OrchestratorEventType,
     TicketTask,
 )
+from cw.pr_hydrate import PrAttentionState
 from cw.reconcile import reconcile
 from cw.reconcile.review_recipes import (
     _REPEAT_FIRE_ATTENTION_REASON as _REPEAT_FIRE_REASON,
@@ -74,6 +76,7 @@ from cw.reconcile.review_recipes import (
 from cw.reconcile.review_recipes import (
     _detect_repeat_fire_counts as _real_detect_repeat_fire_counts,
 )
+from cw.reconcile.review_recipes import _shared
 from cw.review_strategy import ReviewStrategy
 
 # Reuse the sibling test helpers rather than re-deriving TicketTask / PrState
@@ -2505,3 +2508,60 @@ class TestRunReviewRecipesRepeatFire:
         # leak into the address_review key.
         assert len(attn) == 1
         assert attn[0].payload["recipe"] == RECIPE_ADDRESS_REVIEW
+
+
+class TestAttentionConstantsTypedAsPrAttentionState:
+    """GitHub #1613 -- drift guard: _shared.py's four _ATTENTION_* constants
+    must be annotated PrAttentionState (not bare str), so a typo in any of
+    them is a type error, not a silently-never-matching runtime comparison.
+    """
+
+    def test_attention_constant_values_are_pr_attention_state_members(self) -> None:
+        """Value-level guard (mirrors test_board.py's set-comparison shape).
+        Catches PrAttentionState losing/renaming a member (mutation a). Does
+        NOT catch a reverted-to-str/dropped annotation (mutation b) -- see
+        the annotation-level guard below, per GitHub #1613's R4.
+        """
+        values = {
+            _shared._ATTENTION_CHANGES_REQUESTED,
+            _shared._ATTENTION_CI_FAILING,
+            _shared._ATTENTION_NO_REVIEWER,
+            _shared._ATTENTION_MERGE_BLOCKED,
+        }
+        assert values <= set(get_args(PrAttentionState))
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "_ATTENTION_CHANGES_REQUESTED",
+            "_ATTENTION_CI_FAILING",
+            "_ATTENTION_NO_REVIEWER",
+            "_ATTENTION_MERGE_BLOCKED",
+        ],
+    )
+    def test_attention_constant_annotated_as_pr_attention_state(
+        self, name: str
+    ) -> None:
+        """Annotation-level guard: catches mutation (b) -- a reverted-to-str
+        or dropped annotation -- which the value-level guard above cannot
+        see (the runtime string value is unchanged either way).
+
+        _shared.py carries `from __future__ import annotations`, so its raw
+        __annotations__ values are unevaluated source strings, not type
+        objects. `typing.get_type_hints(_shared)` can't be called on the
+        whole module directly: other module-level names (e.g.
+        RECIPE_FIRED_AT_GETTERS) are annotated with TYPE_CHECKING-only
+        forward refs (Callable, datetime, TicketTask) that are genuinely
+        undefined at runtime, so a whole-module resolution raises NameError
+        before it reaches our four names. Scoping resolution to a throwaway
+        stub carrying only *name*'s raw annotation string, resolved against
+        the real module's namespace, resolves exactly the annotation we
+        need without requiring those unrelated forward refs.
+        """
+        raw = _shared.__annotations__
+        assert name in raw, f"{name} has no annotation at all (bare constant)"
+        stub = type("_AnnotationStub", (), {"__annotations__": {name: raw[name]}})
+        resolved = typing.get_type_hints(stub, globalns=vars(_shared))[name]
+        assert resolved == PrAttentionState, (
+            f"{name} must be annotated PrAttentionState, resolved {resolved!r}"
+        )
