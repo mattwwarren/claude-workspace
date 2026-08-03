@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import ast
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 from freezegun import freeze_time
@@ -22,6 +23,7 @@ from cw.models import (
 )
 from cw.pr_hydrate import (
     WATCHED_PR_COUNTERPARTY,
+    PrAttentionState,
     _blocked_attention_state,
     _comment_body_is_blocking,
     _compute_attention_state,
@@ -42,6 +44,7 @@ from cw.pr_hydrate import (
     observe_pushed_event,
     resolve_and_register_review_request,
 )
+from tests.conftest import _REPO_ROOT
 
 _URL = "https://github.com/acme/widgets/pull/42"
 
@@ -413,6 +416,68 @@ class TestAttentionState:
                 has_blocking_comment_review=True,
             )
             == "changes_requested"
+        )
+
+
+class TestAttentionStateVocabularyDrift:
+    """GitHub #1598 — drift guard: PrAttentionState (canonical, this module)
+    must agree with the independent _compute_attention_state implementation
+    in the repo-tracked .claude/scripts/review_monitor.py, which cannot
+    import cw (see this module's docstring) and therefore hand-duplicates
+    the five-string output vocabulary. Not drifted today (confirmed at
+    main@ffd49555) -- this guard exists so future drift fails loudly.
+    """
+
+    def test_review_monitor_vocabulary_matches_pr_attention_state(self) -> None:
+        script = _REPO_ROOT / ".claude" / "scripts" / "review_monitor.py"
+        tree = ast.parse(script.read_text(encoding="utf-8"), filename=str(script))
+
+        func_node = next(
+            (
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef)
+                and node.name == "_compute_attention_state"
+            ),
+            None,
+        )
+        assert func_node is not None, (
+            "_compute_attention_state not found in review_monitor.py -- "
+            "renamed or removed. This drift guard's extraction target must "
+            "be updated (GitHub #1598), not silently skipped."
+        )
+
+        # _compute_attention_state's vocabulary lives as the second element
+        # of the (condition, "state") tuples inside its `precedence` list
+        # literal -- NOT in its Return nodes (those return a loop variable /
+        # None). Scoped to List elements specifically so the unrelated
+        # `merge_state_status in ("DIRTY", "BEHIND")` tuple (a bare Tuple,
+        # never itself a List element) is never picked up.
+        extracted: set[str] = set()
+        for node in ast.walk(func_node):
+            if not isinstance(node, ast.List):
+                continue
+            for elt in node.elts:
+                if (
+                    isinstance(elt, ast.Tuple)
+                    and len(elt.elts) == 2
+                    and isinstance(elt.elts[1], ast.Constant)
+                    and isinstance(elt.elts[1].value, str)
+                ):
+                    extracted.add(elt.elts[1].value)
+
+        assert extracted, (
+            "Extracted zero attention-state strings from "
+            "_compute_attention_state -- its precedence-table shape changed "
+            "(no longer a list[tuple[bool, str]] literal). Update this "
+            "guard's extraction logic; do not compare empty sets."
+        )
+
+        canonical = set(get_args(PrAttentionState))
+        assert extracted == canonical, (
+            f"review_monitor.py._compute_attention_state's vocabulary "
+            f"{sorted(extracted)!r} drifted from cw.pr_hydrate."
+            f"PrAttentionState {sorted(canonical)!r} (GitHub #1598)"
         )
 
 
