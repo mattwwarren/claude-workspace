@@ -22,26 +22,8 @@ from ._group import dev_queue
 
 
 def _task_to_dict(task: TicketTask) -> dict[str, object]:
-    return {
-        "ticket_id": task.ticket_id,
-        "client": task.client,
-        "status": task.status.value,
-        "session_id": task.session_id,
-        "attempts": task.attempts,
-        "priority": task.priority,
-        "lane": task.lane,
-        "created_at": task.created_at.isoformat(),
-        "total_cost_usd": task.total_cost_usd,
-        "worktree_path": str(task.worktree_path) if task.worktree_path else None,
-        "disposition": task.disposition,
-        "blocked_reason": task.blocked_reason,
-        "pr_url": task.pr_url,
-        "pr_state": (
-            task.pr_state.model_dump(mode="json") if task.pr_state is not None else None
-        ),
-        "signoff": task.signoff,
-        "last_blocked_result": task.last_blocked_result,
-    }
+    """Full TicketTask field set for `tasks --json` (GitHub #1618)."""
+    return task.model_dump(mode="json")
 
 
 def _task_attention_state(task: TicketTask) -> str | None:
@@ -74,12 +56,15 @@ def _print_tasks_human(tasks: list[TicketTask]) -> None:
         "SESSION_ID",
         "ATTEMPTS",
         "LANE",
+        "SCOPE_HINT",
+        "COMPUTED_SCOPE_TIER",
+        "STAGE",
         "DISPOSITION",
         "REASON",
         "PR",
         "ATTENTION",
     ]
-    col_widths = [12, 16, 16, 12, 8, 12, 20, 20, 10, 18]
+    col_widths = [12, 16, 16, 12, 8, 12, 12, 20, 10, 20, 20, 10, 18]
     header = "  ".join(f"{h:<{w}}" for h, w in zip(headers, col_widths, strict=True))
     click.echo(header)
     click.echo("-" * len(header))
@@ -92,6 +77,9 @@ def _print_tasks_human(tasks: list[TicketTask]) -> None:
             (t.session_id or "-")[:12],
             str(t.attempts)[:8],
             t.lane[:12],
+            (t.scope_hint or "—")[:12],
+            (t.computed_scope_tier or "—")[:20],
+            t.stage.value[:10],
             (t.disposition or "—")[:20],
             (t.blocked_reason or "—")[:20],
             (t.pr_url or "—")[:10],
