@@ -10,6 +10,7 @@
 | `dispatch-guard.yml` | Push to `main` (dispatch/reconcile/spawn) | ubuntu | Opens a `dispatch-drift` issue when critical files are unreleased; closes on next release |
 | `pr-events.yml` | PR closed / review submitted / CI workflow_run completed | ubuntu | Pushes PR lifecycle events to `cw_pr_events_server` `/pr-event` via an operator-provisioned relay (GitHub #930); no-ops if `CW_PR_EVENTS_RELAY_URL` repo variable is unset |
 | `changelog-advisory.yml` | PR (`pull_request`) | ubuntu | Advisory-only `::warning::` when a PR touches `src/cw/**` without updating `CHANGELOG.md` (GitHub #1532); never fails the job, so do not mark it required |
+| `changelog-gate.yml` | PR (opened / synchronize / reopened / labeled / unlabeled) | ubuntu | Blocking counterpart to the advisory (GitHub #1612): fails a `feat(`/`fix(` PR that touches `src/` without updating `CHANGELOG.md`, unless the `no-changelog` label is applied; safe to mark required |
 
 ## Triggering workflows manually
 

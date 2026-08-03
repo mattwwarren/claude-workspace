@@ -1,0 +1,154 @@
+name: Changelog Gate
+
+# BLOCKING counterpart to changelog-advisory.yml (GitHub #1612).
+#
+# Fails the job when a PR whose title starts with `feat(` or `fix(` touches
+# `src/` without either updating `CHANGELOG.md` or carrying the `no-changelog`
+# label. This is the check that is safe to mark required in branch protection;
+# changelog-advisory.yml is NOT (it warns on every `src/cw/**` PR and must
+# never fail).
+#
+# The rule is deliberately narrow. It fires only on `feat`/`fix` titles, so a
+# `refactor(...)` that quietly changes user-visible behavior is an accepted
+# false negative — widening it to every conventional-commit type would red-flag
+# the `chore`/`docs`/`test`/`ci` majority that genuinely has nothing to
+# document, and a gate that is wrong most of the time gets disabled.
+#
+# `labeled`/`unlabeled` are load-bearing trigger types, not decoration. Without
+# `labeled`, an author who applies the opt-out label gets no re-run and the red
+# check never clears without a fresh push. Without `unlabeled`, revoking the
+# label leaves a stale *passing* check on a PR that no longer qualifies.
+#
+# There is deliberately no trigger-level `paths:` filter — this follows
+# pr-events.yml's established "always trigger, decide inside the script" idiom.
+# A `paths:`-filtered required check is also permanently pending on PRs that
+# don't match the filter, which would wedge the merge queue.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+jobs:
+  gate-changelog:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+      issues: write # labels are issue-scoped; needed by the self-heal step
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      # Copied verbatim (name/id/env/run) from changelog-advisory.yml's own
+      # list-files step, and pinned byte-for-byte by
+      # tests/test_changelog_gate_workflow.py so the two cannot drift. That is
+      # why the fail-open warning below still says "changelog-advisory" — do
+      # not "fix" the string here; port any change to both workflows at once.
+      - name: List PR files
+        id: list-files
+        env:
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          # Random per-run delimiter. $FILES/$GITHUB_OUTPUT below is populated
+          # from PR filenames, which a fork-PR author fully controls — a file
+          # literally named "EOF" would terminate a fixed-delimiter heredoc
+          # early and could smuggle extra key=value pairs into this job's
+          # outputs. GitHub's own hardening guidance is to randomize instead.
+          # Prefer uuidgen's full CSPRNG entropy; fall back to bash builtins
+          # ($RANDOM, $$) only if uuidgen is unavailable, so delimiter
+          # generation itself can never fail this step (consistent with the
+          # job's fail-open invariant) without giving up entropy in the
+          # common case where uuidgen is present.
+          DELIM="EOF_$(uuidgen 2>/dev/null || echo "${RANDOM}${RANDOM}_$$")"
+
+          # Fail open. Because there is no `paths:` filter this step runs on
+          # every PR, so a `gh api` hiccup (5xx, rate limit, network flake,
+          # auth misconfig) must degrade to "skip the advisory this run",
+          # never to a red check. Mirrors dispatch-guard.yml's `|| true`
+          # fail-open idiom.
+          FILES=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/files" \
+            --paginate --jq '.[].filename') || {
+            echo "::warning::changelog-advisory: could not list PR files (exit $?) — skipping check for this run"
+            {
+              echo "files<<$DELIM"
+              echo "$DELIM"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          {
+            echo "files<<$DELIM"
+            echo "$FILES"
+            echo "$DELIM"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Ensure no-changelog label exists
+        id: ensure-label
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          # Self-heal the opt-out label, mirroring dispatch-guard.yml's
+          # `gh label create ... || true` idiom. `|| true` is not cosmetic
+          # here: the label already existing is the common case, and a fork
+          # PR's read-only GITHUB_TOKEN cannot create labels at all. Neither
+          # is a reason to fail a BLOCKING check for a contributor — the gate
+          # step below still reads whatever labels the PR actually carries.
+          gh label create "no-changelog" \
+            --repo "$REPO" \
+            --description "PR intentionally ships without a CHANGELOG entry" \
+            --color "ededed" \
+            || true
+
+      - name: Require a CHANGELOG entry for user-visible changes
+        id: gate
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          # A JSON array of label names. Read from the event payload rather
+          # than a second `gh api` call so the `labeled`/`unlabeled` re-run
+          # sees the post-change state without an extra round trip.
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          CHANGED_FILES: ${{ steps.list-files.outputs.files }}
+        run: |
+          set -euo pipefail
+
+          FAILURE_MESSAGE='add an [Unreleased] entry or apply the no-changelog label'
+
+          # Every grep MUST stay inside an `if`. Under `set -e` a bare grep
+          # that matches nothing exits non-zero and would fail the job — which
+          # is exactly the "nothing to gate" case each check is detecting. Do
+          # not "simplify" these into an unguarded chain.
+
+          # Anchored at the start of the title: a `feat(`/`fix(` appearing
+          # mid-title (e.g. "wip: feat(cli) rework") is not a conventional
+          # commit subject and must not be gated. The trailing `\(` also keeps
+          # unscoped `feat: ...` titles out.
+          if ! printf '%s' "$PR_TITLE" | grep -qE '^(feat|fix)\('; then
+            echo "changelog-gate: title is not a scoped feat(/fix( change — nothing to gate."
+            exit 0
+          fi
+
+          # Anchored at `^src/` so a vendored or documented path such as
+          # `docs/src/cw/example.py` does not count as a source change.
+          if ! printf '%s\n' "$CHANGED_FILES" | grep -q '^src/'; then
+            echo "changelog-gate: no src/ changes in this PR — nothing to gate."
+            exit 0
+          fi
+
+          if printf '%s\n' "$CHANGED_FILES" | grep -qFx 'CHANGELOG.md'; then
+            echo "changelog-gate: CHANGELOG.md was updated."
+            exit 0
+          fi
+
+          # Exact element comparison via jq, not a substring match on the raw
+          # JSON blob: a label named "no-changelog-needed" must NOT waive the
+          # gate. `jq -e` exits non-zero on a false result, so it stays inside
+          # the `if` for the same `set -e` reason as the greps above.
+          if printf '%s' "$PR_LABELS" \
+            | jq -e --arg want 'no-changelog' 'any(.[]; . == $want)' >/dev/null; then
+            echo "changelog-gate: no-changelog label applied — gate waived."
+            exit 0
+          fi
+
+          echo "::error::changelog-gate: ${FAILURE_MESSAGE}"
+          exit 1
