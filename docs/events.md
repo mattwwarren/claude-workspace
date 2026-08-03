@@ -986,6 +986,73 @@ the next legitimate sentinel or operator action.
 
 `correlation_id` is the `ticket_id`.
 
+### `dispatch.scope_routing_decision`
+
+**Emitter:** `_route_scope_gated_approval`, `_route_stage_success`,
+`_walk_stage_pointer_forward` (`cw.dispatch.routing`); `_approve_ticket_locked`
+(`cw.dev_queue.approval`)
+**Payload:**
+```json
+{
+  "ticket_id": "<str>",
+  "client": "<str>",
+  "scope_hint": "<str | null>",
+  "sentinel_tier": "<str | null>",
+  "resolved_tier": "<str | null>",
+  "rule": "Rule 1 | Rule 3 | stage_walk | gate_release",
+  "disposition": "<str | null>"
+}
+```
+**Semantics:** GitHub #1617. An operator/queue-set `scope_hint` of `"large"`
+is meant to force an approval gate at the REVIEW->FINALIZE boundary
+regardless of which sentinel status a worker emits, but nothing recorded
+*why* a gate did or did not fire -- diagnosing a historical bypass required a
+forensic sweep across raw dev-queue state. This event closes that gap:
+emitted at every scope-gate-relevant routing decision, capturing the
+sentinel's own self-reported `scope.tier`, `task.scope_hint`, the tier
+`_resolve_scope_tier` actually resolved (escalate-only: either input being
+`"large"` wins), which of the four call sites made the decision, and the
+resulting disposition.
+
+`rule` identifies the call site: `"Rule 1"` (`_route_scope_gated_approval`,
+the scope-gated-approval statuses' pre-existing reference implementation),
+`"Rule 3"` (`_route_stage_success`, the `stage_complete`/`shipped` bypass this
+ticket closes), `"stage_walk"` (`_walk_stage_pointer_forward`'s REVIEW rung,
+the second bypass this ticket closes -- a sentinel whose mapped stage lands
+past REVIEW in one hop, e.g. the Checkpoint-3a-headless-auto-continue shape),
+or `"gate_release"` (`_approve_ticket_locked`, `cw dev-queue approve` -- see
+below).
+
+For the three `cw.dispatch.routing` sites, `disposition` is `task.disposition`
+read immediately after the site's mutation -- so it is the literal
+sentinel-status-derived value on Rule 1's approval-gate park (e.g.
+`"review_pending_approval"`), `"approval_gate"` (the `_APPROVAL_GATE_REASON`
+constant) on Rule 3/stage_walk's new scope_hint-gate park,
+`"finalize_gate_held"`/`"signoff_gate"` on the two pre-existing REVIEW gates,
+or `null` on an ordinary unparked advance (a non-terminal
+`transition_task_status` call clears disposition). For the `"gate_release"`
+site, `disposition` is instead a literal naming which of
+`_approve_ticket_locked`'s four branches fired --
+`"finalize_held"` | `"awaiting_signoff"` | `"plan_requeued"` | `"advanced"` --
+because that function's force-hold branch performs **no mutation at all**
+(the row stays parked exactly as it is), so `task.disposition` would not
+reflect it there.
+
+`_approve_ticket_locked` is deliberately **excluded** from the scope_hint
+park-decision gate itself (D4): it is a gate-release site, and applying the
+gate there would re-park the exact ticket the operator is releasing. It is
+still covered by this audit event, sourcing `sentinel_tier`/`resolved_tier`
+from the owning session's `last_result` (that site has no `last_result`
+parameter of its own, unlike the three `routing.py` sites).
+
+Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`
+(`orchestrator_config.py`) -- this is an audit/diagnostic trail, not an
+operator alert, and it fires on effectively every stage transition for every
+ticket (Rule 1 and Rule 3 both emit unconditionally on every call, not only
+when a gate fires) -- far higher volume than any currently-forwarded member.
+
+`correlation_id` is the `ticket_id`.
+
 ### `session.park_vetoed`
 
 **Emitter:** `_act_on_stalled_candidates` in `cw.reconcile.stalled`
