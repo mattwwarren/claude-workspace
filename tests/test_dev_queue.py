@@ -3682,25 +3682,7 @@ class TestDevQueueTasks:
         tasks = json.loads(result.output)
         assert isinstance(tasks, list)
         assert len(tasks) == 3
-        expected_fields = {
-            "ticket_id",
-            "client",
-            "status",
-            "session_id",
-            "attempts",
-            "priority",
-            "lane",
-            "created_at",
-            "total_cost_usd",
-            "worktree_path",
-            "disposition",
-            "blocked_reason",
-            "pr_url",
-            "pr_state",
-            "signoff",
-            "last_blocked_result",
-        }
-        assert set(tasks[0].keys()) == expected_fields
+        assert set(tasks[0].keys()) == set(TicketTask.model_fields.keys())
 
     def test_tasks_filter_by_client(self, tmp_config_dir: Path) -> None:
         save_dev_queue(DevQueueStore(tasks=self._three_tasks()))
