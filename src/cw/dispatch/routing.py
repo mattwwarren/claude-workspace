@@ -217,6 +217,27 @@ def _resolve_scope_tier(
     return task.scope_hint
 
 
+def _should_gate_for_scope_hint(
+    task: TicketTask, last_result: dict[str, object] | None
+) -> bool:
+    """True iff the resolved scope tier requires parking at the REVIEW boundary
+    (#1617).
+
+    Mirrors ``_should_gate_for_signoff``/``_should_force_hold_finalize``'s
+    two-arg predicate shape so all three REVIEW-scoped gate checks read
+    identically at each call site. Deliberately checks for exactly
+    ``SCOPE_TIER_LARGE``, NOT Rule 1's conservative "not small" semantics
+    (``_resolve_scope_tier(...) != SCOPE_TIER_SMALL``, which also catches an
+    unresolved/``None`` tier): ``STAGE_SUCCESS_STATUSES`` sentinels
+    (``stage_complete``/``shipped``) routinely omit ``scope.tier`` entirely --
+    it is only meaningful on a scope-gated-approval sentinel -- so treating
+    "unknown" as "gate" here would park nearly every ordinary REVIEW->FINALIZE
+    advance. Reuses ``_resolve_scope_tier`` so this predicate and Rule 1's
+    escalate-only precedence never drift.
+    """
+    return _resolve_scope_tier(last_result, task) == SCOPE_TIER_LARGE
+
+
 def resolve_signoff(
     task: TicketTask,
     clients: dict[str, ClientConfig],
@@ -378,6 +399,72 @@ def _park_signoff_gate(task: TicketTask) -> None:
         task,
         QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
         disposition=SIGNOFF_GATE_DISPOSITION,
+    )
+
+
+def _park_scope_hint_gate(task: TicketTask) -> None:
+    """Park *task* BLOCKED_ON_USER for a ``scope_hint=="large"`` escalation at
+    the REVIEW->FINALIZE boundary (#1617).
+
+    Shared by ``_route_stage_success`` and ``_walk_stage_pointer_forward`` --
+    the two REVIEW-scoped park-decision sites that (unlike
+    ``_route_scope_gated_approval``, Rule 1) do not naturally carry a
+    status-derived disposition to stamp, since their incoming sentinel status
+    (``stage_complete``/``shipped``) is not itself an approval-gated status.
+    Reuses ``_APPROVAL_GATE_REASON`` as both the ``SESSION_NEEDS_ATTENTION``
+    ``paused_status`` and the task ``disposition``, mirroring
+    ``_park_finalize_hold``/``_park_signoff_gate``'s fixed-disposition-constant
+    shape. Deliberately NOT used by ``_route_scope_gated_approval`` itself:
+    that site's existing disposition is the incoming sentinel status (e.g.
+    ``"review_pending_approval"``), an established, test-covered behavior this
+    ticket does not change.
+    """
+    record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {
+            "session_id": task.session_id or "",
+            "session_name": "",
+            "client": task.client,
+            "ticket_id": task.ticket_id,
+            "claude_session_id": None,
+            "paused_status": _APPROVAL_GATE_REASON,
+            "breadcrumbs": "",
+            "crashed": False,
+            "lane": task.lane,
+        },
+        correlation_id=task.ticket_id,
+    )
+    transition_task_status(
+        task, QueueItemStatus.BLOCKED_ON_USER, disposition=_APPROVAL_GATE_REASON
+    )
+
+
+def _record_scope_routing_decision(
+    task: TicketTask, last_result: dict[str, object] | None, rule: str
+) -> None:
+    """Emit the #1617 scope-routing audit event after a park-decision site runs.
+
+    Reads ``task.disposition``/``task.scope_hint`` AFTER the site's mutation
+    (or lack of one), so ``disposition`` reflects what actually happened, not
+    just what was evaluated. Called unconditionally on every routing pass at
+    each of the three ``routing.py`` park-decision sites (Rule 1, Rule 3, and
+    the stage-walk's REVIEW rung) -- this is why the event is excluded from
+    ``_DEFAULT_OPERATOR_EVENT_TYPES`` (``orchestrator_config.py``): an
+    audit/diagnostic trail, not an operator alert, at far higher volume than
+    any currently-forwarded member.
+    """
+    record_event(
+        OrchestratorEventType.SCOPE_ROUTING_DECISION,
+        {
+            "ticket_id": task.ticket_id,
+            "client": task.client,
+            "scope_hint": task.scope_hint,
+            "sentinel_tier": _extract_scope_tier(last_result),
+            "resolved_tier": _resolve_scope_tier(last_result, task),
+            "rule": rule,
+            "disposition": task.disposition,
+        },
+        correlation_id=task.ticket_id,
     )
 
 
@@ -558,20 +645,29 @@ def _walk_stage_pointer_forward(
     stages: list[Stage],
     target_idx: int,
     clients: dict[str, ClientConfig],
+    last_result: dict[str, object] | None,
 ) -> Literal["proceed", "parked"]:
     """Walk ``task.stage`` forward to ``stages[target_idx]``, one rung at a time.
 
     Each rung advances through ``_advance_task_pointer`` (the shared
     ``TASK_STAGE_CHANGED`` chokepoint, dev_queue.py), so every real stage move
-    emits exactly one event. Before crossing a REVIEW rung two gates are
-    checked, in order:
+    emits exactly one event. Before crossing a REVIEW rung three gates are
+    checked, in order (#1617 D1/D3):
 
-      1. The RFC 0011 A3 proactive finalize hold (#1160). It runs FIRST and
-         wins outright: the walk stops at REVIEW and parks the task
-         ``BLOCKED_ON_USER``/``finalize_gate_held``.
-      2. Otherwise the operator-signoff gate -- if it applies, the walk stops
+      1. The scope_hint escalation gate: an operator/queue ``scope_hint`` of
+         ``"large"`` outranks both gates below and parks the task
+         ``BLOCKED_ON_USER``/``approval_gate`` -- the third park-decision site
+         this ticket closes (the Checkpoint-3a-headless-auto-continue bypass).
+      2. Otherwise the RFC 0011 A3 proactive finalize hold (#1160): the walk
+         stops at REVIEW and parks the task ``BLOCKED_ON_USER``/
+         ``finalize_gate_held``.
+      3. Otherwise the operator-signoff gate -- if it applies, the walk stops
          at REVIEW and parks the task ``AWAITING_OPERATOR_SIGNOFF`` (signoff is
          the ship checkpoint, REVIEW->FINALIZE; RFC 0007 Phase 3, #990).
+
+    Every REVIEW-rung evaluation -- gated or not -- emits the #1617
+    scope-routing audit event (``_record_scope_routing_decision``) so a
+    bypass is diagnosable after the fact.
 
     ``_advance_task_pointer`` unconditionally clears ``task.session_id`` on
     every hop ("R6: clear session_id on advance"). That is correct for a genuine
@@ -583,16 +679,26 @@ def _walk_stage_pointer_forward(
     """
     original_session_id = task.session_id
     while stages.index(task.stage) < target_idx:
-        if task.stage == Stage.REVIEW and _should_force_hold_finalize(task, clients):
-            _park_finalize_hold(task)
+        if task.stage == Stage.REVIEW and _should_gate_for_scope_hint(
+            task, last_result
+        ):
+            _park_scope_hint_gate(task)
+            _record_scope_routing_decision(task, last_result, "stage_walk")
             return "parked"
         # Not `elif` (ruff RET505: an elif after a `return` is redundant) --
-        # the `return` above already makes this exclusive with the force-hold
-        # branch, unlike the other two REVIEW-scoped gate sites (which have no
-        # early return and so use a real `elif` chain instead).
+        # the `return` above already makes this exclusive with the branches
+        # below, unlike the landing Rule 1-6 sites (which have no early return
+        # and so use a real `elif` chain instead).
+        if task.stage == Stage.REVIEW and _should_force_hold_finalize(task, clients):
+            _park_finalize_hold(task)
+            _record_scope_routing_decision(task, last_result, "stage_walk")
+            return "parked"
         if task.stage == Stage.REVIEW and _should_gate_for_signoff(task, clients):
             _park_signoff_gate(task)
+            _record_scope_routing_decision(task, last_result, "stage_walk")
             return "parked"
+        if task.stage == Stage.REVIEW:
+            _record_scope_routing_decision(task, last_result, "stage_walk")
         _advance_task_pointer(task, stages)
         task.session_id = original_session_id
     return "proceed"
@@ -617,7 +723,9 @@ def _resolve_stage_walk(
         task, last_result, clients
     )
     if position == "later" and stages is not None and target_idx is not None:
-        return _walk_stage_pointer_forward(task, stages, target_idx, clients)
+        return _walk_stage_pointer_forward(
+            task, stages, target_idx, clients, last_result
+        )
     if position in ("earlier", "unresolvable"):
         return "refuse"
     return "proceed"
@@ -670,6 +778,10 @@ def _route_scope_gated_approval(
     is escalate-only -- see ``_resolve_scope_tier`` docstring (#696, #926).
     Extracted from ``_route_staged_decision`` to keep that function under the
     PLR0912 branch ceiling.
+
+    Every call emits the #1617 scope-routing audit event
+    (``_record_scope_routing_decision``) after the decision is made, whichever
+    of the four arms below actually ran.
     """
     tier = _resolve_scope_tier(last_result, task)
     if tier != SCOPE_TIER_SMALL:
@@ -691,6 +803,7 @@ def _route_scope_gated_approval(
         transition_task_status(
             task, QueueItemStatus.BLOCKED_ON_USER, disposition=disposition
         )
+        _record_scope_routing_decision(task, last_result, "Rule 1")
         return
     if task.stage == Stage.REVIEW and _should_force_hold_finalize(task, clients):
         # Why first: the A3 force hold is an operator's explicit "do not ship
@@ -709,6 +822,7 @@ def _route_scope_gated_approval(
         _park_signoff_gate(task)
     else:
         _stage_advance_unchecked(task, clients, disposition=disposition, pr_url=pr_url)
+    _record_scope_routing_decision(task, last_result, "Rule 1")
 
 
 def _route_stage_success(
@@ -716,30 +830,45 @@ def _route_stage_success(
     clients: dict[str, ClientConfig],
     disposition: str | None,
     pr_url: str | None,
+    last_result: dict[str, object] | None,
 ) -> None:
     """Rule 3 body: shipped/stage_complete -- advance or complete.
 
-    Two REVIEW-scoped gates run ahead of the advance, in order: the RFC 0011 A3
-    proactive finalize hold (#1160), then the operator-signoff gate. The hold
-    wins outright when both are armed -- see ``_route_scope_gated_approval``.
+    Three REVIEW-scoped gates run ahead of the advance, in order (#1617 D1):
+    the scope_hint escalation gate, then the RFC 0011 A3 proactive finalize
+    hold (#1160), then the operator-signoff gate. The scope_hint gate wins
+    outright over both -- an operator/queue ``scope_hint`` of ``"large"``
+    means "gate this," full stop -- and the hold in turn wins outright over
+    signoff when both of those are armed -- see ``_route_scope_gated_approval``.
 
     Why REVIEW-scoped: STAGE_SUCCESS_STATUSES fires at every pipeline stage as
     the ordinary staged-advance signal (each of HARDEN/PLAN/IMPL/REVIEW's
     "stage_complete", plus terminal "shipped"); gating every one of those
-    would pause the ticket at every stage. Signoff is the ship checkpoint
-    only -- the REVIEW->FINALIZE transition -- so the gate applies only when
-    task.stage is REVIEW. This relies on an unenforced producer contract that
-    only REVIEW's advance represents "ready to ship"; dispatch does not
-    otherwise verify it (RFC 0007 Phase 3, #990). Extracted from
+    would pause the ticket at every stage. Signoff (and the scope_hint gate)
+    are the ship checkpoint only -- the REVIEW->FINALIZE transition -- so
+    those gates apply only when task.stage is REVIEW. This relies on an
+    unenforced producer contract that only REVIEW's advance represents "ready
+    to ship"; dispatch does not otherwise verify it (RFC 0007 Phase 3, #990).
+    Similarly, the sentinel's own ``scope.tier`` (and ``last_result`` in
+    general) is self-reported by the agent that produced the work and is not
+    independently verified by dispatch -- only ``task.scope_hint``, an
+    operator/queue-set field, is trusted to escalate a gate; see
+    ``_resolve_scope_tier``'s escalate-only precedence (#1617). Extracted from
     ``_route_staged_decision`` to keep that function under the PLR0912
     branch ceiling.
+
+    Every call emits the #1617 scope-routing audit event
+    (``_record_scope_routing_decision``) after the decision is made.
     """
-    if task.stage == Stage.REVIEW and _should_force_hold_finalize(task, clients):
+    if task.stage == Stage.REVIEW and _should_gate_for_scope_hint(task, last_result):
+        _park_scope_hint_gate(task)
+    elif task.stage == Stage.REVIEW and _should_force_hold_finalize(task, clients):
         _park_finalize_hold(task)
     elif task.stage == Stage.REVIEW and _should_gate_for_signoff(task, clients):
         _park_signoff_gate(task)
     else:
         _stage_advance_unchecked(task, clients, disposition=disposition, pr_url=pr_url)
+    _record_scope_routing_decision(task, last_result, "Rule 3")
 
 
 def _route_staged_decision(
@@ -832,7 +961,7 @@ def _route_staged_decision(
     elif status in STAGE_SUCCESS_STATUSES:
         # Rule 3: shipped -- advance or complete (REVIEW-scoped signoff gate;
         # see _route_stage_success docstring).
-        _route_stage_success(task, clients, disposition, pr_url)
+        _route_stage_success(task, clients, disposition, pr_url, last_result)
     elif status == "merge_pending":
         # Rule 3b: PR created but awaiting CI/merge gate (#899). Not a failure
         # — preserve pr_url so operator can monitor/merge. Do not re-dispatch.

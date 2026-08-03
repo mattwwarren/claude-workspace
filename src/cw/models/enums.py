@@ -285,6 +285,18 @@ class OrchestratorEventType(StrEnum):
     # is operator-attention-worthy — forwarded by default. No paired failure
     # event: emitting this has no mutation of its own that can fail.
     SSH_KEY_GATE_BYPASSED = "gate.ssh_key_bypassed"
+    # GitHub #1617 -- scope_hint routing-decision audit trail. Emitted at every
+    # scope-gate-relevant routing decision (Rule 1, Rule 3, the stage-walk's
+    # REVIEW rung, and the _approve_ticket_locked gate-release site) recording
+    # the sentinel's own scope.tier, task.scope_hint, the resolved tier, which
+    # rule fired, and the resulting disposition -- so a bypass (a gate that
+    # should have fired but didn't) is diagnosable after the fact instead of
+    # requiring a forensic sweep. Deliberately NOT added to
+    # _DEFAULT_OPERATOR_EVENT_TYPES (orchestrator_config.py): this is an
+    # audit/diagnostic trail, not an operator alert, and it fires on
+    # effectively every stage transition for every ticket -- far higher volume
+    # than any currently-forwarded member.
+    SCOPE_ROUTING_DECISION = "dispatch.scope_routing_decision"
 
 
 class DispatchSkipReason(StrEnum):
