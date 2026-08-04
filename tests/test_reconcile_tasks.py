@@ -508,7 +508,9 @@ class TestCompleteTimedOutMergedTasks:
             lane=lane,
         )
 
-    def _spawn_error_only_task(self, ticket_id: str, *, lane: str = "batch-2") -> TicketTask:
+    def _spawn_error_only_task(
+        self, ticket_id: str, *, lane: str = "batch-2"
+    ) -> TicketTask:
         """1617's exact observed shape: every attempt died on the generic
         spawn-error path. attempts == spawn_error_count == 3, session_id=None,
         stage_high_water=None (never entered a stage)."""
@@ -524,7 +526,9 @@ class TestCompleteTimedOutMergedTasks:
             lane=lane,
         )
 
-    def _usage_limit_only_task(self, ticket_id: str, *, lane: str = "batch-2") -> TicketTask:
+    def _usage_limit_only_task(
+        self, ticket_id: str, *, lane: str = "batch-2"
+    ) -> TicketTask:
         """R8: every attempt died on UsageLimitError, which deliberately does
         NOT stamp spawn_error_count (dispatch/claim.py:769, #868 fleet-wide
         backoff). attempts=3, spawn_error_count=0, session_id=None,
@@ -623,7 +627,9 @@ class TestCompleteTimedOutMergedTasks:
         )
         save_state(CwState(sessions=[session]))
         save_dev_queue(
-            DevQueueStore(tasks=[self._spawn_error_only_task(ticket_id, lane="batch-2")])
+            DevQueueStore(
+                tasks=[self._spawn_error_only_task(ticket_id, lane="batch-2")]
+            )
         )
         monkeypatch.setattr(
             "cw.reconcile._deps.pr_is_merged_for_ticket",
@@ -677,7 +683,9 @@ class TestCompleteTimedOutMergedTasks:
         )
         save_state(CwState(sessions=[session]))
         save_dev_queue(
-            DevQueueStore(tasks=[self._usage_limit_only_task(ticket_id, lane="batch-2")])
+            DevQueueStore(
+                tasks=[self._usage_limit_only_task(ticket_id, lane="batch-2")]
+            )
         )
         monkeypatch.setattr(
             "cw.reconcile._deps.pr_is_merged_for_ticket",
