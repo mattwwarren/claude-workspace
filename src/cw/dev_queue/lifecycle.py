@@ -4,7 +4,8 @@ Extracted from the flat ``cw.dev_queue`` module (#1318, part 2). Owns the
 mutation-authority layer for a ``TicketTask``: ``transition_task_status`` (the
 single status-transition primitive), the disposition/terminal-status constants,
 the stage-pointer helpers (``_advance_task_pointer`` / ``_stage_regress`` /
-``_raise_stage_high_water`` / ``_clear_signoff_gate``), the same-stage requeue
+``_raise_stage_high_water`` / ``_stamp_salvage_stage`` /
+``_clear_signoff_gate``), the same-stage requeue
 reset, the plan-review gate (``_plan_is_reviewed``), and the terminal-wait poll
 loop (``wait_for_terminal`` + its ``consume_completed_sessions`` dispatch
 wrapper).
@@ -32,10 +33,10 @@ from cw.auto_dev_result import (
 from cw.dev_queue.storage import load_dev_queue
 from cw.events import record_event
 from cw.gh import fetch_approved_plan_comment
-from cw.models import OrchestratorEventType, QueueItemStatus
+from cw.models import OrchestratorEventType, QueueItemStatus, Stage
 
 if TYPE_CHECKING:
-    from cw.models import Stage, TicketTask
+    from cw.models import TicketTask
 
 _WAIT_POLL_INTERVAL: int = 5
 
@@ -376,10 +377,10 @@ def _emit_stage_change(
 
     Single shared chokepoint for every stage-pointer mutation (RFC 0008 W1,
     closes #978): called from ``_advance_task_pointer`` (advance),
-    ``_stage_regress`` (regress), and ``_apply_requeue_stage``'s forward/
-    same-stage tail (advance). Guarded on ``old_stage != new_stage`` so a
-    same-stage requeue stays silent. ``direction`` is the closed enum
-    ``"advance" | "regress"``.
+    ``_stage_regress`` (regress), ``_apply_requeue_stage``'s forward/
+    same-stage tail (advance), and ``_stamp_salvage_stage`` (advance, #1629).
+    Guarded on ``old_stage != new_stage`` so a same-stage requeue stays
+    silent. ``direction`` is the closed enum ``"advance" | "regress"``.
     """
     if old_stage == new_stage:
         return
@@ -418,6 +419,32 @@ def _raise_stage_high_water(
     current_idx = stages.index(current) if current in stages else -1
     if stages.index(new_stage) > current_idx:
         task.stage_high_water = new_stage
+
+
+def _stamp_salvage_stage(task: TicketTask) -> None:
+    """Force ``task.stage`` to FINALIZE for a terminal salvage completion.
+
+    Companion write for the four reconcile backstops that stamp a terminal
+    ``disposition="shipped"`` without ever having walked the stage pointer
+    through the normal advance/regress path (GitHub #1629). Deliberately
+    does NOT call :func:`_raise_stage_high_water` (R1): leaving
+    ``stage_high_water`` untouched is what lets a completed row's
+    ``stage_high_water != stage`` identify "salvaged before reaching
+    finalize." Deliberately does NOT route through
+    :func:`_advance_task_pointer` (R2): that helper also transitions status
+    to PENDING, clears ``session_id``/``stage_base_ref``, and expects to move
+    exactly one pipeline position -- all wrong for a terminal write.
+
+    Honest limit: a task salvaged after it had already reached FINALIZE has
+    ``stage == stage_high_water == finalize`` already, so this call is a
+    no-op (and emits no event either) -- that completion stays
+    indistinguishable from a normally-routed one. Accepted for #1629; a
+    distinct disposition string is the documented follow-up if full
+    distinguishability is ever needed.
+    """
+    old_stage = task.stage
+    task.stage = Stage.FINALIZE
+    _emit_stage_change(task, old_stage, Stage.FINALIZE, "advance")
 
 
 def _advance_task_pointer(task: TicketTask, stages: list[Stage]) -> None:

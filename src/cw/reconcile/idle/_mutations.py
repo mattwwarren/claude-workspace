@@ -13,6 +13,7 @@ from cw.dev_queue import (
     _extract_pr_url,
     _hold_aware_disposition,
     _result_blocker_reason,
+    _stamp_salvage_stage,
     dev_queue_lock,
     load_dev_queue,
     save_dev_queue,
@@ -248,6 +249,7 @@ def _apply_idle_queue_mutations(
                 transition_task_status(
                     task, QueueItemStatus.COMPLETED, disposition="shipped"
                 )
+                _stamp_salvage_stage(task)
                 task.session_id = None
                 merged_completed.append(task.ticket_id)
                 changed = True

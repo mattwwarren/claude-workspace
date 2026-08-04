@@ -7370,6 +7370,66 @@ class TestStageHighWaterStamping:
         assert task.stage_high_water == Stage.FINALIZE
 
 
+class TestStampSalvageStage:
+    """Unit tests for _stamp_salvage_stage (GitHub #1629)."""
+
+    def test_forces_finalize_and_does_not_raise_high_water(self) -> None:
+        from cw.dev_queue import _stamp_salvage_stage
+
+        task = _make_stage_task(stage=Stage.IMPL, stage_high_water=Stage.IMPL)
+        _stamp_salvage_stage(task)
+        assert task.stage == Stage.FINALIZE
+        # R1: high water stays put so stage_high_water != stage marks a row
+        # salvaged before it ever reached finalize.
+        assert task.stage_high_water == Stage.IMPL
+
+    def test_no_op_at_finalize(
+        self, capture_events: Callable[..., list[CapturedEvent]]
+    ) -> None:
+        from cw.dev_queue import _stamp_salvage_stage
+
+        events = capture_events(
+            "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_STAGE_CHANGED
+        )
+        task = _make_stage_task(stage=Stage.FINALIZE, stage_high_water=Stage.FINALIZE)
+        _stamp_salvage_stage(task)
+        assert task.stage == Stage.FINALIZE
+        assert events == []
+
+    def test_emits_task_stage_changed(
+        self, capture_events: Callable[..., list[CapturedEvent]]
+    ) -> None:
+        from cw.dev_queue import _stamp_salvage_stage
+
+        events = capture_events(
+            "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_STAGE_CHANGED
+        )
+        task = _make_stage_task(stage=Stage.PLAN, stage_high_water=Stage.PLAN)
+        _stamp_salvage_stage(task)
+        assert len(events) == 1
+        etype, payload, corr = events[0]
+        assert etype == OrchestratorEventType.TASK_STAGE_CHANGED
+        assert corr == "REGRESS-1"
+        assert payload["old_stage"] == Stage.PLAN
+        assert payload["new_stage"] == Stage.FINALIZE
+        assert payload["direction"] == "advance"
+
+    def test_normally_routed_completion_stage_equals_high_water_at_finalize(
+        self,
+    ) -> None:
+        """The routed path is unaffected: walking the pointer to FINALIZE
+        leaves stage == stage_high_water, so only salvaged rows diverge."""
+        from cw.dev_queue import _advance_task_pointer
+
+        stages = [Stage.HARDEN, Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE]
+        task = _make_stage_task(stage=Stage.HARDEN, stage_high_water=None)
+        for _ in range(len(stages) - 1):
+            task.status = QueueItemStatus.RUNNING
+            _advance_task_pointer(task, stages)
+        assert task.stage == Stage.FINALIZE
+        assert task.stage_high_water == Stage.FINALIZE
+
+
 class TestRegisterWatchedPr:
     """register_watched_pr idempotent insert (GitHub #1154, RFC 0011 S2, R7)."""
 

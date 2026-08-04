@@ -684,6 +684,39 @@ class TestCompleteTimedOutMergedTasks:
         assert len(events) == 1
         assert events[0].payload["reason"] == "timed_out_merged"
 
+    def test_complete_timed_out_merged_tasks_forces_finalize_stage_not_high_water(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#1629: a salvage completion forces stage to FINALIZE so the row
+        stops advertising a stage it never finished, while stage_high_water
+        stays where it was -- the divergence IS the salvage marker."""
+        now = datetime.now(UTC)
+        ticket_id = "TKT-SALVAGE-STAGE"
+        session = _mk_timed_out_daemon_session(
+            "sess-salvage-stage", ticket_id, completed_at=now - timedelta(days=1)
+        )
+        save_state(CwState(sessions=[session]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[self._legitimately_progressed_reverted_task(ticket_id)]
+            )
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.pr_is_merged_for_ticket",
+            lambda _tid, **_kw: (True, True),
+        )
+
+        assert complete_timed_out_merged_tasks() == [ticket_id]
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.COMPLETED
+        assert task.disposition == "shipped"
+        assert task.stage == Stage.FINALIZE
+        assert task.stage_high_water == Stage.IMPL
+
     def test_happy_path(
         self,
         tmp_config_dir: Path,

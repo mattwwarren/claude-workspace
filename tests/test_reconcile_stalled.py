@@ -337,6 +337,53 @@ def test_revert_stalled_headless_sessions_merged_pr_completes_not_times_out(
     assert not any(e.payload.get("session_id") == sess.id for e in timed_out_events)
 
 
+def test_revert_stalled_headless_sessions_merged_pr_forces_finalize_stage(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1629: the stalled-merged salvage forces stage to FINALIZE and leaves
+    stage_high_water where it was."""
+    config = _auto_config()
+
+    worktree = tmp_path / "wt-1629-merged"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 3, 0, 0, tzinfo=UTC)
+    # Stage.IMPL carries its own (longer) wall-clock budget than the global
+    # default, so the elapsed window is measured against that entry.
+    assert (now - started_at).total_seconds() > config.headless_timeout_by_stage[
+        Stage.IMPL
+    ]
+
+    sess = _mk_headless_daemon_session("1629-merged", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="1629-merged",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="1629-merged",
+        stage=Stage.IMPL,
+        stage_high_water=Stage.IMPL,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (True, True),
+    )
+
+    revert_stalled_headless_sessions(state, now=now, config=config)
+
+    store = load_dev_queue()
+    task_after = next(t for t in store.tasks if t.ticket_id == "1629-merged")
+    assert task_after.status == QueueItemStatus.COMPLETED
+    assert task_after.disposition == "shipped"
+    assert task_after.stage == Stage.FINALIZE
+    assert task_after.stage_high_water == Stage.IMPL
+
+
 def test_revert_stalled_headless_sessions_not_merged_times_out(
     tmp_config_dir: Path,
     tmp_path: Path,

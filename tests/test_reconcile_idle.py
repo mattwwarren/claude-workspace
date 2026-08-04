@@ -4357,6 +4357,40 @@ def test_idle_queue_mutations_merged_stamps_shipped(
     assert t.disposition == "shipped"
 
 
+def test_idle_queue_mutations_merged_forces_finalize_stage(
+    tmp_config_dir: Path,
+) -> None:
+    """#1629: merged_revert_candidates → stage forced to FINALIZE, with
+    stage_high_water left untouched as the salvage marker."""
+    from cw.reconcile._shared import ProposedAction, ReapCandidate
+    from cw.reconcile.idle import _apply_idle_queue_mutations
+
+    task = _make_ticket_task(
+        ticket_id="idle-salvage-stage",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="idle-salvage-stage",
+        stage=Stage.REVIEW,
+        stage_high_water=Stage.REVIEW,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidate = ReapCandidate(
+        session_id="idle-salvage-stage",
+        proposed_action=ProposedAction.REVERT_TASK,
+        ticket_id="idle-salvage-stage",
+        client="client-a",
+    )
+
+    _apply_idle_queue_mutations([], [candidate], [], [], [], {})
+
+    t = next(t for t in load_dev_queue().tasks if t.ticket_id == "idle-salvage-stage")
+    assert t.status == QueueItemStatus.COMPLETED
+    assert t.disposition == "shipped"
+    assert t.stage == Stage.FINALIZE
+    assert t.stage_high_water == Stage.REVIEW
+
+
 def test_idle_queue_mutations_park_stamps_paused_status(
     tmp_config_dir: Path,
 ) -> None:
