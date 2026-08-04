@@ -141,13 +141,23 @@ def _record_approve_scope_routing_decision(
     caller's four branches actually fired -- NOT ``task.disposition``, since
     the ``finalize_held`` branch performs no mutation at all (the row stays
     parked exactly as it is), so ``task.disposition`` would not reflect it.
+
+    The ``"finalize_hold_branch"``/``"signoff_branch"`` literals below are
+    deliberately spelled distinct from
+    ``lifecycle.FINALIZE_GATE_HELD_DISPOSITION``
+    (``"finalize_gate_held"``)/``lifecycle.SIGNOFF_GATE_DISPOSITION``
+    (``"signoff_gate"``) -- this function's four branches describe *which
+    code path fired inside* ``_approve_ticket_locked``, a different semantic
+    axis from ``task.disposition`` at the ``routing.py`` sites, and reusing
+    those constants directly would collapse that distinction. See Checkpoint
+    3a review, #1617.
     """
     from cw.dispatch import _RULE_GATE_RELEASE, _extract_scope_tier, _resolve_scope_tier
 
     if finalize_held:
-        disposition = "finalize_held"
+        disposition = "finalize_hold_branch"
     elif awaiting_signoff:
-        disposition = "awaiting_signoff"
+        disposition = "signoff_branch"
     elif plan_requeued:
         disposition = "plan_requeued"
     else:
