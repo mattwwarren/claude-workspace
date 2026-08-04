@@ -140,7 +140,7 @@ re-derive the decision tree here; cross-reference `ship-it.md` Step 3a so the
 two copies can't drift.
 
 ```bash
-gh pr create --base main --head "$BRANCH" ${EXTRA_LABEL_ARGS}  # body derived from the review summary
+gh pr create --base main --head "$BRANCH" --title "$TITLE" ${EXTRA_LABEL_ARGS}  # body derived from the review summary
 ```
 
 #### `ambiguities_pending_resolution` / `premises_pending_verification`
