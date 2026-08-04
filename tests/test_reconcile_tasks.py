@@ -30,6 +30,7 @@ from cw.models import (
     SessionOrigin,
     SessionPurpose,
     SessionStatus,
+    Stage,
     TicketTask,
 )
 from cw.reconcile import (
@@ -507,6 +508,39 @@ class TestCompleteTimedOutMergedTasks:
             lane=lane,
         )
 
+    def _spawn_error_only_task(
+        self, ticket_id: str, *, lane: str = "batch-2"
+    ) -> TicketTask:
+        """1617's exact observed shape: every attempt died on the generic
+        spawn-error path. attempts == spawn_error_count == 3, session_id=None,
+        stage_high_water=None (never entered a stage)."""
+        return _make_ticket_task(
+            ticket_id=ticket_id,
+            client="client-a",
+            stage=Stage.PLAN,
+            stage_high_water=None,
+            attempts=3,
+            spawn_error_count=3,
+            session_id=None,
+            signoff="operator",
+            lane=lane,
+        )
+
+    def _legitimately_progressed_reverted_task(self, ticket_id: str) -> TicketTask:
+        """A task that genuinely ran, completed at least one stage, then was
+        reverted to PENDING (session_id cleared) for retry -- attempts >
+        spawn_error_count and stage_high_water is set. Must NOT be refused;
+        this is the failure mode that would make the fix worse than the bug."""
+        return _make_ticket_task(
+            ticket_id=ticket_id,
+            client="client-a",
+            stage=Stage.IMPL,
+            stage_high_water=Stage.IMPL,
+            attempts=2,
+            spawn_error_count=0,
+            session_id=None,
+        )
+
     def test_never_claimed_row_refused_stays_pending_and_emits_needs_attention(
         self,
         tmp_config_dir: Path,
@@ -556,6 +590,99 @@ class TestCompleteTimedOutMergedTasks:
         assert p["lane"] == "batch-2"
         assert p["paused_status"] == _NEVER_CLAIMED_COMPLETION_REASON
         assert attention_events[0].correlation_id == ticket_id
+
+    def test_spawn_error_only_history_refused_stays_pending_and_emits_needs_attention(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """1617's exact observed shape: attempts=3, spawn_error_count=3,
+        session_id=None, stage_high_water=None -- every attempt died on the
+        generic spawn-error path. Refused: stays PENDING, NOT in the return
+        value, no SESSION_COMPLETED fires, exactly one SESSION_NEEDS_ATTENTION
+        fires with client/ticket_id/lane/paused_status."""
+        now = datetime.now(UTC)
+        ticket_id = "TKT-SPAWN-ERROR"
+        session = _mk_timed_out_daemon_session(
+            "sess-spawn-error", ticket_id, completed_at=now - timedelta(days=1)
+        )
+        save_state(CwState(sessions=[session]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[self._spawn_error_only_task(ticket_id, lane="batch-2")]
+            )
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.pr_is_merged_for_ticket",
+            lambda _tid, **_kw: (True, True),
+        )
+
+        completed = complete_timed_out_merged_tasks()
+
+        assert completed == []
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.PENDING
+        assert task.attempts == 3
+        assert task.spawn_error_count == 3
+        assert task.session_id is None
+
+        completed_events = read_events(
+            consumer="test-spawn-error-completed",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert len(completed_events) == 0
+
+        attention_events = read_events(
+            consumer="test-spawn-error-attention",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert len(attention_events) == 1
+        p = attention_events[0].payload
+        assert p["client"] == "client-a"
+        assert p["ticket_id"] == ticket_id
+        assert p["lane"] == "batch-2"
+        assert p["paused_status"] == _NEVER_CLAIMED_COMPLETION_REASON
+        assert attention_events[0].correlation_id == ticket_id
+
+    def test_legitimately_progressed_reverted_task_still_completes(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A task that genuinely ran, then was reverted to PENDING for retry
+        (attempts > spawn_error_count) must NOT be refused -- proves the
+        widened predicate doesn't over-refuse legitimate recoveries."""
+        now = datetime.now(UTC)
+        ticket_id = "TKT-LEGIT-RETRY"
+        session = _mk_timed_out_daemon_session(
+            "sess-legit-retry", ticket_id, completed_at=now - timedelta(days=1)
+        )
+        save_state(CwState(sessions=[session]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[self._legitimately_progressed_reverted_task(ticket_id)]
+            )
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.pr_is_merged_for_ticket",
+            lambda _tid, **_kw: (True, True),
+        )
+
+        completed = complete_timed_out_merged_tasks()
+
+        assert completed == [ticket_id]
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.COMPLETED
+        assert task.disposition == "shipped"
+
+        events = read_events(
+            consumer="test-legit-retry-completed",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert len(events) == 1
+        assert events[0].payload["reason"] == "timed_out_merged"
 
     def test_happy_path(
         self,

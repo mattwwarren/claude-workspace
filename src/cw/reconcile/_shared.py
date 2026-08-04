@@ -174,9 +174,11 @@ _TIMED_OUT_MERGED_REASON = "timed_out_merged"
 _DIRTY_WORKTREE_REASON = "dirty_worktree"
 # paused_status written to SESSION_NEEDS_ATTENTION events when
 # complete_timed_out_merged_tasks refuses a COMPLETED transition for a
-# PENDING row with no claim history (attempts == 0, session_id is None) --
+# PENDING row with no claim history (attempts == spawn_error_count,
+# session_id is None -- every attempt died on the spawn-error path) --
 # a reconciler false-match rather than a genuine completion (GitHub #1385,
-# #1387 belt-and-braces guard).
+# #1387 belt-and-braces guard, widened by #1623 to also cover
+# attempts > 0 spawn-error-only histories).
 _NEVER_CLAIMED_COMPLETION_REASON = "never_claimed_completion_refused"
 # Reason tag written to SESSION_COMPLETED events when a phantom/stalled/idle
 # session's PR was found MERGED before its task was reverted to PENDING.
