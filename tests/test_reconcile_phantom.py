@@ -3036,3 +3036,48 @@ def test_reconcile_crashed_phantom_salvage_corrects_inflated_scope(
     assert reloaded.last_result is not None
     assert reloaded.last_result["scope"]["files"] == SCOPE_GUARD_FILES
     assert reloaded.last_result["scope"]["lines_actual"] == SCOPE_GUARD_LINES
+
+
+def test_phantom_queue_mutations_merged_crash_forces_finalize_stage(
+    tmp_config_dir: Path,
+) -> None:
+    """#1629: the merged-crash salvage branch forces stage to FINALIZE and
+    leaves stage_high_water alone.
+
+    Why the private function: driving the whole phantom sweep to reach this
+    one branch needs a live daemon roster, a stale session, and a merged-PR
+    stub; calling ``_apply_phantom_queue_mutations`` directly matches the
+    convention already used by the idle-mutation disposition tests and keeps
+    the assertion pinned on the branch under test.
+    """
+    from cw.reconcile._shared import ProposedAction, ReapCandidate
+    from cw.reconcile.phantom import _apply_phantom_queue_mutations
+
+    task = TicketTask(
+        ticket_id="ph-salvage-stage",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="ph-salvage-stage",
+        stage=Stage.REVIEW,
+        stage_high_water=Stage.REVIEW,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidate = ReapCandidate(
+        session_id="ph-salvage-stage",
+        proposed_action=ProposedAction.CRASH_COMPLETE,
+        ticket_id="ph-salvage-stage",
+        client="client-a",
+    )
+    merged_completed_ids: list[str] = []
+
+    _apply_phantom_queue_mutations(
+        {}, [], [candidate], [], [], {}, set(), [], merged_completed_ids
+    )
+
+    assert merged_completed_ids == ["ph-salvage-stage"]
+    t = next(t for t in load_dev_queue().tasks if t.ticket_id == "ph-salvage-stage")
+    assert t.status == QueueItemStatus.COMPLETED
+    assert t.disposition == "shipped"
+    assert t.stage == Stage.FINALIZE
+    assert t.stage_high_water == Stage.REVIEW
