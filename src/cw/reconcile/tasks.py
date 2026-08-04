@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from cw.config import load_clients, load_orchestrator_config, load_state, save_state
 from cw.dev_queue import (
+    _stamp_salvage_stage,
     dev_queue_lock,
     load_dev_queue,
     save_dev_queue,
@@ -367,6 +368,7 @@ def complete_timed_out_merged_tasks() -> list[str]:
                     transition_task_status(
                         task, QueueItemStatus.COMPLETED, disposition="shipped"
                     )
+                    _stamp_salvage_stage(task)
                     completed_ids.append(ticket_id)
                     changed = True
                     break
