@@ -167,15 +167,36 @@ def _collect_timed_out_merged_candidates(
 
 
 def _is_never_claimed(task: TicketTask) -> bool:
-    """True when *task* shows no claim history (#1387 belt-and-braces guard).
+    """True when *task* shows no evidence of ever attaching to a worker.
 
-    No legitimate completion has attempts == 0 and session_id is None --
-    attempts increments only at claim time (dispatch/claim.py:216-217,
-    243-244) and session_id is stamped only on spawn. A task in this
-    shape reaching this call site is definitionally a reconciler
-    false-match (GitHub #1385), not a genuine completion.
+    Refuses when every attempt this row made died on the generic
+    spawn-error path (dispatch/claim.py:793, stamp_backoff=True increments
+    spawn_error_count in lockstep with attempts at claim.py:435), i.e.
+    attempts == spawn_error_count. The original #1387 shape (attempts == 0,
+    session_id is None) is a degenerate case of this: attempts == 0 forces
+    spawn_error_count == 0 too (it can only increment after a claim already
+    happened), so attempts == 0 == spawn_error_count always holds and
+    #1387's refusal is preserved unchanged (R4).
+
+    No legitimate completion can satisfy this: attempts increments only at
+    claim time (dispatch/claim.py:250,278) and is never decremented on
+    revert; session_id is stamped only on spawn and cleared on every
+    revert-to-PENDING path. A task in this shape reaching this call site is
+    definitionally a reconciler false-match (GitHub #1385, #1623), not a
+    genuine completion.
+
+    Known accepted gap (#1631, not closed here): a task whose every attempt
+    failed via UsageLimitError has attempts > spawn_error_count (that revert
+    path deliberately does not stamp spawn_error_count -- dispatch/claim.py:
+    769, #868 fleet-wide backoff, see #1623 R7) and is therefore NOT refused
+    by this predicate, even though it never attached to a worker either. It
+    is structurally identical on the task record to a task that legitimately
+    ran, shipped, and timed out inside its first stage (both have
+    stage_high_water is None) apart from an attempts count that carries no
+    threshold meaning -- closing it needs new durable state ("a session was
+    successfully spawned at least once"), not a cleverer predicate.
     """
-    return task.attempts == 0 and task.session_id is None
+    return task.session_id is None and task.attempts == task.spawn_error_count
 
 
 def _emit_never_claimed_refusals(refused: list[tuple[str, Session, str]]) -> None:
@@ -198,9 +219,9 @@ def _emit_never_claimed_refusals(refused: list[tuple[str, Session, str]]) -> Non
                 "claude_session_id": None,
                 "paused_status": _NEVER_CLAIMED_COMPLETION_REASON,
                 "breadcrumbs": (
-                    f"matched timed-out session {session.id!r} but the "
-                    "dev-queue task was never claimed (attempts=0, "
-                    "session_id=None) -- refusing false completion"
+                    f"matched timed-out session {session.id!r} but the dev-queue "
+                    "task was never claimed (session_id=None, every attempt "
+                    "died on the spawn-error path) -- refusing false completion"
                 ),
                 "crashed": False,
                 "lane": lane,
@@ -282,12 +303,15 @@ def complete_timed_out_merged_tasks() -> list[str]:
     issue-linkage), upgrades the task to COMPLETED and emits SESSION_COMPLETED
     with reason="timed_out_merged".
 
-    A matching PENDING row with no claim history (attempts == 0, session_id
-    is None) is refused rather than completed — such a row was never
-    dispatched and its match is a reconciler false-match (GitHub #1385), not
-    a genuine completion. It is left PENDING and a SESSION_NEEDS_ATTENTION
-    event is emitted with paused_status=_NEVER_CLAIMED_COMPLETION_REASON
-    (#1387 belt-and-braces guard).
+    A matching PENDING row with no claim history (attempts == spawn_error_
+    count, session_id is None -- every attempt died on the generic
+    spawn-error path) is refused rather than completed. Such a row was
+    never dispatched and its match is a reconciler false-match (GitHub
+    #1385), not a genuine completion. It is left PENDING and a
+    SESSION_NEEDS_ATTENTION event is emitted with
+    paused_status=_NEVER_CLAIMED_COMPLETION_REASON (#1387 belt-and-braces
+    guard, widened by #1623 to also cover attempts > 0 spawn-error-only
+    histories).
 
     Called from reconcile() AFTER sessions_lock is released — no gh subprocess
     runs under the session lock (liveness requirement, #485 SHOULD_FIX 4).
