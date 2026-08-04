@@ -351,7 +351,13 @@ def _approve_ticket_locked(
 
     # #1617 (D4): _approve_ticket_locked is a gate-release site, excluded from
     # the scope_hint park-decision gate (Scope item 1) but still covered by
-    # the scope-routing audit trail (Scope item 2).
+    # the scope-routing audit trail (Scope item 2). save_dev_queue runs first
+    # so the audit event never durably claims a disposition that did not
+    # actually land in the dev-queue store (Checkpoint 3a review, #1617): if
+    # save_dev_queue raises or the process dies between the two calls, no
+    # audit event is emitted for a mutation that never persisted.
+    save_dev_queue(store)
+
     _record_approve_scope_routing_decision(
         ticket_id,
         client_name,
@@ -361,8 +367,6 @@ def _approve_ticket_locked(
         awaiting_signoff=awaiting_signoff,
         plan_requeued=plan_requeued,
     )
-
-    save_dev_queue(store)
 
     return {
         "from_stage": from_stage,
