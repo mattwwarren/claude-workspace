@@ -304,10 +304,36 @@ cd <impl-worktree>
 uv run ruff check src/ tests/
 uv run mypy src/
 uv run pytest tests/ -q
+```
 
+Before opening the PR, replicate `ship-it.md` Step 3a's gate check (this
+recovery path has no `$TITLE` of its own, so derive it from the commit
+subject about to be used below):
+
+```bash
+CHANGED_FILES=$(git -C <impl-worktree> diff --name-only origin/main...HEAD)
+TITLE="<commit subject>"
+GATE_FIRES=false
+if printf '%s' "$TITLE" | grep -qE '^(feat|fix)\('; then
+  if printf '%s\n' "$CHANGED_FILES" | grep -q '^src/'; then
+    GATE_FIRES=true
+  fi
+fi
+EXTRA_LABEL_ARGS=""
+```
+
+If `$GATE_FIRES` is `true` and `CHANGED_FILES` doesn't already include
+`CHANGELOG.md`, apply the same decision tree as `.claude/commands/ship-it.md`
+Step 3a before opening the PR — add a real `[Unreleased]` entry by default,
+or, only as a deliberate escape hatch, `gh label create no-changelog ... ||
+true` and set `EXTRA_LABEL_ARGS="--label no-changelog"`. Do not duplicate or
+re-derive the decision tree here; cross-reference `ship-it.md` Step 3a so the
+two copies can't drift.
+
+```bash
 # 3. If gates green, open the PR with auto-merge
 gh pr create --base main --head dev/<ticket>-<slug> \
-  --title "<commit subject>" --body "<body>"
+  --title "<commit subject>" --body "<body>" ${EXTRA_LABEL_ARGS}
 gh pr merge <PR#> --squash --auto
 
 # 4. Clear the ticket from dev-queue (PR will close it on merge)
