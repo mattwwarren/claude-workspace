@@ -142,7 +142,7 @@ def _record_approve_scope_routing_decision(
     the ``finalize_held`` branch performs no mutation at all (the row stays
     parked exactly as it is), so ``task.disposition`` would not reflect it.
     """
-    from cw.dispatch import _extract_scope_tier, _resolve_scope_tier
+    from cw.dispatch import _RULE_GATE_RELEASE, _extract_scope_tier, _resolve_scope_tier
 
     if finalize_held:
         disposition = "finalize_held"
@@ -160,7 +160,7 @@ def _record_approve_scope_routing_decision(
             "scope_hint": task.scope_hint,
             "sentinel_tier": _extract_scope_tier(session.last_result),
             "resolved_tier": _resolve_scope_tier(session.last_result, task),
-            "rule": "gate_release",
+            "rule": _RULE_GATE_RELEASE,
             "disposition": disposition,
         },
         correlation_id=ticket_id,

@@ -58,6 +58,18 @@ if TYPE_CHECKING:
 _log = logging.getLogger("cw.dispatch")
 
 
+# ``rule`` values stamped onto the #1617 ``dispatch.scope_routing_decision``
+# audit event by each of this module's park-decision sites, plus the
+# gate-release site in ``dev_queue.approval`` (imported there, see that
+# module's function-level deferred-import convention for the
+# dispatch<->dev_queue cycle break). Named constants so a typo at any of the
+# ~9 call sites cannot silently break the audit trail's site-attribution.
+_RULE_SCOPE_GATED_APPROVAL = "Rule 1"
+_RULE_STAGE_SUCCESS = "Rule 3"
+_RULE_STAGE_WALK = "stage_walk"
+_RULE_GATE_RELEASE = "gate_release"
+
+
 # paused_status written to SESSION_NEEDS_ATTENTION when a session parks at plan
 # stage (ambiguities_pending_resolution / premises_pending_verification).
 _PLAN_PARKED_REASON = "plan_parked"
@@ -683,7 +695,7 @@ def _walk_stage_pointer_forward(
             task, last_result
         ):
             _park_scope_hint_gate(task)
-            _record_scope_routing_decision(task, last_result, "stage_walk")
+            _record_scope_routing_decision(task, last_result, _RULE_STAGE_WALK)
             return "parked"
         # Not `elif` (ruff RET505: an elif after a `return` is redundant) --
         # the `return` above already makes this exclusive with the branches
@@ -691,14 +703,14 @@ def _walk_stage_pointer_forward(
         # and so use a real `elif` chain instead).
         if task.stage == Stage.REVIEW and _should_force_hold_finalize(task, clients):
             _park_finalize_hold(task)
-            _record_scope_routing_decision(task, last_result, "stage_walk")
+            _record_scope_routing_decision(task, last_result, _RULE_STAGE_WALK)
             return "parked"
         if task.stage == Stage.REVIEW and _should_gate_for_signoff(task, clients):
             _park_signoff_gate(task)
-            _record_scope_routing_decision(task, last_result, "stage_walk")
+            _record_scope_routing_decision(task, last_result, _RULE_STAGE_WALK)
             return "parked"
         if task.stage == Stage.REVIEW:
-            _record_scope_routing_decision(task, last_result, "stage_walk")
+            _record_scope_routing_decision(task, last_result, _RULE_STAGE_WALK)
         _advance_task_pointer(task, stages)
         task.session_id = original_session_id
     return "proceed"
@@ -803,7 +815,7 @@ def _route_scope_gated_approval(
         transition_task_status(
             task, QueueItemStatus.BLOCKED_ON_USER, disposition=disposition
         )
-        _record_scope_routing_decision(task, last_result, "Rule 1")
+        _record_scope_routing_decision(task, last_result, _RULE_SCOPE_GATED_APPROVAL)
         return
     if task.stage == Stage.REVIEW and _should_force_hold_finalize(task, clients):
         # Why first: the A3 force hold is an operator's explicit "do not ship
@@ -822,7 +834,7 @@ def _route_scope_gated_approval(
         _park_signoff_gate(task)
     else:
         _stage_advance_unchecked(task, clients, disposition=disposition, pr_url=pr_url)
-    _record_scope_routing_decision(task, last_result, "Rule 1")
+    _record_scope_routing_decision(task, last_result, _RULE_SCOPE_GATED_APPROVAL)
 
 
 def _route_stage_success(
@@ -868,7 +880,7 @@ def _route_stage_success(
         _park_signoff_gate(task)
     else:
         _stage_advance_unchecked(task, clients, disposition=disposition, pr_url=pr_url)
-    _record_scope_routing_decision(task, last_result, "Rule 3")
+    _record_scope_routing_decision(task, last_result, _RULE_STAGE_SUCCESS)
 
 
 def _route_staged_decision(
