@@ -6551,12 +6551,14 @@ class TestApplyStagedDecision:
         self,
         ticket_id: str,
         stage: Stage = Stage.FINALIZE,
+        scope_hint: str | None = None,
     ) -> TicketTask:
         task = _make_ticket_task(
             ticket_id=ticket_id,
             client="test-client",
             status=QueueItemStatus.RUNNING,
             stage=stage,
+            scope_hint=scope_hint,
         )
         save_dev_queue(DevQueueStore(tasks=[task]))
         return task
@@ -8200,6 +8202,206 @@ class TestApplyStagedDecision:
         assert attention[0][1]["session_id"] == "sess-fh-attn-1"
         assert attention[0][1]["lane"] == "bugs"
         assert attention[2][1]["session_id"] == "sess-fh-attn-3"
+
+    # -- scope_hint escalation gate (#1617) ------------------------------
+
+    def test_stage_complete_at_review_with_large_scope_hint_parks(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """#1617: Rule 3's stage_complete/shipped bypass -- a scope_hint=='large'
+        task must park at REVIEW, not sail through to FINALIZE unattended."""
+        from cw.dispatch import _APPROVAL_GATE_REASON, apply_staged_decision
+
+        task = self._make_running_task(
+            "SH-BYPASS-1", stage=Stage.REVIEW, scope_hint="large"
+        )
+        apply_staged_decision(task, "stage_complete", None, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == _APPROVAL_GATE_REASON
+        assert task.stage == Stage.REVIEW  # not advanced to FINALIZE
+
+    def test_stage_complete_at_non_review_stage_ignores_scope_hint(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """The scope_hint gate is REVIEW-scoped, mirroring force_hold/signoff: a
+        mid-pipeline stage_complete (IMPL->REVIEW here) advances unattended even
+        with scope_hint=='large' -- Rule 1 already handles PLAN-stage gating
+        for the scope-gated-approval statuses (#1617)."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task(
+            "SH-NONREVIEW-1", stage=Stage.IMPL, scope_hint="large"
+        )
+        apply_staged_decision(task, "stage_complete", None, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.REVIEW
+
+    def test_scope_hint_gate_takes_precedence_over_signoff_and_force_hold(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """D1: scope_hint=='large' outranks both REVIEW gates -- the row parks
+        with _APPROVAL_GATE_REASON, never AWAITING_OPERATOR_SIGNOFF or
+        finalize_gate_held (#1617)."""
+        from cw.dev_queue import FINALIZE_GATE_HELD_DISPOSITION
+        from cw.dispatch import _APPROVAL_GATE_REASON, apply_staged_decision
+
+        task = self._make_running_task(
+            "SH-PREC-1", stage=Stage.REVIEW, scope_hint="large"
+        )
+        task.signoff = "operator"
+        task.hold_finalize = "manual"
+        apply_staged_decision(task, "stage_complete", None, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.status != QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+        assert task.disposition == _APPROVAL_GATE_REASON
+        assert task.disposition != FINALIZE_GATE_HELD_DISPOSITION
+        assert task.stage == Stage.REVIEW
+
+    def test_later_stage_stops_at_review_scope_hint_gate(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """D3 (#1617): the Checkpoint-3a-headless-auto-continue shape -- a
+        REVIEW-stage task whose sentinel maps directly to FINALIZE must still
+        stop at the REVIEW rung when scope_hint=='large', not walk straight
+        through to a shipped completion."""
+        from cw.dispatch import _APPROVAL_GATE_REASON, apply_staged_decision
+
+        task = self._make_running_task(
+            "SH-WALK-1", stage=Stage.REVIEW, scope_hint="large"
+        )
+        task.session_id = "sess-sh-walk-1"
+        last_result: dict[str, object] = {
+            "status": "shipped",
+            "stage_reached": "stage5_post_create",
+        }
+        routed = apply_staged_decision(
+            task, "shipped", last_result, self._clients(tmp_path)
+        )
+
+        assert routed is True
+        assert task.stage == Stage.REVIEW
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == _APPROVAL_GATE_REASON
+        assert task.session_id == "sess-sh-walk-1"
+
+    def test_scope_hint_gate_park_emits_session_needs_attention(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """Both new scope_hint gate park sites (Rule 3 and the stage-walk) emit
+        exactly one SESSION_NEEDS_ATTENTION carrying
+        paused_status=_APPROVAL_GATE_REASON (#1617). Rule 1's own arm is the
+        pre-existing reference implementation, already covered elsewhere."""
+        from cw.dispatch import _APPROVAL_GATE_REASON, apply_staged_decision
+
+        attention = capture_events(
+            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+        clients = self._clients(tmp_path)
+
+        # Site 2: Rule 3's stage-success arm (_route_stage_success).
+        stage_success = self._make_running_task(
+            "SH-ATTN-2", stage=Stage.REVIEW, scope_hint="large"
+        )
+        stage_success.session_id = "sess-sh-attn-2"
+        apply_staged_decision(stage_success, "stage_complete", None, clients)
+
+        # Site 3: the multi-hop walk (_walk_stage_pointer_forward).
+        walked = self._make_running_task(
+            "SH-ATTN-3", stage=Stage.IMPL, scope_hint="large"
+        )
+        walked.session_id = "sess-sh-attn-3"
+        apply_staged_decision(
+            walked,
+            "blocked",
+            {"status": "blocked", "stage_reached": "stage4b_pr_create"},
+            clients,
+        )
+
+        assert len(attention) == 2
+        for (_event_type, payload, correlation_id), ticket_id in zip(
+            attention, ["SH-ATTN-2", "SH-ATTN-3"], strict=True
+        ):
+            assert payload["paused_status"] == _APPROVAL_GATE_REASON
+            assert payload["ticket_id"] == ticket_id
+            assert payload["client"] == "test-client"
+            assert payload["crashed"] is False
+            assert correlation_id == ticket_id
+
+    def test_scope_routing_decision_event_fields(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """The #1617 scope-routing audit event carries every field item 2
+        requires, across all three routing.py park-decision sites
+        (mutation-testing bullet (c))."""
+        from cw.dispatch import _APPROVAL_GATE_REASON, apply_staged_decision
+        from cw.events import read_events
+
+        clients = self._clients(tmp_path)
+
+        # Rule 1 (the pre-existing reference implementation).
+        rule1_task = self._make_running_task(
+            "SRD-1", stage=Stage.REVIEW, scope_hint="large"
+        )
+        apply_staged_decision(
+            rule1_task,
+            "review_pending_approval",
+            {"status": "review_pending_approval", "scope": {"tier": "small"}},
+            clients,
+        )
+
+        # Rule 3.
+        rule3_task = self._make_running_task(
+            "SRD-3", stage=Stage.REVIEW, scope_hint="large"
+        )
+        apply_staged_decision(rule3_task, "stage_complete", None, clients)
+
+        # stage_walk.
+        walk_task = self._make_running_task(
+            "SRD-W", stage=Stage.IMPL, scope_hint="large"
+        )
+        apply_staged_decision(
+            walk_task,
+            "blocked",
+            {"status": "blocked", "stage_reached": "stage4b_pr_create"},
+            clients,
+        )
+
+        events = read_events(
+            consumer="test-scope-routing-decision-fields",
+            event_types=[OrchestratorEventType.SCOPE_ROUTING_DECISION],
+        )
+        assert len(events) == 3
+        by_ticket = {e.payload["ticket_id"]: e.payload for e in events}
+
+        p1 = by_ticket["SRD-1"]
+        assert p1["client"] == "test-client"
+        assert p1["scope_hint"] == "large"
+        assert p1["sentinel_tier"] == "small"
+        assert p1["resolved_tier"] == "large"
+        assert p1["rule"] == "Rule 1"
+        assert p1["disposition"] == "review_pending_approval"
+
+        p3 = by_ticket["SRD-3"]
+        assert p3["client"] == "test-client"
+        assert p3["scope_hint"] == "large"
+        assert p3["sentinel_tier"] is None
+        assert p3["resolved_tier"] == "large"
+        assert p3["rule"] == "Rule 3"
+        assert p3["disposition"] == _APPROVAL_GATE_REASON
+
+        pw = by_ticket["SRD-W"]
+        assert pw["client"] == "test-client"
+        assert pw["scope_hint"] == "large"
+        assert pw["sentinel_tier"] is None
+        assert pw["resolved_tier"] == "large"
+        assert pw["rule"] == "stage_walk"
+        assert pw["disposition"] == _APPROVAL_GATE_REASON
 
     def test_signoff_gate_park_emits_session_needs_attention(
         self,
