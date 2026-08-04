@@ -103,6 +103,65 @@ if [ -f .claude/cw-context.json ]; then
 fi
 ```
 
+## Step 3a: Changelog Gate Compliance
+
+`.github/workflows/changelog-gate.yml` fails a PR whose title starts with
+`feat(` or `fix(` **and** whose diff touches `src/`, unless the diff also
+updates `CHANGELOG.md` or the PR carries the `no-changelog` label. Match these
+conditions exactly — do not widen to `refactor(`/`chore(`/`docs(`/`test(`/
+`ci(` titles; the workflow's own comments call the `refactor(` case an
+accepted false negative, and adding a changelog entry or label for those
+titles would be noise the gate was deliberately designed not to demand.
+
+```bash
+CHANGED_FILES=$(git diff --name-only origin/main...HEAD)
+
+GATE_FIRES=false
+if printf '%s' "$TITLE" | grep -qE '^(feat|fix)\('; then
+  if printf '%s\n' "$CHANGED_FILES" | grep -q '^src/'; then
+    GATE_FIRES=true
+  fi
+fi
+EXTRA_LABEL_ARGS=""
+```
+
+- **`GATE_FIRES=false`** — do nothing. Do not add a CHANGELOG entry or a
+  label; the gate does not apply here and either would be noise.
+- **`GATE_FIRES=true` and `CHANGED_FILES` already lists `CHANGELOG.md`** —
+  already satisfied, proceed to PR creation.
+- **`GATE_FIRES=true` and no `CHANGELOG.md` change yet** — choose one.
+  Default to option 1; option 2 must be a deliberate call, not the default:
+
+  1. **Add a real `[Unreleased]` entry (default).** Edit `CHANGELOG.md`'s
+     `## [Unreleased]` section, under `### Added` (for a `feat(` title) or
+     `### Fixed` (for a `fix(` title) — create the subsection heading
+     directly under `## [Unreleased]` if it doesn't already exist there
+     (the file does not enforce a strict subsection order — e.g. today's
+     `## [Unreleased]` lists `### Fixed` before `### Changed`). Match the
+     file's existing bullet format exactly:
+     ```
+     - **<Short, user-facing summary> (#<ticket number>):** <1-3 sentence
+       description of the change and why a user/operator would care.>
+     ```
+     Use `$TICKET_ID` (already resolved above for `CLOSES_TRAILER`) for the
+     parenthetical when non-empty; omit the parenthetical otherwise. Commit
+     the entry as its own commit — never amend — before creating the PR:
+     ```bash
+     git add CHANGELOG.md
+     git commit -m "docs(changelog): <one-line summary>"
+     CHANGED_FILES=$(git diff --name-only origin/main...HEAD)
+     ```
+  2. **Escape hatch: `no-changelog` label** — only when the change genuinely
+     has nothing user-visible to document (an internal guard, a test-only
+     surface, or a `fix(`/`feat(`-titled change with no observable behavior
+     change). This is a deliberate judgment call, not a default:
+     ```bash
+     gh label create "no-changelog" \
+       --description "PR intentionally ships without a CHANGELOG entry" \
+       --color "ededed" || true
+     EXTRA_LABEL_ARGS="--label no-changelog"
+     ```
+
 Create the PR with `gh pr create`:
 
 ```bash
@@ -110,6 +169,7 @@ gh pr create \
   --base "${BASE:-main}" \
   --head "$BRANCH" \
   --title "$TITLE" \
+  ${EXTRA_LABEL_ARGS} \
   --body "$(cat <<EOF
 ## Summary
 

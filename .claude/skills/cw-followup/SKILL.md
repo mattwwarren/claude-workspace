@@ -114,7 +114,33 @@ git -C "$WORKTREE" fetch origin
 git -C "$WORKTREE" checkout -B "$BRANCH" "origin/$BRANCH"
 git -C "$WORKTREE" rebase --onto origin/main "$FORK_POINT" "$BRANCH"
 git -C "$WORKTREE" push --force-with-lease origin "$BRANCH"
-gh pr create --base main --head "$BRANCH"  # body derived from the review summary
+```
+
+Before opening the PR, replicate `ship-it.md` Step 3a's gate check (this
+recovery path has no `$TITLE` of its own, so derive it from the branch tip):
+
+```bash
+CHANGED_FILES=$(git -C "$WORKTREE" diff --name-only origin/main...HEAD)
+TITLE=$(git -C "$WORKTREE" log -1 --format=%s "$BRANCH")
+GATE_FIRES=false
+if printf '%s' "$TITLE" | grep -qE '^(feat|fix)\('; then
+  if printf '%s\n' "$CHANGED_FILES" | grep -q '^src/'; then
+    GATE_FIRES=true
+  fi
+fi
+EXTRA_LABEL_ARGS=""
+```
+
+If `$GATE_FIRES` is `true` and `CHANGED_FILES` doesn't already include
+`CHANGELOG.md`, apply the same decision tree as `.claude/commands/ship-it.md`
+Step 3a before opening the PR — add a real `[Unreleased]` entry by default,
+or, only as a deliberate escape hatch, `gh label create no-changelog ... ||
+true` and set `EXTRA_LABEL_ARGS="--label no-changelog"`. Do not duplicate or
+re-derive the decision tree here; cross-reference `ship-it.md` Step 3a so the
+two copies can't drift.
+
+```bash
+gh pr create --base main --head "$BRANCH" --title "$TITLE" ${EXTRA_LABEL_ARGS}  # body derived from the review summary
 ```
 
 #### `ambiguities_pending_resolution` / `premises_pending_verification`
