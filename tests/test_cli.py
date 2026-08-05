@@ -7220,6 +7220,103 @@ class TestDevQueueStatusWithTick:
         assert "    lane default:" not in result.output
         assert "    lane fast:" not in result.output
 
+    def test_dev_queue_status_single_default_lane_paused_with_pending_shows_marker(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A paused single-default-lane with pending work must not stay silent (#1630).
+
+        Reproduces the ticket's literal bug: previously a paused lane's line
+        was suppressed by the single-default-lane noteworthy gate whenever it
+        had no RUNNING/BLOCKED/SIGNOFF occupants, even with PENDING tickets
+        stranded behind the pause.
+        """
+        from cw.config import _save_concurrency_overrides
+        from cw.dev_queue import add_ticket
+        from cw.events import record_event
+        from cw.models import (
+            ConcurrencyOverrides,
+            LaneConcurrencyOverride,
+            OrchestratorEventType,
+            QueueItemStatus,
+            TicketTask,
+        )
+
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-1630F",
+                client="default-client",
+                priority=5,
+                status=QueueItemStatus.PENDING,
+            )
+        )
+        _save_concurrency_overrides(
+            ConcurrencyOverrides(
+                lanes={"default-client/default": LaneConcurrencyOverride(paused=True)}
+            )
+        )
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "default-client",
+                "claimed": 0,
+                "pending": 1,
+                "running": 0,
+                "cap": 2,
+                "skip_reason": "lane_circuit_paused",
+                "lanes": {"default": {"claimed": 0, "running": 0, "pending": 1}},
+            },
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "[PAUSED]" in result.output
+
+    def test_dev_queue_status_paused_lane_no_pending_stays_quiet(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A genuinely idle paused lane (no pending) stays suppressed (regression guard)."""
+        from cw.config import _save_concurrency_overrides
+        from cw.dev_queue import add_ticket
+        from cw.events import record_event
+        from cw.models import (
+            ConcurrencyOverrides,
+            LaneConcurrencyOverride,
+            OrchestratorEventType,
+            QueueItemStatus,
+            TicketTask,
+        )
+
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-1630G",
+                client="default-client",
+                priority=5,
+                status=QueueItemStatus.COMPLETED,
+            )
+        )
+        _save_concurrency_overrides(
+            ConcurrencyOverrides(
+                lanes={"default-client/default": LaneConcurrencyOverride(paused=True)}
+            )
+        )
+        record_event(
+            OrchestratorEventType.DISPATCH_TICK,
+            {
+                "client": "default-client",
+                "claimed": 0,
+                "pending": 0,
+                "running": 0,
+                "cap": 2,
+                "skip_reason": "none",
+                "lanes": {"default": {"claimed": 0, "running": 0, "pending": 0}},
+            },
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "[PAUSED]" not in result.output
+        assert "    lane default:" not in result.output
+
     def test_dev_queue_status_blocked_on_user_shows_in_lane(
         self, tmp_config_dir: Path
     ) -> None:
