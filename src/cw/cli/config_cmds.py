@@ -370,9 +370,17 @@ def lane_resume(client: str, name: str) -> None:
         lane_override = current.lanes.get(lane_key, LaneConcurrencyOverride())
         # Resume also clears the circuit-breaker counter: resume is the sole
         # recovery path for a tripped lane, so a stale count must not re-trip
-        # the breaker on the next spawn error. See GitHub #875.
+        # the breaker on the next spawn error. See GitHub #875. It must
+        # likewise clear the lane-starved-notify debounce stamp (#1630): a
+        # stale ``lane_starved_notify_next_eligible_at`` left over from the
+        # prior episode would otherwise silently suppress the *next* trip's
+        # first attention notification until that old window expires.
         updated_lane = lane_override.model_copy(
-            update={"paused": False, "consecutive_spawn_errors": 0}
+            update={
+                "paused": False,
+                "consecutive_spawn_errors": 0,
+                "lane_starved_notify_next_eligible_at": None,
+            }
         )
         current.lanes[lane_key] = updated_lane
         _save_concurrency_overrides(current)
