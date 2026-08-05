@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`stalled_retry_cap_parked` payloads carry correction-signal fields
+  (#1625):** `ReapCandidate` gains `regress_attempts`/`spawn_error_count`
+  fields (mirroring the existing `attempts` field), stamped at the
+  stalled-retry-cap park emit site. Both `SESSION_NEEDS_ATTENTION` and
+  `SESSION_REAP_PROPOSED` payloads now carry `crashed`/`regress_attempts`/
+  `spawn_error_count` when the disposition is a stalled-retry-cap park —
+  scoped strictly to that reason via a shared `_apply_correction_signal_fields`
+  helper in `cw.reconcile._shared`, so a consumer no longer has to
+  cross-reference the two events by hand to see retry/regression state.
+
 ### Fixed
 
 - **Salvaged sessions no longer mark failed tickets as done (#1566):**
