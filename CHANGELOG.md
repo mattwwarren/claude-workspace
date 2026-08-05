@@ -8,6 +8,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Recurring attention signal for starved circuit-paused lanes (#1630):**
+  a lane paused by the circuit breaker while a task still waits in it no
+  longer sits silently — `dev-queue status` now surfaces the paused-with-
+  pending lane, and dispatch emits a recurring `SESSION_NEEDS_ATTENTION`
+  (not just a one-shot) for as long as the lane stays starved, so an
+  operator watching the event stream doesn't miss it after the first
+  notification scrolls by. Lane resume clears the notify debounce stamp,
+  and each firing timestamps its `session_id` so `dedup-terminal` treats
+  every recurrence as distinct instead of collapsing them into one.
+
 - **`stalled_retry_cap_parked` payloads carry correction-signal fields
   (#1625):** `ReapCandidate` gains `regress_attempts`/`spawn_error_count`
   fields (mirroring the existing `attempts` field), stamped at the

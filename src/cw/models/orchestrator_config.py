@@ -7,6 +7,7 @@ validators). See ``cw.models.__init__`` for the full DAG.
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -32,6 +33,19 @@ class LaneConcurrencyOverride(BaseModel):
     # Consecutive spawn_error count for the per-lane circuit breaker (#875).
     # Incremented once per tick on a spawn error, reset to 0 on any success.
     consecutive_spawn_errors: int = 0
+    # Debounce stamp for the recurring lane-starved session.needs_attention
+    # signal (#1630). Same persisted-timestamp-gate shape as
+    # TicketTask.false_park_recovery_next_eligible_at (see
+    # cw.reconcile.concierge) -- checked as a plain ``now < next_eligible_at``
+    # gate under concurrency_override_lock() and re-armed on every fire -- but
+    # a FIXED interval (OrchestratorConfig.lane_starved_notify_interval_minutes),
+    # not concierge's exponential backoff: that backoff exists to damp a
+    # flapping recovery retry storm, which doesn't apply here -- the operator
+    # wants "page me again in N minutes while this lane is still starved", not
+    # a growing delay. Cleared by ``cw lane resume`` so a fresh circuit trip
+    # after a resume notifies immediately rather than inheriting a stale
+    # debounce window from the prior episode.
+    lane_starved_notify_next_eligible_at: datetime | None = None
 
 
 class ClientConcurrencyOverride(BaseModel):
@@ -378,6 +392,18 @@ class OrchestratorConfig(BaseModel):
     # the global attempt ceiling (#786); a paused lane resumes only via
     # ``cw lane resume``. See GitHub issue #875.
     lane_circuit_breaker_threshold: int = 3
+    # Fixed re-notify interval (minutes) for the recurring lane-starved
+    # session.needs_attention signal (#1630). Scope is LANE_CIRCUIT_PAUSED
+    # only -- a circuit-paused lane with pending work fires immediately on
+    # first detection, then again every N minutes while it stays starved
+    # (gated by LaneConcurrencyOverride.lane_starved_notify_next_eligible_at),
+    # so an operator without an active `cw dev-queue status` poll still
+    # learns pending work is stranded. Fixed, not exponential (contrast
+    # freshness_block_attention_threshold below, which is a one-shot latch,
+    # and concierge's false_park_recovery backoff, which doubles) -- a
+    # starved lane's operator page should recur at a steady cadence until the
+    # operator acts, not decay into silence.
+    lane_starved_notify_interval_minutes: int = 15
     # Retention window (hours) for per-session executor-diagnostics bundles
     # under state_dir()/sessions/<id>/diagnostics/. dispatch_tick's cleanup
     # pass rmtree's any bundle whose newest file is older than this. See

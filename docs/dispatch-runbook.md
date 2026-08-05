@@ -588,7 +588,12 @@ read-modify-write (observed twice, 2026-07-04).
   breaker tripped on consecutive spawn errors. `cw lane resume <CLIENT>
   <lane>` resumes AND resets the counter. The trip emits a `lane.paused` bus
   event (`cw event tail`) but no push notification — check for it whenever
-  pending tickets sit unclaimed.
+  pending tickets sit unclaimed. **#1630:** once tripped, a lane with
+  stranded PENDING work also pages via a recurring
+  `session.needs_attention` (`paused_status=lane_circuit_paused`,
+  `session_id=lane:<client>/<lane>`) — immediately on first detection, then
+  every `lane_starved_notify_interval_minutes` (default 15) while it stays
+  starved, so `cw lane resume` is not the only way to find out.
 - `BLOCKED_ON_USER` rows hold lane slots by design; a parked ticket can
   starve its lane. Requeue or remove to free the slot.
 - A session wedged in `needs_salvage` with a park marker poisons every

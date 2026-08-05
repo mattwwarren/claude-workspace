@@ -88,17 +88,22 @@ def _emit_dev_queue_lane_breakdown(
         occupants = [t for t in lane_tasks if t.status in OCCUPIED_LANE_STATUSES]
         cap = lane_caps.get(lane_name, 1)
         at_cap = len(occupants) >= cap
-        noteworthy = (blocked + signoff) > 0 or at_cap
+        override = overrides.lanes.get(f"{lane_tasks[0].client}/{lane_name}")
+        # A paused lane with pending work stranded behind it is noteworthy
+        # even with zero occupants -- without this, a single-default-lane
+        # client with a circuit-paused, pending-only lane rendered as if
+        # nothing were wrong (#1630's literal bug report).
+        paused_with_pending = override is not None and override.paused and pending > 0
+        noteworthy = (blocked + signoff) > 0 or at_cap or paused_with_pending
         if single_default_lane and not noteworthy:
             continue
-        override = overrides.lanes.get(f"{lane_tasks[0].client}/{lane_name}")
         marker = _PAUSED_LANE_MARKER if override is not None and override.paused else ""
         click.echo(
             f"    lane {lane_name}:"
             f" pending={pending} running={running} blocked={blocked}"
             f" signoff={signoff}{marker}"
         )
-        if noteworthy:
+        if noteworthy and occupants:
             occupant_str = ", ".join(
                 f"{t.ticket_id} ({t.status.value})" for t in occupants
             )

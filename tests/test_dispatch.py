@@ -10268,6 +10268,276 @@ class TestLaneCircuitBreaker:
         assert len(loads) == 2
 
 
+# ---------------------------------------------------------------------------
+# TestLaneStarvedAttention — recurring SESSION_NEEDS_ATTENTION for a
+# circuit-paused lane with stranded pending work (#1630)
+# ---------------------------------------------------------------------------
+
+
+class TestLaneStarvedAttention:
+    """A circuit-paused lane with pending work pages the operator on a
+    fixed-interval debounce (#1630).
+
+    Distinct from the one-shot LANE_CIRCUIT_PAUSED skip_reason already
+    covered by TestLaneCircuitBreaker above -- that's a per-tick
+    DISPATCH_TICK observability field an operator must poll for; this is a
+    push (SESSION_NEEDS_ATTENTION) so a starved lane surfaces without
+    polling ``cw dev-queue status``.
+    """
+
+    def test_no_emit_when_paused_lane_has_zero_pending(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+    ) -> None:
+        """A tripped, paused lane with no pending tickets never emits."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        _seed_lane_override(2, paused=True)
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(breaker_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-1630-zero-pending",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert events == []
+
+    def test_first_occurrence_fires_immediately(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+    ) -> None:
+        """First tick of a starved circuit-paused lane emits immediately."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        _seed_lane_override(2, paused=True)
+        add_ticket(TicketTask(ticket_id="GEN-1630A", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(breaker_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-1630-first",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["paused_status"] == DispatchSkipReason.LANE_CIRCUIT_PAUSED
+        # session_id folds in the firing instant (#1630 send-back, R2a) so
+        # each recurrence gets a distinct _terminal_dedup_key -- see
+        # test_two_starved_lanes_produce_distinguishable_events and
+        # test_lane_starved_attention_recurs_and_survives_dedup_terminal.
+        assert payload["session_id"].startswith("lane:test-client/default@")
+        datetime.fromisoformat(
+            payload["session_id"].removeprefix("lane:test-client/default@")
+        )
+        assert payload["client"] == "test-client"
+        assert payload["lane"] == "default"
+        assert "1" in payload["breadcrumbs"]
+
+    def test_lane_starved_attention_recurs_after_debounce_interval(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+    ) -> None:
+        """Recurs only after the debounce interval elapses, not sooner (#1630)."""
+        from freezegun import freeze_time
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        _seed_lane_override(2, paused=True)
+        add_ticket(TicketTask(ticket_id="GEN-1630B", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        counts: list[int] = []
+        with freeze_time("2026-08-01 12:00:00") as frozen:
+            dispatch_tick(breaker_config, native_daemon=daemon)
+            events = read_events(
+                consumer="test-1630-recur",
+                event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+            )
+            counts.append(len(events))
+
+            frozen.tick(delta=timedelta(minutes=2))
+            dispatch_tick(breaker_config, native_daemon=daemon)
+            events = read_events(
+                consumer="test-1630-recur",
+                event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+            )
+            counts.append(len(events))
+
+            frozen.tick(delta=timedelta(minutes=13, seconds=1))
+            dispatch_tick(breaker_config, native_daemon=daemon)
+            events = read_events(
+                consumer="test-1630-recur",
+                event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+            )
+            counts.append(len(events))
+
+        assert counts == [1, 1, 2]
+
+    def test_two_starved_lanes_produce_distinguishable_events(
+        self,
+        tmp_dispatch_dirs: Path,
+        breaker_config: OrchestratorConfig,
+        workspace_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Two simultaneously-starved lanes emit distinct, dedup-safe events."""
+        from cw.cli.queues import _dedup_terminal
+
+        lanes = [
+            LaneConfig(name="lane-a", max_parallel=1),
+            LaneConfig(name="lane-b", max_parallel=1),
+        ]
+        client = ClientConfig(
+            name="test-client",
+            workspace_path=workspace_dir,
+            default_branch="main",
+            worktree_base=tmp_path / "worktrees",
+            lanes=lanes,
+        )
+        _make_clients_yaml(tmp_dispatch_dirs, client)
+        _save_concurrency_overrides(
+            ConcurrencyOverrides(
+                lanes={
+                    "test-client/lane-a": LaneConcurrencyOverride(
+                        consecutive_spawn_errors=2, paused=True
+                    ),
+                    "test-client/lane-b": LaneConcurrencyOverride(
+                        consecutive_spawn_errors=2, paused=True
+                    ),
+                }
+            )
+        )
+        add_ticket(
+            TicketTask(ticket_id="GEN-1630C1", client="test-client", lane="lane-a")
+        )
+        add_ticket(
+            TicketTask(ticket_id="GEN-1630C2", client="test-client", lane="lane-b")
+        )
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(breaker_config, native_daemon=daemon)
+
+        events = read_events(
+            consumer="test-1630-two-lanes",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert len(events) == 2
+        session_ids = {ev.payload["session_id"] for ev in events}
+        assert {sid.split("@")[0] for sid in session_ids} == {
+            "lane:test-client/lane-a",
+            "lane:test-client/lane-b",
+        }
+        assert len(_dedup_terminal(events)) == 2
+
+    def test_lane_starved_attention_recurs_and_survives_dedup_terminal(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+    ) -> None:
+        """Two same-lane recurrences both survive the real _dedup_terminal (#1630, R2c).
+
+        Distinct from test_two_starved_lanes_produce_distinguishable_events
+        (two DIFFERENT lanes) -- this covers the half of R2 the send-back
+        found still open: a stable, per-lane (not per-firing) session_id
+        collapses every recurrence of the SAME lane into one surviving
+        event under `cw event tail --dedup-terminal`, because
+        _terminal_dedup_key is (event_type, session_id, paused_status) and
+        both were constant across recurrences. Mutation for R2a: reverting
+        session_id to the stable f"lane:{client}/{lane}" form must turn
+        this test RED (verified manually per the send-back's mutation
+        instruction; not re-run automatically here).
+        """
+        from freezegun import freeze_time
+
+        from cw.cli.queues import _dedup_terminal
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        _seed_lane_override(2, paused=True)
+        add_ticket(TicketTask(ticket_id="GEN-1630E1", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        with freeze_time("2026-08-01 12:00:00") as frozen:
+            dispatch_tick(breaker_config, native_daemon=daemon)
+
+            frozen.tick(delta=timedelta(minutes=16))
+            dispatch_tick(breaker_config, native_daemon=daemon)
+
+            events = read_events(
+                consumer="test-1630-dedup-survives",
+                event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+            )
+
+        assert len(events) == 2
+        session_ids = {ev.payload["session_id"] for ev in events}
+        assert len(session_ids) == 2, "recurrences must not share a session_id"
+        assert len(_dedup_terminal(events)) == 2
+
+    def test_lane_resume_clears_starved_notify_debounce_for_fresh_trip(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+    ) -> None:
+        """Resume must clear the debounce stamp; else a fresh trip stays silent.
+
+        A full-object re-seed via ``_seed_lane_override`` would always reset
+        ``lane_starved_notify_next_eligible_at`` to its ``None`` default
+        regardless of whether ``lane_resume`` cleared it -- that would make
+        this test pass unconditionally and prove nothing about the mutation
+        it exists to catch (#1630's "the mutation that matters" -- R5).
+        Instead, the fresh-trip simulation below is a ``model_copy`` on the
+        *existing* (just-resumed) override, mirroring how the real
+        circuit-breaker (``_record_lane_spawn_error``) increments state in
+        place rather than overwriting the whole record.
+        """
+        from click.testing import CliRunner
+        from freezegun import freeze_time
+
+        from cw.cli import main
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        _seed_lane_override(2, paused=True)
+        add_ticket(TicketTask(ticket_id="GEN-1630D1", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        with freeze_time("2026-08-01 12:00:00") as frozen:
+            dispatch_tick(breaker_config, native_daemon=daemon)
+            events = read_events(
+                consumer="test-1630-resume",
+                event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+            )
+            assert len(events) == 1
+
+            runner = CliRunner()
+            result = runner.invoke(main, ["lane", "resume", "test-client", "default"])
+            assert result.exit_code == 0, result.output
+
+            # Simulate a fresh circuit-breaker trip on top of the just-resumed
+            # override, preserving whatever lane_resume left in place for the
+            # debounce field (see docstring above).
+            current = _load_concurrency_overrides()
+            existing = current.lanes.get(_BREAKER_LANE_KEY, LaneConcurrencyOverride())
+            current.lanes[_BREAKER_LANE_KEY] = existing.model_copy(
+                update={"consecutive_spawn_errors": 2, "paused": True}
+            )
+            _save_concurrency_overrides(current)
+            add_ticket(TicketTask(ticket_id="GEN-1630D2", client="test-client"))
+
+            frozen.tick(delta=timedelta(minutes=1))
+            dispatch_tick(breaker_config, native_daemon=daemon)
+            events = read_events(
+                consumer="test-1630-resume",
+                event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+            )
+            assert len(events) == 2
+
+
 class TestResolveDispatchSkipReasonCircuitPaused:
     """Precedence of LANE_CIRCUIT_PAUSED inside _resolve_dispatch_skip_reason."""
 

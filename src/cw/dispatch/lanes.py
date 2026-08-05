@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from cw.config import (
@@ -31,7 +32,6 @@ from cw.reconcile import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from datetime import datetime
 
     from cw.models import (
         ClientConfig,
@@ -66,6 +66,24 @@ class _ClientDispatchResult:
     usage_limit_detected: bool = False
 
 
+def _pending_in_lane(
+    lane_cfg: LaneConfig, queue_snapshot: DevQueueStore, client_name: str
+) -> int:
+    """Count PENDING tasks for *client_name* in *lane_cfg* (#1630).
+
+    Shared by :func:`_check_lane_circuit_paused` (breaker-pause detection)
+    and :func:`_maybe_notify_lane_starved` (the starved-lane attention
+    signal) so the two never drift onto separately-computed pending counts.
+    """
+    return sum(
+        1
+        for t in queue_snapshot.tasks
+        if t.client == client_name
+        and t.lane == lane_cfg.name
+        and t.status == QueueItemStatus.PENDING
+    )
+
+
 def _check_lane_circuit_paused(
     lane_cfg: LaneConfig,
     queue_snapshot: DevQueueStore,
@@ -88,14 +106,77 @@ def _check_lane_circuit_paused(
         return False
     if override.consecutive_spawn_errors < config.lane_circuit_breaker_threshold:
         return False
-    pending_in_lane = sum(
-        1
-        for t in queue_snapshot.tasks
-        if t.client == client_name
-        and t.lane == lane_cfg.name
-        and t.status == QueueItemStatus.PENDING
-    )
-    return pending_in_lane > 0
+    return _pending_in_lane(lane_cfg, queue_snapshot, client_name) > 0
+
+
+def _maybe_notify_lane_starved(
+    client_name: str,
+    lane_name: str,
+    pending_count: int,
+    *,
+    config: OrchestratorConfig,
+) -> None:
+    """Emit a recurring SESSION_NEEDS_ATTENTION for a starved circuit-paused lane.
+
+    No-op when *pending_count* is 0 -- a genuinely idle paused lane must stay
+    silent. Otherwise, under ``concurrency_override_lock()``: load the lane's
+    override, check ``lane_starved_notify_next_eligible_at`` -- if unset or
+    already elapsed, re-stamp it ``config.lane_starved_notify_interval_minutes``
+    minutes into the future and save; if still in the future, short-circuit
+    (no write, no emit). The event itself is emitted AFTER releasing the lock,
+    mirroring :func:`_record_lane_spawn_error`'s lock-then-emit-after-release
+    shape. Uses the canonical 9-field SESSION_NEEDS_ATTENTION payload (see
+    ``claim.py::_emit_attempt_cap_attention_event``), with
+    ``session_id=f"lane:{client_name}/{lane_name}@{now.isoformat()}"``
+    standing in for the pre-spawn "no real session exists yet" situation this
+    signal fires from. The firing instant is folded into ``session_id``
+    (rather than the stable ``f"lane:{client}/{lane}"`` form) because
+    ``_terminal_dedup_key`` (``cw.cli.queues``) keys on
+    ``(event_type, session_id, paused_status)`` and both of the latter two
+    are otherwise constant across every recurrence of the same lane --
+    ``cw event tail --dedup-terminal`` (and ``_follow_loop``'s
+    process-lifetime ``seen_terminal`` set) would collapse every recurrence
+    after the first into a single shown event, silently reproducing this
+    ticket's own bug one hop downstream (#1630 send-back, R2a). The debounce
+    above already caps firings to one per interval, so a timestamped
+    ``session_id`` cannot spam. ``client``/``lane`` remain explicit payload
+    fields (R2b) so no consumer has to parse the synthetic id.
+    See GitHub #1630.
+    """
+    if pending_count <= 0:
+        return
+    lane_key = f"{client_name}/{lane_name}"
+    now = datetime.now(UTC)
+    should_emit = False
+    with concurrency_override_lock():
+        overrides = _load_concurrency_overrides()
+        override = overrides.lanes.get(lane_key, LaneConcurrencyOverride())
+        next_eligible_at = override.lane_starved_notify_next_eligible_at
+        if next_eligible_at is None or now >= next_eligible_at:
+            should_emit = True
+            new_next_eligible_at = now + timedelta(
+                minutes=config.lane_starved_notify_interval_minutes
+            )
+            overrides.lanes[lane_key] = override.model_copy(
+                update={"lane_starved_notify_next_eligible_at": new_next_eligible_at}
+            )
+            _save_concurrency_overrides(overrides)
+    if should_emit:
+        record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": f"lane:{lane_key}@{now.isoformat()}",
+                "session_name": "",
+                "client": client_name,
+                "ticket_id": None,
+                "claude_session_id": None,
+                "paused_status": DispatchSkipReason.LANE_CIRCUIT_PAUSED,
+                "breadcrumbs": f"pending={pending_count}",
+                "crashed": False,
+                "lane": lane_name,
+            },
+            correlation_id=None,
+        )
 
 
 def _record_lane_spawn_error(
@@ -239,6 +320,39 @@ def _apply_host_capacity_budget(
 _DEFAULT_HOST_CAPACITY = HostCapacityContext()
 
 
+def _handle_paused_lane(
+    lane_cfg: LaneConfig,
+    queue_snapshot: DevQueueStore,
+    client_name: str,
+    *,
+    overrides: ConcurrencyOverrides,
+    config: OrchestratorConfig,
+) -> bool:
+    """Circuit-check a paused lane and fire its starved-attention notify (#1630).
+
+    Extracted from :func:`_dispatch_client_lanes` to keep it within the
+    PLR0912/PLR0915 ceilings (CLAUDE.md) -- mirrors
+    :func:`_apply_host_capacity_budget`'s own extraction for the same reason.
+    Returns whether this lane is a breaker-tripped pause with pending work
+    (the caller ORs this into its running ``lane_circuit_paused`` flag).
+    """
+    lane_paused_here = _check_lane_circuit_paused(
+        lane_cfg,
+        queue_snapshot,
+        client_name,
+        overrides=overrides,
+        config=config,
+    )
+    if lane_paused_here:
+        _maybe_notify_lane_starved(
+            client_name,
+            lane_cfg.name,
+            _pending_in_lane(lane_cfg, queue_snapshot, client_name),
+            config=config,
+        )
+    return lane_paused_here
+
+
 def _dispatch_client_lanes(
     client: ClientConfig,
     effective_lanes: list[LaneConfig],
@@ -314,12 +428,21 @@ def _dispatch_client_lanes(
             break
         if lane_cfg.paused:
             overrides = overrides or _load_concurrency_overrides()
-            lane_circuit_paused = lane_circuit_paused or _check_lane_circuit_paused(
-                lane_cfg,
-                queue_snapshot,
-                client.name,
-                overrides=overrides,
-                config=config,
+            # The call is the LEFT operand of `or` (not the reverse): once
+            # lane_circuit_paused flips True, `lane_circuit_paused or
+            # _handle_paused_lane(...)` would short-circuit and skip the
+            # call -- and its _maybe_notify_lane_starved side effect -- for
+            # every paused lane after the first tripped one (#1630 -- caught
+            # by test_two_starved_lanes_produce_distinguishable_events).
+            lane_circuit_paused = (
+                _handle_paused_lane(
+                    lane_cfg,
+                    queue_snapshot,
+                    client.name,
+                    overrides=overrides,
+                    config=config,
+                )
+                or lane_circuit_paused
             )
             continue
         # running_in_lane = RUNNING + BLOCKED_ON_USER + AWAITING_OPERATOR_SIGNOFF
