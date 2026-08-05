@@ -23,6 +23,7 @@ from cw.reconcile._shared import (
     _SALVAGE_SKIP_ESCALATED_REASON,
     _SALVAGE_SKIP_REASON,
     _STALLED_CAP_PARKED_REASON,
+    _apply_correction_signal_fields,
     _cleanup_timed_out_worktree,
 )
 from cw.reconcile.dispositions import (
@@ -280,8 +281,7 @@ def _build_needs_attention_park_payload(
         "lane": candidate.lane,
     }
     if paused_status == _STALLED_CAP_PARKED_REASON:
-        payload["regress_attempts"] = candidate.regress_attempts
-        payload["spawn_error_count"] = candidate.spawn_error_count
+        _apply_correction_signal_fields(payload, candidate)
     return payload
 
 

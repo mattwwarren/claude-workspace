@@ -420,6 +420,19 @@ class ReapCandidate:
     spawn_error_count: int = 0
 
 
+def _apply_correction_signal_fields(
+    payload: dict[str, object], candidate: ReapCandidate
+) -> None:
+    """Merge the #1625 correction-signal fields onto a stalled_retry_cap_parked
+    payload. Caller must already have gated on the disposition/reap_reason —
+    shared by the two sites that can produce this disposition (SESSION_
+    NEEDS_ATTENTION and SESSION_REAP_PROPOSED) so they cannot drift apart on
+    which fields are copied from the candidate.
+    """
+    payload["regress_attempts"] = candidate.regress_attempts
+    payload["spawn_error_count"] = candidate.spawn_error_count
+
+
 @dataclass(frozen=True)
 class ReconcileReport:
     """What reconciliation would do / did.
@@ -1966,8 +1979,7 @@ def _emit_reap_proposed(
         # (wall-clock budget, usage-limit cutoff, etc.) do not carry these keys.
         if candidate.reap_reason == ReapReason.STALLED_RETRY_CAP_PARKED:
             payload["crashed"] = False
-            payload["regress_attempts"] = candidate.regress_attempts
-            payload["spawn_error_count"] = candidate.spawn_error_count
+            _apply_correction_signal_fields(payload, candidate)
         # Stamp before record_event: dedup guard fires on retry if write fails.
         session.reap_proposed_at = _now
         newly_stamped.add(candidate.session_id)
