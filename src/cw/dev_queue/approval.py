@@ -10,7 +10,9 @@ Layering: imports ``crud`` (``_find_ticket`` / ``_APPROVABLE_STATUSES``) and
 ``dev_queue ↔ dispatch`` cycle break — ``_should_gate_for_signoff``,
 ``_should_force_hold_finalize``, and (#1617) ``_resolve_scope_tier`` /
 ``_extract_scope_tier`` — stays a function-level deferred import inside
-``_approve_ticket_locked``.
+``_approve_ticket_locked``. (#1640) ``_APPROVAL_GATE_REASON`` and
+``SCOPE_GATED_APPROVAL_STATUSES`` are deferred imports inside
+``_not_at_approval_gate`` instead, the sole site that now consumes them.
 """
 
 from __future__ import annotations
@@ -177,6 +179,30 @@ def _record_approve_scope_routing_decision(
     )
 
 
+def _not_at_approval_gate(session: Session, task: TicketTask) -> bool:
+    """True iff neither release condition for the approval gate is met.
+
+    Extracted from ``_approve_ticket_locked`` to keep that function under the
+    PLR0915 statement ceiling (#1640), following the same extraction pattern
+    as ``_record_approve_scope_routing_decision`` above. Two independent
+    conditions can satisfy the gate: the session's ``last_result`` status is
+    one of ``SCOPE_GATED_APPROVAL_STATUSES`` (the ``plan_pending_approval`` /
+    ``review_pending_approval`` release path), or the task's ``disposition``
+    records a park armed by the ``scope_hint`` escalation gate
+    (``_APPROVAL_GATE_REASON``, GitHub #1640). ``approve`` proceeds if either
+    condition holds.
+    """
+    from cw.auto_dev_result import SCOPE_GATED_APPROVAL_STATUSES
+    from cw.dispatch import _APPROVAL_GATE_REASON
+
+    not_at_status_gate = (
+        session.last_result is None
+        or session.last_result.get("status") not in SCOPE_GATED_APPROVAL_STATUSES
+    )
+    not_at_disposition_gate = task.disposition != _APPROVAL_GATE_REASON
+    return not_at_status_gate and not_at_disposition_gate
+
+
 def _approve_ticket_locked(
     ticket_id: str,
     client_name: str,
@@ -234,7 +260,6 @@ def _approve_ticket_locked(
             diverged from the validated status.
         CwError: if no matching task is found.
     """
-    from cw.auto_dev_result import SCOPE_GATED_APPROVAL_STATUSES
     from cw.config import load_state
     from cw.dispatch import (
         _park_signoff_gate,
@@ -291,16 +316,13 @@ def _approve_ticket_locked(
         )
         raise ApproveGateError(msg)
 
-    if (
-        session.last_result is None
-        or session.last_result.get("status") not in SCOPE_GATED_APPROVAL_STATUSES
-    ):
+    if _not_at_approval_gate(session, task):
         actual = session.last_result.get("status") if session.last_result else None
         msg = (
             f"Cannot approve ticket '{ticket_id}': not at an approval gate"
-            f" (last_result status={actual!r})."
-            " Expected one of: plan_pending_approval, review_pending_approval."
-            " Use 'requeue' if you want to re-run the current stage."
+            f" (disposition={task.disposition!r}, last_result status={actual!r})."
+            " Expected disposition 'approval_gate', or last_result status one of:"
+            " plan_pending_approval, review_pending_approval."
         )
         raise ApproveGateError(msg)
 

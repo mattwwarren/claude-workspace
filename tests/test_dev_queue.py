@@ -4601,6 +4601,295 @@ class TestApproveTicketLockedResolved:
 
 
 # ---------------------------------------------------------------------------
+# TestApproveScopeHintGateRelease — #1640: approve must release a
+# scope_hint-gated park (disposition="approval_gate"), not just the
+# plan_pending_approval/review_pending_approval last_result statuses.
+# ---------------------------------------------------------------------------
+
+
+class TestApproveScopeHintGateRelease:
+    """Adjacent to TestApproveTicket (#1640 regression coverage)."""
+
+    def test_approve_scope_hint_gated_park_releases_via_disposition(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """A task parked BLOCKED_ON_USER by _park_scope_hint_gate (disposition
+        'approval_gate', last_result.status 'stage_complete') must release on
+        approve, not raise (#1630 regression)."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.REVIEW,
+            session_id="sess-1630",
+            disposition="approval_gate",
+            scope_hint="large",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess-1630",
+            last_result={"status": "stage_complete"},
+        )
+        save_state(CwState(sessions=[session]))
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["from_stage"] == "review"
+        assert result["to_stage"] == "finalize"
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.stage == Stage.FINALIZE
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_approve_scope_hint_gated_park_matches_review_pending_approval(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Parity: the disposition='approval_gate' release path produces the
+        same result shape and (stage, status) as the existing
+        review_pending_approval release path."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+
+        task_a = _make_blocked_task(stage=Stage.REVIEW, session_id="sess-parity-a")
+        save_dev_queue(DevQueueStore(tasks=[task_a]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(
+                        session_id="sess-parity-a",
+                        last_result={"status": "review_pending_approval"},
+                    )
+                ]
+            )
+        )
+        result_a = approve_ticket("GEN-500", "genhealth")
+        store_a = load_dev_queue()
+        t_a = next(t for t in store_a.tasks if t.ticket_id == "GEN-500")
+
+        task_b = _make_blocked_task(
+            ticket_id="GEN-501",
+            stage=Stage.REVIEW,
+            session_id="sess-parity-b",
+            disposition="approval_gate",
+            scope_hint="large",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task_b]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(
+                        session_id="sess-parity-b",
+                        last_result={"status": "stage_complete"},
+                    )
+                ]
+            )
+        )
+        result_b = approve_ticket("GEN-501", "genhealth")
+        store_b = load_dev_queue()
+        t_b = next(t for t in store_b.tasks if t.ticket_id == "GEN-501")
+
+        assert result_a.keys() == result_b.keys()
+        assert result_a["from_stage"] == result_b["from_stage"]
+        assert result_a["to_stage"] == result_b["to_stage"]
+        assert result_a["awaiting_signoff"] == result_b["awaiting_signoff"]
+        assert result_a["plan_requeued"] == result_b["plan_requeued"]
+        assert result_a["finalize_held"] == result_b["finalize_held"]
+        assert (t_a.stage, t_a.status) == (t_b.stage, t_b.status)
+
+    def test_approve_error_message_no_longer_suggests_requeue(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """A genuinely-not-at-gate task raises without the misleading
+        'requeue' suggestion, which belongs to the missing-session message
+        (approval.py:286-292) but not to this disposition/last_result gate."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.exceptions import ApproveGateError
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-no-gate")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess-no-gate",
+            last_result={"status": "ambiguities_pending_resolution"},
+        )
+        save_state(CwState(sessions=[session]))
+
+        with pytest.raises(ApproveGateError) as excinfo:
+            approve_ticket("GEN-500", "genhealth")
+
+        msg = str(excinfo.value)
+        assert "requeue" not in msg.lower()
+        assert "not at an approval gate" in msg
+        assert "disposition=None" in msg
+
+    def test_approve_genuinely_not_at_gate_still_raises(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Confirms the fix is scoped: a task with no gating disposition, and
+        a task with disposition unset at the wrong stage, both still raise
+        and leave the dev-queue row unchanged."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.exceptions import ApproveGateError
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.REVIEW, session_id="sess-not-gated", disposition=None
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess-not-gated",
+            last_result={"status": "ambiguities_pending_resolution"},
+        )
+        save_state(CwState(sessions=[session]))
+
+        with pytest.raises(ApproveGateError):
+            approve_ticket("GEN-500", "genhealth")
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert t.stage == Stage.REVIEW
+
+        # Second sub-case: disposition not 'approval_gate', wrong stage (PLAN).
+        task2 = _make_blocked_task(
+            ticket_id="GEN-502",
+            stage=Stage.PLAN,
+            session_id="sess-not-gated-2",
+            disposition=None,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task2]))
+        save_state(
+            CwState(
+                sessions=[
+                    _make_session(
+                        session_id="sess-not-gated-2",
+                        last_result={"status": "blocked"},
+                    )
+                ]
+            )
+        )
+
+        with pytest.raises(ApproveGateError):
+            approve_ticket("GEN-502", "genhealth")
+
+    def test_approve_scope_hint_gated_park_releases_with_null_last_result(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """disposition='approval_gate' releases the task even when
+        session.last_result is None -- the disposition check is independent
+        of (and does not require) a populated last_result. Confirms
+        `_not_at_approval_gate` short-circuits on the disposition clause
+        alone."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.REVIEW,
+            session_id="sess-1630-null-result",
+            disposition="approval_gate",
+            scope_hint="large",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(session_id="sess-1630-null-result", last_result=None)
+        save_state(CwState(sessions=[session]))
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["from_stage"] == "review"
+        assert result["to_stage"] == "finalize"
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.stage == Stage.FINALIZE
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_approve_signoff_two_step_unaffected_by_scope_hint_disposition(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """The #1630 scope_hint-gated shape (disposition='approval_gate',
+        scope_hint='large', last_result.status='stage_complete') combined
+        with a ticket-level signoff requirement still needs two approves:
+        the first parks for signoff (clearing the 'approval_gate'
+        disposition to 'signoff_gate'), the second releases to FINALIZE."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.REVIEW,
+            session_id="sess-1630-signoff",
+            disposition="approval_gate",
+            scope_hint="large",
+        )
+        task.signoff = "operator"
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess-1630-signoff",
+            last_result={"status": "stage_complete"},
+        )
+        save_state(CwState(sessions=[session]))
+
+        first = approve_ticket("GEN-500", "genhealth")
+
+        assert first["awaiting_signoff"] is True
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF
+        assert t.disposition == "signoff_gate"
+        assert t.stage == Stage.REVIEW
+
+        second = approve_ticket("GEN-500", "genhealth")
+
+        assert second["awaiting_signoff"] is False
+        assert second["to_stage"] == "finalize"
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+        assert t.stage == Stage.FINALIZE
+
+    def test_cli_approve_releases_scope_hint_gated_park(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """CLI-level: `cw dev-queue approve` releases a scope_hint-gated park
+        (#1630 shape) with exit_code 0."""
+        from cw.config import save_state
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.REVIEW,
+            session_id="sess-1630-cli",
+            disposition="approval_gate",
+            scope_hint="large",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess-1630-cli",
+            last_result={"status": "stage_complete"},
+        )
+        save_state(CwState(sessions=[session]))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "approve", "GEN-500", "--client", "genhealth"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "review -> finalize" in result.output
+
+
+# ---------------------------------------------------------------------------
 # TestApproveTicketLockedForceHold — operator_initiated caller-provenance gate
 # ---------------------------------------------------------------------------
 

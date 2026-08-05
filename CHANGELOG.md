@@ -30,6 +30,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`approve` can release a `scope_hint`-gated park (#1640):** the approval
+  gate only ever checked `session.last_result.status` against
+  `SCOPE_GATED_APPROVAL_STATUSES`, so a ticket parked by the `scope_hint`
+  escalation gate (`task.disposition == "approval_gate"`, with no matching
+  `last_result` status) could never be released via `approve` — the operator
+  had to fall back to `requeue` instead. `approve` now also checks
+  `task.disposition`, extracted into a new `_not_at_approval_gate` helper,
+  and either release condition is sufficient. The gate's error message now
+  reports both `disposition` and `last_result` status so a future mismatch
+  is easier to diagnose.
+
 - **Salvaged sessions no longer mark failed tickets as done (#1566):**
   reconcile's salvage path and live dispatch classified the same terminal
   `AutoDevResult` status oppositely — dispatch held `scope_exceeded`,
