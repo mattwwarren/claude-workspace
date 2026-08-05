@@ -411,6 +411,13 @@ class ReapCandidate:
     # phase can emit an immediate session.needs_attention at parity across both
     # cap-fire sites. See #1445.
     veto_cap_exhausted: bool = False
+    # Stamped from task.regress_attempts / task.spawn_error_count in stalled
+    # detect's cap-park site so the SESSION_NEEDS_ATTENTION and
+    # SESSION_REAP_PROPOSED payloads for a stalled_retry_cap_parked disposition
+    # can carry these correction-signal fields without the consumer having to
+    # cross-reference the task record by hand. See #1625.
+    regress_attempts: int = 0
+    spawn_error_count: int = 0
 
 
 @dataclass(frozen=True)
