@@ -127,8 +127,20 @@ def _maybe_notify_lane_starved(
     mirroring :func:`_record_lane_spawn_error`'s lock-then-emit-after-release
     shape. Uses the canonical 9-field SESSION_NEEDS_ATTENTION payload (see
     ``claim.py::_emit_attempt_cap_attention_event``), with
-    ``session_id=f"lane:{client_name}/{lane_name}"`` standing in for the
-    pre-spawn "no real session exists yet" situation this signal fires from.
+    ``session_id=f"lane:{client_name}/{lane_name}@{now.isoformat()}"``
+    standing in for the pre-spawn "no real session exists yet" situation this
+    signal fires from. The firing instant is folded into ``session_id``
+    (rather than the stable ``f"lane:{client}/{lane}"`` form) because
+    ``_terminal_dedup_key`` (``cw.cli.queues``) keys on
+    ``(event_type, session_id, paused_status)`` and both of the latter two
+    are otherwise constant across every recurrence of the same lane --
+    ``cw event tail --dedup-terminal`` (and ``_follow_loop``'s
+    process-lifetime ``seen_terminal`` set) would collapse every recurrence
+    after the first into a single shown event, silently reproducing this
+    ticket's own bug one hop downstream (#1630 send-back, R2a). The debounce
+    above already caps firings to one per interval, so a timestamped
+    ``session_id`` cannot spam. ``client``/``lane`` remain explicit payload
+    fields (R2b) so no consumer has to parse the synthetic id.
     See GitHub #1630.
     """
     if pending_count <= 0:
@@ -153,7 +165,7 @@ def _maybe_notify_lane_starved(
         record_event(
             OrchestratorEventType.SESSION_NEEDS_ATTENTION,
             {
-                "session_id": f"lane:{lane_key}",
+                "session_id": f"lane:{lane_key}@{now.isoformat()}",
                 "session_name": "",
                 "client": client_name,
                 "ticket_id": None,

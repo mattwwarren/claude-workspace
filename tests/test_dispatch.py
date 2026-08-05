@@ -10325,7 +10325,14 @@ class TestLaneStarvedAttention:
         assert len(events) == 1
         payload = events[0].payload
         assert payload["paused_status"] == DispatchSkipReason.LANE_CIRCUIT_PAUSED
-        assert payload["session_id"] == "lane:test-client/default"
+        # session_id folds in the firing instant (#1630 send-back, R2a) so
+        # each recurrence gets a distinct _terminal_dedup_key -- see
+        # test_two_starved_lanes_produce_distinguishable_events and
+        # test_lane_starved_attention_recurs_and_survives_dedup_terminal.
+        assert payload["session_id"].startswith("lane:test-client/default@")
+        datetime.fromisoformat(
+            payload["session_id"].removeprefix("lane:test-client/default@")
+        )
         assert payload["client"] == "test-client"
         assert payload["lane"] == "default"
         assert "1" in payload["breadcrumbs"]
@@ -10421,10 +10428,54 @@ class TestLaneStarvedAttention:
         )
         assert len(events) == 2
         session_ids = {ev.payload["session_id"] for ev in events}
-        assert session_ids == {
+        assert {sid.split("@")[0] for sid in session_ids} == {
             "lane:test-client/lane-a",
             "lane:test-client/lane-b",
         }
+        assert len(_dedup_terminal(events)) == 2
+
+    def test_lane_starved_attention_recurs_and_survives_dedup_terminal(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        breaker_config: OrchestratorConfig,
+    ) -> None:
+        """Two same-lane recurrences both survive the real _dedup_terminal (#1630, R2c).
+
+        Distinct from test_two_starved_lanes_produce_distinguishable_events
+        (two DIFFERENT lanes) -- this covers the half of R2 the send-back
+        found still open: a stable, per-lane (not per-firing) session_id
+        collapses every recurrence of the SAME lane into one surviving
+        event under `cw event tail --dedup-terminal`, because
+        _terminal_dedup_key is (event_type, session_id, paused_status) and
+        both were constant across recurrences. Mutation for R2a: reverting
+        session_id to the stable f"lane:{client}/{lane}" form must turn
+        this test RED (verified manually per the send-back's mutation
+        instruction; not re-run automatically here).
+        """
+        from freezegun import freeze_time
+
+        from cw.cli.queues import _dedup_terminal
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        _seed_lane_override(2, paused=True)
+        add_ticket(TicketTask(ticket_id="GEN-1630E1", client="test-client"))
+
+        daemon = FakeNativeDaemonClient()
+        with freeze_time("2026-08-01 12:00:00") as frozen:
+            dispatch_tick(breaker_config, native_daemon=daemon)
+
+            frozen.tick(delta=timedelta(minutes=16))
+            dispatch_tick(breaker_config, native_daemon=daemon)
+
+            events = read_events(
+                consumer="test-1630-dedup-survives",
+                event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+            )
+
+        assert len(events) == 2
+        session_ids = {ev.payload["session_id"] for ev in events}
+        assert len(session_ids) == 2, "recurrences must not share a session_id"
         assert len(_dedup_terminal(events)) == 2
 
     def test_lane_resume_clears_starved_notify_debounce_for_fresh_trip(
