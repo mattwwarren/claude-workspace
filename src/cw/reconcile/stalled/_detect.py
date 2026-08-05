@@ -511,6 +511,8 @@ def _detect_stalled_candidates(
                     client=session.client,
                     stage=task.stage if task else DEFAULT_STAGE,
                     attempts=task.attempts if task else 0,
+                    regress_attempts=task.regress_attempts if task else 0,
+                    spawn_error_count=task.spawn_error_count if task else 0,
                     paused_status=_STALLED_CAP_PARKED_REASON,
                     usage_limit_detected=cap_usage_limit_detected,
                     # #1445: True only when the veto declined because the cap was

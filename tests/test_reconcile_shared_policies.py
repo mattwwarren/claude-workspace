@@ -520,6 +520,88 @@ class TestEmitReapProposed:
         assert len(reap_events) == 1
         assert reap_events[0].payload["proposed_action"] == "park_blocked_on_user"
 
+    def test_reap_proposed_stalled_retry_cap_carries_correction_signal_fields(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """STALLED_RETRY_CAP_PARKED reason → payload carries crashed/
+        regress_attempts/spawn_error_count (#1625)."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _emit_reap_proposed
+
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+        sess = _mk_session("prop-cap-1", "live-ref")
+        sess.origin = SessionOrigin.DAEMON
+        sess.started_at = started_at
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        candidate = ReapCandidate(
+            session_id="prop-cap-1",
+            proposed_action=ProposedAction.PARK_BLOCKED_ON_USER,
+            ticket_id="prop-cap-1",
+            reap_reason=ReapReason.STALLED_RETRY_CAP_PARKED,
+            regress_attempts=0,
+            spawn_error_count=0,
+        )
+
+        _emit_reap_proposed(state, [candidate], native_live=set(), now=now)
+
+        events = read_events()
+        reap_events = [
+            e for e in events if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+        ]
+        assert len(reap_events) == 1
+        payload = reap_events[0].payload
+        assert payload["reason"] == "stalled_retry_cap_parked"
+        assert payload["crashed"] is False
+        assert payload["regress_attempts"] == 0
+        assert payload["spawn_error_count"] == 0
+
+    def test_reap_proposed_non_cap_reason_omits_correction_signal_fields(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Non-cap reap_reason → payload does NOT carry crashed/regress_attempts/
+        spawn_error_count (negative guard, #1625)."""
+        from cw.reconcile import ProposedAction, ReapCandidate, _emit_reap_proposed
+
+        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+        sess = _mk_session("prop-noncap-1", "live-ref")
+        sess.origin = SessionOrigin.DAEMON
+        sess.started_at = started_at
+        state = CwState(sessions=[sess])
+        save_state(state)
+        save_dev_queue(DevQueueStore(tasks=[]))
+
+        candidate = ReapCandidate(
+            session_id="prop-noncap-1",
+            proposed_action=ProposedAction.REVERT_TASK,
+            ticket_id="prop-noncap-1",
+            reap_reason=ReapReason.WALL_CLOCK_BUDGET,
+            regress_attempts=0,
+            spawn_error_count=0,
+        )
+
+        _emit_reap_proposed(state, [candidate], native_live=set(), now=now)
+
+        events = read_events()
+        reap_events = [
+            e for e in events if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+        ]
+        assert len(reap_events) == 1
+        payload = reap_events[0].payload
+        assert payload["reason"] == "wall_clock_budget"
+        assert "crashed" not in payload
+        assert "regress_attempts" not in payload
+        assert "spawn_error_count" not in payload
+
     def test_reap_proposed_skips_non_reap_actions(
         self,
         tmp_config_dir: Path,
