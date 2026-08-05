@@ -308,6 +308,39 @@ def _apply_host_capacity_budget(
 _DEFAULT_HOST_CAPACITY = HostCapacityContext()
 
 
+def _handle_paused_lane(
+    lane_cfg: LaneConfig,
+    queue_snapshot: DevQueueStore,
+    client_name: str,
+    *,
+    overrides: ConcurrencyOverrides,
+    config: OrchestratorConfig,
+) -> bool:
+    """Circuit-check a paused lane and fire its starved-attention notify (#1630).
+
+    Extracted from :func:`_dispatch_client_lanes` to keep it within the
+    PLR0912/PLR0915 ceilings (CLAUDE.md) -- mirrors
+    :func:`_apply_host_capacity_budget`'s own extraction for the same reason.
+    Returns whether this lane is a breaker-tripped pause with pending work
+    (the caller ORs this into its running ``lane_circuit_paused`` flag).
+    """
+    lane_paused_here = _check_lane_circuit_paused(
+        lane_cfg,
+        queue_snapshot,
+        client_name,
+        overrides=overrides,
+        config=config,
+    )
+    if lane_paused_here:
+        _maybe_notify_lane_starved(
+            client_name,
+            lane_cfg.name,
+            _pending_in_lane(lane_cfg, queue_snapshot, client_name),
+            config=config,
+        )
+    return lane_paused_here
+
+
 def _dispatch_client_lanes(
     client: ClientConfig,
     effective_lanes: list[LaneConfig],
@@ -383,21 +416,22 @@ def _dispatch_client_lanes(
             break
         if lane_cfg.paused:
             overrides = overrides or _load_concurrency_overrides()
-            lane_paused_here = _check_lane_circuit_paused(
-                lane_cfg,
-                queue_snapshot,
-                client.name,
-                overrides=overrides,
-                config=config,
-            )
-            lane_circuit_paused = lane_circuit_paused or lane_paused_here
-            if lane_paused_here:
-                _maybe_notify_lane_starved(
+            # The call is the LEFT operand of `or` (not the reverse): once
+            # lane_circuit_paused flips True, `lane_circuit_paused or
+            # _handle_paused_lane(...)` would short-circuit and skip the
+            # call -- and its _maybe_notify_lane_starved side effect -- for
+            # every paused lane after the first tripped one (#1630 -- caught
+            # by test_two_starved_lanes_produce_distinguishable_events).
+            lane_circuit_paused = (
+                _handle_paused_lane(
+                    lane_cfg,
+                    queue_snapshot,
                     client.name,
-                    lane_cfg.name,
-                    _pending_in_lane(lane_cfg, queue_snapshot, client.name),
+                    overrides=overrides,
                     config=config,
                 )
+                or lane_circuit_paused
+            )
             continue
         # running_in_lane = RUNNING + BLOCKED_ON_USER + AWAITING_OPERATOR_SIGNOFF
         # (total occupied slots, OCCUPIED_LANE_STATUSES, #990).

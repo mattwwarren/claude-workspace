@@ -10405,8 +10405,12 @@ class TestLaneStarvedAttention:
                 }
             )
         )
-        add_ticket(TicketTask(ticket_id="GEN-1630C1", client="test-client", lane="lane-a"))
-        add_ticket(TicketTask(ticket_id="GEN-1630C2", client="test-client", lane="lane-b"))
+        add_ticket(
+            TicketTask(ticket_id="GEN-1630C1", client="test-client", lane="lane-a")
+        )
+        add_ticket(
+            TicketTask(ticket_id="GEN-1630C2", client="test-client", lane="lane-b")
+        )
 
         daemon = FakeNativeDaemonClient()
         dispatch_tick(breaker_config, native_daemon=daemon)

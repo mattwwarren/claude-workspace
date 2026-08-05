@@ -7274,7 +7274,11 @@ class TestDevQueueStatusWithTick:
     def test_dev_queue_status_paused_lane_no_pending_stays_quiet(
         self, tmp_config_dir: Path
     ) -> None:
-        """A genuinely idle paused lane (no pending) stays suppressed (regression guard)."""
+        """A genuinely idle paused lane (no pending) stays suppressed.
+
+        Regression guard: the paused_with_pending condition must not fire
+        when there is no pending work behind the pause.
+        """
         from cw.config import _save_concurrency_overrides
         from cw.dev_queue import add_ticket
         from cw.events import record_event
