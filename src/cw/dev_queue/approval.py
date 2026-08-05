@@ -8,9 +8,9 @@ and the physical-row resolver (``_resolve_approval_target``).
 Layering: imports ``crud`` (``_find_ticket`` / ``_APPROVABLE_STATUSES``) and
 ``lifecycle`` (the transition + stage-advance helpers) at module level. The
 ``dev_queue ↔ dispatch`` cycle break — ``_should_gate_for_signoff``,
-``_should_force_hold_finalize``, and (#1617) ``_resolve_scope_tier`` /
-``_extract_scope_tier`` — stays a function-level deferred import inside
-``_approve_ticket_locked``.
+``_should_force_hold_finalize``, (#1617) ``_resolve_scope_tier`` /
+``_extract_scope_tier``, and (#1640) ``_APPROVAL_GATE_REASON`` — stays a
+function-level deferred import inside ``_approve_ticket_locked``.
 """
 
 from __future__ import annotations
@@ -237,6 +237,7 @@ def _approve_ticket_locked(
     from cw.auto_dev_result import SCOPE_GATED_APPROVAL_STATUSES
     from cw.config import load_state
     from cw.dispatch import (
+        _APPROVAL_GATE_REASON,
         _park_signoff_gate,
         _should_force_hold_finalize,
         _should_gate_for_signoff,
@@ -294,13 +295,13 @@ def _approve_ticket_locked(
     if (
         session.last_result is None
         or session.last_result.get("status") not in SCOPE_GATED_APPROVAL_STATUSES
-    ):
+    ) and task.disposition != _APPROVAL_GATE_REASON:
         actual = session.last_result.get("status") if session.last_result else None
         msg = (
             f"Cannot approve ticket '{ticket_id}': not at an approval gate"
-            f" (last_result status={actual!r})."
-            " Expected one of: plan_pending_approval, review_pending_approval."
-            " Use 'requeue' if you want to re-run the current stage."
+            f" (disposition={task.disposition!r}, last_result status={actual!r})."
+            " Expected disposition 'approval_gate', or last_result status one of:"
+            " plan_pending_approval, review_pending_approval."
         )
         raise ApproveGateError(msg)
 

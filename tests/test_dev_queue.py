@@ -4643,7 +4643,7 @@ class TestApproveScopeHintGateRelease:
         assert t.stage == Stage.FINALIZE
         assert t.status == QueueItemStatus.PENDING
 
-    def test_approve_scope_hint_gated_park_advances_identically_to_review_pending_approval(
+    def test_approve_scope_hint_gated_park_matches_review_pending_approval(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """Parity: the disposition='approval_gate' release path produces the
