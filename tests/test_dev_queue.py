@@ -4781,6 +4781,38 @@ class TestApproveScopeHintGateRelease:
         with pytest.raises(ApproveGateError):
             approve_ticket("GEN-502", "genhealth")
 
+    def test_approve_scope_hint_gated_park_releases_with_null_last_result(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """disposition='approval_gate' releases the task even when
+        session.last_result is None -- the disposition check is independent
+        of (and does not require) a populated last_result. Confirms
+        `_not_at_approval_gate` short-circuits on the disposition clause
+        alone."""
+        from cw.config import save_state
+        from cw.dev_queue import approve_ticket
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.REVIEW,
+            session_id="sess-1630-null-result",
+            disposition="approval_gate",
+            scope_hint="large",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(session_id="sess-1630-null-result", last_result=None)
+        save_state(CwState(sessions=[session]))
+
+        result = approve_ticket("GEN-500", "genhealth")
+
+        assert result["from_stage"] == "review"
+        assert result["to_stage"] == "finalize"
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.stage == Stage.FINALIZE
+        assert t.status == QueueItemStatus.PENDING
+
     def test_approve_signoff_two_step_unaffected_by_scope_hint_disposition(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
