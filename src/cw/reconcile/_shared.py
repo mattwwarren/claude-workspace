@@ -411,6 +411,26 @@ class ReapCandidate:
     # phase can emit an immediate session.needs_attention at parity across both
     # cap-fire sites. See #1445.
     veto_cap_exhausted: bool = False
+    # Stamped from task.regress_attempts / task.spawn_error_count in stalled
+    # detect's cap-park site so the SESSION_NEEDS_ATTENTION and
+    # SESSION_REAP_PROPOSED payloads for a stalled_retry_cap_parked disposition
+    # can carry these correction-signal fields without the consumer having to
+    # cross-reference the task record by hand. See #1625.
+    regress_attempts: int = 0
+    spawn_error_count: int = 0
+
+
+def _apply_correction_signal_fields(
+    payload: dict[str, object], candidate: ReapCandidate
+) -> None:
+    """Merge the #1625 correction-signal fields onto a stalled_retry_cap_parked
+    payload. Caller must already have gated on the disposition/reap_reason —
+    shared by the two sites that can produce this disposition (SESSION_
+    NEEDS_ATTENTION and SESSION_REAP_PROPOSED) so they cannot drift apart on
+    which fields are copied from the candidate.
+    """
+    payload["regress_attempts"] = candidate.regress_attempts
+    payload["spawn_error_count"] = candidate.spawn_error_count
 
 
 @dataclass(frozen=True)
@@ -1937,7 +1957,7 @@ def _emit_reap_proposed(
                 mtime = transcript_path.stat().st_mtime
                 transcript_mtime_age_seconds = _now.timestamp() - mtime
 
-        payload = {
+        payload: dict[str, object] = {
             "session_id": session.id,
             "session_name": session.name,
             "client": session.client,
@@ -1952,6 +1972,14 @@ def _emit_reap_proposed(
                 "transcript_mtime_age_seconds": transcript_mtime_age_seconds,
             },
         }
+        # #1625: stalled_retry_cap_parked carries the correction-signal fields
+        # (crashed is always False on this park path — it never corresponds to
+        # a crash) so a consumer doesn't have to cross-reference the task
+        # record by hand. Scoped strictly to this reap_reason — other reasons
+        # (wall-clock budget, usage-limit cutoff, etc.) do not carry these keys.
+        if candidate.reap_reason == ReapReason.STALLED_RETRY_CAP_PARKED:
+            payload["crashed"] = False
+            _apply_correction_signal_fields(payload, candidate)
         # Stamp before record_event: dedup guard fires on retry if write fails.
         session.reap_proposed_at = _now
         newly_stamped.add(candidate.session_id)

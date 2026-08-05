@@ -1475,6 +1475,81 @@ def test_stalled_retry_cap_parks_when_at_cap(
     assert payload["lane"] == "stalled-park-lane"
 
 
+def test_stalled_retry_cap_park_payload_carries_correction_signal_fields(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stalled_retry_cap_parked park → SESSION_NEEDS_ATTENTION and
+    SESSION_REAP_PROPOSED both carry crashed/regress_attempts/spawn_error_count
+    (#1625)."""
+    from cw.reconcile import (
+        _STALLED_CAP_PARKED_REASON,
+        DEFAULT_STALLED_RETRY_CAP,
+        HEADLESS_TIMEOUT_SECONDS,
+    )
+
+    worktree = tmp_path / "wt-cap-signal-fields"
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
+    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
+
+    sess = _mk_headless_daemon_session("cap-signal-fields", worktree, started_at)
+    state = CwState(sessions=[sess])
+    save_state(state)
+
+    task = TicketTask(
+        ticket_id="cap-signal-fields",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="cap-signal-fields",
+        stage=Stage.PLAN,
+        attempts=DEFAULT_STALLED_RETRY_CAP,
+        regress_attempts=0,
+        spawn_error_count=0,
+        lane="stalled-park-lane",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
+
+    reverted = revert_stalled_headless_sessions(
+        state, now=now, config=_auto_config(headless_timeout_by_stage={})
+    )
+
+    assert "cap-signal-fields" not in reverted
+
+    store = load_dev_queue()
+    t = next(t for t in store.tasks if t.ticket_id == "cap-signal-fields")
+    assert t.disposition == _STALLED_CAP_PARKED_REASON
+
+    needs_attention_events = read_events(
+        consumer="test-cap-signal-fields-needs-attention",
+        event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+    )
+    assert len(needs_attention_events) == 1
+    na_payload = needs_attention_events[0].payload
+    assert na_payload["stage"] == "plan"
+    assert na_payload["attempts"] == DEFAULT_STALLED_RETRY_CAP
+    assert na_payload["crashed"] is False
+    assert na_payload["regress_attempts"] == 0
+    assert na_payload["spawn_error_count"] == 0
+
+    reap_proposed_events = read_events(
+        consumer="test-cap-signal-fields-reap-proposed",
+        event_types=[OrchestratorEventType.SESSION_REAP_PROPOSED],
+    )
+    assert len(reap_proposed_events) == 1
+    rp_payload = reap_proposed_events[0].payload
+    assert rp_payload["reason"] == "stalled_retry_cap_parked"
+    assert rp_payload["crashed"] is False
+    assert rp_payload["regress_attempts"] == 0
+    assert rp_payload["spawn_error_count"] == 0
+
+
 def test_stalled_retry_cap_no_retried_event_when_parked(
     tmp_config_dir: Path,
     tmp_path: Path,
