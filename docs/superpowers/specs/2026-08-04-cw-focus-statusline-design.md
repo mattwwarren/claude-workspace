@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-04
 **Status:** approved design, not yet implemented
-**Repos touched:** `claude-workspace` (the `cw focus` / render commands), `global-claude` (the status line script and the orchestrator skill step)
+**Repo:** `claude-workspace` — all of it. Skills, commands, and the scripts they call are authored here and installed from here (`scripts/install-skills.sh`, `scripts/excluded-commands.txt`). `global-claude` is the install surface, not the authoring surface, and needs no change for this feature.
 
 ## Problem
 
@@ -69,13 +69,13 @@ Resolution order — this is the entire noise-control mechanism:
 
 Step 3 is why an unfocused shell in an unmapped directory stays silent.
 
-### 3. `statusline-command.sh` (global-claude)
+### 3. `statusline-command.sh` (claude-workspace, installed)
 
-Parses stdin **once**, composes `[work] [capacity] cwd`, and — critically — becomes a **tracked, installed** file.
+Parses stdin **once**, composes `[work] [capacity] cwd`, and becomes a **tracked, installed** file in this repo alongside the other skill/command scripts.
 
-Today `global-claude/settings.json` declares `statusLine` pointing at `~/.claude/statusline-command.sh`, but `git ls-files` shows the script is untracked and `install.sh` never mentions it. The config travels to every machine; the script does not. On a fresh machine this is a `statusLine` pointing at a file that does not exist. **Fixing that dangling reference is in scope here** — it is a prerequisite, not a bonus.
+Today `global-claude/settings.json` declares `statusLine` pointing at `~/.claude/statusline-command.sh`, but that script is untracked in global-claude and `install.sh` never mentions it. The config travels to every machine; the script does not. On a fresh machine this is a `statusLine` pointing at a file that does not exist. Authoring and installing the script from here closes that gap by construction — it lands on the same install path as everything else.
 
-### 4. Orchestrator injection (global-claude, `orchestrate-sprint` skill)
+### 4. Orchestrator injection (`orchestrate-sprint` skill, this repo)
 
 No config flag, no automatic cw behavior. The skill gains one documented step: after a successful enqueue, call `cw focus set <client>/<lane>`; on queue drain, `cw focus clear`. Injection is the orchestrator's editorial act, which is where the judgment lives.
 
@@ -122,10 +122,12 @@ The script must never be the reason the bar goes blank.
 
 ## Scope split for implementation
 
-Two tickets, sequenced — `claude-workspace` first, since the `global-claude` script depends on the commands existing:
+Two tickets, both in `claude-workspace`, sequenced — the script depends on the commands existing:
 
-1. **claude-workspace:** `cw focus` command group + `cw statusline render` + tests.
-2. **global-claude:** track and install `statusline-command.sh`, wire it to `cw statusline render` with the degradation wrapper, and add the injection step to the `orchestrate-sprint` skill.
+1. `cw focus` command group + `cw statusline render` + tests.
+2. `statusline-command.sh` (tracked + installed here, with the degradation wrapper) + the injection step in the `orchestrate-sprint` skill.
+
+A **separate, unrelated** ticket belongs against `global-claude`: a `statusline.d`-style composite setup so several independent fragments can contribute to one status line, rather than a single script owning the whole width. That is an install/compose-mechanism concern, which is the only category of work that belongs in global-claude. It is **not** a dependency of this design — this feature ships as a single script first, and would later become one fragment among several.
 
 ## Explicitly out of scope
 
