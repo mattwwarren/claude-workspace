@@ -8,6 +8,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`Verified: DEFER` for runtime-only premises (#1651):** a premise
+  checkable only against a live system used to park the run
+  (`premises_pending_verification`) even though the human at a desk cannot
+  check it statically either — one observed ticket burned six plan
+  dispatches re-litigating a single runtime-only premise until the operator
+  hand-wrote the "confirm during implementation, halt on mismatch" framing.
+  That framing is now a first-class contract: the Product Manager Reviewer
+  may tag a premise `DEFER` when it is (a) runtime-only, (b) checkable by a
+  cheap bounded probe at implementation start, and (c) safe if false
+  (halt-and-report, never silent fallback), carrying mandatory
+  `In-implementation check:` / `On mismatch:` fields — either missing
+  fails closed to `NO`. Stage 1 partitions premises three ways
+  (`self_verified` / `deferred` / `unverified`); `deferred` never parks,
+  lands in a `## Deferred Premises` plan section plus a leading
+  implementation-phase step that runs the checks before dependent work,
+  and leaves one `friction_highlights` audit line per premise. Exit
+  gating keys on `parked` + `unverified` only.
+
 - **Stage 1 persists `.cw/plan-draft.md` on every human-gated headless exit
   (#1649):** draft persistence previously fired only on the rare Step 1f.3
   `plan_unreviewable`/`plan_unsound` exits, so the dominant park exits
