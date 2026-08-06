@@ -18,6 +18,13 @@ subsequent retry attempt can resume from it (Step 1a) instead of
 regenerating the plan from scratch. `.cw/plan.md` itself (the Stage-2
 implementation contract) is never touched by this change — it remains
 written only by Step 1g.
+
+#1649 extends persistence to EVERY Stage-1 human-gated headless exit with a
+plan in hand — the Step 4c `ambiguities_pending_resolution` /
+`premises_pending_verification` exits (including the combined exit) and
+Checkpoint 1's headless `plan_pending_approval` exit — via a shared
+draft-persistence rule in Step 1c's headless branch that each exit clause
+references.
 """
 
 from pathlib import Path
@@ -66,6 +73,13 @@ def _step1e_section() -> str:
     content = _cmd("auto-dev-plan.md")
     start = content.index("### Step 1e: Pre-flight Already-Satisfied Check")
     end = content.index("### Step 1f:")
+    return content[start:end]
+
+
+def _step1c_headless_section() -> str:
+    content = _cmd("auto-dev-plan.md")
+    start = content.index("4. **Headless mode:**")
+    end = content.index("### Step 1d:")
     return content[start:end]
 
 
@@ -235,7 +249,95 @@ def test_no_op_clears_draft_scenario_documented() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 10. Blocked-exit clauses do NOT carry a deletion instruction (the
+# 10. #1649: the shared draft-persistence rule covers every Stage-1
+#     human-gated headless exit, and each exit clause references it.
+# ---------------------------------------------------------------------------
+
+
+def test_step1c_declares_shared_draft_persistence_rule() -> None:
+    """Step 1c's headless branch declares the shared draft-persistence rule."""
+    section = _step1c_headless_section()
+    window = _after(section, "**Draft-persistence rule", span=1200)
+    assert DRAFT_FILE in window
+    # The rule names all three human-gated park exits plus the existing
+    # Step 1f.3 blocked-exit writes as instances of the same rule.
+    assert "`ambiguities_pending_resolution`" in window
+    assert "`premises_pending_verification`" in window
+    assert "`plan_pending_approval`" in window
+    assert "`plan_unreviewable`" in window
+    assert "`plan_unsound`" in window
+
+
+def test_step1c_draft_rule_captures_inserted_sections() -> None:
+    """The rule persists the plan as it stands at exit, inserted sections included."""
+    section = _step1c_headless_section()
+    window = _after(section, "**Draft-persistence rule", span=1200)
+    assert "as it stands at the moment of exit" in window
+    assert "## Adopted Assumptions" in window
+    assert "## Self-Verified Premises" in window
+
+
+def test_step1c_ambiguities_exit_persists_draft() -> None:
+    """The parked-non-empty ambiguities exit persists the draft before posting."""
+    section = _step1c_headless_section()
+    window = _after(
+        section,
+        "`parked` non-empty AND `unverified` empty → EXIT "
+        "`ambiguities_pending_resolution`",
+        span=300,
+    )
+    assert "draft-persistence rule" in window
+    assert DRAFT_FILE in window
+
+
+def test_step1c_premises_exit_persists_draft() -> None:
+    """The unverified-premises exit persists the draft before posting."""
+    section = _step1c_headless_section()
+    window = _after(
+        section,
+        "`unverified` non-empty AND `parked` empty → EXIT "
+        "`premises_pending_verification`",
+        span=300,
+    )
+    assert "draft-persistence rule" in window
+
+
+def test_step1c_combined_exit_persists_draft() -> None:
+    """The combined premises+ambiguities exit persists the draft before posting."""
+    section = _step1c_headless_section()
+    window = _after(
+        section,
+        "`unverified` non-empty AND `parked` non-empty → EXIT "
+        "`premises_pending_verification`",
+        span=400,
+    )
+    assert "draft-persistence rule" in window
+
+
+def test_checkpoint1_plan_pending_approval_persists_draft() -> None:
+    """The headless large-scope plan_pending_approval exit persists the draft."""
+    section = _checkpoint1_section()
+    window = _after(section, "EXIT `plan_pending_approval`", span=600)
+    assert DRAFT_FILE in window
+    assert "draft-persistence rule" in window
+
+
+def test_park_exits_do_not_delete_draft() -> None:
+    """The three park-exit clauses write the draft but never delete it."""
+    section = _step1c_headless_section()
+    for anchor in (
+        "`parked` non-empty AND `unverified` empty → EXIT "
+        "`ambiguities_pending_resolution`",
+        "`unverified` non-empty AND `parked` empty → EXIT "
+        "`premises_pending_verification`",
+        "`unverified` non-empty AND `parked` non-empty → EXIT "
+        "`premises_pending_verification`",
+    ):
+        assert "delete" not in _after(section, anchor, span=300).lower()
+
+
+# ---------------------------------------------------------------------------
+# 11. Blocked-exit clauses do NOT carry a deletion instruction (the
 #     deliberate write-and-resume exception).
 # ---------------------------------------------------------------------------
 

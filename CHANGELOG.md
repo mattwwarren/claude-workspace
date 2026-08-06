@@ -8,6 +8,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Stage 1 persists `.cw/plan-draft.md` on every human-gated headless exit
+  (#1649):** draft persistence previously fired only on the rare Step 1f.3
+  `plan_unreviewable`/`plan_unsound` exits, so the dominant park exits
+  (`ambiguities_pending_resolution`, `premises_pending_verification`,
+  `plan_pending_approval` — 130 firings in a 3-week window) threw the
+  generated plan away and every re-dispatch regenerated from scratch,
+  making fresh interpretive choices that surfaced fresh ambiguities and
+  cost fresh operator rounds. `auto-dev-plan.md` now defines a single
+  draft-persistence rule covering all Stage-1 human-gated headless exits
+  with a plan in hand; the existing Step 1a.0 resume check, supersession
+  guard, and `no_op`/Step-1g cleanup paths consume it unchanged.
 - **`TicketTask.salvage_no_sentinel_at` marks the LOW-path salvage park
   (#1638):** dev-queue schema bumps to v25, adding a durable timestamp field
   stamped by `transition_task_status` when a task transitions to

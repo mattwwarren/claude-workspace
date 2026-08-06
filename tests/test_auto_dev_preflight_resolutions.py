@@ -446,7 +446,9 @@ def test_step1c_all_adopt_plus_premises_exits_premises_only() -> None:
     section = _step1c_section()
     assert (
         "`unverified` non-empty AND `parked` empty → EXIT "
-        "`premises_pending_verification`. Post ONLY the `unverified` premises"
+        "`premises_pending_verification`. Persist the draft per the "
+        "draft-persistence rule above before posting. Post ONLY the "
+        "`unverified` premises"
     ) in section
 
 
