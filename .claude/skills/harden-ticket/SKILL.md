@@ -7,13 +7,13 @@ description: >-
   MUST_FIX issues a reviewer will raise, resolve the technical ones yourself,
   batch only the genuine product/scope decisions to the operator, then post a
   single "Pre-flight Resolutions" comment so the worker passes plan review on
-  the first try. Use this whenever you are about to queue or dispatch a
-  non-trivial ticket (new event types, schemas, multi-condition logic, status
-  or contract output, anything touching freshly-merged code) to auto-dev,
-  queue-issues, cw dev-queue, or a fan-out wave — and ALWAYS use it when a
-  ticket keeps bouncing back with ambiguities_pending_resolution or
-  plan_unreviewable. Run it BEFORE enqueue to kill the multi-run
-  ambiguity/plan-review whack-a-mole.
+  the first try. Since consolidated park (#1650) landed, ordinary tickets
+  converge fastest by dispatching first — reserve this skill for the
+  targeted cases: multi-task plan docs whose literal code blocks the worker
+  transcribes verbatim, tickets defining public contracts (new event types,
+  schemas, --json output), batch waves that must run with zero mid-wave
+  interrupts — and ALWAYS use it when a ticket keeps bouncing back with
+  ambiguities_pending_resolution or plan_unreviewable.
 ---
 
 # harden-ticket
@@ -37,20 +37,34 @@ Observed effect: in the run that motivated this skill, the first ticket took
 6 runs (ambiguity whack-a-mole → plan-review whack-a-mole); after hardening,
 sibling tickets shipped on the first or second run.
 
+**Positioning update (#1655):** consolidated park (#1650) + draft persistence
+(#1649) moved the "surface everything at once" property into the pipeline
+itself. Round 1 of a dispatch now produces the same comprehensive findings
+list a hardening pass did — grounded in the code at dispatch time, with the
+draft plan attached — so for ordinary tickets, dispatch first. This skill
+remains the right tool for the targeted cases below.
+
 ## When to run it
 
-Run before enqueueing/dispatching when the ticket is anything more than a
-trivial one-liner — especially when it:
+**Default for ordinary tickets: dispatch first.** Round 1's consolidated park
+IS the hardening sweep, and a better one than a pre-flight pass:
 
-- introduces new event types, enum values, schema/contract fields, or `--json`
-  output (these become public contracts; a wrong shape is a breaking change later),
-- has multi-condition logic (a reviewer will demand a precedence/decision table),
-- asserts against or renders data from **freshly-merged** code (the ticket may
-  reference fields/functions that don't exist, or were renamed),
-- is a test ticket that replays incidents (mock seams + time-window determinism
-  are easy to get silently wrong),
-- is **one task of a multi-task plan whose literal code the worker transcribes
-  verbatim** (a `/sprint-buildout`- or `/writing-plans`-style plan doc). Here the
+- **Grounded at dispatch time — no rot window.** A pre-flight resolution can
+  be stale within hours (observed: a resolution asserting a sibling change was
+  "not on main" that had merged by the time the plan cycle ran). The
+  consolidated park's sweep runs against the code the worker actually sees.
+- **No drafting-nit gap.** It covers both product/scope ambiguity AND the
+  plan-quality findings (touch-point conflations, a file mischaracterized as
+  new vs. existing) the pre-flight sweep was never scoped to catch — a fully
+  hardened ticket still bounced once at plan review on exactly those.
+- **One comment, two rounds total.** Everything arrives in a single
+  `## Pending Verification Scan` comment with the draft plan attached; answer
+  once, and round 2 resumes the persisted draft and ships.
+
+**Run pre-flight hardening (this skill) anyway for:**
+
+- **Multi-task plan docs whose literal code the worker transcribes verbatim**
+  (a `/sprint-buildout`- or `/writing-plans`-style plan doc). Here the
   sweep target is the plan's own code blocks, and the recurring defect classes
   are specific — `E402`/`I001`/`E501`, untested exception branches that fail the
   patch-coverage gate, fabricated test helpers, dropped registration entries,
@@ -58,10 +72,16 @@ trivial one-liner — especially when it:
   Contract / `Files:` entries. Sweep **every** task's code before dispatch and
   verify with a real `ruff`/`mypy` run on a reconstruction, not by eyeballing:
   see [`references/multi-task-plan-hardening.md`](references/multi-task-plan-hardening.md).
-
-Also run it reactively the moment a ticket comes back
-`ambiguities_pending_resolution` or `plan_unreviewable` — don't just
-re-dispatch and hope.
+  The pipeline cannot do that sweep for the plan doc itself.
+- **Tickets defining public contracts** — new event types, enum values,
+  schema/contract fields, `--json` output. These become public contracts; a
+  wrong first plan is expensive to walk back once anything consumes the shape.
+- **Tickets already bouncing** (the reactive trigger, unchanged): the moment a
+  ticket comes back `ambiguities_pending_resolution` or `plan_unreviewable`,
+  harden — don't just re-dispatch and hope.
+- **Batch waves where the operator explicitly wants zero mid-wave
+  interrupts** — pre-answering everything up front trades one early operator
+  round for an uninterrupted wave.
 
 ## Workflow
 

@@ -107,6 +107,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **harden-ticket repositioned as targeted pre-flight (#1655):**
+  `/harden-ticket` front-loaded an operator round for every non-trivial
+  ticket to compensate for the pipeline surfacing findings one exit class
+  at a time — duplicating the sweep the plan stage runs anyway, missing
+  plan-drafting-precision findings, and rotting within hours when a
+  dependency PR merged. With consolidated park (#1650) and draft
+  persistence (#1649) landed, the default flips to dispatch-first: round 1
+  of the pipeline IS the hardening sweep, grounded in dispatch-time code
+  with the draft attached. The skill keeps four mandatory cases —
+  multi-task plan docs with verbatim code blocks (the pipeline cannot
+  sweep the plan doc itself), public-contract tickets, tickets already
+  bouncing (reactive trigger unchanged), and zero-interrupt batch waves.
+  `orchestrate-sprint` Phase 2 gets the same default flip, keeping its
+  read-fresh-plan-comments rule.
+
 - **Headless re-dispatch enters via stage detection — implicit `--resume`
   (#1652):** the durable-signal stage detector was informational without an
   explicit `--resume`, so a headless queue re-dispatch always re-entered at
