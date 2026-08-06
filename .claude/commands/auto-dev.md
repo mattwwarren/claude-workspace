@@ -93,7 +93,7 @@ Everything else runs to completion or exits with a structured error.
 
 ### Gate-Collapse Table
 
-All 41 rows define the deterministic headless action for every interactive gate in the pipeline:
+The rows below define the deterministic headless action for every interactive gate in the pipeline:
 
 > **Maintenance:** the `expected 2` and `hard-cap at 5` cycle values appear in 6 locations across this file. See the maintenance note in Step 3b.5 for the full sync list before editing the cycle-related rows here.
 
@@ -144,6 +144,7 @@ All 41 rows define the deterministic headless action for every interactive gate 
 | S4d UI Evidence Gate, UI files present + body missing media | Skip auto-merge enable; append `"ui_evidence_missing"` to `friction_highlights`; set `pr.auto_merge: false`; set `next_actions: ["attach_ui_evidence_and_enable_automerge"]`; continue to Post-to-Linear |
 | S5 CI wait | AUTO-SKIP — return immediately after auto-merge enabled. CI watching = orchestrator concern |
 | Invoked with `--resume <ticket>` | Run `detect_current_stage()` and jump to the detected stage's entry point; emit `resumed_from_stage: "<stage>"` in the structured output. Skip Pre-flight and S0 (ticket already known). Not a blocker — informational only. If detector returns `pre_flight`, behave as a normal `--headless` run on `<ticket>` |
+| Headless invocation without `--resume` (every queue re-dispatch) | Implicit resume (#1652): run `detect_current_stage()` first; unambiguous durable signals → enter at the detected stage exactly as `--resume` would (emit `resumed_from_stage`); conflicting/ambiguous signals → enter Stage 1 as before. See Resume Detection §Headless implicit resume |
 | S4 PR-exists check, branch already has open PR | Skip Step 4a/4b/4c; proceed to Step 4d (auto-merge enable + Linear comment if missing) and S5. Append `"pr_reused_existing"` to `friction_highlights` |
 | S4 PR-exists check, branch has closed (unmerged) PR | EXIT `blocked` with `blocker.reason: "pr_already_terminal"`, `retry_eligible: false` — closed PR represents human decision; pipeline must not create a duplicate |
 | Trailing /schedule asks | suppress |
@@ -158,7 +159,16 @@ Auto-dev runs `detect_current_stage(ticket_id)` at the top of every invocation. 
 
 Pass `--resume <ticket>` to resume a previously-started pipeline from the latest detected stage. Skips earlier stages entirely — no re-planning, re-implementing, or re-reviewing of work already marked complete via durable signals (Linear plan markers, branch commit trailers, PR state).
 
-Combines with `--headless` for non-interactive resume (e.g. cron-driven retry of a ticket that previously exited `plan_pending_approval` and has since received approval). Without `--resume`, the detector still runs but is informational — used inside each stage to short-circuit redundant work (e.g. S1's existing marker-skip at the plan-reviewer step), not to jump stages.
+Combines with `--headless` for non-interactive resume (e.g. cron-driven retry of a ticket that previously exited `plan_pending_approval` and has since received approval). In **interactive mode** without `--resume`, the detector still runs but is informational — used inside each stage to short-circuit redundant work (e.g. S1's existing marker-skip at the plan-reviewer step), not to jump stages.
+
+### Headless implicit resume (#1652)
+
+**Headless invocations always enter via the detector.** Every `--headless` run — including every queue re-dispatch, with or without an explicit `--resume` flag — runs `detect_current_stage()` first and, when the durable signals are unambiguous, enters at the latest detected stage, identical to explicit `--resume` (skip earlier stages, emit `resumed_from_stage: "<stage>"`). A queue re-dispatch after a park is a continuation of the same ticket, not a fresh start: without this, a re-dispatch re-enters Stage 1 against a branch whose implementation already shipped, re-verifies merged code, and re-posts questions already open on the ticket — a pure waste round plus tracker noise (observed: a full 10-minute Stage-1 re-run whose own friction report stated "this Stage-1 pass ran after Stage 2 already shipped").
+
+- **Unambiguous signal set → authoritative.** The detected stage's signals must be internally consistent with every earlier stage having completed: a branch claiming S2+ has current plan markers behind it; commits claiming S3 carry the `Auto-Dev-Stage: impl-complete` trailer; a PR claiming S4+ sits on the detected branch. A clean signal set jumps.
+- **Signal conflict or ambiguity → fall back to Stage 1 as today.** Examples: a branch exists but the plan markers are absent or stale; branch commits carry no pipeline trailers; PR and branch disagree. Ambiguity favors the conservative start — re-running Stage 1 wastes minutes, while a wrong jump ships unreviewed work.
+- **Stage-entry gates are unchanged.** Entering a stage via implicit resume honors that stage's own guards exactly as explicit `--resume` does (idempotency requirement below, per-stage Pre-Stage Detector Guards, approval gates). Implicit resume changes where the pipeline starts, never what it may skip within a stage.
+- **Interactive mode without `--resume` keeps current behavior** (detector informational only) — a human watching a fresh invocation expects a fresh start unless they asked to resume.
 
 ### Durable signals
 

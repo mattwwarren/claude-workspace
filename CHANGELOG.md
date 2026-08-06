@@ -107,6 +107,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Headless re-dispatch enters via stage detection — implicit `--resume`
+  (#1652):** the durable-signal stage detector was informational without an
+  explicit `--resume`, so a headless queue re-dispatch always re-entered at
+  Stage 1 — observed re-verifying a branch whose implementation had already
+  shipped and re-posting an already-open question. Headless invocations now
+  always run `detect_current_stage()` first and, when the durable signals
+  are unambiguous and internally consistent, enter at the latest detected
+  stage exactly as explicit `--resume` does (emitting `resumed_from_stage`).
+  Signal conflict or ambiguity (branch without plan markers, commits
+  without trailers) falls back to Stage 1; stage-entry gates and per-stage
+  detector guards are unchanged; interactive mode without `--resume` keeps
+  the detector informational.
+
 - **Multi-marker gate resolves newest-wins instead of hard-EXITing
   (#1654):** when Step 1b's pre-flight-resolutions extraction found more
   than one marker-bearing comment it EXITed `ambiguities_pending_resolution`
