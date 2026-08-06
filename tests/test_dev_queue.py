@@ -2962,6 +2962,46 @@ class TestMigrateDevQueue:
             == "2026-07-01T00:00:00+00:00"
         )
 
+    def test_migrate_dev_queue_fills_salvage_no_sentinel_at_default(self) -> None:
+        """migrate_dev_queue fills salvage_no_sentinel_at=None on tasks missing
+        the key (v25, GitHub #1638)."""
+        raw: dict[str, object] = {
+            "schema_version": 24,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-1638",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["salvage_no_sentinel_at"] is None
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 25
+
+    def test_v25_salvage_no_sentinel_at_preserved_idempotently(self) -> None:
+        """An existing salvage_no_sentinel_at value survives a second
+        migration pass."""
+        raw: dict[str, object] = {
+            "schema_version": 24,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-1638",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                    "salvage_no_sentinel_at": "2026-07-01T00:00:00+00:00",
+                }
+            ],
+        }
+        once = migrate_dev_queue(raw)
+        twice = migrate_dev_queue(once)
+        assert (
+            twice["tasks"][0]["salvage_no_sentinel_at"]
+            == "2026-07-01T00:00:00+00:00"
+        )
+
     def test_ticket_task_hold_finalize_rejects_invalid_literal(self) -> None:
         """hold_finalize is a closed Literal: an unrecognised value fails loud."""
         from pydantic import ValidationError
