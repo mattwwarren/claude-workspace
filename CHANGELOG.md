@@ -8,6 +8,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Stage 1 persists `.cw/plan-draft.md` on every human-gated headless exit
+  (#1649):** draft persistence previously fired only on the rare Step 1f.3
+  `plan_unreviewable`/`plan_unsound` exits, so the dominant park exits
+  (`ambiguities_pending_resolution`, `premises_pending_verification`,
+  `plan_pending_approval` — 130 firings in a 3-week window) threw the
+  generated plan away and every re-dispatch regenerated from scratch,
+  making fresh interpretive choices that surfaced fresh ambiguities and
+  cost fresh operator rounds. `auto-dev-plan.md` now defines a single
+  draft-persistence rule covering all Stage-1 human-gated headless exits
+  with a plan in hand; the existing Step 1a.0 resume check, supersession
+  guard, and `no_op`/Step-1g cleanup paths consume it unchanged.
+
 - **Recurring attention signal for starved circuit-paused lanes (#1630):**
   a lane paused by the circuit breaker while a task still waits in it no
   longer sits silently — `dev-queue status` now surfaces the paused-with-
