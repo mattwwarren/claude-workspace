@@ -578,3 +578,103 @@ def test_step1c_malformed_recommendation_note_is_count_only() -> None:
     section = _step1c_section()
     assert "not because of a genuine PARK decision" in section
     assert "count-only note — no per-item classification" in section
+
+
+# ---------------------------------------------------------------------------
+# #1651: Verified: DEFER — runtime-only premises verify at implementation
+# start with halt-and-report instead of parking the run.
+# ---------------------------------------------------------------------------
+
+
+def test_defer_token_gated_on_all_three_conditions() -> None:
+    """The producer allows DEFER only when runtime-only + cheap check + safe."""
+    content = _agent("product-manager-reviewer.md")
+    window = _after(content, "**Deferred verification (`Verified: DEFER`)", span=1600)
+    assert "ONLY when ALL three conditions hold" in window
+    assert "verifiable only at runtime" in window
+    assert "START of implementation" in window
+    assert "halt-and-report, never a silent fallback" in window
+
+
+def test_defer_runtime_only_excludes_in_session_answers() -> None:
+    """Anything answerable from docs/source/in-session command meets YES, not DEFER."""
+    content = _agent("product-manager-reviewer.md")
+    window = _after(content, "**(a) Runtime-only:**", span=400)
+    assert "meets the `YES` bar instead" in window
+
+
+def test_defer_requires_check_and_mismatch_fields() -> None:
+    """A DEFER item must carry In-implementation check: and On mismatch: fields."""
+    content = _agent("product-manager-reviewer.md")
+    assert "In-implementation check:" in content
+    assert "On mismatch:" in content
+    window = _after(content, "A DEFER item MUST carry", span=400)
+    assert "`In-implementation check:`" in window
+    assert "`On mismatch:`" in window
+
+
+def test_defer_missing_field_fails_closed_to_no() -> None:
+    """A DEFER missing either required field is treated as NO downstream."""
+    content = _agent("product-manager-reviewer.md")
+    window = _after(content, "A DEFER missing either field", span=300)
+    assert "treated as `NO` downstream" in window
+    # The consumer-side mandatory-field paragraph mirrors the same default.
+    assert (
+        "or a `DEFER` missing its `In-implementation check:` or "
+        "`On mismatch:` sub-bullet, is treated as NO downstream" in content
+    )
+
+
+def test_defer_excludes_operator_intent_questions() -> None:
+    """Operator-intent questions never route through DEFER (non-goal guard)."""
+    content = _agent("product-manager-reviewer.md")
+    window = _after(content, "Operator-intent questions never qualify", span=300)
+    assert "condition (a) excludes them by construction" in window
+
+
+def test_defer_output_format_names_all_three_tokens() -> None:
+    """The premises output format offers YES | NO | DEFER."""
+    content = _agent("product-manager-reviewer.md")
+    assert "| DEFER — <why the fact is runtime-only" in content
+
+
+def test_step1c_premise_partition_is_three_way() -> None:
+    """The consumer partitions premises self_verified / deferred / unverified."""
+    section = _step1c_section()
+    window = _after(section, "**Same partition, mirrored for premises", span=1200)
+    assert "`self_verified`" in window
+    assert "`deferred`" in window
+    assert "`unverified`" in window
+    assert "a `DEFER` missing either required sub-bullet" in window
+    assert "`deferred` never parks" in window
+
+
+def test_step1c_deferred_premises_plan_section_and_leading_step() -> None:
+    """Deferred premises get a plan section and a leading implementation step."""
+    section = _step1c_section()
+    assert "## Deferred Premises" in section
+    window = _after(section, "insert an explicit leading step", span=500)
+    assert "before any dependent work" in window
+    assert "existing `blocked` exit with the premise named" in window
+    assert "never a silent fallback" in window
+
+
+def test_step1c_deferred_unrunnable_check_is_mismatch() -> None:
+    """A deferred check that cannot run counts as a mismatch, not a pass."""
+    section = _step1c_section()
+    assert "cannot even be run" in section
+    assert "is a mismatch for this purpose, not a pass" in section
+
+
+def test_step1c_deferred_premises_audited_in_friction_highlights() -> None:
+    """Each deferred premise leaves a friction_highlights audit line."""
+    section = _step1c_section()
+    assert "deferred premise: <claim> — checked at implementation start" in section
+
+
+def test_step1c_exit_gating_ignores_deferred() -> None:
+    """Step 4c keys on parked + unverified only; deferred never gates."""
+    section = _step1c_section()
+    assert "`deferred` never gates" in section
+    window = _after(section, "Keys on `parked` and `unverified` ONLY", span=600)
+    assert "`self_verified` and/or `deferred`" in window

@@ -76,6 +76,14 @@ fact, and the plan a few lines later builds the opposite.
 
 **Self-verification (`Verified: YES`) evidence bar.** A premise may be resolved without the human by your OWN investigation *in this session* — but only against a specific evidence bar: official vendor documentation (cite the URL), a `<tool> --help` excerpt (quote it), the tool's own source code (cite file:line or quote the excerpt), or the verbatim output of a command you actually ran in this session, together with the exact invocation, so a reviewer can re-check it. A bare "I ran it and it works" without the quoted output does not qualify. Reserve `Verified: NO` whenever your evidence is absent, ambiguous, or self-contradictory (e.g. two runs of the same command disagreed), or whenever the answer turns on operator intent rather than external fact — even confident recall is NO.
 
+**Deferred verification (`Verified: DEFER`) — runtime-only premises (#1651).** A third token, allowed ONLY when ALL three conditions hold:
+
+- **(a) Runtime-only:** the fact is verifiable only at runtime / against live data. Anything answerable from docs, source code, or a command runnable in this session meets the `YES` bar instead — DEFER is never a substitute for doing the investigation.
+- **(b) Cheap bounded check at implementation start:** a small, bounded check (one API call, one query, one fixture comparison) can run at the START of implementation, before any dependent work is built.
+- **(c) Safe if false:** a false premise at that point is safe — the check precedes anything destructive or costly, and the mismatch behavior is halt-and-report, never a silent fallback.
+
+A DEFER item MUST carry two additional sub-bullets: `In-implementation check:` (the exact bounded check to run) and `On mismatch:` (the halt condition). A DEFER missing either field, or any malformed token, is treated as `NO` downstream — the same fail-closed default the `Recommendation`/`Verified` fields already use. Operator-intent questions never qualify: condition (a) excludes them by construction — a preference has no runtime observation that settles it. A premise parked as `NO` when it genuinely met the DEFER bar costs an operator round the human at a desk cannot even resolve statically; that asymmetry is what DEFER exists to remove.
+
 ### Output format
 
 ```
@@ -109,18 +117,22 @@ PREMISES TO VERIFY — N items
    - Plan depends on it for: <what was chosen / what breaks if false>
    - Evidence in plan or ticket: <verbatim quote, or "none — asserted without source">
    - Verify before building by: <capture a payload / check Datadog / read the API stub / ask the integration owner>
-   - Verified: YES — <authoritative citation: the quoted --help excerpt, doc URL, source excerpt, or the exact command + verbatim output that settles the claim> | NO — <why your own evidence is absent, ambiguous, self-contradictory, or turns on operator intent>
+   - Verified: YES — <authoritative citation: the quoted --help excerpt, doc URL, source excerpt, or the exact command + verbatim output that settles the claim> | NO — <why your own evidence is absent, ambiguous, self-contradictory, or turns on operator intent> | DEFER — <why the fact is runtime-only AND why a false premise is safe to catch at implementation start>
+   - In-implementation check: <DEFER only — the exact bounded check to run at the start of implementation, before dependent work>
+   - On mismatch: <DEFER only — the halt condition: stop and report, naming this premise>
 
 2. ...
 ```
 
-**Verified is mandatory on every item — never omit it.** `Verified: YES` is only for premises your own investigation settled against the evidence bar above. Consumer-side default: a missing or malformed `Verified` line (wrong token, absent sub-bullet, anything other than a leading `YES`/`NO` token) is treated as NO downstream — a deliberate fail-closed default, mirroring the ambiguities `Recommendation` field, and never a shortcut for writing YES.
+**Verified is mandatory on every item — never omit it.** `Verified: YES` is only for premises your own investigation settled against the evidence bar above; `Verified: DEFER` is only for premises meeting all three DEFER conditions, with both required sub-bullets present. Consumer-side default: a missing or malformed `Verified` line (wrong token, absent sub-bullet, anything other than a leading `YES`/`NO`/`DEFER` token), or a `DEFER` missing its `In-implementation check:` or `On mismatch:` sub-bullet, is treated as NO downstream — a deliberate fail-closed default, mirroring the ambiguities `Recommendation` field, and never a shortcut for writing YES or DEFER.
 
 Omit the block entirely when there are none. A premise is not resolved by
 revising the plan — it is resolved by verifying the fact. A `Verified: YES`
 premise was resolved by your own authoritative evidence in this session and
-proceeds without the human; a `Verified: NO` premise is still routed to the
-human, not the plan-revision loop.
+proceeds without the human; a `Verified: DEFER` premise proceeds with its
+bounded check scheduled at implementation start (halt-and-report on
+mismatch); a `Verified: NO` premise is still routed to the human, not the
+plan-revision loop.
 
 ## Mode 2: Spec Compliance Review
 
