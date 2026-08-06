@@ -135,6 +135,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Human-gated parks are no longer mechanically re-dispatched or
+  duplicated (#1653):** a ticket parked on a human gate
+  (`ambiguities_pending_resolution` / `premises_pending_verification` /
+  `plan_pending_approval` / `review_pending_approval`) could be fed back
+  into dispatch with zero new information — observed as 10 mechanical
+  retries on a fixed ~2h39m cadence (~20.5h) that never left the plan
+  stage. Two loopholes closed: `add_ticket` now refuses to insert when a
+  `BLOCKED_ON_USER` / `AWAITING_OPERATOR_SIGNOFF` row already owns the
+  ticket (previously a silent sibling row was minted, later surfacing as
+  `terminal_sibling` reconcile noise; the CLI now points at
+  `requeue`/`approve`), and `cw doctor --reap`'s class-5 wedge path
+  (dead-session `BLOCKED_ON_USER` collapse — the one revert path with no
+  disposition gate) now excludes human-gated dispositions at both the
+  detector and the shared `_collapse_blocked_on_user_tasks` chokepoint,
+  sourced from `PAUSED_FOR_USER_INPUT_STATUSES` so the sets cannot drift.
+  `orchestrate-sprint` codifies the operator rule: a human-gated park is
+  retry-eligible only after a tracker-state delta (new comment, body edit,
+  or approval reply).
+
 - **`approve` can release a `scope_hint`-gated park (#1640):** the approval
   gate only ever checked `session.last_result.status` against
   `SCOPE_GATED_APPROVAL_STATUSES`, so a ticket parked by the `scope_hint`
