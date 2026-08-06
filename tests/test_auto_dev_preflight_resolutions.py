@@ -50,15 +50,46 @@ def _after(content: str, anchor: str, span: int = 400) -> str:
     return content[idx : idx + span]
 
 
-def test_plan_refuses_multiple_marker_comments() -> None:
-    """>1 marker comment refuses with the exact operator message."""
-    assert REFUSE in _cmd("auto-dev-plan.md")
+def test_plan_multi_marker_newest_wins_no_exit() -> None:
+    """>1 marker comment resolves newest-wins instead of hard-EXITing (#1654)."""
+    section = _step1b_section()
+    window = _after(section, "**>1 marker comment** → ", span=700)
+    assert "newest-wins, no exit" in window
+    assert "latest created timestamp" in window
+    assert "ignore every older marker-bearing comment" in window
 
 
-def test_plan_refuse_uses_ambiguities_status() -> None:
-    """Multi-marker refuse reuses the ambiguities_pending_resolution status."""
-    window = _nearby(_cmd("auto-dev-plan.md"), REFUSE)
-    assert "ambiguities_pending_resolution" in window
+def test_plan_multi_marker_appends_friction_highlight() -> None:
+    """The newest-wins branch logs the multi-marker friction_highlights entry."""
+    section = _step1b_section()
+    window = _after(section, "**>1 marker comment** → ", span=900)
+    assert (
+        "multi-marker: <N> resolution comments found — newest (by timestamp) "
+        "used; consolidate via /harden-ticket when convenient"
+    ) in window
+    assert "friction_highlights" in window
+
+
+def test_plan_multi_marker_proceeds_under_exactly_one_branch() -> None:
+    """Newest-wins proceeds under the existing exactly-1-marker branch."""
+    section = _step1b_section()
+    window = _after(section, "**>1 marker comment** → ", span=1200)
+    assert '"exactly 1 marker comment" branch' in window
+
+
+def test_plan_multi_marker_keeps_consolidation_with_harden_ticket() -> None:
+    """Timestamp selection only — content consolidation stays /harden-ticket's job."""
+    section = _step1b_section()
+    window = _after(section, "**>1 marker comment** → ", span=1800)
+    assert "do NOT build content-merge/supersession logic here" in window
+    assert "`/harden-ticket`'s job" in window
+
+
+def test_plan_refuse_message_survives_only_as_historical_note() -> None:
+    """The old refuse message remains documented only as the hard-EXIT era note."""
+    section = _step1b_section()
+    window = _nearby(section, REFUSE, span=400)
+    assert "former hard EXIT" in window
 
 
 def test_plan_setup_greps_preflight_marker() -> None:
@@ -77,12 +108,17 @@ def test_marker_consistent_between_producer_and_consumer() -> None:
 
 
 def test_multi_marker_blocker_has_distinct_header() -> None:
-    """The >1-marker gate posts its blocker under a distinct, greppable header."""
+    """The historical blocker header stays documented (and tally-excluded)."""
     assert BLOCKER_HEADER in _step1b_section()
 
 
 def test_multi_marker_blocker_forbids_literal_marker() -> None:
-    """The gate's blocker-comment template must never emit the literal marker (#967)."""
+    """Hard-EXIT-era blocker comments never carried the literal marker (#967).
+
+    Retained as a historical note after #1654's newest-wins retirement — it is
+    what makes excluding `## Multi-Marker Gate Blocked` comments from the
+    marker tally safe.
+    """
     section = _step1b_section()
     assert "MUST NOT contain the literal pre-flight resolutions marker" in section
 
@@ -99,6 +135,15 @@ def test_harden_directs_superseding_comment() -> None:
     assert "## Pre-flight Resolutions (operator) — supersedes all prior" in _skill(
         "harden-ticket/SKILL.md"
     )
+
+
+def test_harden_marker_strip_is_hygiene_not_load_bearing() -> None:
+    """harden-ticket documents marker-stripping as hygiene after #1654."""
+    content = _skill("harden-ticket/SKILL.md")
+    assert "newest by\ncreated timestamp" in content or (
+        "newest by created timestamp" in " ".join(content.split())
+    )
+    assert "no longer load-bearing" in " ".join(content.split())
 
 
 def test_harden_drops_accretion_guidance() -> None:
