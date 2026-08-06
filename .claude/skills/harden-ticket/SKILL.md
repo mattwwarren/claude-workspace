@@ -201,10 +201,13 @@ the first, do NOT append to the prior comment. Post a NEW comment titled
 FULL consolidated numbered list (every still-valid prior resolution plus the new
 ones), ending with `Proceed.` and the `<!-- auto-dev-preflight-resolutions -->`
 marker. No in-place PATCH or comment-ID plumbing — a fresh superseding comment is
-the single source of truth. Exactly one marker-bearing comment may be present at
-dispatch: the pipeline refuses with `ambiguities_pending_resolution` when it
-finds more than one, so strip the marker from (or delete) the superseded comment
-by hand before re-dispatch.
+the single source of truth. The pipeline applies the same rule mechanically:
+when Step 1b finds more than one marker-bearing comment it uses the newest by
+created timestamp and appends a `multi-marker` friction warning instead of
+blocking (#1654). Stripping the marker from (or deleting) the superseded
+comment is therefore recommended hygiene — it keeps the audit trail
+unambiguous and the warning quiet — but it is no longer load-bearing for
+dispatch.
 
 ### 4. Hand off
 
