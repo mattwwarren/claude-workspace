@@ -4390,6 +4390,7 @@ class TestWedgeDeadSessionBlockedOnUser:
         session_id: str | None = "dead-sess-1",
         created_at: datetime | None = None,
         pr_url: str | None = None,
+        disposition: str | None = None,
     ) -> TicketTask:
         from cw.models import QueueItemStatus
 
@@ -4401,6 +4402,7 @@ class TestWedgeDeadSessionBlockedOnUser:
                 session_id=session_id,
                 created_at=created_at,
                 pr_url=pr_url,
+                disposition=disposition,
             )
         return _make_ticket_task(
             ticket_id=ticket_id,
@@ -4408,6 +4410,7 @@ class TestWedgeDeadSessionBlockedOnUser:
             status=QueueItemStatus.BLOCKED_ON_USER,
             session_id=session_id,
             pr_url=pr_url,
+            disposition=disposition,
         )
 
     def test_blocked_on_user_dead_surface_detected_and_reverted(
@@ -4509,6 +4512,96 @@ class TestWedgeDeadSessionBlockedOnUser:
         assert len(cancelled) == 2
         # The oldest (t1) becomes PENDING
         assert pending[0].created_at == datetime(2026, 1, 1, tzinfo=UTC)
+
+    def test_human_gated_park_not_detected_or_reverted(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A human-gated park with a dead session is not a wedge finding (#1653).
+
+        The worker behind every human-gated park has legitimately exited, so
+        the dead-session heuristic matches all of them — but reverting one
+        mechanically re-dispatches a ticket with zero new information and
+        reproduces the identical park. Covers all four gate dispositions.
+        """
+        from cw.config import save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import CwState, DevQueueStore, QueueItemStatus
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+
+        gate_dispositions = [
+            "ambiguities_pending_resolution",
+            "premises_pending_verification",
+            "plan_pending_approval",
+            "review_pending_approval",
+        ]
+        for disposition in gate_dispositions:
+            save_state(CwState(sessions=[]))
+            task = self._make_blocked_task(
+                "TST-1653-A", session_id=None, disposition=disposition
+            )
+            save_dev_queue(DevQueueStore(tasks=[task]))
+
+            report = run_doctor(reap=True)
+
+            store = load_dev_queue()
+            t = next(t for t in store.tasks if t.ticket_id == "TST-1653-A")
+            assert t.status == QueueItemStatus.BLOCKED_ON_USER, disposition
+            assert t.disposition == disposition
+            gated_findings = [
+                f
+                for f in report.wedge_findings
+                if f.wedge_class == "wedge/blocked-on-user-dead-session"
+                and f.ticket_id == "TST-1653-A"
+            ]
+            assert gated_findings == [], disposition
+
+    def test_collapse_leaves_human_gated_sibling_untouched(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Collapse reverts only non-gated rows; a human-gated sibling stays.
+
+        The gated row is oldest — without the #1653 guard the collapse would
+        pick it as the revert target verbatim.
+        """
+        from cw.config import save_state
+        from cw.dev_queue import load_dev_queue, save_dev_queue
+        from cw.models import CwState, DevQueueStore, QueueItemStatus
+        from cw.native_daemon import FakeNativeDaemonClient
+
+        daemon = FakeNativeDaemonClient()
+        monkeypatch.setattr("cw.doctor.wedge.get_native_daemon_client", lambda: daemon)
+
+        save_state(CwState(sessions=[]))
+        gated_oldest = self._make_blocked_task(
+            "TST-1653-B",
+            session_id=None,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            disposition="ambiguities_pending_resolution",
+        )
+        plain_younger = self._make_blocked_task(
+            "TST-1653-B",
+            session_id=None,
+            created_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+        save_dev_queue(DevQueueStore(tasks=[gated_oldest, plain_younger]))
+
+        run_doctor(reap=True)
+
+        store = load_dev_queue()
+        tasks = sorted(
+            (t for t in store.tasks if t.ticket_id == "TST-1653-B"),
+            key=lambda t: t.created_at,
+        )
+        assert tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+        assert tasks[0].disposition == "ambiguities_pending_resolution"
+        assert tasks[1].status == QueueItemStatus.PENDING
 
     def test_blocked_on_user_with_pr_url_not_reverted(
         self,

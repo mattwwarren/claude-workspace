@@ -217,6 +217,20 @@ be read in light of that arithmetic — it is not evidence of "N real failures."
 - **Blocked on user / ambiguities / plan-approval** → resolve the technical
   parts, batch the real forks to the operator (rule 5). Often `/harden-ticket`
   reactively, then re-dispatch.
+
+  **Human-gated parks are not retry-eligible without a tracker-state delta
+  (#1653).** A ticket parked on `ambiguities_pending_resolution` /
+  `premises_pending_verification` / `plan_pending_approval` /
+  `review_pending_approval` may be re-dispatched ONLY after its tracker state
+  has changed since the park — a new operator comment, a body edit, or an
+  approval reply. A retry without a state delta feeds a timer-driven loop:
+  it burns an attempt, re-derives the identical park, and pages you again to
+  learn nothing (observed: 10 mechanical retries on a fixed ~2h39m cadence,
+  ~20.5h, ending in manual queue removal). Your job as orchestrator is to
+  supply the delta (answer/harden/approve on the ticket) and THEN release —
+  via `cw dev-queue requeue`/`approve`, never by `cw dev-queue add` (a
+  re-add against a parked row is refused and would otherwise mint a
+  duplicate row that later surfaces as `terminal_sibling` noise).
 - **Premise-pending-verification on an external unknown** → it's human-gated.
   Park it, write the gate down, tell the operator what un-gates it (rule 6).
 - **Stalled / retry-cap / reap_proposed** → a wedge. Stop the session
