@@ -59,7 +59,16 @@ from cw.models.events import PrState, WatchedPr
 # v24: added TicketTask.attention_digest_buffered_at (GitHub #1162, RFC 0011
 #      A6) — durable buffer-membership marker for the operator-channel
 #      session.needs_attention digest coalescer (cw.cw_operator_events).
-DEV_QUEUE_SCHEMA_VERSION = 24
+# v25: added TicketTask.salvage_no_sentinel_at (GitHub #1638) — timestamp of
+#      the most recent salvage-without-sentinel park via reconcile/salvage.py's
+#      LOW path (the "stopped without ever emitting a sentinel" marker).
+#      Stamped by transition_task_status, not salvage.py directly (R2 seam).
+#      Deliberately NOT cleared on requeue/unblock/cancel — a diagnostic-only
+#      historical fact, mirroring last_blocked_result's no-clear-site
+#      convention (#1266), not the escalation-latch convention: erasing it the
+#      moment unblock_ticket reverts the row to PENDING would destroy the
+#      exact evidence this field exists to preserve.
+DEV_QUEUE_SCHEMA_VERSION = 25
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -388,6 +397,7 @@ class TicketTask(BaseModel):
     # thrashing (never got past IMPL) from one that is legitimately grinding
     # through repeated review/finalize cycles.
     stage_high_water: Stage | None = None
+    salvage_no_sentinel_at: datetime | None = None
 
     @field_validator("gate_recipes")
     @classmethod

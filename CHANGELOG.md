@@ -19,6 +19,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   draft-persistence rule covering all Stage-1 human-gated headless exits
   with a plan in hand; the existing Step 1a.0 resume check, supersession
   guard, and `no_op`/Step-1g cleanup paths consume it unchanged.
+- **`TicketTask.salvage_no_sentinel_at` marks the LOW-path salvage park
+  (#1638):** dev-queue schema bumps to v25, adding a durable timestamp field
+  stamped by `transition_task_status` when a task transitions to
+  `BLOCKED_ON_USER` with disposition `needs_salvage` — the LOW-path salvage
+  outcome (`salvage.py`'s single call site, funneled through
+  `_notify_needs_salvage`). `task.stage`/`stage_high_water` are deliberately
+  left untouched so `unblock_ticket` respawns the row at the stage that
+  actually stalled, instead of restarting from scratch. Migration backfills
+  the field as the 25th per-task filler.
 
 - **Recurring attention signal for starved circuit-paused lanes (#1630):**
   a lane paused by the circuit breaker while a task still waits in it no

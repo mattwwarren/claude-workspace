@@ -278,6 +278,224 @@ class TestSalvageCommittedNoPrSessions:
         assert lr.get("paused_status") == _NEEDS_SALVAGE_REASON
         assert s.status == SessionStatus.COMPLETED
 
+    def test_low_path_stamps_salvage_no_sentinel_at(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """LOW path stamps TicketTask.salvage_no_sentinel_at via the
+        transition_task_status seam, and leaves task.stage/stage_high_water
+        untouched (GitHub #1638 R4/R7 — the explicit "silent failure" probe:
+        without this stage/high-water assertion, a reintroduced
+        _stamp_salvage_stage(task) call would pass the suite silently)."""
+        worktree = tmp_path / "wt-low-sentinel"
+        worktree.mkdir(parents=True)
+        ticket_id = "TKT-LOW-SENTINEL"
+        sess = _mk_live_daemon_session_with_worktree(
+            "sess-low-sentinel", worktree, ticket_id
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="sess-low-sentinel",
+                        stage=Stage.IMPL,
+                        stage_high_water=Stage.IMPL,
+                    )
+                ]
+            )
+        )
+        # No stage event written → post_review_clean=False
+
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+        monkeypatch.setattr(
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
+        )
+        monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
+
+        candidates: list[tuple[str, str | None, str, str, bool]] = [
+            (
+                "sess-low-sentinel",
+                ticket_id,
+                "dev/low-sentinel-branch",
+                str(worktree),
+                False,
+            )
+        ]
+        salvage_committed_no_pr_sessions(candidates)
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == _NEEDS_SALVAGE_REASON
+        assert task.salvage_no_sentinel_at is not None
+        assert task.stage == Stage.IMPL
+        assert task.stage_high_water == Stage.IMPL
+
+    def test_salvage_no_sentinel_disposition_constant_matches_needs_salvage_reason(
+        self,
+    ) -> None:
+        """lifecycle.py's local _SALVAGE_NO_SENTINEL_DISPOSITION and
+        reconcile's _NEEDS_SALVAGE_REASON are two separately-defined constants
+        (an import-cycle-driven duplication, not a shared import) that MUST
+        carry the identical string value for transition_task_status's seam
+        guard to keep matching salvage.py's LOW-path call. Without this
+        assertion, either literal could drift silently and the
+        salvage_no_sentinel_at stamp would stop firing with no test failure
+        to surface it (GitHub #1638)."""
+        from cw.dev_queue.lifecycle import _SALVAGE_NO_SENTINEL_DISPOSITION
+
+        assert _SALVAGE_NO_SENTINEL_DISPOSITION == _NEEDS_SALVAGE_REASON
+
+    def test_low_path_idempotent_no_sentinel_marker_not_reset(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A second LOW-path pass for an already-flagged session (the
+        already_flagged early-return in _salvage_low_path) does not further
+        mutate the salvage_no_sentinel_at marker set on the first pass."""
+        worktree = tmp_path / "wt-idem-sentinel"
+        worktree.mkdir(parents=True)
+        ticket_id = "TKT-IDEM-SENTINEL"
+        sess = _mk_live_daemon_session_with_worktree(
+            "sess-idem-sentinel", worktree, ticket_id
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="sess-idem-sentinel",
+                    )
+                ]
+            )
+        )
+
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+        monkeypatch.setattr(
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
+        )
+        monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
+
+        candidates = [
+            (
+                "sess-idem-sentinel",
+                ticket_id,
+                "dev/idem-sentinel-branch",
+                str(worktree),
+                False,
+            )
+        ]
+
+        # First pass — should flag and stamp the marker.
+        salvage_committed_no_pr_sessions(candidates)
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.salvage_no_sentinel_at is not None
+        first_marker = task.salvage_no_sentinel_at
+
+        # Second pass — already_flagged should suppress the queue mutation.
+        salvage_committed_no_pr_sessions(candidates)
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.salvage_no_sentinel_at == first_marker
+
+    def test_salvage_low_path_then_unblock_respawns_at_original_stage(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Round-trip: LOW-path park (BLOCKED_ON_USER + salvage_no_sentinel_at
+        + session.reap_reason=SALVAGE_PARKED) followed by unblock_ticket must
+        respawn the row PENDING at its original stage — NOT forced to
+        FINALIZE — and must NOT clear salvage_no_sentinel_at (GitHub #1638
+        Acceptance bullet 3: the diagnostic-persistence design)."""
+        from cw.dev_queue import unblock_ticket
+        from cw.models import ReapReason
+
+        worktree = tmp_path / "wt-roundtrip"
+        worktree.mkdir(parents=True)
+        ticket_id = "TKT-ROUNDTRIP"
+        sess = _mk_live_daemon_session_with_worktree(
+            "sess-roundtrip", worktree, ticket_id
+        )
+        save_state(CwState(sessions=[sess]))
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=ticket_id,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id="sess-roundtrip",
+                        stage=Stage.REVIEW,
+                        stage_high_water=Stage.REVIEW,
+                    )
+                ]
+            )
+        )
+
+        _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+        monkeypatch.setattr(
+            "cw.reconcile.salvage._has_commits_beyond_base", lambda _p, _b: True
+        )
+        monkeypatch.setattr(
+            "cw.reconcile.salvage.pr_exists_for_branch", lambda _b, **_kw: (False, True)
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.fire_push_notification", lambda *_a, **_kw: None
+        )
+        monkeypatch.setattr("cw.reconcile._deps.get_native_daemon_client", MagicMock)
+
+        candidates: list[tuple[str, str | None, str, str, bool]] = [
+            ("sess-roundtrip", ticket_id, "dev/roundtrip-branch", str(worktree), False)
+        ]
+        salvage_committed_no_pr_sessions(candidates)
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.salvage_no_sentinel_at is not None
+
+        reloaded = load_state()
+        s = next(s for s in reloaded.sessions if s.id == "sess-roundtrip")
+        assert s.reap_reason == ReapReason.SALVAGE_PARKED
+
+        unblock_ticket(ticket_id, "client-a")
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.REVIEW
+        assert task.stage_high_water == Stage.REVIEW
+        assert task.salvage_no_sentinel_at is not None
+
     def test_low_path_flags_needs_salvage_lane_none_survives_uncoerced(
         self,
         tmp_config_dir: Path,

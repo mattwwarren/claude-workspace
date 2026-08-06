@@ -180,6 +180,13 @@ def _fill_attention_digest_buffered_default(task_raw: dict[str, Any]) -> None:
         task_raw["attention_digest_buffered_at"] = None
 
 
+def _fill_salvage_no_sentinel_at_default(task_raw: dict[str, Any]) -> None:
+    """Fill salvage_no_sentinel_at introduced in dev-queue schema v25
+    (GitHub #1638). Idempotent."""
+    if "salvage_no_sentinel_at" not in task_raw:
+        task_raw["salvage_no_sentinel_at"] = None
+
+
 def _fill_watched_prs_default(raw: dict[str, Any]) -> None:
     """Fill the top-level watched_prs list introduced in schema v15 (#1154).
 
@@ -220,6 +227,7 @@ def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
                 _fill_blocked_reason_default(task_raw)
                 _fill_hold_finalize_default(task_raw)
                 _fill_attention_digest_buffered_default(task_raw)
+                _fill_salvage_no_sentinel_at_default(task_raw)
     _fill_watched_prs_default(raw)
     raw["schema_version"] = DEV_QUEUE_SCHEMA_VERSION
     return raw
