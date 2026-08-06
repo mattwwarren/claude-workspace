@@ -85,12 +85,18 @@ AWAITING_OPERATOR_DISPOSITION = "awaiting_operator"
 FINALIZE_GATE_HELD_DISPOSITION = "finalize_gate_held"
 
 # Textually identical to cw.reconcile._shared._NEEDS_SALVAGE_REASON
-# ("needs_salvage") but a SEPARATE constant, not an import of it:
-# _shared imports FROM cw.dev_queue (dev_queue -> reconcile is the only
-# cycle-safe direction; see AWAITING_OPERATOR_DISPOSITION above for the
-# same duplication rationale). transition_task_status string-matches
-# against this value to recognize the salvage.py LOW-path park and stamp
-# TicketTask.salvage_no_sentinel_at (GitHub #1638, R2/R8/R5).
+# ("needs_salvage") but a SEPARATE constant, not an import of it: _shared
+# imports FROM cw.dev_queue (dev_queue -> reconcile is the only cycle-safe
+# direction), so lifecycle.py cannot import the reconcile-side copy without
+# a cycle. Unlike AWAITING_OPERATOR_DISPOSITION/FINALIZE_GATE_HELD_DISPOSITION
+# above (deliberately DISTINCT values from their dispatch.routing namesakes --
+# safe to diverge), this constant's value must stay identical to
+# _NEEDS_SALVAGE_REASON for the seam guard below to keep matching salvage.py's
+# call; test_dev_queue.py asserts the two literals in lockstep so a future
+# edit to either fails loudly instead of silently breaking the stamp.
+# transition_task_status string-matches against this value to recognize the
+# salvage.py LOW-path park and stamp TicketTask.salvage_no_sentinel_at
+# (GitHub #1638, R2/R8/R5).
 _SALVAGE_NO_SENTINEL_DISPOSITION = "needs_salvage"
 
 # The shared hold-disposition namespace: the set of TicketTask.disposition

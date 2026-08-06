@@ -344,6 +344,21 @@ class TestSalvageCommittedNoPrSessions:
         assert task.stage == Stage.IMPL
         assert task.stage_high_water == Stage.IMPL
 
+    def test_salvage_no_sentinel_disposition_constant_matches_needs_salvage_reason(
+        self,
+    ) -> None:
+        """lifecycle.py's local _SALVAGE_NO_SENTINEL_DISPOSITION and
+        reconcile's _NEEDS_SALVAGE_REASON are two separately-defined constants
+        (an import-cycle-driven duplication, not a shared import) that MUST
+        carry the identical string value for transition_task_status's seam
+        guard to keep matching salvage.py's LOW-path call. Without this
+        assertion, either literal could drift silently and the
+        salvage_no_sentinel_at stamp would stop firing with no test failure
+        to surface it (GitHub #1638)."""
+        from cw.dev_queue.lifecycle import _SALVAGE_NO_SENTINEL_DISPOSITION
+
+        assert _SALVAGE_NO_SENTINEL_DISPOSITION == _NEEDS_SALVAGE_REASON
+
     def test_low_path_idempotent_no_sentinel_marker_not_reset(
         self,
         tmp_config_dir: Path,
