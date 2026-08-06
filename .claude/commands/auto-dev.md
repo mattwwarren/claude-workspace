@@ -102,10 +102,10 @@ All 41 rows define the deterministic headless action for every interactive gate 
 | Pre-flight, local main not in sync with origin/main | EXIT `blocked` with `blocker.reason: "local_main_diverged_from_origin"`, `retry_eligible: true`, `next_actions: ["sync_local_main"]` (see Pre-flight section) |
 | S1 plan, plan in Linear | AUTO-SKIP plan-approval question (ambiguity scan still runs) |
 | S1 plan, no Linear plan, small | Generate → AUTO-APPROVE (ambiguity scan still runs) |
-| S1 plan, no Linear plan, large | Generate → EXIT `plan_pending_approval` (post to Linear, no branch) |
+| S1 plan, no Linear plan, large | Generate → EXIT `plan_pending_approval` through the consolidated park (#1650): one `## Pending Verification Scan` comment carrying advisory Step-1f findings, `### Approval requested`, and the full draft; draft persisted to `.cw/plan-draft.md`; no branch |
 | S1 ambiguity scan, no ambiguities | AUTO-CONTINUE |
-| S1 ambiguity scan, ambiguities found | EXIT `ambiguities_pending_resolution` (post ambiguity list to Linear as a comment, no branch) |
-| S1 ambiguity scan, non-empty `PREMISES TO VERIFY` | EXIT `premises_pending_verification` (post premise list to Linear as a comment, no branch — verification is human/investigation work, not a plan revision) |
+| S1 ambiguity scan, ambiguities found (parked) | EXIT `ambiguities_pending_resolution` through the consolidated park (#1650): parked questions + advisory Step-1f findings (+ `### Approval requested` when Large) + draft, ONE comment; draft persisted; no branch |
+| S1 ambiguity scan, non-empty `PREMISES TO VERIFY` (unverified) | EXIT `premises_pending_verification` through the consolidated park (#1650): unverified premises (+ parked ambiguities) + advisory Step-1f findings + draft, ONE comment; draft persisted; no branch — verification is human/investigation work, not a plan revision |
 | S1 pre-flight finds ticket already satisfied | EXIT `no_op` (no branch, `next_actions: ["close_issue_as_completed"]`) |
 | S1 plan review, both markers present + current | AUTO-SKIP (no reviewer spawn, no marker re-append) |
 | S1 spec review, NO_ISSUES / SHOULD_FIX / PRINCIPLE only | Append `plan-spec-reviewed` marker, continue |
