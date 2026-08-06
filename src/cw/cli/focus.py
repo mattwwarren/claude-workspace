@@ -16,24 +16,23 @@ import os
 
 import click
 
-from cw.cli._base import handle_errors, main
+from cw.cli._base import SESSION_ENV_VAR, handle_errors, main
 from cw.config import get_client
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.focus import clear_focus, get_focus, set_focus
 from cw.models import OrchestratorEventType
 
-_SESSION_ENV_VAR = "CLAUDE_CODE_SESSION_ID"
-_SESSION_OPTION_HELP = f"Session id (default: ${_SESSION_ENV_VAR})."
+_SESSION_OPTION_HELP = f"Session id (default: ${SESSION_ENV_VAR})."
 
 
 def _resolve_session_id(session: str | None) -> str:
     """Return the explicit ``--session`` value, else the env default."""
-    session_id = session or os.environ.get(_SESSION_ENV_VAR) or ""
+    session_id = session or os.environ.get(SESSION_ENV_VAR) or ""
     if not session_id:
         msg = (
             "No session id: pass --session <id> or set"
-            f" ${_SESSION_ENV_VAR} in the environment."
+            f" ${SESSION_ENV_VAR} in the environment."
         )
         raise CwError(msg)
     return session_id
@@ -48,7 +47,7 @@ def _parse_target(target: str) -> tuple[str, str | None]:
     client, _, lane_raw = target.partition("/")
     lane = lane_raw or None
     client_cfg = get_client(client)
-    if lane is not None and lane not in {ln.name for ln in client_cfg.effective_lanes}:
+    if lane is not None and lane not in client_cfg.lane_names:
         msg = f"Lane '{lane}' is not declared for client '{client}'."
         raise CwError(msg)
     return client, lane

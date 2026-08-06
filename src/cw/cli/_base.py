@@ -36,6 +36,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Shared by ``cw focus`` (writer) and ``cw statusline render`` (reader, #1644)
+# — a single source of truth so the two never drift apart on the env var name
+# that ties them together.
+SESSION_ENV_VAR = "CLAUDE_CODE_SESSION_ID"
+
 
 def handle_errors[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
     """Convert CwError exceptions to click.ClickException at the CLI boundary."""

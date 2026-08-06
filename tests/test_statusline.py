@@ -514,3 +514,46 @@ class TestPerformance:
 
         assert segment.startswith("client-3/lane-4 ")
         assert elapsed < _PERF_BUDGET_SECONDS, f"render took {elapsed:.4f}s"
+
+    def test_cwd_fallback_path_renders_well_inside_budget(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Same fixture, but no focus set — forces resolve_client_for_cwd's
+        step-2 walk (the more expensive path pre-`cw focus set` adoption,
+        and the one that a redundant clients.yaml re-parse would hit)."""
+        n_clients = 17
+        n_lanes = 10
+        base = tmp_config_dir / "perf"
+        base.mkdir(parents=True, exist_ok=True)
+        lanes = [{"name": f"lane-{i}"} for i in range(n_lanes)]
+        clients_file().write_text(
+            yaml.safe_dump(
+                {
+                    "clients": {
+                        f"client-{c}": {
+                            "workspace_path": str(base / f"client-{c}"),
+                            "lanes": lanes,
+                        }
+                        for c in range(n_clients)
+                    }
+                }
+            )
+        )
+        tasks = [
+            _make_ticket_task(
+                ticket_id=f"T-{c}-{i}",
+                client=f"client-{c}",
+                lane=f"lane-{i % n_lanes}",
+                status=QueueItemStatus.RUNNING if i % 2 else QueueItemStatus.PENDING,
+            )
+            for c in range(n_clients)
+            for i in range(20)
+        ]
+        _seed_queue(*tasks)
+
+        started = time.perf_counter()
+        segment = render_work_segment(None, base / "client-3")
+        elapsed = time.perf_counter() - started
+
+        assert segment.startswith("client-3 ")
+        assert elapsed < _PERF_BUDGET_SECONDS, f"render took {elapsed:.4f}s"

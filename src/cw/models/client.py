@@ -83,6 +83,11 @@ class ClientConfig(BaseModel):
             return list(self.lanes)
         return [LaneConfig(name=DEFAULT_LANE)]
 
+    @property
+    def lane_names(self) -> set[str]:
+        """Names of this client's effective lanes, for membership checks."""
+        return {lane.name for lane in self.effective_lanes}
+
     @model_validator(mode="after")
     def _validate_path_config(self) -> ClientConfig:
         has_workspace = self.workspace_path is not None

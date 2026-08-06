@@ -18,10 +18,8 @@ from pathlib import Path
 
 import click
 
-from cw.cli._base import main
+from cw.cli._base import SESSION_ENV_VAR, main
 from cw.statusline import render_work_segment
-
-_SESSION_ENV_VAR = "CLAUDE_CODE_SESSION_ID"
 
 
 @main.group("statusline", help="Render Claude Code statusline segments.")
@@ -33,7 +31,7 @@ def statusline_group() -> None:
 @click.option(
     "--session",
     default=None,
-    help=f"Session id (default: ${_SESSION_ENV_VAR}).",
+    help=f"Session id (default: ${SESSION_ENV_VAR}).",
 )
 @click.option(
     "--cwd",
@@ -47,7 +45,7 @@ def statusline_render(session: str | None, cwd: str | None) -> None:
     overridable; the real call site passes neither.
     """
     try:
-        session_id = session or os.environ.get(_SESSION_ENV_VAR) or None
+        session_id = session or os.environ.get(SESSION_ENV_VAR) or None
         segment = render_work_segment(session_id, Path(cwd) if cwd else Path.cwd())
     except Exception:  # noqa: BLE001 — machine-invoked; must never crash.
         return

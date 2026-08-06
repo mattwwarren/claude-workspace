@@ -58,17 +58,24 @@ def _client_roots(client: ClientConfig) -> set[Path]:
     return {Path(root).resolve() for root in roots}
 
 
-def resolve_client_for_cwd(cwd: Path) -> str | None:
+def resolve_client_for_cwd(
+    cwd: Path, clients: dict[str, ClientConfig] | None = None
+) -> str | None:
     """Return the configured client whose tree contains *cwd*, else None.
 
     When several clients match (e.g. a client whose workspace nests inside
     another's), the longest — most specific — root wins, so the answer does not
     depend on ``clients.yaml`` ordering.
+
+    *clients* lets a caller that already loaded ``clients.yaml`` (e.g.
+    :func:`_resolve_segment`) pass it through instead of triggering a second
+    ``yaml.safe_load`` on every step-2 invocation; defaults to a fresh
+    :func:`load_clients` call for standalone use.
     """
     resolved = Path(cwd).resolve()
     best_name: str | None = None
     best_depth = -1
-    for name, client in load_clients().items():
+    for name, client in (clients if clients is not None else load_clients()).items():
         for root in _client_roots(client):
             if resolved == root or root in resolved.parents:
                 depth = len(root.parts)
@@ -121,7 +128,7 @@ def _render_focused(client: str, lane: str | None) -> str:
         if t.client == client and (lane is None or t.lane == lane)
     ]
     if lane is None:
-        # No lane detail in the aggregate view, pause state included: an
+        # No lane detail and no pause marker in the aggregate view: an
         # operator who wants to see a paused lane can focus that lane.
         return _format_segment(client, tasks, paused=False)
     return _format_segment(
@@ -136,7 +143,7 @@ def _focus_is_declared(
     client_cfg = clients.get(client)
     if client_cfg is None:
         return False
-    return lane is None or lane in {ln.name for ln in client_cfg.effective_lanes}
+    return lane is None or lane in client_cfg.lane_names
 
 
 def _resolve_segment(session_id: str | None, cwd: Path) -> str:
@@ -149,13 +156,9 @@ def _resolve_segment(session_id: str | None, cwd: Path) -> str:
         return _render_focused(entry.client, entry.lane)
 
     # Step 2 — the client whose tree contains cwd, aggregated across lanes.
-    client = resolve_client_for_cwd(cwd)
+    client = resolve_client_for_cwd(cwd, clients)
     if client is not None:
-        return _format_segment(
-            client,
-            [t for t in _load_tasks() if t.client == client],
-            paused=False,
-        )
+        return _render_focused(client, None)
 
     # Step 3 — nothing to say.
     return ""
