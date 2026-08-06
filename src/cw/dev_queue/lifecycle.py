@@ -84,6 +84,15 @@ AWAITING_OPERATOR_DISPOSITION = "awaiting_operator"
 # by an explicit ``cw dev-queue approve``.
 FINALIZE_GATE_HELD_DISPOSITION = "finalize_gate_held"
 
+# Textually identical to cw.reconcile._shared._NEEDS_SALVAGE_REASON
+# ("needs_salvage") but a SEPARATE constant, not an import of it:
+# _shared imports FROM cw.dev_queue (dev_queue -> reconcile is the only
+# cycle-safe direction; see AWAITING_OPERATOR_DISPOSITION above for the
+# same duplication rationale). transition_task_status string-matches
+# against this value to recognize the salvage.py LOW-path park and stamp
+# TicketTask.salvage_no_sentinel_at (GitHub #1638, R2/R8/R5).
+_SALVAGE_NO_SENTINEL_DISPOSITION = "needs_salvage"
+
 # The shared hold-disposition namespace: the set of TicketTask.disposition
 # values that mean "parked pending a human/dependency, not pending a fix". This
 # is the *selection contract* consumers (attention layer, and later A4
@@ -193,6 +202,20 @@ def transition_task_status(
         task.pr_url = pr_url
         task.completed_at = datetime.now(UTC)
         task.blocked_reason = blocked_reason
+        # GitHub #1638 R2/R8: the shared seam, not a 5th call site. Only
+        # salvage.py's LOW path (_notify_needs_salvage) passes this disposition
+        # (verified: grep -rn 'disposition=_NEEDS_SALVAGE_REASON' src/cw --
+        # exactly one hit). Deliberately does NOT touch task.stage or
+        # stage_high_water: unlike the four _stamp_salvage_stage sites (which
+        # drive a row to a TERMINAL disposition), this park is RESPAWNABLE via
+        # unblock_ticket / the concierge poison-catch-all, neither of which
+        # resets task.stage -- forcing FINALIZE here would make recovery skip
+        # the verification tail this field exists to flag as skipped.
+        if (
+            new_status is QueueItemStatus.BLOCKED_ON_USER
+            and disposition == _SALVAGE_NO_SENTINEL_DISPOSITION
+        ):
+            task.salvage_no_sentinel_at = datetime.now(UTC)
     elif new_status in _RESET_DISPOSITION_STATUSES:
         task.disposition = None
         task.pr_url = None
