@@ -79,9 +79,7 @@ class TestSetGetRoundTrip:
         assert entry.client == "client-b"
         assert entry.lane is None
 
-    def test_get_focus_unknown_session_returns_none(
-        self, tmp_config_dir: Path
-    ) -> None:
+    def test_get_focus_unknown_session_returns_none(self, tmp_config_dir: Path) -> None:
         assert get_focus("never-set") is None
 
     def test_set_focus_stamps_set_at(self, tmp_config_dir: Path) -> None:
@@ -117,17 +115,13 @@ class TestClearFocus:
 
         assert get_focus("sess-1") is None
 
-    def test_clear_is_idempotent_on_unknown_session(
-        self, tmp_config_dir: Path
-    ) -> None:
+    def test_clear_is_idempotent_on_unknown_session(self, tmp_config_dir: Path) -> None:
         clear_focus("never-set")
         clear_focus("never-set")
 
         assert get_focus("never-set") is None
 
-    def test_clear_leaves_other_sessions_untouched(
-        self, tmp_config_dir: Path
-    ) -> None:
+    def test_clear_leaves_other_sessions_untouched(self, tmp_config_dir: Path) -> None:
         """R6: no pruning — clear_focus is the ONLY deletion path, and it is
         scoped to a single session id."""
         set_focus("sess-1", "client-a")

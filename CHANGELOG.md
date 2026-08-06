@@ -8,6 +8,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`cw focus` and `cw statusline render` (#1644):** a session can now say what
+  it is working on, and the statusline can show it. `cw focus set
+  <client>[/<lane>]` records a pointer keyed by `$CLAUDE_CODE_SESSION_ID` in
+  `~/.local/share/cw/focus.json` (own file lock, validated against
+  `clients.yaml`, cleared only by `cw focus clear` — no TTL, no pruning), with
+  `cw focus show` to read it back. `cw statusline render` turns that into one
+  terse segment — `client/lane 2▶ 1⧗ !1`, or `client/lane PAUSED 0▶ 1⧗` for a
+  circuit-paused lane — via a three-step ladder: the session's focus, else the
+  client whose workspace/worktree tree contains the cwd (aggregated across its
+  lanes), else nothing at all. `render` is machine-invoked on every assistant
+  message, so it reads only local files (no `gh`, `git`, network, or
+  subprocess) and always exits 0: a missing, malformed, or config-drifted
+  `focus.json` degrades to the next rung instead of failing. The `!N` count
+  reuses `dev-queue status`'s existing `NEEDS_ATTN` predicate — relocated to
+  `cw.dev_queue.attention.task_attention_state` so both surfaces share one
+  definition — and therefore reflects last-hydrated PR state.
+
 - **Recurring attention signal for starved circuit-paused lanes (#1630):**
   a lane paused by the circuit breaker while a task still waits in it no
   longer sits silently — `dev-queue status` now surfaces the paused-with-

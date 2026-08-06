@@ -42,7 +42,7 @@ _SESSION = "sess-statusline-1"
 _PERF_BUDGET_SECONDS = 0.05
 
 
-def _write_clients(tmp_path: Path, *, extra_lane: bool = False) -> Path:
+def _write_clients(tmp_path: Path) -> Path:
     """Write clients.yaml with ``client-a`` (lanes impl/debt) and ``client-b``.
 
     Returns ``client-a``'s workspace path so cwd-based tests can point at it.
@@ -52,8 +52,6 @@ def _write_clients(tmp_path: Path, *, extra_lane: bool = False) -> Path:
     ws_a.mkdir(parents=True, exist_ok=True)
     ws_b.mkdir(parents=True, exist_ok=True)
     lanes = [{"name": "impl"}, {"name": "debt"}]
-    if extra_lane:
-        lanes.append({"name": "review"})
     clients_file().write_text(
         yaml.safe_dump(
             {
@@ -119,9 +117,7 @@ class TestStepOneFocused:
         )
         set_focus(_SESSION, "client-a", "impl")
 
-        assert (
-            render_work_segment(_SESSION, tmp_config_dir) == "client-a/impl 2▶ 1⧗ !1"
-        )
+        assert render_work_segment(_SESSION, tmp_config_dir) == "client-a/impl 2▶ 1⧗ !1"
 
     def test_lane_focus_excludes_other_lanes(self, tmp_config_dir: Path) -> None:
         _write_clients(tmp_config_dir)
@@ -175,9 +171,7 @@ class TestStepOneFocused:
 
         assert render_work_segment(_SESSION, tmp_config_dir) == "client-a 1▶ 1⧗"
 
-    def test_circuit_paused_lane_with_pending_work(
-        self, tmp_config_dir: Path
-    ) -> None:
+    def test_circuit_paused_lane_with_pending_work(self, tmp_config_dir: Path) -> None:
         """#1630 shape — R5's second example line, byte-for-byte."""
         _write_clients(tmp_config_dir)
         _seed_queue(
@@ -209,9 +203,7 @@ class TestStepOneFocused:
             == "client-a/impl PAUSED 0▶ 0⧗"
         )
 
-    def test_client_only_focus_never_shows_paused(
-        self, tmp_config_dir: Path
-    ) -> None:
+    def test_client_only_focus_never_shows_paused(self, tmp_config_dir: Path) -> None:
         """Adopted Assumption 3: the aggregate view carries no pause detail."""
         _write_clients(tmp_config_dir)
         _seed_queue(
@@ -377,6 +369,31 @@ class TestStepTwoCwd:
 
         assert render_work_segment(None, ws_a) == "client-a 0▶ 1⧗"
 
+    def test_cwd_under_a_worktree_client_repo_path(self, tmp_config_dir: Path) -> None:
+        """A worktree-mode client is also findable through its backing repo."""
+        repo = tmp_config_dir / "repos" / "client-c"
+        repo.mkdir(parents=True)
+        clients_file().write_text(
+            yaml.safe_dump(
+                {
+                    "clients": {
+                        "client-c": {
+                            "workspace_path": str(tmp_config_dir / "ws" / "client-c"),
+                            "repo_path": str(repo),
+                            "branch": "main",
+                        }
+                    }
+                }
+            )
+        )
+        _seed_queue(
+            _make_ticket_task(
+                ticket_id="T-1", client="client-c", status=QueueItemStatus.RUNNING
+            ),
+        )
+
+        assert render_work_segment(None, repo / "src") == "client-c 1▶ 0⧗"
+
     def test_resolve_client_for_cwd_matches_workspace(
         self, tmp_config_dir: Path
     ) -> None:
@@ -483,9 +500,7 @@ class TestPerformance:
                 ticket_id=f"T-{c}-{i}",
                 client=f"client-{c}",
                 lane=f"lane-{i % n_lanes}",
-                status=QueueItemStatus.RUNNING
-                if i % 2
-                else QueueItemStatus.PENDING,
+                status=QueueItemStatus.RUNNING if i % 2 else QueueItemStatus.PENDING,
             )
             for c in range(n_clients)
             for i in range(20)
