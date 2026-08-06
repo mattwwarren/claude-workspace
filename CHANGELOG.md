@@ -28,6 +28,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   helper in `cw.reconcile._shared`, so a consumer no longer has to
   cross-reference the two events by hand to see retry/regression state.
 
+- **`_stamp_salvage_stage` forces `stage=FINALIZE` at reconcile's four
+  salvage backstops (#1629):** `tasks.py`'s timed-out-merged completion, and
+  the merged branches of `idle`/`phantom`/`stalled`'s reconcile mutations
+  each stamped a terminal `disposition="shipped"` while leaving `task.stage`
+  advertising a stage the ticket never finished. Each now calls the new
+  `_stamp_salvage_stage` helper (`cw.dev_queue.lifecycle`, re-exported from
+  `cw.dev_queue`) to force `stage` to `FINALIZE`, emitting
+  `TASK_STAGE_CHANGED` via the existing `_emit_stage_change` chokepoint.
+  `stage_high_water` is deliberately left untouched, so a completed row
+  where `stage_high_water != stage` now identifies a salvaged completion.
+
+- **Anchor breadcrumb-eligible paused statuses, the sentinel health-field
+  check, and the operator-event doc example against silent drift (#1597):**
+  a new `BREADCRUMB_ELIGIBLE_PAUSED_STATUSES` constant in
+  `cw.dispatch.routing` (composed from `STAGE_FAILURE_STATUSES` minus
+  `scope_exceeded`/`forbidden_area`, which never carry a blocker per the
+  #777 exception, plus the `_AWAITING_OPERATOR_REASON` substitute) anchors
+  `attention_monitor.sh`'s hand-transcribed `_BLOCKER_REASON_PAUSED_STATUSES`
+  set (outside `src/cw`, so it can't import the constant) to a
+  `routing.py:131` file:line comment; `cw-validate-result`'s
+  `validate_sentinel.py` now derives its `health_present` check from an
+  `_EXPECTED_HEALTH_FIELDS` allowlist guarded at import time against
+  `cw.auto_dev_result.Health.model_fields` instead of an inline
+  string-literal set; and a new drift-guard test asserts
+  `CONFIG_REFERENCE.md`'s documented `operator_channel_forward.event_types`
+  example matches `_DEFAULT_OPERATOR_EVENT_TYPES` exactly. No behavior
+  change in any of the three — doc and code already agreed; only the guards
+  are new.
+
 ### Fixed
 
 - **`approve` can release a `scope_hint`-gated park (#1640):** the approval
@@ -40,6 +69,57 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and either release condition is sufficient. The gate's error message now
   reports both `disposition` and `last_result` status so a future mismatch
   is easier to diagnose.
+
+- **`complete_timed_out_merged_tasks` no longer over-trusts a
+  spawn-error-only claim history (#1623):** `_is_never_claimed` narrows from
+  `attempts == 0 and session_id is None` to `session_id is None and
+  attempts == task.spawn_error_count` — this reconcile backstop previously
+  matched only the exact #1387 shape, so a task where every attempt died on
+  the generic spawn-error path (`attempts == spawn_error_count`, observed
+  twice in the wild) could be marked `shipped` by borrowing an unrelated
+  session's merged PR despite never having attached to a worker at all. The
+  usage-limit-only gap (`attempts > spawn_error_count`, never attached) is a
+  known accepted gap tracked in #1631, not closed here.
+
+- **`scope_hint` escalation now binds at all three routing park sites, not
+  just one (#1617):** only Rule 1 (`_route_scope_gated_approval`) honored a
+  `scope_hint="large"` ticket's REVIEW-boundary park; Rule 3
+  (`_route_stage_success`) and the stage-walk's REVIEW rung never consulted
+  `task.scope_hint`/`_resolve_scope_tier`, so a worker that skipped the
+  `review_pending_approval` sentinel (a Checkpoint 3a auto-continue, or a
+  literal `stage_complete`) could sail straight to `FINALIZE` unattended. A
+  shared `_should_gate_for_scope_hint` predicate and `_park_scope_hint_gate`
+  helper now wire the escalation into both bypass sites, checked ahead of
+  the finalize-hold and signoff gates. A new
+  `dispatch.scope_routing_decision` audit event (diagnostic trail, not an
+  operator alert — excluded from `_DEFAULT_OPERATOR_EVENT_TYPES`) records
+  the sentinel tier, `scope_hint`, resolved tier, which rule fired, and the
+  resulting disposition at all three `routing.py` park-decision sites plus
+  the `approve` gate-release site.
+
+- **BREAKING — `tasks --json` emits the full `TicketTask` field set
+  (#1618):** `_task_to_dict` hand-listed 16 of `TicketTask`'s 43 fields,
+  silently dropping `scope_hint`, `computed_scope_tier`, `stage`,
+  `hold_finalize`, and 23 others from `cw dev-queue tasks --json`. It now
+  calls `task.model_dump(mode="json")` directly. `created_at`'s JSON shape
+  moves from a `+00:00` UTC offset suffix to a `Z` suffix under this dump
+  mode; `status` and `worktree_path` shapes are unchanged. No in-repo
+  consumer parses the suffix (`tests/test_dev_queue.py`,
+  `.claude/skills/cw-fanout`, `src/cw/data/GUIDE.md`, and `CHANGELOG.md`
+  itself all checked clean) — the population actually at risk is an
+  external `jq`/script consumer of `cw dev-queue tasks --json`. The human
+  table also gains `SCOPE_HINT`/`COMPUTED_SCOPE_TIER`/`STAGE` columns.
+
+- **`review_recipes/_shared.py`'s four attention-state constants are now
+  type-annotated (#1613):** `_ATTENTION_CHANGES_REQUESTED`,
+  `_ATTENTION_CI_FAILING`, `_ATTENTION_NO_REVIEWER`, and
+  `_ATTENTION_MERGE_BLOCKED` were bare, unannotated `str` values with no
+  type link to `cw.pr_hydrate.PrAttentionState`, the canonical `Literal` for
+  this vocabulary — a typo in any of them would type-check cleanly and
+  surface only as a silently-never-matching runtime comparison. Each is now
+  annotated `PrAttentionState` so mypy catches drift; a comment notes why
+  only four of the `Literal`'s five members have a recipe here
+  (`ready_to_approve` has nothing to auto-fix).
 
 - **Salvaged sessions no longer mark failed tickets as done (#1566):**
   reconcile's salvage path and live dispatch classified the same terminal
