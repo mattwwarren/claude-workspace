@@ -69,6 +69,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   change in any of the three — doc and code already agreed; only the guards
   are new.
 
+### Changed
+
+- **Multi-marker gate resolves newest-wins instead of hard-EXITing
+  (#1654):** when Step 1b's pre-flight-resolutions extraction found more
+  than one marker-bearing comment it EXITed `ambiguities_pending_resolution`
+  and demanded a manual `/harden-ticket` consolidation — a full operator
+  round (~13h mean park latency) spent on a mechanical slip, and a contract
+  mismatch with `harden-ticket/SKILL.md`, which already declares the newest
+  superseding comment the single source of truth. The pipeline now uses the
+  marker-bearing comment with the latest created timestamp, appends a
+  `multi-marker` `friction_highlights` warning, and proceeds; body-over-
+  comment precedence and the #967 `## Multi-Marker Gate Blocked` tally
+  exclusion are unchanged, and harden-ticket's marker-stripping guidance
+  relaxes to recommended hygiene.
+
 ### Fixed
 
 - **`approve` can release a `scope_hint`-gated park (#1640):** the approval
