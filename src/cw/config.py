@@ -87,6 +87,11 @@ SESSIONS_LOCK = STATE_DIR / ".sessions.lock"
 CLIENTS_LOCK = CONFIG_DIR / ".clients.yaml.lock"
 CONCURRENCY_OVERRIDE_FILE = STATE_DIR / "concurrency_overrides.json"
 CONCURRENCY_OVERRIDE_LOCK = STATE_DIR / ".concurrency_overrides.lock"
+# Session-scoped "what am I working on" pointer (#1644), read by
+# ``cw statusline render`` and written by ``cw focus set/clear``. Keyed by
+# Claude Code session id; entries never expire and are never pruned.
+FOCUS_FILE = STATE_DIR / "focus.json"
+FOCUS_LOCK = STATE_DIR / ".focus.lock"
 # Process-lifetime singleton lock for the dispatch loop (#1362). A single
 # GLOBAL file (no --client keying): only one run_dispatch_loop may run at a
 # time against a given STATE_DIR.
@@ -198,6 +203,14 @@ def concurrency_override_lock_file() -> Path:
 
 def dispatch_loop_lock_file() -> Path:
     return DISPATCH_LOOP_LOCK
+
+
+def focus_file() -> Path:
+    return FOCUS_FILE
+
+
+def focus_lock_file() -> Path:
+    return FOCUS_LOCK
 
 
 def _under_pytest() -> bool:
