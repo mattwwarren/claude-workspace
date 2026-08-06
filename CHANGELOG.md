@@ -8,6 +8,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Consolidated park — Stage 1 finishes all plan-phase analysis before any
+  human-gated exit (#1650):** the plan stage's human gates fired serially
+  (ambiguity/premise parks before the plan-quality stations ever ran; the
+  large-scope approval exit posted the plan without station findings), so a
+  single ticket paid 2–4 operator rounds — one observed ticket bounced
+  between `ambiguities_pending_resolution` and `plan_pending_approval` five
+  times before being cancelled. When Stage 1 must exit headless with a
+  draft in hand it now runs scope classification and both Step 1f stations
+  in advisory mode (findings collected only — no markers, no revision
+  cycle, a MUST_FIX never converts the park to `blocked`), posts ONE
+  `## Pending Verification Scan` comment (parked items, advisory findings,
+  `### Approval requested` when Large, and the full draft), and persists
+  the draft. Exit statuses and result-payload rules are unchanged; a
+  `consolidated park: …` line lands in `friction_highlights`. Step 1a
+  explicitly never treats the parked comment's embedded draft as an
+  existing plan, and a resumed Large draft still requires approval
+  evidence before the approval gate auto-skips.
+
 - **`Verified: DEFER` for runtime-only premises (#1651):** a premise
   checkable only against a live system used to park the run
   (`premises_pending_verification`) even though the human at a desk cannot
