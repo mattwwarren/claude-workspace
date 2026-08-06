@@ -24,6 +24,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reuses `dev-queue status`'s existing `NEEDS_ATTN` predicate — relocated to
   `cw.dev_queue.attention.task_attention_state` so both surfaces share one
   definition — and therefore reflects last-hydrated PR state.
+- **Stage 1 persists `.cw/plan-draft.md` on every human-gated headless exit
+  (#1649):** draft persistence previously fired only on the rare Step 1f.3
+  `plan_unreviewable`/`plan_unsound` exits, so the dominant park exits
+  (`ambiguities_pending_resolution`, `premises_pending_verification`,
+  `plan_pending_approval` — 130 firings in a 3-week window) threw the
+  generated plan away and every re-dispatch regenerated from scratch,
+  making fresh interpretive choices that surfaced fresh ambiguities and
+  cost fresh operator rounds. `auto-dev-plan.md` now defines a single
+  draft-persistence rule covering all Stage-1 human-gated headless exits
+  with a plan in hand; the existing Step 1a.0 resume check, supersession
+  guard, and `no_op`/Step-1g cleanup paths consume it unchanged.
+- **`TicketTask.salvage_no_sentinel_at` marks the LOW-path salvage park
+  (#1638):** dev-queue schema bumps to v25, adding a durable timestamp field
+  stamped by `transition_task_status` when a task transitions to
+  `BLOCKED_ON_USER` with disposition `needs_salvage` — the LOW-path salvage
+  outcome (`salvage.py`'s single call site, funneled through
+  `_notify_needs_salvage`). `task.stage`/`stage_high_water` are deliberately
+  left untouched so `unblock_ticket` respawns the row at the stage that
+  actually stalled, instead of restarting from scratch. Migration backfills
+  the field as the 25th per-task filler.
 
 - **Recurring attention signal for starved circuit-paused lanes (#1630):**
   a lane paused by the circuit breaker while a task still waits in it no
@@ -73,6 +93,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   example matches `_DEFAULT_OPERATOR_EVENT_TYPES` exactly. No behavior
   change in any of the three — doc and code already agreed; only the guards
   are new.
+
+### Changed
+
+- **Multi-marker gate resolves newest-wins instead of hard-EXITing
+  (#1654):** when Step 1b's pre-flight-resolutions extraction found more
+  than one marker-bearing comment it EXITed `ambiguities_pending_resolution`
+  and demanded a manual `/harden-ticket` consolidation — a full operator
+  round (~13h mean park latency) spent on a mechanical slip, and a contract
+  mismatch with `harden-ticket/SKILL.md`, which already declares the newest
+  superseding comment the single source of truth. The pipeline now uses the
+  marker-bearing comment with the latest created timestamp, appends a
+  `multi-marker` `friction_highlights` warning, and proceeds; body-over-
+  comment precedence and the #967 `## Multi-Marker Gate Blocked` tally
+  exclusion are unchanged, and harden-ticket's marker-stripping guidance
+  relaxes to recommended hygiene.
 
 ### Fixed
 
