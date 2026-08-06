@@ -317,7 +317,11 @@ def test_step1c_combined_exit_persists_draft() -> None:
 def test_checkpoint1_plan_pending_approval_persists_draft() -> None:
     """The headless large-scope plan_pending_approval exit persists the draft."""
     section = _checkpoint1_section()
-    window = _after(section, "EXIT `plan_pending_approval`", span=600)
+    window = _after(
+        section,
+        "EXIT `plan_pending_approval` **through the Step 1c consolidated park**",
+        span=700,
+    )
     assert DRAFT_FILE in window
     assert "draft-persistence rule" in window
 
