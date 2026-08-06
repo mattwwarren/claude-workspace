@@ -7635,6 +7635,53 @@ class TestDevQueueTasksPrState:
         data = _json.loads(result.output)
         assert data[0]["signoff"] == "operator"
 
+    def test_tasks_json_includes_salvage_no_sentinel_at_null_by_default(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """_task_to_dict's JSON contract carries a salvage_no_sentinel_at key,
+        null by default. See GitHub #1638.
+        """
+        import json as _json
+
+        from cw.dev_queue import add_ticket
+        from cw.models import TicketTask
+
+        add_ticket(TicketTask(ticket_id="GEN-406", client="attn-client"))
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "tasks", "--json"])
+        assert result.exit_code == 0, result.output
+        data = _json.loads(result.output)
+        assert data[0]["salvage_no_sentinel_at"] is None
+
+    def test_tasks_json_includes_salvage_no_sentinel_at_when_set(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """salvage_no_sentinel_at round-trips through the JSON contract as a
+        non-null ISO string (#1638)."""
+        import json as _json
+
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, TicketTask
+
+        stamp = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        with freeze_time(stamp):
+            save_dev_queue(
+                DevQueueStore(
+                    tasks=[
+                        TicketTask(
+                            ticket_id="GEN-407",
+                            client="attn-client",
+                            salvage_no_sentinel_at=datetime.now(UTC),
+                        )
+                    ]
+                )
+            )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "tasks", "--json"])
+        assert result.exit_code == 0, result.output
+        data = _json.loads(result.output)
+        assert data[0]["salvage_no_sentinel_at"] == "2026-01-01T12:00:00Z"
+
     def test_tasks_human_has_attention_column(self, tmp_config_dir: Path) -> None:
         from cw.dev_queue import save_dev_queue
         from cw.models import DevQueueStore, PrState, QueueItemStatus, TicketTask
