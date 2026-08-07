@@ -891,6 +891,20 @@ class TestFixLoopNonBlockingPassthrough:
 # ---------------------------------------------------------------------------
 
 
+def _verdict_without_durations(verdict: ReviewVerdict | None) -> dict[str, object]:
+    """Dump *verdict*, blanking the one field that cannot be reproducible.
+
+    ``ReviewerRunRecord.duration_seconds`` (#1710) is measured wall time, so it
+    differs between two otherwise-identical review passes. Blanking only that
+    field keeps the rest of the equality assertion strict.
+    """
+    assert verdict is not None
+    dumped = verdict.model_dump()
+    for record in dumped["agents_run"]:
+        record["duration_seconds"] = None
+    return dumped
+
+
 class TestFixLoopDisabledGate:
     def test_disabled_gate_blocking_cycle0_returns_run_review_tuple_unchanged(
         self, make_git_repo: Callable[..., Path]
@@ -913,7 +927,13 @@ class TestFixLoopDisabledGate:
         )
 
         assert loop_result == plain_result
-        assert loop_verdict == plain_verdict
+        # #1710: ReviewerRunRecord.duration_seconds is a real measured wall
+        # clock, so two separate invocations can never be byte-identical on
+        # that one field. Everything else about the verdict — including the
+        # rest of the audit telemetry — still must match exactly.
+        assert _verdict_without_durations(loop_verdict) == _verdict_without_durations(
+            plain_verdict
+        )
         assert loop_result.status == "blocked"
         assert loop_result.blocker is not None
         assert loop_result.blocker.reason == CODEX_MUST_FIX_FINDINGS
@@ -1221,9 +1241,7 @@ class TestFixLoopCarriesAuditMetrics:
         self, make_git_repo: Callable[..., Path]
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-metrics-clean")
-        runner = _FixLoopRunner(
-            [_MF_DOC, _CLEAN_DOC], review_stdout=_AUDIT_JSONL
-        )
+        runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC], review_stdout=_AUDIT_JSONL)
         out, verdict = _run_loop(runner, worktree, session_id="s-metrics-clean")
 
         assert out.status == "stage_complete"

@@ -533,7 +533,9 @@ class TestCodexContractAuditEvents:
     on every nightly run rather than only at plan time.
     """
 
-    def test_argv_always_carries_the_audit_flags(self, live_base: Callable[[], Path]) -> None:
+    def test_argv_always_carries_the_audit_flags(
+        self, live_base: Callable[[], Path]
+    ) -> None:
         base = live_base()
         argv = _build_generic_codex_argv(
             model=None,

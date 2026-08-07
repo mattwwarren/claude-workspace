@@ -903,9 +903,7 @@ class TestRunCodexRoleFlagRejectionRetry:
         assert doc is None
         assert failure is not None
         assert failure.reason == CODEX_ERROR
-        path = _bundle_file(
-            "sess-retry-fail", "code-quality-reviewer", "nonzero_exit"
-        )
+        path = _bundle_file("sess-retry-fail", "code-quality-reviewer", "nonzero_exit")
         persisted = ExecutorFailure.model_validate_json(path.read_text())
         # argv was reassigned in place, so diagnostics name what actually ran.
         assert "--json" not in persisted.argv_sanitized

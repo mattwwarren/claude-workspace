@@ -19,8 +19,8 @@ Public surface:
 - Models: :class:`Finding`, :class:`EscalationMetadata`,
   :class:`ReviewerFindingsDocument`, :class:`RejectedFinding`,
   :class:`AcceptedFinding`, :class:`ReviewerRunRecord`,
-  :class:`ReviewerRunFailure`, :class:`StrippedEscalation`,
-  :class:`ReviewVerdict`, :class:`CapturedDiff`.
+  :class:`ReviewerRunMetrics`, :class:`ReviewerRunFailure`,
+  :class:`StrippedEscalation`, :class:`ReviewVerdict`, :class:`CapturedDiff`.
 - Functions: :func:`validate_reviewer_document`, :func:`dedupe_findings`,
   :func:`derive_review_counts`, :func:`consolidate_verdict`,
   :func:`write_review_verdict`.
@@ -29,7 +29,7 @@ Public surface:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Literal, get_args
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, get_args
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -214,12 +214,61 @@ class AcceptedFinding(BaseModel):
     disposition: Disposition = "fixed"
 
 
+class ReviewerRunMetrics(TypedDict, total=False):
+    """Transient kwargs bag of one reviewer run's executor telemetry (#1710).
+
+    NOT a persisted structure and NOT a field on any model: a ``TypedDict``
+    erases to a plain ``dict`` at runtime, and the only thing this shape is
+    ever used for is ``ReviewerRunRecord(**metrics)``. The persisted home for
+    every value here is :class:`ReviewerRunRecord`'s own fields — there is
+    deliberately no parallel metrics structure hanging off
+    :class:`ReviewVerdict` (R3, #1710).
+
+    ``total=False`` so a producer may omit any key; every corresponding
+    ``ReviewerRunRecord`` field is defaulted, so a partial bag splats cleanly.
+    """
+
+    thread_id: str | None
+    effective_model: str | None
+    duration_seconds: float | None
+    input_tokens: int | None
+    cached_input_tokens: int | None
+    output_tokens: int | None
+    reasoning_tokens: int | None
+    terminal_event: str | None
+    tool_call_counts: dict[str, int]
+    had_command_evidence: bool
+    unexpected_tool_attempts: list[str]
+
+
 class ReviewerRunRecord(BaseModel):
-    """Terminal-health record for one reviewer agent that ran (or failed)."""
+    """Terminal-health record for one reviewer agent that ran (or failed).
+
+    Everything below ``finding_count`` is executor audit telemetry (#1710),
+    populated from the codex ``--json`` event stream where one is available and
+    left at its default everywhere else (the Claude-native review path, a role
+    whose stream was malformed, a run that never emitted one). It is purely
+    observational: no health, blocking, or gate decision reads any of it.
+    """
 
     reviewer_role: str
     status: ReviewerHealthStatus
     finding_count: int
+    # Executor-native run identifier (codex ``thread.started.thread_id``).
+    thread_id: str | None = None
+    # Always None today: no codex-cli 0.147.0 event carries a model field.
+    effective_model: str | None = None
+    duration_seconds: float | None = None
+    input_tokens: int | None = None
+    cached_input_tokens: int | None = None
+    output_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    # Type of the last recognized stream event; anything other than
+    # "turn.completed"/"turn.failed" means the stream was cut off or absent.
+    terminal_event: str | None = None
+    tool_call_counts: dict[str, int] = Field(default_factory=dict)
+    had_command_evidence: bool = False
+    unexpected_tool_attempts: list[str] = Field(default_factory=list)
 
 
 class ReviewerRunFailure(BaseModel):
@@ -528,6 +577,7 @@ def consolidate_verdict(
     *,
     failed_reviewers: list[ReviewerRunFailure] | None = None,
     fix_cycles_used: int = 0,
+    metrics_by_role: dict[str, ReviewerRunMetrics] | None = None,
 ) -> ReviewVerdict:
     """Consolidate every reviewer's document into a single :class:`ReviewVerdict`.
 
@@ -558,8 +608,16 @@ def consolidate_verdict(
     terminal ``Review`` itself (see ``cw.codex_fix_loop._finalize_review``);
     this parameter only carries the per-cycle count for that adapter's own
     intermediate verdicts (#1392).
+
+    ``metrics_by_role`` (default ``None`` → ``{}``) supplies per-role executor
+    audit telemetry, splatted onto the matching :class:`ReviewerRunRecord` for
+    documents and failures alike; a role with no entry keeps every telemetry
+    field at its default. Defaulting to ``None`` is what lets the Claude-native
+    caller (``cw.cli.review``), which never has codex metrics, stay unchanged —
+    and it is purely additive: nothing here reads the values back (#1710).
     """
     failures = failed_reviewers if failed_reviewers is not None else []
+    metrics = metrics_by_role if metrics_by_role is not None else {}
     candidates: list[tuple[str, Finding]] = []
     all_rejected: list[RejectedFinding] = []
     all_stripped: list[StrippedEscalation] = []
@@ -575,11 +633,17 @@ def consolidate_verdict(
                 reviewer_role=doc.reviewer_role,
                 status=doc.status,
                 finding_count=len(accepted),
+                **metrics.get(doc.reviewer_role, {}),
             )
         )
 
     run_records.extend(
-        ReviewerRunRecord(reviewer_role=failure.role, status="failed", finding_count=0)
+        ReviewerRunRecord(
+            reviewer_role=failure.role,
+            status="failed",
+            finding_count=0,
+            **metrics.get(failure.role, {}),
+        )
         for failure in failures
     )
 

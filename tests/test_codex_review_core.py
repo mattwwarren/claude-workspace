@@ -96,7 +96,10 @@ class TestPrepareReviewPass:
 
 
 _AUDIT_FIXTURE = (
-    Path(__file__).parent / "fixtures" / "codex_audit_events" / "clean_with_command.jsonl"
+    Path(__file__).parent
+    / "fixtures"
+    / "codex_audit_events"
+    / "clean_with_command.jsonl"
 )
 
 
