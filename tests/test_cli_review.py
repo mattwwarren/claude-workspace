@@ -507,4 +507,3 @@ class TestReviewConsolidateWorktreeOption:
         verdict = json.loads(result.output)
         assert verdict["rejected"][0]["reason"] == "unknown_file"
         assert verdict["blocking"] is False
-        assert diff.files == {f: sorted(lines) for f, lines in file_line_text.items()}

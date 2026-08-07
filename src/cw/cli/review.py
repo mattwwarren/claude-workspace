@@ -16,6 +16,8 @@ subagent's ``REVIEW_FINDINGS`` block is extracted from its prose response.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import click
 from pydantic import BaseModel, Field, ValidationError
 
@@ -140,13 +142,39 @@ def review_register(pr_url: str) -> None:
 
 @review.command(name="consolidate")
 @click.argument("path")
+@click.option(
+    "--worktree",
+    default=None,
+    type=click.Path(path_type=Path),
+    help=(
+        "Worktree root for unanchored-finding tree-existence checks "
+        "(defaults to the current directory)."
+    ),
+)
+@click.option(
+    "--no-tree-evidence",
+    is_flag=True,
+    default=False,
+    help=(
+        "Disable tree-existence relaxation for unanchored findings; "
+        "restores diff-anchored-only evidence even when --worktree is "
+        "set or inferred from the current directory."
+    ),
+)
 @handle_errors
-def review_consolidate(path: str) -> None:
+def review_consolidate(
+    path: str, worktree: Path | None, no_tree_evidence: bool
+) -> None:
     """Validate, dedupe, and aggregate reviewer findings into a ReviewVerdict.
 
     PATH is a file path or '-' for stdin. Payload: {"documents": [...],
     "diff": "<raw unified diff text>", "reviewed_sha": "<sha>",
     "failed_reviewers": [...]} (failed_reviewers optional, default []).
+
+    --worktree sets the tree root used to accept non-diff-anchored findings
+    that still exist on disk (defaults to the current directory).
+    --no-tree-evidence disables that relaxation entirely, restoring
+    diff-anchored-only evidence regardless of --worktree or cwd.
 
     On success: exits 0, prints the ReviewVerdict as JSON to stdout.
     On failure: exits 1, prints 'field.path: message' lines to stderr.
@@ -161,11 +189,17 @@ def review_consolidate(path: str) -> None:
             click.echo(line, err=True)
         raise click.exceptions.Exit(1) from exc
 
+    if no_tree_evidence:
+        resolved_worktree = None
+    else:
+        resolved_worktree = worktree if worktree is not None else Path.cwd()
+
     diff = _build_captured_diff(parsed.diff)
     verdict = consolidate_verdict(
         parsed.documents,
         diff,
         parsed.reviewed_sha,
+        worktree=resolved_worktree,
         failed_reviewers=parsed.failed_reviewers,
     )
     click.echo(verdict.model_dump_json(indent=2))

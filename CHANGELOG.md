@@ -8,6 +8,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Unanchored reviewer findings now reach adjudication instead of being
+  silently discarded (#1632):** a finding whose `file` wasn't a key of the
+  diff's changed-file set was rejected outright as `unknown_file` before it
+  ever reached adjudication, even when the file genuinely exists in the repo
+  tree (e.g. a reviewer citing a doc or config file the diff didn't touch).
+  `consolidate_verdict`/`validate_reviewer_document` now accept an optional
+  `worktree`; when a finding's file resolves to a real path under it, the
+  finding is classified `"unanchored"` and routed into `accepted` rather than
+  `rejected` — tree-existence proves the path is real, not the evidence
+  quote, so an unanchored finding's escalation still goes through the
+  ordinary diff-based check. `cw review consolidate` gains `--worktree`
+  (defaults to the current directory) and a `--no-tree-evidence` flag to
+  disable the relaxation entirely. Omitting `worktree` everywhere keeps
+  today's `unknown_file` behavior byte-identical.
+
 - **Degraded review health now actually gates the stage (#1702):** a REVIEW
   result could carry `health.recommendation="EXIT_FOR_HUMAN_REVIEW"` — meaning
   the review itself was incomplete — and still advance to FINALIZE, because

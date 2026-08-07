@@ -378,6 +378,21 @@ def _evidence_in_claimed_lines(
     return text in window
 
 
+def _classify_unanchored_file(
+    file: str, worktree: Path | None
+) -> Literal["unanchored", "unknown_file"]:
+    """Classify a finding's file once it's known not to be a diff key (#1632).
+
+    Split out of :func:`_classify_finding` to keep that function's return
+    count under the ``PLR0911`` ceiling. ``worktree=None`` (no caller opted
+    in) or a failed tree-existence check both return ``"unknown_file"`` —
+    today's behavior, byte-identical.
+    """
+    if worktree is not None and _file_in_repo_tree(worktree, file):
+        return "unanchored"
+    return "unknown_file"
+
+
 def _classify_finding(
     finding: Finding,
     diff: CapturedDiff,
@@ -411,9 +426,7 @@ def _classify_finding(
     if _is_blank(finding.evidence):
         return "missing_evidence"
     if finding.file not in changed:
-        if worktree is not None and _file_in_repo_tree(worktree, finding.file):
-            return "unanchored"
-        return "unknown_file"
+        return _classify_unanchored_file(finding.file, worktree)
     if not _line_reference_valid(diff, finding):
         return "invalid_line_reference"
     if not _evidence_in_claimed_lines(
