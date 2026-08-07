@@ -1208,6 +1208,57 @@ class TestWriteHookContextAtomicAndLiveSession:
         remaining = json.loads((claude_dir / "cw-context.json").read_text())
         assert remaining["session_id"] == "live1234"
 
+    def test_daemon_overwrite_raises_carries_conflicting_session_id(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """GitHub #1674: the raised error names the session that blocks reuse.
+
+        Same fixture shape as the message-matching test above, but asserts on
+        the typed evidence the dispatch claim path stamps onto the task so
+        concierge recipe 1 can refuse a futile requeue against this exact
+        session.
+        """
+        from cw.config import save_state
+        from cw.exceptions import HookContextConflictError
+        from cw.models import (
+            CwState,
+            Session,
+            SessionOrigin,
+            SessionPurpose,
+            SessionStatus,
+        )
+
+        workspace = tmp_path / "workspace" / "test-client"
+        workspace.mkdir(parents=True)
+        live_sess = Session(
+            id="live1234",
+            name="test-client/auto-dev/LIVE-1",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            status=SessionStatus.ACTIVE,
+            workspace_path=workspace,
+        )
+        save_state(CwState(sessions=[live_sess]))
+
+        worktree = tmp_path / "worktree-live-guard-id"
+        claude_dir = worktree / ".claude"
+        claude_dir.mkdir(parents=True)
+        prior_context = {
+            "session_id": "live1234",
+            "session_name": "test-client/auto-dev/LIVE-1",
+            "client": "test-client",
+            "purpose": "impl",
+            "ticket_id": "LIVE-1",
+            "headless": False,
+        }
+        (claude_dir / "cw-context.json").write_text(json.dumps(prior_context))
+
+        with pytest.raises(HookContextConflictError) as excinfo:
+            self._call(worktree, origin=SessionOrigin.DAEMON)
+
+        assert excinfo.value.conflicting_session_id == "live1234"
+
     def test_daemon_overwrite_allowed_when_context_references_completed_session(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:

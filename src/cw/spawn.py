@@ -26,11 +26,11 @@ from cw.exceptions import (
     WorktreeError,
 )
 from cw.models import (
+    TERMINAL_SESSION_STATUSES,
     OrchestratorEventType,
     Session,
     SessionOrigin,
     SessionPurpose,
-    SessionStatus,
     TicketTask,
 )
 from cw.native_daemon import get_native_daemon_client, resolve_permission_mode
@@ -99,11 +99,11 @@ def _collect_prior_attempts_summary(ticket_id: str) -> list[dict[str, object]]:
     """
     try:
         state = load_state()
-        terminal = (SessionStatus.TIMED_OUT, SessionStatus.COMPLETED)
         matching = [
             s
             for s in state.sessions
-            if s.status in terminal and ticket_id_for_session(s.name) == ticket_id
+            if s.status in TERMINAL_SESSION_STATUSES
+            and ticket_id_for_session(s.name) == ticket_id
         ]
         matching.sort(key=lambda s: s.completed_at or s.started_at)
         summaries: list[dict[str, object]] = []
@@ -334,9 +334,9 @@ def _write_hook_context(
         if prior_session_id is not None:
             state = load_state()
             prior_sess = state.find_by_name_or_id(prior_session_id)
-            if prior_sess is not None and prior_sess.status not in (
-                SessionStatus.COMPLETED,
-                SessionStatus.TIMED_OUT,
+            if (
+                prior_sess is not None
+                and prior_sess.status not in TERMINAL_SESSION_STATUSES
             ):
                 msg = (
                     f"Cannot overwrite hook context: {context_path} references "
@@ -344,7 +344,9 @@ def _write_hook_context(
                     f"(status: {prior_sess.status}). "
                     "Complete or close that session before reusing this worktree."
                 )
-                raise HookContextConflictError(msg)
+                raise HookContextConflictError(
+                    msg, conflicting_session_id=prior_session_id
+                )
 
     atomic_write_text(
         settings_path,

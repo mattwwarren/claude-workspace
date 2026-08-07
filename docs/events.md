@@ -906,6 +906,44 @@ escalation latch's existing backstop instead.
 
 `correlation_id` is the `ticket_id`.
 
+### `concierge.hook_context_conflict_refused`
+
+**Emitter:** `_act_on_false_park_candidates` (`cw.reconcile.concierge`)
+**Payload:**
+```json
+{
+  "ticket_id": "<str>",
+  "client": "<str>",
+  "recipe": "false_park_requeue",
+  "session_id": "<str | null>"
+}
+```
+**Semantics:** GitHub #1674. Emitted from recipe 1 (`false_park_requeue`)
+when the row's currently-resolved session is the exact session already
+recorded on `TicketTask.hook_context_conflict_session_id` — the session whose
+still-live `.claude/cw-context.json` made the last spawn attempt raise
+`HookContextConflictError` — and that session's status is still non-terminal.
+**The PENDING requeue is skipped entirely** on this detect: unlike
+`concierge.recovery_backoff_armed` above (which defers only the *next* cycle
+and still requeues now), respawning here cannot succeed until the session is
+closed, so requeuing would burn another `attempts` increment for nothing. No
+task or session field is mutated — the row keeps its disposition and stays
+escalation-eligible exactly like a ceiling-refused row.
+
+Audit-only: **not** forwarded to the operator-attention channel, matching its
+`concierge.*` siblings. Deliberately **not** latched either (contrast
+`operator.escalation`'s one-shot `escalation_fired_at`) — it re-fires on
+every reconcile pass for as long as the row stays parked against the same
+conflicting session, which costs one event line and keeps the evidence
+current.
+
+Clears when the conflicting session goes terminal — `cw spawn close
+--confirmed-dead <id>` flips its status without changing its id, so the
+refusal predicate goes False on the next cycle — or when a newer session
+supersedes it by id. Any successful spawn also wipes the recorded id.
+
+`correlation_id` is the `ticket_id`.
+
 ### `operator.escalation`
 
 **Emitter:** `run_escalation_sweep` (`cw.reconcile.escalation`)
@@ -1295,8 +1333,10 @@ events plus `pr.action_taken`/`pr.action_failed`), `session.liveness_changed`
 `gate.auto_approved`, `gate.auto_approve_failed`, and
 `gate.auto_approve_held` — onto a distinct
 `cw-operator` SSE topic on the existing `cw_queue_events_server`, consumed
-with cursor name `"operator-channel-bridge"`. `concierge.recovered` and
-`concierge.recovery_backoff_armed` are deliberately excluded (audit-only).
+with cursor name `"operator-channel-bridge"`. `concierge.recovered`,
+`concierge.recovery_backoff_armed` and
+`concierge.hook_context_conflict_refused` are deliberately excluded
+(audit-only).
 See [`docs/operator-channel.md`](operator-channel.md) for the filter
 reference, subscription instructions, and degradation contract.
 

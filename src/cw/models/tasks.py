@@ -68,7 +68,11 @@ from cw.models.events import PrState, WatchedPr
 #      convention (#1266), not the escalation-latch convention: erasing it the
 #      moment unblock_ticket reverts the row to PENDING would destroy the
 #      exact evidence this field exists to preserve.
-DEV_QUEUE_SCHEMA_VERSION = 25
+# v26: added TicketTask.hook_context_conflict_session_id (GitHub #1674) — the
+#      session whose still-live cw-context.json made the last spawn attempt
+#      raise HookContextConflictError. Stamped by the dispatch claim path,
+#      read by concierge recipe 1 to refuse a requeue that cannot succeed.
+DEV_QUEUE_SCHEMA_VERSION = 26
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -229,6 +233,15 @@ class TicketTask(BaseModel):
     # dead-on-arrival (a legitimate stall).
     false_park_recovery_count: int = 0
     false_park_recovery_next_eligible_at: datetime | None = None
+    # The session whose still-non-terminal cw-context.json made the last spawn
+    # attempt raise HookContextConflictError (GitHub #1674). A third companion
+    # field in the same convention as the two pairs above — stamped by the
+    # dispatch claim path's narrow HookContextConflictError handler, cleared on
+    # any successful spawn. Concierge recipe 1 reads it to refuse requeuing a
+    # row whose currently-resolved session IS this one and is still
+    # non-terminal: that worktree cannot be reused until the session is closed,
+    # so every requeue burns an attempt for nothing.
+    hook_context_conflict_session_id: str | None = None
     # Hydrated GitHub PR state (merge/CI/review) persisted by the serve-tick
     # hydration pass (cw.pr_hydrate). None until first hydration or for pre-v8
     # legacy tasks. See GitHub #929.

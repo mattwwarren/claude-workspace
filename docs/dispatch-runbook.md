@@ -1051,6 +1051,23 @@ evidence (no session record, or an unlocatable transcript) never arms the
 backoff — a legitimately-stalled row is never penalized, and evidence-less
 churn stays covered by the 11.2 escalation latch below.
 
+Recipe 1 additionally **refuses** (not merely defers) a requeue that has
+already been proven impossible (#1674). A DAEMON session that dies under the
+default `reap_policy: signal_only` never gets its `Session.status` flipped,
+so the `.claude/cw-context.json` it left in the worktree keeps failing every
+reuse with `HookContextConflictError`. The dispatch claim path records the
+blocking session on the row (`hook_context_conflict_session_id`); when the
+row's currently-resolved session **is** that session and its status is still
+non-terminal, recipe 1 leaves the row parked and emits
+`concierge.hook_context_conflict_refused` instead of requeuing — otherwise
+every cycle burns another `attempts` increment for a spawn that cannot
+succeed. Clear it with `cw spawn close --confirmed-dead <id>`: that flips the
+session's status (it never changes its id), which is exactly what makes the
+refusal predicate go False on the next concierge cycle — the ticket then
+requeues normally with no separate unblock step. A fresh session superseding
+the old one by id clears it the same way, and any successful spawn wipes the
+recorded id.
+
 ### 11.2 Durable escalation latch (`cw.reconcile.escalation`)
 
 Runs **unconditionally** every reconcile tick (not gated by

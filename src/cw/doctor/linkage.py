@@ -15,7 +15,7 @@ from pydantic import ValidationError
 from cw.doctor import _deps
 from cw.doctor._shared import CheckResult
 from cw.exceptions import CwError
-from cw.models import SessionStatus
+from cw.models import TERMINAL_SESSION_STATUSES, SessionStatus
 from cw.pr_hydrate import _parse_pr_url, _repo_slug_mismatch
 from cw.reconcile import reconcile
 from cw.worktree import _git_dir, get_head_branch
@@ -24,14 +24,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.models import ClientConfig, CwState, Session
-
-
-# Session statuses that represent an expected terminal lifecycle end-state.
-# A missing worktree on a terminal session is normal (cleaned after merge);
-# only non-terminal sessions with missing worktrees indicate a potential fault.
-_TERMINAL_SESSION_STATUSES: frozenset[SessionStatus] = frozenset(
-    {SessionStatus.COMPLETED, SessionStatus.TIMED_OUT}
-)
 
 
 def _check_linkage(state: CwState) -> list[CheckResult]:
@@ -282,7 +274,7 @@ def _check_worktree_paths_sessions(
     total_checked = len(wt_paths)
     results: list[CheckResult] = []
     for session_id, wt, status in wt_paths:
-        if status in _TERMINAL_SESSION_STATUSES:
+        if status in TERMINAL_SESSION_STATUSES:
             continue
         if not wt.exists():
             results.append(

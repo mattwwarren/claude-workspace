@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import subprocess
 from datetime import UTC, datetime, timedelta
@@ -1783,6 +1784,188 @@ class TestDispatchTickSpawnErrors:
         task = queue.tasks[0]
         assert task.status == QueueItemStatus.PENDING
         assert task.session_id is None
+
+    # -- GitHub #1674: hook-context conflict stamps the conflicting session --
+    #
+    # These drive the conflict through the REAL create_worktree /
+    # _write_hook_context path rather than injecting an exception at the
+    # daemon seam: the failure only exists because a real pre-existing
+    # ``.claude/cw-context.json`` in a reused worktree references a session
+    # that is still non-terminal in cw state, so the shape must come from
+    # that code path, not from an invented mock.
+
+    _CONFLICT_SESSION_ID = "live1674"
+
+    def _seed_hook_context_conflict(self, client: ClientConfig, ticket_id: str) -> None:
+        """Provision the ticket's worktree carrying a live-session hook context.
+
+        Mirrors the incident state: a DAEMON session that died under
+        ``ReapPolicy.SIGNAL_ONLY`` never had its ``Session.status`` flipped, so
+        the ``cw-context.json`` it left behind still points at a non-terminal
+        session and blocks every reuse of that worktree.
+
+        The seeded session is deliberately named for a DIFFERENT ticket so the
+        reconcile preamble inside ``dispatch_tick`` cannot reverse-map it onto
+        the task under test and park the row before it is ever claimed.
+        """
+        from cw.worktree import create_worktree
+
+        worktree = create_worktree(
+            client,
+            f"{client.feature_branch_prefix}/{ticket_id}",
+            allow_dirty_reuse=True,
+        )
+        claude_dir = worktree / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        (claude_dir / "cw-context.json").write_text(
+            json.dumps(
+                {
+                    "session_id": self._CONFLICT_SESSION_ID,
+                    "session_name": "test-client/auto-dev/OTHER-1674",
+                    "client": client.name,
+                    "purpose": "impl",
+                    "ticket_id": "OTHER-1674",
+                    "headless": True,
+                }
+            )
+        )
+        save_state(
+            CwState(
+                sessions=[
+                    _make_daemon_session(
+                        id=self._CONFLICT_SESSION_ID,
+                        name="test-client/auto-dev/OTHER-1674",
+                        client=client.name,
+                        status=SessionStatus.ACTIVE,
+                        workspace_path=client.workspace_path,
+                        worktree_path=worktree,
+                    )
+                ]
+            )
+        )
+
+    def test_first_hook_context_conflict_reverts_to_pending_and_stamps_session_id(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        cap2_config: OrchestratorConfig,
+    ) -> None:
+        """A hook-context conflict reverts to PENDING and records WHICH session
+        blocked the worktree (#1674)."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(TicketTask(ticket_id="GEN-1674A", client="test-client"))
+        self._seed_hook_context_conflict(sample_client_config, "GEN-1674A")
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(cap2_config, native_daemon=daemon).spawned
+
+        assert spawned == 0
+        assert daemon.spawn_calls == []
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.PENDING
+        assert task.session_id is None
+        # Existing #868 spawn-error backoff is unchanged by this ticket.
+        assert task.spawn_error_count == 1
+        assert task.next_eligible_at is not None
+        assert task.hook_context_conflict_session_id == self._CONFLICT_SESSION_ID
+
+    def test_repeat_hook_context_conflict_does_not_re_stamp_backoff_differently(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        cap2_config: OrchestratorConfig,
+    ) -> None:
+        """claim.py's own retry cadence is deliberately unchanged by #1674.
+
+        The refusal lives in concierge recipe 1, not here: a repeat conflict
+        against the already-recorded session still reverts to PENDING and still
+        advances the ordinary spawn-error backoff, and the stamp is simply
+        re-affirmed.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-1674B",
+                client="test-client",
+                spawn_error_count=1,
+                hook_context_conflict_session_id=self._CONFLICT_SESSION_ID,
+            )
+        )
+        self._seed_hook_context_conflict(sample_client_config, "GEN-1674B")
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(cap2_config, native_daemon=daemon).spawned
+
+        assert spawned == 0
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.PENDING
+        assert task.spawn_error_count == 2
+        assert task.hook_context_conflict_session_id == self._CONFLICT_SESSION_ID
+
+    def test_successful_spawn_clears_hook_context_conflict_session_id(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """A successful spawn clears the stamp alongside the #868 backoff
+        fields, so a later genuine park is not refused on stale evidence."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-1674C",
+                client="test-client",
+                spawn_error_count=3,
+                hook_context_conflict_session_id="stale-conflict",
+            )
+        )
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
+
+        assert spawned == 1
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.RUNNING
+        assert task.spawn_error_count == 0
+        assert task.next_eligible_at is None
+        assert task.hook_context_conflict_session_id is None
+
+    def test_unrelated_revert_preserves_existing_hook_context_conflict_stamp(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """A revert-to-PENDING for an UNRELATED reason (here: a fleet-wide
+        usage limit) must not erase a still-live hook-context-conflict stamp.
+
+        ``_revert_claimed_task_to_pending`` is a FAILURE path: the underlying
+        phantom-locked worktree is not proven clear just because THIS attempt
+        failed for a different reason. Wiping the stamp here would let
+        concierge recipe 1 requeue the row once more against the same
+        still-live session — a narrower recurrence of the exact bug #1674
+        fixes. Only a successful spawn resets the field itself; the
+        conflicting session going terminal or being superseded by id only
+        clears concierge recipe 1's refusal predicate, not this field.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-1674D",
+                client="test-client",
+                hook_context_conflict_session_id="still-live-conflict",
+            )
+        )
+
+        daemon = FakeNativeDaemonClient()
+        daemon.raise_usage_limit = True
+
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert result.usage_limit_detected is True
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.PENDING
+        assert task.hook_context_conflict_session_id == "still-live-conflict"
 
 
 # ---------------------------------------------------------------------------
