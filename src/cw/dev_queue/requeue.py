@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING
 from cw.config import get_client
 from cw.dev_queue.crud import _APPROVABLE_STATUSES, _find_ticket
 from cw.dev_queue.lifecycle import (
+    _PLAN_SOUNDNESS_MARKER,
+    _PLAN_SPEC_MARKER,
     _emit_stage_change,
     _plan_body_signoff_ok,
     _raise_stage_high_water,
@@ -33,6 +35,8 @@ from cw.models import QueueItemStatus, Stage
 from cw.worktree import _checked_out_branch, worktree_path_for
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from cw.models import ClientConfig, TicketTask
 
 # Issue #917: --regress requires an explicit backward --stage target.
@@ -63,6 +67,19 @@ _REQUEUE_FROM_FAILED_STATUSES: frozenset[QueueItemStatus] = frozenset(
 )
 
 
+def _impl_bypass_worktree_path(task: TicketTask, client_cfg: ClientConfig) -> Path:
+    """Worktree path the impl-bypass guard would find for ``task``.
+
+    Single source for the branch-name/worktree-path formula shared by
+    :func:`_impl_bypass_plan_available` (which uses it to check for
+    ``.cw/plan.md``) and the guard's own error message in
+    :func:`_apply_requeue_stage` (which cites the same path in its refusal
+    text) -- keeps the two from drifting independently. See GitHub #1681.
+    """
+    branch = f"{client_cfg.feature_branch_prefix}/{task.ticket_id}"
+    return worktree_path_for(client_cfg, branch)
+
+
 def _impl_bypass_plan_available(task: TicketTask, client_cfg: ClientConfig) -> bool:
     """True iff an approved plan is available for a forward bypass to IMPL.
 
@@ -83,7 +100,7 @@ def _impl_bypass_plan_available(task: TicketTask, client_cfg: ClientConfig) -> b
     ``.cw/plan.md``). See GitHub #1681.
     """
     branch = f"{client_cfg.feature_branch_prefix}/{task.ticket_id}"
-    wt_path = worktree_path_for(client_cfg, branch)
+    wt_path = _impl_bypass_worktree_path(task, client_cfg)
     if wt_path.exists() and _checked_out_branch(wt_path) == branch:
         plan_path = wt_path / ".cw" / "plan.md"
         try:
@@ -169,14 +186,12 @@ def _apply_requeue_stage(
         and target_idx > current_idx
         and not _impl_bypass_plan_available(task, client_cfg)
     ):
-        wt_path = worktree_path_for(
-            client_cfg, f"{client_cfg.feature_branch_prefix}/{task.ticket_id}"
-        )
+        wt_path = _impl_bypass_worktree_path(task, client_cfg)
         msg = (
             f"Cannot requeue ticket '{task.ticket_id}' to stage 'impl':"
             f" no approved plan is available. '{wt_path / '.cw' / 'plan.md'}'"
             " is missing or stale, and no reviewed plan comment"
-            " ('<!-- plan-spec-reviewed' + '<!-- plan-soundness-reviewed')"
+            f" ('{_PLAN_SPEC_MARKER}' + '{_PLAN_SOUNDNESS_MARKER}')"
             " was found on the tracker. Let Stage 1 (plan) run and post its"
             " approved plan first, or requeue at --stage plan instead."
         )
@@ -283,8 +298,8 @@ def requeue_ticket(
         regressed = _apply_requeue_stage(
             task,
             stages,
-            stage_override,
-            client_cfg,
+            stage_override=stage_override,
+            client_cfg=client_cfg,
             allow_regress=allow_regress,
         )
 

@@ -8106,7 +8106,13 @@ class TestStageHighWaterStamping:
         client_cfg = ClientConfig(
             name="test-client", workspace_path=Path("test-workspace")
         )
-        _apply_requeue_stage(task, stages, "harden", client_cfg, allow_regress=True)
+        _apply_requeue_stage(
+            task,
+            stages,
+            stage_override="harden",
+            client_cfg=client_cfg,
+            allow_regress=True,
+        )
         assert task.stage_high_water == Stage.IMPL
 
     def test_apply_requeue_stage_forward_raises_high_water(self) -> None:
@@ -8119,7 +8125,13 @@ class TestStageHighWaterStamping:
         client_cfg = ClientConfig(
             name="test-client", workspace_path=Path("test-workspace")
         )
-        _apply_requeue_stage(task, stages, "review", client_cfg, allow_regress=False)
+        _apply_requeue_stage(
+            task,
+            stages,
+            stage_override="review",
+            client_cfg=client_cfg,
+            allow_regress=False,
+        )
         assert task.stage_high_water == Stage.REVIEW
 
     def test_apply_requeue_stage_forward_does_not_lower_high_water(self) -> None:
@@ -8132,7 +8144,13 @@ class TestStageHighWaterStamping:
         client_cfg = ClientConfig(
             name="test-client", workspace_path=Path("test-workspace")
         )
-        _apply_requeue_stage(task, stages, "review", client_cfg, allow_regress=False)
+        _apply_requeue_stage(
+            task,
+            stages,
+            stage_override="review",
+            client_cfg=client_cfg,
+            allow_regress=False,
+        )
         assert task.stage_high_water == Stage.FINALIZE
 
 
