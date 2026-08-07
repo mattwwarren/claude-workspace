@@ -9524,12 +9524,25 @@ class TestApplyStagedDecision:
     # -- review-health gate (#1702) --------------------------------------
 
     def test_stage_complete_review_health_gate_parks_without_signoff(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
         """#1702: Rule 3 at REVIEW with health.recommendation=EXIT_FOR_HUMAN_REVIEW
-        parks even in a lane with no independent signoff rule configured."""
+        parks even in a lane with no independent signoff rule configured.
+
+        Also asserts the SESSION_NEEDS_ATTENTION payload identifies degraded
+        review health as the park reason (acceptance criterion 6), mirroring
+        the sibling gates' own event-content assertions (e.g.
+        test_scope_gated_large_tier_emits_session_needs_attention).
+        """
         from cw.dev_queue import REVIEW_HEALTH_GATE_DISPOSITION
         from cw.dispatch import apply_staged_decision
+
+        attention = capture_events(
+            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
 
         task = self._make_running_task("RHG-SC-1", stage=Stage.REVIEW)
         assert task.signoff is None
@@ -9549,6 +9562,13 @@ class TestApplyStagedDecision:
         assert task.disposition == REVIEW_HEALTH_GATE_DISPOSITION
         assert task.disposition == "review_health_gate"
         assert task.stage == Stage.REVIEW  # not advanced to FINALIZE
+
+        assert len(attention) == 1
+        event_type, payload, correlation_id = attention[0]
+        assert event_type == OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        assert payload["paused_status"] == "review_health_gate"
+        assert payload["ticket_id"] == "RHG-SC-1"
+        assert correlation_id == "RHG-SC-1"
 
     def test_stage_complete_impl_stage_with_degraded_health_advances_unchanged(
         self, tmp_dispatch_dirs: Path, tmp_path: Path
@@ -9578,7 +9598,12 @@ class TestApplyStagedDecision:
 
         assert task.status == QueueItemStatus.PENDING
         assert task.stage == Stage.REVIEW
-        assert task.disposition != "review_health_gate"
+        # Exact value, not a negative comparison: a plain advance clears
+        # disposition to None (transition_task_status's _RESET_DISPOSITION_STATUSES
+        # branch, via _advance_task_pointer -> transition_task_status(..., PENDING)
+        # with no disposition kwarg) -- the precise pre-#1702 baseline, not just
+        # "anything other than the literal review_health_gate string".
+        assert task.disposition is None
 
     def test_stage_complete_recommendation_proceed_advances_unchanged(
         self, tmp_dispatch_dirs: Path, tmp_path: Path
