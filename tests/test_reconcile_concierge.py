@@ -275,6 +275,28 @@ class TestRecipeFalseParkRequeue:
         assert store.tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
         assert store.tasks[0].disposition == "dirty_worktree"
 
+    def test_review_health_gate_disposition_untouched(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """#1702: a dead-session row parked ``review_health_gate`` is NOT
+        auto-recovered by the false-park requeue recipe.
+
+        Auto-recovering it would misclassify a real review-coverage finding as
+        a technical/session-death glitch, defeating the gate's purpose.
+        """
+        task = _make_task(disposition="review_health_gate", attempts=1)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[]))
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config()
+        )
+
+        assert recovered == []
+        store = load_dev_queue()
+        assert store.tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+        assert store.tasks[0].disposition == "review_health_gate"
+
     def test_ceiling_refusal_leaves_row_parked(self, tmp_config_dir: Path) -> None:
         """A1/A2: at the global attempt ceiling, the row is refused, not requeued."""
         task = _make_task(disposition="stalled_retry_cap_parked", attempts=10)

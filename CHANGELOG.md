@@ -6,7 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [1.28.0] - 2026-08-07
+### Fixed
+
+- **Degraded review health now actually gates the stage (#1702):** a REVIEW
+  result could carry `health.recommendation="EXIT_FOR_HUMAN_REVIEW"` — meaning
+  the review itself was incomplete — and still advance to FINALIZE, because
+  dispatch routed on `status="stage_complete"` alone and never consulted
+  health. In one nine-pass sample 8 of 9 passes derived
+  `EXIT_FOR_HUMAN_REVIEW` and all 9 were eligible to advance; whether a lane
+  stopped depended on it happening to carry an unrelated signoff rule, so
+  safety rested on configuration coincidence. A REVIEW-stage advance now parks
+  `BLOCKED_ON_USER` with the distinct `review_health_gate` disposition, which
+  is batch-releasable via `dev-queue drain` (re-running review clears it,
+  unlike a deliberate force-hold) and escalation-eligible so it pages rather
+  than sits. `recommendation="PROCEED"` routing is byte-identical to before,
+  and a missing or malformed `health` payload degrades to today's behavior
+  rather than to a park. Deliberately scoped to REVIEW: the local/aider IMPL
+  path hardcodes `EXIT_FOR_HUMAN_REVIEW` as a pessimistic default (#1580)
+  rather than deriving it, so gating IMPL would have permanently stalled
+  unattended `IMPL → REVIEW` auto-advance on LOCAL-backend clients.
 
 ### Fixed
 
