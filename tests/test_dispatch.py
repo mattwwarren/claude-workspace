@@ -8973,6 +8973,65 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.RUNNING
         assert task.stage == Stage.FINALIZE
 
+    def test_earlier_stage_blocked_sentinel_does_not_self_heal_regress(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """GitHub #1676 follow-up: Rule 5a's FINALIZE self-heal regress must
+        not fire on an earlier-stage report -- 'agent_block' is FINALIZE's own
+        regress-eligible reason, but a sentinel reporting stage_reached=
+        stage1_plan never actually failed at FINALIZE. Since the #1676
+        narrowing lets this earlier-stage 'blocked' sentinel proceed to the
+        Rule 1-6 table instead of being refused, Rule 5a must not mistake it
+        for a genuine FINALIZE failure and silently regress task.stage to
+        IMPL -- that would mask the true (PLAN-stage) failure the sentinel
+        already reported."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("EARLIER-FIN-1", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "stage_reached": "stage1_plan",
+            "blocker": {"stage": "s1_plan", "reason": "agent_block"},
+        }
+
+        routed = apply_staged_decision(
+            task, "blocked", last_result, self._clients(tmp_path)
+        )
+
+        assert routed is True
+        assert task.stage == Stage.FINALIZE  # NOT regressed to IMPL
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.regress_attempts == 0  # self-heal never fired
+
+    def test_earlier_stage_scope_gated_approval_sentinel_does_not_auto_advance(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """GitHub #1676 follow-up: Rule 1's small-tier auto-advance must not
+        fire on an earlier-stage report. A sentinel reporting stage_reached=
+        stage1_plan while task.stage is IMPL never actually reached IMPL, so
+        resolving 'small tier' from its scope block and auto-advancing
+        task.stage to REVIEW would silently skip the IMPL stage's work.
+        Contrast with test_route_scope_gated_approval_1091_shaped_small_tier_
+        auto_advances, whose last_result carries no stage_reached at all
+        (bypass position) and must keep auto-advancing unaffected by this
+        fix."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("EARLIER-SCOPE-2", stage=Stage.IMPL)
+        last_result: dict[str, object] = {
+            "status": "plan_pending_approval",
+            "stage_reached": "stage1_plan",
+            "scope": {"tier": "small", "forbidden_touched": False},
+        }
+
+        routed = apply_staged_decision(
+            task, "plan_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert routed is True
+        assert task.stage == Stage.IMPL  # NOT advanced to REVIEW
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+
     def test_unresolvable_stage_position_falls_back_to_refuse(
         self, tmp_dispatch_dirs: Path, tmp_path: Path
     ) -> None:
