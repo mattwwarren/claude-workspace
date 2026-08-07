@@ -582,6 +582,18 @@ open enum; consumers MUST tolerate unknown values. Known values:
   BLOCKED_ON_USER. Deliberately distinct from `"plan_parked"`, which covers
   the unrelated v4 ambiguities/premises park. `breadcrumbs` empty. Operator
   should review the session's scope/plan and approve or redirect. See #1302.
+- `"review_health_gate"` — a REVIEW-stage sentinel reported
+  `health.recommendation == "EXIT_FOR_HUMAN_REVIEW"`: the review that just ran
+  did not vouch for its own coverage (e.g. a reviewer document with
+  `status="degraded"`). The task is BLOCKED_ON_USER with
+  `disposition="review_health_gate"`, at its unchanged REVIEW stage.
+  Deliberately REVIEW-scoped: `local_runner.synthesize_git_result` hardcodes
+  the same recommendation on its IMPL success path as an honest "I am not a
+  reviewer" default (#1580), which is not a degraded-review signal and must
+  keep auto-advancing. `breadcrumbs` empty. Operator recovery is to re-run
+  review — `cw dev-queue requeue` (or `cw dev-queue drain`, which selects this
+  disposition); `cw dev-queue approve` deliberately fails closed here, because
+  there is nothing shippable to authorize until review is re-run. See #1702.
 
 `correlation_id` is the `ticket_id` when resolvable, `null` otherwise.
 A push notification is fired for most emissions (via `fire_push_notification`)
