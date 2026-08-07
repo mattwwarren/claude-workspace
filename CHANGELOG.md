@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **OpenCode executor backend foundation (#1669):** `opencode` is now a
+  first-class executor backend, selectable via `backend: opencode` in
+  `StageExecutorConfig`. Spawn is fire-and-forget (mirroring `LocalExecutor`):
+  `opencode run --format json --pure --dir <worktree>` is launched as a
+  detached subprocess, PID + start-time are captured on `LocalLivenessHandle`,
+  and the session is left ACTIVE until `reconcile/local` harvest detects the
+  dead process and parses the JSONL log for the `<<<AUTO_DEV_RESULT>>>`
+  sentinel. No `--output-schema` (opencode has none); the sentinel pattern is
+  used instead, like the `claude-native` and `local` backends. `--pure` is the
+  mechanical permission profile (built-in tools only, never `--auto`).
+  Cancellation does NOT kill the process tree — cw stops tracking + parks the
+  task; the orchestrator session kills strays. Stage-specific adapters
+  (finalize/plan/impl) are follow-on tickets (#1670, #1671). Part of #1668.
+
 ## [1.28.0] - 2026-08-07
 
 ### Fixed
