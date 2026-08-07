@@ -79,3 +79,41 @@ class TestAssertNoSecretsLeaked:
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         # Ordinary review output with no secret-shaped substrings.
         _assert_no_secrets_leaked("Reviewer found a naming nit on line 5.")
+
+    def test_codex_auth_token_name_raises_at_length(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setenv("CODEX_AUTH_TOKEN", "abcdefghijklmnopqrstuvwx")
+        try:
+            _assert_no_secrets_leaked(
+                "output contains abcdefghijklmnopqrstuvwx here"
+            )
+        except AssertionError:
+            return
+        msg = "expected AssertionError for leaked CODEX_AUTH_TOKEN value"
+        raise AssertionError(msg)
+
+    def test_codex_short_credential_named_var_raises_under_floor(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setenv("CODEX_API_KEY", "abc")
+        try:
+            _assert_no_secrets_leaked("output contains abc here")
+        except AssertionError:
+            return
+        msg = "expected AssertionError for short CODEX_API_KEY value"
+        raise AssertionError(msg)
+
+    def test_codex_generic_short_values_pass_clean(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setenv("CODEX_FEATURE_FLAG", "1")
+        monkeypatch.setenv("CODEX_LEGACY_MODE", "0")
+        monkeypatch.setenv("CODEX_WORKDIR", "/opt/codex/bin")
+        monkeypatch.setenv("CODEX_REQUEST_ID", "req_9f2ab3")
+        _assert_no_secrets_leaked(
+            "flag=1 mode=0 workdir=/opt/codex/bin request_id=req_9f2ab3"
+        )
