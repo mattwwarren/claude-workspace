@@ -56,7 +56,7 @@ ExecutorFailureCategory = Literal[
 # Closed taxonomy of executor backends (#1330 item 3) — matches the sibling
 # ExecutorFailureCategory's use of Literal (not StrEnum) as this file's local
 # convention for closed string taxonomies.
-ExecutorName = Literal["codex", "aider", "claude"]
+ExecutorName = Literal["codex", "aider", "claude", "opencode"]
 
 # Every bounded excerpt field is capped at this many characters. Matches
 # codex_runner.py's stderr[-4000:] and local_runner's _AIDER_LOG_TAIL_CHARS
@@ -100,32 +100,45 @@ def redact(text: str) -> str:
 
 _REDACTED_MESSAGE_RE = re.compile(r"^<redacted: \d+ chars>$")
 
+# Minimum argv length for opencode prompt redaction: binary + subcommand + prompt.
+_OPENCODE_MIN_REDACT_ARGV = 3
+
 
 def redact_argv(argv: list[str], *, executor_name: ExecutorName) -> list[str]:
     """Return an executor-appropriate sanitized copy of *argv*.
 
     Codex/Claude argvs are content-free (the prompt travels over stdin), so
     they pass through unchanged. Aider embeds the full ticket+plan text in its
-    ``--message`` value; that value is replaced wholesale with a
-    ``<redacted: N chars>`` placeholder rather than regex-scrubbed — selectively
-    redacting free-form ticket text is too risky, so it is dropped entirely.
+    ``--message`` value; opencode embeds it as the trailing positional argument.
+    Both are replaced wholesale with a ``<redacted: N chars>`` placeholder
+    rather than regex-scrubbed — selectively redacting free-form ticket text is
+    too risky, so it is dropped entirely.
 
-    Idempotent (#1330 item 3/4): after one redaction, ``"--message"`` is still
-    present in *argv* (only its value changed), so a second pass must not
-    re-wrap the already-redacted placeholder — that would silently corrupt the
-    recorded original length. This guard matters both for a caller that
-    accidentally redacts twice, and for ``ExecutorFailure.model_validate_json``
-    reloading an already-persisted bundle through the model's own
-    ``argv_sanitized`` field_validator.
+    Idempotent (#1330 item 3/4): after one redaction, the redacted value
+    matches ``_REDACTED_MESSAGE_RE``, so a second pass must not re-wrap the
+    already-redacted placeholder — that would silently corrupt the recorded
+    original length. This guard matters both for a caller that accidentally
+    redacts twice, and for ``ExecutorFailure.model_validate_json`` reloading an
+    already-persisted bundle through the model's own ``argv_sanitized``
+    field_validator.
     """
-    if executor_name != "aider" or "--message" not in argv:
-        return list(argv)
-    out = list(argv)
-    idx = out.index("--message")
-    if idx + 1 < len(out) and not _REDACTED_MESSAGE_RE.match(out[idx + 1]):
-        value = out[idx + 1]
-        out[idx + 1] = f"<redacted: {len(value)} chars>"
-    return out
+    if executor_name == "aider" and "--message" in argv:
+        out = list(argv)
+        idx = out.index("--message")
+        if idx + 1 < len(out) and not _REDACTED_MESSAGE_RE.match(out[idx + 1]):
+            value = out[idx + 1]
+            out[idx + 1] = f"<redacted: {len(value)} chars>"
+        return out
+    if executor_name == "opencode" and len(argv) >= _OPENCODE_MIN_REDACT_ARGV:
+        out = list(argv)
+        last_idx = len(out) - 1
+        if not out[last_idx].startswith("-") and not _REDACTED_MESSAGE_RE.match(
+            out[last_idx]
+        ):
+            value = out[last_idx]
+            out[last_idx] = f"<redacted: {len(value)} chars>"
+        return out
+    return list(argv)
 
 
 class ExecutorFailure(BaseModel):

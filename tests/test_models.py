@@ -1650,6 +1650,7 @@ class TestPackageExportCompleteness:
             "LivenessBucket",
             "LocalLivenessHandle",
             "OCCUPIED_LANE_STATUSES",
+            "OPENCODE_BACKEND",
             "OperatorChannelForward",
             "OrchestratorConfig",
             "OrchestratorEvent",

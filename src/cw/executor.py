@@ -46,6 +46,7 @@ from cw.models import (
     CLAUDE_NATIVE_BACKEND,
     CODEX_BACKEND,
     LOCAL_BACKEND,
+    OPENCODE_BACKEND,
     ClientConfig,
     LastResultSource,
     LocalLivenessHandle,
@@ -58,6 +59,21 @@ from cw.models import (
     Stage,
     StageExecutorConfig,
     TicketTask,
+)
+from cw.opencode_runner import (
+    OPENCODE_NOT_FOUND,
+    OpencodeRunner,
+    RealOpencodeRunner,
+    opencode_available,
+)
+from cw.opencode_runner import (
+    build_argv as build_opencode_argv,
+)
+from cw.opencode_runner import (
+    build_env as build_opencode_env,
+)
+from cw.opencode_runner import (
+    make_blocked as make_opencode_blocked,
 )
 from cw.reconcile import AUTO_DEV_LABEL_PREFIX
 from cw.result import emit_result_locked
@@ -192,6 +208,8 @@ def resolve_executor(
         return CodexExecutor(config=config)
     if config.backend == CLAUDE_NATIVE_BACKEND:
         return ClaudeNativeExecutor(config=config, native_daemon=native_daemon)
+    if config.backend == OPENCODE_BACKEND:
+        return OpencodeExecutor(config=config)
     msg = f"unknown executor backend: {config.backend!r}"
     raise ValueError(msg)
 
@@ -526,6 +544,210 @@ def _persist_aider_runtime_error_diagnostics(
     persist_diagnostics_bundle(
         session_id=session_id,
         role_slug="aider",
+        failure=failure,
+    )
+
+
+class _OpencodePreflightOK(NamedTuple):
+    """Resolved launch parameters returned by _opencode_preflight on success."""
+
+    argv: list[str]
+    env: dict[str, str]
+
+
+def _opencode_preflight(
+    config: StageExecutorConfig,
+    task: TicketTask,
+    worktree: Path,
+    client: ClientConfig,
+) -> AutoDevResult | _OpencodePreflightOK:
+    """Run OpencodeExecutor pre-flight checks (binary + plan availability).
+
+    Returns a blocked ``AutoDevResult`` on the first failing check; returns
+    ``_OpencodePreflightOK`` with the resolved argv + env when all checks pass.
+    Mirrors ``_local_preflight``'s discriminated return shape.
+    """
+    if not opencode_available():
+        return make_opencode_blocked(
+            ticket_id=task.ticket_id,
+            worktree=worktree,
+            reason=OPENCODE_NOT_FOUND,
+            retry_eligible=True,
+            retry_delay_seconds=0,
+        )
+    plan_fetcher: PlanFetcher | None = None
+    if resolve_tracker(client.workspace_path) == TRACKER_GITHUB_ISSUES:
+        plan_fetcher = GithubIssuePlanFetcher()
+    task_message = build_task_message(
+        worktree,
+        ticket_id=task.ticket_id,
+        plan_fetcher=plan_fetcher,
+    )
+    if task_message is None:
+        return make_opencode_blocked(
+            ticket_id=task.ticket_id,
+            worktree=worktree,
+            reason=PLAN_MISSING,
+        )
+    return _OpencodePreflightOK(
+        argv=build_opencode_argv(config.model, worktree, task_message),
+        env=build_opencode_env(),
+    )
+
+
+class OpencodeExecutor:
+    """StageExecutor backed by a fire-and-forget opencode subprocess (#1669).
+
+    spawn() is non-blocking on the launch path: after synchronous pre-flight
+    checks, it launches opencode via ``OpencodeRunner.launch`` (Popen, no wait),
+    records a ``Session.local_liveness`` handle (PID + start-time), leaves the
+    session ACTIVE, and returns the sid immediately. The opencode run completes
+    asynchronously; reconcile/local harvest later detects the dead process,
+    parses the JSONL log for the sentinel, and completes the session.
+
+    Pre-flight failures (binary missing, plan missing) stay synchronous: they
+    persist a blocked result to Session.last_result via the door
+    (``emit_result_locked``, source=EXECUTOR_DIRECT — RFC 0012 A2), mark the
+    session COMPLETED, and emit SESSION_COMPLETED before returning.
+
+    opencode has no ``--output-schema`` (probe-confirmed, #1669 R3); the result
+    travels as free-form text in ``text`` event payloads, harvested via the
+    ``<<<AUTO_DEV_RESULT>>>`` sentinel pattern. Appropriate only for
+    max_parallel=1 lanes (mirrors CodexExecutor).
+    """
+
+    def __init__(
+        self,
+        *,
+        config: StageExecutorConfig,
+        runner: OpencodeRunner | None = None,
+    ) -> None:
+        self._config = config
+        self._runner: OpencodeRunner = (
+            runner if runner is not None else RealOpencodeRunner()
+        )
+
+    def spawn(
+        self,
+        *,
+        stage: Stage,
+        task: TicketTask,
+        worktree: Path,
+        client: ClientConfig,
+        wall_clock_budget_seconds: int | None = None,
+        parent: str | None = None,
+    ) -> str:
+        del parent, wall_clock_budget_seconds
+        sess = Session(
+            name=f"{client.name}/{AUTO_DEV_LABEL_PREFIX}{task.ticket_id}",
+            client=client.name,
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            workspace_path=client.workspace_path,
+            worktree_path=worktree,
+            stage=stage,
+            lane=task.lane,
+        )
+        sid = sess.id
+        with sessions_lock():
+            state = load_state()
+            state.sessions.append(sess)
+            save_state(state)
+
+        preflight = _opencode_preflight(self._config, task, worktree, client)
+        argv: list[str] = []
+        try:
+            if isinstance(preflight, _OpencodePreflightOK):
+                argv = preflight.argv
+                proc = self._runner.launch(worktree, argv, preflight.env)
+                start_time_ns = read_process_start_time_ns(proc.pid)
+                if start_time_ns is not None:
+                    with sessions_lock():
+                        state = load_state()
+                        target = next((s for s in state.sessions if s.id == sid), None)
+                        if target is not None:
+                            target.local_liveness = LocalLivenessHandle(
+                                pid=proc.pid,
+                                start_time_ns=start_time_ns,
+                            )
+                            save_state(state)
+                    return sid
+                with contextlib.suppress(OSError):
+                    proc.kill()
+                    proc.wait()
+                liveness_detail = f"process {proc.pid} start-time unavailable"
+                _persist_opencode_runtime_error_diagnostics(
+                    session_id=sid, argv=argv, details=liveness_detail
+                )
+                completion_result = make_opencode_blocked(
+                    ticket_id=task.ticket_id,
+                    worktree=worktree,
+                    reason=LIVENESS_UNAVAILABLE,
+                    details=append_diagnostics_pointer(liveness_detail, session_id=sid),
+                )
+            else:
+                completion_result = preflight
+
+            with sessions_lock():
+                _complete_session_via_door(
+                    sid=sid, payload=completion_result.model_dump(mode="json")
+                )
+            _record_orchestrator_event(
+                OrchestratorEventType.SESSION_COMPLETED,
+                {
+                    "session_id": sid,
+                    "ticket_id": task.ticket_id,
+                    "session_name": sess.name,
+                },
+            )
+        except Exception:
+            unexpected_error_detail = "unexpected error during opencode launch"
+            _persist_opencode_runtime_error_diagnostics(
+                session_id=sid,
+                argv=argv,
+                details=unexpected_error_detail,
+            )
+            with sessions_lock():
+                _complete_session_via_door(
+                    sid=sid,
+                    payload=make_opencode_blocked(
+                        ticket_id=task.ticket_id,
+                        worktree=worktree,
+                        reason=UNEXPECTED_ERROR,
+                        details=append_diagnostics_pointer(
+                            unexpected_error_detail, session_id=sid
+                        ),
+                    ).model_dump(mode="json"),
+                    guard_already_completed=True,
+                )
+            raise
+
+        return sid
+
+    def stage_sentinel_schema(self, _stage: Stage) -> dict[str, Any]:
+        return AutoDevResult.model_json_schema()
+
+
+def _persist_opencode_runtime_error_diagnostics(
+    *, session_id: str, argv: list[str], details: str
+) -> None:
+    """Write a ``runtime_error`` diagnostics bundle for an OpencodeExecutor failure.
+
+    Mirrors ``_persist_aider_runtime_error_diagnostics``. *argv* is passed
+    through ``redact_argv`` (executor_name="opencode") which redacts the
+    trailing prompt positional wholesale (#1669). Never raises.
+    """
+    failure = build_executor_failure(
+        category="runtime_error",
+        executor_name="opencode",
+        session_id=session_id,
+        argv=argv,
+        stdout_excerpt="",
+        stderr_excerpt=details,
+    )
+    persist_diagnostics_bundle(
+        session_id=session_id,
+        role_slug="opencode",
         failure=failure,
     )
 

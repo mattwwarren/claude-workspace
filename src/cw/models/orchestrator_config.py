@@ -82,6 +82,7 @@ DEFAULT_GLOBAL_ATTEMPT_CEILING = 10
 CLAUDE_NATIVE_BACKEND: str = "claude-native"
 LOCAL_BACKEND: str = "local"
 CODEX_BACKEND: str = "codex"
+OPENCODE_BACKEND: str = "opencode"
 
 # Relative path of the per-worktree materialized ticket context, shared by
 # dispatch's pre-spawn invalidation (#1046) and local_runner's prompt builder

@@ -5,6 +5,7 @@ RFC 0005 A2 / F3.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
@@ -16,6 +17,7 @@ from cw.exceptions import EmitSessionNotFoundError
 from cw.executor import (
     ClaudeNativeExecutor,
     LocalExecutor,
+    OpencodeExecutor,
     StageExecutor,
     _local_preflight,
     _PreflightOK,
@@ -38,6 +40,7 @@ from cw.local_runner import (
 from cw.models import (
     CLAUDE_NATIVE_BACKEND,
     LOCAL_BACKEND,
+    OPENCODE_BACKEND,
     ClientConfig,
     LaneConfig,
     LastResultSource,
@@ -48,12 +51,16 @@ from cw.models import (
     StagePipelineConfig,
     TicketTask,
 )
+from cw.opencode_runner import (
+    OPENCODE_NOT_FOUND,
+    FakeOpencodeRunner,
+    OpencodeRunner,
+)
 from cw.result import EmitOutcome
 from tests.conftest import find_completed_session
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from cw.native_daemon import FakeNativeDaemonClient
 
@@ -1178,3 +1185,200 @@ def test_local_preflight_ok_model_none_defaults_to_empty_string(
 
     assert isinstance(result, _PreflightOK)
     assert result.model == ""
+
+
+# ---------------------------------------------------------------------------
+# OpencodeExecutor (#1669)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_executor_opencode(tmp_config_dir: Path) -> None:
+    """resolve_executor returns OpencodeExecutor for OPENCODE_BACKEND."""
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
+    client = ClientConfig(
+        name="test",
+        workspace_path=Path("/tmp"),
+        pipeline=StagePipelineConfig(
+            executors={Stage.IMPL: StageExecutorConfig(backend=OPENCODE_BACKEND)}
+        ),
+    )
+    executor = resolve_executor(task, client)
+    assert isinstance(executor, OpencodeExecutor)
+
+
+def test_opencode_executor_blocked_binary_missing(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """opencode_available() is False → blocked/opencode_not_found."""
+    worktree = make_git_repo("wt-opencode-binary-missing")
+    fake_runner = FakeOpencodeRunner()
+    config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
+    executor = OpencodeExecutor(config=config, runner=fake_runner)
+    client = ClientConfig(name="test", workspace_path=worktree)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
+
+    with patch("cw.executor.opencode_available", return_value=False):
+        executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+
+    assert len(fake_runner.calls) == 0
+    state = load_state()
+    session = find_completed_session(state)
+    assert session.last_result_source == LastResultSource.EXECUTOR_DIRECT
+    result = AutoDevResult.model_validate(session.last_result)
+    assert result.status == "blocked"
+    assert result.blocker is not None
+    assert result.blocker.reason == OPENCODE_NOT_FOUND
+    assert result.blocker.retry_eligible is True
+
+
+def test_opencode_executor_blocked_plan_missing(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Absent .cw/plan.md → blocked/plan_missing."""
+    worktree = make_git_repo("wt-opencode-plan-missing")
+    fake_runner = FakeOpencodeRunner()
+    config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
+    executor = OpencodeExecutor(config=config, runner=fake_runner)
+    client = ClientConfig(name="test", workspace_path=worktree)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
+
+    with patch("cw.executor.opencode_available", return_value=True):
+        executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+
+    assert len(fake_runner.calls) == 0
+    state = load_state()
+    session = find_completed_session(state)
+    result = AutoDevResult.model_validate(session.last_result)
+    assert result.status == "blocked"
+    assert result.blocker is not None
+    assert result.blocker.reason == PLAN_MISSING
+
+
+def test_opencode_executor_spawn_runner_path(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Happy path: pre-flight passes → launch() called, session left ACTIVE.
+
+    Fire-and-forget: liveness handle stored, no result written, session ACTIVE.
+    """
+    worktree = make_git_repo("wt-opencode-runner-path")
+    cw_dir = worktree / ".cw"
+    cw_dir.mkdir(exist_ok=True)
+    (cw_dir / "plan.md").write_text("do the thing", encoding="utf-8")
+
+    fake_runner = FakeOpencodeRunner()
+    config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="genhealth/glm-5.2")
+    executor = OpencodeExecutor(config=config, runner=fake_runner)
+    client = ClientConfig(name="test", workspace_path=worktree)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
+
+    try:
+        with patch("cw.executor.opencode_available", return_value=True):
+            sid = executor.spawn(
+                stage=Stage.IMPL, task=task, worktree=worktree, client=client
+            )
+
+        assert len(fake_runner.calls) == 1
+        call = fake_runner.calls[0]
+        assert call["argv"][0] == "opencode"
+        assert "--format" in call["argv"]
+        assert "--pure" in call["argv"]
+        assert "--model" in call["argv"]
+
+        state = load_state()
+        session = next(s for s in state.sessions if s.id == sid)
+        assert session.status == SessionStatus.ACTIVE
+        assert session.local_liveness is not None
+        assert session.local_liveness.pid > 0
+        assert session.last_result is None
+    finally:
+        for proc in fake_runner.procs:
+            proc.kill()
+            proc.wait()
+
+
+def test_opencode_executor_spawn_liveness_unavailable(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """start_time None → blocked/liveness_unavailable, session COMPLETED."""
+    worktree = make_git_repo("wt-opencode-liveness-unavailable")
+    cw_dir = worktree / ".cw"
+    cw_dir.mkdir(exist_ok=True)
+    (cw_dir / "plan.md").write_text("do the thing", encoding="utf-8")
+
+    fake_runner = FakeOpencodeRunner()
+    config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
+    executor = OpencodeExecutor(config=config, runner=fake_runner)
+    client = ClientConfig(name="test", workspace_path=worktree)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
+
+    try:
+        with (
+            patch("cw.executor.opencode_available", return_value=True),
+            patch("cw.executor.read_process_start_time_ns", return_value=None),
+        ):
+            executor.spawn(
+                stage=Stage.IMPL, task=task, worktree=worktree, client=client
+            )
+
+        state = load_state()
+        session = find_completed_session(state)
+        result = AutoDevResult.model_validate(session.last_result)
+        assert result.status == "blocked"
+        assert result.blocker is not None
+        assert result.blocker.reason == LIVENESS_UNAVAILABLE
+    finally:
+        for proc in fake_runner.procs:
+            proc.kill()
+            proc.wait()
+
+
+def test_opencode_executor_exception_handler(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Unexpected error during launch → blocked/unexpected_error, session COMPLETED."""
+
+    _boom_msg = "boom"
+
+    class _ExplodingRunner:
+        def launch(self, *args: object) -> object:
+            raise RuntimeError(_boom_msg)
+
+    worktree = make_git_repo("wt-opencode-explode")
+    cw_dir = worktree / ".cw"
+    cw_dir.mkdir(exist_ok=True)
+    (cw_dir / "plan.md").write_text("do the thing", encoding="utf-8")
+
+    config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
+    executor = OpencodeExecutor(
+        config=config, runner=cast("OpencodeRunner", _ExplodingRunner())
+    )
+    client = ClientConfig(name="test", workspace_path=worktree)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
+
+    with (
+        patch("cw.executor.opencode_available", return_value=True),
+        pytest.raises(RuntimeError, match=_boom_msg),
+    ):
+        executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+
+    state = load_state()
+    session = find_completed_session(state)
+    result = AutoDevResult.model_validate(session.last_result)
+    assert result.status == "blocked"
+    assert result.blocker is not None
+    assert result.blocker.reason == UNEXPECTED_ERROR
+
+
+def test_opencode_executor_stage_sentinel_schema(tmp_path: Path) -> None:
+    """stage_sentinel_schema returns AutoDevResult JSON schema."""
+    config = StageExecutorConfig(backend=OPENCODE_BACKEND)
+    executor = OpencodeExecutor(config=config)
+    schema = executor.stage_sentinel_schema(Stage.IMPL)
+    assert "properties" in schema
+    assert "status" in schema["properties"]
