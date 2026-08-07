@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.28.0] - 2026-08-07
+
 ### Fixed
 
 - **`requeue --stage impl` could bypass to an unrunnable impl session without
