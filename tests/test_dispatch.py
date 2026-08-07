@@ -9004,7 +9004,10 @@ class TestApplyStagedDecision:
         assert task.regress_attempts == 0  # self-heal never fired
 
     def test_earlier_stage_scope_gated_approval_sentinel_does_not_auto_advance(
-        self, tmp_dispatch_dirs: Path, tmp_path: Path
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
     ) -> None:
         """GitHub #1676 follow-up: Rule 1's small-tier auto-advance must not
         fire on an earlier-stage report. A sentinel reporting stage_reached=
@@ -9015,9 +9018,12 @@ class TestApplyStagedDecision:
         auto_advances, whose last_result carries no stage_reached at all
         (bypass position) and must keep auto-advancing unaffected by this
         fix."""
-        from cw.dispatch import apply_staged_decision
+        from cw.dispatch import _EARLIER_STAGE_REPORT_REASON, apply_staged_decision
 
         task = self._make_running_task("EARLIER-SCOPE-2", stage=Stage.IMPL)
+        attention = capture_events(
+            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
         last_result: dict[str, object] = {
             "status": "plan_pending_approval",
             "stage_reached": "stage1_plan",
@@ -9031,6 +9037,10 @@ class TestApplyStagedDecision:
         assert routed is True
         assert task.stage == Stage.IMPL  # NOT advanced to REVIEW
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
+
+        assert len(attention) == 1
+        _, payload, _ = attention[0]
+        assert payload["paused_status"] == _EARLIER_STAGE_REPORT_REASON
 
     def test_unresolvable_stage_position_falls_back_to_refuse(
         self, tmp_dispatch_dirs: Path, tmp_path: Path
