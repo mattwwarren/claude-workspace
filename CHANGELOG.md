@@ -6,6 +6,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Per-role codex reviewer metrics, and one-shot reviewer runs are now
+  ephemeral (#1710):** reviewer invocations pass `--json` and `--ephemeral`,
+  and the JSONL audit stream is consumed into per-role metrics on the existing
+  `ReviewerRunRecord` — token usage, tool-call counts, and an
+  `unexpected_tool_attempts` list recording any MCP, web, or write attempt made
+  during a nominally read-only review. `duration_seconds` is now recorded on
+  the success path as well as the failure path, where it was previously
+  computed and discarded. `--ephemeral` suppresses Codex's own rollout store,
+  which cw never read; cw's own diagnostics are unaffected.
+
+  Two safety properties are deliberate and tested. Telemetry can never
+  influence a review's outcome — metrics reach `ReviewerRunRecord` only, never
+  `ReviewerFindingsDocument.status`, so a malformed or truncated audit stream
+  degrades to "no metrics" rather than to a degraded verdict. This matters
+  because #1702 now parks the REVIEW stage on degraded health. And a codex
+  build that rejects the new flags is detected and retried once without them,
+  so a runtime lacking `--json`/`--ephemeral` records no metrics instead of
+  failing every reviewer invocation.
+
 ### Fixed
 
 - **Unanchored reviewer findings now reach adjudication instead of being
