@@ -148,14 +148,22 @@ Don't enqueue everything reflexively — a ticket that's obviously human-gated
 (no spec, open design question, missing dependency) should be hardened or parked
 *before* it ever takes a lane slot.
 
-### Phase 2 — Harden before dispatch
+### Phase 2 — Harden before dispatch (targeted, #1655)
 
-For anything past a trivial one-liner, run `/harden-ticket` first. A ticket that
-plans first-try costs one run; a ticket that bounces on ambiguities can burn
-4–6. The leverage here is enormous and it's the cheapest quality you'll buy all
-sprint. Crucially: **if the ticket already has fresh auto-dev plan comments,
-read them instead of re-sweeping** (rule 3). Harden by reconciling what's
-already known + resolving the forks, not by re-running the whole sweep.
+For ordinary tickets, **dispatch first**: round 1's consolidated park (#1650)
+is the hardening sweep — grounded in the code at dispatch time, covering both
+scope ambiguity and plan-quality findings in one comment, with the draft
+persisted (#1649) so round 2 resumes the same plan instead of regenerating.
+Answer the one comment; ship on round 2.
+
+Reserve `/harden-ticket` for the targeted cases its skill names: multi-task
+plan docs whose literal code the worker transcribes verbatim, tickets
+defining public contracts (new event types, schemas, `--json` output),
+tickets already bouncing, and waves the operator explicitly wants to run with
+zero mid-wave interrupts. Crucially: **if the ticket already has fresh
+auto-dev plan comments, read them instead of re-sweeping** (rule 3). Harden
+by reconciling what's already known + resolving the forks, not by re-running
+the whole sweep.
 
 ### Phase 3 — Dispatch the wave
 
