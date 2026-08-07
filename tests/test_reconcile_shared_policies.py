@@ -2118,18 +2118,80 @@ class TestApplySentinelToTaskStagedAdvance:
         t = next(t for t in store.tasks if t.ticket_id == ticket_id)
         assert t.status == QueueItemStatus.BLOCKED_ON_USER
 
+    def test_apply_sentinel_to_task_earlier_stage_blocked_now_routes(
+        self,
+        tmp_config_dir: Path,
+    ) -> None:
+        """GitHub #1676: an earlier-stage 'blocked' sentinel (non-advance-claim)
+        now routes end-to-end through _apply_sentinel_to_task instead of being
+        refused as an #1019/#986 stage-mismatch replay.
 
-def _blocked_autodev_payload(ticket_id: str) -> dict[str, Any]:
-    """Minimal valid AutoDevResult with status='blocked' at IMPL.
+        Task sits at IMPL; the sentinel reports 'blocked' at stage1_plan
+        (PLAN, earlier than IMPL) -- a legitimate "could not reach the
+        dispatched stage" report, not a same-session replay, since 'blocked'
+        is not in STAGE_SUCCESS_STATUSES.
+        """
+        client_name = "staged-client"
+        _write_staged_clients_yaml(tmp_config_dir, client_name)
+
+        ticket_id = "GH-1676-earlier-blocked"
+        session_id = "sess-1676-earlier-blocked"
+        session = _make_daemon_session(id=session_id, worktree_path=None)
+
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client=client_name,
+            status=QueueItemStatus.RUNNING,
+            session_id=session_id,
+            stage=Stage.IMPL,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        sentinel = AutoDevResult.model_validate(
+            _blocked_autodev_payload(
+                ticket_id,
+                stage_reached="stage1_plan",
+                scope={
+                    "tier": None,
+                    "files": 4,
+                    "lines_estimate": 120,
+                    "lines_actual": None,
+                    "forbidden_touched": False,
+                },
+                blocker={"stage": "s1_plan", "reason": "plan_missing"},
+            )
+        )
+
+        outcome = _apply_sentinel_to_task(ticket_id, session, sentinel)
+
+        assert outcome.routed is True
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert t.blocked_reason == "plan_missing"
+
+
+def _blocked_autodev_payload(
+    ticket_id: str,
+    *,
+    stage_reached: str = "stage2_impl",
+    scope: dict[str, Any] | None = None,
+    blocker: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Minimal valid AutoDevResult with status='blocked'.
 
     Routes through STAGE_FAILURE (Rule 5) → BLOCKED_ON_USER when applied.
+    Defaults reproduce the original post-impl (stage2_impl) shape; pass
+    ``stage_reached``/``scope``/``blocker`` to reshape for other stages -- e.g.
+    #1676's pre-impl (stage1_plan) earlier-stage-blocked coverage, which needs
+    ``scope.lines_actual=None`` to satisfy the pre-impl-exit invariant.
     """
     return {
         "schema_version": 4,
         "ticket_id": ticket_id,
         "status": "blocked",
-        "stage_reached": "stage2_impl",
-        "scope": {
+        "stage_reached": stage_reached,
+        "scope": scope
+        or {
             "tier": "small",
             "files": 1,
             "lines_estimate": 10,
@@ -2152,7 +2214,8 @@ def _blocked_autodev_payload(ticket_id: str) -> dict[str, Any]:
             "fix_loop_escalated": False,
         },
         "friction_highlights": [],
-        "blocker": {
+        "blocker": blocker
+        or {
             "stage": "stage2_impl",
             "reason": "agent_block",
             "details": "still failing",
