@@ -148,14 +148,22 @@ Don't enqueue everything reflexively — a ticket that's obviously human-gated
 (no spec, open design question, missing dependency) should be hardened or parked
 *before* it ever takes a lane slot.
 
-### Phase 2 — Harden before dispatch
+### Phase 2 — Harden before dispatch (targeted, #1655)
 
-For anything past a trivial one-liner, run `/harden-ticket` first. A ticket that
-plans first-try costs one run; a ticket that bounces on ambiguities can burn
-4–6. The leverage here is enormous and it's the cheapest quality you'll buy all
-sprint. Crucially: **if the ticket already has fresh auto-dev plan comments,
-read them instead of re-sweeping** (rule 3). Harden by reconciling what's
-already known + resolving the forks, not by re-running the whole sweep.
+For ordinary tickets, **dispatch first**: round 1's consolidated park (#1650)
+is the hardening sweep — grounded in the code at dispatch time, covering both
+scope ambiguity and plan-quality findings in one comment, with the draft
+persisted (#1649) so round 2 resumes the same plan instead of regenerating.
+Answer the one comment; ship on round 2.
+
+Reserve `/harden-ticket` for the targeted cases its skill names: multi-task
+plan docs whose literal code the worker transcribes verbatim, tickets
+defining public contracts (new event types, schemas, `--json` output),
+tickets already bouncing, and waves the operator explicitly wants to run with
+zero mid-wave interrupts. Crucially: **if the ticket already has fresh
+auto-dev plan comments, read them instead of re-sweeping** (rule 3). Harden
+by reconciling what's already known + resolving the forks, not by re-running
+the whole sweep.
 
 ### Phase 3 — Dispatch the wave
 
@@ -217,6 +225,20 @@ be read in light of that arithmetic — it is not evidence of "N real failures."
 - **Blocked on user / ambiguities / plan-approval** → resolve the technical
   parts, batch the real forks to the operator (rule 5). Often `/harden-ticket`
   reactively, then re-dispatch.
+
+  **Human-gated parks are not retry-eligible without a tracker-state delta
+  (#1653).** A ticket parked on `ambiguities_pending_resolution` /
+  `premises_pending_verification` / `plan_pending_approval` /
+  `review_pending_approval` may be re-dispatched ONLY after its tracker state
+  has changed since the park — a new operator comment, a body edit, or an
+  approval reply. A retry without a state delta feeds a timer-driven loop:
+  it burns an attempt, re-derives the identical park, and pages you again to
+  learn nothing (observed: 10 mechanical retries on a fixed ~2h39m cadence,
+  ~20.5h, ending in manual queue removal). Your job as orchestrator is to
+  supply the delta (answer/harden/approve on the ticket) and THEN release —
+  via `cw dev-queue requeue`/`approve`, never by `cw dev-queue add` (a
+  re-add against a parked row is refused and would otherwise mint a
+  duplicate row that later surfaces as `terminal_sibling` noise).
 - **Premise-pending-verification on an external unknown** → it's human-gated.
   Park it, write the gate down, tell the operator what un-gates it (rule 6).
 - **Stalled / retry-cap / reap_proposed** → a wedge. Stop the session

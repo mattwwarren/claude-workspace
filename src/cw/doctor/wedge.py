@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 import yaml
 from pydantic import ValidationError
 
+from cw.auto_dev_result import PAUSED_FOR_USER_INPUT_STATUSES
 from cw.config import state_file
 from cw.dev_queue import dev_queue_lock, save_dev_queue, transition_task_status
 from cw.doctor import _deps
@@ -48,6 +49,17 @@ if TYPE_CHECKING:
 
 # Wedge class for BLOCKED_ON_USER tasks whose sessions are dead (OOM/crash path).
 _WEDGE_BLOCKED_DEAD_SESSION = "wedge/blocked-on-user-dead-session"
+
+# Dispositions marking a park that waits on a HUMAN, not on a wedge (#1653):
+# the four sentinel statuses stamped verbatim onto the task at park time.
+# A human-gated park's worker has legitimately exited, so the dead-session
+# heuristic matches every one of them — but reverting one to PENDING
+# mechanically re-dispatches a ticket with zero new information and produces
+# the identical park (observed: 10 retries at a fixed cadence, ~20.5h, ending
+# in manual queue removal). These parks are released by an operator verb
+# (requeue/approve) or a gate recipe reading fresh tracker state, never by
+# the reap path. Sourced from the schema constant so the sets cannot drift.
+_HUMAN_GATED_PARK_DISPOSITIONS: frozenset[str] = PAUSED_FOR_USER_INPUT_STATUSES
 
 # Wedge class for ACTIVE/IDLE sessions with no matching daemon entry (crash/SSH
 # failure path that leaves roster absent but session still "active" in cw state).
@@ -269,8 +281,18 @@ def _check_wedge_dead_session_blocked_on_user(
 
     Guards daemon I/O: list_live_session_short_ids() is only called when at
     least one BLOCKED_ON_USER task exists in the queue.
+
+    Human-gated parks (disposition in _HUMAN_GATED_PARK_DISPOSITIONS) are
+    excluded outright (#1653): their worker exited by design, so they always
+    look "dead" to this heuristic, but they are waiting on an operator, not
+    wedged — reverting them re-runs the identical park.
     """
-    candidates = [t for t in queue.tasks if t.status == QueueItemStatus.BLOCKED_ON_USER]
+    candidates = [
+        t
+        for t in queue.tasks
+        if t.status == QueueItemStatus.BLOCKED_ON_USER
+        and t.disposition not in _HUMAN_GATED_PARK_DISPOSITIONS
+    ]
     if not candidates:
         return []
 
@@ -363,15 +385,34 @@ def _collapse_blocked_on_user_tasks(
     (no mutation) when the oldest task already has ``pr_url`` set — see
     the inline comment at the guard for why.
 
+    Human-gated parks are never touched (#1653): rows whose disposition is in
+    _HUMAN_GATED_PARK_DISPOSITIONS are filtered out before any mutation, as
+    defense in depth behind the class-5 detector's own exclusion — this
+    helper is also reached from loop_health._reap_session_by_selector, whose
+    callers select tickets by other criteria.
+
     Returns True when any mutation was applied.
     """
     changed = False
     for ticket_id in blocked_ticket_ids:
-        tasks_for_ticket = [
+        all_blocked = [
             t
             for t in queue.tasks
             if t.ticket_id == ticket_id and t.status == QueueItemStatus.BLOCKED_ON_USER
         ]
+        tasks_for_ticket = [
+            t
+            for t in all_blocked
+            if t.disposition not in _HUMAN_GATED_PARK_DISPOSITIONS
+        ]
+        if len(tasks_for_ticket) < len(all_blocked):
+            _log.warning(
+                "Ticket %s: %d BLOCKED_ON_USER row(s) parked on a human gate "
+                "left untouched by collapse (#1653); release via requeue/"
+                "approve or a gate recipe.",
+                ticket_id,
+                len(all_blocked) - len(tasks_for_ticket),
+            )
         if not tasks_for_ticket:
             continue
         # Stable sort preserves insertion order for equal created_at values.

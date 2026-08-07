@@ -132,7 +132,10 @@ def dev_queue_add(
         if not inserted:
             click.echo(
                 f"Skipped {ticket_id} -> {resolved}: already queued"
-                " (pending, running, completed, or cancelled).",
+                " (pending, running, completed, or cancelled) or parked"
+                " awaiting the operator — a parked row is released with"
+                " `cw dev-queue requeue` or `cw dev-queue approve`, never"
+                " by re-adding (#1653).",
                 err=True,
             )
             continue

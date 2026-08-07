@@ -24,6 +24,43 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reuses `dev-queue status`'s existing `NEEDS_ATTN` predicate — relocated to
   `cw.dev_queue.attention.task_attention_state` so both surfaces share one
   definition — and therefore reflects last-hydrated PR state.
+
+- **Consolidated park — Stage 1 finishes all plan-phase analysis before any
+  human-gated exit (#1650):** the plan stage's human gates fired serially
+  (ambiguity/premise parks before the plan-quality stations ever ran; the
+  large-scope approval exit posted the plan without station findings), so a
+  single ticket paid 2–4 operator rounds — one observed ticket bounced
+  between `ambiguities_pending_resolution` and `plan_pending_approval` five
+  times before being cancelled. When Stage 1 must exit headless with a
+  draft in hand it now runs scope classification and both Step 1f stations
+  in advisory mode (findings collected only — no markers, no revision
+  cycle, a MUST_FIX never converts the park to `blocked`), posts ONE
+  `## Pending Verification Scan` comment (parked items, advisory findings,
+  `### Approval requested` when Large, and the full draft), and persists
+  the draft. Exit statuses and result-payload rules are unchanged; a
+  `consolidated park: …` line lands in `friction_highlights`. Step 1a
+  explicitly never treats the parked comment's embedded draft as an
+  existing plan, and a resumed Large draft still requires approval
+  evidence before the approval gate auto-skips.
+
+- **`Verified: DEFER` for runtime-only premises (#1651):** a premise
+  checkable only against a live system used to park the run
+  (`premises_pending_verification`) even though the human at a desk cannot
+  check it statically either — one observed ticket burned six plan
+  dispatches re-litigating a single runtime-only premise until the operator
+  hand-wrote the "confirm during implementation, halt on mismatch" framing.
+  That framing is now a first-class contract: the Product Manager Reviewer
+  may tag a premise `DEFER` when it is (a) runtime-only, (b) checkable by a
+  cheap bounded probe at implementation start, and (c) safe if false
+  (halt-and-report, never silent fallback), carrying mandatory
+  `In-implementation check:` / `On mismatch:` fields — either missing
+  fails closed to `NO`. Stage 1 partitions premises three ways
+  (`self_verified` / `deferred` / `unverified`); `deferred` never parks,
+  lands in a `## Deferred Premises` plan section plus a leading
+  implementation-phase step that runs the checks before dependent work,
+  and leaves one `friction_highlights` audit line per premise. Exit
+  gating keys on `parked` + `unverified` only.
+
 - **Stage 1 persists `.cw/plan-draft.md` on every human-gated headless exit
   (#1649):** draft persistence previously fired only on the rare Step 1f.3
   `plan_unreviewable`/`plan_unsound` exits, so the dominant park exits
@@ -96,6 +133,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **harden-ticket repositioned as targeted pre-flight (#1655):**
+  `/harden-ticket` front-loaded an operator round for every non-trivial
+  ticket to compensate for the pipeline surfacing findings one exit class
+  at a time — duplicating the sweep the plan stage runs anyway, missing
+  plan-drafting-precision findings, and rotting within hours when a
+  dependency PR merged. With consolidated park (#1650) and draft
+  persistence (#1649) landed, the default flips to dispatch-first: round 1
+  of the pipeline IS the hardening sweep, grounded in dispatch-time code
+  with the draft attached. The skill keeps four mandatory cases —
+  multi-task plan docs with verbatim code blocks (the pipeline cannot
+  sweep the plan doc itself), public-contract tickets, tickets already
+  bouncing (reactive trigger unchanged), and zero-interrupt batch waves.
+  `orchestrate-sprint` Phase 2 gets the same default flip, keeping its
+  read-fresh-plan-comments rule.
+
+- **Headless re-dispatch enters via stage detection — implicit `--resume`
+  (#1652):** the durable-signal stage detector was informational without an
+  explicit `--resume`, so a headless queue re-dispatch always re-entered at
+  Stage 1 — observed re-verifying a branch whose implementation had already
+  shipped and re-posting an already-open question. Headless invocations now
+  always run `detect_current_stage()` first and, when the durable signals
+  are unambiguous and internally consistent, enter at the latest detected
+  stage exactly as explicit `--resume` does (emitting `resumed_from_stage`).
+  Signal conflict or ambiguity (branch without plan markers, commits
+  without trailers) falls back to Stage 1; stage-entry gates and per-stage
+  detector guards are unchanged; interactive mode without `--resume` keeps
+  the detector informational.
+
 - **Multi-marker gate resolves newest-wins instead of hard-EXITing
   (#1654):** when Step 1b's pre-flight-resolutions extraction found more
   than one marker-bearing comment it EXITed `ambiguities_pending_resolution`
@@ -110,6 +175,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   relaxes to recommended hygiene.
 
 ### Fixed
+
+- **Human-gated parks are no longer mechanically re-dispatched or
+  duplicated (#1653):** a ticket parked on a human gate
+  (`ambiguities_pending_resolution` / `premises_pending_verification` /
+  `plan_pending_approval` / `review_pending_approval`) could be fed back
+  into dispatch with zero new information — observed as 10 mechanical
+  retries on a fixed ~2h39m cadence (~20.5h) that never left the plan
+  stage. Two loopholes closed: `add_ticket` now refuses to insert when a
+  `BLOCKED_ON_USER` / `AWAITING_OPERATOR_SIGNOFF` row already owns the
+  ticket (previously a silent sibling row was minted, later surfacing as
+  `terminal_sibling` reconcile noise; the CLI now points at
+  `requeue`/`approve`), and `cw doctor --reap`'s class-5 wedge path
+  (dead-session `BLOCKED_ON_USER` collapse — the one revert path with no
+  disposition gate) now excludes human-gated dispositions at both the
+  detector and the shared `_collapse_blocked_on_user_tasks` chokepoint,
+  sourced from `PAUSED_FOR_USER_INPUT_STATUSES` so the sets cannot drift.
+  `orchestrate-sprint` codifies the operator rule: a human-gated park is
+  retry-eligible only after a tracker-state delta (new comment, body edit,
+  or approval reply).
 
 - **`approve` can release a `scope_hint`-gated park (#1640):** the approval
   gate only ever checked `session.last_result.status` against
