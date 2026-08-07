@@ -164,6 +164,18 @@ class TestParseCodexAuditEventsDegradesGracefully:
         assert metrics["output_tokens"] is None
         assert metrics["reasoning_tokens"] == 3
 
+    def test_event_with_a_non_string_type_is_skipped_entirely(self) -> None:
+        # A dict line whose "type" is absent or not a string carries no
+        # recognizable event, so it must not become terminal_event either.
+        stdout = (
+            '{"type":"thread.started","thread_id":"T"}\n'
+            '{"type":42,"thread_id":"NOPE"}\n'
+            '{"no_type_at_all":true}\n'
+        )
+        metrics = _parse_codex_audit_events(stdout, duration_seconds=1.0)
+        assert metrics["thread_id"] == "T"
+        assert metrics["terminal_event"] == "thread.started"
+
     def test_usage_block_that_is_not_a_dict_is_ignored(self) -> None:
         stdout = '{"type":"turn.completed","usage":"nope"}\n'
         metrics = _parse_codex_audit_events(stdout, duration_seconds=1.0)
