@@ -20,20 +20,49 @@ if TYPE_CHECKING:
 # Matches an OpenAI-style secret token (``sk-`` followed by 20+ url-safe chars).
 _SK_TOKEN_RE = re.compile(r"sk-[A-Za-z0-9]{20,}")
 
+# Credential-bearing CODEX_* variable names always count as secrets,
+# regardless of value length (#1712) -- matches OPENAI_API_KEY's
+# unconditional inclusion below.
+_CODEX_CREDENTIAL_NAME_RE = re.compile(
+    r"_(?:KEY|TOKEN|SECRET|AUTH|PASSWORD|CREDENTIAL)(?:_|$)"
+)
+
+# Non-credential-named CODEX_* values only count as secrets at or above
+# this length, matching _SK_TOKEN_RE's 20-char precedent (#1712) --
+# shorter values here are ordinary flags/enums/paths/ids, not leaked
+# credentials.
+_CODEX_VALUE_LENGTH_FLOOR = 20
+
 
 def _known_secret_values() -> list[str]:
     """Return the runtime secret values to deny, skipping empty ones.
 
     Sources: ``OPENAI_API_KEY`` and every ``CODEX_*``-prefixed environment
-    variable actually present in ``os.environ``. Empty values are skipped —
-    an empty needle would match every text.
+    variable actually present in ``os.environ``, classified in two branches:
+    a variable whose name matches ``_CODEX_CREDENTIAL_NAME_RE`` (KEY, TOKEN,
+    SECRET, AUTH, PASSWORD, CREDENTIAL) always counts, regardless of value
+    length; any other ``CODEX_*`` variable counts only when its value is at
+    least ``_CODEX_VALUE_LENGTH_FLOOR`` characters long. Empty values are
+    skipped — an empty needle would match every text.
     """
     values: list[str] = []
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if api_key:
         values.append(api_key)
     for name, value in os.environ.items():
-        if name.startswith("CODEX_") and value:
+        if not name.startswith("CODEX_") or not value:
+            continue
+        if _CODEX_CREDENTIAL_NAME_RE.search(name):
+            values.append(value)
+        elif len(value) >= _CODEX_VALUE_LENGTH_FLOOR:
+            # Deliberate: no shape carve-out for path-like/session-ID-like
+            # values (#1712 round 2). A carve-out here is an allowlist
+            # wearing a costume and rots the same way. Failure directions
+            # are asymmetric -- a false positive is a loud, diagnosable
+            # test failure; a false negative is a silent credential leak.
+            # A long ambient path/ID occasionally tripping this is an
+            # accepted, intentional trade-off, not a bug to "fix" by
+            # re-adding shape exclusions.
             values.append(value)
     return values
 
@@ -41,8 +70,11 @@ def _known_secret_values() -> list[str]:
 def _assert_no_secrets_leaked(*texts: str) -> None:
     """Raise ``AssertionError`` if any *text* contains a known secret.
 
-    Checks each text against the runtime values of ``OPENAI_API_KEY`` and any
-    ``CODEX_*``-prefixed environment variable, plus the ``sk-`` token pattern.
+    Checks each text against the runtime value of ``OPENAI_API_KEY``, any
+    ``CODEX_*``-prefixed environment variable classified as a secret by
+    :func:`_known_secret_values` (credential-named regardless of length, or
+    non-credential-named at or above the 20-char floor), and the ``sk-``
+    token pattern.
     """
     secret_values = _known_secret_values()
     for text in texts:
