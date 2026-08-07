@@ -20,6 +20,7 @@ from cw.config import get_client
 from cw.dev_queue.crud import _APPROVABLE_STATUSES, _find_ticket
 from cw.dev_queue.lifecycle import (
     _emit_stage_change,
+    _plan_body_signoff_ok,
     _raise_stage_high_water,
     _reset_for_same_stage_requeue,
     _stage_regress,
@@ -27,10 +28,12 @@ from cw.dev_queue.lifecycle import (
 )
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.exceptions import RequeueStageError, RequeueStateError, UnblockStateError
+from cw.gh import fetch_approved_plan_comment
 from cw.models import QueueItemStatus, Stage
+from cw.worktree import _checked_out_branch, worktree_path_for
 
 if TYPE_CHECKING:
-    from cw.models import TicketTask
+    from cw.models import ClientConfig, TicketTask
 
 # Issue #917: --regress requires an explicit backward --stage target.
 _REGRESS_NEEDS_BACKWARD_STAGE_MSG = (
@@ -60,10 +63,45 @@ _REQUEUE_FROM_FAILED_STATUSES: frozenset[QueueItemStatus] = frozenset(
 )
 
 
+def _impl_bypass_plan_available(task: TicketTask, client_cfg: ClientConfig) -> bool:
+    """True iff an approved plan is available for a forward bypass to IMPL.
+
+    Local-first, tracker-fallback -- the inverse order of
+    :func:`cw.dev_queue.lifecycle._plan_is_reviewed` (tracker-first,
+    ``.cw/plan.md``-fallback). That predicate targets ``task.worktree_path``,
+    which is always ``None`` for dispatch-driven ``TicketTask`` rows (dispatch
+    stamps ``session_id`` but not ``worktree_path`` -- see
+    ``queue_peek.py:298-299``), so it would never see the real on-disk
+    worktree and would always pay for a network call on the common path. This
+    predicate instead computes the real worktree path via
+    :func:`worktree_path_for` + :func:`_checked_out_branch` -- the same
+    read-only primitives :func:`cw.worktree.create_worktree` uses to decide
+    reuse-vs-rebuild -- so the common "reused worktree, no rebuild" case is
+    resolved with zero network cost. Only falls through to
+    :func:`fetch_approved_plan_comment` when the local read fails to prove
+    the plan is there (worktree missing, foreign branch, or no/unmarked
+    ``.cw/plan.md``). See GitHub #1681.
+    """
+    branch = f"{client_cfg.feature_branch_prefix}/{task.ticket_id}"
+    wt_path = worktree_path_for(client_cfg, branch)
+    if wt_path.exists() and _checked_out_branch(wt_path) == branch:
+        plan_path = wt_path / ".cw" / "plan.md"
+        try:
+            body = plan_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            body = None
+        if body is not None and _plan_body_signoff_ok(body):
+            return True
+
+    tracker_body = fetch_approved_plan_comment(task.ticket_id)
+    return tracker_body is not None and _plan_body_signoff_ok(tracker_body)
+
+
 def _apply_requeue_stage(
     task: TicketTask,
     stages: list[Stage],
     stage_override: str | None,
+    client_cfg: ClientConfig,
     *,
     allow_regress: bool,
 ) -> bool:
@@ -81,6 +119,13 @@ def _apply_requeue_stage(
     ``client_name``/``ticket_id`` are read off ``task`` rather than taken as
     separate params: callers always source ``task`` via ``_find_ticket``,
     which guarantees ``task.client``/``task.ticket_id`` already match.
+
+    A forward bypass whose target is ``Stage.IMPL`` additionally requires an
+    approved plan to be available (locally or on the tracker) -- see
+    :func:`_impl_bypass_plan_available`. This guard is scoped to IMPL only:
+    a missing plan is *fatal* there (the impl worker hard-exits
+    ``plan_missing``), whereas REVIEW and FINALIZE degrade gracefully on a
+    missing plan and are deliberately not guarded (GitHub #1681).
     """
     if stage_override is None:
         return False
@@ -116,6 +161,26 @@ def _apply_requeue_stage(
             raise RequeueStageError(msg)
         _stage_regress(task, target_stage)
         return True
+
+    # Guarded because impl hard-exits plan_missing; review and finalize
+    # degrade and are deliberately not guarded (see #1681 Decisions).
+    if (
+        target_stage == Stage.IMPL
+        and target_idx > current_idx
+        and not _impl_bypass_plan_available(task, client_cfg)
+    ):
+        wt_path = worktree_path_for(
+            client_cfg, f"{client_cfg.feature_branch_prefix}/{task.ticket_id}"
+        )
+        msg = (
+            f"Cannot requeue ticket '{task.ticket_id}' to stage 'impl':"
+            f" no approved plan is available. '{wt_path / '.cw' / 'plan.md'}'"
+            " is missing or stale, and no reviewed plan comment"
+            " ('<!-- plan-spec-reviewed' + '<!-- plan-soundness-reviewed')"
+            " was found on the tracker. Let Stage 1 (plan) run and post its"
+            " approved plan first, or requeue at --stage plan instead."
+        )
+        raise RequeueStageError(msg)
 
     # Forward or same-stage: caller enforces the BLOCKED_ON_USER precondition.
     old_stage = task.stage
@@ -197,8 +262,10 @@ def requeue_ticket(
             is True and the ticket is CANCELLED, or from_failed is True and
             the ticket is FAILED.
         RequeueStageError: if stage_override would regress without allow_regress,
-            is not in the client pipeline, regresses a non-blocked task, or if
-            allow_regress is set with no backward stage_override.
+            is not in the client pipeline, regresses a non-blocked task, if
+            allow_regress is set with no backward stage_override, or if a
+            forward bypass targets stage 'impl' with no approved plan
+            available locally or on the tracker (#1681).
         CwError: if no matching task is found.
     """
     with _lock():
@@ -217,6 +284,7 @@ def requeue_ticket(
             task,
             stages,
             stage_override,
+            client_cfg,
             allow_regress=allow_regress,
         )
 
