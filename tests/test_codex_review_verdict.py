@@ -275,6 +275,128 @@ class TestSynthesizeCodexReviewResultHealth:
         assert result.health.recommendation == "PROCEED"
         assert verdict is not None
 
+    @pytest.mark.parametrize("status", ["ok", "degraded"])
+    def test_health_unaffected_by_malformed_or_absent_metrics(
+        self, make_git_repo: Callable[[str], Path], status: str
+    ) -> None:
+        # R2 (#1710): audit metrics feed ReviewerRunRecord's new fields only.
+        # A malformed stream (no terminal event, an unexpected tool attempt)
+        # must produce exactly the same health/disposition as no metrics at all.
+        worktree = make_git_repo(f"wt-synth-health-metrics-{status}")
+        doc = _make_reviewer_doc(status=status)
+        baseline, _v = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-synth",
+            default_branch="main",
+        )
+        with_metrics, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-synth",
+            default_branch="main",
+            metrics_by_role={
+                doc.reviewer_role: {
+                    "terminal_event": None,
+                    "unexpected_tool_attempts": ["mcp_tool_call"],
+                    "had_command_evidence": False,
+                }
+            },
+        )
+        assert with_metrics.status == baseline.status
+        assert with_metrics.health.model_dump() == baseline.health.model_dump()
+        assert verdict is not None
+        assert verdict.agents_run[0].unexpected_tool_attempts == ["mcp_tool_call"]
+
+
+class TestSynthesizeCodexReviewResultMetrics:
+    """#1710: metrics_by_role threads onto verdict.agents_run."""
+
+    def test_metrics_land_on_agents_run_records(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-synth-metrics")
+        doc = _make_reviewer_doc(reviewer_role="Role A")
+        _result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-synth",
+            default_branch="main",
+            metrics_by_role={
+                "Role A": {
+                    "thread_id": "thr-a",
+                    "duration_seconds": 4.0,
+                    "input_tokens": 11,
+                    "terminal_event": "turn.completed",
+                    "tool_call_counts": {"command_execution": 3},
+                    "had_command_evidence": True,
+                }
+            },
+        )
+        assert verdict is not None
+        record = verdict.agents_run[0]
+        assert record.reviewer_role == "Role A"
+        assert record.thread_id == "thr-a"
+        assert record.duration_seconds == pytest.approx(4.0)
+        assert record.input_tokens == 11
+        assert record.terminal_event == "turn.completed"
+        assert record.tool_call_counts == {"command_execution": 3}
+        assert record.had_command_evidence is True
+
+    def test_default_none_leaves_records_at_defaults(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-synth-metrics-none")
+        doc = _make_reviewer_doc(reviewer_role="Role A")
+        _result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-synth",
+            default_branch="main",
+        )
+        assert verdict is not None
+        assert verdict.agents_run[0].thread_id is None
+        assert verdict.agents_run[0].tool_call_counts == {}
+
+    def test_zero_documents_path_is_metrics_free(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        # Adopted assumption 5 (#1710): no ReviewVerdict is built when every
+        # role failed, so metrics have nowhere to attach — and passing them
+        # must not perturb the blocked result.
+        worktree = make_git_repo("wt-synth-metrics-zero")
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[],
+            failures=[ReviewerRunFailure(role="R", reason="crash")],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-synth",
+            default_branch="main",
+            metrics_by_role={"R": {"thread_id": "thr-r"}},
+        )
+        assert verdict is None
+        assert result.status == "blocked"
+        assert result.blocker is not None
+        assert result.blocker.reason == CODEX_REVIEW_UNPARSEABLE
+
 
 # ---------------------------------------------------------------------------
 # render_verdict_comment

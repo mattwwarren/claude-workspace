@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -19,7 +20,6 @@ from tests.conftest import _make_reviewer_doc
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
 
 def test_run_review_threads_session_id_to_run_codex_role(
@@ -28,9 +28,9 @@ def test_run_review_threads_session_id_to_run_codex_role(
     worktree = make_git_repo("wt-run-review-thread")
     captured: dict[str, object] = {}
 
-    def _spy_run_codex_role(**kwargs: object) -> tuple[object, object]:
+    def _spy_run_codex_role(**kwargs: object) -> tuple[object, object, object]:
         captured["session_id"] = kwargs["session_id"]
-        return _make_reviewer_doc(), None
+        return _make_reviewer_doc(), None, {}
 
     monkeypatch.setattr("cw.codex_review._roles._run_codex_role", _spy_run_codex_role)
     run_review(
@@ -88,3 +88,44 @@ class TestPrepareReviewPass:
         assert verdict.blocking is False
         assert verdict.review.should_fix == 1
         assert len(runner.calls) == len(prepared.roles)
+
+
+# ---------------------------------------------------------------------------
+# run_review threads codex audit metrics onto the verdict (#1710)
+# ---------------------------------------------------------------------------
+
+
+_AUDIT_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "codex_audit_events" / "clean_with_command.jsonl"
+)
+
+
+def test_run_review_threads_metrics_onto_verdict_agents_run(
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    repo = make_git_repo("wt-run-review-metrics")
+    _git(repo, "checkout", "-b", "feature")
+    (repo / "mod.py").write_text("def broken():\n", encoding="utf-8")
+    _git(repo, "add", "mod.py")
+    _git(repo, "commit", "-m", "add mod.py")
+
+    prepared = _prepare_review_pass(_task(), repo, "main")
+    jsonl = _AUDIT_FIXTURE.read_text(encoding="utf-8")
+    runner = _SequencedRunner([_ok_result(stdout=jsonl) for _ in prepared.roles])
+    _result, verdict = run_review(
+        runner=runner,
+        task=_task(),
+        worktree=repo,
+        default_branch="main",
+        model=None,
+        wall_clock_budget_seconds=None,
+        session_id="sess-run-review-metrics",
+    )
+    assert verdict is not None
+    assert verdict.agents_run
+    for record in verdict.agents_run:
+        assert record.thread_id == "<THREAD_ID>"
+        assert record.terminal_event == "turn.completed"
+        assert record.input_tokens == 26617
+        assert record.had_command_evidence is True
+        assert record.duration_seconds is not None

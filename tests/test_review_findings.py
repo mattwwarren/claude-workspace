@@ -806,6 +806,158 @@ class TestReviewerRunRecord:
         r = ReviewerRunRecord(reviewer_role="R", status="ok", finding_count=3)
         assert r.finding_count == 3
 
+    def test_audit_metrics_fields_all_default_when_unset(self) -> None:
+        # #1710: every new telemetry field is optional, so pre-#1710 bare
+        # construction (and consolidate_verdict's own two construction sites)
+        # keep working untouched.
+        r = ReviewerRunRecord(reviewer_role="R", status="ok", finding_count=3)
+        assert r.thread_id is None
+        assert r.effective_model is None
+        assert r.duration_seconds is None
+        assert r.input_tokens is None
+        assert r.cached_input_tokens is None
+        assert r.output_tokens is None
+        assert r.reasoning_tokens is None
+        assert r.terminal_event is None
+        assert r.tool_call_counts == {}
+        assert r.had_command_evidence is False
+        assert r.unexpected_tool_attempts == []
+
+    def test_construct_with_explicit_metrics(self) -> None:
+        r = ReviewerRunRecord(
+            reviewer_role="R",
+            status="ok",
+            finding_count=0,
+            thread_id="thr-1",
+            effective_model=None,
+            duration_seconds=12.5,
+            input_tokens=100,
+            cached_input_tokens=80,
+            output_tokens=5,
+            reasoning_tokens=1,
+            terminal_event="turn.completed",
+            tool_call_counts={"command_execution": 2},
+            had_command_evidence=True,
+            unexpected_tool_attempts=["mcp_tool_call"],
+        )
+        assert r.thread_id == "thr-1"
+        assert r.duration_seconds == pytest.approx(12.5)
+        assert r.tool_call_counts == {"command_execution": 2}
+        assert r.had_command_evidence is True
+        assert r.unexpected_tool_attempts == ["mcp_tool_call"]
+
+    def test_metrics_defaults_are_not_shared_between_instances(self) -> None:
+        # Mutable defaults must come from a factory, not a shared literal.
+        a = ReviewerRunRecord(reviewer_role="A", status="ok", finding_count=0)
+        b = ReviewerRunRecord(reviewer_role="B", status="ok", finding_count=0)
+        a.tool_call_counts["x"] = 1
+        a.unexpected_tool_attempts.append("y")
+        assert b.tool_call_counts == {}
+        assert b.unexpected_tool_attempts == []
+
+
+class TestConsolidateVerdictMetricsByRole:
+    """#1710: per-role codex audit metrics land on ReviewerRunRecord."""
+
+    def test_metrics_attach_to_matching_document_record(self) -> None:
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(), reviewer_role="Reviewer A")
+        verdict = consolidate_verdict(
+            [doc],
+            diff,
+            reviewed_sha="sha",
+            metrics_by_role={
+                "Reviewer A": {
+                    "thread_id": "thr-a",
+                    "duration_seconds": 3.5,
+                    "input_tokens": 42,
+                    "terminal_event": "turn.completed",
+                    "tool_call_counts": {"agent_message": 1},
+                    "had_command_evidence": True,
+                }
+            },
+        )
+        record = verdict.agents_run[0]
+        assert record.thread_id == "thr-a"
+        assert record.duration_seconds == pytest.approx(3.5)
+        assert record.input_tokens == 42
+        assert record.terminal_event == "turn.completed"
+        assert record.tool_call_counts == {"agent_message": 1}
+        assert record.had_command_evidence is True
+
+    def test_role_absent_from_metrics_gets_defaults(self) -> None:
+        diff = _make_diff()
+        doc_a = _make_reviewer_doc(_make_finding(), reviewer_role="Reviewer A")
+        doc_b = _make_reviewer_doc(_make_finding(), reviewer_role="Reviewer B")
+        verdict = consolidate_verdict(
+            [doc_a, doc_b],
+            diff,
+            reviewed_sha="sha",
+            metrics_by_role={"Reviewer A": {"thread_id": "thr-a"}},
+        )
+        by_role = {r.reviewer_role: r for r in verdict.agents_run}
+        assert by_role["Reviewer A"].thread_id == "thr-a"
+        assert by_role["Reviewer B"].thread_id is None
+        assert by_role["Reviewer B"].tool_call_counts == {}
+
+    def test_failed_reviewer_record_picks_up_its_metrics(self) -> None:
+        # A role that invoked codex and failed still has audit telemetry —
+        # the ticket's "runtime failures before the final document" framing.
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(), reviewer_role="Reviewer A")
+        verdict = consolidate_verdict(
+            [doc],
+            diff,
+            reviewed_sha="sha",
+            failed_reviewers=[
+                ReviewerRunFailure(role="Perf Reviewer", reason="timeout")
+            ],
+            metrics_by_role={
+                "Perf Reviewer": {
+                    "thread_id": "thr-perf",
+                    "terminal_event": "turn.failed",
+                    "duration_seconds": 900.0,
+                }
+            },
+        )
+        failed = next(r for r in verdict.agents_run if r.status == "failed")
+        assert failed.reviewer_role == "Perf Reviewer"
+        assert failed.thread_id == "thr-perf"
+        assert failed.terminal_event == "turn.failed"
+        assert failed.duration_seconds == pytest.approx(900.0)
+
+    def test_none_default_is_byte_identical_to_omitting_the_param(self) -> None:
+        # Regression guard for the additive-default claim: the new parameter
+        # must not perturb any pre-#1710 verdict.
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="MUST_FIX"))
+        without = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        with_none = consolidate_verdict(
+            [doc], diff, reviewed_sha="sha", metrics_by_role=None
+        )
+        assert without.model_dump() == with_none.model_dump()
+
+    def test_metrics_never_affect_blocking_or_must_fix(self) -> None:
+        # R2/R4 (#1710): metrics are purely observational.
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="MUST_FIX"))
+        baseline = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        with_metrics = consolidate_verdict(
+            [doc],
+            diff,
+            reviewed_sha="sha",
+            metrics_by_role={
+                doc.reviewer_role: {
+                    "terminal_event": None,
+                    "unexpected_tool_attempts": ["mcp_tool_call"],
+                    "had_command_evidence": False,
+                }
+            },
+        )
+        assert with_metrics.blocking == baseline.blocking
+        assert with_metrics.must_fix == baseline.must_fix
+        assert with_metrics.review.model_dump() == baseline.review.model_dump()
+
 
 class TestCapturedDiffStructure:
     def test_file_diffs_and_line_text_round_trip(self) -> None:
