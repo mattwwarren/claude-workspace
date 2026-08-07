@@ -78,10 +78,17 @@ def _ok_result(
     role: str = "Code Quality Reviewer",
     *,
     findings: list[dict[str, object]] | None = None,
+    stdout: str = "",
 ) -> CodexRunResult:
+    """A successful CodexRunResult whose ``-o`` file holds a valid document.
+
+    *stdout* defaults to "" (no ``codex exec --json`` audit stream); pass a
+    JSONL body to drive :func:`cw.codex_review._audit_events._parse_codex_audit_events`
+    through the real ``_run_codex_role`` path (#1710).
+    """
     return CodexRunResult(
         returncode=0,
-        stdout="",
+        stdout=stdout,
         stderr="",
         output_file_content=_doc_json(role=role, findings=findings),
     )

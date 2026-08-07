@@ -22,6 +22,60 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   task; the orchestrator session kills strays. Stage-specific adapters
   (finalize/plan/impl) are follow-on tickets (#1670, #1671). Part of #1668.
 
+- **Per-role codex reviewer metrics, and one-shot reviewer runs are now
+  ephemeral (#1710):** reviewer invocations pass `--json` and `--ephemeral`,
+  and the JSONL audit stream is consumed into per-role metrics on the existing
+  `ReviewerRunRecord` — token usage, tool-call counts, and an
+  `unexpected_tool_attempts` list recording any MCP, web, or write attempt made
+  during a nominally read-only review. `duration_seconds` is now recorded on
+  the success path as well as the failure path, where it was previously
+  computed and discarded. `--ephemeral` suppresses Codex's own rollout store,
+  which cw never read; cw's own diagnostics are unaffected.
+
+  Two safety properties are deliberate and tested. Telemetry can never
+  influence a review's outcome — metrics reach `ReviewerRunRecord` only, never
+  `ReviewerFindingsDocument.status`, so a malformed or truncated audit stream
+  degrades to "no metrics" rather than to a degraded verdict. This matters
+  because #1702 now parks the REVIEW stage on degraded health. And a codex
+  build that rejects the new flags is detected and retried once without them,
+  so a runtime lacking `--json`/`--ephemeral` records no metrics instead of
+  failing every reviewer invocation.
+
+### Fixed
+
+- **Unanchored reviewer findings now reach adjudication instead of being
+  silently discarded (#1632):** a finding whose `file` wasn't a key of the
+  diff's changed-file set was rejected outright as `unknown_file` before it
+  ever reached adjudication, even when the file genuinely exists in the repo
+  tree (e.g. a reviewer citing a doc or config file the diff didn't touch).
+  `consolidate_verdict`/`validate_reviewer_document` now accept an optional
+  `worktree`; when a finding's file resolves to a real path under it, the
+  finding is classified `"unanchored"` and routed into `accepted` rather than
+  `rejected` — tree-existence proves the path is real, not the evidence
+  quote, so an unanchored finding's escalation still goes through the
+  ordinary diff-based check. `cw review consolidate` gains `--worktree`
+  (defaults to the current directory) and a `--no-tree-evidence` flag to
+  disable the relaxation entirely. Omitting `worktree` everywhere keeps
+  today's `unknown_file` behavior byte-identical.
+
+- **Degraded review health now actually gates the stage (#1702):** a REVIEW
+  result could carry `health.recommendation="EXIT_FOR_HUMAN_REVIEW"` — meaning
+  the review itself was incomplete — and still advance to FINALIZE, because
+  dispatch routed on `status="stage_complete"` alone and never consulted
+  health. In one nine-pass sample 8 of 9 passes derived
+  `EXIT_FOR_HUMAN_REVIEW` and all 9 were eligible to advance; whether a lane
+  stopped depended on it happening to carry an unrelated signoff rule, so
+  safety rested on configuration coincidence. A REVIEW-stage advance now parks
+  `BLOCKED_ON_USER` with the distinct `review_health_gate` disposition, which
+  is batch-releasable via `dev-queue drain` (re-running review clears it,
+  unlike a deliberate force-hold) and escalation-eligible so it pages rather
+  than sits. `recommendation="PROCEED"` routing is byte-identical to before,
+  and a missing or malformed `health` payload degrades to today's behavior
+  rather than to a park. Deliberately scoped to REVIEW: the local/aider IMPL
+  path hardcodes `EXIT_FOR_HUMAN_REVIEW` as a pessimistic default (#1580)
+  rather than deriving it, so gating IMPL would have permanently stalled
+  unattended `IMPL → REVIEW` auto-advance on LOCAL-backend clients.
+
 ## [1.28.0] - 2026-08-07
 
 ### Fixed

@@ -46,6 +46,10 @@ _ELIGIBLE_COMBOS: list[tuple[QueueItemStatus, str | None]] = [
     (QueueItemStatus.BLOCKED_ON_USER, "wall_clock_budget"),
     (QueueItemStatus.BLOCKED_ON_USER, "phantom_surface"),
     (QueueItemStatus.BLOCKED_ON_USER, "silently_idle"),
+    # #1702: the review-health gate is an unresolved, non-operator-initiated
+    # quality signal — same class as plan/review_pending_approval above, not a
+    # deliberately-armed operator stop (which are excluded from escalation).
+    (QueueItemStatus.BLOCKED_ON_USER, "review_health_gate"),
     (QueueItemStatus.AWAITING_OPERATOR_SIGNOFF, None),
     (QueueItemStatus.AWAITING_OPERATOR_SIGNOFF, "signoff_gate"),
     (QueueItemStatus.FAILED, None),

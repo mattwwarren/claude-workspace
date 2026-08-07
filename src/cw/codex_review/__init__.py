@@ -16,6 +16,7 @@ This package was split out of a single module; the public import surface
 (``from cw.codex_review import X``) is preserved here via re-exports.
 Submodules:
 
+- ``_audit_events`` — ``codex exec --json`` JSONL event-stream parsing.
 - ``_const`` — reason vocabulary, transient-failure set, and category mapping.
 - ``_diff`` — unified-diff capture and parsing.
 - ``_context`` — reviewer selection and prompt-context assembly (+ doc parsing),
@@ -27,6 +28,10 @@ Submodules:
 
 from __future__ import annotations
 
+from cw.codex_review._audit_events import (
+    _EXPECTED_REVIEWER_ITEM_TYPES,
+    _parse_codex_audit_events,
+)
 from cw.codex_review._const import (
     _CATEGORY_TO_REASON,
     _MIN_ROLE_TIMEOUT_SECONDS,
@@ -70,11 +75,15 @@ from cw.codex_review._diff import (
     _parse_unified_diff,
 )
 from cw.codex_review._roles import (
+    _AUDIT_ARGV_FLAGS,
     _COMMAND_NOT_FOUND_RETURNCODE,
+    _FLAG_REJECTION_MARKERS,
+    _TERMINAL_EVENTS,
     _build_generic_codex_argv,
     _classify_codex_failure,
     _classify_codex_output_failure,
     _codex_scratch_dir,
+    _is_audit_flag_rejection,
     _persist_codex_role_diagnostics,
     _run_codex_role,
     _slug,
@@ -98,15 +107,19 @@ __all__ = [
     "CODEX_REVIEW_UNPARSEABLE",
     "CODEX_TIMEOUT",
     "STAGE3_REVIEW",
+    "_AUDIT_ARGV_FLAGS",
     "_CATEGORY_TO_REASON",
     "_COMMAND_NOT_FOUND_RETURNCODE",
     "_CONFIDENCE_ANNOTATION",
     "_DIFF_GIT_HEADER_RE",
+    "_EXPECTED_REVIEWER_ITEM_TYPES",
+    "_FLAG_REJECTION_MARKERS",
     "_HUNK_RE",
     "_MIN_ROLE_TIMEOUT_SECONDS",
     "_OUTPUT_INSTRUCTIONS",
     "_REVIEWER_ROLE_AGENT_FILES",
     "_SENSITIVE_HEADER",
+    "_TERMINAL_EVENTS",
     "_TRANSIENT_FAILURE_REASONS",
     "_FileCategories",
     "_ReviewPassInputs",
@@ -120,11 +133,13 @@ __all__ = [
     "_codex_scratch_dir",
     "_format_failures_detail",
     "_hit_from_entry",
+    "_is_audit_flag_rejection",
     "_load_agent_spec",
     "_load_optional_text",
     "_load_review_policy",
     "_load_sensitive_hits",
     "_load_ticket_context",
+    "_parse_codex_audit_events",
     "_parse_hunk_new_start",
     "_parse_review_policy",
     "_parse_reviewer_document",

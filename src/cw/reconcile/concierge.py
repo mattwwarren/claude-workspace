@@ -90,6 +90,19 @@ from cw.reconcile._shared import (
     salvage_terminal_result,
     ticket_id_for_session,
 )
+
+# GitHub #1702: REVIEW_HEALTH_GATE_DISPOSITION ("review_health_gate") is
+# deliberately NOT a member of this set, and must not be added to
+# _REAP_ELIGIBLE_DISPOSITIONS_BASE to make it one. Every disposition here names
+# a *technical* park -- a dead surface, an idle stall, a phantom, a session that
+# died before it could report -- for which "requeue it and try again" is the
+# correct mechanical answer. A review-health park is the opposite: the review
+# genuinely ran and reported that it could not vouch for its own coverage.
+# Auto-requeuing it would misclassify a real review-coverage finding as a
+# session-death glitch and silently spin the ticket back through the pipeline
+# without a human ever seeing the signal -- exactly what #1702 exists to
+# prevent. Escalation (cw.reconcile.escalation) pages the operator on it
+# instead; drain (cw.dev_queue.drain) releases it on an explicit operator call.
 from cw.reconcile._shared import (
     _REAP_ELIGIBLE_DISPOSITIONS_BASE as _FALSE_PARK_ELIGIBLE_DISPOSITIONS,
 )

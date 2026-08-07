@@ -110,6 +110,14 @@ class TestRejectionReasonLiteral:
                 reason="evidence_not_in_diff",
             )
 
+    def test_unanchored_is_valid_rejection_reason_literal(self) -> None:
+        # #1632: "unanchored" is a 6th RejectedFindingReason value. Normal
+        # operation never constructs a RejectedFinding with it (validate_
+        # reviewer_document routes it to accepted instead) — this only pins
+        # the Literal itself accepts direct construction.
+        rf = RejectedFinding(raw={}, reviewer_role="R", reason="unanchored")
+        assert rf.reason == "unanchored"
+
 
 class TestFindingValidation:
     def test_required_fields(self) -> None:
@@ -303,7 +311,10 @@ class TestValidateReviewerDocument:
         assert not accepted
         assert rejected[0].reason == "evidence_not_in_diff"
 
-    def test_unknown_file_rejected(self) -> None:
+    def test_unknown_file_rejected_without_worktree(self) -> None:
+        # Exercises the worktree=None back-compat path (#1632): with no
+        # worktree opted in, a non-diff file is always "unknown_file",
+        # regardless of whether it exists on disk anywhere.
         f = _make_finding(file="src/cw/other.py")
         accepted, rejected, _ = validate_reviewer_document(
             _make_reviewer_doc(f), _make_diff()
@@ -328,8 +339,12 @@ class TestValidateReviewerDocument:
         assert not rejected
 
     def test_rejected_preserves_raw_payload(self) -> None:
+        # worktree=None explicitly: stays on the no-worktree fallback path
+        # (#1632) — the tree-existence relaxation never engages here.
         f = _make_finding(file="src/cw/other.py", summary="raw kept")
-        _, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), _make_diff())
+        _, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(f), _make_diff(), worktree=None
+        )
         assert rejected[0].raw["summary"] == "raw kept"
         assert rejected[0].reviewer_role == "Test Reviewer"
 
@@ -414,6 +429,100 @@ class TestValidateReviewerDocument:
         accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
         assert len(accepted) == 1
         assert not rejected
+
+
+class TestUnanchoredFindings:
+    """#1632: a finding whose file is not in the diff but does resolve to a
+    real path under an opted-in ``worktree`` is routed to adjudication
+    (``"unanchored"``) instead of being silently discarded as
+    ``"unknown_file"``. Tree-existence proves the *path* is real, never the
+    evidence *quote* — the escalation-quote check still runs against the
+    diff for these findings (see
+    ``test_unanchored_finding_escalation_still_validated_against_diff``).
+    """
+
+    def test_unanchored_file_in_tree_is_accepted(self, tmp_path: Path) -> None:
+        (tmp_path / "docs").mkdir()
+        (tmp_path / "docs" / "plan.md").write_text("hello")
+        finding = _make_finding(file="docs/plan.md", line_start=None, line_end=None)
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), _make_diff(), worktree=tmp_path
+        )
+        assert accepted == [finding]
+        assert rejected == []
+
+    def test_unanchored_file_not_in_tree_still_unknown_file(
+        self, tmp_path: Path
+    ) -> None:
+        # worktree is opted in but the cited file does not exist on disk —
+        # the tree check fails, so this falls back to unknown_file exactly
+        # like the no-worktree case.
+        finding = _make_finding(file="docs/plan.md", line_start=None, line_end=None)
+        _, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), _make_diff(), worktree=tmp_path
+        )
+        assert rejected[0].reason == "unknown_file"
+
+    def test_unanchored_path_traversal_outside_worktree_rejected(
+        self, tmp_path: Path
+    ) -> None:
+        # Proves the containment guard, not just existence: the cited path
+        # DOES exist on the real filesystem (a tmp_path sibling), but escapes
+        # the worktree root via "../" — must still be unknown_file.
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        (tmp_path / "sibling.txt").write_text("secret")
+        finding = _make_finding(file="../sibling.txt", line_start=None, line_end=None)
+        _, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), _make_diff(), worktree=worktree
+        )
+        assert rejected[0].reason == "unknown_file"
+
+    def test_unanchored_finding_preserves_reviewer_text(self, tmp_path: Path) -> None:
+        (tmp_path / "docs.md").write_text("x")
+        finding = _make_finding(
+            file="docs.md",
+            line_start=None,
+            line_end=None,
+            summary="custom summary",
+            consequence="custom consequence",
+            suggested_fix="custom fix",
+            evidence="custom evidence",
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), _make_diff(), worktree=tmp_path
+        )
+        assert not rejected
+        assert accepted[0].summary == "custom summary"
+        assert accepted[0].consequence == "custom consequence"
+        assert accepted[0].suggested_fix == "custom fix"
+        assert accepted[0].evidence == "custom evidence"
+
+    def test_unanchored_finding_escalation_still_validated_against_diff(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "docs.md").write_text("x")
+        good_esc = _make_escalation(evidence_quote="def broken():")
+        good_finding = _make_finding(
+            file="docs.md", line_start=None, line_end=None, escalation=good_esc
+        )
+        accepted, rejected, stripped = validate_reviewer_document(
+            _make_reviewer_doc(good_finding), _make_diff(), worktree=tmp_path
+        )
+        assert not rejected
+        assert accepted[0].escalation is not None
+        assert not stripped
+
+        bad_esc = _make_escalation(evidence_quote="ghost quote")
+        bad_finding = _make_finding(
+            file="docs.md", line_start=None, line_end=None, escalation=bad_esc
+        )
+        accepted2, rejected2, stripped2 = validate_reviewer_document(
+            _make_reviewer_doc(bad_finding), _make_diff(), worktree=tmp_path
+        )
+        assert not rejected2
+        assert accepted2[0].escalation is None
+        assert len(stripped2) == 1
 
 
 class TestEscalationStripOnInvalidEvidence:
@@ -635,6 +744,34 @@ class TestConsolidateVerdict:
         assert verdict.blocking is False
         assert verdict.must_fix == []
 
+    def test_unanchored_must_fix_finding_blocks_via_worktree(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "docs.md").write_text("x")
+        finding = _make_finding(
+            severity="MUST_FIX", file="docs.md", line_start=None, line_end=None
+        )
+        doc = _make_reviewer_doc(finding)
+        verdict = consolidate_verdict(
+            [doc], _make_diff(), reviewed_sha="sha", worktree=tmp_path
+        )
+        assert verdict.blocking is True
+        assert len(verdict.must_fix) == 1
+        assert verdict.rejected == []
+        assert verdict.review.must_fix_initial == 1
+
+    def test_unanchored_without_worktree_still_rejected(self, tmp_path: Path) -> None:
+        # Same finding, no worktree kwarg passed — proves the relaxation is
+        # strictly opt-in even when the cited file genuinely exists on disk.
+        (tmp_path / "docs.md").write_text("x")
+        finding = _make_finding(
+            severity="MUST_FIX", file="docs.md", line_start=None, line_end=None
+        )
+        doc = _make_reviewer_doc(finding)
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        assert verdict.blocking is False
+        assert verdict.rejected[0].reason == "unknown_file"
+
 
 class TestConsolidateVerdictFailedReviewers:
     def test_default_no_failed_reviewers(self) -> None:
@@ -805,6 +942,158 @@ class TestReviewerRunRecord:
     def test_construct(self) -> None:
         r = ReviewerRunRecord(reviewer_role="R", status="ok", finding_count=3)
         assert r.finding_count == 3
+
+    def test_audit_metrics_fields_all_default_when_unset(self) -> None:
+        # #1710: every new telemetry field is optional, so pre-#1710 bare
+        # construction (and consolidate_verdict's own two construction sites)
+        # keep working untouched.
+        r = ReviewerRunRecord(reviewer_role="R", status="ok", finding_count=3)
+        assert r.thread_id is None
+        assert r.effective_model is None
+        assert r.duration_seconds is None
+        assert r.input_tokens is None
+        assert r.cached_input_tokens is None
+        assert r.output_tokens is None
+        assert r.reasoning_tokens is None
+        assert r.terminal_event is None
+        assert r.tool_call_counts == {}
+        assert r.had_command_evidence is False
+        assert r.unexpected_tool_attempts == []
+
+    def test_construct_with_explicit_metrics(self) -> None:
+        r = ReviewerRunRecord(
+            reviewer_role="R",
+            status="ok",
+            finding_count=0,
+            thread_id="thr-1",
+            effective_model=None,
+            duration_seconds=12.5,
+            input_tokens=100,
+            cached_input_tokens=80,
+            output_tokens=5,
+            reasoning_tokens=1,
+            terminal_event="turn.completed",
+            tool_call_counts={"command_execution": 2},
+            had_command_evidence=True,
+            unexpected_tool_attempts=["mcp_tool_call"],
+        )
+        assert r.thread_id == "thr-1"
+        assert r.duration_seconds == pytest.approx(12.5)
+        assert r.tool_call_counts == {"command_execution": 2}
+        assert r.had_command_evidence is True
+        assert r.unexpected_tool_attempts == ["mcp_tool_call"]
+
+    def test_metrics_defaults_are_not_shared_between_instances(self) -> None:
+        # Mutable defaults must come from a factory, not a shared literal.
+        a = ReviewerRunRecord(reviewer_role="A", status="ok", finding_count=0)
+        b = ReviewerRunRecord(reviewer_role="B", status="ok", finding_count=0)
+        a.tool_call_counts["x"] = 1
+        a.unexpected_tool_attempts.append("y")
+        assert b.tool_call_counts == {}
+        assert b.unexpected_tool_attempts == []
+
+
+class TestConsolidateVerdictMetricsByRole:
+    """#1710: per-role codex audit metrics land on ReviewerRunRecord."""
+
+    def test_metrics_attach_to_matching_document_record(self) -> None:
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(), reviewer_role="Reviewer A")
+        verdict = consolidate_verdict(
+            [doc],
+            diff,
+            reviewed_sha="sha",
+            metrics_by_role={
+                "Reviewer A": {
+                    "thread_id": "thr-a",
+                    "duration_seconds": 3.5,
+                    "input_tokens": 42,
+                    "terminal_event": "turn.completed",
+                    "tool_call_counts": {"agent_message": 1},
+                    "had_command_evidence": True,
+                }
+            },
+        )
+        record = verdict.agents_run[0]
+        assert record.thread_id == "thr-a"
+        assert record.duration_seconds == pytest.approx(3.5)
+        assert record.input_tokens == 42
+        assert record.terminal_event == "turn.completed"
+        assert record.tool_call_counts == {"agent_message": 1}
+        assert record.had_command_evidence is True
+
+    def test_role_absent_from_metrics_gets_defaults(self) -> None:
+        diff = _make_diff()
+        doc_a = _make_reviewer_doc(_make_finding(), reviewer_role="Reviewer A")
+        doc_b = _make_reviewer_doc(_make_finding(), reviewer_role="Reviewer B")
+        verdict = consolidate_verdict(
+            [doc_a, doc_b],
+            diff,
+            reviewed_sha="sha",
+            metrics_by_role={"Reviewer A": {"thread_id": "thr-a"}},
+        )
+        by_role = {r.reviewer_role: r for r in verdict.agents_run}
+        assert by_role["Reviewer A"].thread_id == "thr-a"
+        assert by_role["Reviewer B"].thread_id is None
+        assert by_role["Reviewer B"].tool_call_counts == {}
+
+    def test_failed_reviewer_record_picks_up_its_metrics(self) -> None:
+        # A role that invoked codex and failed still has audit telemetry —
+        # the ticket's "runtime failures before the final document" framing.
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(), reviewer_role="Reviewer A")
+        verdict = consolidate_verdict(
+            [doc],
+            diff,
+            reviewed_sha="sha",
+            failed_reviewers=[
+                ReviewerRunFailure(role="Perf Reviewer", reason="timeout")
+            ],
+            metrics_by_role={
+                "Perf Reviewer": {
+                    "thread_id": "thr-perf",
+                    "terminal_event": "turn.failed",
+                    "duration_seconds": 900.0,
+                }
+            },
+        )
+        failed = next(r for r in verdict.agents_run if r.status == "failed")
+        assert failed.reviewer_role == "Perf Reviewer"
+        assert failed.thread_id == "thr-perf"
+        assert failed.terminal_event == "turn.failed"
+        assert failed.duration_seconds == pytest.approx(900.0)
+
+    def test_none_default_is_byte_identical_to_omitting_the_param(self) -> None:
+        # Regression guard for the additive-default claim: the new parameter
+        # must not perturb any pre-#1710 verdict.
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="MUST_FIX"))
+        without = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        with_none = consolidate_verdict(
+            [doc], diff, reviewed_sha="sha", metrics_by_role=None
+        )
+        assert without.model_dump() == with_none.model_dump()
+
+    def test_metrics_never_affect_blocking_or_must_fix(self) -> None:
+        # R2/R4 (#1710): metrics are purely observational.
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="MUST_FIX"))
+        baseline = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        with_metrics = consolidate_verdict(
+            [doc],
+            diff,
+            reviewed_sha="sha",
+            metrics_by_role={
+                doc.reviewer_role: {
+                    "terminal_event": None,
+                    "unexpected_tool_attempts": ["mcp_tool_call"],
+                    "had_command_evidence": False,
+                }
+            },
+        )
+        assert with_metrics.blocking == baseline.blocking
+        assert with_metrics.must_fix == baseline.must_fix
+        assert with_metrics.review.model_dump() == baseline.review.model_dump()
 
 
 class TestCapturedDiffStructure:

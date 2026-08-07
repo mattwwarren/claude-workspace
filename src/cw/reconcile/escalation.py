@@ -34,7 +34,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from cw.auto_dev_result import PAUSED_FOR_USER_INPUT_STATUSES
-from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
+from cw.dev_queue import (
+    REVIEW_HEALTH_GATE_DISPOSITION,
+    dev_queue_lock,
+    load_dev_queue,
+    save_dev_queue,
+)
 from cw.events import record_event
 from cw.models import OrchestratorEventType, QueueItemStatus
 from cw.reconcile._shared import _REAP_ELIGIBLE_DISPOSITIONS_BASE
@@ -77,9 +82,20 @@ ESCALATION_PARK_MINUTES = 45
 # _FALSE_PARK_ELIGIBLE_DISPOSITIONS, synced only by a comment telling the
 # reader to update both. Only the value moved; this module's own addition
 # (PAUSED_FOR_USER_INPUT_STATUSES minus the named exclusion) is unchanged.
+#
+# GitHub #1702: the review-health gate joins as a THIRD union term, deliberately
+# not by extending _REAP_ELIGIBLE_DISPOSITIONS_BASE -- that shared frozenset also
+# feeds concierge's _FALSE_PARK_ELIGIBLE_DISPOSITIONS, and auto-requeuing a
+# review-health park would defeat the gate (see concierge.py's import site).
+# Escalation-eligible it *is*, though: it is an unresolved, non-operator-
+# initiated quality signal, the same class as the plan/review_pending_approval
+# members above -- not a deliberately-armed operator stop (signoff_gate,
+# finalize_gate_held), which are intentionally absent from this set because
+# their clock does not start until an operator chooses to act.
 _ELIGIBLE_DISPOSITIONS: frozenset[str | None] = frozenset(
     (PAUSED_FOR_USER_INPUT_STATUSES - {"premises_pending_verification"})
     | _REAP_ELIGIBLE_DISPOSITIONS_BASE
+    | {REVIEW_HEALTH_GATE_DISPOSITION}
 )
 
 # Status branch: disposition is irrelevant for these two statuses.

@@ -10,7 +10,9 @@ requeue_ticket in the drain-command interpretation of RFC 0011 A4's
 requeue_ticket's same-stage default (R3, R7).
 
 Scope: A3 force-holds (proactive stop-before-finalize, #1160) are explicitly
-OUT of scope -- see DRAIN_DISPOSITIONS below and RFC 0011 A4 R11.
+OUT of scope -- see DRAIN_DISPOSITIONS below and RFC 0011 A4 R11. #1702's
+review-health gate is explicitly IN scope (it clears by re-running review),
+even though it is not a HOLD_DISPOSITIONS member -- see DRAIN_DISPOSITIONS.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from typing import TYPE_CHECKING, Literal, TypedDict
 from cw.dev_queue.lifecycle import (
     FINALIZE_GATE_HELD_DISPOSITION,
     HOLD_DISPOSITIONS,
+    REVIEW_HEALTH_GATE_DISPOSITION,
 )
 from cw.dev_queue.requeue import requeue_ticket
 from cw.dev_queue.storage import load_dev_queue
@@ -55,9 +58,18 @@ class DrainOutcome(TypedDict):
 # disposition added to HOLD_DISPOSITIONS therefore flows into drain's
 # selection automatically -- exclude it here explicitly if it must not be
 # batch-releasable, mirroring the A3 exclusion.
-DRAIN_DISPOSITIONS: frozenset[str] = HOLD_DISPOSITIONS - frozenset(
-    {FINALIZE_GATE_HELD_DISPOSITION}
-)
+#
+# #1702 adds REVIEW_HEALTH_GATE_DISPOSITION by explicit union rather than
+# through HOLD_DISPOSITIONS (it is deliberately not a member of that set, see
+# lifecycle.py). The two exclusion/inclusion calls have opposite answers for a
+# reason: an A3 force hold is a deliberate operator stop, so batch-releasing it
+# would override the operator; a review-health park is "the review that ran did
+# not vouch for its own coverage", which clears by re-running review -- exactly
+# what drain does. Including it here does NOT make it concierge-false-park-
+# eligible; those sets are independent by design.
+DRAIN_DISPOSITIONS: frozenset[str] = (
+    HOLD_DISPOSITIONS - frozenset({FINALIZE_GATE_HELD_DISPOSITION})
+) | frozenset({REVIEW_HEALTH_GATE_DISPOSITION})
 
 
 def select_held_tickets(client: str, *, lane: str | None = None) -> list[TicketTask]:

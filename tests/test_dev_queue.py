@@ -6446,6 +6446,40 @@ class TestDrainHeldTickets:
         assert t.status == QueueItemStatus.BLOCKED_ON_USER
         assert t.disposition == "finalize_gate_held"
 
+    def test_drain_includes_review_health_gate(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#1702: a review-health-gate park IS batch-releasable.
+
+        Positive mirror of ``test_drain_excludes_a3_force_hold``: unlike a
+        force hold (a deliberate operator stop), a degraded-review-health park
+        clears by re-running review — exactly what drain does.
+        """
+        from cw.dev_queue import (
+            REVIEW_HEALTH_GATE_DISPOSITION,
+            drain_held_tickets,
+            select_held_tickets,
+        )
+
+        assert REVIEW_HEALTH_GATE_DISPOSITION == "review_health_gate"
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        health_gated = _make_blocked_task(
+            ticket_id="GEN-502",
+            stage=Stage.REVIEW,
+            session_id="sess-health-1",
+            disposition=REVIEW_HEALTH_GATE_DISPOSITION,
+        )
+        save_dev_queue(DevQueueStore(tasks=[health_gated]))
+
+        assert [t.ticket_id for t in select_held_tickets("genhealth")] == ["GEN-502"]
+        outcomes = drain_held_tickets("genhealth")
+
+        assert [o["status"] for o in outcomes] == ["requeued"]
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-502")
+        assert t.status == QueueItemStatus.PENDING
+        assert t.stage == Stage.REVIEW
+
     def test_no_outer_lock_held_during_batch(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:

@@ -9521,6 +9521,241 @@ class TestApplyStagedDecision:
         assert OPERATOR_UNAVAILABLE_BLOCKER_REASONS
         assert _AWAITING_OPERATOR_REASON in BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
 
+    # -- review-health gate (#1702) --------------------------------------
+
+    def test_stage_complete_review_health_gate_parks_without_signoff(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """#1702: Rule 3 at REVIEW with health.recommendation=EXIT_FOR_HUMAN_REVIEW
+        parks even in a lane with no independent signoff rule configured.
+
+        Also asserts the SESSION_NEEDS_ATTENTION payload identifies degraded
+        review health as the park reason (acceptance criterion 6), mirroring
+        the sibling gates' own event-content assertions (e.g.
+        test_scope_gated_large_tier_emits_session_needs_attention).
+        """
+        from cw.dev_queue import REVIEW_HEALTH_GATE_DISPOSITION
+        from cw.dispatch import apply_staged_decision
+
+        attention = capture_events(
+            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+
+        task = self._make_running_task("RHG-SC-1", stage=Stage.REVIEW)
+        assert task.signoff is None
+        assert task.hold_finalize is None
+        last_result: dict[str, object] = {
+            "status": "stage_complete",
+            "health": {
+                "any_incomplete_risk": True,
+                "recommendation": "EXIT_FOR_HUMAN_REVIEW",
+            },
+        }
+        apply_staged_decision(
+            task, "stage_complete", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == REVIEW_HEALTH_GATE_DISPOSITION
+        assert task.disposition == "review_health_gate"
+        assert task.stage == Stage.REVIEW  # not advanced to FINALIZE
+
+        assert len(attention) == 1
+        event_type, payload, correlation_id = attention[0]
+        assert event_type == OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        assert payload["paused_status"] == "review_health_gate"
+        assert payload["ticket_id"] == "RHG-SC-1"
+        assert correlation_id == "RHG-SC-1"
+
+    def test_stage_complete_impl_stage_with_degraded_health_advances_unchanged(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """#1702: the gate is REVIEW-scoped, so an IMPL-stage completion carrying
+        EXIT_FOR_HUMAN_REVIEW still advances IMPL->REVIEW unattended.
+
+        ``local_runner.synthesize_git_result`` hardcodes EXIT_FOR_HUMAN_REVIEW on
+        its only success path (#1580) as an honest "I am not a reviewer" default,
+        not a derived review signal. Gating on it at IMPL stage would permanently
+        park every LOCAL-backend IMPL completion and silently disable the
+        documented unattended IMPL->REVIEW auto-advance.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("RHG-IMPL-1", stage=Stage.IMPL)
+        last_result: dict[str, object] = {
+            "status": "stage_complete",
+            "health": {
+                "any_incomplete_risk": True,
+                "recommendation": "EXIT_FOR_HUMAN_REVIEW",
+            },
+        }
+        apply_staged_decision(
+            task, "stage_complete", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.REVIEW
+        # Exact value, not a negative comparison: a plain advance clears
+        # disposition to None (transition_task_status's _RESET_DISPOSITION_STATUSES
+        # branch, via _advance_task_pointer -> transition_task_status(..., PENDING)
+        # with no disposition kwarg) -- the precise pre-#1702 baseline, not just
+        # "anything other than the literal review_health_gate string".
+        assert task.disposition is None
+
+    def test_stage_complete_recommendation_proceed_advances_unchanged(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """#1702: recommendation="PROCEED" leaves Rule 3 routing untouched."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("RHG-PROCEED-1", stage=Stage.REVIEW)
+        last_result: dict[str, object] = {
+            "status": "stage_complete",
+            "health": {"any_incomplete_risk": False, "recommendation": "PROCEED"},
+        }
+        apply_staged_decision(
+            task, "stage_complete", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.FINALIZE
+
+    def test_stage_complete_missing_health_advances_unchanged(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """#1702: a null last_result and one with no ``health`` key both advance."""
+        from cw.dispatch import apply_staged_decision
+
+        clients = self._clients(tmp_path)
+
+        null_result = self._make_running_task("RHG-NULL-1", stage=Stage.REVIEW)
+        apply_staged_decision(null_result, "stage_complete", None, clients)
+        assert null_result.status == QueueItemStatus.PENDING
+        assert null_result.stage == Stage.FINALIZE
+
+        no_key = self._make_running_task("RHG-NOKEY-1", stage=Stage.REVIEW)
+        apply_staged_decision(
+            no_key, "stage_complete", {"status": "stage_complete"}, clients
+        )
+        assert no_key.status == QueueItemStatus.PENDING
+        assert no_key.stage == Stage.FINALIZE
+
+    def test_stage_complete_malformed_health_advances_unchanged(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """#1702: a non-dict ``health`` value is tolerated, not gated on."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("RHG-MALFORMED-1", stage=Stage.REVIEW)
+        last_result: dict[str, object] = {
+            "status": "stage_complete",
+            "health": "not-a-dict",
+        }
+        apply_staged_decision(
+            task, "stage_complete", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.FINALIZE
+
+    def test_review_pending_approval_small_tier_review_health_gate_parks(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """#1702: Rule 1's small-tier auto-advance arm is now health-gated."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("RHG-R1-SMALL-1", stage=Stage.REVIEW)
+        last_result: dict[str, object] = {
+            "status": "review_pending_approval",
+            "scope": {"tier": "small"},
+            "health": {
+                "any_incomplete_risk": True,
+                "recommendation": "EXIT_FOR_HUMAN_REVIEW",
+            },
+        }
+        apply_staged_decision(
+            task, "review_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "review_health_gate"
+        assert task.stage == Stage.REVIEW
+
+    def test_review_pending_approval_large_tier_with_degraded_health_reports_gate(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """#1702: a quality signal outranks the authorization-workflow signal.
+
+        Large tier + degraded health lands on the same terminal status
+        (BLOCKED_ON_USER) either way, but the disposition reports the health
+        gate rather than the status-derived approval gate.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("RHG-R1-LARGE-1", stage=Stage.REVIEW)
+        last_result: dict[str, object] = {
+            "status": "review_pending_approval",
+            "scope": {"tier": "large"},
+            "health": {
+                "any_incomplete_risk": True,
+                "recommendation": "EXIT_FOR_HUMAN_REVIEW",
+            },
+        }
+        apply_staged_decision(
+            task, "review_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "review_health_gate"
+        assert task.disposition != "review_pending_approval"
+        assert task.stage == Stage.REVIEW
+
+    def test_codex_review_degraded_document_parks_without_signoff(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+    ) -> None:
+        """#1702 end-to-end: a real degraded reviewer document, run through the
+        UNMODIFIED codex producer, parks at the routing layer.
+
+        Proves the wiring between ``_derive_health``'s real output and the new
+        gate -- not just a hand-built ``last_result`` dict.
+        """
+        from cw.codex_review import synthesize_codex_review_result
+        from cw.dispatch import apply_staged_decision
+        from tests._codex_review_helpers import _task as _codex_task
+        from tests.conftest import _make_diff, _make_reviewer_doc
+
+        worktree = make_git_repo("wt-1702-health-gate")
+        result, _verdict = synthesize_codex_review_result(
+            task=_codex_task(),
+            worktree=worktree,
+            documents=[_make_reviewer_doc(status="degraded")],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-1702",
+            default_branch="main",
+        )
+        # The producer is untouched by this ticket: assert its real output shape
+        # before feeding it through routing.
+        assert result.status == "stage_complete"
+        assert result.health.recommendation == "EXIT_FOR_HUMAN_REVIEW"
+
+        task = self._make_running_task("RHG-E2E-1", stage=Stage.REVIEW)
+        assert task.signoff is None
+        apply_staged_decision(
+            task, result.status, result.model_dump(mode="json"), self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "review_health_gate"
+        assert task.stage == Stage.REVIEW
+
 
 # ---------------------------------------------------------------------------
 # TestPersistCarriedContext

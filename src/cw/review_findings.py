@@ -19,8 +19,8 @@ Public surface:
 - Models: :class:`Finding`, :class:`EscalationMetadata`,
   :class:`ReviewerFindingsDocument`, :class:`RejectedFinding`,
   :class:`AcceptedFinding`, :class:`ReviewerRunRecord`,
-  :class:`ReviewerRunFailure`, :class:`StrippedEscalation`,
-  :class:`ReviewVerdict`, :class:`CapturedDiff`.
+  :class:`ReviewerRunMetrics`, :class:`ReviewerRunFailure`,
+  :class:`StrippedEscalation`, :class:`ReviewVerdict`, :class:`CapturedDiff`.
 - Functions: :func:`validate_reviewer_document`, :func:`dedupe_findings`,
   :func:`derive_review_counts`, :func:`consolidate_verdict`,
   :func:`write_review_verdict`.
@@ -29,7 +29,7 @@ Public surface:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Literal, get_args
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, get_args
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -45,17 +45,25 @@ Severity = Literal["MUST_FIX", "SHOULD_FIX", "NIT", "PRINCIPLE"]
 Disposition = Literal["fixed", "rejected", "deferred"]
 ReviewerHealthStatus = Literal["ok", "degraded", "failed"]
 Confidence = Literal["HIGH", "MEDIUM", "LOW"]
-# The five reasons a finding can be rejected outright (used by
+# The six reasons a finding can be rejected outright (used by
 # :attr:`RejectedFinding.reason` and :func:`_classify_finding`'s return type).
 # Split from the escalation-strip reason (R6): a stripped escalation is a
 # survived finding whose escalation evidence failed the diff check, not a
 # rejected finding, so the two never share a Literal.
+#
+# "unanchored" is special (#1632): _classify_finding returns it as a plain
+# discriminator like every other value here, but validate_reviewer_document
+# routes it to `accepted` rather than constructing a RejectedFinding — in
+# normal operation no RejectedFinding.reason is ever "unanchored". It exists
+# in this Literal only so the discriminator type is honest about every value
+# _classify_finding can return.
 RejectedFindingReason = Literal[
     "invalid_severity",
     "missing_evidence",
     "evidence_not_in_diff",
     "unknown_file",
     "invalid_line_reference",
+    "unanchored",
 ]
 # The sole reason an escalation is stripped, kept as its own single-value
 # Literal so :attr:`StrippedEscalation.reason` cannot accidentally carry a
@@ -214,12 +222,61 @@ class AcceptedFinding(BaseModel):
     disposition: Disposition = "fixed"
 
 
+class ReviewerRunMetrics(TypedDict, total=False):
+    """Transient kwargs bag of one reviewer run's executor telemetry (#1710).
+
+    NOT a persisted structure and NOT a field on any model: a ``TypedDict``
+    erases to a plain ``dict`` at runtime, and the only thing this shape is
+    ever used for is ``ReviewerRunRecord(**metrics)``. The persisted home for
+    every value here is :class:`ReviewerRunRecord`'s own fields — there is
+    deliberately no parallel metrics structure hanging off
+    :class:`ReviewVerdict` (R3, #1710).
+
+    ``total=False`` so a producer may omit any key; every corresponding
+    ``ReviewerRunRecord`` field is defaulted, so a partial bag splats cleanly.
+    """
+
+    thread_id: str | None
+    effective_model: str | None
+    duration_seconds: float | None
+    input_tokens: int | None
+    cached_input_tokens: int | None
+    output_tokens: int | None
+    reasoning_tokens: int | None
+    terminal_event: str | None
+    tool_call_counts: dict[str, int]
+    had_command_evidence: bool
+    unexpected_tool_attempts: list[str]
+
+
 class ReviewerRunRecord(BaseModel):
-    """Terminal-health record for one reviewer agent that ran (or failed)."""
+    """Terminal-health record for one reviewer agent that ran (or failed).
+
+    Everything below ``finding_count`` is executor audit telemetry (#1710),
+    populated from the codex ``--json`` event stream where one is available and
+    left at its default everywhere else (the Claude-native review path, a role
+    whose stream was malformed, a run that never emitted one). It is purely
+    observational: no health, blocking, or gate decision reads any of it.
+    """
 
     reviewer_role: str
     status: ReviewerHealthStatus
     finding_count: int
+    # Executor-native run identifier (codex ``thread.started.thread_id``).
+    thread_id: str | None = None
+    # Always None today: no codex-cli 0.147.0 event carries a model field.
+    effective_model: str | None = None
+    duration_seconds: float | None = None
+    input_tokens: int | None = None
+    cached_input_tokens: int | None = None
+    output_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    # Type of the last recognized stream event; anything other than
+    # "turn.completed"/"turn.failed" means the stream was cut off or absent.
+    terminal_event: str | None = None
+    tool_call_counts: dict[str, int] = Field(default_factory=dict)
+    had_command_evidence: bool = False
+    unexpected_tool_attempts: list[str] = Field(default_factory=list)
 
 
 class ReviewerRunFailure(BaseModel):
@@ -308,6 +365,24 @@ def _substring_in_diff(diff: CapturedDiff, text: str) -> bool:
     return text in diff.text
 
 
+def _file_in_repo_tree(worktree: Path, file: str) -> bool:
+    """True iff *file* resolves to a real file under *worktree*.
+
+    Guards against a hallucinated/adversarial ``Finding.file`` escaping the
+    worktree via an absolute path (pathlib's ``/`` operator silently
+    discards the left operand when the right is absolute) or a ``../``
+    traversal — the joined-and-resolved candidate must stay under the
+    resolved worktree root. Proves the *path* is real; callers must not
+    treat this as evidence the *quote* is real (R2, #1632).
+    """
+    try:
+        root = worktree.resolve()
+        candidate = (worktree / file).resolve()
+    except OSError:
+        return False
+    return candidate.is_relative_to(root) and candidate.is_file()
+
+
 def _line_reference_valid(diff: CapturedDiff, finding: Finding) -> bool:
     """Return True iff *finding*'s line references are in the diff.
 
@@ -352,8 +427,26 @@ def _evidence_in_claimed_lines(
     return text in window
 
 
+def _classify_unanchored_file(
+    file: str, worktree: Path | None
+) -> Literal["unanchored", "unknown_file"]:
+    """Classify a finding's file once it's known not to be a diff key (#1632).
+
+    Split out of :func:`_classify_finding` to keep that function's return
+    count under the ``PLR0911`` ceiling. ``worktree=None`` (no caller opted
+    in) or a failed tree-existence check both return ``"unknown_file"`` —
+    today's behavior, byte-identical.
+    """
+    if worktree is not None and _file_in_repo_tree(worktree, file):
+        return "unanchored"
+    return "unknown_file"
+
+
 def _classify_finding(
-    finding: Finding, diff: CapturedDiff, changed: frozenset[str]
+    finding: Finding,
+    diff: CapturedDiff,
+    changed: frozenset[str],
+    worktree: Path | None = None,
 ) -> RejectedFindingReason | None:
     """Return the rejection reason for *finding*, or ``None`` if it passes.
 
@@ -365,13 +458,24 @@ def _classify_finding(
     as ``invalid_line_reference``, not misclassified as ``evidence_not_in_diff``
     via an empty window. The escalation-quote check is NOT here — it runs only
     after a finding passes all of these.
+
+    When *finding*'s file is not in the diff at all, ``worktree`` (when given)
+    is consulted as a fallback: a file that genuinely exists in the repo tree
+    is "unanchored" rather than "unknown_file" (#1632) — evidence proven only
+    by tree-existence, not diff-containment, so the finding is routed to
+    adjudication (see :func:`validate_reviewer_document`) instead of being
+    silently discarded. ``worktree=None`` (no caller opted in) or a failed
+    tree check both fall back to today's ``"unknown_file"`` behavior, and
+    neither ``_line_reference_valid`` nor ``_evidence_in_claimed_lines`` ever
+    runs for an unanchored finding — there is no diff-line window to check it
+    against.
     """
     if finding.severity not in _VALID_SEVERITIES:
         return "invalid_severity"
     if _is_blank(finding.evidence):
         return "missing_evidence"
     if finding.file not in changed:
-        return "unknown_file"
+        return _classify_unanchored_file(finding.file, worktree)
     if not _line_reference_valid(diff, finding):
         return "invalid_line_reference"
     if not _evidence_in_claimed_lines(
@@ -382,7 +486,7 @@ def _classify_finding(
 
 
 def validate_reviewer_document(
-    doc: ReviewerFindingsDocument, diff: CapturedDiff
+    doc: ReviewerFindingsDocument, diff: CapturedDiff, *, worktree: Path | None = None
 ) -> tuple[list[Finding], list[RejectedFinding], list[StrippedEscalation]]:
     """Validate one reviewer's findings against *diff*.
 
@@ -391,6 +495,17 @@ def validate_reviewer_document(
     diff is accepted with its escalation nulled, and a
     :class:`StrippedEscalation` is recorded (with a WARNING log). A finding
     that is itself rejected never reaches the escalation-quote check.
+
+    ``worktree`` (default ``None``) opts into the #1632 unanchored-finding
+    relaxation: when a finding's ``file`` is not part of *diff* but resolves
+    to a real file under ``worktree``, :func:`_classify_finding` returns
+    ``"unanchored"`` instead of ``"unknown_file"`` — this function then routes
+    it into ``accepted`` (with an INFO log) rather than constructing a
+    :class:`RejectedFinding`, so it reaches adjudication instead of being
+    silently discarded. Tree-existence proves only that the *path* is real,
+    not that the finding's evidence quote is — an unanchored finding's
+    escalation (if any) still goes through the ordinary diff-based
+    evidence_quote check below, same as any other accepted finding.
     """
     accepted: list[Finding] = []
     rejected: list[RejectedFinding] = []
@@ -398,8 +513,8 @@ def validate_reviewer_document(
     changed = _changed_files(diff)
 
     for index, finding in enumerate(doc.findings):
-        reason = _classify_finding(finding, diff, changed)
-        if reason is not None:
+        reason = _classify_finding(finding, diff, changed, worktree)
+        if reason is not None and reason != "unanchored":
             rejected.append(
                 RejectedFinding(
                     raw=finding.model_dump(),
@@ -408,6 +523,15 @@ def validate_reviewer_document(
                 )
             )
             continue
+        if reason == "unanchored":
+            _log.info(
+                "auto-dev: routed unanchored finding to adjudication (file "
+                "exists in repo tree, not diff-anchored; evidence quote not "
+                "verified) (reviewer_role=%s, finding_index=%d, file=%s)",
+                doc.reviewer_role,
+                index,
+                finding.file,
+            )
         escalation = finding.escalation
         if escalation is not None and not _substring_in_diff(
             diff, escalation.evidence_quote
@@ -526,10 +650,17 @@ def consolidate_verdict(
     diff: CapturedDiff,
     reviewed_sha: str,
     *,
+    worktree: Path | None = None,
     failed_reviewers: list[ReviewerRunFailure] | None = None,
     fix_cycles_used: int = 0,
+    metrics_by_role: dict[str, ReviewerRunMetrics] | None = None,
 ) -> ReviewVerdict:
     """Consolidate every reviewer's document into a single :class:`ReviewVerdict`.
+
+    ``worktree`` (default ``None``) is threaded into
+    :func:`validate_reviewer_document` for every document — see that
+    function's docstring for the #1632 unanchored-finding relaxation it
+    controls.
 
     ``failed_reviewers`` (defaulting to an empty list — never a mutable default)
     each contribute one ``status="failed"`` / ``finding_count=0``
@@ -558,15 +689,25 @@ def consolidate_verdict(
     terminal ``Review`` itself (see ``cw.codex_fix_loop._finalize_review``);
     this parameter only carries the per-cycle count for that adapter's own
     intermediate verdicts (#1392).
+
+    ``metrics_by_role`` (default ``None`` → ``{}``) supplies per-role executor
+    audit telemetry, splatted onto the matching :class:`ReviewerRunRecord` for
+    documents and failures alike; a role with no entry keeps every telemetry
+    field at its default. Defaulting to ``None`` is what lets the Claude-native
+    caller (``cw.cli.review``), which never has codex metrics, stay unchanged —
+    and it is purely additive: nothing here reads the values back (#1710).
     """
     failures = failed_reviewers if failed_reviewers is not None else []
+    metrics = metrics_by_role if metrics_by_role is not None else {}
     candidates: list[tuple[str, Finding]] = []
     all_rejected: list[RejectedFinding] = []
     all_stripped: list[StrippedEscalation] = []
     run_records: list[ReviewerRunRecord] = []
 
     for doc in documents:
-        accepted, rejected, stripped = validate_reviewer_document(doc, diff)
+        accepted, rejected, stripped = validate_reviewer_document(
+            doc, diff, worktree=worktree
+        )
         candidates.extend((doc.reviewer_role, f) for f in accepted)
         all_rejected.extend(rejected)
         all_stripped.extend(stripped)
@@ -575,11 +716,17 @@ def consolidate_verdict(
                 reviewer_role=doc.reviewer_role,
                 status=doc.status,
                 finding_count=len(accepted),
+                **metrics.get(doc.reviewer_role, {}),
             )
         )
 
     run_records.extend(
-        ReviewerRunRecord(reviewer_role=failure.role, status="failed", finding_count=0)
+        ReviewerRunRecord(
+            reviewer_role=failure.role,
+            status="failed",
+            finding_count=0,
+            **metrics.get(failure.role, {}),
+        )
         for failure in failures
     )
 
