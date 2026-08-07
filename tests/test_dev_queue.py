@@ -211,6 +211,76 @@ class TestLoadSaveDevQueue:
         store = load_dev_queue()
         assert store.tasks[0].priority == 5
 
+    # -- #1653: a parked row owns the ticket; re-adding is refused ---------
+
+    def test_add_refused_when_row_parked_blocked_on_user(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        """A BLOCKED_ON_USER row blocks a re-add — no sibling row is minted."""
+        parked = TicketTask(
+            ticket_id="GEN-400",
+            client="genhealth",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            disposition="ambiguities_pending_resolution",
+        )
+        save_dev_queue(DevQueueStore(tasks=[parked]))
+
+        inserted = add_ticket(TicketTask(ticket_id="GEN-400", client="genhealth"))
+
+        assert inserted is False
+        store = load_dev_queue()
+        assert len(store.tasks) == 1
+        assert store.tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_add_refused_when_row_awaiting_operator_signoff(
+        self, tmp_dev_queue: Path
+    ) -> None:
+        """An AWAITING_OPERATOR_SIGNOFF row blocks a re-add too."""
+        parked = TicketTask(
+            ticket_id="GEN-401",
+            client="genhealth",
+            status=QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+        )
+        save_dev_queue(DevQueueStore(tasks=[parked]))
+
+        inserted = add_ticket(TicketTask(ticket_id="GEN-401", client="genhealth"))
+
+        assert inserted is False
+        assert len(load_dev_queue().tasks) == 1
+
+    def test_add_parked_refusal_is_not_stage_scoped(self, tmp_dev_queue: Path) -> None:
+        """Unlike the terminal dedup, a park blocks adds at ANY stage."""
+        parked = TicketTask(
+            ticket_id="GEN-402",
+            client="genhealth",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            disposition="plan_pending_approval",
+            stage=Stage.PLAN,
+        )
+        save_dev_queue(DevQueueStore(tasks=[parked]))
+
+        inserted = add_ticket(
+            TicketTask(ticket_id="GEN-402", client="genhealth", stage=Stage.IMPL)
+        )
+
+        assert inserted is False
+        assert len(load_dev_queue().tasks) == 1
+
+    def test_add_parked_other_ticket_still_inserts(self, tmp_dev_queue: Path) -> None:
+        """A park on one ticket never blocks enqueueing a different ticket."""
+        parked = TicketTask(
+            ticket_id="GEN-403",
+            client="genhealth",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            disposition="review_pending_approval",
+        )
+        save_dev_queue(DevQueueStore(tasks=[parked]))
+
+        inserted = add_ticket(TicketTask(ticket_id="GEN-404", client="genhealth"))
+
+        assert inserted is True
+        assert len(load_dev_queue().tasks) == 2
+
     def test_save_dev_queue_first_write_creates_no_backup(
         self, tmp_dev_queue: Path
     ) -> None:

@@ -51,7 +51,11 @@ def add_ticket(task: TicketTask) -> bool:
     """Enqueue a TicketTask, acquiring the file lock atomically.
 
     Returns True if the task was inserted, False if a task with the same
-    (client, ticket_id) is already PENDING or RUNNING, or if the same
+    (client, ticket_id) is already PENDING or RUNNING, already parked on an
+    operator gate (BLOCKED_ON_USER / AWAITING_OPERATOR_SIGNOFF — the parked
+    row already owns the ticket; re-adding would mint a sibling row that
+    later surfaces as ``terminal_sibling`` reconcile noise, #1653 — release
+    the park via ``requeue``/``approve`` instead), or if the same
     (client, ticket_id, stage) is already COMPLETED or CANCELLED
     (deduplication guard — terminal check is stage-scoped to allow normal
     multi-stage progression, e.g. COMPLETED PLAN does not block IMPL, #876).
@@ -60,6 +64,10 @@ def add_ticket(task: TicketTask) -> bool:
         LaneNotFoundError: if task.lane is not declared for the client.
     """
     _active = {QueueItemStatus.PENDING, QueueItemStatus.RUNNING}
+    _parked = {
+        QueueItemStatus.BLOCKED_ON_USER,
+        QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
+    }
     _terminal = {QueueItemStatus.COMPLETED, QueueItemStatus.CANCELLED}
     with _lock():
         try:
@@ -79,7 +87,7 @@ def add_ticket(task: TicketTask) -> bool:
         for existing in store.tasks:
             if existing.client != task.client or existing.ticket_id != task.ticket_id:
                 continue
-            if existing.status in _active:
+            if existing.status in _active or existing.status in _parked:
                 return False
             if existing.status in _terminal and existing.stage == task.stage:
                 return False
