@@ -5980,7 +5980,7 @@ class TestRequeueTicket:
         with pytest.raises(RequeueStageError):
             requeue_ticket("GEN-500", "genhealth", stage_override="impl")
 
-    def test_requeue_stage_impl_bypass_worktree_missing_plan_md_and_no_tracker_plan_raises(
+    def test_requeue_stage_impl_bypass_worktree_missing_plan_md_raises(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
@@ -6051,7 +6051,7 @@ class TestRequeueTicket:
 
         assert result["to_stage"] == "impl"
 
-    def test_requeue_stage_impl_bypass_local_plan_md_missing_but_tracker_has_reviewed_comment_succeeds(
+    def test_requeue_stage_impl_bypass_tracker_fallback_recovers_succeeds(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
@@ -6079,7 +6079,7 @@ class TestRequeueTicket:
 
         assert result["to_stage"] == "impl"
 
-    def test_requeue_stage_impl_bypass_tracker_comment_unmarked_and_no_local_plan_raises(
+    def test_requeue_stage_impl_bypass_tracker_unmarked_comment_raises(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
@@ -6125,9 +6125,7 @@ class TestRequeueTicket:
             msg = "worktree_path_for must not be called for a same-stage requeue"
             raise AssertionError(msg)
 
-        monkeypatch.setattr(
-            "cw.dev_queue.requeue.worktree_path_for", _fail_if_called
-        )
+        monkeypatch.setattr("cw.dev_queue.requeue.worktree_path_for", _fail_if_called)
         task = _make_blocked_task(stage=Stage.IMPL, session_id="sess-bypass-7")
         save_dev_queue(DevQueueStore(tasks=[task]))
 
@@ -6153,17 +6151,13 @@ class TestRequeueTicket:
             msg = "worktree_path_for must not be called for a review/finalize target"
             raise AssertionError(msg)
 
-        monkeypatch.setattr(
-            "cw.dev_queue.requeue.worktree_path_for", _fail_if_called
-        )
+        monkeypatch.setattr("cw.dev_queue.requeue.worktree_path_for", _fail_if_called)
 
         task_review = _make_blocked_task(
             ticket_id="GEN-503", stage=Stage.PLAN, session_id="sess-bypass-8a"
         )
         save_dev_queue(DevQueueStore(tasks=[task_review]))
-        result_review = requeue_ticket(
-            "GEN-503", "genhealth", stage_override="review"
-        )
+        result_review = requeue_ticket("GEN-503", "genhealth", stage_override="review")
         assert result_review["to_stage"] == "review"
 
         task_finalize = _make_blocked_task(
@@ -8109,10 +8103,10 @@ class TestStageHighWaterStamping:
         stages = [Stage.HARDEN, Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE]
         task = _make_stage_task(stage=Stage.IMPL, stage_high_water=Stage.IMPL)
         task.status = QueueItemStatus.BLOCKED_ON_USER
-        client_cfg = ClientConfig(name="test-client", workspace_path=Path("test-workspace"))
-        _apply_requeue_stage(
-            task, stages, "harden", client_cfg, allow_regress=True
+        client_cfg = ClientConfig(
+            name="test-client", workspace_path=Path("test-workspace")
         )
+        _apply_requeue_stage(task, stages, "harden", client_cfg, allow_regress=True)
         assert task.stage_high_water == Stage.IMPL
 
     def test_apply_requeue_stage_forward_raises_high_water(self) -> None:
@@ -8122,10 +8116,10 @@ class TestStageHighWaterStamping:
 
         stages = [Stage.HARDEN, Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE]
         task = _make_stage_task(stage=Stage.PLAN, stage_high_water=Stage.PLAN)
-        client_cfg = ClientConfig(name="test-client", workspace_path=Path("test-workspace"))
-        _apply_requeue_stage(
-            task, stages, "review", client_cfg, allow_regress=False
+        client_cfg = ClientConfig(
+            name="test-client", workspace_path=Path("test-workspace")
         )
+        _apply_requeue_stage(task, stages, "review", client_cfg, allow_regress=False)
         assert task.stage_high_water == Stage.REVIEW
 
     def test_apply_requeue_stage_forward_does_not_lower_high_water(self) -> None:
@@ -8135,10 +8129,10 @@ class TestStageHighWaterStamping:
 
         stages = [Stage.HARDEN, Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE]
         task = _make_stage_task(stage=Stage.PLAN, stage_high_water=Stage.FINALIZE)
-        client_cfg = ClientConfig(name="test-client", workspace_path=Path("test-workspace"))
-        _apply_requeue_stage(
-            task, stages, "review", client_cfg, allow_regress=False
+        client_cfg = ClientConfig(
+            name="test-client", workspace_path=Path("test-workspace")
         )
+        _apply_requeue_stage(task, stages, "review", client_cfg, allow_regress=False)
         assert task.stage_high_water == Stage.FINALIZE
 
 
