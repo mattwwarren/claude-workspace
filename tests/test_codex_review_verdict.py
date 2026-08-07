@@ -177,6 +177,37 @@ class TestSynthesizeCodexReviewResult:
         assert verdict is not None
         assert verdict.blocking is True
 
+    def test_unanchored_must_fix_finding_blocks_through_codex_path(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        # #1632: synthesize_codex_review_result always threads its own
+        # already-available `worktree` param straight through to
+        # consolidate_verdict — a MUST_FIX finding citing a file that is
+        # real on disk but not part of the diff still blocks, via the new
+        # "unanchored" routing rather than being silently dropped.
+        worktree = make_git_repo("wt-synth-unanchored")
+        (worktree / "docs.md").write_text("real file, not in the diff")
+        finding = _make_finding(
+            severity="MUST_FIX", file="docs.md", line_start=None, line_end=None
+        )
+        doc = _make_reviewer_doc(finding)
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-synth-unanchored",
+            default_branch="main",
+        )
+        assert result.status == "blocked"
+        assert result.blocker is not None
+        assert result.blocker.reason == CODEX_MUST_FIX_FINDINGS
+        assert verdict is not None
+        assert verdict.blocking is True
+        assert verdict.rejected == []
+
     def test_stage_complete_non_blocking(
         self, make_git_repo: Callable[[str], Path]
     ) -> None:

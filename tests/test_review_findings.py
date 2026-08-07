@@ -110,6 +110,14 @@ class TestRejectionReasonLiteral:
                 reason="evidence_not_in_diff",
             )
 
+    def test_unanchored_is_valid_rejection_reason_literal(self) -> None:
+        # #1632: "unanchored" is a 6th RejectedFindingReason value. Normal
+        # operation never constructs a RejectedFinding with it (validate_
+        # reviewer_document routes it to accepted instead) — this only pins
+        # the Literal itself accepts direct construction.
+        rf = RejectedFinding(raw={}, reviewer_role="R", reason="unanchored")
+        assert rf.reason == "unanchored"
+
 
 class TestFindingValidation:
     def test_required_fields(self) -> None:
@@ -303,7 +311,10 @@ class TestValidateReviewerDocument:
         assert not accepted
         assert rejected[0].reason == "evidence_not_in_diff"
 
-    def test_unknown_file_rejected(self) -> None:
+    def test_unknown_file_rejected_without_worktree(self) -> None:
+        # Exercises the worktree=None back-compat path (#1632): with no
+        # worktree opted in, a non-diff file is always "unknown_file",
+        # regardless of whether it exists on disk anywhere.
         f = _make_finding(file="src/cw/other.py")
         accepted, rejected, _ = validate_reviewer_document(
             _make_reviewer_doc(f), _make_diff()
@@ -328,8 +339,12 @@ class TestValidateReviewerDocument:
         assert not rejected
 
     def test_rejected_preserves_raw_payload(self) -> None:
+        # worktree=None explicitly: stays on the no-worktree fallback path
+        # (#1632) — the tree-existence relaxation never engages here.
         f = _make_finding(file="src/cw/other.py", summary="raw kept")
-        _, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), _make_diff())
+        _, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(f), _make_diff(), worktree=None
+        )
         assert rejected[0].raw["summary"] == "raw kept"
         assert rejected[0].reviewer_role == "Test Reviewer"
 
@@ -414,6 +429,100 @@ class TestValidateReviewerDocument:
         accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
         assert len(accepted) == 1
         assert not rejected
+
+
+class TestUnanchoredFindings:
+    """#1632: a finding whose file is not in the diff but does resolve to a
+    real path under an opted-in ``worktree`` is routed to adjudication
+    (``"unanchored"``) instead of being silently discarded as
+    ``"unknown_file"``. Tree-existence proves the *path* is real, never the
+    evidence *quote* — the escalation-quote check still runs against the
+    diff for these findings (see
+    ``test_unanchored_finding_escalation_still_validated_against_diff``).
+    """
+
+    def test_unanchored_file_in_tree_is_accepted(self, tmp_path: Path) -> None:
+        (tmp_path / "docs").mkdir()
+        (tmp_path / "docs" / "plan.md").write_text("hello")
+        finding = _make_finding(file="docs/plan.md", line_start=None, line_end=None)
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), _make_diff(), worktree=tmp_path
+        )
+        assert accepted == [finding]
+        assert rejected == []
+
+    def test_unanchored_file_not_in_tree_still_unknown_file(
+        self, tmp_path: Path
+    ) -> None:
+        # worktree is opted in but the cited file does not exist on disk —
+        # the tree check fails, so this falls back to unknown_file exactly
+        # like the no-worktree case.
+        finding = _make_finding(file="docs/plan.md", line_start=None, line_end=None)
+        _, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), _make_diff(), worktree=tmp_path
+        )
+        assert rejected[0].reason == "unknown_file"
+
+    def test_unanchored_path_traversal_outside_worktree_rejected(
+        self, tmp_path: Path
+    ) -> None:
+        # Proves the containment guard, not just existence: the cited path
+        # DOES exist on the real filesystem (a tmp_path sibling), but escapes
+        # the worktree root via "../" — must still be unknown_file.
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        (tmp_path / "sibling.txt").write_text("secret")
+        finding = _make_finding(file="../sibling.txt", line_start=None, line_end=None)
+        _, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), _make_diff(), worktree=worktree
+        )
+        assert rejected[0].reason == "unknown_file"
+
+    def test_unanchored_finding_preserves_reviewer_text(self, tmp_path: Path) -> None:
+        (tmp_path / "docs.md").write_text("x")
+        finding = _make_finding(
+            file="docs.md",
+            line_start=None,
+            line_end=None,
+            summary="custom summary",
+            consequence="custom consequence",
+            suggested_fix="custom fix",
+            evidence="custom evidence",
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), _make_diff(), worktree=tmp_path
+        )
+        assert not rejected
+        assert accepted[0].summary == "custom summary"
+        assert accepted[0].consequence == "custom consequence"
+        assert accepted[0].suggested_fix == "custom fix"
+        assert accepted[0].evidence == "custom evidence"
+
+    def test_unanchored_finding_escalation_still_validated_against_diff(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "docs.md").write_text("x")
+        good_esc = _make_escalation(evidence_quote="def broken():")
+        good_finding = _make_finding(
+            file="docs.md", line_start=None, line_end=None, escalation=good_esc
+        )
+        accepted, rejected, stripped = validate_reviewer_document(
+            _make_reviewer_doc(good_finding), _make_diff(), worktree=tmp_path
+        )
+        assert not rejected
+        assert accepted[0].escalation is not None
+        assert not stripped
+
+        bad_esc = _make_escalation(evidence_quote="ghost quote")
+        bad_finding = _make_finding(
+            file="docs.md", line_start=None, line_end=None, escalation=bad_esc
+        )
+        accepted2, rejected2, stripped2 = validate_reviewer_document(
+            _make_reviewer_doc(bad_finding), _make_diff(), worktree=tmp_path
+        )
+        assert not rejected2
+        assert accepted2[0].escalation is None
+        assert len(stripped2) == 1
 
 
 class TestEscalationStripOnInvalidEvidence:
@@ -634,6 +743,34 @@ class TestConsolidateVerdict:
         verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
         assert verdict.blocking is False
         assert verdict.must_fix == []
+
+    def test_unanchored_must_fix_finding_blocks_via_worktree(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "docs.md").write_text("x")
+        finding = _make_finding(
+            severity="MUST_FIX", file="docs.md", line_start=None, line_end=None
+        )
+        doc = _make_reviewer_doc(finding)
+        verdict = consolidate_verdict(
+            [doc], _make_diff(), reviewed_sha="sha", worktree=tmp_path
+        )
+        assert verdict.blocking is True
+        assert len(verdict.must_fix) == 1
+        assert verdict.rejected == []
+        assert verdict.review.must_fix_initial == 1
+
+    def test_unanchored_without_worktree_still_rejected(self, tmp_path: Path) -> None:
+        # Same finding, no worktree kwarg passed — proves the relaxation is
+        # strictly opt-in even when the cited file genuinely exists on disk.
+        (tmp_path / "docs.md").write_text("x")
+        finding = _make_finding(
+            severity="MUST_FIX", file="docs.md", line_start=None, line_end=None
+        )
+        doc = _make_reviewer_doc(finding)
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        assert verdict.blocking is False
+        assert verdict.rejected[0].reason == "unknown_file"
 
 
 class TestConsolidateVerdictFailedReviewers:

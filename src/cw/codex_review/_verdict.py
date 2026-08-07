@@ -141,6 +141,7 @@ def synthesize_codex_review_result(
         documents,
         diff,
         reviewed_sha,
+        worktree=worktree,
         failed_reviewers=failures,
         metrics_by_role=metrics_by_role,
     )
