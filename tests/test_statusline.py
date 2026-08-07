@@ -37,14 +37,18 @@ if TYPE_CHECKING:
     from cw.models import TicketTask
 
 _SESSION = "sess-statusline-1"
-# Tight CPU-time ceiling for an in-process render over a large fixture.
-# process_time() excludes scheduler/I-O wait, so this catches an actual
-# algorithmic regression in our code without flaking on runner contention.
-_CPU_BUDGET_SECONDS = 0.15
-# Wall-clock backstop at R1's real budget: the 300ms statusline debounce.
-# process_time() alone is blind to a call that burns wall-clock without
-# burning CPU (e.g. a subprocess/network/gh/git call R1 forbids), so this
-# assertion exists specifically to catch that regression class.
+# Wall-clock ceiling at R1's real budget: the 300ms statusline debounce.
+#
+# A CPU-time assertion (process_time) lived here briefly and was removed: it
+# was introduced to dodge scheduler contention, but coverage instrumentation
+# burns real CPU, so process_time does not escape it. Two successive budgets
+# (0.05s wall, then 0.15s CPU) were both set against a fast local baseline and
+# both failed on CI under --cov (0.1938s, then 0.2367s / 0.1740s). A guard that
+# has to be widened every time it fires is measuring the runner, not the code.
+#
+# 300ms is the number the design actually specifies, and it catches the
+# regression class that matters: a subprocess / network / gh / git call, which
+# R1 forbids and which would blow far past the debounce budget.
 _WALL_CLOCK_BUDGET_SECONDS = 0.3
 
 
@@ -514,14 +518,11 @@ class TestPerformance:
         _seed_queue(*tasks)
         set_focus(_SESSION, "client-3", "lane-4")
 
-        cpu_started = time.process_time()
         wall_started = time.perf_counter()
         segment = render_work_segment(_SESSION, tmp_config_dir)
-        cpu_elapsed = time.process_time() - cpu_started
         wall_elapsed = time.perf_counter() - wall_started
 
         assert segment.startswith("client-3/lane-4 ")
-        assert cpu_elapsed < _CPU_BUDGET_SECONDS, f"CPU time {cpu_elapsed:.4f}s"
         assert wall_elapsed < _WALL_CLOCK_BUDGET_SECONDS, (
             f"wall clock {wall_elapsed:.4f}s"
         )
@@ -562,14 +563,11 @@ class TestPerformance:
         ]
         _seed_queue(*tasks)
 
-        cpu_started = time.process_time()
         wall_started = time.perf_counter()
         segment = render_work_segment(None, base / "client-3")
-        cpu_elapsed = time.process_time() - cpu_started
         wall_elapsed = time.perf_counter() - wall_started
 
         assert segment.startswith("client-3 ")
-        assert cpu_elapsed < _CPU_BUDGET_SECONDS, f"CPU time {cpu_elapsed:.4f}s"
         assert wall_elapsed < _WALL_CLOCK_BUDGET_SECONDS, (
             f"wall clock {wall_elapsed:.4f}s"
         )
