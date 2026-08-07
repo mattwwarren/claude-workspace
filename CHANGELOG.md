@@ -33,6 +33,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   worktree may have inherited from a prior dead session, and nulls
   `idle_min` when it would be logically inconsistent with that anchor.
 
+### Added
+
+- **`HookContextConflictError` carries the conflicting session id, closing
+  the phantom-locked-worktree recovery loop (#1674):** a requeue attempt
+  that discovers an active session already holds the target worktree now
+  records that session's id on the task, and concierge recipe 1 refuses to
+  requeue when it cannot spawn into a conflicting context — instead of
+  retrying indefinitely and burning the attempt counter. A shared
+  terminal-session-status constant also stops an unrelated revert from
+  wiping the recorded hook-context-conflict evidence.
+
 ## [1.27.0] - 2026-08-07
 
 ### Added

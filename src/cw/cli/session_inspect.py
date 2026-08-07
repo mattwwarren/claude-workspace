@@ -9,16 +9,13 @@ import click
 
 from cw.cli._base import _relative_time, handle_errors
 from cw.config import load_state
-from cw.models import Session, SessionStatus
+from cw.models import TERMINAL_SESSION_STATUSES, Session, SessionStatus
 from cw.reconcile import ticket_id_for_session
 
 _WAIT_POLL_INTERVAL: int = 5
 _WAIT_DEFAULT_TIMEOUT: int = 300
 _SESSION_WAIT_EXIT_TIMED_OUT: int = 1
 _SESSION_WAIT_EXIT_HARD_TIMEOUT: int = 124
-_TERMINAL_STATUSES: frozenset[SessionStatus] = frozenset(
-    {SessionStatus.COMPLETED, SessionStatus.TIMED_OUT}
-)
 
 _SESSION_LIST_HEADERS = ["ID", "CLIENT", "PURPOSE", "STATUS", "NAME", "STARTED"]
 _SESSION_LIST_WIDTHS = [10, 16, 10, 12, 30, 12]
@@ -171,7 +168,7 @@ def session_list(
     sessions: list[Session] = state.sessions
 
     if status is None:
-        sessions = [s for s in sessions if s.status not in _TERMINAL_STATUSES]
+        sessions = [s for s in sessions if s.status not in TERMINAL_SESSION_STATUSES]
     else:
         target_status = SessionStatus(status)
         sessions = [s for s in sessions if s.status == target_status]

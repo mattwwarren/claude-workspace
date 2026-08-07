@@ -20,6 +20,7 @@ from cw.dev_queue import (
 )
 from cw.events import record_event
 from cw.exceptions import (
+    HookContextConflictError,
     StaleWorktreeError,
     UsageLimitError,
     WorktreeError,
@@ -401,7 +402,11 @@ class _SpawnOutcome:
 
 
 def _revert_claimed_task_to_pending(
-    client_name: str, ticket_id: str, *, stamp_backoff: bool = False
+    client_name: str,
+    ticket_id: str,
+    *,
+    stamp_backoff: bool = False,
+    hook_context_conflict_session_id: str | None = None,
 ) -> None:
     """Revert a still-RUNNING claimed task back to PENDING, clearing session_id.
 
@@ -413,6 +418,21 @@ def _revert_claimed_task_to_pending(
     spawn_error_count and sets next_eligible_at to enforce exponential backoff
     before the task is re-claimed.  The usage-limit path passes stamp_backoff=False
     because it has its own fleet-wide backoff mechanism.  See GitHub #868.
+
+    *hook_context_conflict_session_id* (GitHub #1674) mirrors *stamp_backoff*'s
+    conditional-stamp shape: it is applied only when the caller supplies a
+    real id (the narrow :class:`~cw.exceptions.HookContextConflictError`
+    handler), and left untouched otherwise. This function is a FAILURE path —
+    the worktree conflict is not known to be resolved just because a later,
+    unrelated attempt hit :class:`UsageLimitError` or a generic exception, so
+    an unrelated revert must not silently erase still-live conflict evidence.
+    (The stamp itself is reset to None only by the successful-spawn path
+    below — this function never clears it. The conflicting session going
+    terminal or being superseded by id does NOT touch the stamp; it only
+    makes concierge recipe 1's refusal predicate evaluate False on the next
+    cycle, per docs/events.md's `concierge.hook_context_conflict_refused`
+    section. The stamp is stale-but-harmless once the predicate is False —
+    the next successful spawn is what actually clears it.)
 
     # Why: task.attempts is NOT decremented here. The increment-at-claim
     # contract is intentional — usage_limit deaths and spawn errors consume
@@ -431,6 +451,10 @@ def _revert_claimed_task_to_pending(
             ):
                 transition_task_status(stored_task, QueueItemStatus.PENDING)
                 stored_task.session_id = None
+                if hook_context_conflict_session_id is not None:
+                    stored_task.hook_context_conflict_session_id = (
+                        hook_context_conflict_session_id
+                    )
                 if stamp_backoff:
                     stored_task.spawn_error_count += 1
                     delay = min(
@@ -714,6 +738,10 @@ def _spawn_claimed_task(
                     stored_task.session_id = session_id
                     stored_task.spawn_error_count = 0
                     stored_task.next_eligible_at = None
+                    # #1674: the worktree just proved reusable, so any recorded
+                    # hook-context conflict is stale evidence — cleared here
+                    # atomically with the other spawn-failure counters.
+                    stored_task.hook_context_conflict_session_id = None
                     # R5: stamp stage_base_ref -- non-fatal on failure
                     try:
                         head_sha = subprocess.check_output(
@@ -768,6 +796,29 @@ def _spawn_claimed_task(
         # Revert the claimed task back to PENDING — spawn never succeeded.
         _revert_claimed_task_to_pending(client.name, task.ticket_id)
         return _SpawnOutcome(usage_limit_detected=True)
+    except HookContextConflictError as exc:
+        # Narrow catch ahead of the broad handler below (order matters —
+        # HookContextConflictError is a plain CwError subclass and would
+        # otherwise fall through). Behaviour is deliberately identical to the
+        # broad path (revert to PENDING with the #868 backoff); the ONLY
+        # addition is recording WHICH session's live cw-context.json blocked
+        # the worktree, so concierge recipe 1 can stop requeuing a row that
+        # cannot spawn until that session is closed (GitHub #1674). The
+        # refusal itself lives there, not here.
+        _log.exception(
+            "dispatch_tick: hook-context conflict for %s/%s"
+            " (blocking session=%s); reverting task to PENDING",
+            client.name,
+            task.ticket_id,
+            exc.conflicting_session_id,
+        )
+        _revert_claimed_task_to_pending(
+            client.name,
+            task.ticket_id,
+            stamp_backoff=True,
+            hook_context_conflict_session_id=exc.conflicting_session_id,
+        )
+        return _SpawnOutcome(spawn_error=True, error=str(exc))
     except Exception as exc:  # noqa: BLE001
         # Sanctioned broad-catch per PYTHON-PATTERNS.md:316-331.
         # Paired tests: TestDispatchTickSpawnErrors in

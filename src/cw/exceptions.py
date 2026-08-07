@@ -56,16 +56,35 @@ class StaleWorktreeError(WorktreeError):
 
 
 class HookContextConflictError(CwError):
-    """A user-owned ``.claude/settings.local.json`` already exists.
+    """Hook-context injection refused to overwrite a worktree's existing state.
 
-    Raised by hook-context injection on a USER-origin session whose
-    worktree already carries a settings file. The user-managed file must
-    not be silently clobbered with the cw Stop-hook template; callers
-    (Phase C of multiplexer-removal) route this to a clean failure mode
-    rather than overwriting.
+    Two functionally distinct raise reasons, both from
+    :func:`cw.spawn._write_hook_context`:
+
+    1. **USER-origin settings conflict** — a user-owned
+       ``.claude/settings.local.json`` already exists in the worktree. The
+       user-managed file must not be silently clobbered with the cw Stop-hook
+       template; callers (Phase C of multiplexer-removal) route this to a
+       clean failure mode rather than overwriting.
+    2. **DAEMON-origin live-session conflict** — the worktree's existing
+       ``.claude/cw-context.json`` references a session that is still
+       non-terminal in cw state, so its hook context must not be stolen
+       (issue #427 fix 2).
+
+    Only reason 2 supplies ``conflicting_session_id`` — the id of the session
+    that blocks the reuse. The dispatch claim path stamps it onto the owning
+    task so concierge recipe 1 can refuse to requeue a row it already proved
+    cannot spawn until that session is closed (GitHub #1674). It stays None
+    for reason 1, whose raise site has no session to name.
     """
 
-    __slots__ = ()
+    __slots__ = ("conflicting_session_id",)
+
+    def __init__(
+        self, message: str, *, conflicting_session_id: str | None = None
+    ) -> None:
+        super().__init__(message)
+        self.conflicting_session_id = conflicting_session_id
 
 
 class DisclaimerNotAcceptedError(CwError):

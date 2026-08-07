@@ -39,6 +39,19 @@ class SessionStatus(StrEnum):
     TIMED_OUT = "timed_out"
 
 
+# Statuses a Session never leaves once reached. Single source of truth for
+# "is this session done" checks scattered across spawn.py, reconcile, cli,
+# and doctor (GitHub #1674 — was independently duplicated as an inline tuple
+# or a locally-defined frozenset in several places before this constant
+# existed; consolidated at four of those call sites here, alongside
+# SessionStatus itself, following the WORKER_PURPOSES derived-constant
+# precedent above — reconcile/salvage.py:231 carries one remaining
+# unconsolidated copy, tracked separately, not folded into this ticket).
+TERMINAL_SESSION_STATUSES: frozenset[SessionStatus] = frozenset(
+    {SessionStatus.COMPLETED, SessionStatus.TIMED_OUT}
+)
+
+
 class CompletionReason(StrEnum):
     USER = "user"
     HANDOFF = "handoff"
@@ -222,6 +235,18 @@ class OrchestratorEventType(StrEnum):
     # ticket. NOT a veto (contrast SESSION_PARK_VETOED above, which
     # accompanies zero mutation) — no queue/session mutation is suppressed.
     CONCIERGE_RECOVERY_BACKOFF_ARMED = "concierge.recovery_backoff_armed"
+    # GitHub #1674 — concierge recipe 1 (false_park_requeue) hook-context
+    # conflict refusal. Emitted from _act_on_false_park_candidates when the
+    # row's currently-resolved session is the exact session that already made
+    # a spawn attempt raise HookContextConflictError, and that session is
+    # still non-terminal. Distinct from CONCIERGE_RECOVERY_BACKOFF_ARMED
+    # above: that one still requeues and only defers the *next* detection
+    # cycle, whereas this one SKIPS the requeue outright (no
+    # CONCIERGE_RECOVERED, no mutation) because retrying is proven futile
+    # until an operator closes the session (`cw spawn close --confirmed-dead
+    # <id>`). Deliberately not latched — it re-fires every reconcile pass the
+    # row stays parked against the same session.
+    CONCIERGE_HOOK_CONTEXT_CONFLICT_REFUSED = "concierge.hook_context_conflict_refused"
     # RFC 0009 P1+P2 (#1065) — gate-recipe automation. Emitted by
     # cw.reconcile.gate_recipes._act_auto_approve_review before the
     # auto-approve mutation when a review met the fixed clean-review predicate
