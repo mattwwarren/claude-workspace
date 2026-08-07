@@ -1930,6 +1930,43 @@ class TestDispatchTickSpawnErrors:
         assert task.next_eligible_at is None
         assert task.hook_context_conflict_session_id is None
 
+    def test_unrelated_revert_preserves_existing_hook_context_conflict_stamp(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """A revert-to-PENDING for an UNRELATED reason (here: a fleet-wide
+        usage limit) must not erase a still-live hook-context-conflict stamp.
+
+        ``_revert_claimed_task_to_pending`` is a FAILURE path: the underlying
+        phantom-locked worktree is not proven clear just because THIS attempt
+        failed for a different reason. Wiping the stamp here would let
+        concierge recipe 1 requeue the row once more against the same
+        still-live session — a narrower recurrence of the exact bug #1674
+        fixes. Only the three documented paths (successful spawn, the
+        conflicting session going terminal, or a new session superseding it)
+        may clear the field.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-1674D",
+                client="test-client",
+                hook_context_conflict_session_id="still-live-conflict",
+            )
+        )
+
+        daemon = FakeNativeDaemonClient()
+        daemon.raise_usage_limit = True
+
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert result.usage_limit_detected is True
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.PENDING
+        assert task.hook_context_conflict_session_id == "still-live-conflict"
+
 
 # ---------------------------------------------------------------------------
 # TestDispatchCodexCapabilityGate

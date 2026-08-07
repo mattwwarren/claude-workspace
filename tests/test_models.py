@@ -1665,6 +1665,7 @@ class TestPackageExportCompleteness:
             "Stage",
             "StageExecutorConfig",
             "StagePipelineConfig",
+            "TERMINAL_SESSION_STATUSES",
             "TicketTask",
             "WORKER_PURPOSES",
             "WatchedPr",

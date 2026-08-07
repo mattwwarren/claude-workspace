@@ -419,11 +419,17 @@ def _revert_claimed_task_to_pending(
     before the task is re-claimed.  The usage-limit path passes stamp_backoff=False
     because it has its own fleet-wide backoff mechanism.  See GitHub #868.
 
-    *hook_context_conflict_session_id* (GitHub #1674) is stamped
-    unconditionally — passing None (every caller but the narrow
-    :class:`~cw.exceptions.HookContextConflictError` handler) clears any stale
-    evidence just as correctly as a real id records fresh evidence, so there is
-    one code path here rather than a second *stamp_backoff*-style conditional.
+    *hook_context_conflict_session_id* (GitHub #1674) mirrors *stamp_backoff*'s
+    conditional-stamp shape: it is applied only when the caller supplies a
+    real id (the narrow :class:`~cw.exceptions.HookContextConflictError`
+    handler), and left untouched otherwise. This function is a FAILURE path —
+    the worktree conflict is not known to be resolved just because a later,
+    unrelated attempt hit :class:`UsageLimitError` or a generic exception, so
+    an unrelated revert must not silently erase still-live conflict evidence.
+    (A prior stamp is cleared only via the three documented paths that are
+    NOT this function: the successful-spawn reset below, the conflicting
+    session going terminal, or a new session superseding it by id — see
+    docs/events.md's `concierge.hook_context_conflict_refused` section.)
 
     # Why: task.attempts is NOT decremented here. The increment-at-claim
     # contract is intentional — usage_limit deaths and spawn errors consume
@@ -442,9 +448,10 @@ def _revert_claimed_task_to_pending(
             ):
                 transition_task_status(stored_task, QueueItemStatus.PENDING)
                 stored_task.session_id = None
-                stored_task.hook_context_conflict_session_id = (
-                    hook_context_conflict_session_id
-                )
+                if hook_context_conflict_session_id is not None:
+                    stored_task.hook_context_conflict_session_id = (
+                        hook_context_conflict_session_id
+                    )
                 if stamp_backoff:
                     stored_task.spawn_error_count += 1
                     delay = min(

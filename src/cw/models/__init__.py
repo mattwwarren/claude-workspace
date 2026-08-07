@@ -26,6 +26,7 @@ from __future__ import annotations
 from cw.models.client import DEFAULT_AUTO_PURPOSES, ClientConfig
 from cw.models.enums import (
     OCCUPIED_LANE_STATUSES,
+    TERMINAL_SESSION_STATUSES,
     WORKER_PURPOSES,
     CompletionReason,
     DispatchSkipReason,
@@ -88,6 +89,7 @@ __all__ = [
     "DEV_QUEUE_SCHEMA_VERSION",
     "LOCAL_BACKEND",
     "OCCUPIED_LANE_STATUSES",
+    "TERMINAL_SESSION_STATUSES",
     "WORKER_PURPOSES",
     "_DEFAULT_OPERATOR_EVENT_TYPES",
     "_DEFAULT_OPERATOR_TASK_TRANSITION_STATUSES",

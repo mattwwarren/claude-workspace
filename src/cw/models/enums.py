@@ -39,6 +39,17 @@ class SessionStatus(StrEnum):
     TIMED_OUT = "timed_out"
 
 
+# Statuses a Session never leaves once reached. Single source of truth for
+# "is this session done" checks scattered across spawn.py, reconcile, cli,
+# and doctor (GitHub #1674 — was independently duplicated as an inline tuple
+# or a locally-defined frozenset in four places before this constant existed;
+# consolidated here, alongside SessionStatus itself, following the
+# WORKER_PURPOSES derived-constant precedent above).
+TERMINAL_SESSION_STATUSES: frozenset[SessionStatus] = frozenset(
+    {SessionStatus.COMPLETED, SessionStatus.TIMED_OUT}
+)
+
+
 class CompletionReason(StrEnum):
     USER = "user"
     HANDOFF = "handoff"

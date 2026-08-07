@@ -803,7 +803,7 @@ class TestHookContextConflictRefusal:
         )
         assert events == []
 
-    def test_session_not_found_with_no_prior_conflict_still_requeues_normally(
+    def test_session_not_found_with_no_prior_conflict_predicate_is_false(
         self, tmp_config_dir: Path
     ) -> None:
         """Fail-closed guard: ``session is None`` + field at its ``None``
@@ -832,6 +832,20 @@ class TestHookContextConflictRefusal:
             config=_config(),
         )
         assert [c.refused_hook_context_conflict for c in candidates] == [False]
+
+    def test_session_not_found_with_no_prior_conflict_still_requeues_normally(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Companion to the predicate-level test above: the same session-None
+        + field-unset combination must also requeue normally through the full
+        recovery pipeline, not just at the detect-phase predicate."""
+        task = _make_task(
+            disposition=ReapReason.PHANTOM_SURFACE.value,
+            attempts=1,
+            hook_context_conflict_session_id=None,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[]))
 
         recovered = run_concierge_recoveries(
             now=_NOW, native_live=set(), config=_config()

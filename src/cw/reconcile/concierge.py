@@ -69,6 +69,7 @@ from cw.dev_queue import (
 from cw.events import record_event
 from cw.exceptions import CwError
 from cw.models import (
+    TERMINAL_SESSION_STATUSES,
     CompletionReason,
     LivenessBucket,
     OrchestratorEventType,
@@ -396,7 +397,7 @@ def _detect_false_park_candidates(
         refused_hook_context_conflict = (
             session is not None
             and session.id == task.hook_context_conflict_session_id
-            and session.status not in (SessionStatus.COMPLETED, SessionStatus.TIMED_OUT)
+            and session.status not in TERMINAL_SESSION_STATUSES
         )
         candidates.append(
             ConciergeCandidate(
