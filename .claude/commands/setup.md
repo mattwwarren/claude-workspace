@@ -144,15 +144,6 @@ tracking:
   auto_create_issues: true
   auto_close_on_complete: true
 
-quality_gates:
-  # Commands run in order; all must pass
-  - name: lint
-    command: "<detected lint command>"
-  - name: typecheck
-    command: "<detected typecheck command>"
-  - name: test
-    command: "<detected test command>"
-
 review:
   self_review: true
   max_cycles: 3
@@ -172,8 +163,6 @@ pr:
 plan_exit:
   mode: <suggest|ask|auto>
 ```
-
-Omit sections where a tool isn't available (e.g., omit the typecheck gate if no typechecker found). Only include gates that have real commands.
 
 ### Step 6: Bootstrap Per-Project `/ship-it`
 
