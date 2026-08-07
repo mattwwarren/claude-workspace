@@ -7,7 +7,15 @@ behind evidence-confirmed-dead sessions:
    :func:`_act_on_false_park_candidates`) — a row parked
    ``stalled_retry_cap_parked`` (or with no disposition at all) whose owning
    session is confirmed dead (absent from the daemon roster, transcript
-   flat) is requeued to PENDING at its current stage.
+   flat) is requeued to PENDING at its current stage. Exception (GitHub
+   #1674): the requeue is *refused* — the row is left parked and
+   ``CONCIERGE_HOOK_CONTEXT_CONFLICT_REFUSED`` is emitted — when the row's
+   currently-resolved session is the exact session that already made a spawn
+   attempt raise ``HookContextConflictError`` and is still non-terminal;
+   respawning cannot succeed until that session is closed, so requeuing only
+   burns attempts. The refusal clears itself once the session's status goes
+   terminal (``cw spawn close --confirmed-dead <id>``) or a new session
+   supersedes it by id — no separate manual unblock step.
 2. **Park-marker-poison clear** (:func:`_detect_park_marker_poison_candidates`
    / :func:`_act_on_park_marker_poison_candidates`) — a row behind a session
    repeatedly skipped by the salvage watchdog's park-marker check
@@ -154,6 +162,10 @@ class ConciergeCandidate:
     rather than requeuing it (A1/A2): a ceiling-refused
     ``stalled_retry_cap_parked`` row is itself part of the escalation-eligible
     set (see ``cw.reconcile.escalation``), so refusing here is not silent.
+
+    ``refused_hook_context_conflict`` is the same shape for a different,
+    likewise-futile requeue (GitHub #1674) — see the field comment below. A
+    refused row keeps its disposition, so it too stays escalation-eligible.
     """
 
     ticket_id: str
@@ -169,6 +181,16 @@ class ConciergeCandidate:
     # missing evidence never arms the backoff. Consumed by the act phase to
     # arm/reset the false_park_recovery_count / next_eligible_at backoff.
     dead_on_arrival: bool = False
+    # Recipe 1 only (GitHub #1674): True when this row's currently-resolved
+    # session IS the session that already made a spawn attempt raise
+    # HookContextConflictError (task.hook_context_conflict_session_id), and
+    # that session is still non-terminal. Its cw-context.json still owns the
+    # worktree, so a requeue can only fail the same way again and burn another
+    # attempt. Unlike dead_on_arrival's backoff (a deferral of the next cycle),
+    # the act phase skips the requeue entirely — elapsed time cannot clear this
+    # condition, only an operator closing the session or a newer session
+    # superseding it.
+    refused_hook_context_conflict: bool = False
 
 
 def _find_session_for_ticket(
@@ -359,6 +381,23 @@ def _detect_false_park_candidates(
             transcript_age_seconds, window_seconds=TRANSCRIPT_LIVENESS_WINDOW_SECONDS
         ):
             continue
+        # #1674: clause order is load-bearing. `session is not None` must be
+        # evaluated first so neither `session.id` nor `session.status` is ever
+        # dereferenced on a missing session, AND so the ordinary
+        # never-conflicted row (no session record + the field at its None
+        # default) can never satisfy the identity check by `None == None` —
+        # missing evidence is innocent, not guilty (see
+        # _compute_dead_on_arrival's guard). The status clause is what lets
+        # `cw spawn close --confirmed-dead <id>` clear the refusal: closing
+        # flips the session's status but not its id, and
+        # _find_session_for_ticket keeps resolving that same session
+        # regardless of status, so identity equality alone would stay True
+        # forever after the operator did exactly what the runbook says.
+        refused_hook_context_conflict = (
+            session is not None
+            and session.id == task.hook_context_conflict_session_id
+            and session.status not in (SessionStatus.COMPLETED, SessionStatus.TIMED_OUT)
+        )
         candidates.append(
             ConciergeCandidate(
                 ticket_id=task.ticket_id,
@@ -374,6 +413,7 @@ def _detect_false_park_candidates(
                 dead_on_arrival=_compute_dead_on_arrival(
                     session, now, transcript_age_seconds=transcript_age_seconds
                 ),
+                refused_hook_context_conflict=refused_hook_context_conflict,
             )
         )
     return candidates
@@ -409,6 +449,13 @@ def _act_on_false_park_candidates(
     ``CONCIERGE_RECOVERY_BACKOFF_ARMED``) before the unconditional
     ``CONCIERGE_RECOVERED`` emit + requeue. When False (a legitimate stall,
     including the missing-evidence cases), both fields are reset.
+
+    GitHub #1674: ``candidate.refused_hook_context_conflict`` is the one
+    condition that skips the requeue outright (rather than deferring it) —
+    the row's worktree is still owned by a non-terminal session's hook
+    context, so respawning is impossible until that session is closed. The
+    row is left byte-identical and ``CONCIERGE_HOOK_CONTEXT_CONFLICT_REFUSED``
+    records the decision.
     """
     if not candidates:
         return []
@@ -426,6 +473,25 @@ def _act_on_false_park_candidates(
             if task.disposition not in _FALSE_PARK_ELIGIBLE_DISPOSITIONS:
                 continue
             if candidate.refused_ceiling:
+                continue
+            if candidate.refused_hook_context_conflict:
+                # #1674: no mutation at all — disposition, attempts and the
+                # dead-on-arrival backoff fields are left exactly as they are.
+                # Deliberately unlatched (unlike escalation.py's
+                # escalation_fired_at): this re-fires every reconcile pass the
+                # row stays parked against the same session. It is audit-only
+                # telemetry, not forwarded, so repeat firing costs one event
+                # line and keeps the operator's evidence current.
+                record_event(
+                    OrchestratorEventType.CONCIERGE_HOOK_CONTEXT_CONFLICT_REFUSED,
+                    {
+                        "ticket_id": task.ticket_id,
+                        "client": task.client,
+                        "recipe": RECIPE_FALSE_PARK_REQUEUE,
+                        "session_id": candidate.session_id,
+                    },
+                    correlation_id=task.ticket_id,
+                )
                 continue
             if candidate.dead_on_arrival:
                 task.false_park_recovery_count += 1

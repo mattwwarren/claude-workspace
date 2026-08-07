@@ -642,6 +642,204 @@ class TestDeadOnArrivalBackoff:
         )
 
 
+class TestHookContextConflictRefusal:
+    """GitHub #1674: recipe 1 refuses a requeue it already proved is futile.
+
+    A DAEMON session that died under ``ReapPolicy.SIGNAL_ONLY`` keeps
+    ``Session.status`` non-terminal forever, so its ``cw-context.json`` blocks
+    every worktree reuse. ``task.hook_context_conflict_session_id`` records the
+    session that produced the ``HookContextConflictError``; when the row's
+    currently-resolved session IS that session and it is still non-terminal,
+    requeuing can only burn another attempt, so the act phase leaves the row
+    parked and emits ``CONCIERGE_HOOK_CONTEXT_CONFLICT_REFUSED``.
+
+    The refusal is scoped to session *identity* plus non-terminal status, so it
+    clears on its own once the operator runs ``cw spawn close --confirmed-dead
+    <id>`` (status goes terminal) or once a new session supersedes the old one.
+    """
+
+    def test_repeat_conflict_against_same_session_refuses_requeue(
+        self, tmp_config_dir: Path
+    ) -> None:
+        from cw.events import read_events
+
+        task = _make_task(
+            disposition=ReapReason.PHANTOM_SURFACE.value,
+            attempts=3,
+            hook_context_conflict_session_id="sess-1",
+        )
+        session = _make_session(session_id="sess-1", surface_ref="surf-dead")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[session]))
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config()
+        )
+
+        assert recovered == []
+        parked = load_dev_queue().tasks[0]
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.disposition == ReapReason.PHANTOM_SURFACE.value
+        assert parked.attempts == 3
+
+        events = read_events(
+            consumer="test-hook-context-conflict-refused",
+            event_types=[
+                OrchestratorEventType.CONCIERGE_HOOK_CONTEXT_CONFLICT_REFUSED,
+                OrchestratorEventType.CONCIERGE_RECOVERED,
+            ],
+        )
+        assert [e.type for e in events] == [
+            OrchestratorEventType.CONCIERGE_HOOK_CONTEXT_CONFLICT_REFUSED
+        ]
+        assert events[0].payload["ticket_id"] == "GEN-1"
+        assert events[0].payload["client"] == "acme"
+        assert events[0].payload["recipe"] == RECIPE_FALSE_PARK_REQUEUE
+        assert events[0].payload["session_id"] == "sess-1"
+
+    def test_first_time_conflict_field_unset_still_requeues(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Regression guard: the ordinary crashed-session case is unaffected.
+
+        A roster-dead session whose status was never flipped is recipe 1's
+        primary intended catch — refusing on status alone would break the
+        recipe's whole purpose.
+        """
+        task = _make_task(
+            disposition=ReapReason.PHANTOM_SURFACE.value,
+            attempts=1,
+            hook_context_conflict_session_id=None,
+        )
+        session = _make_session(session_id="sess-1", surface_ref="surf-dead")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[session]))
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config()
+        )
+
+        assert recovered == ["GEN-1"]
+
+    def test_conflict_against_a_different_session_id_still_requeues(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """The refusal is scoped to the SAME session, not "ever conflicted"."""
+        task = _make_task(
+            disposition=ReapReason.PHANTOM_SURFACE.value,
+            attempts=1,
+            hook_context_conflict_session_id="sess-OLD",
+        )
+        session = _make_session(session_id="sess-1", surface_ref="surf-dead")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[session]))
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config()
+        )
+
+        assert recovered == ["GEN-1"]
+
+    @pytest.mark.parametrize(
+        "closed_status", [SessionStatus.COMPLETED, SessionStatus.TIMED_OUT]
+    )
+    def test_terminal_conflicting_session_clears_the_refusal(
+        self, tmp_config_dir: Path, closed_status: SessionStatus
+    ) -> None:
+        """``cw spawn close --confirmed-dead`` flips status, not id — the
+        status clause is what lets the refusal clear on the next cycle."""
+        task = _make_task(
+            disposition=ReapReason.PHANTOM_SURFACE.value,
+            attempts=1,
+            hook_context_conflict_session_id="sess-1",
+        )
+        session = _make_session(
+            session_id="sess-1", surface_ref="surf-dead", status=closed_status
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[session]))
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config()
+        )
+
+        assert recovered == ["GEN-1"]
+
+    def test_refusal_and_ceiling_refusal_do_not_double_emit(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Both refusals true at once: one non-mutation outcome, no crash.
+
+        Precedence is irrelevant because both arms ``continue`` — the ceiling
+        check runs first and emits nothing, so exactly zero events are
+        recorded and the row stays parked.
+        """
+        from cw.events import read_events
+
+        task = _make_task(
+            disposition=ReapReason.PHANTOM_SURFACE.value,
+            attempts=10,
+            hook_context_conflict_session_id="sess-1",
+        )
+        session = _make_session(session_id="sess-1", surface_ref="surf-dead")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[session]))
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config(global_attempt_ceiling=10)
+        )
+
+        assert recovered == []
+        parked = load_dev_queue().tasks[0]
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.disposition == ReapReason.PHANTOM_SURFACE.value
+
+        events = read_events(
+            consumer="test-hook-context-conflict-double-emit",
+            event_types=[
+                OrchestratorEventType.CONCIERGE_HOOK_CONTEXT_CONFLICT_REFUSED,
+                OrchestratorEventType.CONCIERGE_RECOVERED,
+            ],
+        )
+        assert events == []
+
+    def test_session_not_found_with_no_prior_conflict_still_requeues_normally(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Fail-closed guard: ``session is None`` + field at its ``None``
+        default must never satisfy the identity check.
+
+        A predicate written as ``task.hook_context_conflict_session_id ==
+        (session.id if session else None)`` evaluates ``None == None`` here and
+        would wrongly refuse an ordinary row that never had a conflict. None of
+        the other cases in this class construct that combination.
+        """
+        from cw.reconcile.concierge import _detect_false_park_candidates
+
+        task = _make_task(
+            disposition=ReapReason.PHANTOM_SURFACE.value,
+            attempts=1,
+            hook_context_conflict_session_id=None,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[]))
+
+        candidates = _detect_false_park_candidates(
+            CwState(sessions=[]),
+            [task],
+            now=_NOW,
+            native_live=set(),
+            config=_config(),
+        )
+        assert [c.refused_hook_context_conflict for c in candidates] == [False]
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config()
+        )
+
+        assert recovered == ["GEN-1"]
+
+
 class TestRecipeParkMarkerPoisonClear:
     def _stale_45m(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
