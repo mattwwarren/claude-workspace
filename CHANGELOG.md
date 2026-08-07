@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`cw queue peek` false STOP verdicts from attempt-count churn and stale
+  reused-worktree transcripts (#1678):** `_score_session`'s attempts-based STOP
+  branch no longer fires on fleet-wide usage-limit outage churn — a high
+  attempt counter deliberately does not decrement on a usage-limit death
+  (#786), so `parse_transcript` now scans assistant text for the documented
+  usage-limit phrasing and `recommend()` downgrades the STOP to a PEEK when
+  present. Separately, `format_row` now anchors `age_min`/`idle_min` on
+  `Session.started_at` (claim time) instead of a transcript that a reused
+  worktree may have inherited from a prior dead session, and nulls
+  `idle_min` when it would be logically inconsistent with that anchor.
+
 ## [1.27.0] - 2026-08-07
 
 ### Added
