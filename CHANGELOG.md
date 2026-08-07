@@ -8,6 +8,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Earlier-stage terminal sentinel wrongly discarded (#1676):** a headless
+  auto-dev session that reports a terminal sentinel from an earlier stage
+  than the one it was dispatched at (e.g. a `plan_pending_approval` or
+  `review_pending_approval` report surfacing while the task record still
+  shows a later stage) is no longer misread by dispatch routing as if the
+  work had completed at the later stage. A new `_is_earlier_stage_report`
+  predicate now gates Rule 5a's FINALIZE self-heal regress and Rule 1's
+  small-tier auto-advance, both of which previously performed an additional
+  `task.stage` mutation on the assumption that any sentinel reflected work
+  done at the task's current stage — that assumption broke for
+  non-advance-claim, earlier-stage reports, silently regressing or
+  over-advancing `task.stage`. Both rules now park the task
+  `BLOCKED_ON_USER` instead when an earlier-stage report is detected.
+
 - **`cw queue peek` false STOP verdicts from attempt-count churn and stale
   reused-worktree transcripts (#1678):** `_score_session`'s attempts-based STOP
   branch no longer fires on fleet-wide usage-limit outage churn — a high

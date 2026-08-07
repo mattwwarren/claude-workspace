@@ -222,7 +222,9 @@ _FINALIZE_BLOCKED_REASON = "finalize_blocked"
 _MAIN_CHECKOUT_DRIFT_REASON = "main_checkout_drift"
 # paused_status written to session.last_result when a ROUTE_EMITTED_SENTINEL
 # candidate is refused by the shared staged-advance guard (an earlier-stage
-# replay or unresolvable position, #1019). Flips the "last_result is None"
+# stage-advance-claim replay, or an unresolvable position, #1019; narrowed to
+# advance-claims only by GitHub #1676 -- an earlier-stage non-advance-claim
+# sentinel now routes instead of refusing). Flips the "last_result is None"
 # unrouted-check gate false so the doomed candidate stops re-firing every tick
 # (GitHub #1149). Carries no "status" key, so _has_terminal_sentinel stays
 # False and the session is not mistaken for genuinely terminal.
