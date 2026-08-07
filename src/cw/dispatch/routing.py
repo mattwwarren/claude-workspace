@@ -129,6 +129,15 @@ _FINALIZE_HOLD_REASON = "finalize_hold"
 _SIGNOFF_GATE_REASON = "signoff_gate"
 
 
+# paused_status written to SESSION_NEEDS_ATTENTION when Rule 1 parks an
+# earlier-stage scope-gated approval sentinel instead of auto-advancing it
+# (GitHub #1676 follow-up). Deliberately distinct from _APPROVAL_GATE_REASON
+# -- that reason means "tier resolved to large, waiting on an operator";
+# this one means "the sentinel never reached task.stage, so its tier verdict
+# cannot be trusted to auto-advance regardless of tier."
+_EARLIER_STAGE_REPORT_REASON = "earlier_stage_report"
+
+
 # Paused-status values that carry a non-empty breadcrumbs string derived
 # verbatim from blocker.reason in Rule 5's SESSION_NEEDS_ATTENTION payload
 # below (GitHub #1511) -- every STAGE_FAILURE_STATUSES member for which the
@@ -563,6 +572,16 @@ def _stage_advance_unchecked(
 # guard against a late/replayed sentinel from a previous leg being routed
 # against whatever stage the task's row currently holds (#986 incident, GitHub
 # #1019), and to classify a legitimate later-stage self-escalation (#1149).
+# GitHub #1676 narrowed the earlier-stage arm of that guard: only a
+# STAGE_SUCCESS_STATUSES sentinel (the shape the #986/#1019 replay race can
+# actually produce) still refuses at an earlier stage -- see
+# ``_is_stage_advance_claim`` and ``_resolve_stage_walk``. A follow-up in the
+# same ticket then gated the two Rule 1-6 bodies that perform their own
+# additional task.stage-mutating decision beyond the table's ordinary status
+# transition (Rule 5a's FINALIZE self-heal regress, Rule 1's small-tier
+# auto-advance) on ``_is_earlier_stage_report`` -- neither is safe to fire on
+# a sentinel that never reached task.stage, even though the table's ordinary
+# transition now routes it correctly.
 #
 # Stage.HARDEN is deliberately absent: it has no legitimate stage_reached
 # counterpart (RFC 0005 A1, dormant stage) -- every one of the 7 canonical
@@ -595,6 +614,26 @@ if set(_STAGE_REACHED_TO_STAGE) != _STAGE_REACHED_CANONICAL:
 _StagePosition = Literal["bypass", "earlier", "same", "later", "unresolvable"]
 
 
+def _is_stage_advance_claim(last_result: dict[str, object] | None) -> bool:
+    """True iff *last_result* claims a stage-advance (GitHub #1676).
+
+    Only a ``STAGE_SUCCESS_STATUSES`` sentinel (``shipped``/``stage_complete``)
+    can be the subject of the #986/#1019 same-session multi-observation replay
+    race this guard exists for: those are the only statuses a live worker
+    self-escalates on, walking ``task.stage`` forward one rung at a time via
+    ``_walk_stage_pointer_forward`` while preserving ``session_id`` across
+    hops, which is exactly the shape a stale/replayed observation of an
+    earlier hop can be mistaken for. Every other terminal status (``blocked``,
+    a pause, a scope-gated approval, ``no_op``, ...) reported at an earlier
+    stage is a legitimate "could not reach the dispatched stage" outcome, not
+    a replay -- ``_resolve_stage_walk`` uses this to narrow the earlier-stage
+    refusal to advance-claims only.
+    """
+    return isinstance(last_result, dict) and last_result.get("status") in (
+        STAGE_SUCCESS_STATUSES
+    )
+
+
 def _classify_sentinel_stage_position(
     task: TicketTask,
     last_result: dict[str, object] | None,
@@ -610,8 +649,14 @@ def _classify_sentinel_stage_position(
     - ``"bypass"``       -- no ``stage_reached`` to check (e.g. a
       ``BlockedResult``-derived payload). Routing proceeds exactly as before
       #1019.
-    - ``"earlier"``      -- the sentinel's stage precedes ``task.stage``: a
-      late/replayed sentinel from a previous leg (the #986 incident). Refuse.
+    - ``"earlier"``      -- the sentinel's stage precedes ``task.stage``. This
+      classifier is a pure ordinal position -- it does not itself decide
+      refuse/proceed. ``_resolve_stage_walk`` refuses an ``"earlier"``
+      position only when the sentinel is a stage-advance claim
+      (``_is_stage_advance_claim``, GitHub #1676): the late/replayed-sentinel
+      shape from a previous leg (the #986 incident). Every other earlier-stage
+      status is a legitimate "could not reach the dispatched stage" report and
+      proceeds to the ordinary Rule 1-6 table at the task's unchanged stage.
     - ``"same"``         -- exact match. Routes normally via the Rule 1-6 table,
       exactly as the pre-#1149 equality guard did.
     - ``"later"``        -- the sentinel's stage follows ``task.stage``: a
@@ -650,6 +695,31 @@ def _classify_sentinel_stage_position(
     if sentinel_idx < stages.index(task.stage):
         return "earlier", None, None
     return "later", stages, sentinel_idx
+
+
+def _is_earlier_stage_report(
+    task: TicketTask,
+    last_result: dict[str, object] | None,
+    clients: dict[str, ClientConfig],
+) -> bool:
+    """True iff the sentinel's ``stage_reached`` precedes ``task.stage`` (GitHub #1676).
+
+    ``_resolve_stage_walk``'s narrowed refusal (``_is_stage_advance_claim``)
+    already lets a non-advance-claim earlier-stage sentinel proceed to the
+    ordinary Rule 1-6 table at ``task.stage`` unchanged -- that part is
+    correct and covers Rule 2/Rule 4/Rule 5's main body as-is. But two Rule
+    bodies perform an *additional* ``task.stage``-mutating decision beyond
+    the table's ordinary status transition, and both implicitly assumed the
+    sentinel reflects work actually done AT ``task.stage``: Rule 5a's
+    FINALIZE self-heal regress, and Rule 1's small-tier auto-advance
+    (``_route_scope_gated_approval``). An earlier-stage sentinel breaks that
+    assumption -- it never reached ``task.stage``, so regressing or
+    advancing ``task.stage`` on its say-so is wrong regardless of its
+    ``blocker.reason`` or resolved scope tier. This predicate gates exactly
+    those two sites; it does not change ``_resolve_stage_walk`` itself.
+    """
+    position, _, _ = _classify_sentinel_stage_position(task, last_result, clients)
+    return position == "earlier"
 
 
 def _walk_stage_pointer_forward(
@@ -723,12 +793,19 @@ def _resolve_stage_walk(
 ) -> Literal["refuse", "proceed", "parked"]:
     """Decide how a sentinel's stage position routes against ``task.stage`` (#1149).
 
-    Earlier-stage replays and unresolvable positions refuse (fail-closed, the
-    #1019/#986 guard, preserved); same-stage and bypass proceed to the ordinary
-    Rule 1-6 table (unchanged); a later-stage sentinel walks ``task.stage``
-    forward to the sentinel's stage via ``_walk_stage_pointer_forward``, then
-    proceeds (or parks at a REVIEW signoff gate). The walk mutates ``task.stage``
-    in place as a side effect -- the caller then applies the Rule 1-6 table at
+    Unresolvable positions always refuse (fail-closed, the #1019/#986 guard,
+    preserved). An earlier-stage position refuses only when the sentinel is a
+    stage-advance claim (``_is_stage_advance_claim``, GitHub #1676) --
+    narrowed from an unconditional earlier-stage refusal, since only a
+    ``STAGE_SUCCESS_STATUSES`` sentinel can be the #986/#1019 same-session
+    replay this guard exists for. Every other earlier-stage status (a
+    pause, a scope-gated approval, ``no_op``, ``blocked``, ...) is a
+    legitimate "could not reach the dispatched stage" report and proceeds to
+    the ordinary Rule 1-6 table at the task's unchanged stage, same as
+    same-stage and bypass. A later-stage sentinel walks ``task.stage`` forward
+    to the sentinel's stage via ``_walk_stage_pointer_forward``, then proceeds
+    (or parks at a REVIEW signoff gate). The walk mutates ``task.stage`` in
+    place as a side effect -- the caller then applies the Rule 1-6 table at
     the now-matching stage.
     """
     position, stages, target_idx = _classify_sentinel_stage_position(
@@ -738,7 +815,9 @@ def _resolve_stage_walk(
         return _walk_stage_pointer_forward(
             task, stages, target_idx, clients, last_result
         )
-    if position in ("earlier", "unresolvable"):
+    if position == "unresolvable":
+        return "refuse"
+    if position == "earlier" and _is_stage_advance_claim(last_result):
         return "refuse"
     return "proceed"
 
@@ -794,9 +873,17 @@ def _route_scope_gated_approval(
     Every call emits the #1617 scope-routing audit event
     (``_record_scope_routing_decision``) after the decision is made, whichever
     of the four arms below actually ran.
+
+    An earlier-stage report (GitHub #1676 follow-up, ``_is_earlier_stage_
+    report``) also always parks, regardless of resolved tier: the sentinel
+    never reached ``task.stage``, so its scope block cannot be trusted to
+    auto-advance the pipeline past stage work that was never done. Distinct
+    ``paused_status`` (``_EARLIER_STAGE_REPORT_REASON``) from the large-tier
+    park (``_APPROVAL_GATE_REASON``) so the two causes stay diagnosable.
     """
     tier = _resolve_scope_tier(last_result, task)
-    if tier != SCOPE_TIER_SMALL:
+    earlier_stage_report = _is_earlier_stage_report(task, last_result, clients)
+    if tier != SCOPE_TIER_SMALL or earlier_stage_report:
         record_event(
             OrchestratorEventType.SESSION_NEEDS_ATTENTION,
             {
@@ -805,7 +892,11 @@ def _route_scope_gated_approval(
                 "client": task.client,
                 "ticket_id": task.ticket_id,
                 "claude_session_id": None,
-                "paused_status": _APPROVAL_GATE_REASON,
+                "paused_status": (
+                    _EARLIER_STAGE_REPORT_REASON
+                    if earlier_stage_report
+                    else _APPROVAL_GATE_REASON
+                ),
                 "breadcrumbs": "",
                 "crashed": False,
                 "lane": task.lane,
@@ -900,15 +991,25 @@ def _route_staged_decision(
 
     First classifies the sentinel's ``stage_reached`` against ``task.stage`` by
     pipeline position (``_resolve_stage_walk``, GitHub #1149, extending #1019).
-    An *earlier*-stage or unresolvable sentinel (a late/replayed sentinel from a
-    previous leg, the #986 incident) is refused: a true no-op -- no status
-    transition, no ``save_dev_queue`` by callers that gate on the return value
-    -- and ``SENTINEL_STAGE_MISMATCH`` is emitted for observability. A *later*-
-    stage sentinel (a legitimate self-escalation the row lags behind) walks
-    ``task.stage`` forward one rung at a time to the sentinel's stage, then the
-    Rule 1-6 table applies at the now-matching stage; if a REVIEW gate (the A3
-    finalize hold, #1160, or the signoff gate) intervenes the walk parks the
-    task and returns without applying the table.
+    An unresolvable sentinel always refuses; an *earlier*-stage sentinel
+    refuses only when it is a stage-advance claim -- a late/replayed sentinel
+    from a previous leg, the #986 incident (``_is_stage_advance_claim``,
+    GitHub #1676). A refusal is a true no-op -- no status transition, no
+    ``save_dev_queue`` by callers that gate on the return value -- and
+    ``SENTINEL_STAGE_MISMATCH`` is emitted for observability. Every other
+    earlier-stage sentinel (a pause, a scope-gated approval, ``no_op``,
+    ``blocked``, ...) is a legitimate "could not reach the dispatched stage"
+    report and proceeds to the ordinary Rule 1-6 table at the task's unchanged
+    stage -- except Rule 5a's FINALIZE self-heal regress and Rule 1's
+    small-tier auto-advance, which additionally gate on
+    ``_is_earlier_stage_report`` (GitHub #1676 follow-up) and park instead,
+    since both perform a further ``task.stage`` mutation the table's ordinary
+    transition does not, one that assumes the sentinel reflects work done AT
+    ``task.stage``. A *later*-stage sentinel (a legitimate self-escalation the row lags
+    behind) walks ``task.stage`` forward one rung at a time to the sentinel's
+    stage, then the Rule 1-6 table applies at the now-matching stage; if a
+    REVIEW gate (the A3 finalize hold, #1160, or the signoff gate) intervenes
+    the walk parks the task and returns without applying the table.
     Same-stage and no-``stage_reached`` sentinels route through Rule 1-6 exactly
     as before. Returns ``False`` on refusal, ``True`` for every routed path.
     """
@@ -1010,12 +1111,17 @@ def _route_staged_decision(
         # this) so they always fall through to BLOCKED_ON_USER. merge_gate_blocked
         # MAY carry one (schema.py's #777 exception), but 5a is gated on
         # status=="blocked" so it still cannot regress. blocker/blocker_reason are
-        # read once above, before the rule table (#1254).
+        # read once above, before the rule table (#1254). Also excludes an
+        # earlier-stage report (GitHub #1676 follow-up, _is_earlier_stage_report):
+        # "agent_block" reported at, say, stage1_plan never actually failed at
+        # FINALIZE, so self-healing off it would mask the sentinel's real,
+        # earlier failure behind a fresh, doomed-to-repeat IMPL dispatch.
         if (
             status == "blocked"
             and task.stage == Stage.FINALIZE
             and blocker_reason in FINALIZE_REGRESS_BLOCKER_REASONS
             and task.regress_attempts < FINALIZE_REGRESS_CAP
+            and not _is_earlier_stage_report(task, last_result, clients)
         ):
             _log.info(
                 "dispatch: finalize gate blocked (%r) — regressing %r to IMPL"

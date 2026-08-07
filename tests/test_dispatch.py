@@ -9018,6 +9018,213 @@ class TestApplyStagedDecision:
         assert task_b.status == QueueItemStatus.RUNNING
         assert task_b.stage == Stage.IMPL
 
+    def test_earlier_stage_blocked_sentinel_now_routes_instead_of_refusing(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """An earlier-stage 'blocked' sentinel is a legitimate could-not-reach-
+        the-dispatched-stage report, not a same-session replay (GitHub #1676).
+
+        Only STAGE_SUCCESS_STATUSES sentinels (shipped/stage_complete) can be
+        the subject of the #986/#1019 replay race this guard exists for --
+        'blocked' is not one of them, so it must route through Rule 5 at the
+        task's unchanged stage instead of being refused.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("EARLIER-BLK-1", stage=Stage.IMPL)
+        events = capture_events("cw.dispatch.routing")
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "stage_reached": "stage1_plan",
+            "blocker": {"stage": "s1_plan", "reason": "plan_missing"},
+        }
+
+        routed = apply_staged_decision(
+            task, "blocked", last_result, self._clients(tmp_path)
+        )
+
+        assert routed is True
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.stage == Stage.IMPL
+        assert task.blocked_reason == "plan_missing"
+
+        mismatch_events = [
+            e for e in events if e[0] == OrchestratorEventType.SENTINEL_STAGE_MISMATCH
+        ]
+        assert mismatch_events == []
+        attention_events = [
+            e for e in events if e[0] == OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        ]
+        assert len(attention_events) == 1
+        _, payload, _ = attention_events[0]
+        assert payload["breadcrumbs"] == "plan_missing"
+
+    def test_earlier_stage_paused_for_user_input_sentinel_now_routes(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """An earlier-stage 'ambiguities_pending_resolution' sentinel routes
+        through Rule 2 instead of being refused (#1676)."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("EARLIER-AMB-1", stage=Stage.REVIEW)
+        last_result: dict[str, object] = {
+            "status": "ambiguities_pending_resolution",
+            "stage_reached": "stage1_plan",
+            "ambiguities": [{"question": "which auth flow?"}],
+        }
+
+        routed = apply_staged_decision(
+            task,
+            "ambiguities_pending_resolution",
+            last_result,
+            self._clients(tmp_path),
+        )
+
+        assert routed is True
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.stage == Stage.REVIEW
+
+    def test_earlier_stage_scope_gated_approval_sentinel_now_routes(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """An earlier-stage 'plan_pending_approval' sentinel (non-small tier)
+        routes through Rule 1's park arm instead of being refused (#1676)."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("EARLIER-SCOPE-1", stage=Stage.IMPL)
+        last_result: dict[str, object] = {
+            "status": "plan_pending_approval",
+            "stage_reached": "stage1_plan",
+        }
+
+        routed = apply_staged_decision(
+            task, "plan_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert routed is True
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "plan_pending_approval"
+        assert task.stage == Stage.IMPL
+
+    def test_earlier_stage_no_op_sentinel_now_routes(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """An earlier-stage 'no_op' sentinel routes through Rule 4 instead of
+        being refused (#1676). stage1_pre_flight is the only stage_reached
+        value 'no_op' schema-legally pairs with."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("EARLIER-NOOP-1", stage=Stage.IMPL)
+        last_result: dict[str, object] = {
+            "status": "no_op",
+            "stage_reached": "stage1_pre_flight",
+        }
+
+        routed = apply_staged_decision(
+            task, "no_op", last_result, self._clients(tmp_path)
+        )
+
+        assert routed is True
+        assert task.status == QueueItemStatus.COMPLETED
+        assert task.disposition == "no_op"
+
+    def test_earlier_stage_shipped_sentinel_still_refused(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """A well-formed earlier-stage 'shipped' sentinel stays refused (#1676):
+        STAGE_SUCCESS_STATUSES is the carve-out that still refuses, proving it
+        covers both 'shipped' and 'stage_complete' (the latter already pinned
+        by test_earlier_stage_replay_still_refused_unchanged above)."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("EARLIER-SHIP-1", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "shipped",
+            "stage_reached": "stage3_review",
+            "pr": {"url": "https://github.com/user/repo/pull/7"},
+            "next_actions": ["wait_for_ci"],
+        }
+
+        routed = apply_staged_decision(
+            task, "shipped", last_result, self._clients(tmp_path)
+        )
+
+        assert routed is False
+        assert task.status == QueueItemStatus.RUNNING
+        assert task.stage == Stage.FINALIZE
+
+    def test_earlier_stage_blocked_sentinel_does_not_self_heal_regress(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """GitHub #1676 follow-up: Rule 5a's FINALIZE self-heal regress must
+        not fire on an earlier-stage report -- 'agent_block' is FINALIZE's own
+        regress-eligible reason, but a sentinel reporting stage_reached=
+        stage1_plan never actually failed at FINALIZE. Since the #1676
+        narrowing lets this earlier-stage 'blocked' sentinel proceed to the
+        Rule 1-6 table instead of being refused, Rule 5a must not mistake it
+        for a genuine FINALIZE failure and silently regress task.stage to
+        IMPL -- that would mask the true (PLAN-stage) failure the sentinel
+        already reported."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("EARLIER-FIN-1", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "stage_reached": "stage1_plan",
+            "blocker": {"stage": "s1_plan", "reason": "agent_block"},
+        }
+
+        routed = apply_staged_decision(
+            task, "blocked", last_result, self._clients(tmp_path)
+        )
+
+        assert routed is True
+        assert task.stage == Stage.FINALIZE  # NOT regressed to IMPL
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.regress_attempts == 0  # self-heal never fired
+
+    def test_earlier_stage_scope_gated_approval_sentinel_does_not_auto_advance(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """GitHub #1676 follow-up: Rule 1's small-tier auto-advance must not
+        fire on an earlier-stage report. A sentinel reporting stage_reached=
+        stage1_plan while task.stage is IMPL never actually reached IMPL, so
+        resolving 'small tier' from its scope block and auto-advancing
+        task.stage to REVIEW would silently skip the IMPL stage's work.
+        Contrast with test_route_scope_gated_approval_1091_shaped_small_tier_
+        auto_advances, whose last_result carries no stage_reached at all
+        (bypass position) and must keep auto-advancing unaffected by this
+        fix."""
+        from cw.dispatch import _EARLIER_STAGE_REPORT_REASON, apply_staged_decision
+
+        task = self._make_running_task("EARLIER-SCOPE-2", stage=Stage.IMPL)
+        attention = capture_events(
+            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+        last_result: dict[str, object] = {
+            "status": "plan_pending_approval",
+            "stage_reached": "stage1_plan",
+            "scope": {"tier": "small", "forbidden_touched": False},
+        }
+
+        routed = apply_staged_decision(
+            task, "plan_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert routed is True
+        assert task.stage == Stage.IMPL  # NOT advanced to REVIEW
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+
+        assert len(attention) == 1
+        _, payload, _ = attention[0]
+        assert payload["paused_status"] == _EARLIER_STAGE_REPORT_REASON
+
     def test_unresolvable_stage_position_falls_back_to_refuse(
         self, tmp_dispatch_dirs: Path, tmp_path: Path
     ) -> None:
