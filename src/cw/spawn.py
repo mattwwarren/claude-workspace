@@ -344,7 +344,9 @@ def _write_hook_context(
                     f"(status: {prior_sess.status}). "
                     "Complete or close that session before reusing this worktree."
                 )
-                raise HookContextConflictError(msg)
+                raise HookContextConflictError(
+                    msg, conflicting_session_id=prior_session_id
+                )
 
     atomic_write_text(
         settings_path,

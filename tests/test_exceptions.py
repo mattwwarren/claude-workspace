@@ -39,6 +39,29 @@ class TestExceptionHierarchy:
         assert "interactively" in str(err)
 
 
+class TestHookContextConflictError:
+    """GitHub #1674: the error now carries the id of the conflicting session.
+
+    Only the DAEMON-origin live-session raise site supplies it; the USER-origin
+    settings-file raise site keeps the message-only call shape.
+    """
+
+    def test_carries_conflicting_session_id_when_provided(self) -> None:
+        from cw.exceptions import HookContextConflictError
+
+        err = HookContextConflictError("msg", conflicting_session_id="sess-1")
+
+        assert err.conflicting_session_id == "sess-1"
+        assert str(err) == "msg"
+
+    def test_conflicting_session_id_defaults_to_none(self) -> None:
+        from cw.exceptions import HookContextConflictError
+
+        err = HookContextConflictError("msg")
+
+        assert err.conflicting_session_id is None
+
+
 class TestUsageLimitError:
     def test_usage_limit_error_is_cw_error(self) -> None:
         from cw.exceptions import UsageLimitError
