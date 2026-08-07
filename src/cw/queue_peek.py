@@ -2,7 +2,9 @@
 
 For each RUNNING task in the dev-queue (one client or all), look up:
 
-- session age (first user message in the worker's transcript)
+- session age (primarily the session's claim time — ``Session.started_at``
+  in CW_STATE — falling back to the first user message in the worker's
+  transcript when claim data is unavailable)
 - idle gap (last assistant message)
 - last AUTO_DEV_RESULT sentinel status and stage
 - PR number and state (via ``gh pr view``)
@@ -32,6 +34,7 @@ from cw.auto_dev_result import (
     parse_stdout,
 )
 from cw.dev_queue import list_tickets
+from cw.exceptions import USAGE_LIMIT_RE
 from cw.gh import _fetch_pr_state
 from cw.models import QueueItemStatus, Stage, TicketTask
 
@@ -321,6 +324,35 @@ def find_transcript_for_ticket(
     return _find_transcript_heuristic(ticket_id)
 
 
+def _scan_assistant_content(contents: list[Any]) -> tuple[AutoDevResult | None, bool]:
+    """Scan one assistant message's content blocks.
+
+    Returns ``(sentinel, usage_limit_detected)`` — the latest non-example
+    ``AutoDevResult`` found in the blocks (or None), and whether any text
+    block matched :data:`USAGE_LIMIT_RE`. Usage-limit detection is
+    independent of sentinel framing — it scans every text block regardless
+    of whether it is wrapped in a ``<<<AUTO_DEV_RESULT`` marker.
+    """
+    sentinel: AutoDevResult | None = None
+    usage_limit_detected = False
+    for block in contents:
+        if not isinstance(block, dict) or block.get("type") != "text":
+            continue
+        text = block.get("text", "")
+        if not isinstance(text, str):
+            continue
+        if USAGE_LIMIT_RE.search(text):
+            usage_limit_detected = True
+        if extract_block(text) is None:
+            continue
+        result = parse_stdout(text)
+        if not isinstance(result, AutoDevResult):
+            continue
+        if not is_documented_example(result):
+            sentinel = result
+    return sentinel, usage_limit_detected
+
+
 def parse_transcript(path: Path) -> dict[str, Any]:
     """Walk the jsonl, return first/last activity timestamps + last sentinel status.
 
@@ -331,6 +363,7 @@ def parse_transcript(path: Path) -> dict[str, Any]:
     first_user_ts: str | None = None
     last_asst_ts: str | None = None
     last_sentinel: AutoDevResult | None = None
+    usage_limit_detected = False
 
     try:
         with path.open(encoding="utf-8", errors="replace") as f:
@@ -349,17 +382,10 @@ def parse_transcript(path: Path) -> dict[str, Any]:
                     contents = msg.get("content", [])
                     if not isinstance(contents, list):
                         continue
-                    for block in contents:
-                        if not isinstance(block, dict) or block.get("type") != "text":
-                            continue
-                        text = block.get("text", "")
-                        if not isinstance(text, str) or extract_block(text) is None:
-                            continue
-                        result = parse_stdout(text)
-                        if not isinstance(result, AutoDevResult):
-                            continue
-                        if not is_documented_example(result):
-                            last_sentinel = result
+                    sentinel, hit_limit = _scan_assistant_content(contents)
+                    usage_limit_detected = usage_limit_detected or hit_limit
+                    if sentinel is not None:
+                        last_sentinel = sentinel
     except OSError:
         pass
 
@@ -371,6 +397,7 @@ def parse_transcript(path: Path) -> dict[str, Any]:
         "last_pr_number": (
             last_sentinel.pr.number if last_sentinel and last_sentinel.pr else None
         ),
+        "usage_limit_detected": usage_limit_detected,
     }
 
 
@@ -383,13 +410,20 @@ def gh_pr_state(pr_number: int) -> str:
 
 
 def minutes_since(iso_ts: str | None, now: dt.datetime) -> float | None:
-    """Return minutes elapsed since *iso_ts*, or None if unparseable."""
+    """Return minutes elapsed since *iso_ts*, or None if unparseable.
+
+    A naive (tz-less) *iso_ts* is coerced to UTC, mirroring
+    ``_parse_started_at``'s coercion — CW_STATE's ``started_at`` can be a
+    naive ISO string in practice.
+    """
     if not iso_ts:
         return None
     try:
         ts = dt.datetime.fromisoformat(iso_ts)
     except ValueError:
         return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=dt.UTC)
     return (now - ts).total_seconds() / 60.0
 
 
@@ -432,6 +466,7 @@ def _score_session(
     sentinel_status: str | None,
     attempts: int,
     stage_high_water: Stage | None = None,
+    usage_limit_detected: bool = False,
 ) -> tuple[str, str]:
     """Return recommendation when age_min is known."""
     if pr_state == "MERGED" and idle_min is not None and idle_min > IDLE_POST_PR_MIN:
@@ -445,6 +480,12 @@ def _score_session(
         reason = f"age {age_min:.0f}min approaches 60-min timeout — stop or hand off"
         return ("STOP", reason)
     if attempts >= STOP_ATTEMPTS_MIN and not _reached_deep_stage(stage_high_water):
+        if usage_limit_detected:
+            return (
+                "PEEK",
+                f"attempt {attempts} but usage-limit outage detected in "
+                "transcript — verify before stopping",
+            )
         return ("STOP", f"attempt {attempts} — systemic, not transient")
     return _stall_check(age_min, idle_min, pr_state)
 
@@ -456,12 +497,19 @@ def recommend(
     sentinel_status: str | None,
     attempts: int,
     stage_high_water: Stage | None = None,
+    usage_limit_detected: bool = False,
 ) -> tuple[str, str]:
     """Return (recommendation, reasoning) from the peek-stop ladder."""
     if age_min is None:
         return ("PEEK", "no transcript timestamps — verify session is alive")
     return _score_session(
-        age_min, idle_min, pr_state, sentinel_status, attempts, stage_high_water
+        age_min,
+        idle_min,
+        pr_state,
+        sentinel_status,
+        attempts,
+        stage_high_water,
+        usage_limit_detected,
     )
 
 
@@ -494,8 +542,18 @@ def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[st
             "pipeline_stage": t.stage,
         }
 
-    age = minutes_since(info.get("first_user_ts"), now)
+    claim_age = minutes_since(info.get("claim_started_at"), now)
+    age = (
+        claim_age
+        if claim_age is not None
+        else minutes_since(info.get("first_user_ts"), now)
+    )
     idle = minutes_since(info.get("last_asst_ts"), now)
+    if claim_age is not None and idle is not None and age is not None and idle > age:
+        # The transcript's last-assistant timestamp predates the session's own
+        # claim time — a logical contradiction proving it belongs to a stale,
+        # reused-worktree transcript rather than this session.
+        idle = None
     pr_state = None
     if info.get("last_pr_number"):
         pr_state = gh_pr_state(info["last_pr_number"])
@@ -506,6 +564,7 @@ def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[st
         info.get("last_sentinel_status"),
         t.attempts,
         t.stage_high_water,
+        info.get("usage_limit_detected", False),
     )
     return {
         "ticket": t.ticket_id,
@@ -538,6 +597,9 @@ def build_peek_rows(client: str | None, now: dt.datetime) -> list[dict[str, Any]
             info: dict[str, Any] = parse_transcript(transcript)
             info["signal_source"] = _SIGNAL_SOURCE_TRANSCRIPT
             info["jsonl_idle_min"] = None
+            info["claim_started_at"] = _load_session_refs(t.session_id).get(
+                "started_at"
+            )
         else:
             info = {
                 "signal_source": _SIGNAL_SOURCE_BLIND,
