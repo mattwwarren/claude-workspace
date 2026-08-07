@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.27.0] - 2026-08-07
+
 ### Added
 
 - **`cw focus` and `cw statusline render` (#1644):** a session can now say what
