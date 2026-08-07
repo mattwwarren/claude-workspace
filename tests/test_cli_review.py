@@ -423,4 +423,88 @@ class TestReviewConsolidateCommand:
         diff = _build_captured_diff(_CONSOLIDATE_DIFF)
         assert diff.file_diffs == file_diffs
         assert diff.file_line_text == file_line_text
+
+
+class TestReviewConsolidateWorktreeOption:
+    """#1632: --worktree / --no-tree-evidence for unanchored-finding routing."""
+
+    def test_consolidate_worktree_option_routes_unanchored_finding(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        (tmp_path / "docs.md").write_text("real file, not in the diff")
+        finding = _make_finding(
+            severity="MUST_FIX", file="docs.md", line_start=None, line_end=None
+        )
+        doc = _make_reviewer_doc(finding, status="ok")
+        payload = _consolidate_payload(documents=[doc.model_dump(mode="json")])
+        result = runner.invoke(
+            main,
+            ["review", "consolidate", "-", "--worktree", str(tmp_path)],
+            input=json.dumps(payload),
+        )
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert verdict["blocking"] is True
+        assert verdict["rejected"] == []
+
+    def test_consolidate_default_worktree_is_cwd(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        (tmp_path / "docs.md").write_text("real file, not in the diff")
+        monkeypatch.chdir(tmp_path)
+        finding = _make_finding(
+            severity="MUST_FIX", file="docs.md", line_start=None, line_end=None
+        )
+        doc = _make_reviewer_doc(finding, status="ok")
+        payload = _consolidate_payload(documents=[doc.model_dump(mode="json")])
+        result = runner.invoke(
+            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+        )
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert verdict["blocking"] is True
+        assert verdict["rejected"] == []
+
+    def test_consolidate_unanchored_without_tree_match_stays_rejected(
+        self, runner: CliRunner
+    ) -> None:
+        # No --worktree, and the current directory (the repo checkout) has no
+        # "docs.md" at its root — the tree check fails, stays unknown_file.
+        finding = _make_finding(
+            severity="MUST_FIX", file="docs.md", line_start=None, line_end=None
+        )
+        doc = _make_reviewer_doc(finding, status="ok")
+        payload = _consolidate_payload(documents=[doc.model_dump(mode="json")])
+        result = runner.invoke(
+            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+        )
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert verdict["rejected"][0]["reason"] == "unknown_file"
+
+    def test_consolidate_no_tree_evidence_flag_disables_worktree_check(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        (tmp_path / "docs.md").write_text("real file, not in the diff")
+        finding = _make_finding(
+            severity="MUST_FIX", file="docs.md", line_start=None, line_end=None
+        )
+        doc = _make_reviewer_doc(finding, status="ok")
+        payload = _consolidate_payload(documents=[doc.model_dump(mode="json")])
+        result = runner.invoke(
+            main,
+            [
+                "review",
+                "consolidate",
+                "-",
+                "--worktree",
+                str(tmp_path),
+                "--no-tree-evidence",
+            ],
+            input=json.dumps(payload),
+        )
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert verdict["rejected"][0]["reason"] == "unknown_file"
+        assert verdict["blocking"] is False
         assert diff.files == {f: sorted(lines) for f, lines in file_line_text.items()}
