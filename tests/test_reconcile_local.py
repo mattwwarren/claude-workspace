@@ -7,6 +7,7 @@ and park_terminal_sibling_tasks policy branches.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -15,6 +16,7 @@ from pathlib import Path
 import freezegun
 import pytest
 
+from cw.auto_dev_result import AutoDevResult
 from cw.config import (
     load_state,
     save_state,
@@ -36,6 +38,13 @@ from cw.models import (
     SessionStatus,
     Stage,
     TicketTask,
+)
+from cw.opencode_runner import (
+    OPENCODE_LOG_RELATIVE_PATH,
+    OPENCODE_NO_OUTPUT,
+)
+from cw.opencode_runner import (
+    make_blocked as make_opencode_blocked,
 )
 from cw.reconcile import (
     _act_on_local_harvest_candidates,
@@ -858,3 +867,108 @@ def test_park_terminal_sibling_tasks_failed_not_terminal(
         if t.ticket_id == "TSB-FAIL" and t.status == QueueItemStatus.PENDING
     )
     assert t.status == QueueItemStatus.PENDING
+
+
+# ---------------------------------------------------------------------------
+# Opencode harvest (#1669) — .cw/opencode.log with sentinel
+# ---------------------------------------------------------------------------
+
+
+def test_local_harvest_opencode_sentinel_found(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Dead opencode process with sentinel in log → completed with parsed result."""
+    worktree = make_git_repo("wt-opencode-harvest-sentinel")
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+    blocked = make_opencode_blocked(
+        ticket_id="T-OC-1", worktree=worktree, reason="test-sentinel"
+    )
+    sentinel_json = blocked.model_dump_json()
+    sentinel_text = f"<<<AUTO_DEV_RESULT\n{sentinel_json}\nAUTO_DEV_RESULT>>>"
+    text_event = json.dumps({"type": "text", "part": {"text": sentinel_text}})
+    log_path = worktree / OPENCODE_LOG_RELATIVE_PATH
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(text_event, encoding="utf-8")
+
+    dead_handle = LocalLivenessHandle(pid=999999, start_time_ns=1)
+    sess = _mk_local_session("ses-oc-sentinel", worktree, dead_handle)
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="T-OC-1",
+                    client="client-a",
+                    stage=Stage.IMPL,
+                    status=QueueItemStatus.RUNNING,
+                )
+            ]
+        )
+    )
+
+    candidates = _detect_local_harvest_candidates(load_state())
+    assert len(candidates) == 1
+
+    with freezegun.freeze_time("2026-01-01 12:00:00"):
+        _act_on_local_harvest_candidates(
+            load_state(),
+            candidates,
+            now=datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC),
+        )
+
+    state = load_state()
+    session = next(s for s in state.sessions if s.id == "ses-oc-sentinel")
+    assert session.status == SessionStatus.COMPLETED
+    assert session.last_result is not None
+    result = AutoDevResult.model_validate(session.last_result)
+    assert result.blocker is not None
+    assert result.blocker.reason == "test-sentinel"
+
+
+def test_local_harvest_opencode_no_output(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Dead opencode process with no sentinel in log → OPENCODE_NO_OUTPUT."""
+    worktree = make_git_repo("wt-opencode-harvest-no-output")
+    _write_staged_clients_yaml(tmp_config_dir, "client-a")
+
+    log_content = json.dumps({"type": "text", "part": {"text": "no sentinel here"}})
+    log_path = worktree / OPENCODE_LOG_RELATIVE_PATH
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(log_content, encoding="utf-8")
+
+    dead_handle = LocalLivenessHandle(pid=999999, start_time_ns=1)
+    sess = _mk_local_session("ses-oc-no-output", worktree, dead_handle)
+    save_state(CwState(sessions=[sess]))
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id="T-OC-2",
+                    client="client-a",
+                    stage=Stage.IMPL,
+                    status=QueueItemStatus.RUNNING,
+                )
+            ]
+        )
+    )
+
+    candidates = _detect_local_harvest_candidates(load_state())
+    assert len(candidates) == 1
+
+    with freezegun.freeze_time("2026-01-01 12:00:00"):
+        _act_on_local_harvest_candidates(
+            load_state(),
+            candidates,
+            now=datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC),
+        )
+
+    state = load_state()
+    session = next(s for s in state.sessions if s.id == "ses-oc-no-output")
+    assert session.status == SessionStatus.COMPLETED
+    result = AutoDevResult.model_validate(session.last_result)
+    assert result.blocker is not None
+    assert result.blocker.reason == OPENCODE_NO_OUTPUT

@@ -36,6 +36,10 @@ from cw.models import (
     Stage,
     TicketTask,
 )
+from cw.opencode_runner import (
+    OPENCODE_LOG_RELATIVE_PATH,
+    synthesize_opencode_result,
+)
 from cw.reconcile import _deps
 from cw.reconcile._shared import (
     ProposedAction,
@@ -47,7 +51,9 @@ from cw.result import emit_result_on
 
 if TYPE_CHECKING:
     from datetime import datetime
+    from pathlib import Path
 
+    from cw.auto_dev_result import AutoDevResult
     from cw.models import CwState, LocalLivenessHandle
 
 
@@ -104,6 +110,42 @@ def _detect_local_harvest_candidates(
     return candidates
 
 
+def _synthesize_harvest_sentinel(
+    worktree: Path,
+    task: TicketTask,
+    default_branch: str,
+    session_id: str,
+) -> AutoDevResult:
+    """Synthesize the harvest sentinel, choosing opencode or git synthesis.
+
+    If ``.cw/opencode.log`` exists, the session was spawned by OpencodeExecutor
+    — parse the JSONL log for the sentinel. Otherwise, fall back to git-fact
+    synthesis (aider path). A git/opencode failure on one candidate must not
+    abort the entire harvest sweep — returns a blocked result on exception.
+    """
+    try:
+        opencode_log = worktree / OPENCODE_LOG_RELATIVE_PATH
+        if opencode_log.exists():
+            return synthesize_opencode_result(
+                task=task,
+                worktree=worktree,
+                session_id=session_id,
+            )
+        return synthesize_git_result(
+            task=task,
+            worktree=worktree,
+            default_branch=default_branch,
+            plan_source="none",
+            session_id=session_id,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return make_blocked(
+            ticket_id=task.ticket_id,
+            worktree=worktree,
+            reason=UNEXPECTED_ERROR,
+        )
+
+
 def _act_on_local_harvest_candidates(
     state: CwState,
     candidates: list[ReapCandidate],
@@ -150,23 +192,12 @@ def _act_on_local_harvest_candidates(
                 stage=session.stage or Stage.IMPL,
             )
 
-        try:
-            sentinel = synthesize_git_result(
-                task=task,
-                worktree=candidate.worktree_path,
-                default_branch=default_branch,
-                plan_source="none",
-                session_id=candidate.session_id,
-            )
-        except (OSError, subprocess.CalledProcessError):
-            # A git failure on one candidate must not abort the entire harvest
-            # sweep. Record UNEXPECTED_ERROR so the task is advanced/reverted
-            # through the normal blocked path.
-            sentinel = make_blocked(
-                ticket_id=candidate.ticket_id or "",
-                worktree=candidate.worktree_path,
-                reason=UNEXPECTED_ERROR,
-            )
+        sentinel = _synthesize_harvest_sentinel(
+            worktree=candidate.worktree_path,
+            task=task,
+            default_branch=default_branch,
+            session_id=candidate.session_id,
+        )
         # Task first (before the session status change) so the task is in its
         # terminal/advanced state when revert_completed_silent_tasks runs.
         routed = True

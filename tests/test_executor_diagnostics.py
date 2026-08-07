@@ -178,6 +178,56 @@ def test_redact_argv_is_idempotent_on_already_redacted_value() -> None:
     assert twice == once
 
 
+def test_redact_argv_opencode_replaces_prompt() -> None:
+    """opencode's trailing positional (the prompt) is redacted wholesale."""
+    prompt = "Implement the thing per the plan; secret sk-" + "z" * 40
+    argv = [
+        "opencode",
+        "run",
+        "--format",
+        "json",
+        "--pure",
+        "--dir",
+        "/tmp/worktree",
+        prompt,
+    ]
+    out = redact_argv(argv, executor_name="opencode")
+    assert out[-1] == f"<redacted: {len(prompt)} chars>"
+    # Every other element untouched.
+    assert out[0] == "opencode"
+    assert out[5] == "--dir"
+    assert out[6] == "/tmp/worktree"
+
+
+def test_redact_argv_opencode_idempotent() -> None:
+    """Double redaction of an opencode argv does not re-wrap the placeholder."""
+    argv = [
+        "opencode",
+        "run",
+        "--format",
+        "json",
+        "--pure",
+        "--dir",
+        "/tmp",
+        "some ticket text",
+    ]
+    once = redact_argv(argv, executor_name="opencode")
+    twice = redact_argv(once, executor_name="opencode")
+    assert twice == once
+
+
+def test_redact_argv_opencode_short_argv_untouched() -> None:
+    """Short argv (no trailing positional) passes through unchanged."""
+    argv = ["opencode", "run"]
+    assert redact_argv(argv, executor_name="opencode") == argv
+
+
+def test_redact_argv_opencode_flag_last_untouched() -> None:
+    """Last arg starting with '-' is a flag, not a prompt — untouched."""
+    argv = ["opencode", "run", "--pure"]
+    assert redact_argv(argv, executor_name="opencode") == argv
+
+
 # ---------------------------------------------------------------------------
 # diagnostics_bundle_dir
 # ---------------------------------------------------------------------------
