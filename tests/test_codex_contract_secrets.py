@@ -118,9 +118,7 @@ class TestAssertNoSecretsLeaked:
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.setenv("CODEX_AUTH_TOKEN", "abcdefghijklmnopqrstuvwx")
         try:
-            _assert_no_secrets_leaked(
-                "output contains abcdefghijklmnopqrstuvwx here"
-            )
+            _assert_no_secrets_leaked("output contains abcdefghijklmnopqrstuvwx here")
         except AssertionError:
             return
         msg = "expected AssertionError for leaked CODEX_AUTH_TOKEN value"
@@ -149,3 +147,30 @@ class TestAssertNoSecretsLeaked:
         _assert_no_secrets_leaked(
             "flag=1 mode=0 workdir=/opt/codex/bin request_id=req_9f2ab3"
         )
+
+    def test_codex_generic_value_at_or_above_floor_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Proves the accepted round-2 trade-off: a non-credential-named
+        # CODEX_* value at/above the length floor is still a needle, even
+        # though it is path-shaped rather than a real credential (#1712).
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setenv("CODEX_WORKDIR", "/opt/codex/bin/long/session/path")
+        try:
+            _assert_no_secrets_leaked(
+                "output contains /opt/codex/bin/long/session/path here"
+            )
+        except AssertionError:
+            return
+        msg = "expected AssertionError for CODEX_WORKDIR value at/above length floor"
+        raise AssertionError(msg)
+
+    def test_codex_authority_url_name_does_not_false_match_auth(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Proves the credential-name regex's trailing word boundary: AUTH
+        # inside AUTHORITY must not false-match (#1712 round 2), unlike the
+        # genuine CODEX_AUTH_TOKEN case covered above.
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setenv("CODEX_AUTHORITY_URL", "http://x")
+        _assert_no_secrets_leaked("output contains http://x here")
