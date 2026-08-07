@@ -426,10 +426,13 @@ def _revert_claimed_task_to_pending(
     the worktree conflict is not known to be resolved just because a later,
     unrelated attempt hit :class:`UsageLimitError` or a generic exception, so
     an unrelated revert must not silently erase still-live conflict evidence.
-    (A prior stamp is cleared only via the three documented paths that are
-    NOT this function: the successful-spawn reset below, the conflicting
-    session going terminal, or a new session superseding it by id — see
-    docs/events.md's `concierge.hook_context_conflict_refused` section.)
+    (The stamp itself is reset to None only by the successful-spawn path
+    below — this function never clears it. The conflicting session going
+    terminal or being superseded by id does NOT touch the stamp; it only
+    makes concierge recipe 1's refusal predicate evaluate False on the next
+    cycle, per docs/events.md's `concierge.hook_context_conflict_refused`
+    section. The stamp is stale-but-harmless once the predicate is False —
+    the next successful spawn is what actually clears it.)
 
     # Why: task.attempts is NOT decremented here. The increment-at-claim
     # contract is intentional — usage_limit deaths and spawn errors consume

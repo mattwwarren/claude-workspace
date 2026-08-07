@@ -42,9 +42,11 @@ class SessionStatus(StrEnum):
 # Statuses a Session never leaves once reached. Single source of truth for
 # "is this session done" checks scattered across spawn.py, reconcile, cli,
 # and doctor (GitHub #1674 — was independently duplicated as an inline tuple
-# or a locally-defined frozenset in four places before this constant existed;
-# consolidated here, alongside SessionStatus itself, following the
-# WORKER_PURPOSES derived-constant precedent above).
+# or a locally-defined frozenset in several places before this constant
+# existed; consolidated at four of those call sites here, alongside
+# SessionStatus itself, following the WORKER_PURPOSES derived-constant
+# precedent above — reconcile/salvage.py:231 carries one remaining
+# unconsolidated copy, tracked separately, not folded into this ticket).
 TERMINAL_SESSION_STATUSES: frozenset[SessionStatus] = frozenset(
     {SessionStatus.COMPLETED, SessionStatus.TIMED_OUT}
 )

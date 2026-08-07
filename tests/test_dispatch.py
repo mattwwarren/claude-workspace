@@ -1944,9 +1944,9 @@ class TestDispatchTickSpawnErrors:
         failed for a different reason. Wiping the stamp here would let
         concierge recipe 1 requeue the row once more against the same
         still-live session — a narrower recurrence of the exact bug #1674
-        fixes. Only the three documented paths (successful spawn, the
-        conflicting session going terminal, or a new session superseding it)
-        may clear the field.
+        fixes. Only a successful spawn resets the field itself; the
+        conflicting session going terminal or being superseded by id only
+        clears concierge recipe 1's refusal predicate, not this field.
         """
         _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
         add_ticket(
