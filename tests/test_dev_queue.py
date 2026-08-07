@@ -5295,12 +5295,23 @@ class TestRequeueTicket:
         assert t.session_id is None
 
     def test_requeue_with_forward_stage_override(
-        self, tmp_config_dir: Path, tmp_path: Path
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """--stage that is forward in pipeline moves task forward."""
         from cw.dev_queue import requeue_ticket
 
         _write_client_yaml(tmp_config_dir, tmp_path)
+        # No worktree exists in this test, so the #1681 impl-bypass guard
+        # falls through to the tracker check -- stub it deterministically
+        # rather than let it hit a real (unstubbed) `gh` call.
+        stub_fetch_plan(
+            monkeypatch,
+            plan_body(),
+            target="cw.dev_queue.requeue.fetch_approved_plan_comment",
+        )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess9002")
         save_dev_queue(DevQueueStore(tasks=[task]))
 
@@ -5335,11 +5346,19 @@ class TestRequeueTicket:
         tmp_config_dir: Path,
         tmp_path: Path,
         capture_events: Callable[..., list[CapturedEvent]],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Forward stage_override (plan→impl) emits task.stage_changed advance."""
         from cw.dev_queue import requeue_ticket
 
         _write_client_yaml(tmp_config_dir, tmp_path)
+        # No worktree exists in this test; stub the tracker fallback the
+        # #1681 impl-bypass guard falls through to (see test above).
+        stub_fetch_plan(
+            monkeypatch,
+            plan_body(),
+            target="cw.dev_queue.requeue.fetch_approved_plan_comment",
+        )
         events = capture_events(
             "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_STAGE_CHANGED
         )
@@ -5497,12 +5516,22 @@ class TestRequeueTicket:
             )
 
     def test_regress_forward_target_is_inert(
-        self, tmp_config_dir: Path, tmp_path: Path
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """allow_regress + forward/same stage is not an error (inert flag)."""
         from cw.dev_queue import requeue_ticket
 
         _write_client_yaml(tmp_config_dir, tmp_path)
+        # No worktree exists in this test; stub the tracker fallback the
+        # #1681 impl-bypass guard falls through to.
+        stub_fetch_plan(
+            monkeypatch,
+            plan_body(),
+            target="cw.dev_queue.requeue.fetch_approved_plan_comment",
+        )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess9104")
         save_dev_queue(DevQueueStore(tasks=[task]))
 
@@ -5518,12 +5547,23 @@ class TestRequeueTicket:
         assert t.stage == Stage.IMPL
 
     def test_regress_return_dict_reports_regressed_and_attempts(
-        self, tmp_config_dir: Path, tmp_path: Path
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Backward regress reports regressed + attempts; forward reports neither."""
         from cw.dev_queue import requeue_ticket
 
         _write_client_yaml(tmp_config_dir, tmp_path)
+        # No worktree exists in this test; stub the tracker fallback the
+        # #1681 impl-bypass guard falls through to for the forward GEN-501
+        # call below (backward regress calls are unaffected by the guard).
+        stub_fetch_plan(
+            monkeypatch,
+            plan_body(),
+            target="cw.dev_queue.requeue.fetch_approved_plan_comment",
+        )
         task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess9105")
         save_dev_queue(DevQueueStore(tasks=[task]))
 
@@ -5868,6 +5908,266 @@ class TestRequeueTicket:
                 allow_regress=True,
                 from_failed=True,
             )
+
+    # -- #1681: impl-bypass plan-availability guard -------------------------
+
+    def test_requeue_stage_impl_bypass_worktree_missing_and_no_tracker_plan_raises(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No worktree on disk, no reviewed tracker comment -> refuse."""
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStageError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        missing_wt = tmp_path / "no-such-worktree"
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue.worktree_path_for",
+            lambda _client, _branch: missing_wt,
+        )
+        stub_fetch_plan(
+            monkeypatch, None, target="cw.dev_queue.requeue.fetch_approved_plan_comment"
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-bypass-1")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(RequeueStageError) as exc_info:
+            requeue_ticket("GEN-500", "genhealth", stage_override="impl")
+
+        msg = str(exc_info.value)
+        assert "GEN-500" in msg
+        assert ".cw/plan.md" in msg
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.stage == Stage.PLAN
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_requeue_stage_impl_bypass_worktree_wrong_branch_and_no_tracker_plan_raises(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Worktree dir exists but is checked out on a foreign branch -> refuse.
+
+        Mirrors create_worktree's own stale-worktree refusal (#402/#404):
+        a directory that merely exists must not be trusted as "the plan is
+        there" without also proving it's the expected branch.
+        """
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStageError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        wt_path = tmp_path / "stale-worktree"
+        wt_path.mkdir()
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue.worktree_path_for",
+            lambda _client, _branch: wt_path,
+        )
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue._checked_out_branch",
+            lambda _wt_path: "some-other-branch",
+        )
+        stub_fetch_plan(
+            monkeypatch, None, target="cw.dev_queue.requeue.fetch_approved_plan_comment"
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-bypass-2")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(RequeueStageError):
+            requeue_ticket("GEN-500", "genhealth", stage_override="impl")
+
+    def test_requeue_stage_impl_bypass_worktree_missing_plan_md_raises(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Worktree exists on the right branch but has no .cw/plan.md -> refuse."""
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStageError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        wt_path = tmp_path / "reused-worktree"
+        wt_path.mkdir()
+        branch = "dev/GEN-500"
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue.worktree_path_for",
+            lambda _client, _branch: wt_path,
+        )
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue._checked_out_branch",
+            lambda _wt_path: branch,
+        )
+        stub_fetch_plan(
+            monkeypatch, None, target="cw.dev_queue.requeue.fetch_approved_plan_comment"
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-bypass-3")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(RequeueStageError):
+            requeue_ticket("GEN-500", "genhealth", stage_override="impl")
+
+    def test_requeue_stage_impl_bypass_worktree_has_valid_plan_md_succeeds(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Reused worktree with a validly-marked .cw/plan.md -> succeeds, and
+        the tracker network call is never made (common reused-worktree path
+        must stay zero-network-cost)."""
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        wt_path = tmp_path / "reused-worktree"
+        cw_dir = wt_path / ".cw"
+        cw_dir.mkdir(parents=True)
+        (cw_dir / "plan.md").write_text(plan_body(), encoding="utf-8")
+        branch = "dev/GEN-500"
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue.worktree_path_for",
+            lambda _client, _branch: wt_path,
+        )
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue._checked_out_branch",
+            lambda _wt_path: branch,
+        )
+
+        def _fail_if_called(_ticket_id: str, **_kwargs: object) -> str | None:
+            msg = "fetch_approved_plan_comment must not be called on the local-hit path"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue.fetch_approved_plan_comment", _fail_if_called
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-bypass-4")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket("GEN-500", "genhealth", stage_override="impl")
+
+        assert result["to_stage"] == "impl"
+
+    def test_requeue_stage_impl_bypass_tracker_fallback_recovers_succeeds(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No local worktree, but the tracker carries a reviewed plan comment
+        -> the tracker-fallback recovers it and the requeue succeeds."""
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        missing_wt = tmp_path / "no-such-worktree"
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue.worktree_path_for",
+            lambda _client, _branch: missing_wt,
+        )
+        stub_fetch_plan(
+            monkeypatch,
+            plan_body(),
+            target="cw.dev_queue.requeue.fetch_approved_plan_comment",
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-bypass-5")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket("GEN-500", "genhealth", stage_override="impl")
+
+        assert result["to_stage"] == "impl"
+
+    def test_requeue_stage_impl_bypass_tracker_unmarked_comment_raises(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A tracker comment with no signoff markers doesn't count as reviewed
+        -- proves the guard uses _plan_body_signoff_ok, not a bare "comment
+        exists" check."""
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStageError
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        missing_wt = tmp_path / "no-such-worktree"
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue.worktree_path_for",
+            lambda _client, _branch: missing_wt,
+        )
+        stub_fetch_plan(
+            monkeypatch,
+            plan_body(spec=False),
+            target="cw.dev_queue.requeue.fetch_approved_plan_comment",
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-bypass-6")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(RequeueStageError):
+            requeue_ticket("GEN-500", "genhealth", stage_override="impl")
+
+    def test_requeue_same_stage_at_impl_unaffected(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Same-stage requeue at impl performs no worktree/tracker check at all
+        -- the guard is scoped to genuine forward bypass of plan, not every
+        touch of the impl stage."""
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+
+        def _fail_if_called(*_args: object, **_kwargs: object) -> Path:
+            msg = "worktree_path_for must not be called for a same-stage requeue"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr("cw.dev_queue.requeue.worktree_path_for", _fail_if_called)
+        task = _make_blocked_task(stage=Stage.IMPL, session_id="sess-bypass-7")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket("GEN-500", "genhealth", stage_override="impl")
+
+        assert result["to_stage"] == "impl"
+
+    def test_requeue_forward_to_review_or_finalize_unaffected(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Forward requeue targeting review or finalize (not impl) performs no
+        worktree/tracker check -- the guard is scoped to target_stage ==
+        Stage.IMPL only (review/finalize degrade gracefully on a missing
+        plan; see #1681 Decisions)."""
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+
+        def _fail_if_called(*_args: object, **_kwargs: object) -> Path:
+            msg = "worktree_path_for must not be called for a review/finalize target"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr("cw.dev_queue.requeue.worktree_path_for", _fail_if_called)
+
+        task_review = _make_blocked_task(
+            ticket_id="GEN-503", stage=Stage.PLAN, session_id="sess-bypass-8a"
+        )
+        save_dev_queue(DevQueueStore(tasks=[task_review]))
+        result_review = requeue_ticket("GEN-503", "genhealth", stage_override="review")
+        assert result_review["to_stage"] == "review"
+
+        task_finalize = _make_blocked_task(
+            ticket_id="GEN-504", stage=Stage.PLAN, session_id="sess-bypass-8b"
+        )
+        save_dev_queue(DevQueueStore(tasks=[task_finalize]))
+        result_finalize = requeue_ticket(
+            "GEN-504", "genhealth", stage_override="finalize"
+        )
+        assert result_finalize["to_stage"] == "finalize"
 
 
 # ---------------------------------------------------------------------------
@@ -6469,10 +6769,20 @@ class TestCLIRequeue:
         assert t.status == QueueItemStatus.PENDING
 
     def test_requeue_with_forward_stage(
-        self, tmp_config_dir: Path, tmp_path: Path
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """--stage impl from plan advances forward."""
         _write_client_yaml(tmp_config_dir, tmp_path)
+        # No worktree exists in this test; stub the tracker fallback the
+        # #1681 impl-bypass guard falls through to.
+        stub_fetch_plan(
+            monkeypatch,
+            plan_body(),
+            target="cw.dev_queue.requeue.fetch_approved_plan_comment",
+        )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess6002")
         save_dev_queue(DevQueueStore(tasks=[task]))
 
@@ -6514,6 +6824,42 @@ class TestCLIRequeue:
             ],
         )
         assert result.exit_code != 0
+
+    def test_requeue_impl_bypass_without_plan_exits_nonzero(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """--stage impl with neither a local nor tracker plan exits nonzero
+        and surfaces the refusal message via @handle_errors (#1681)."""
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        missing_wt = tmp_path / "no-such-worktree"
+        monkeypatch.setattr(
+            "cw.dev_queue.requeue.worktree_path_for",
+            lambda _client, _branch: missing_wt,
+        )
+        stub_fetch_plan(
+            monkeypatch, None, target="cw.dev_queue.requeue.fetch_approved_plan_comment"
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-cli-bypass")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "requeue",
+                "GEN-500",
+                "--client",
+                "genhealth",
+                "--stage",
+                "impl",
+            ],
+        )
+        assert result.exit_code != 0
+        assert ".cw/plan.md" in result.output
 
     def test_requeue_non_blocked_exits_nonzero(
         self, tmp_config_dir: Path, tmp_path: Path
@@ -6656,6 +7002,13 @@ class TestCLIRequeue:
     ) -> None:
         """Plain forward requeue omits the regress_attempts key entirely."""
         _write_client_yaml(tmp_config_dir, tmp_path)
+        # No worktree exists in this test; stub the tracker fallback the
+        # #1681 impl-bypass guard falls through to.
+        stub_fetch_plan(
+            monkeypatch,
+            plan_body(),
+            target="cw.dev_queue.requeue.fetch_approved_plan_comment",
+        )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess6105")
         save_dev_queue(DevQueueStore(tasks=[task]))
 
@@ -7743,28 +8096,61 @@ class TestStageHighWaterStamping:
         assert task.stage_high_water == Stage.IMPL
 
     def test_apply_requeue_stage_backward_leaves_high_water_unchanged(self) -> None:
+        from pathlib import Path
+
         from cw.dev_queue import _apply_requeue_stage
 
         stages = [Stage.HARDEN, Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE]
         task = _make_stage_task(stage=Stage.IMPL, stage_high_water=Stage.IMPL)
         task.status = QueueItemStatus.BLOCKED_ON_USER
-        _apply_requeue_stage(task, stages, "harden", allow_regress=True)
+        client_cfg = ClientConfig(
+            name="test-client", workspace_path=Path("test-workspace")
+        )
+        _apply_requeue_stage(
+            task,
+            stages,
+            stage_override="harden",
+            client_cfg=client_cfg,
+            allow_regress=True,
+        )
         assert task.stage_high_water == Stage.IMPL
 
     def test_apply_requeue_stage_forward_raises_high_water(self) -> None:
+        from pathlib import Path
+
         from cw.dev_queue import _apply_requeue_stage
 
         stages = [Stage.HARDEN, Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE]
         task = _make_stage_task(stage=Stage.PLAN, stage_high_water=Stage.PLAN)
-        _apply_requeue_stage(task, stages, "review", allow_regress=False)
+        client_cfg = ClientConfig(
+            name="test-client", workspace_path=Path("test-workspace")
+        )
+        _apply_requeue_stage(
+            task,
+            stages,
+            stage_override="review",
+            client_cfg=client_cfg,
+            allow_regress=False,
+        )
         assert task.stage_high_water == Stage.REVIEW
 
     def test_apply_requeue_stage_forward_does_not_lower_high_water(self) -> None:
+        from pathlib import Path
+
         from cw.dev_queue import _apply_requeue_stage
 
         stages = [Stage.HARDEN, Stage.PLAN, Stage.IMPL, Stage.REVIEW, Stage.FINALIZE]
         task = _make_stage_task(stage=Stage.PLAN, stage_high_water=Stage.FINALIZE)
-        _apply_requeue_stage(task, stages, "review", allow_regress=False)
+        client_cfg = ClientConfig(
+            name="test-client", workspace_path=Path("test-workspace")
+        )
+        _apply_requeue_stage(
+            task,
+            stages,
+            stage_override="review",
+            client_cfg=client_cfg,
+            allow_regress=False,
+        )
         assert task.stage_high_water == Stage.FINALIZE
 
 
