@@ -130,7 +130,7 @@ def synthesize_codex_review_result(
         )
         return result, None
     verdict = consolidate_verdict(
-        documents, diff, reviewed_sha, failed_reviewers=failures
+        documents, diff, reviewed_sha, worktree=worktree, failed_reviewers=failures
     )
     if verdict.blocking:
         blocked = make_blocked(
