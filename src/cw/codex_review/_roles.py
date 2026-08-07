@@ -21,6 +21,11 @@ import time
 import uuid
 from typing import TYPE_CHECKING
 
+from cw.codex_review._audit_events import (
+    _TURN_COMPLETED,
+    _TURN_FAILED,
+    _parse_codex_audit_events,
+)
 from cw.codex_review._const import (
     _CATEGORY_TO_REASON,
     _MIN_ROLE_TIMEOUT_SECONDS,
@@ -30,7 +35,11 @@ from cw.codex_review._context import _parse_reviewer_document
 from cw.config import state_dir
 from cw.executor_diagnostics import build_executor_failure, persist_diagnostics_bundle
 from cw.openai_strict_schema import to_openai_strict_schema
-from cw.review_findings import ReviewerFindingsDocument, ReviewerRunFailure
+from cw.review_findings import (
+    ReviewerFindingsDocument,
+    ReviewerRunFailure,
+    ReviewerRunMetrics,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -44,6 +53,28 @@ _log = logging.getLogger(__name__)
 # (FileNotFoundError → CodexRunResult(returncode=127, ...)); paired with a
 # "command not found" stderr it classifies as a spawn_error (#1239).
 _COMMAND_NOT_FOUND_RETURNCODE = 127
+
+# The two audit flags #1710 adds to every generic reviewer invocation. Kept as
+# one tuple so the argv builder and the degrade-and-retry strip cannot drift.
+_AUDIT_ARGV_FLAGS = ("--json", "--ephemeral")
+
+# clap-style "you passed a flag I don't know" phrasings. An older codex-cli
+# that predates --json/--ephemeral rejects the whole invocation with one of
+# these plus the offending flag name; both must be present before
+# _run_codex_role degrades and retries (see _is_audit_flag_rejection).
+_FLAG_REJECTION_MARKERS = (
+    "unexpected argument",
+    "unrecognized argument",
+    "unrecognized option",
+    "unknown argument",
+    "unknown option",
+)
+
+# A healthy ``codex exec --json`` stream ends on one of these. Anything else
+# (or nothing at all) means the stream was truncated or never produced. Built
+# from _audit_events's own wire-name constants so the two modules cannot drift
+# on codex's terminal-event vocabulary (#1710 review finding).
+_TERMINAL_EVENTS = frozenset({_TURN_COMPLETED, _TURN_FAILED})
 
 
 def _codex_scratch_dir(session_id: str) -> Path:
@@ -70,12 +101,21 @@ def _build_generic_codex_argv(
     legitimate reason to write to the worktree, so it never gets write
     access, matching the pre-#1236 ``codex exec review`` path's implicit
     read-only posture.
+
+    ``--json`` + ``--ephemeral`` (#1710): the former makes codex print its
+    run as a JSONL event stream on stdout (parsed by ``_audit_events`` into
+    per-role telemetry), the latter stops a one-shot reviewer invocation from
+    persisting a resumable session file under ``~/.codex/sessions``. Both are
+    unconditional and independent of the ``-o`` document, which is still
+    written normally. They are inserted before ``--output-schema`` so the
+    trailing ``-m <model>`` append contract stays intact.
     """
     argv = [
         "codex",
         "exec",
         "--sandbox",
         "read-only",
+        *_AUDIT_ARGV_FLAGS,
         "--output-schema",
         str(schema_path),
         "-o",
@@ -137,6 +177,32 @@ def _classify_codex_failure(result: CodexRunResult) -> ExecutorFailureCategory:
     return _classify_codex_output_failure(result.output_file_content)
 
 
+def _is_audit_flag_rejection(result: CodexRunResult) -> bool:
+    """True when *result* looks like codex rejecting ``--json``/``--ephemeral``.
+
+    A codex-cli older than the one this feature was built against does not know
+    these two flags and refuses the whole invocation, which would otherwise turn
+    an observability upgrade into a total loss of review coverage. This narrow
+    predicate gates a single degrade-and-retry in :func:`_run_codex_role`.
+
+    Both conditions are required: stderr must carry a clap-style rejection
+    marker **and** name one of the two flags we actually added. An unrelated
+    non-zero exit whose stderr merely says "unrecognized" for some other reason
+    must not be retried, and neither must one that only echoes our argv back.
+
+    This is a heuristic — no capture of a real older codex-cli's exact wording
+    was available (Deferred Premise 2, #1710). A false negative is safe: the
+    role fails exactly as it did before this ticket, which is today's behavior
+    for any ``nonzero_exit``.
+    """
+    if result.timed_out or result.returncode == 0:
+        return False
+    lowered = result.stderr.lower()
+    return any(marker in lowered for marker in _FLAG_REJECTION_MARKERS) and any(
+        flag in result.stderr for flag in _AUDIT_ARGV_FLAGS
+    )
+
+
 def _persist_codex_role_diagnostics(
     *,
     session_id: str,
@@ -188,13 +254,31 @@ def _run_codex_role(
     timeout_seconds: int | None,
     scratch_dir: Path,
     session_id: str,
-) -> tuple[ReviewerFindingsDocument | None, ReviewerRunFailure | None]:
-    """Run one reviewer role; return ``(document, failure)`` (exactly one set).
+) -> tuple[
+    ReviewerFindingsDocument | None, ReviewerRunFailure | None, ReviewerRunMetrics
+]:
+    """Run one reviewer role; return ``(document, failure, metrics)``.
+
+    Exactly one of ``document``/``failure`` is set. ``metrics`` is always set
+    (#1710): the audit telemetry parsed from the ``codex exec --json`` stream,
+    degrading to all-defaults when no parseable stream was produced. It is
+    returned on both branches — a role that failed mid-run still has telemetry
+    worth recording.
 
     Logs each failure mode (timeout, non-zero exit, missing/malformed output)
     via ``_log.warning`` before constructing the ``ReviewerRunFailure``, and
     persists a typed diagnostics bundle (classified into the finer #1239
     taxonomy) under ``session_id``'s diagnostics dir on every failure branch.
+
+    Degrade-and-retry (#1710): when the first invocation fails specifically
+    because codex did not recognize ``--json``/``--ephemeral``
+    (:func:`_is_audit_flag_rejection`), the two flags are stripped from
+    ``argv`` and the role is run **once** more, so an older codex-cli loses the
+    audit stream rather than the review itself. The retry's result replaces the
+    first for every downstream step, and ``argv`` is reassigned in place so a
+    subsequent failure's diagnostics name what actually ran. Every other
+    failure — a timeout, a spawn error, an ordinary non-zero exit — falls
+    through to the pre-existing path untouched.
     """
     slug = _slug(role)
     schema_path = scratch_dir / f"{slug}-schema.json"
@@ -210,12 +294,39 @@ def _run_codex_role(
     )
     start = time.monotonic()
     result = runner.run(worktree, argv, timeout_seconds, stdin=prompt)
+    if (
+        not result.timed_out
+        and result.returncode != 0
+        and _classify_codex_failure(result) == "nonzero_exit"
+        and _is_audit_flag_rejection(result)
+    ):
+        argv = [flag for flag in argv if flag not in _AUDIT_ARGV_FLAGS]
+        result = runner.run(worktree, argv, timeout_seconds, stdin=prompt)
+    # Exactly two time.monotonic() reads per call, retry or not (a retry is a
+    # second subprocess, not a second clock read) — so *duration* is total wall
+    # time across both invocations when one happened. The invariant is asserted
+    # by the _Clock-driven tests in tests/test_codex_review_roles.py.
     duration = time.monotonic() - start
+    metrics = _parse_codex_audit_events(result.stdout, duration_seconds=duration)
 
     if not result.timed_out and result.returncode == 0:
         doc = _parse_reviewer_document(result.output_file_content)
         if doc is not None:
-            return doc, None
+            if (
+                _AUDIT_ARGV_FLAGS[0] in argv
+                and metrics["terminal_event"] not in _TERMINAL_EVENTS
+            ):
+                # A retry (no --json) legitimately has no terminal event, so the
+                # argv guard is what keeps this warning specific to a genuinely
+                # malformed stream.
+                _log.warning(
+                    "codex review role %r (session %r) produced a malformed/"
+                    "incomplete JSONL audit stream (terminal_event=%r)",
+                    role,
+                    session_id,
+                    metrics["terminal_event"],
+                )
+            return doc, None, metrics
 
     category = _classify_codex_failure(result)
     reason = _CATEGORY_TO_REASON[category]
@@ -230,7 +341,7 @@ def _run_codex_role(
         schema_path=schema_path,
         output_path=output_path,
     )
-    return None, ReviewerRunFailure(role=role, reason=reason)
+    return None, ReviewerRunFailure(role=role, reason=reason), metrics
 
 
 def run_codex_roles(
@@ -242,7 +353,11 @@ def run_codex_roles(
     model: str | None,
     wall_clock_budget_seconds: int | None,
     session_id: str,
-) -> tuple[list[ReviewerFindingsDocument], list[ReviewerRunFailure]]:
+) -> tuple[
+    list[ReviewerFindingsDocument],
+    list[ReviewerRunFailure],
+    dict[str, ReviewerRunMetrics],
+]:
     """Run every role under one shared wall-clock deadline (Comment 3).
 
     A ``None`` budget means no deadline (unlimited per-role timeout). Otherwise a
@@ -256,11 +371,17 @@ def run_codex_roles(
     shared, long-running ``state_dir()``, not an auto-cleaning
     ``tempfile.TemporaryDirectory()``, so leaving it behind on every call
     leaks disk on a long-running dispatch host (MUST_FIX 1, #1236).
+
+    The third return element maps each role that actually invoked codex to its
+    audit telemetry (#1710). A ``budget_exhausted`` skip never calls
+    :func:`_run_codex_role`, so it correctly contributes no entry — "no
+    telemetry" and "telemetry showing nothing happened" are different facts.
     """
     scratch_dir = _codex_scratch_dir(uuid.uuid4().hex)
     try:
         documents: list[ReviewerFindingsDocument] = []
         failures: list[ReviewerRunFailure] = []
+        metrics_by_role: dict[str, ReviewerRunMetrics] = {}
         deadline: float | None = (
             None
             if wall_clock_budget_seconds is None
@@ -278,7 +399,7 @@ def run_codex_roles(
                 timeout: int | None = max(int(remaining), _MIN_ROLE_TIMEOUT_SECONDS)
             else:
                 timeout = None
-            doc, failure = _run_codex_role(
+            doc, failure, metrics = _run_codex_role(
                 runner=runner,
                 worktree=worktree,
                 role=role,
@@ -288,10 +409,11 @@ def run_codex_roles(
                 scratch_dir=scratch_dir,
                 session_id=session_id,
             )
+            metrics_by_role[role] = metrics
             if doc is not None:
                 documents.append(doc)
             if failure is not None:
                 failures.append(failure)
-        return documents, failures
+        return documents, failures, metrics_by_role
     finally:
         shutil.rmtree(scratch_dir, ignore_errors=True)

@@ -145,7 +145,7 @@ class TestCodexSandboxReadOnlyProbe:
             content=sentinel_token + "\n",
         )
         runner = _RecordingCodexRunner()
-        doc, failure = _run_codex_role(
+        doc, failure, _metrics = _run_codex_role(
             runner=runner,
             worktree=repo,
             role="Sandbox Probe",

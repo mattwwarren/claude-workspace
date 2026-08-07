@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -48,7 +49,6 @@ from tests.conftest import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from cw.auto_dev_result import AutoDevResult
     from cw.codex_runner import CodexRunner
@@ -162,9 +162,14 @@ class _FixLoopRunner:
         self,
         review_docs: list[str],
         fix_behaviors: list[_FixBehavior] | None = None,
+        *,
+        review_stdout: str = "",
     ) -> None:
         self._review_docs = review_docs
         self._fix_behaviors = list(fix_behaviors or [])
+        # #1710: JSONL audit stream every review invocation emits on stdout;
+        # "" (the default) reproduces the pre-#1710 no-audit-stream shape.
+        self._review_stdout = review_stdout
         self._pass = 0
         self._fix_i = 0
         self.calls: list[dict[str, object]] = []
@@ -199,7 +204,10 @@ class _FixLoopRunner:
         self.review_calls += 1
         doc = self._review_docs[min(self._pass, len(self._review_docs) - 1)]
         return CodexRunResult(
-            returncode=0, stdout="", stderr="", output_file_content=doc
+            returncode=0,
+            stdout=self._review_stdout,
+            stderr="",
+            output_file_content=doc,
         )
 
 
@@ -883,6 +891,20 @@ class TestFixLoopNonBlockingPassthrough:
 # ---------------------------------------------------------------------------
 
 
+def _verdict_without_durations(verdict: ReviewVerdict | None) -> dict[str, object]:
+    """Dump *verdict*, blanking the one field that cannot be reproducible.
+
+    ``ReviewerRunRecord.duration_seconds`` (#1710) is measured wall time, so it
+    differs between two otherwise-identical review passes. Blanking only that
+    field keeps the rest of the equality assertion strict.
+    """
+    assert verdict is not None
+    dumped = verdict.model_dump()
+    for record in dumped["agents_run"]:
+        record["duration_seconds"] = None
+    return dumped
+
+
 class TestFixLoopDisabledGate:
     def test_disabled_gate_blocking_cycle0_returns_run_review_tuple_unchanged(
         self, make_git_repo: Callable[..., Path]
@@ -905,7 +927,13 @@ class TestFixLoopDisabledGate:
         )
 
         assert loop_result == plain_result
-        assert loop_verdict == plain_verdict
+        # #1710: ReviewerRunRecord.duration_seconds is a real measured wall
+        # clock, so two separate invocations can never be byte-identical on
+        # that one field. Everything else about the verdict — including the
+        # rest of the audit telemetry — still must match exactly.
+        assert _verdict_without_durations(loop_verdict) == _verdict_without_durations(
+            plain_verdict
+        )
         assert loop_result.status == "blocked"
         assert loop_result.blocker is not None
         assert loop_result.blocker.reason == CODEX_MUST_FIX_FINDINGS
@@ -1189,3 +1217,50 @@ class TestFixPromptAndArgv:
         assert "--output-schema" not in argv
         assert "-o" not in argv
         assert argv[-2:] == ["-m", "gpt-x"]
+
+
+# ---------------------------------------------------------------------------
+# Codex audit metrics survive the fix loop's terminal verdict (#1710)
+# ---------------------------------------------------------------------------
+
+
+_AUDIT_JSONL = (
+    Path(__file__).parent
+    / "fixtures"
+    / "codex_audit_events"
+    / "clean_with_command.jsonl"
+).read_text(encoding="utf-8")
+
+
+class TestFixLoopCarriesAuditMetrics:
+    """`_finalize_review`/`_survivors_only_verdict` model_copy the verdict but
+    never touch `agents_run`, so per-role metrics must survive to the terminal
+    verdict of a multi-cycle run."""
+
+    def test_clean_exit_terminal_verdict_carries_metrics(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-metrics-clean")
+        runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC], review_stdout=_AUDIT_JSONL)
+        out, verdict = _run_loop(runner, worktree, session_id="s-metrics-clean")
+
+        assert out.status == "stage_complete"
+        assert verdict is not None
+        assert verdict.agents_run
+        for record in verdict.agents_run:
+            assert record.thread_id == "<THREAD_ID>"
+            assert record.terminal_event == "turn.completed"
+            assert record.tool_call_counts["command_execution"] == 1
+            assert record.had_command_evidence is True
+
+    def test_capped_run_terminal_verdict_carries_metrics(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-metrics-capped")
+        runner = _FixLoopRunner([_MF_DOC], review_stdout=_AUDIT_JSONL)
+        out, verdict = _run_loop(runner, worktree, session_id="s-metrics-capped")
+
+        assert out.status == "blocked"
+        assert verdict is not None
+        assert verdict.agents_run
+        assert all(r.thread_id == "<THREAD_ID>" for r in verdict.agents_run)

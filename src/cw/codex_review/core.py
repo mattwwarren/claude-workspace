@@ -41,7 +41,7 @@ def run_review(
     and synthesize the typed result.
     """
     prepared = _prepare_review_pass(task, worktree, default_branch)
-    documents, failures = run_codex_roles(
+    documents, failures, metrics_by_role = run_codex_roles(
         runner=runner,
         worktree=worktree,
         roles=prepared.roles,
@@ -59,4 +59,5 @@ def run_review(
         reviewed_sha=prepared.reviewed_sha,
         session_id=session_id,
         default_branch=default_branch,
+        metrics_by_role=metrics_by_role,
     )

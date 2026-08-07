@@ -33,6 +33,7 @@ if TYPE_CHECKING:
         CapturedDiff,
         ReviewerFindingsDocument,
         ReviewerRunFailure,
+        ReviewerRunMetrics,
         ReviewVerdict,
         Severity,
     )
@@ -99,6 +100,7 @@ def synthesize_codex_review_result(
     reviewed_sha: str,
     session_id: str,
     default_branch: str,
+    metrics_by_role: dict[str, ReviewerRunMetrics] | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Map consolidated review documents to a typed AutoDevResult.
 
@@ -117,6 +119,12 @@ def synthesize_codex_review_result(
 
     Returns ``(result, verdict)``; ``verdict`` is ``None`` only on the zero-
     documents path (nothing to render into a review comment).
+
+    ``metrics_by_role`` (#1710) is per-role codex audit telemetry, threaded
+    into :func:`consolidate_verdict` so it lands on ``verdict.agents_run``. It
+    is deliberately unused on the zero-documents branch: no ``ReviewVerdict``
+    is built there, so the telemetry has nowhere to attach. Nothing in the
+    disposition table or :func:`_derive_health` reads it (R2).
     """
     if not documents:
         transient = any(f.reason in _TRANSIENT_FAILURE_REASONS for f in failures)
@@ -130,7 +138,12 @@ def synthesize_codex_review_result(
         )
         return result, None
     verdict = consolidate_verdict(
-        documents, diff, reviewed_sha, worktree=worktree, failed_reviewers=failures
+        documents,
+        diff,
+        reviewed_sha,
+        worktree=worktree,
+        failed_reviewers=failures,
+        metrics_by_role=metrics_by_role,
     )
     if verdict.blocking:
         blocked = make_blocked(
