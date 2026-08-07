@@ -423,6 +423,7 @@ class TestReviewConsolidateCommand:
         diff = _build_captured_diff(_CONSOLIDATE_DIFF)
         assert diff.file_diffs == file_diffs
         assert diff.file_line_text == file_line_text
+        assert diff.files == {f: sorted(lines) for f, lines in file_line_text.items()}
 
 
 class TestReviewConsolidateWorktreeOption:
