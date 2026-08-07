@@ -37,9 +37,15 @@ if TYPE_CHECKING:
     from cw.models import TicketTask
 
 _SESSION = "sess-statusline-1"
-# Generous ceiling for an in-process render over a large fixture; R1's real
-# budget is the 300ms statusline debounce.
-_PERF_BUDGET_SECONDS = 0.05
+# Tight CPU-time ceiling for an in-process render over a large fixture.
+# process_time() excludes scheduler/I-O wait, so this catches an actual
+# algorithmic regression in our code without flaking on runner contention.
+_CPU_BUDGET_SECONDS = 0.15
+# Wall-clock backstop at R1's real budget: the 300ms statusline debounce.
+# process_time() alone is blind to a call that burns wall-clock without
+# burning CPU (e.g. a subprocess/network/gh/git call R1 forbids), so this
+# assertion exists specifically to catch that regression class.
+_WALL_CLOCK_BUDGET_SECONDS = 0.3
 
 
 def _write_clients(tmp_path: Path) -> Path:
