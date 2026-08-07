@@ -8,6 +8,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`requeue --stage impl` could bypass to an unrunnable impl session without
+  a plan (#1681):** requeuing a task at `plan`/`harden` directly to
+  `Stage.IMPL` previously advanced the stage pointer unconditionally, even
+  when no `.cw/plan.md` was ever written for the bypassed worktree — the
+  common case right after a fresh dispatch tick, since dispatch stamps
+  `session_id` but never `worktree_path` on `TicketTask`. The requeue guard
+  now checks local-first (via the same read-only primitives
+  `create_worktree` uses to decide reuse-vs-rebuild), falling back to the
+  tracker's approved-plan comment only when the local read can't prove the
+  plan is there, and refuses the bypass with a clear error naming the
+  missing plan path when neither source proves sign-off. The `review` and
+  `finalize` bypass targets are intentionally left unguarded — both degrade
+  gracefully on a missing plan per their own command specs.
+
 - **Earlier-stage terminal sentinel wrongly discarded (#1676):** a headless
   auto-dev session that reports a terminal sentinel from an earlier stage
   than the one it was dispatched at (e.g. a `plan_pending_approval` or
