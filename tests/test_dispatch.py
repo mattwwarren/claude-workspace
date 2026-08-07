@@ -9604,14 +9604,16 @@ class TestApplyStagedDecision:
         """#1702: a null last_result and one with no ``health`` key both advance."""
         from cw.dispatch import apply_staged_decision
 
+        clients = self._clients(tmp_path)
+
         null_result = self._make_running_task("RHG-NULL-1", stage=Stage.REVIEW)
-        apply_staged_decision(null_result, "stage_complete", None, self._clients(tmp_path))
+        apply_staged_decision(null_result, "stage_complete", None, clients)
         assert null_result.status == QueueItemStatus.PENDING
         assert null_result.stage == Stage.FINALIZE
 
         no_key = self._make_running_task("RHG-NOKEY-1", stage=Stage.REVIEW)
         apply_staged_decision(
-            no_key, "stage_complete", {"status": "stage_complete"}, self._clients(tmp_path)
+            no_key, "stage_complete", {"status": "stage_complete"}, clients
         )
         assert no_key.status == QueueItemStatus.PENDING
         assert no_key.stage == Stage.FINALIZE
