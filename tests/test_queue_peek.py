@@ -684,6 +684,13 @@ class TestMinutesSince:
         result = queue_peek.minutes_since(ts, _NOW)
         assert result == pytest.approx(0.0)
 
+    def test_naive_timestamp_coerced_to_utc(self) -> None:
+        """A tz-less ISO string (e.g. from CW_STATE started_at) is coerced to
+        UTC rather than raising, mirroring _parse_started_at's coercion."""
+        ts = "2026-06-20T11:50:00"  # no offset — 10 minutes before _NOW
+        result = queue_peek.minutes_since(ts, _NOW)
+        assert result == pytest.approx(10.0)
+
 
 # ---------------------------------------------------------------------------
 # recommend / peek-stop ladder
@@ -814,6 +821,32 @@ class TestRecommend:
         assert rec == "WAIT"
         assert "early" in reason
 
+    def test_high_attempts_with_usage_limit_signal_does_not_stop(self) -> None:
+        rec, reason = queue_peek.recommend(
+            age_min=10.0,
+            idle_min=0.0,
+            pr_state=None,
+            sentinel_status=None,
+            attempts=queue_peek.STOP_ATTEMPTS_MIN,
+            usage_limit_detected=True,
+        )
+        assert rec != "STOP"
+        assert "usage-limit" in reason
+
+    def test_high_attempts_without_usage_limit_signal_still_stops(self) -> None:
+        """Regression guard for test_high_attempts_returns_stop: omitting/False
+        usage_limit_detected preserves the existing STOP behavior."""
+        rec, reason = queue_peek.recommend(
+            age_min=10.0,
+            idle_min=0.0,
+            pr_state=None,
+            sentinel_status=None,
+            attempts=queue_peek.STOP_ATTEMPTS_MIN,
+            usage_limit_detected=False,
+        )
+        assert rec == "STOP"
+        assert "systemic" in reason
+
 
 class TestReachedDeepStage:
     """_reached_deep_stage — pipeline-order gate for stage_high_water (#1361)."""
@@ -928,6 +961,21 @@ class TestScoreSessionStageHighWater:
             stage_high_water=Stage.REVIEW,
         )
         assert rec == "STOP-OR-PEEK"
+
+    def test_high_attempts_usage_limit_and_shallow_stage_falls_through(self) -> None:
+        """The new usage_limit_detected flag and the existing stage_high_water
+        gate don't double-negate or crash when both independently apply."""
+        rec, reason = queue_peek.recommend(
+            age_min=10.0,
+            idle_min=0.0,
+            pr_state=None,
+            sentinel_status=None,
+            attempts=queue_peek.STOP_ATTEMPTS_MIN,
+            stage_high_water=Stage.IMPL,
+            usage_limit_detected=True,
+        )
+        assert rec != "STOP"
+        assert "systemic" not in reason
 
 
 # ---------------------------------------------------------------------------
@@ -1143,6 +1191,103 @@ class TestParseTranscript:
         result = queue_peek.parse_transcript(p)
         assert result["last_sentinel_status"] is None
 
+    def test_usage_limit_message_sets_flag_true(self, tmp_path: Path) -> None:
+        p = tmp_path / "t.jsonl"
+        _make_transcript(
+            p,
+            [
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-06-01T10:00:00Z",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "You've hit your session limit · resets 3:45pm",
+                            }
+                        ]
+                    },
+                }
+            ],
+        )
+        result = queue_peek.parse_transcript(p)
+        assert result["usage_limit_detected"] is True
+
+    def test_no_usage_limit_message_flag_false(self, tmp_path: Path) -> None:
+        p = tmp_path / "t.jsonl"
+        _make_transcript(
+            p,
+            [
+                {
+                    "type": "user",
+                    "timestamp": "2026-06-01T10:00:00Z",
+                    "message": {"content": "start"},
+                },
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-06-01T10:05:00Z",
+                    "message": {"content": []},
+                },
+            ],
+        )
+        result = queue_peek.parse_transcript(p)
+        assert result["usage_limit_detected"] is False
+
+    def test_usage_limit_detected_outside_sentinel_frame(self, tmp_path: Path) -> None:
+        """A plain assistant text block with the limit phrasing and no
+        <<<AUTO_DEV_RESULT frame around it is still detected — proves
+        detection isn't gated behind extract_block."""
+        p = tmp_path / "t.jsonl"
+        _make_transcript(
+            p,
+            [
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-06-01T10:00:00Z",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Hit your weekly limit · resets Mon 12:00am",
+                            }
+                        ]
+                    },
+                }
+            ],
+        )
+        result = queue_peek.parse_transcript(p)
+        assert result["usage_limit_detected"] is True
+
+    def test_usage_limit_flag_present_alongside_existing_keys(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression: existing returned-dict keys are unchanged; the new key
+        is additive only."""
+        text = _sentinel_text(_sentinel_payload())
+        p = tmp_path / "t.jsonl"
+        _make_transcript(
+            p,
+            [
+                {
+                    "type": "user",
+                    "timestamp": "2026-06-01T10:00:00Z",
+                    "message": {"content": "start"},
+                },
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-06-01T10:05:00Z",
+                    "message": {"content": [{"type": "text", "text": text}]},
+                },
+            ],
+        )
+        result = queue_peek.parse_transcript(p)
+        assert result["first_user_ts"] == "2026-06-01T10:00:00Z"
+        assert result["last_asst_ts"] == "2026-06-01T10:05:00Z"
+        assert result["last_sentinel_status"] == "review_pending_approval"
+        assert result["last_sentinel_stage"] == "stage3_review"
+        assert result["last_pr_number"] is None
+        assert result["usage_limit_detected"] is False
+
 
 # ---------------------------------------------------------------------------
 # format_row
@@ -1257,6 +1402,90 @@ class TestFormatRow:
         assert row["stage_high_water"] == task.stage_high_water
         assert row["stage"] is None
 
+    def test_age_min_uses_claim_started_at_when_present(self) -> None:
+        """claim_started_at (Session.started_at) is the trustworthy age
+        anchor — the far-off first_user_ts is ignored when it's present."""
+        task = _make_ticket_task()
+        info: dict[str, Any] = {
+            "claim_started_at": "2026-06-20T11:55:00+00:00",  # 5 min before _NOW
+            "first_user_ts": "2026-06-20T10:00:00+00:00",  # 2 hours before _NOW
+            "last_asst_ts": None,
+            "last_sentinel_status": None,
+            "last_sentinel_stage": None,
+            "last_pr_number": None,
+            "signal_source": "transcript",
+        }
+        row = queue_peek.format_row(task, info, _NOW)
+        assert row["age_min"] == pytest.approx(5.0)
+
+    def test_age_min_falls_back_to_first_user_ts_without_claim_started_at(
+        self,
+    ) -> None:
+        """No claim_started_at in info → existing first_user_ts-derived
+        behavior is unchanged (locks in backward compatibility)."""
+        task = _make_ticket_task()
+        info: dict[str, Any] = {
+            "first_user_ts": "2026-06-20T11:50:00+00:00",  # 10 min before _NOW
+            "last_asst_ts": None,
+            "last_sentinel_status": None,
+            "last_sentinel_stage": None,
+            "last_pr_number": None,
+            "signal_source": "transcript",
+        }
+        row = queue_peek.format_row(task, info, _NOW)
+        assert row["age_min"] == pytest.approx(10.0)
+
+    def test_idle_min_nulled_when_inconsistent_with_claim_anchored_age(self) -> None:
+        """Reproduces the ticket's false-STOP shape: claim_started_at is
+        seconds old but last_asst_ts is ~99 minutes stale (leftover
+        prior-session transcript on a reused worktree) — idle_min is nulled
+        and the row must not recommend STOP/STOP-OR-PEEK."""
+        task = _make_ticket_task(attempts=1)
+        info: dict[str, Any] = {
+            "claim_started_at": "2026-06-20T11:59:55+00:00",  # 5 sec before _NOW
+            "first_user_ts": None,
+            "last_asst_ts": "2026-06-20T10:21:00+00:00",  # ~99 min before _NOW
+            "last_sentinel_status": None,
+            "last_sentinel_stage": None,
+            "last_pr_number": None,
+            "signal_source": "transcript",
+        }
+        row = queue_peek.format_row(task, info, _NOW)
+        assert row["idle_min"] is None
+        assert row["recommend"] not in {"STOP", "STOP-OR-PEEK"}
+
+    def test_idle_min_kept_when_consistent_with_claim_anchored_age(self) -> None:
+        """Healthy case: idle_min <= age_min → the transcript-derived value
+        is unchanged."""
+        task = _make_ticket_task()
+        info: dict[str, Any] = {
+            "claim_started_at": "2026-06-20T11:50:00+00:00",  # 10 min before _NOW
+            "first_user_ts": None,
+            "last_asst_ts": "2026-06-20T11:58:00+00:00",  # 2 min before _NOW
+            "last_sentinel_status": None,
+            "last_sentinel_stage": None,
+            "last_pr_number": None,
+            "signal_source": "transcript",
+        }
+        row = queue_peek.format_row(task, info, _NOW)
+        assert row["idle_min"] == pytest.approx(2.0)
+
+    def test_idle_clamp_skipped_without_claim_started_at(self) -> None:
+        """No claim data at all → an idle value that looks inconsistent
+        against first_user_ts is NOT nulled (degraded/legacy path preserved,
+        no false-positive invalidation)."""
+        task = _make_ticket_task()
+        info: dict[str, Any] = {
+            "first_user_ts": "2026-06-20T11:59:00+00:00",  # 1 min before _NOW
+            "last_asst_ts": "2026-06-20T10:21:00+00:00",  # ~99 min before _NOW
+            "last_sentinel_status": None,
+            "last_sentinel_stage": None,
+            "last_pr_number": None,
+            "signal_source": "transcript",
+        }
+        row = queue_peek.format_row(task, info, _NOW)
+        assert row["idle_min"] is not None
+
 
 # ---------------------------------------------------------------------------
 # build_peek_rows
@@ -1336,6 +1565,89 @@ class TestBuildPeekRows:
         assert len(rows) == 1
         assert rows[0]["signal_source"] == "transcript"
         assert rows[0]["jsonl_idle_min"] is None
+
+    def test_threads_claim_started_at_from_session_refs(
+        self, patched_peek: None, tmp_path: Path
+    ) -> None:
+        """build_peek_rows threads Session.started_at (via CW_STATE) into
+        info['claim_started_at'] so format_row anchors age on claim time."""
+        task = _make_ticket_task("T-1", session_id="sess1234")
+        transcript_path = tmp_path / "session.jsonl"
+        transcript_path.write_text(
+            json.dumps(
+                {
+                    "type": "user",
+                    "timestamp": "2026-06-20T09:00:00Z",  # ~3h before _NOW — stale
+                    "message": {"content": "start"},
+                }
+            )
+            + "\n"
+        )
+        _write_sessions(
+            queue_peek.CW_STATE,
+            [
+                {
+                    "id": "sess1234",
+                    "claude_session_id": None,
+                    "started_at": "2026-06-20T11:55:00+00:00",  # 5 min before _NOW
+                }
+            ],
+        )
+        with (
+            patch("cw.queue_peek.load_running_tasks", return_value=[task]),
+            patch(
+                "cw.queue_peek.find_transcript_for_ticket",
+                return_value=transcript_path,
+            ),
+            patch("cw.queue_peek.gh_pr_state", return_value="UNKNOWN"),
+        ):
+            rows = queue_peek.build_peek_rows(None, _NOW)
+        assert rows[0]["age_min"] == pytest.approx(5.0)
+
+    def test_reused_worktree_stale_transcript_does_not_false_stop(
+        self, patched_peek: None, tmp_path: Path
+    ) -> None:
+        """Full regression for evidence (2): a project dir containing only an
+        old jsonl (first/last timestamps ~100 min stale) plus a CW_STATE
+        session claimed seconds ago, attempts=1 (otherwise healthy) — the row
+        must not recommend STOP/STOP-OR-PEEK."""
+        task = _make_ticket_task("T-2", session_id="sess5678", attempts=1)
+        transcript_path = tmp_path / "session.jsonl"
+        _make_transcript(
+            transcript_path,
+            [
+                {
+                    "type": "user",
+                    "timestamp": "2026-06-20T10:21:00Z",  # ~99 min before _NOW
+                    "message": {"content": "start"},
+                },
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-06-20T10:21:36Z",  # ~98.9 min before _NOW
+                    "message": {"content": []},
+                },
+            ],
+        )
+        _write_sessions(
+            queue_peek.CW_STATE,
+            [
+                {
+                    "id": "sess5678",
+                    "claude_session_id": None,
+                    "started_at": "2026-06-20T11:59:55+00:00",  # 5 sec before _NOW
+                }
+            ],
+        )
+        with (
+            patch("cw.queue_peek.load_running_tasks", return_value=[task]),
+            patch(
+                "cw.queue_peek.find_transcript_for_ticket",
+                return_value=transcript_path,
+            ),
+            patch("cw.queue_peek.gh_pr_state", return_value="UNKNOWN"),
+        ):
+            rows = queue_peek.build_peek_rows(None, _NOW)
+        assert rows[0]["recommend"] not in {"STOP", "STOP-OR-PEEK"}
 
 
 # ---------------------------------------------------------------------------
