@@ -3,6 +3,8 @@
 Package split (#1317-#1318, complete). The historical flat ``cw.dev_queue``
 module is now a package of focused submodules:
 
+* ``attention`` — the shared ``task_attention_state`` predicate backing every
+  "needs attention" count (CLI ``NEEDS_ATTN``, statusline ``!N``).
 * ``migrate`` — the pure dict-in / dict-out schema-normalisation layer.
 * ``storage`` — the on-disk persistence layer (file locks + plan/queue
   load & save).
@@ -22,6 +24,7 @@ working unchanged.
 from __future__ import annotations
 
 from cw.dev_queue.approval import _approve_ticket_locked, approve_ticket
+from cw.dev_queue.attention import task_attention_state
 from cw.dev_queue.crud import (
     _find_ticket,
     _newest_by_created_at,
@@ -121,6 +124,7 @@ __all__ = [
     "save_dev_queue",
     "save_plan",
     "select_held_tickets",
+    "task_attention_state",
     "transition_task_status",
     "unblock_ticket",
     "wait_for_terminal",

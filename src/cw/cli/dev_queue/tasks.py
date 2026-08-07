@@ -13,7 +13,7 @@ import click
 
 from cw.cli._base import handle_errors
 from cw.config import load_clients
-from cw.dev_queue import load_dev_queue
+from cw.dev_queue import load_dev_queue, task_attention_state
 from cw.exceptions import MissingWorkspaceError, WorktreeError
 from cw.models import QueueItemStatus, TicketTask
 from cw.worktree import fast_forward_main
@@ -26,21 +26,16 @@ def _task_to_dict(task: TicketTask) -> dict[str, object]:
     return task.model_dump(mode="json")
 
 
-def _task_attention_state(task: TicketTask) -> str | None:
-    """The task's hydrated PR attention_state, or None if not hydrated/clean."""
-    return task.pr_state.attention_state if task.pr_state is not None else None
-
-
 def _count_needs_attn(tasks: list[TicketTask]) -> int:
     """Count tasks whose hydrated PR state carries a non-null attention_state."""
-    return sum(1 for t in tasks if _task_attention_state(t) is not None)
+    return sum(1 for t in tasks if task_attention_state(t) is not None)
 
 
 def _needs_attn_by_client(tasks: list[TicketTask]) -> dict[str, int]:
     """Map client -> count of tasks needing attention (non-null attention_state)."""
     counts: dict[str, int] = {}
     for t in tasks:
-        if _task_attention_state(t) is not None:
+        if task_attention_state(t) is not None:
             counts[t.client] = counts.get(t.client, 0) + 1
     return counts
 
@@ -69,7 +64,7 @@ def _print_tasks_human(tasks: list[TicketTask]) -> None:
     click.echo(header)
     click.echo("-" * len(header))
     for t in tasks:
-        attention = _task_attention_state(t) or "—"
+        attention = task_attention_state(t) or "—"
         row = [
             t.ticket_id[:12],
             t.client[:16],

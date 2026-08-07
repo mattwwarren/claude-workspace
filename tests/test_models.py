@@ -1641,6 +1641,7 @@ class TestPackageExportCompleteness:
             "DispatchPlan",
             "DispatchSkipReason",
             "EventHookRegistry",
+            "FocusEntry",
             "HookRule",
             "LOCAL_BACKEND",
             "LaneConcurrencyOverride",

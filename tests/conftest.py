@@ -407,6 +407,8 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "cw.config.CONCURRENCY_OVERRIDE_LOCK",
         state_dir / ".concurrency_overrides.lock",
     )
+    monkeypatch.setattr("cw.config.FOCUS_FILE", state_dir / "focus.json")
+    monkeypatch.setattr("cw.config.FOCUS_LOCK", state_dir / ".focus.lock")
 
     # Redirect the native-daemon roster path so tests don't read the
     # user's real ~/.claude/daemon/roster.json. RealNativeDaemonClient

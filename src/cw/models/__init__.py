@@ -7,6 +7,8 @@ each submodule only imports from those above it (no cycles):
 - ``enums`` — StrEnums and enum-derived frozenset/tuple constants. The DAG
   root: depends on nothing else in the package.
 - ``events`` — ``OrchestratorEvent``, ``PrState``, ``WatchedPr``.
+- ``focus`` — ``FocusEntry`` (the ``cw focus`` session pointer, #1644). Also a
+  DAG root: imports nothing else in the package.
 - ``tasks`` — ``TicketTask``, ``DispatchPlan``, ``DevQueueStore``, the shared
   recipe-key validators, ``DEV_QUEUE_SCHEMA_VERSION``, ``DEFAULT_LANE``.
 - ``orchestrator_config`` — lane/pipeline/orchestrator config models and their
@@ -39,6 +41,7 @@ from cw.models.enums import (
     Stage,
 )
 from cw.models.events import OrchestratorEvent, PrState, WatchedPr
+from cw.models.focus import FocusEntry
 from cw.models.orchestrator_config import (
     _DEFAULT_OPERATOR_EVENT_TYPES,
     _DEFAULT_OPERATOR_TASK_TRANSITION_STATUSES,
@@ -99,6 +102,7 @@ __all__ = [
     "DispatchPlan",
     "DispatchSkipReason",
     "EventHookRegistry",
+    "FocusEntry",
     "HookRule",
     "LaneConcurrencyOverride",
     "LaneConfig",
