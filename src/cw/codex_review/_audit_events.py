@@ -47,6 +47,7 @@ _EXPECTED_REVIEWER_ITEM_TYPES = frozenset(
 # Wire event names.
 _THREAD_STARTED = "thread.started"
 _TURN_COMPLETED = "turn.completed"
+_TURN_FAILED = "turn.failed"
 _ITEM_STARTED = "item.started"
 _ITEM_COMPLETED = "item.completed"
 

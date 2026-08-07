@@ -21,7 +21,11 @@ import time
 import uuid
 from typing import TYPE_CHECKING
 
-from cw.codex_review._audit_events import _parse_codex_audit_events
+from cw.codex_review._audit_events import (
+    _TURN_COMPLETED,
+    _TURN_FAILED,
+    _parse_codex_audit_events,
+)
 from cw.codex_review._const import (
     _CATEGORY_TO_REASON,
     _MIN_ROLE_TIMEOUT_SECONDS,
@@ -67,8 +71,10 @@ _FLAG_REJECTION_MARKERS = (
 )
 
 # A healthy ``codex exec --json`` stream ends on one of these. Anything else
-# (or nothing at all) means the stream was truncated or never produced.
-_TERMINAL_EVENTS = frozenset({"turn.completed", "turn.failed"})
+# (or nothing at all) means the stream was truncated or never produced. Built
+# from _audit_events's own wire-name constants so the two modules cannot drift
+# on codex's terminal-event vocabulary (#1710 review finding).
+_TERMINAL_EVENTS = frozenset({_TURN_COMPLETED, _TURN_FAILED})
 
 
 def _codex_scratch_dir(session_id: str) -> Path:
@@ -306,7 +312,10 @@ def _run_codex_role(
     if not result.timed_out and result.returncode == 0:
         doc = _parse_reviewer_document(result.output_file_content)
         if doc is not None:
-            if "--json" in argv and metrics["terminal_event"] not in _TERMINAL_EVENTS:
+            if (
+                _AUDIT_ARGV_FLAGS[0] in argv
+                and metrics["terminal_event"] not in _TERMINAL_EVENTS
+            ):
                 # A retry (no --json) legitimately has no terminal event, so the
                 # argv guard is what keeps this warning specific to a genuinely
                 # malformed stream.
