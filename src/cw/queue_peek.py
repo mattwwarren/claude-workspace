@@ -503,13 +503,13 @@ def recommend(
     if age_min is None:
         return ("PEEK", "no transcript timestamps — verify session is alive")
     return _score_session(
-        age_min,
-        idle_min,
-        pr_state,
-        sentinel_status,
-        attempts,
-        stage_high_water,
-        usage_limit_detected,
+        age_min=age_min,
+        idle_min=idle_min,
+        pr_state=pr_state,
+        sentinel_status=sentinel_status,
+        attempts=attempts,
+        stage_high_water=stage_high_water,
+        usage_limit_detected=usage_limit_detected,
     )
 
 
@@ -558,13 +558,13 @@ def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[st
     if info.get("last_pr_number"):
         pr_state = gh_pr_state(info["last_pr_number"])
     rec, reason = recommend(
-        age,
-        idle,
-        pr_state,
-        info.get("last_sentinel_status"),
-        t.attempts,
-        t.stage_high_water,
-        info.get("usage_limit_detected", False),
+        age_min=age,
+        idle_min=idle,
+        pr_state=pr_state,
+        sentinel_status=info.get("last_sentinel_status"),
+        attempts=t.attempts,
+        stage_high_water=t.stage_high_water,
+        usage_limit_detected=info.get("usage_limit_detected", False),
     )
     return {
         "ticket": t.ticket_id,
