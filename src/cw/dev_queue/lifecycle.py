@@ -84,6 +84,22 @@ AWAITING_OPERATOR_DISPOSITION = "awaiting_operator"
 # by an explicit ``cw dev-queue approve``.
 FINALIZE_GATE_HELD_DISPOSITION = "finalize_gate_held"
 
+# Disposition stamped when dispatch's REVIEW-stage routing refuses to advance a
+# ticket whose sentinel reported health.recommendation == "EXIT_FOR_HUMAN_REVIEW"
+# (#1702). Distinct from SIGNOFF_GATE_DISPOSITION above: a signoff park is an
+# *authorization* slot an operator `approve` clears, whereas this park is a
+# *quality* signal -- the review that just ran did not vouch for its own
+# coverage, so there is nothing to authorize yet.
+#
+# Deliberately NOT a member of HOLD_DISPOSITIONS below. That set means "parked
+# pending a human/dependency, not pending a fix"; degraded review health IS
+# pending a fix -- it clears by re-running review, not by an operator saying
+# yes. Adding it there would also silently make it eligible for concierge's
+# false-park auto-requeue recipe (which draws from the same
+# _REAP_ELIGIBLE_DISPOSITIONS_BASE lineage), defeating the gate. Same treatment
+# SIGNOFF_GATE_DISPOSITION already gets.
+REVIEW_HEALTH_GATE_DISPOSITION = "review_health_gate"
+
 # Textually identical to cw.reconcile._shared._NEEDS_SALVAGE_REASON
 # ("needs_salvage") but a SEPARATE constant, not an import of it: _shared
 # imports FROM cw.dev_queue (dev_queue -> reconcile is the only cycle-safe
