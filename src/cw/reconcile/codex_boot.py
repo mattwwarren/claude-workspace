@@ -68,7 +68,14 @@ def reap_orphaned_codex_sessions_at_boot() -> int:
     from cw.executor import resolve_executor_config
 
     state = load_state()
-    task_by_ticket = {task.ticket_id: task for task in load_dev_queue().tasks}
+    # Keyed by (ticket_id, client), not ticket_id alone: ticket numbering is
+    # per-client, so a claude-workspace ticket 21 and another client's ticket 21
+    # are different tasks. Keying on ticket_id alone would let one client's row
+    # shadow the other's and park the wrong client's live session. Matches
+    # _park_running_task_blocked_on_user's own (ticket_id, client) key exactly.
+    task_by_ticket = {
+        (task.ticket_id, task.client): task for task in load_dev_queue().tasks
+    }
     clients = load_clients()
 
     parked = 0
@@ -82,7 +89,7 @@ def reap_orphaned_codex_sessions_at_boot() -> int:
         ticket_id = ticket_id_for_session(session.name)
         if ticket_id is None:
             continue
-        task = task_by_ticket.get(ticket_id)
+        task = task_by_ticket.get((ticket_id, session.client))
         client = clients.get(session.client)
         if task is None or client is None:
             continue

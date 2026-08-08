@@ -35,19 +35,26 @@ from tests._reconcile_helpers import _mk_headless_daemon_session
 _STARTED_AT = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
 
 
-def _write_clients_yaml(tmp_config_dir: Path, workspace: Path, backend: str) -> None:
+def _write_clients_yaml(
+    tmp_config_dir: Path,
+    workspace: Path,
+    backend: str,
+    *,
+    names: tuple[str, ...] = ("client-a",),
+) -> None:
     config_dir = tmp_config_dir / ".config" / "cw"
     config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "clients.yaml").write_text(
-        "clients:\n"
-        "  client-a:\n"
+    body = "".join(
+        f"  {name}:\n"
         f"    workspace_path: {workspace}\n"
         "    default_branch: main\n"
         "    pipeline:\n"
         "      executors:\n"
         "        review:\n"
         f"          backend: {backend}\n"
+        for name in names
     )
+    (config_dir / "clients.yaml").write_text(f"clients:\n{body}")
 
 
 def _seed(
@@ -178,6 +185,61 @@ def test_session_with_unparseable_name_is_skipped(
 
     assert reap_orphaned_codex_sessions_at_boot() == 0
     assert load_dev_queue().tasks[0].status is QueueItemStatus.RUNNING
+
+
+def test_same_ticket_id_on_two_clients_does_not_collide(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """Ticket numbering is per-client, so the queue lookup must key on both.
+
+    Two clients each own a ticket numbered 21. Only client-b's is the codex
+    REVIEW orphan; client-a's row is at PLAN and is added last, so a lookup
+    keyed on ticket_id alone resolves to it and reads a non-codex backend —
+    silently skipping the real orphan and leaving the wrong client's row in
+    the match. Keying on (ticket_id, client) is what makes this pass.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_clients_yaml(
+        tmp_config_dir, workspace, "codex", names=("client-a", "client-b")
+    )
+
+    orphan = _mk_headless_daemon_session("21", tmp_path / "wt-b", _STARTED_AT)
+    orphan.client = "client-b"
+    orphan.name = "client-b/auto-dev/21"
+    save_state(CwState(sessions=[orphan]))
+
+    add_ticket(
+        TicketTask(
+            ticket_id="21",
+            client="client-b",
+            stage=Stage.REVIEW,
+            status=QueueItemStatus.RUNNING,
+            session_id=orphan.id,
+        )
+    )
+    add_ticket(
+        TicketTask(
+            ticket_id="21",
+            client="client-a",
+            stage=Stage.PLAN,
+            status=QueueItemStatus.RUNNING,
+            session_id="live-a",
+        )
+    )
+
+    assert reap_orphaned_codex_sessions_at_boot() == 1
+
+    by_client = {t.client: t for t in load_dev_queue().tasks}
+    assert by_client["client-b"].status is QueueItemStatus.BLOCKED_ON_USER
+    assert by_client["client-b"].disposition == CODEX_ORPHANED_AT_BOOT_DISPOSITION
+    # client-a's same-numbered ticket is a different task and stays untouched.
+    assert by_client["client-a"].status is QueueItemStatus.RUNNING
+    assert by_client["client-a"].session_id == "live-a"
+
+    payloads = _attention_events("test-codex-boot-collision")
+    assert len(payloads) == 1
+    assert payloads[0]["client"] == "client-b"
 
 
 def test_unknown_client_is_skipped(tmp_config_dir: Path, tmp_path: Path) -> None:
