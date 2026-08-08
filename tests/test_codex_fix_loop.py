@@ -928,7 +928,13 @@ class TestFixLoopNonBlockingPassthrough:
         assert out.blocker.reason == CODEX_MUST_FIX_MECHANICALLY_REJECTED
         assert verdict is not None
         assert verdict.blocking is False
-        assert len(verdict.rejected_must_fix) == 1
+        # One entry per selected reviewer role (the runner double replays the
+        # same document for each); rejections are not deduped the way accepted
+        # findings are, so assert on the reason rather than a role count.
+        assert verdict.rejected_must_fix
+        assert {rf.reason for rf in verdict.rejected_must_fix} == {
+            "evidence_not_in_diff"
+        }
 
 
 # ---------------------------------------------------------------------------
