@@ -6,7 +6,86 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A mechanically-rejected MUST_FIX no longer reads as a clean review
+  (#1714):** `consolidate_verdict` computed `blocking` from accepted findings
+  only, so a MUST_FIX rejected for a mechanical reason (bad line anchor,
+  evidence not found in the diff, unknown file) landed in `rejected`, never
+  reached `must_fix`, and the codex path fell through to `stage_complete`. The
+  posted comment then read "Non-blocking — no MUST_FIX findings", and
+  `_render_findings` iterates only `accepted`, so the discarded findings
+  appeared nowhere at all. In a 9-pass fleet sample, 4 of 4 MUST_FIX findings
+  were rejected this way and the review reported clean. `ReviewVerdict` gains
+  `rejected_must_fix` — the MUST_FIX-severity subset of `rejected`, selected
+  by severity rather than by rejection reason, so any future
+  `RejectedFindingReason` is covered by construction — and the codex path now
+  exits `blocked` with its own reason and its own park disposition rather than
+  reporting success. Deliberately a *second* signal rather than a widening of
+  `blocking`: the fix loop gates on `verdict.blocking`, and a finding whose
+  anchor could not be located is precisely what must never be handed to an
+  autofix loop. The Claude-native coordinator's instruction to discard
+  `.rejected` from adjudication is narrowed to non-MUST_FIX severities, since
+  the same `consolidate_verdict` serves both backends.
+
+- **The #1709 capability probe reported every host incapable, and cached it
+  (#1732):** the probe deliberately runs in its own scratch dir under
+  `state_dir()` rather than the review worktree — so it is never inside a git
+  repo, and `codex exec` refuses to start outside one ("Not inside a trusted
+  directory and `--skip-git-repo-check` was not specified", exit 1) before any
+  sandbox work happens. `_is_probe_error` classified that as neither a timeout
+  nor a spawn error, so it fell through to `_classify_capability_failure`,
+  matched no known marker, and returned a determinate `unknown` — which was
+  then written to a cache that has no TTL. Every codex review would have been
+  marked degraded, and #1702 hard-parks the REVIEW stage on degraded health:
+  the exact failure #1709 was filed to eliminate, reproduced through a new
+  mechanism. The probe now passes `--skip-git-repo-check`, and
+  `_is_probe_error` additionally treats "codex exited non-zero having written
+  nothing to stdout" as a probe error — degrading this one run, logged, and
+  never cached — per R7's requirement that a transient failure must not become
+  silently permanent. Keyed on empty stdout rather than on any particular
+  message, so a new refusal reason inherits the safe behavior; a genuinely
+  incapable sandbox still *replies*, so it is still classified and cached as a
+  real verdict. Operators who ran a codex review between #1709 and this fix
+  must clear the poisoned cache at
+  `~/.local/share/cw/codex-review/capability-cache.json`. Found by running the
+  shipped probe end-to-end against merged main while the unit suite was fully
+  green — every probe test used a fake runner, so nothing exercised a real
+  `codex exec` invocation.
+
 ### Added
+
+- **Codex filesystem capability is now probed, not assumed (#1709):** the
+  codex-review path used to tell every reviewer "do not rely on filesystem
+  access" as a hardcoded constant. That was true of exactly one runtime. The
+  discriminator turns out to be the *install method*, not the OS: a
+  snap-confined codex gets its own PATH/mount namespace, cannot see the host's
+  `bwrap`, and fails closed — while a non-snap install on the same machine
+  reads the worktree fine. A host-side `which bwrap` check answers CAPABLE for
+  the snap install and is wrong, so `cw` now asks codex itself, via a real
+  `codex exec --sandbox read-only` read of a sentinel file whose value never
+  appears in the prompt.
+
+  The verdict is cached on disk at
+  `~/.local/share/cw/codex-review/capability-cache.json`, keyed by a runtime
+  fingerprint (cli version, platform, install type, sandbox mode) and with **no
+  TTL** — the fact only changes when the codex install does, so re-probing on a
+  timer would spend a model round-trip per dispatch tick to re-learn it. Delete
+  the file to force a re-probe. A probe that never *completed* (timeout, spawn
+  failure) degrades that one run and is deliberately not cached, so a transient
+  failure cannot become silently permanent.
+
+  Reviewers on a capable runtime now get a prompt variant that permits reading
+  beyond the inlined diff (consumer search, prior-art search, repo-wide
+  regression verification); write access is neither offered nor possible, and
+  the schema/degraded/escalation rules are shared verbatim between the two
+  variants so capability can never quietly alter the output contract. Failures
+  are classified — `sandbox_incapable`, `install_incomplete`, `unknown` — rather
+  than collapsed into one boolean, because a broken install and a confined
+  sandbox produce the same "cannot read" answer and want opposite remedies. The
+  selected mode is recorded on `ReviewVerdict.capability_mode` /
+  `capability_reason` and in a per-session `codex-capability.json` diagnostics
+  artifact. Rendering it in the verdict comment is deferred to #1725.
 
 - **OpenCode executor backend foundation (#1669):** `opencode` is now a
   first-class executor backend, selectable via `backend: opencode` in

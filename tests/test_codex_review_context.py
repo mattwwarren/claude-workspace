@@ -22,6 +22,15 @@ from cw.codex_review import (
     _read_sensitive_manifest,
     _select_reviewer_roles,
 )
+from cw.codex_review._capability import _PROBE_SENTINEL
+from cw.codex_review._context import (
+    _CAPABLE_ONLY_MARKER,
+    _INLINED_ONLY_MARKER,
+    _OUTPUT_INSTRUCTIONS_CAPABLE,
+    _OUTPUT_INSTRUCTIONS_INLINED_ONLY,
+    _select_output_instructions,
+)
+from cw.codex_runner import FakeCodexRunner
 from tests._codex_review_helpers import (
     _doc_json,
     _finding_payload,
@@ -540,6 +549,84 @@ class TestBuildReviewerPrompt:
 
 
 # ---------------------------------------------------------------------------
+# Capability-driven output-instruction selection (#1709)
+# ---------------------------------------------------------------------------
+
+
+class TestSelectOutputInstructions:
+    def test_capable_selects_the_capable_variant(self) -> None:
+        assert _select_output_instructions(True) is _OUTPUT_INSTRUCTIONS_CAPABLE
+
+    def test_incapable_selects_the_inlined_only_variant(self) -> None:
+        assert _select_output_instructions(False) is _OUTPUT_INSTRUCTIONS_INLINED_ONLY
+
+    def test_inlined_only_variant_is_the_back_compat_alias(self) -> None:
+        """``_OUTPUT_INSTRUCTIONS`` must stay byte-identical to the pre-#1709
+        single-variant text so the #1548 regression-lock above keeps meaning
+        what it meant."""
+        from cw.codex_review._context import _OUTPUT_INSTRUCTIONS
+
+        assert _OUTPUT_INSTRUCTIONS == _OUTPUT_INSTRUCTIONS_INLINED_ONLY
+
+    def test_both_variants_keep_the_shared_schema_and_precedence_rules(self) -> None:
+        for variant in (
+            _OUTPUT_INSTRUCTIONS_CAPABLE,
+            _OUTPUT_INSTRUCTIONS_INLINED_ONLY,
+        ):
+            assert 'status="degraded"' in variant
+            assert 'confidence: "LOW"' in variant
+            assert "advisory here, not blocking" in variant
+            assert "Report no prose outside the JSON object." in variant
+
+
+class TestBuildReviewerPromptCapability:
+    """R8 anti-vacuous seam: each capability value must produce a prompt that
+    carries its own marker and NOT the other's. Either direction of regression
+    (always-capable, always-inlined) fails one of these two tests."""
+
+    def _prompt(self, *, capable: bool) -> str:
+        return _build_reviewer_prompt(
+            "SysAdmin Reviewer",
+            agent_spec_text="SPEC",
+            diff=_make_diff(),
+            changed_files=["src/cw/foo.py"],
+            plan_text=None,
+            ticket_text=None,
+            project_rubrics=None,
+            repo_policy_section=None,
+            sensitive_hits=[],
+            capable=capable,
+        )
+
+    def test_capable_prompt_grants_read_only_repo_access(self) -> None:
+        prompt = self._prompt(capable=True)
+        assert _CAPABLE_ONLY_MARKER in prompt
+        assert _INLINED_ONLY_MARKER not in prompt
+
+    def test_incapable_prompt_keeps_the_inlined_only_premise(self) -> None:
+        prompt = self._prompt(capable=False)
+        assert _INLINED_ONLY_MARKER in prompt
+        assert _CAPABLE_ONLY_MARKER not in prompt
+
+    def test_capable_defaults_to_false(self) -> None:
+        """The parameter is additive-with-default so ``TestBuildReviewerPrompt``'s
+        variant-agnostic call sites stay byte-identical; production always
+        passes it explicitly."""
+        prompt = _build_reviewer_prompt(
+            "SysAdmin Reviewer",
+            agent_spec_text="SPEC",
+            diff=_make_diff(),
+            changed_files=["src/cw/foo.py"],
+            plan_text=None,
+            ticket_text=None,
+            project_rubrics=None,
+            repo_policy_section=None,
+            sensitive_hits=[],
+        )
+        assert _INLINED_ONLY_MARKER in prompt
+
+
+# ---------------------------------------------------------------------------
 # _prepare_review_pass extraction (#1392)
 # ---------------------------------------------------------------------------
 
@@ -554,7 +641,13 @@ class TestPrepareReviewPass:
         _git(repo, "add", "mod.py")
         _git(repo, "commit", "-m", "add mod.py")
 
-        prepared = _prepare_review_pass(_task(), repo, "main")
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-prepare",
+        )
 
         # A python-only small-scope change selects code/sysadmin + data-safety
         # (python mutates persisted state) and no product-manager (no ticket ctx).
@@ -573,3 +666,50 @@ class TestPrepareReviewPass:
             ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
         ).strip()
         assert prepared.reviewed_sha == head
+
+    def test_capable_probe_threads_into_every_role_prompt(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """A runtime whose probe returns the sentinel gets the capable prompt
+        variant on EVERY selected role, and the verdict-bound capability on the
+        prepared inputs (#1709)."""
+        repo = make_git_repo("wt-prepare-capable")
+        _git(repo, "checkout", "-b", "feature")
+        (repo / "mod.py").write_text("def broken():\n", encoding="utf-8")
+        _git(repo, "add", "mod.py")
+        _git(repo, "commit", "-m", "add mod.py")
+
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(stdout=f"codex\n{_PROBE_SENTINEL}\n"),
+            session_id="s-prepare-capable",
+        )
+
+        assert prepared.capability.capable is True
+        assert prepared.roles
+        for role in prepared.roles:
+            assert _CAPABLE_ONLY_MARKER in prepared.prompts_by_role[role]
+            assert _INLINED_ONLY_MARKER not in prepared.prompts_by_role[role]
+
+    def test_incapable_probe_threads_the_inlined_only_variant(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = make_git_repo("wt-prepare-incapable")
+        _git(repo, "checkout", "-b", "feature")
+        (repo / "mod.py").write_text("def broken():\n", encoding="utf-8")
+        _git(repo, "add", "mod.py")
+        _git(repo, "commit", "-m", "add mod.py")
+
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(stdout="NO_FILESYSTEM_ACCESS\n"),
+            session_id="s-prepare-incapable",
+        )
+
+        assert prepared.capability.capable is False
+        for role in prepared.roles:
+            assert _INLINED_ONLY_MARKER in prepared.prompts_by_role[role]

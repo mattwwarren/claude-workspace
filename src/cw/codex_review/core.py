@@ -45,7 +45,9 @@ def run_review(
     :func:`synthesize_codex_review_result`, which threads it into
     :func:`render_verdict_comment` on the blocking branch.
     """
-    prepared = _prepare_review_pass(task, worktree, default_branch)
+    prepared = _prepare_review_pass(
+        task, worktree, default_branch, runner=runner, session_id=session_id
+    )
     documents, failures, metrics_by_role = run_codex_roles(
         runner=runner,
         worktree=worktree,
@@ -66,4 +68,5 @@ def run_review(
         default_branch=default_branch,
         fix_loop_enabled=fix_loop_enabled,
         metrics_by_role=metrics_by_role,
+        capability=prepared.capability,
     )

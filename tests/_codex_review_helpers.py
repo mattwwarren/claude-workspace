@@ -22,6 +22,22 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def _mk_codex_proc(
+    stdout: str = "", returncode: int = 0
+) -> subprocess.CompletedProcess[str]:
+    """A ``codex --version`` :class:`subprocess.CompletedProcess` double.
+
+    Shared by ``test_codex_executor.py``'s ``TestCodexCapabilityDiagnosis``
+    (binary presence/version probe) and ``test_codex_capability.py``'s
+    fingerprint tests (#1709) — the two probes are different subsystems but
+    build the identical ``CompletedProcess`` shape, so the builder lives here
+    rather than being copied a third time.
+    """
+    return subprocess.CompletedProcess(
+        args=[], returncode=returncode, stdout=stdout, stderr=""
+    )
+
+
 def _finding_payload(
     *,
     severity: str = "MUST_FIX",

@@ -494,6 +494,40 @@ def _mock_ssh_key_available(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def _mock_codex_capability_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default the codex filesystem-capability fingerprint probe (#1709).
+
+    Sibling of ``_mock_gh_availability``: without this, every test that reaches
+    ``_prepare_review_pass`` for the first time in a process would shell out to
+    the *host machine's* real ``codex --version``, making the runtime
+    fingerprint — and therefore cache-hit/miss behavior — depend on whatever
+    happens to be installed. Patching both seams autouse makes the fingerprint
+    deterministic; the probe itself still runs for real against the mocked
+    boundary, which is the point of the idiom.
+
+    Note the patch targets are ``_capability``'s own module-level seam
+    functions, NOT ``cw.codex_review._capability.subprocess.run`` /
+    ``.shutil.which``: those attribute paths resolve to the *global*
+    ``subprocess``/``shutil`` module objects, so patching them autouse would
+    replace ``subprocess.run`` process-wide and break every git helper in this
+    suite. See ``_capability._run_codex_version``'s docstring.
+
+    ``tests/test_codex_capability.py`` re-patches the same two names directly
+    for its binary-absent/timeout/non-zero-exit/unparseable cases; pytest's
+    patch stack lets the test-level patch win.
+    """
+    monkeypatch.setattr(
+        "cw.codex_review._capability._which_codex", lambda: "/usr/bin/codex"
+    )
+    monkeypatch.setattr(
+        "cw.codex_review._capability._run_codex_version",
+        lambda _timeout_seconds: subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="codex-cli 0.144.5\n", stderr=""
+        ),
+    )
+
+
 @pytest.fixture
 def tmp_state_dir(tmp_config_dir: Path) -> Path:
     """Return the state directory within tmp_config_dir."""

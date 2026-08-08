@@ -20,6 +20,10 @@ from cw.codex_review import (
     render_verdict_comment,
     synthesize_codex_review_result,
 )
+from cw.codex_review._capability import (
+    _CodexFilesystemCapability,
+    _CodexFingerprint,
+)
 from cw.executor_diagnostics import diagnostics_bundle_dir
 from cw.review_findings import ReviewerRunFailure, consolidate_verdict
 from tests._codex_review_helpers import _task
@@ -924,3 +928,88 @@ class TestCleanReviewScopeMeasurement:
         assert result.health.lowest_agent_confidence == "HIGH"
         assert result.health.any_incomplete_risk is False
         assert result.health.recommendation == "PROCEED"
+
+
+# ---------------------------------------------------------------------------
+# Filesystem-capability recording on the verdict (#1709)
+# ---------------------------------------------------------------------------
+
+
+def _capability(*, capable: bool, reason: str | None) -> _CodexFilesystemCapability:
+    return _CodexFilesystemCapability(
+        capable=capable,
+        reason=reason,
+        fingerprint=_CodexFingerprint(
+            cli_version="0.147.0",
+            platform="Linux",
+            install_type="other",
+            sandbox_mode="read-only",
+        ),
+    )
+
+
+class TestVerdictRecordsCapabilityMode:
+    """The selected capability mode must be recoverable from the artifact a
+    human reads, not just from a log line that scrolled away (#1709)."""
+
+    def test_degraded_capability_recorded_on_verdict(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-cap-degraded")
+        _result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[_make_reviewer_doc()],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-cap-degraded",
+            default_branch="main",
+            fix_loop_enabled=False,
+            capability=_capability(capable=False, reason="unknown"),
+        )
+        assert verdict is not None
+        assert verdict.capability_mode == "degraded"
+        assert verdict.capability_reason == "unknown"
+
+    def test_capable_capability_recorded_on_verdict(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-cap-capable")
+        _result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[_make_reviewer_doc()],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-cap-capable",
+            default_branch="main",
+            fix_loop_enabled=False,
+            capability=_capability(capable=True, reason=None),
+        )
+        assert verdict is not None
+        assert verdict.capability_mode == "capable"
+        assert verdict.capability_reason is None
+
+    def test_absent_capability_leaves_fields_unset(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """The kwarg is optional (additive): callers that do not probe — e.g.
+        the direct-synthesis tests above — record nothing rather than a
+        misleading default."""
+        worktree = make_git_repo("wt-cap-absent")
+        _result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[_make_reviewer_doc()],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-cap-absent",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+        assert verdict is not None
+        assert verdict.capability_mode is None
+        assert verdict.capability_reason is None

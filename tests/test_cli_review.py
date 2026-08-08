@@ -394,7 +394,14 @@ class TestReviewConsolidateCommand:
             # Claude-native coordinator through this passthrough with no
             # Python-side change beyond the field itself.
             "rejected_must_fix",
+            # #1709: which filesystem-capability mode the reviewers ran under.
+            # Always emitted (null for executors that never probe) so a
+            # consumer can tell "not probed" from "probed and degraded".
+            "capability_mode",
+            "capability_reason",
         }
+        assert verdict["capability_mode"] is None
+        assert verdict["capability_reason"] is None
         assert set(verdict["review"]) == {
             "must_fix_initial",
             "should_fix",

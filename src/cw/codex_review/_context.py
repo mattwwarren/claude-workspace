@@ -1,11 +1,21 @@
 """Reviewer role selection and prompt-context assembly for the codex-review package.
 
-Codex has no filesystem access to ``.claude/*`` (snap sandbox), so every
-reviewer input — the authoritative agent spec, plan/ticket context, project
-rubrics, per-reviewer policy, and sensitive-file hits — is read here by ``cw``
-and inlined into each role's materialized prompt. Also owns file categorization,
-the small-/large-scope reviewer-selection tables, and codex output-document
-parsing. Consumed by ``core`` (prompt assembly) and ``_roles`` (doc parsing).
+Every reviewer input — the authoritative agent spec, plan/ticket context,
+project rubrics, per-reviewer policy, and sensitive-file hits — is read here by
+``cw`` and inlined into each role's materialized prompt. Inlining is
+unconditional: it is what makes a review pass reproducible and independent of
+where ``.claude/*`` happens to live.
+
+What is **not** unconditional is whether codex can read anything *else*. That
+varies by runtime — a snap-confined install cannot reach ``bwrap`` and fails
+closed, while a non-snap install on the same machine reads the worktree fine
+(#1709). ``_capability`` probes which one this is, and
+:func:`_select_output_instructions` picks the matching ``_OUTPUT_INSTRUCTIONS``
+variant, so a capable runtime is no longer told it cannot read.
+
+Also owns file categorization, the small-/large-scope reviewer-selection
+tables, and codex output-document parsing. Consumed by ``core`` (prompt
+assembly) and ``_roles`` (doc parsing).
 """
 
 from __future__ import annotations
@@ -17,6 +27,7 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import yaml
 
+from cw.codex_review._capability import _probe_filesystem_capability
 from cw.codex_review._diff import _capture_diff
 from cw.local_runner import resolve_tier
 from cw.models import CONTEXT_JSON_RELATIVE_PATH
@@ -26,6 +37,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
     from pathlib import Path
 
+    from cw.codex_review._capability import _CodexFilesystemCapability
+    from cw.codex_runner import CodexRunner
     from cw.models import TicketTask
     from cw.review_findings import CapturedDiff
 
@@ -52,10 +65,36 @@ _SENSITIVE_HEADER = (
     "handling gaps, cross-org data leakage, and regression risk."
 )
 
-_OUTPUT_INSTRUCTIONS = (
+# The one sentence that differs between the two `_OUTPUT_INSTRUCTIONS`
+# variants, named so the prompt text and its regression tests cannot drift
+# apart (R8: each variant must carry its own marker and NOT the other's).
+_INLINED_ONLY_MARKER = "do not rely on filesystem access"
+_CAPABLE_ONLY_MARKER = (
+    "read-only filesystem access to the repository worktree is available"
+)
+
+_INLINED_ONLY_PREAMBLE = (
     "## Output\n"
-    "Evaluate the diff strictly from the material inlined above — do not rely "
-    "on filesystem access. Emit a single JSON object conforming to the provided "
+    "Evaluate the diff strictly from the material inlined above — "
+    f"{_INLINED_ONLY_MARKER}. "
+)
+
+_CAPABLE_PREAMBLE = (
+    "## Output\n"
+    f"This runtime was probed and confirmed capable: {_CAPABLE_ONLY_MARKER} to "
+    "you, and you MAY use it when it makes a finding stronger — searching for "
+    "a changed symbol's other consumers, checking prior art before calling "
+    "something a new abstraction, or verifying a regression repo-wide. Write "
+    "access is neither offered nor possible. The material inlined above "
+    "remains the authoritative context; reading is a supplement to it, never a "
+    "replacement for evaluating the diff. "
+)
+
+# Schema/degraded/escalation rules — identical in both variants by
+# construction, so a capability change can never quietly alter the contract
+# codex's output is validated against.
+_OUTPUT_SCHEMA_RULES = (
+    "Emit a single JSON object conforming to the provided "
     "ReviewerFindingsDocument schema to the output file (`-o`): `reviewer_role`, "
     "`status` (ok/degraded/failed), `detail`, and a `findings` array. When "
     'returning `status="ok"` with an empty `findings` array, `detail` MUST '
@@ -66,7 +105,10 @@ _OUTPUT_INSTRUCTIONS = (
     'environment, use `status="degraded"` (naming the unperformed check in '
     '`detail`) rather than silently reporting `"ok"`. Every '
     "finding's `evidence` MUST be a verbatim substring of the claimed file's "
-    "changed lines. Report no prose outside the JSON object.\n\n"
+    "changed lines. Report no prose outside the JSON object."
+)
+
+_OUTPUT_SPEC_PRECEDENCE = (
     "The inlined Agent Specification section above was authored for a "
     "different execution environment (a tool-using Claude subagent). Any "
     "tool-invocation syntax or search/verification precondition it names is "
@@ -83,6 +125,26 @@ _OUTPUT_INSTRUCTIONS = (
     "result — are void for this invocation; this instruction block's JSON "
     "ReviewerFindingsDocument contract governs exclusively."
 )
+
+_OUTPUT_INSTRUCTIONS_INLINED_ONLY = (
+    f"{_INLINED_ONLY_PREAMBLE}{_OUTPUT_SCHEMA_RULES}\n\n{_OUTPUT_SPEC_PRECEDENCE}"
+)
+
+_OUTPUT_INSTRUCTIONS_CAPABLE = (
+    f"{_CAPABLE_PREAMBLE}{_OUTPUT_SCHEMA_RULES}\n\n{_OUTPUT_SPEC_PRECEDENCE}"
+)
+
+# Back-compat alias: byte-identical to the single pre-#1709 variant, so the
+# #1548 regression-lock test keeps asserting against the same string.
+_OUTPUT_INSTRUCTIONS = _OUTPUT_INSTRUCTIONS_INLINED_ONLY
+
+
+def _select_output_instructions(capable: bool) -> str:
+    """Pick the output-instruction variant matching this runtime's capability."""
+    return (
+        _OUTPUT_INSTRUCTIONS_CAPABLE if capable else _OUTPUT_INSTRUCTIONS_INLINED_ONLY
+    )
+
 
 _CODEX_OUTPUT_FORMAT_ROLES: frozenset[str] = frozenset(
     {
@@ -412,8 +474,16 @@ def _build_reviewer_prompt(
     project_rubrics: str | None,
     repo_policy_section: str | None,
     sensitive_hits: list[_SensitiveHit],
+    capable: bool = False,
 ) -> str:
-    """Materialize one reviewer's full prompt, inlining every needed section."""
+    """Materialize one reviewer's full prompt, inlining every needed section.
+
+    *capable* selects which ``_OUTPUT_INSTRUCTIONS`` variant closes the prompt
+    (#1709). It defaults to ``False`` — the pre-#1709 text — purely so this
+    function's variant-agnostic unit tests stay byte-identical; the sole
+    production caller (:func:`_prepare_review_pass`) always passes the probed
+    value explicitly, so the default never fires in production.
+    """
     parts = [
         f"# Reviewer Role: {role}",
         f"## Agent Specification\n{agent_spec_text}",
@@ -433,7 +503,7 @@ def _build_reviewer_prompt(
         parts.append(_render_sensitive_block(sensitive_hits))
     parts.append("## Changed Files\n" + "\n".join(changed_files))
     parts.append(f"## Diff\n{diff.text}")
-    parts.append(_OUTPUT_INSTRUCTIONS)
+    parts.append(_select_output_instructions(capable))
     return "\n\n".join(parts)
 
 
@@ -454,7 +524,7 @@ def _parse_reviewer_document(
 
 
 class _ReviewPassInputs(NamedTuple):
-    """Assembled, side-effect-free inputs for one per-role review pass (#1392).
+    """Assembled inputs for one per-role review pass (#1392).
 
     The output of :func:`_prepare_review_pass` — everything ``run_codex_roles``
     needs (selected ``roles`` and their materialized ``prompts_by_role``) plus
@@ -462,21 +532,31 @@ class _ReviewPassInputs(NamedTuple):
     ``synthesize_codex_review_result`` consumes. Extracted so the fix loop can
     re-run a fresh review pass each cycle without re-inlining ``run_review``'s
     input-assembly body.
+
+    ``capability`` (#1709) is the probed filesystem-capability verdict the
+    prompts were built against — returned so the caller can record it on the
+    verdict rather than re-deriving (or, worse, re-probing) it.
     """
 
     roles: list[str]
     prompts_by_role: dict[str, str]
     diff: CapturedDiff
     reviewed_sha: str
+    capability: _CodexFilesystemCapability
 
 
 def _prepare_review_pass(
-    task: TicketTask, worktree: Path, default_branch: str
+    task: TicketTask,
+    worktree: Path,
+    default_branch: str,
+    *,
+    runner: CodexRunner,
+    session_id: str,
 ) -> _ReviewPassInputs:
     """Assemble one review pass's inputs: capture diff, select roles, build prompts.
 
-    Pure extraction of ``run_review``'s former input-assembly body (everything
-    before ``run_codex_roles`` was called) — no logic change, no side effects
+    Extracted from ``run_review``'s former input-assembly body (everything
+    before ``run_codex_roles`` was called). Before #1709 it had no side effects
     beyond the read-only git/\u200bfilesystem reads it already performed. Shared by
     ``run_review`` and ``cw.codex_fix_loop``'s per-cycle re-review (#1392).
 
@@ -484,7 +564,15 @@ def _prepare_review_pass(
     :func:`_load_optional_text` alongside its other bare-name callers — a test
     patches ``_load_optional_text`` via module-object ``setattr`` on this
     module, which only intercepts same-module bare-name calls.
+
+    ``runner``/``session_id`` (#1709) drive the filesystem-capability probe,
+    which is what changed that: on a cold fingerprint cache it spends one real
+    ``codex exec`` round-trip and writes the verdict to disk. Every subsequent
+    call — notably the fix loop's per-cycle re-review — is a cache hit that
+    runs nothing, which is why the probe lives here rather than at each call
+    site.
     """
+    capability = _probe_filesystem_capability(runner=runner, session_id=session_id)
     diff, reviewed_sha, changed_files = _capture_diff(worktree, default_branch)
     scope_tier = resolve_tier(task.scope_hint)
     categories = _categorize_changed_files(changed_files)
@@ -512,6 +600,7 @@ def _prepare_review_pass(
             project_rubrics=project_rubrics,
             repo_policy_section=repo_policy.get(role),
             sensitive_hits=sensitive_hits,
+            capable=capability.capable,
         )
         for role in roles
     }
@@ -520,4 +609,5 @@ def _prepare_review_pass(
         prompts_by_role=prompts_by_role,
         diff=diff,
         reviewed_sha=reviewed_sha,
+        capability=capability,
     )

@@ -45,6 +45,9 @@ Severity = Literal["MUST_FIX", "SHOULD_FIX", "NIT", "PRINCIPLE"]
 Disposition = Literal["fixed", "rejected", "deferred"]
 ReviewerHealthStatus = Literal["ok", "degraded", "failed"]
 Confidence = Literal["HIGH", "MEDIUM", "LOW"]
+# The filesystem-capability mode reviewers actually ran under (#1709); see
+# ReviewVerdict.capability_mode.
+CapabilityMode = Literal["capable", "degraded"]
 # The six reasons a finding can be rejected outright (used by
 # :attr:`RejectedFinding.reason` and :func:`_classify_finding`'s return type).
 # Split from the escalation-strip reason (R6): a stripped escalation is a
@@ -319,6 +322,13 @@ class ReviewVerdict(BaseModel):
 
     ``blocking``/``must_fix``/``reviewed_sha`` are the exact 3 keys #1108
     requires; the rest is the executor-neutral superset.
+
+    ``capability_mode``/``capability_reason`` record which filesystem-capability
+    mode the reviewers actually ran under (#1709) — ``"capable"`` or
+    ``"degraded"``, with the classified reason on the degraded branch. Both stay
+    ``None`` for executors that have no such concept (LocalExecutor) rather than
+    defaulting to a mode nobody probed. Purely recorded: nothing in
+    ``consolidate_verdict`` or the health derivation reads them.
     """
 
     schema_version: Literal[1] = _REVIEW_VERDICT_SCHEMA_VERSION
@@ -336,6 +346,8 @@ class ReviewVerdict(BaseModel):
     # :func:`_select_rejected_must_fix` for why this is a second signal rather
     # than a widening of the first.
     rejected_must_fix: list[RejectedFinding] = Field(default_factory=list)
+    capability_mode: CapabilityMode | None = None
+    capability_reason: str | None = None
 
 
 class CapturedDiff(BaseModel):

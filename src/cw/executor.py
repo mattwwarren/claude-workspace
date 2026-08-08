@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import re
 import shutil
 import subprocess
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
@@ -15,6 +14,7 @@ from cw.codex_review import (
     STAGE3_REVIEW,
     render_verdict_comment,
 )
+from cw.codex_review._const import _CODEX_VERSION_RE
 from cw.codex_runner import CodexRunner, RealCodexRunner
 from cw.config import load_effective_config, load_state, save_state, sessions_lock
 from cw.events import record_event as _record_orchestrator_event
@@ -99,13 +99,6 @@ CODEX_REVIEW_ONLY = "codex_review_only"
 # failure-reason vocabulary): the binary is present but `codex --version`
 # could not be confirmed.
 CODEX_VERSION_UNKNOWN = "codex_version_unknown"
-
-# Matches a dotted major.minor.patch version number anywhere in a
-# `codex --version` output line (#1238). Real CLI banners are name-prefixed
-# (e.g. ``codex-cli 0.136.0``, confirmed live), not a bare version string like
-# ``_check_claude_version``'s sibling probe — search the whole line rather
-# than assuming the version is the first whitespace token.
-_CODEX_VERSION_RE = re.compile(r"\d+(?:\.\d+){2}")
 
 # Default subprocess timeout for a one-shot, user-invoked probe (e.g. `cw
 # doctor`). Callers on a hot path (dispatch's pre-spawn gate) should pass a
