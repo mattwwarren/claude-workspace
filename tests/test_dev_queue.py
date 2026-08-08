@@ -8037,7 +8037,9 @@ class TestMustFixMechanicallyRejectedDisposition:
             REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
         )
 
-        assert REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION not in HOLD_DISPOSITIONS
+        assert (
+            REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION not in HOLD_DISPOSITIONS
+        )
         # Unchanged by #1714 — this ticket adds no HOLD_DISPOSITIONS member.
         assert len(HOLD_DISPOSITIONS) == 2
 

@@ -320,9 +320,7 @@ class TestRecipeFalseParkRequeue:
         assert recovered == []
         store = load_dev_queue()
         assert store.tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
-        assert (
-            store.tasks[0].disposition == "codex_must_fix_mechanically_rejected"
-        )
+        assert store.tasks[0].disposition == "codex_must_fix_mechanically_rejected"
 
     def test_ceiling_refusal_leaves_row_parked(self, tmp_config_dir: Path) -> None:
         """A1/A2: at the global attempt ceiling, the row is refused, not requeued."""
