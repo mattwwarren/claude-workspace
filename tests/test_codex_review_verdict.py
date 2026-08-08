@@ -54,6 +54,7 @@ class TestSynthesizeCodexReviewResult:
             reviewed_sha="sha",
             session_id="s-synth",
             default_branch="main",
+            fix_loop_enabled=False,
         )
         assert result.status == "blocked"
         assert result.blocker is not None
@@ -88,6 +89,7 @@ class TestSynthesizeCodexReviewResult:
             reviewed_sha="sha",
             session_id="s-synth",
             default_branch="main",
+            fix_loop_enabled=False,
         )
         assert result.blocker is not None
         assert result.blocker.retry_eligible == expect_retry
@@ -106,6 +108,7 @@ class TestSynthesizeCodexReviewResult:
             reviewed_sha="sha",
             session_id="s-synth",
             default_branch="main",
+            fix_loop_enabled=False,
         )
         assert result.status == "blocked"
         assert result.blocker is not None
@@ -138,6 +141,7 @@ class TestSynthesizeCodexReviewResult:
             reviewed_sha="sha",
             session_id="s-synth",
             default_branch="main",
+            fix_loop_enabled=False,
         )
         assert result.status == "blocked"
         assert result.blocker is not None
@@ -170,6 +174,7 @@ class TestSynthesizeCodexReviewResult:
             reviewed_sha="sha",
             session_id="s-synth",
             default_branch="main",
+            fix_loop_enabled=False,
         )
         assert result.status == "blocked"
         assert result.blocker is not None
@@ -200,6 +205,7 @@ class TestSynthesizeCodexReviewResult:
             reviewed_sha="sha",
             session_id="s-synth-unanchored",
             default_branch="main",
+            fix_loop_enabled=False,
         )
         assert result.status == "blocked"
         assert result.blocker is not None
@@ -222,6 +228,7 @@ class TestSynthesizeCodexReviewResult:
             reviewed_sha="sha",
             session_id="s-synth",
             default_branch="main",
+            fix_loop_enabled=False,
         )
         assert result.status == "stage_complete"
         assert result.stage_reached == "stage3_review"
@@ -269,6 +276,7 @@ class TestSynthesizeCodexReviewResultHealth:
             reviewed_sha="sha",
             session_id="s-synth",
             default_branch="main",
+            fix_loop_enabled=False,
         )
         assert result.status == "stage_complete"
         assert result.health.lowest_agent_confidence == "MEDIUM"
@@ -299,6 +307,7 @@ class TestSynthesizeCodexReviewResultHealth:
             reviewed_sha="sha",
             session_id="s-synth",
             default_branch="main",
+            fix_loop_enabled=False,
         )
         assert result.status == "stage_complete"
         assert result.health.lowest_agent_confidence == "HIGH"
@@ -324,6 +333,7 @@ class TestSynthesizeCodexReviewResultHealth:
             reviewed_sha="sha",
             session_id="s-synth",
             default_branch="main",
+            fix_loop_enabled=False,
         )
         with_metrics, verdict = synthesize_codex_review_result(
             task=_task(),
@@ -334,6 +344,7 @@ class TestSynthesizeCodexReviewResultHealth:
             reviewed_sha="sha",
             session_id="s-synth",
             default_branch="main",
+            fix_loop_enabled=False,
             metrics_by_role={
                 doc.reviewer_role: {
                     "terminal_event": None,
@@ -365,6 +376,7 @@ class TestSynthesizeCodexReviewResultMetrics:
             reviewed_sha="sha",
             session_id="s-synth",
             default_branch="main",
+            fix_loop_enabled=False,
             metrics_by_role={
                 "Role A": {
                     "thread_id": "thr-a",
@@ -400,6 +412,7 @@ class TestSynthesizeCodexReviewResultMetrics:
             reviewed_sha="sha",
             session_id="s-synth",
             default_branch="main",
+            fix_loop_enabled=False,
         )
         assert verdict is not None
         assert verdict.agents_run[0].thread_id is None
@@ -421,6 +434,7 @@ class TestSynthesizeCodexReviewResultMetrics:
             reviewed_sha="sha",
             session_id="s-synth",
             default_branch="main",
+            fix_loop_enabled=False,
             metrics_by_role={"R": {"thread_id": "thr-r"}},
         )
         assert verdict is None
@@ -441,7 +455,7 @@ class TestRenderVerdictComment:
             _make_finding(severity="MUST_FIX", summary="bad thing")
         )
         verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
-        body = render_verdict_comment(verdict)
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
         assert "BLOCKING" in body
         assert "MUST_FIX" in body
         assert "bad thing" in body
@@ -451,7 +465,7 @@ class TestRenderVerdictComment:
         diff = _make_diff()
         doc = _make_reviewer_doc(_make_finding(severity="NIT"))
         verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
-        body = render_verdict_comment(verdict)
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
         assert "Non-blocking" in body
 
     def test_mixed_must_fix_and_should_fix_both_render(self) -> None:
@@ -473,7 +487,7 @@ class TestRenderVerdictComment:
         )
         doc = _make_reviewer_doc(must_fix, should_fix)
         verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
-        body = render_verdict_comment(verdict)
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
         assert "BLOCKING" in body
         assert "### MUST_FIX" in body
         assert "### SHOULD_FIX" in body
@@ -487,7 +501,7 @@ class TestRenderVerdictComment:
             _make_finding(severity="MUST_FIX", confidence="LOW", summary="bad thing")
         )
         verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
-        body = render_verdict_comment(verdict)
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
         assert "LOW confidence" in body
         assert "bad thing" in body
 
@@ -497,7 +511,7 @@ class TestRenderVerdictComment:
             _make_finding(severity="MUST_FIX", confidence="HIGH", summary="bad thing")
         )
         verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
-        body = render_verdict_comment(verdict)
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
         assert "confidence" not in body.lower()
 
     def test_medium_confidence_finding_renders_confidence_label(self) -> None:
@@ -506,7 +520,7 @@ class TestRenderVerdictComment:
             _make_finding(severity="MUST_FIX", confidence="MEDIUM", summary="bad thing")
         )
         verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
-        body = render_verdict_comment(verdict)
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
         assert "MEDIUM confidence" in body
 
     def test_confidence_does_not_affect_blocking_or_partition(self) -> None:
@@ -525,7 +539,96 @@ class TestRenderVerdictComment:
         assert verdict_high.blocking is True
         assert verdict_low.blocking is True
         assert len(verdict_high.must_fix) == len(verdict_low.must_fix) == 1
-        assert "### MUST_FIX" in render_verdict_comment(verdict_low)
+        assert "### MUST_FIX" in render_verdict_comment(
+            verdict_low, fix_loop_enabled=False
+        )
+
+    # -----------------------------------------------------------------
+    # #1705 — found-nothing vs found-and-fixed vs fix-loop-off histories
+    # -----------------------------------------------------------------
+
+    def test_clean_no_findings_fix_loop_off_states_single_pass(self) -> None:
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="NIT"))
+        verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "single-pass" in body.lower()
+        assert "disabled" in body.lower()
+        # R1: fix-loop-off must never be phrased as flaked/degraded.
+        assert "flak" not in body.lower()
+        assert "degrad" not in body.lower()
+
+    def test_clean_no_findings_fix_loop_on_states_available_but_unneeded(
+        self,
+    ) -> None:
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="NIT"))
+        verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        off_body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        on_body = render_verdict_comment(verdict, fix_loop_enabled=True)
+        assert "available" in on_body.lower()
+        assert on_body != off_body
+
+    def test_found_and_fixed_headline_differs_from_found_nothing(self) -> None:
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="NIT"))
+        clean_verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        fixed_verdict = clean_verdict.model_copy(
+            update={
+                "review": clean_verdict.review.model_copy(
+                    update={"must_fix_initial": 2, "fix_cycles_used": 2}
+                )
+            }
+        )
+        clean_body = render_verdict_comment(clean_verdict, fix_loop_enabled=True)
+        fixed_body = render_verdict_comment(fixed_verdict, fix_loop_enabled=True)
+        assert fixed_body != clean_body
+        assert "2" in fixed_body
+        # Honesty caveat: individual fix-cycle commit outcomes are not tracked.
+        assert "commit outcomes not individually tracked" in fixed_body
+
+    def test_blocking_capped_exit_shows_resolved_vs_open_counts(self) -> None:
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="MUST_FIX"))
+        verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        verdict = verdict.model_copy(
+            update={
+                "review": verdict.review.model_copy(
+                    update={
+                        "must_fix_initial": 3,
+                        "deferred": 1,
+                        "fix_cycles_used": 5,
+                    }
+                )
+            }
+        )
+        body = render_verdict_comment(verdict, fix_loop_enabled=True)
+        assert "2 of 3" in body
+        assert "1" in body
+
+    def test_failed_role_note_rendered_for_partial_coverage(self) -> None:
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="NIT"))
+        verdict = consolidate_verdict(
+            [doc],
+            diff,
+            reviewed_sha="sha",
+            failed_reviewers=[
+                ReviewerRunFailure(role="Performance Reviewer", reason="codex_timeout")
+            ],
+        )
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "PARTIAL COVERAGE" in body
+        assert "Performance Reviewer" in body
+
+    def test_fix_loop_off_blocking_states_single_pass(self) -> None:
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="MUST_FIX"))
+        verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "BLOCKING" in body
+        assert "single-pass" in body.lower()
+        assert "disabled" in body.lower()
 
 
 def test_format_failures_detail_includes_diagnostics_path() -> None:
@@ -561,6 +664,7 @@ class TestCleanReviewScopeMeasurement:
             reviewed_sha="sha",
             session_id="s-scope",
             default_branch="main",
+            fix_loop_enabled=False,
         )
 
         assert result.status == "stage_complete"
@@ -588,6 +692,7 @@ class TestCleanReviewScopeMeasurement:
             reviewed_sha="sha",
             session_id="s-scope-trunk",
             default_branch="trunk",
+            fix_loop_enabled=False,
         )
 
         assert result.scope.files == SCOPE_GUARD_FILES
@@ -609,6 +714,7 @@ class TestCleanReviewScopeMeasurement:
             reviewed_sha="sha",
             session_id="s-scope-none",
             default_branch="main",
+            fix_loop_enabled=False,
         )
 
         assert result.scope.files == 0
@@ -633,6 +739,7 @@ class TestCleanReviewScopeMeasurement:
                 reviewed_sha="sha",
                 session_id="s-scope-warns",
                 default_branch="main",
+                fix_loop_enabled=False,
             )
 
         assert result.scope.files == 0
@@ -655,6 +762,7 @@ class TestCleanReviewScopeMeasurement:
             reviewed_sha="sha",
             session_id="s-scope-health",
             default_branch="main",
+            fix_loop_enabled=False,
         )
 
         assert result.branch == SCOPE_GUARD_BRANCH

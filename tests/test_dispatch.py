@@ -9740,6 +9740,7 @@ class TestApplyStagedDecision:
             reviewed_sha="sha",
             session_id="s-1702",
             default_branch="main",
+            fix_loop_enabled=False,
         )
         # The producer is untouched by this ticket: assert its real output shape
         # before feeding it through routing.
