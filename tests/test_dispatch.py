@@ -1359,6 +1359,13 @@ def test_dispatch_tick_reconciles_phantoms_before_counting(
         "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
+    # Keep the reconcile() gh pre-pass hermetic: a host without a working
+    # `gh` would route TKT-OLD to gh_blocked (BLOCKED_ON_USER holds the lane
+    # slot) instead of the phantom-revert path under test.
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda *_args, **_kwargs: (False, True),
+    )
     from cw.models import OrchestratorConfig, ReapPolicy
 
     monkeypatch.setattr(
@@ -1436,6 +1443,13 @@ def test_crash_revert_respawn_rejects_old_event_completes_new(
     monkeypatch.setattr(
         "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
+    )
+    # Keep the reconcile() gh pre-pass hermetic: a host without a working
+    # `gh` would route TKT-RACE to gh_blocked instead of the crash-revert
+    # path under test.
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda *_args, **_kwargs: (False, True),
     )
     from cw.models import OrchestratorConfig, ReapPolicy
 

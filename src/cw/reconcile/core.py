@@ -22,9 +22,8 @@ from cw.config import (
     sessions_lock,
 )
 from cw.dev_queue import load_dev_queue
-from cw.gh import pr_exists_for_branch
-from cw.models import SessionOrigin, SessionStatus, Stage
-from cw.reconcile import _deps, _shared
+from cw.models import SessionOrigin
+from cw.reconcile import _deps
 from cw.reconcile._shared import (
     _LIVE_STATUSES,
     ReconcileReport,
@@ -32,7 +31,6 @@ from cw.reconcile._shared import (
     _claude_agents_json,
     _emit_reap_proposed,
     _looks_like_daemon_outage,
-    _SalvageCandidate,
     compute_drift,
     feature_branch_key,
     ticket_id_for_session,
@@ -55,10 +53,6 @@ from cw.reconcile.phantom import (
     _detect_phantom_candidates,
 )
 from cw.reconcile.review_recipes import run_review_recipes
-from cw.reconcile.salvage import (
-    rescue_finalize_blocked_sessions,
-    salvage_committed_no_pr_sessions,
-)
 from cw.reconcile.stalled import (
     _act_on_stalled_candidates,
     _detect_stalled_candidates,
@@ -155,59 +149,6 @@ def _verify_supervisor_session_id(state: CwState) -> int:
     return cleared
 
 
-def _build_finalize_pr_map(
-    state: CwState,
-) -> dict[str, tuple[bool | None, bool]]:
-    """Return pr_exists_for_branch results for FINALIZE-stage DAEMON sessions.
-
-    Must run OUTSIDE sessions_lock — gh subprocess is not safe under the lock
-    (liveness invariant, #485). Called by reconcile() as a lockless pre-pass.
-
-    Uses load_effective_clients() to match the branch-key lookup in
-    _detect_stalled_candidates; the two functions must use the same client dict
-    shape so the pre-computed result is found in the dict and not silently
-    missed due to a feature_branch_prefix format divergence (#812).
-
-    Note: load_dev_queue() here and in _reconcile_locked() are two separate
-    reads with no consistency guarantee. A task that advances to FINALIZE
-    between these two reads will miss the pre-pass (dict lookup returns default
-    (None, False) → conservative non-detection for one tick). The next tick
-    will catch it.
-    """
-    effective_clients = _deps.load_effective_clients()
-    pre_tasks = {t.ticket_id: t for t in load_dev_queue().tasks}
-    result: dict[str, tuple[bool | None, bool]] = {}
-    for session in state.sessions:
-        if session.status not in _LIVE_STATUSES:
-            continue
-        if session.origin is not SessionOrigin.DAEMON:
-            continue
-        if session.worktree_path is None:
-            continue
-        ticket_id = ticket_id_for_session(session.name)
-        if ticket_id is None:
-            continue
-        task = pre_tasks.get(ticket_id)
-        if task is None or task.stage != Stage.FINALIZE:
-            continue
-        if _is_dangling_client(session.client, effective_clients):
-            # Client removed/renamed from a populated clients.yaml -- skip
-            # rather than risk an unscoped gh call (GitHub #1269/#1279).
-            # Mirrors the _reconcile_locked pre-pass guard above.
-            _log.warning(
-                "finalize_pr_map_client_dangling ticket=%s client=%s: client "
-                "missing from clients.yaml (config drift) -- gh call skipped",
-                ticket_id,
-                session.client,
-            )
-            continue
-        branch = feature_branch_key(session.client, ticket_id, effective_clients)
-        if branch not in result:
-            cwd = _client_cwd(session.client, effective_clients)
-            result[branch] = pr_exists_for_branch(branch, cwd=cwd)
-    return result
-
-
 def reconcile() -> ReconcileReport:
     """Apply drift reconciliation against the persisted state.
 
@@ -278,34 +219,21 @@ def reconcile() -> ReconcileReport:
             continue
         if _merged:
             _merged_client_tids.append((_session.client, _ticket_id))
-    merged_client_ticket_ids = frozenset(_merged_client_tids)
     merged_ticket_ids = frozenset(tid for _client, tid in _merged_client_tids)
     gh_blocked_ticket_ids = frozenset(_gh_blocked_tids)
 
-    # Pre-pass: check PR existence for FINALIZE-stage sessions with pushed branches.
-    # gh subprocess must NOT run under sessions_lock (liveness invariant, #485).
-    finalize_pr_by_branch = _build_finalize_pr_map(pre_state)
-
     with sessions_lock():
-        locked_report, salvage_git_candidates = _reconcile_locked(
+        locked_report = _reconcile_locked(
             merged_ticket_ids=merged_ticket_ids,
-            merged_client_ticket_ids=merged_client_ticket_ids,
             gh_blocked_ticket_ids=gh_blocked_ticket_ids,
-            finalize_pr_by_branch=finalize_pr_by_branch,
             clients=_clients,
         )
 
     # Post-pass: runs AFTER sessions_lock releases so no gh subprocess
     # executes under the session lock (liveness — #485 SHOULD_FIX 4).
     completed_ticket_ids = complete_timed_out_merged_tasks()
-    salvaged_ticket_ids = salvage_committed_no_pr_sessions(
-        salvage_git_candidates, merged_client_ticket_ids=merged_client_ticket_ids
-    )
-    rescued_ticket_ids = rescue_finalize_blocked_sessions(
-        merged_client_ticket_ids=merged_client_ticket_ids
-    )
 
-    if not completed_ticket_ids and not salvaged_ticket_ids and not rescued_ticket_ids:
+    if not completed_ticket_ids:
         return locked_report
 
     return ReconcileReport(
@@ -314,104 +242,51 @@ def reconcile() -> ReconcileReport:
         reverted_ticket_ids=locked_report.reverted_ticket_ids,
         completed_ticket_ids=locked_report.completed_ticket_ids + completed_ticket_ids,
         usage_limited=locked_report.usage_limited,
-        salvaged_ticket_ids=salvaged_ticket_ids,
-        rescued_ticket_ids=rescued_ticket_ids,
     )
 
 
 def _reconcile_locked(
     *,
     merged_ticket_ids: frozenset[str] = frozenset(),
-    merged_client_ticket_ids: frozenset[tuple[str, str]] = frozenset(),
     gh_blocked_ticket_ids: frozenset[str] = frozenset(),
-    finalize_pr_by_branch: dict[str, tuple[bool | None, bool]] | None = None,
     clients: dict[str, ClientConfig] | None = None,
-) -> tuple[ReconcileReport, list[_SalvageCandidate]]:
+) -> ReconcileReport:
     """Body of reconcile(), called while sessions_lock is held.
 
     Separated so reconcile() holds exactly one lock acquisition and the
-    helpers (revert_stalled_headless_sessions, flag_silently_idle_daemon_sessions)
-    can save_state directly without re-acquiring the lock.
+    sweep helpers can save_state directly without re-acquiring the lock.
 
     merged_ticket_ids / gh_blocked_ticket_ids come from a lockless pre-pass in
     reconcile() (GitHub #637); no gh subprocess executes under sessions_lock.
-    They are consumed as-is by the stalled/phantom sweeps below (out of scope
-    for #1054). merged_client_ticket_ids is the same merge signal, additionally
-    keyed by client, and is threaded into idle.py's classify AND act phases
-    (``_detect_idle_candidates``, ``_act_on_idle_candidates``) — the merged-first
-    classification is new-in-#1054 code that routes FINALIZE-stage / git-branch
-    sessions into the REVERT_TASK completion pipeline for the first time (such
-    sessions previously always short-circuited to SALVAGE_GIT), so every
-    consumer of that pipeline in idle.py (route-by-policy, the merged split,
-    and the dev-queue sweep) must key on (client, ticket_id), not a bare
-    ticket_id, to avoid completing a different client's same-numbered task.
-    See GitHub #1054.
-    finalize_pr_by_branch comes from a second lockless pre-pass that checks PR
-    existence for FINALIZE-stage sessions (GitHub #812, liveness invariant #485).
+    They are consumed as-is by the phantom sweep below.
     clients comes from the same lockless pre-pass's `load_clients()` call
     (feature_branch_prefix SSOT, #728) — threaded through so the main-drift
     sweep (#940) doesn't re-read clients.yaml a second time this tick.
 
-    Returns a tuple of (ReconcileReport, salvage_git_candidates) where
-    salvage_git_candidates is the list of git-state salvage candidates for
-    the post-lock pass in salvage_committed_no_pr_sessions.
+    Since the process-kill-timeout removal, no sweep in here dispositions a
+    session off elapsed time or transcript quietness: the foreign-result and
+    emitted-sentinel sweeps act only on positive completion evidence, the
+    phantom sweep acts only on roster absence (the process is genuinely
+    gone), and the liveness sweep is signal-only.
     """
-    # Why: None means the caller did not run the lockless pre-pass. Default to
-    # empty dict so _resolve_finalize_blocked_condition never calls pr_exists_for_branch
-    # under sessions_lock (#816 SHOULD_FIX 1 — latent lock-under-gh footgun).
-    if finalize_pr_by_branch is None:
-        finalize_pr_by_branch = {}
     if clients is None:
         clients = load_clients()
     state = load_state()
     now = datetime.now(UTC)
 
-    # Snapshot sessions that are already TIMED_OUT before ANY reap sweep runs
-    # this tick, so the usage-limit diff below (watchdog_usage_limited) can
-    # see transitions caused by the stalled sweep in addition to the idle
-    # sweep. #1030: this snapshot used to be taken AFTER the stalled sweep
-    # already ran (right before the idle sweep), which meant a session the
-    # stalled sweep had just reaped to TIMED_OUT was already present in the
-    # "pre" snapshot and silently excluded from the diff — a usage-limit
-    # death caught by the stalled sweep could never reach
-    # ReconcileReport.usage_limited. Widening the window to before the
-    # stalled sweep closes that gap. Named for the widened scope (not just
-    # "pre_watchdog") so a future sweep inserted above this line doesn't
-    # silently fall outside it under a stale name, reintroducing this bug.
-    pre_reap_timed_out_ids = {
-        s.id for s in state.sessions if s.status == SessionStatus.TIMED_OUT
-    }
-
-    # Passive budget sweep: catches headless DAEMON sessions whose agent
-    # stalled mid-turn and produced no further Stop hook firings. Runs before
-    # the outage guard so a daemon hiccup does not delay budget enforcement.
-    # See GitHub issue #185.
+    # Foreign-result sweep: completes headless DAEMON sessions whose
+    # last_result already carries a terminal sentinel recorded by another
+    # authority (#1470). Evidence-only; runs before the outage guard because
+    # it does not depend on the daemon roster.
     orchestrator_config = load_orchestrator_config()
-    # Load dev queue once here; pass to both sweeps to avoid a duplicate
-    # filesystem read within the same reconcile tick. See GitHub issue #326.
+    # Load dev queue once here; pass to all sweeps to avoid duplicate
+    # filesystem reads within the same reconcile tick. See GitHub issue #326.
     shared_task_by_ticket = {t.ticket_id: t for t in load_dev_queue().tasks}
     stalled_candidates = _detect_stalled_candidates(
         state,
-        now=now,
-        config=orchestrator_config,
         task_by_ticket=shared_task_by_ticket,
-        finalize_pr_by_branch=finalize_pr_by_branch,
     )
-    # native_live not yet known — stalled sweep is pre-daemon-query.
-    # Capture newly_proposed_ids to edge-trigger SESSION_STAGE_TIMED_OUT_RETRIED
-    # only on first detection; re-detect ticks are suppressed. See GitHub #782.
-    stalled_newly_proposed = _emit_reap_proposed(
-        state, stalled_candidates, native_live=set(), now=now
-    )
-    stalled_reverted, merged_from_stalled = _act_on_stalled_candidates(
-        state,
-        stalled_candidates,
-        now=now,
-        config=orchestrator_config,
-        merged_ticket_ids=merged_ticket_ids,
-        gh_blocked_ticket_ids=gh_blocked_ticket_ids,
-        newly_proposed_ids=stalled_newly_proposed,
-    )
+    _act_on_stalled_candidates(state, stalled_candidates, now=now)
 
     # Harvest fire-and-forget LOCAL aider sessions whose process has exited
     # (#888). Runs BEFORE the daemon query + outage guard: it depends only on
@@ -461,49 +336,27 @@ def _reconcile_locked(
         daemon_errored = True
     if _looks_like_daemon_outage(state, daemon_errored, native_live):
         return ReconcileReport(
-            reverted_ticket_ids=stalled_reverted,
-            completed_ticket_ids=list(
-                dict.fromkeys(merged_from_stalled + local_harvested)
-            ),
-        ), []
+            completed_ticket_ids=list(dict.fromkeys(local_harvested)),
+        )
     _backfill_claude_session_ids(state, surface_to_full)
     _verify_supervisor_session_id(state)
 
+    # Emitted-sentinel router (#578): routes sessions whose transcript already
+    # carries a sentinel that signal_stop never routed. Evidence-only —
+    # constructive completion, never a reap.
     idle_candidates = _detect_idle_candidates(
         state,
         now=now,
         native_live=native_live,
         config=orchestrator_config,
         task_by_ticket=shared_task_by_ticket,
-        merged_client_ticket_ids=merged_client_ticket_ids,
     )
-    _emit_reap_proposed(state, idle_candidates, native_live=native_live, now=now)
-    silently_idle_ticket_ids, merged_from_idle, salvage_git_candidates = (
-        _act_on_idle_candidates(
-            state,
-            idle_candidates,
-            now=now,
-            config=orchestrator_config,
-            merged_client_ticket_ids=merged_client_ticket_ids,
-            gh_blocked_ticket_ids=gh_blocked_ticket_ids,
-        )
-    )
-    # Check whether any session newly transitioned to TIMED_OUT has a usage-limit
-    # transcript. The _detect_usage_limit I/O cost is minimal (OS-cached files).
-    watchdog_usage_limited = any(
-        s.status == SessionStatus.TIMED_OUT
-        and s.id not in pre_reap_timed_out_ids
-        and _shared.usage_limit_is_recent(
-            _shared.detect_usage_limit(s),
-            window_seconds=_shared.USAGE_LIMIT_BACKOFF_WINDOW_SECONDS,
-        )
-        for s in state.sessions
-    )
+    _act_on_idle_candidates(state, idle_candidates, now=now)
 
-    # Pure-observation liveness-bucket sweep (RFC 0008 W2): latches
-    # Session.liveness_bucket transitions and emits session.liveness_changed.
-    # No disposition, no queue mutation — runs alongside the idle sweep so it
-    # sees the same native_live set this tick. See GitHub #1001.
+    # Signal-only liveness-bucket sweep (RFC 0008 W2): latches
+    # Session.liveness_bucket transitions, emits session.liveness_changed, and
+    # emits the operator distress signal on a top-bucket crossing. No
+    # disposition, no queue mutation. See GitHub #1001.
     record_session_liveness_changes(
         state,
         now=now,
@@ -524,20 +377,12 @@ def _reconcile_locked(
             )
         )
         all_reverted = list(
-            dict.fromkeys(
-                stalled_reverted
-                + silently_idle_ticket_ids
-                + timed_out_ticket_ids
-                + completed_silent_ticket_ids
-            )
+            dict.fromkeys(timed_out_ticket_ids + completed_silent_ticket_ids)
         )
         return ReconcileReport(
             reverted_ticket_ids=all_reverted,
-            completed_ticket_ids=list(
-                dict.fromkeys(merged_from_stalled + merged_from_idle + local_harvested)
-            ),
-            usage_limited=watchdog_usage_limited,
-        ), salvage_git_candidates
+            completed_ticket_ids=list(dict.fromkeys(local_harvested)),
+        )
 
     phantom_set = set(drift.phantom_session_ids)
     phantom_candidates = _detect_phantom_candidates(
@@ -578,30 +423,14 @@ def _reconcile_locked(
         )
     )
     all_reverted = list(
-        dict.fromkeys(
-            stalled_reverted
-            + silently_idle_ticket_ids
-            + reverted
-            + timed_out_ticket_ids
-            + completed_silent_ticket_ids
-        )
+        dict.fromkeys(reverted + timed_out_ticket_ids + completed_silent_ticket_ids)
     )
 
-    all_merged_completed = list(
-        dict.fromkeys(
-            merged_from_stalled
-            + merged_from_idle
-            + merged_from_phantom
-            + local_harvested
-        )
-    )
-    return (
-        ReconcileReport(
-            phantom_session_ids=drift.phantom_session_ids,
-            phantom_session_names=phantom_names,
-            reverted_ticket_ids=all_reverted,
-            completed_ticket_ids=all_merged_completed,
-            usage_limited=watchdog_usage_limited or phantom_usage_limited,
-        ),
-        salvage_git_candidates,
+    all_merged_completed = list(dict.fromkeys(merged_from_phantom + local_harvested))
+    return ReconcileReport(
+        phantom_session_ids=drift.phantom_session_ids,
+        phantom_session_names=phantom_names,
+        reverted_ticket_ids=all_reverted,
+        completed_ticket_ids=all_merged_completed,
+        usage_limited=phantom_usage_limited,
     )

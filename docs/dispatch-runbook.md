@@ -48,22 +48,21 @@ operator channel.
 
 ```bash
 cw dev-queue add <TICKET-ID> [<TICKET-ID> ...] --client <client> \
-  [--scope small|large] [--priority <n>] [--timeout <seconds>] \
+  [--scope small|large] [--priority <n>] \
   [--lane <lane>] [--signoff operator] [--hold-finalize]
 ```
 
-- `-s/--scope` sets `TicketTask.scope_hint` (default `None`). Two effects:
-  - **Headless budget fallback**: pre-Stage-1 (before any sentinel has
-    reported a tier), the hint selects the per-tier wall-clock and
-    idle-watchdog budgets.
+- `-s/--scope` sets `TicketTask.scope_hint` (default `None`). One effect:
   - **Escalate-only approval gating**: at a `plan_pending_approval` /
     `review_pending_approval` sentinel, a `large` hint forces the operator
     approval gate, and a `small` hint is used only when the sentinel omits
     its own tier — a hint can ADD the gate, never remove it (`large` from
     the sentinel always wins).
 - `-p/--priority` — higher dispatches sooner.
-- `-t/--timeout` — per-ticket wall-clock budget override (seconds), taking
-  precedence over the per-tier defaults.
+- (The former `-t/--timeout` wall-clock budget override was removed with the
+  process-kill timeouts — see ADR-0014. Sessions are never dispositioned on
+  elapsed time; a quiet worker surfaces via the liveness distress signal
+  instead.)
 - `--lane` — target lane (must be declared for the client; default
   `default`). Move a pending ticket later with `cw dev-queue move <T> -c
   <client> --to <lane>`.
@@ -326,8 +325,10 @@ Exit codes:
   dispositions, or `FAILED` / `CANCELLED` queue status
 - `2` — `blocked` / any `*_pending_*` status / `BLOCKED_ON_USER` **not**
   caused by a reap proposal
-- `3` — ATTENTION: transcript stale past idle budget, worker not in daemon
-  roster; a mid-wait reap confirmed by `reap_proposed_at` on the prior
+- `3` — ATTENTION: transcript stale past the wait command's fixed 900 s
+  reporting threshold AND worker not in daemon roster (roster absence is the
+  evidence; the threshold only debounces the report — nothing is
+  dispositioned); a mid-wait reap confirmed by `reap_proposed_at` on the prior
   session (#542, hardened #1557 — a bare `session_id` clear during a normal
   stage handoff no longer fires this); or a `BLOCKED_ON_USER` park that
   originated from a reap proposal (`reap_proposed_at` set on the owning

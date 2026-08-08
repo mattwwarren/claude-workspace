@@ -1,7 +1,7 @@
-"""Unit tests for cw.reconcile._shared — reap-policy routing and budgets.
+"""Unit tests for cw.reconcile._shared — reap-policy routing and sentinels.
 
-Headless-budget resolution, reap-proposed emission, per-lane reap_policy
-routing, emitted-sentinel routing, and _apply_sentinel_to_task disposition.
+Reap-proposed emission, per-lane reap_policy resolution, emitted-sentinel
+routing, and _apply_sentinel_to_task disposition.
 """
 
 from __future__ import annotations
@@ -40,21 +40,17 @@ from cw.models import (
     ReapReason,
     Session,
     SessionOrigin,
-    SessionPurpose,
     SessionStatus,
     Stage,
     TicketTask,
 )
-from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import (
     _VALIDATION_FAILED_MAX_ATTEMPTS,
-    HEADLESS_TIMEOUT_SECONDS,
-    IDLE_WATCHDOG_SECONDS,
     SentinelRouteOutcome,
+    _act_on_idle_candidates,
     _apply_sentinel_to_task,
+    _detect_idle_candidates,
     _has_terminal_sentinel,
-    flag_silently_idle_daemon_sessions,
-    resolve_headless_budget,
 )
 from cw.reconcile._shared import (
     _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
@@ -76,329 +72,6 @@ from tests._reconcile_helpers import (
     _write_transcript_records,
 )
 from tests.conftest import _make_daemon_session
-
-
-def test_resolve_headless_budget_small_tier(
-    tmp_config_dir: Path,
-    tmp_path: Path,
-) -> None:
-    """Per-tier default: session with scope.tier='small' → 1800s."""
-    worktree = tmp_path / "wt-small"
-    worktree.mkdir(parents=True, exist_ok=True)
-
-    sess = Session(
-        id="small-tier-sess",
-        name="client-a/auto-dev/GEN-1",
-        client="client-a",
-        purpose=SessionPurpose.IMPL,
-        origin=SessionOrigin.DAEMON,
-        status=SessionStatus.ACTIVE,
-        workspace_path=ClientConfig(
-            name="client-a", workspace_path=Path("/tmp/ws")
-        ).workspace_path,
-        worktree_path=worktree,
-        started_at=datetime(2026, 1, 1, tzinfo=UTC),
-        last_result={"scope": {"tier": "small"}},
-    )
-    config = _auto_config(headless_timeout_by_tier={"small": 1800, "large": 5400})
-    budget = resolve_headless_budget(None, sess, config)
-    assert budget == 1800
-
-
-def test_resolve_headless_budget_large_tier(
-    tmp_config_dir: Path,
-    tmp_path: Path,
-) -> None:
-    """Per-tier default: session with scope.tier='large' → 5400s."""
-    worktree = tmp_path / "wt-large"
-    worktree.mkdir(parents=True, exist_ok=True)
-
-    sess = Session(
-        id="large-tier-sess",
-        name="client-a/auto-dev/GEN-2",
-        client="client-a",
-        purpose=SessionPurpose.IMPL,
-        origin=SessionOrigin.DAEMON,
-        status=SessionStatus.ACTIVE,
-        workspace_path=ClientConfig(
-            name="client-a", workspace_path=Path("/tmp/ws")
-        ).workspace_path,
-        worktree_path=worktree,
-        started_at=datetime(2026, 1, 1, tzinfo=UTC),
-        last_result={"scope": {"tier": "large"}},
-    )
-    config = _auto_config(headless_timeout_by_tier={"small": 1800, "large": 5400})
-    budget = resolve_headless_budget(None, sess, config)
-    assert budget == 5400
-
-
-def test_resolve_headless_budget_per_ticket_override(
-    tmp_config_dir: Path,
-    tmp_path: Path,
-) -> None:
-    """Per-ticket override beats tier: headless_timeout_override=7200 > small=1800."""
-    worktree = tmp_path / "wt-override"
-    worktree.mkdir(parents=True, exist_ok=True)
-
-    sess = Session(
-        id="override-sess",
-        name="client-a/auto-dev/GEN-3",
-        client="client-a",
-        purpose=SessionPurpose.IMPL,
-        origin=SessionOrigin.DAEMON,
-        status=SessionStatus.ACTIVE,
-        workspace_path=ClientConfig(
-            name="client-a", workspace_path=Path("/tmp/ws")
-        ).workspace_path,
-        worktree_path=worktree,
-        started_at=datetime(2026, 1, 1, tzinfo=UTC),
-        last_result={"scope": {"tier": "small"}},
-    )
-    task = TicketTask(
-        ticket_id="GEN-3",
-        client="client-a",
-        headless_timeout_override=7200,
-    )
-    config = _auto_config(headless_timeout_by_tier={"small": 1800, "large": 5400})
-    budget = resolve_headless_budget(task, sess, config)
-    assert budget == 7200
-
-
-def test_resolve_headless_budget_pre_stage1_fallback(
-    tmp_config_dir: Path,
-) -> None:
-    """Pre-Stage-1 fallback: no task, no last_result → HEADLESS_TIMEOUT_SECONDS."""
-    sess = Session(
-        id="fallback-sess",
-        name="client-a/auto-dev/GEN-4",
-        client="client-a",
-        purpose=SessionPurpose.IMPL,
-        origin=SessionOrigin.DAEMON,
-        status=SessionStatus.ACTIVE,
-        workspace_path=ClientConfig(
-            name="client-a", workspace_path=Path("/tmp/ws")
-        ).workspace_path,
-        started_at=datetime(2026, 1, 1, tzinfo=UTC),
-        last_result=None,
-    )
-    config = _auto_config(headless_timeout_by_tier={"small": 1800, "large": 5400})
-    budget = resolve_headless_budget(None, sess, config)
-    assert budget == HEADLESS_TIMEOUT_SECONDS
-
-
-def test_resolve_headless_budget_scope_hint_large_no_session(
-    tmp_config_dir: Path,
-) -> None:
-    """Step 2.5 (#314): scope_hint='large' + session=None → large-tier budget."""
-    config = _auto_config(
-        headless_timeout_by_tier={"small": 1800, "large": 5400},
-        headless_timeout_by_stage={},
-    )
-    task = TicketTask(ticket_id="GEN-314", client="client-a", scope_hint="large")
-    budget = resolve_headless_budget(task, None, config)
-    assert budget == 5400
-    assert budget != HEADLESS_TIMEOUT_SECONDS
-
-
-def test_resolve_headless_budget_scope_hint_small_no_session(
-    tmp_config_dir: Path,
-) -> None:
-    """Step 2.5 (#314): scope_hint='small' + session=None → small-tier budget."""
-    config = _auto_config(
-        headless_timeout_by_tier={"small": 1800, "large": 5400},
-        headless_timeout_by_stage={},
-    )
-    task = TicketTask(ticket_id="GEN-314", client="client-a", scope_hint="small")
-    budget = resolve_headless_budget(task, None, config)
-    assert budget == 1800
-
-
-def test_resolve_headless_budget_no_scope_hint_no_session(
-    tmp_config_dir: Path,
-) -> None:
-    """Step 2.5 (#314): scope_hint=None + session=None → global timeout."""
-    config = _auto_config(
-        headless_timeout_by_tier={"small": 1800, "large": 5400},
-        headless_timeout_by_stage={},
-    )
-    task = TicketTask(ticket_id="GEN-314", client="client-a")
-    budget = resolve_headless_budget(task, None, config)
-    assert budget == HEADLESS_TIMEOUT_SECONDS
-
-
-def test_resolve_headless_budget_override_beats_scope_hint(
-    tmp_config_dir: Path,
-) -> None:
-    """Step 1 (override) beats step 2.5 (scope_hint): override=9999 > large=5400."""
-    config = _auto_config(headless_timeout_by_tier={"small": 1800, "large": 5400})
-    task = TicketTask(
-        ticket_id="GEN-314",
-        client="client-a",
-        scope_hint="large",
-        headless_timeout_override=9999,
-    )
-    budget = resolve_headless_budget(task, None, config)
-    assert budget == 9999
-
-
-def test_resolve_headless_budget_last_result_beats_scope_hint(
-    tmp_config_dir: Path,
-) -> None:
-    """Step 2 (last_result tier) beats step 2.5 (scope_hint) when tier is present."""
-    config = _auto_config(
-        headless_timeout_by_tier={"small": 1800, "large": 5400},
-        headless_timeout_by_stage={},
-    )
-    task = TicketTask(ticket_id="GEN-314", client="client-a", scope_hint="large")
-    sess = Session(
-        name="client-a/auto-dev/GEN-314",
-        client="client-a",
-        purpose=SessionPurpose.IMPL,
-        workspace_path=Path("/tmp/ws"),
-        last_result={"scope": {"tier": "small"}},
-    )
-    budget = resolve_headless_budget(task, sess, config)
-    assert budget == 1800  # small from last_result, not large from scope_hint
-
-
-def test_resolve_headless_budget_non_dict_last_result_falls_to_scope_hint(
-    tmp_config_dir: Path,
-) -> None:
-    """Non-dict last_result → AttributeError caught → step 2.5 scope_hint fires."""
-    config = _auto_config(
-        headless_timeout_by_tier={"small": 1800, "large": 5400},
-        headless_timeout_by_stage={},
-    )
-    task = TicketTask(ticket_id="GEN-314", client="client-a", scope_hint="large")
-    sess = Session(
-        name="client-a/auto-dev/GEN-314",
-        client="client-a",
-        purpose=SessionPurpose.IMPL,
-        workspace_path=Path("/tmp/ws"),
-    )
-    sess.last_result = ["not", "a", "dict"]  # type: ignore[assignment]
-    budget = resolve_headless_budget(task, sess, config)
-    assert budget == 5400  # scope_hint fires after AttributeError caught
-
-
-def test_resolve_headless_budget_per_stage_hit_beats_tier(
-    tmp_config_dir: Path,
-) -> None:
-    """Per-stage REVIEW default (7200) beats the small-tier default (1800)."""
-    config = _auto_config(
-        headless_timeout_by_tier={"small": 1800, "large": 5400},
-        headless_timeout_by_stage={Stage.REVIEW: 7200},
-    )
-    task = TicketTask(ticket_id="GEN-1020", client="client-a", stage=Stage.REVIEW)
-    sess = Session(
-        name="client-a/auto-dev/GEN-1020",
-        client="client-a",
-        purpose=SessionPurpose.IMPL,
-        workspace_path=Path("/tmp/ws"),
-        last_result={"scope": {"tier": "small"}},
-    )
-    budget = resolve_headless_budget(task, sess, config)
-    assert budget == 7200
-
-
-def test_resolve_headless_budget_per_stage_hit_beats_scope_hint(
-    tmp_config_dir: Path,
-) -> None:
-    """Per-stage PLAN default (3600) beats the large-tier scope_hint (5400)."""
-    config = _auto_config(
-        headless_timeout_by_tier={"small": 1800, "large": 5400},
-        headless_timeout_by_stage={Stage.PLAN: 3600},
-    )
-    task = TicketTask(
-        ticket_id="GEN-1020",
-        client="client-a",
-        stage=Stage.PLAN,
-        scope_hint="large",
-    )
-    budget = resolve_headless_budget(task, None, config)
-    assert budget == 3600
-
-
-def test_resolve_headless_budget_per_stage_hit_beats_global(
-    tmp_config_dir: Path,
-) -> None:
-    """Per-stage IMPL default (4200) beats the global HEADLESS_TIMEOUT_SECONDS."""
-    config = _auto_config(headless_timeout_by_stage={Stage.IMPL: 4200})
-    task = TicketTask(ticket_id="GEN-1020", client="client-a", stage=Stage.IMPL)
-    budget = resolve_headless_budget(task, None, config)
-    assert budget == 4200
-
-
-def test_resolve_headless_budget_per_stage_override_still_beats_stage(
-    tmp_config_dir: Path,
-) -> None:
-    """Step 1 (headless_timeout_override) still outranks step 1.5 (per-stage)."""
-    config = _auto_config(headless_timeout_by_stage={Stage.REVIEW: 7200})
-    task = TicketTask(
-        ticket_id="GEN-1020",
-        client="client-a",
-        stage=Stage.REVIEW,
-        headless_timeout_override=9999,
-    )
-    budget = resolve_headless_budget(task, None, config)
-    assert budget == 9999
-
-
-def test_resolve_headless_budget_stage_absent_falls_through_to_tier(
-    tmp_config_dir: Path,
-) -> None:
-    """Stage absent from the per-stage map (HARDEN) falls through to tier."""
-    config = _auto_config(
-        headless_timeout_by_tier={"small": 1800, "large": 5400},
-        headless_timeout_by_stage={Stage.PLAN: 3600},
-    )
-    task = TicketTask(ticket_id="GEN-1020", client="client-a", stage=Stage.HARDEN)
-    sess = Session(
-        name="client-a/auto-dev/GEN-1020",
-        client="client-a",
-        purpose=SessionPurpose.IMPL,
-        workspace_path=Path("/tmp/ws"),
-        last_result={"scope": {"tier": "large"}},
-    )
-    budget = resolve_headless_budget(task, sess, config)
-    assert budget == 5400
-
-
-def test_resolve_headless_budget_stage_absent_falls_through_to_scope_hint(
-    tmp_config_dir: Path,
-) -> None:
-    """Stage absent from the per-stage map (HARDEN) falls through to scope_hint."""
-    config = _auto_config(
-        headless_timeout_by_tier={"small": 1800, "large": 5400},
-        headless_timeout_by_stage={Stage.PLAN: 3600},
-    )
-    task = TicketTask(
-        ticket_id="GEN-1020",
-        client="client-a",
-        stage=Stage.HARDEN,
-        scope_hint="small",
-    )
-    budget = resolve_headless_budget(task, None, config)
-    assert budget == 1800
-
-
-def test_resolve_headless_budget_task_none_skips_stage_step(
-    tmp_config_dir: Path,
-) -> None:
-    """task=None short-circuits step 1.5 exactly as it already short-circuits step 1."""
-    config = _auto_config(
-        headless_timeout_by_tier={"small": 1800, "large": 5400},
-        headless_timeout_by_stage={Stage.PLAN: 3600},
-    )
-    sess = Session(
-        name="client-a/auto-dev/GEN-1020",
-        client="client-a",
-        purpose=SessionPurpose.IMPL,
-        workspace_path=Path("/tmp/ws"),
-        last_result={"scope": {"tier": "large"}},
-    )
-    budget = resolve_headless_budget(None, sess, config)
-    assert budget == 5400
 
 
 class TestEmitReapProposed:
@@ -1018,112 +691,6 @@ class TestResolveReapPolicy:
         assert resolve_reap_policy(candidate, clients, cfg) is ReapPolicy.AUTO
 
 
-class TestMixedLanePolicySingleTick:
-    """Single reconcile tick with two candidates on different lane policies."""
-
-    def test_mixed_policy_stalled_one_acts_one_signals(
-        self,
-        tmp_config_dir: Path,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Lane A (auto) acts while lane B (signal_only) routes BLOCKED_ON_USER."""
-        from cw.reconcile import (
-            ProposedAction,
-            ReapCandidate,
-            _act_on_stalled_candidates,
-        )
-
-        worktree_a = tmp_path / "wt-mixed-a"
-        worktree_b = tmp_path / "wt-mixed-b"
-        started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
-        now = datetime(2026, 1, 1, 1, 1, 0, tzinfo=UTC)
-
-        daemon = FakeNativeDaemonClient()
-        monkeypatch.setattr(
-            "cw.reconcile._deps.get_native_daemon_client", lambda: daemon
-        )
-        monkeypatch.setattr(
-            "cw.reconcile._shared.get_client",
-            lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
-        )
-        monkeypatch.setattr(
-            "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: False
-        )
-        monkeypatch.setattr(
-            "cw.reconcile._shared.remove_worktree", lambda *_a, **_kw: None
-        )
-
-        from cw.models import LaneConfig
-
-        client = ClientConfig(
-            name="client-a",
-            workspace_path=tmp_path / "ws",
-            lanes=[
-                LaneConfig(name="fast", reap_policy=ReapPolicy.AUTO),
-                LaneConfig(name="slow", reap_policy=ReapPolicy.SIGNAL_ONLY),
-            ],
-        )
-        monkeypatch.setattr(
-            "cw.reconcile._deps.load_effective_clients",
-            lambda: {"client-a": client},
-        )
-
-        sess_a = _mk_headless_daemon_session("mixed-auto-1", worktree_a, started_at)
-        sess_b = _mk_headless_daemon_session("mixed-sig-1", worktree_b, started_at)
-        state = CwState(sessions=[sess_a, sess_b])
-        save_state(state)
-        task_a = TicketTask(
-            ticket_id="mixed-auto-1",
-            client="client-a",
-            status=QueueItemStatus.RUNNING,
-            session_id="mixed-auto-1",
-        )
-        task_b = TicketTask(
-            ticket_id="mixed-sig-1",
-            client="client-a",
-            status=QueueItemStatus.RUNNING,
-            session_id="mixed-sig-1",
-        )
-        save_dev_queue(DevQueueStore(tasks=[task_a, task_b]))
-
-        candidate_a = ReapCandidate(
-            session_id="mixed-auto-1",
-            proposed_action=ProposedAction.REVERT_TASK,
-            ticket_id="mixed-auto-1",
-            elapsed_seconds=3700.0,
-            lane="fast",
-            client="client-a",
-        )
-        candidate_b = ReapCandidate(
-            session_id="mixed-sig-1",
-            proposed_action=ProposedAction.REVERT_TASK,
-            ticket_id="mixed-sig-1",
-            elapsed_seconds=3700.0,
-            lane="slow",
-            client="client-a",
-        )
-
-        # Global is SIGNAL_ONLY; lane A is AUTO, lane B is SIGNAL_ONLY
-        reverted, _ = _act_on_stalled_candidates(
-            state,
-            [candidate_a, candidate_b],
-            now=now,
-            config=OrchestratorConfig(),
-        )
-
-        # Lane A (fast/AUTO): reverted to PENDING
-        assert "mixed-auto-1" in reverted
-        # Lane B (slow/SIGNAL_ONLY): routes to BLOCKED_ON_USER
-        assert "mixed-sig-1" not in reverted
-
-        store = load_dev_queue()
-        t_a = next(t for t in store.tasks if t.ticket_id == "mixed-auto-1")
-        t_b = next(t for t in store.tasks if t.ticket_id == "mixed-sig-1")
-        assert t_a.status == QueueItemStatus.PENDING
-        assert t_b.status == QueueItemStatus.BLOCKED_ON_USER
-
-
 class TestReapProposedPayloadLane:
     """SESSION_REAP_PROPOSED payload includes lane field (GitHub #560)."""
 
@@ -1201,9 +768,38 @@ class TestReapProposedPayloadLane:
 # ---------------------------------------------------------------------------
 
 
+def _run_emitted_sentinel_router(
+    state: CwState,
+    *,
+    now: datetime,
+    native_live: set[str],
+    config: OrchestratorConfig,
+    task_by_ticket: dict[str, TicketTask] | None = None,
+) -> None:
+    """Drive the emitted-sentinel router's detect + act phases in one call.
+
+    Test-local stand-in for the removed ``flag_silently_idle_daemon_sessions``
+    driver: since the process-kill-timeout removal the idle sweep consists of
+    exactly these two phases, so detect + act IS the whole sweep.
+    """
+    resolved = (
+        task_by_ticket
+        if task_by_ticket is not None
+        else {t.ticket_id: t for t in load_dev_queue().tasks}
+    )
+    candidates = _detect_idle_candidates(
+        state,
+        now=now,
+        native_live=native_live,
+        config=config,
+        task_by_ticket=resolved,
+    )
+    _act_on_idle_candidates(state, candidates, now=now)
+
+
 class TestRouteEmittedSentinel:
-    """flag_silently_idle_daemon_sessions routes a transcript sentinel before
-    the idle watchdog budget fires (GitHub #578)."""
+    """The emitted-sentinel router routes a transcript sentinel that
+    signal_stop never consumed (GitHub #578)."""
 
     def test_detect_sentinel_present_routes_before_watchdog(
         self,
@@ -1217,11 +813,10 @@ class TestRouteEmittedSentinel:
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
         worktree = tmp_path / "wt-578-detect"
-        # 305 s elapsed — past the 300-s check but well under 900-s watchdog.
+        # 305 s elapsed — past the 300-s unrouted-sentinel check delay.
         started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
         now = datetime(2026, 1, 1, 0, 5, 5, tzinfo=UTC)
         assert (now - started_at).total_seconds() >= 300
-        assert (now - started_at).total_seconds() < IDLE_WATCHDOG_SECONDS
 
         sess = _mk_headless_daemon_session("578-detect", worktree, started_at)
         sess.last_result = None
@@ -1251,14 +846,13 @@ class TestRouteEmittedSentinel:
             "cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon
         ):
             state = load_state()
-            blocked, _salvage = flag_silently_idle_daemon_sessions(
+            _run_emitted_sentinel_router(
                 state,
                 now=now,
                 native_live={"fake-short-id"},
                 config=_auto_config(),
             )
 
-        assert blocked == []
         reloaded = next(s for s in load_state().sessions if s.id == "578-detect")
         assert reloaded.status == SessionStatus.COMPLETED
         assert reloaded.completed_reason == CompletionReason.NORMAL
@@ -1306,14 +900,13 @@ class TestRouteEmittedSentinel:
         )
 
         state = load_state()
-        blocked, _salvage = flag_silently_idle_daemon_sessions(
+        _run_emitted_sentinel_router(
             state,
             now=now,
             native_live={"fake-short-id"},
             config=_auto_config(),
         )
 
-        assert blocked == []
         reloaded = next(s for s in load_state().sessions if s.id == "578-under")
         # Session must NOT be completed — too early for the sentinel check.
         assert reloaded.status == SessionStatus.ACTIVE
@@ -1357,14 +950,13 @@ class TestRouteEmittedSentinel:
         )
 
         state = load_state()
-        blocked, _salvage = flag_silently_idle_daemon_sessions(
+        _run_emitted_sentinel_router(
             state,
             now=now,
             native_live={"fake-short-id"},
             config=_auto_config(),
         )
 
-        assert blocked == []
         # Session stays ACTIVE — watchdog budget not yet exhausted, no route.
         reloaded = next(s for s in load_state().sessions if s.id == "578-dbl")
         assert reloaded.status == SessionStatus.ACTIVE
@@ -1411,14 +1003,13 @@ class TestRouteEmittedSentinel:
             "cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon
         ):
             state = load_state()
-            blocked, _salvage = flag_silently_idle_daemon_sessions(
+            _run_emitted_sentinel_router(
                 state,
                 now=now,
                 native_live={"fake-short-id"},
                 config=_auto_config(),
             )
 
-        assert blocked == []
         reloaded = next(s for s in load_state().sessions if s.id == "578-live")
         assert reloaded.status == SessionStatus.COMPLETED
         assert reloaded.completed_reason == CompletionReason.NORMAL
@@ -1504,14 +1095,13 @@ class TestRouteEmittedSentinel:
             "cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon
         ):
             state = load_state()
-            blocked, _salvage = flag_silently_idle_daemon_sessions(
+            _run_emitted_sentinel_router(
                 state,
                 now=now,
                 native_live={"fake-short-id"},
                 config=_auto_config(),
             )
 
-        assert blocked == []
         task = next(t for t in load_dev_queue().tasks if t.ticket_id == "578-retry")
         assert task.status == QueueItemStatus.PENDING
         assert task.session_id is None
@@ -1560,14 +1150,13 @@ class TestRouteEmittedSentinel:
         ):
             state = load_state()
             # signal_only policy — normally gates reaps.
-            blocked, _salvage = flag_silently_idle_daemon_sessions(
+            _run_emitted_sentinel_router(
                 state,
                 now=now,
                 native_live={"fake-short-id"},
                 config=OrchestratorConfig(reap_policy=ReapPolicy.SIGNAL_ONLY),
             )
 
-        assert blocked == []
         reloaded = next(s for s in load_state().sessions if s.id == "578-sigonly")
         # ROUTE_EMITTED_SENTINEL is exempt from signal_only → session COMPLETED.
         assert reloaded.status == SessionStatus.COMPLETED
@@ -1616,7 +1205,7 @@ class TestRouteEmittedSentinel:
             "cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon
         ):
             state = load_state()
-            flag_silently_idle_daemon_sessions(
+            _run_emitted_sentinel_router(
                 state,
                 now=now,
                 native_live={"fake-short-id"},
@@ -1680,14 +1269,13 @@ class TestRouteEmittedSentinel:
             "cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon
         ):
             state = load_state()
-            blocked, _salvage = flag_silently_idle_daemon_sessions(
+            _run_emitted_sentinel_router(
                 state,
                 now=now,
                 native_live={"fake-short-id"},
                 config=_auto_config(),
             )
 
-        assert blocked == []
         reloaded = next(s for s in load_state().sessions if s.id == ticket_id)
         assert reloaded.status == SessionStatus.COMPLETED
         assert reloaded.last_result is not None
@@ -1751,7 +1339,7 @@ class TestRouteEmittedSentinel:
         with patch(
             "cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon
         ):
-            flag_silently_idle_daemon_sessions(
+            _run_emitted_sentinel_router(
                 state,
                 now=now,
                 native_live={"fake-short-id"},
@@ -1897,7 +1485,7 @@ class TestRouteEmittedSentinel:
         with patch(
             "cw.reconcile._deps.get_native_daemon_client", return_value=mock_daemon
         ):
-            blocked, _salvage = flag_silently_idle_daemon_sessions(
+            _run_emitted_sentinel_router(
                 state,
                 now=now,
                 native_live={"fake-short-id"},
@@ -1905,7 +1493,6 @@ class TestRouteEmittedSentinel:
                 task_by_ticket={"1149-idle-later": task},
             )
 
-        assert blocked == []
         reloaded = next(s for s in load_state().sessions if s.id == "1149-idle-later")
         assert reloaded.status == SessionStatus.COMPLETED
         assert reloaded.completed_reason == CompletionReason.NORMAL

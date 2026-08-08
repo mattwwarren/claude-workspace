@@ -125,6 +125,12 @@ def test_reconcile_reverts_daemon_session_ticket_to_pending(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
+    # Hermetic gh: a missing gh binary would route the ticket gh_blocked
+    # instead of exercising the phantom revert under test.
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
     # Non-empty live set bypasses outage guard; "dead-ref" still isn't live.
     monkeypatch.setattr(
         "cw.reconcile.core._claude_agents_json",
@@ -171,6 +177,10 @@ def test_reconcile_clears_session_id_on_revert(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
 
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
     monkeypatch.setattr(
         "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
@@ -229,6 +239,10 @@ def test_reconcile_usage_limited_true_from_phantom_path(
     after_ts = started_at.timestamp() + 60
     os.utime(str(transcript), (after_ts, after_ts))
 
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
     # Non-empty live set bypasses outage guard; surface_ref not present → phantom.
     monkeypatch.setattr(
         "cw.reconcile.core._claude_agents_json",

@@ -635,19 +635,27 @@ Event string: `queue.session_reaped`
 
 **`reason` values (ReapReason enum):**
 
+Current producers (post-ADR-0014 — every one evidence-driven, never a timer):
+
 | Value | Trigger |
 |---|---|
 | `phantom_surface` | Daemon surface absent from roster (`_reconcile_locked` phantom sweep). |
-| `idle_stall` | Watchdog fired, no usage-limit message found; task reverted to PENDING for retry. |
-| `usage_limit_cutoff` | Watchdog fired; transcript contained a Claude usage-limit message; task reverted for retry. |
-| `retry_cap_parked` | Idle watchdog fired; retry cap reached; task set BLOCKED_ON_USER. |
-| `stalled_retry_cap_parked` | Stalled (wall-clock) sweep fired; `task.attempts` reached the per-tier stalled retry cap; task set BLOCKED_ON_USER instead of reverted. |
-| `wall_clock_budget` | Wall-clock budget exceeded (`revert_stalled_headless_sessions`); task reverted for retry. |
-| `finalize_blocked` | Stalled FINALIZE-stage session with commits beyond base but a confirmed absence of an open PR; parked (paused_status `finalize_blocked`) for salvage rather than reverted. |
+| `usage_limit_cutoff` | Transcript of a dead/phantom session contained a Claude usage-limit message; drives dispatch back-off. |
 | `terminal_sibling` | A PENDING row was parked/cancelled because the same (client, ticket) already has a COMPLETED or CANCELLED sibling row (#876). Queue-only disposition — surfaces via `session.reap_proposed` and the task's `disposition`, not via a session reap. |
-| `completed_backstop` | Backstop path (`revert_timed_out_tasks` / `revert_completed_silent_tasks`) found a TIMED_OUT or COMPLETED DAEMON session with a still-RUNNING queue task and no prior reap_reason. |
-| `salvage_completed` | Git-state HIGH path: committed branch, no open PR, post-review-clean; draft PR auto-created, task COMPLETED. |
-| `salvage_parked` | Git-state LOW path: committed branch, no open PR, not post-review-clean; task set BLOCKED_ON_USER for human salvage. |
+| `completed_backstop` | Backstop path (`revert_timed_out_tasks` / `revert_completed_silent_tasks`) found a TIMED_OUT (legacy) or COMPLETED DAEMON session with a still-RUNNING queue task and no prior reap_reason. |
+
+Historical-only values (no longer produced — removed with the process-kill
+timeouts, ADR-0014 — but still present in old event logs and persisted rows):
+
+| Value | Former trigger |
+|---|---|
+| `idle_stall` | Idle watchdog fired; task reverted to PENDING for retry. |
+| `retry_cap_parked` | Idle watchdog fired; retry cap reached; task set BLOCKED_ON_USER. |
+| `stalled_retry_cap_parked` | Wall-clock sweep fired at the per-tier stalled retry cap; task set BLOCKED_ON_USER. |
+| `wall_clock_budget` | Wall-clock budget exceeded; task reverted for retry. |
+| `finalize_blocked` | Stalled FINALIZE-stage session with commits but no PR; parked for rescue. |
+| `salvage_completed` | Git-state HIGH path: draft PR auto-created, task COMPLETED. |
+| `salvage_parked` | Git-state LOW path: task set BLOCKED_ON_USER for human salvage. |
 
 ---
 

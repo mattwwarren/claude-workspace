@@ -174,15 +174,13 @@ class TicketTask(BaseModel):
     # IMPL for self-heal (e.g. diff-cover gate failures). Bounded by
     # FINALIZE_REGRESS_CAP in auto_dev_result.py. See GitHub #770.
     regress_attempts: int = 0
-    # Per-ticket wall-clock budget override (seconds). When set, takes precedence
-    # over the per-tier default in OrchestratorConfig.headless_timeout_by_tier and
-    # the global HEADLESS_TIMEOUT_SECONDS fallback. Set via ``cw dev-queue add
-    # --timeout <s>``. None means "use tier or global default". See issue #265.
+    # DEPRECATED — inert since the process-kill-timeout removal. Formerly the
+    # per-ticket wall-clock budget override (#265); nothing consults it now.
+    # Kept only so persisted dev-queue rows that carry the field keep loading.
     headless_timeout_override: int | None = None
-    # Per-ticket idle-watchdog budget override (seconds). When set, takes precedence
-    # over the per-tier default in OrchestratorConfig.idle_watchdog_by_tier and
-    # the global IDLE_WATCHDOG_SECONDS fallback. None means "use tier or global
-    # default". See GitHub issue #326.
+    # DEPRECATED — inert since the process-kill-timeout removal. Formerly the
+    # per-ticket idle-watchdog budget override (#326); nothing consults it now.
+    # Kept only so persisted dev-queue rows that carry the field keep loading.
     idle_watchdog_override: int | None = None
     # Cumulative USD cost across all auto-dev attempts for this ticket.
     # Populated by _accumulate_task_cost in consume_completed_sessions.

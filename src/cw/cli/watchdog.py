@@ -14,13 +14,12 @@ def watchdog() -> None:
 
 @watchdog.command(name="tick")
 def watchdog_tick() -> None:
-    """Run one watchdog tick: escalation sweep, dispatch-liveness, cycling."""
+    """Run one watchdog tick: escalation sweep + dispatch-liveness check."""
     from cw.watchdog import run_tick
 
     result = run_tick()
     click.echo(f"escalated: {result.escalated_ticket_ids}")
     click.echo(f"dispatch_loop_dead: {result.dispatch_loop_dead}")
-    click.echo(f"cycling: {result.cycling_ticket_ids}")
 
 
 @watchdog.command(name="install")

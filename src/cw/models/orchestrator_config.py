@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import ClassVar, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -310,78 +310,6 @@ class OrchestratorConfig(BaseModel):
     # ConfigValidationError at load_orchestrator_config(), same as every
     # other typed dict field here).
     operator_github_login_by_repo: dict[str, str] = Field(default_factory=dict)
-    # Per-tier wall-clock budgets (seconds) for headless DAEMON sessions.
-    # Keyed by scope.tier from the auto-dev sentinel; unknown tiers fall back
-    # to HEADLESS_TIMEOUT_SECONDS. See GitHub issue #265.
-    headless_timeout_by_tier: dict[str, int] = Field(
-        default_factory=lambda: {"small": 1800, "large": 5400}
-    )
-    # Per-stage wall-clock budgets (seconds) for headless DAEMON sessions,
-    # consulted BEFORE headless_timeout_by_tier above. Keyed by Stage; a stage
-    # absent from this dict (e.g. HARDEN, a dormant stage) falls through to
-    # the per-tier default / global HEADLESS_TIMEOUT_SECONDS fallback
-    # unchanged. Seeds derived from empirical p99/max wall-clock baselines —
-    # finalize legitimately blocks on CI and was falsely parked under the
-    # small-tier 1800s floor during the RFC 0007 wave. See GitHub issue #1020.
-    # Why: PLAN (3600) and IMPL (4200) are numerically below the large-tier
-    # default (5400) this map overrides for those stages on a large-tier
-    # ticket. This is intentional, not a regression: each seed clears its
-    # own stage's *observed max* wall-clock duration (not the tier default)
-    # with a 25-39% margin, and the #976 liveness veto (stalled.py) still
-    # backstops any session actively producing output past budget. Full
-    # override (no max() composition with the tier map) was a deliberate
-    # choice — see ticket #1020 pre-flight resolution §3.
-    headless_timeout_by_stage: dict[Stage, int] = Field(
-        default_factory=lambda: {
-            Stage.PLAN: 3600,
-            Stage.IMPL: 4200,
-            Stage.REVIEW: 7200,
-            Stage.FINALIZE: 5400,
-        }
-    )
-    # Per-tier idle-watchdog budgets (seconds). Keyed by TicketTask.scope_hint;
-    # unknown tiers fall back to IDLE_WATCHDOG_SECONDS (900s). Large-tier
-    # sessions can legitimately stall longer on slow tests/mypy before emitting
-    # any sentinel. 60 min (was 30) shrinks the Mode-3 busy-in-tool-call
-    # false-idle window: a real 31-min FINALIZE gate run (pytest+mypy) left no
-    # margin and got parked mid-completion. See GitHub issues #326, #340, #918.
-    idle_watchdog_by_tier: dict[str, int] = Field(
-        default_factory=lambda: {"large": 3600}
-    )
-    # Per-stage idle-watchdog budgets (seconds), consulted BEFORE
-    # idle_watchdog_by_tier above. Keyed by Stage; a stage absent from this
-    # dict (default: every stage, including REVIEW) falls through to the
-    # per-tier default / global idle_watchdog_seconds / IDLE_WATCHDOG_SECONDS
-    # fallback unchanged. Default is intentionally EMPTY — unlike
-    # headless_timeout_by_stage (#1020's 739-leg empirical wall-clock
-    # baseline), no equivalent per-stage IDLE baseline exists yet; the
-    # operator populates this post-merge (e.g. review: 3600) once observed.
-    # FINALIZE deliberately has no entry here, even as an example: FINALIZE's
-    # idle disposition is owned by stalled.py (#1054), and a FINALIZE budget
-    # entry here would not be fully inert -- it would still shift the
-    # elapsed>=budget crossing at idle.py's _detect_idle_candidate_for_session
-    # gate, which runs before the FINALIZE ownership handoff in
-    # _classify_idle_threshold / _idle_advance_sentinel_candidate. Full
-    # override (no max() composition with the tier map) mirrors the
-    # deliberate choice documented on headless_timeout_by_stage above and at
-    # #1020 pre-flight §3. See GitHub issue #1061.
-    idle_watchdog_by_stage: dict[Stage, int] = Field(default_factory=dict)
-    # Global idle-watchdog budget (seconds) applied when a session has no
-    # per-ticket override and no resolvable per-tier budget (e.g. it stalled
-    # before Stage 1 set a scope_hint). ``None`` falls back to the
-    # IDLE_WATCHDOG_SECONDS constant (900s). Raise this so the watchdog does
-    # not reap workers still mid-plan/mid-review — 15 min is too short for a
-    # full plan+review pass. See the 2026-05-30 fanout-cascade RCA.
-    idle_watchdog_seconds: int | None = None
-    # Per-tier cap on idle-stall auto-retries before a headless worker is
-    # parked BLOCKED_ON_USER for the operator. Keyed by TicketTask.scope_hint;
-    # unknown tiers fall back to DEFAULT_IDLE_RETRY_CAP. See GitHub issue #384.
-    idle_retry_cap_by_tier: dict[str, int] = Field(default_factory=dict)
-    # Per-tier cap on wall-clock-budget (stalled stage) retries before a
-    # headless worker is parked BLOCKED_ON_USER instead of re-queued to PENDING.
-    # Keyed by TicketTask.scope_hint; unknown tiers fall back to
-    # DEFAULT_STALLED_RETRY_CAP. See GitHub issue #756.
-    stalled_retry_cap_by_tier: dict[str, int] = Field(default_factory=dict)
     # Absolute ceiling on task.attempts across ALL kill causes. When a task
     # reaches this count in _claim_next_pending, it is parked BLOCKED_ON_USER
     # instead of spawning again. Above the per-stage caps (#756), below the
@@ -410,34 +338,15 @@ class OrchestratorConfig(BaseModel):
     # pass rmtree's any bundle whose newest file is older than this. See
     # GitHub #1239.
     diagnostics_retention_hours: int = 24
-    # Number of consecutive failed idle-watchdog observations required before a
-    # session is dispositioned (reaped/parked/git-salvaged). 1 reproduces the
-    # pre-#545 single-observation behavior. See GitHub #545.
-    idle_confirm_observations: int = 2
     # Consecutive per-client freshness-gate-block count at which a
     # session.needs_attention (paused_status="freshness_gate_blocked") is
     # emitted exactly once (latch: no re-fire while still at/above threshold,
     # resets on the next non-stale tick). RFC 0007 §W2.
     freshness_block_attention_threshold: int = 5
-    # Consecutive per-session salvage-skip count at which a
-    # session.needs_attention (paused_status="salvage_skip_escalated") is
-    # emitted exactly once (same latch semantics as
-    # freshness_block_attention_threshold above). Closes #974.
-    salvage_skip_attention_threshold: int = 5
-    # Maximum consecutive post-budget liveness vetoes the stalled sweep will
-    # grant a single session before it lets the pending wall-clock-budget /
-    # retry-cap park proceed anyway (closes #1445). Deliberately small: this
-    # counts ONLY vetoes that fire *after* the session has already blown its
-    # wall-clock budget (the pre-budget short-circuit in
-    # _detect_stalled_candidates never reaches the veto), so 2 consecutive
-    # post-budget vetoes already reproduces the "would have parked two sweeps
-    # after budget exhaustion" arithmetic behind the 37-veto runaway that
-    # motivated this bound. Reset for free per episode via a fresh Session.
-    park_veto_cap: int = 2
     # Maximum consecutive sentinel-stage-mismatch vetoes the phantom sweep will
     # grant a single already_refused session before it lets the pending
     # CRASH_COMPLETE fall-through proceed anyway (closes #1449). Deliberately
-    # small, mirroring park_veto_cap: this counts ONLY vetoes that fire while the
+    # small: this counts ONLY vetoes that fire while the
     # transcript is still LIVE (staleness below TRANSCRIPT_LIVENESS_WINDOW_SECONDS)
     # on a session whose most recent tick refused a stage-mismatched sentinel, so
     # 2 consecutive live vetoes already reproduce the #1281 "would have crashed
@@ -467,8 +376,8 @@ class OrchestratorConfig(BaseModel):
     # pre-#554 self-healing behavior. See ADR-0006 invariant 4 and GitHub #554.
     reap_policy: ReapPolicy = ReapPolicy.SIGNAL_ONLY
     # Elapsed seconds before reconcile attempts to route an emitted-but-unrouted
-    # sentinel (signal_stop never fired). Shorter than the idle watchdog budget
-    # because an emitted sentinel is positive evidence the worker completed.
+    # sentinel (signal_stop never fired). A re-check delay, not a disposition
+    # timer: an emitted sentinel is positive evidence the worker completed.
     # See GitHub #578.
     sentinel_unrouted_check_seconds: int = 300
     # RFC 0004 Phase 2 — two-knob scheduler (#558)
@@ -755,6 +664,49 @@ class OrchestratorConfig(BaseModel):
                     "OrchestratorConfig: default_max_parallel is deprecated; "
                     "use default_ceiling instead"
                 )
+        return data
+
+    # Config keys removed with the process-kill timeouts. Stripped (with a
+    # one-time warning) rather than rejected so an operator's existing
+    # orchestrator.yaml keeps loading under extra="forbid" — a stale timeout
+    # knob must degrade to "no timeout", never to a config-load crash.
+    _REMOVED_TIMEOUT_KEYS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "headless_timeout_by_tier",
+            "headless_timeout_by_stage",
+            "idle_watchdog_by_tier",
+            "idle_watchdog_by_stage",
+            "idle_watchdog_seconds",
+            "idle_retry_cap_by_tier",
+            "stalled_retry_cap_by_tier",
+            "idle_confirm_observations",
+            "park_veto_cap",
+            "salvage_skip_attention_threshold",
+        }
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _strip_removed_timeout_fields(cls, data: object) -> object:
+        """Drop config keys for the removed process-kill timeouts (warn once).
+
+        The wall-clock budget and idle-watchdog machinery no longer exists;
+        these keys have no effect. Stripping keeps old configs loading; the
+        warning tells the operator the knob is gone so the config can be
+        cleaned up.
+        """
+        if not isinstance(data, dict):
+            return data
+        present = sorted(cls._REMOVED_TIMEOUT_KEYS & set(data))
+        for key in present:
+            data.pop(key)
+        if present:
+            logging.getLogger(__name__).warning(
+                "OrchestratorConfig: ignoring removed timeout setting(s) %s — "
+                "process-kill timeouts were removed; sessions are never "
+                "dispositioned on elapsed time",
+                present,
+            )
         return data
 
     @model_validator(mode="before")

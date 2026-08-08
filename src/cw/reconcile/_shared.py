@@ -48,7 +48,7 @@ from cw.dev_queue import (
     transition_task_status,
 )
 from cw.events import read_events, record_event
-from cw.exceptions import USAGE_LIMIT_RE, CwError, EmitValidationError
+from cw.exceptions import USAGE_LIMIT_RE, EmitValidationError
 from cw.models import (
     DEFAULT_LANE,
     DEFAULT_STAGE,
@@ -76,10 +76,8 @@ from cw.result import (
 )
 from cw.worktree import (
     reconcile_result_scope,
-    remove_worktree,
     resolve_scope_guard_default_branch,
     worktree_has_unsaved_work,
-    worktree_path_for,
 )
 
 if TYPE_CHECKING:
@@ -98,25 +96,6 @@ _log = logging.getLogger(__name__)
 # here (not in ``cw.dispatch``) to avoid a circular import — ``cw.dispatch``
 # imports :func:`reconcile` from this module.
 AUTO_DEV_LABEL_PREFIX = "auto-dev/"
-
-# Wall-clock budget for headless daemon sessions. Mirrors the constant in
-# cli.py signal_stop; cli.py imports this value so there is a single source
-# of truth. See GitHub issue #185.
-#
-# Bumped 30 → 60 min on 2026-05-25 after ticket #215 (tier=large, 11 files,
-# 626 lines) hit the 30-min cap mid-implementation. Per-ticket / per-tier
-# override mechanism tracked in #265.
-HEADLESS_TIMEOUT_SECONDS = 3600  # 60 minutes
-
-# Watchdog budget for DAEMON RUNNING sessions that have not yet emitted any
-# AUTO_DEV_RESULT sentinel. Per-tier overrides in
-# OrchestratorConfig.idle_watchdog_by_tier take precedence; per-ticket
-# TicketTask.idle_watchdog_override beats both. After this window, reconcile
-# flags the session as BLOCKED_ON_USER and fires a push notification.
-IDLE_WATCHDOG_SECONDS = 900  # 15 minutes
-
-DEFAULT_IDLE_RETRY_CAP = 2  # idle-stall auto-retries before parking (#384)
-DEFAULT_STALLED_RETRY_CAP = 2  # wall-clock-budget retries before parking (#756)
 
 # How recently a session's transcript must have been modified to be considered
 # actively making progress. If the newest .jsonl under the session's project
@@ -153,6 +132,13 @@ SUBAGENT_LIVENESS_WINDOW_SECONDS = 1800
 # Paused-status value written to SESSION_NEEDS_ATTENTION events for sessions
 # the watchdog flags (no sentinel ever emitted, daemon surface still live).
 _SILENTLY_IDLE_REASON = "silently_idle"
+# Paused-status written to SESSION_NEEDS_ATTENTION events by the liveness
+# sweep's operator distress signal: a live DAEMON session crossed the top
+# staleness bucket while still in the daemon roster, with no sentinel emitted
+# and no pending subagent at the transcript tail. Signal-only — the session
+# is left running (no daemon stop, no revert, no park). Replaces the class of
+# signal the removed process-kill timeouts used to provide as a side effect.
+_SESSION_UNRESPONSIVE_REASON = "session_unresponsive"
 _SALVAGE_SKIP_REASON = "park_marker_blocks_salvage"
 # Paused-status written to SESSION_NEEDS_ATTENTION events when an
 # `external`-counterparty session (reviewing a teammate's PR) reaches the
@@ -294,9 +280,6 @@ _LIVE_STATUSES: frozenset[SessionStatus] = frozenset(
         SessionStatus.IDLE,
     }
 )
-
-
-_SalvageCandidate = tuple[str, str | None, str, str, bool]
 
 
 class ProposedAction(StrEnum):
@@ -453,12 +436,6 @@ class ReconcileReport:
     ``usage_limited`` — True when any reaped session had
     cause=usage_limit_cutoff during this reconcile pass. Signals the
     dispatch loop to enter back-off mode.
-    ``salvaged_ticket_ids`` — ticket IDs auto-completed via the HIGH-path
-    git-state salvage (committed-but-no-PR reaped sessions). Populated by
-    :func:`salvage_committed_no_pr_sessions`. See GitHub issue #497.
-    ``rescued_ticket_ids`` — ticket IDs auto-completed via the finalize-blocked
-    rescue path (TIMED_OUT sessions whose PR creation previously failed).
-    Populated by :func:`rescue_finalize_blocked_sessions`. See GitHub #812 #816.
     """
 
     phantom_session_ids: list[str] = field(default_factory=list)
@@ -466,8 +443,6 @@ class ReconcileReport:
     reverted_ticket_ids: list[str] = field(default_factory=list)
     completed_ticket_ids: list[str] = field(default_factory=list)
     usage_limited: bool = False
-    salvaged_ticket_ids: list[str] = field(default_factory=list)
-    rescued_ticket_ids: list[str] = field(default_factory=list)
 
 
 def _claude_agents_json() -> list[dict[str, object]]:
@@ -650,54 +625,6 @@ def _backfill_claude_session_ids(
         _log.debug("Backfilled claude_session_id for %d session(s)", count)
         save_state(state)
     return count
-
-
-def resolve_headless_budget(
-    task: TicketTask | None,
-    session: Session | None,
-    config: OrchestratorConfig,
-) -> int:
-    """Return the wall-clock budget (seconds) for *session*.
-
-    Precedence (highest first):
-    1. task.headless_timeout_override — explicit per-ticket escape hatch.
-    1.5. config.headless_timeout_by_stage[task.stage] — per-stage default,
-         when task is not None and task.stage has an entry in the map.
-    2. session.last_result scope.tier — look up per-tier default in config.
-    2.5. task.scope_hint — fallback when last_result tier is unavailable (#314).
-    3. HEADLESS_TIMEOUT_SECONDS — global fallback (pre-Stage-1 or unknown tier).
-
-    *session* may be None when called from the dispatch path (pre-spawn,
-    no session object exists yet). In that case step 2 is skipped and
-    step 2.5 fires if task.scope_hint is set.
-    """
-    if task is not None and task.headless_timeout_override is not None:
-        return task.headless_timeout_override
-    if task is not None:
-        stage_budget = config.headless_timeout_by_stage.get(task.stage)
-        if stage_budget is not None:
-            return stage_budget
-    last_result = session.last_result if session is not None else None
-    if last_result is not None:
-        tier: str | None = None
-        try:
-            scope = last_result.get("scope")
-            if isinstance(scope, dict):
-                tier = scope.get("tier")
-        except (AttributeError, TypeError):
-            pass
-        if isinstance(tier, str):
-            return config.headless_timeout_by_tier.get(tier, HEADLESS_TIMEOUT_SECONDS)
-    # Step 2.5: last_result is None or had no extractable tier — try scope_hint.
-    # Fires for sessions that haven't yet emitted a sentinel (pre-Stage-1) and
-    # for sessions whose last result had no scope.tier. Fixes the dogfood reap
-    # incident where large-tier sessions fell back to the 60-min global default
-    # because their first spawn had no last_result (#314).
-    if task is not None and task.scope_hint is not None:
-        return config.headless_timeout_by_tier.get(
-            task.scope_hint, HEADLESS_TIMEOUT_SECONDS
-        )
-    return HEADLESS_TIMEOUT_SECONDS
 
 
 def _is_headless(session: Session) -> bool:
@@ -1689,75 +1616,6 @@ def _has_terminal_sentinel(session: Session) -> bool:
     return has_terminal_result(session.last_result)
 
 
-def resolve_idle_watchdog_budget(
-    task: TicketTask | None,
-    config: OrchestratorConfig,
-) -> int:
-    """Return the idle-watchdog budget (seconds) for a session's ticket.
-
-    Precedence (highest first):
-    1. task.idle_watchdog_override — explicit per-ticket escape hatch.
-    2. config.idle_watchdog_by_stage[task.stage] — per-stage default, when
-       task is not None and task.stage has an entry in the map.
-    3. task.scope_hint — look up per-tier default in config.
-    4. config.idle_watchdog_seconds — operator-tunable global default.
-    5. IDLE_WATCHDOG_SECONDS — hardcoded fallback.
-    """
-    global_default = (
-        IDLE_WATCHDOG_SECONDS
-        if config.idle_watchdog_seconds is None
-        else config.idle_watchdog_seconds
-    )
-    if task is None:
-        return global_default
-    if task.idle_watchdog_override is not None:
-        return task.idle_watchdog_override
-    stage_budget = config.idle_watchdog_by_stage.get(task.stage)
-    if stage_budget is not None:
-        return stage_budget
-    if task.scope_hint is not None:
-        tier_budget = config.idle_watchdog_by_tier.get(task.scope_hint)
-        if tier_budget is not None:
-            return tier_budget
-    return global_default
-
-
-def resolve_idle_retry_cap(
-    task: TicketTask | None,
-    config: OrchestratorConfig,
-) -> int:
-    """Return the idle-stall auto-retry cap for a session's ticket.
-
-    Precedence: task.scope_hint per-tier override, else the global default.
-    See GitHub issue #384.
-    """
-    if task is None:
-        return DEFAULT_IDLE_RETRY_CAP
-    if task.scope_hint is not None:
-        tier_cap = config.idle_retry_cap_by_tier.get(task.scope_hint)
-        if tier_cap is not None:
-            return tier_cap
-    return DEFAULT_IDLE_RETRY_CAP
-
-
-def resolve_stalled_retry_cap(
-    task: TicketTask | None,
-    config: OrchestratorConfig,
-) -> int:
-    """Return the wall-clock-budget stalled-stage auto-retry cap for a ticket.
-
-    Precedence: task.scope_hint per-tier override, else the global default.
-    See GitHub issue #756.
-    """
-    if task is None:
-        return DEFAULT_STALLED_RETRY_CAP
-    if task.scope_hint is not None:
-        tier_cap = config.stalled_retry_cap_by_tier.get(task.scope_hint)
-        if tier_cap is not None:
-            return tier_cap
-    return DEFAULT_STALLED_RETRY_CAP
-
-
 def resolve_reap_policy(
     candidate: ReapCandidate,
     clients: dict[str, ClientConfig],
@@ -1781,96 +1639,6 @@ def resolve_reap_policy(
             if lane_cfg.name == candidate.lane and lane_cfg.reap_policy is not None:
                 return lane_cfg.reap_policy
     return global_cfg.reap_policy
-
-
-def _cleanup_timed_out_worktree(
-    session: Session,
-    ticket_id: str | None = None,
-) -> None:
-    """Remove a timed-out session's worktree so the re-dispatch starts clean.
-
-    A timed-out DAEMON session has its ``TicketTask`` reverted to PENDING for
-    re-dispatch. If its worktree is left on disk, ``create_worktree`` would
-    reuse it (or, post-#404, refuse and spin) — either way feeding the retry a
-    prior run's branch and commits. Removing it here means the next claim builds
-    a fresh worktree from the current default branch. See GitHub issue #404.
-
-    Dirty-check guard (#425): if the worktree contains uncommitted changes or
-    unpushed commits the removal is SKIPPED.  Instead the owning task is flipped
-    from PENDING back to BLOCKED_ON_USER so the operator can inspect the tree
-    before it is removed.  *ticket_id* is required for the BLOCKED_ON_USER flip;
-    when omitted the skip is logged but the queue is not mutated.
-
-    Best-effort: every failure is logged and swallowed. Worktree cleanup must
-    never abort the reconcile sweep — a missing/renamed client, an
-    already-gone directory, or a git error is non-fatal.
-    """
-    if not session.branch:
-        return
-    try:
-        client = get_client(session.client)
-        if worktree_has_unsaved_work(client, session.branch):
-            wt_path = str(worktree_path_for(client, session.branch))
-            _log.warning(
-                "worktree_cleanup_skip_dirty: %s/%s has unsaved work"
-                " — leaving worktree at %s for operator inspection"
-                " (ticket=%s)",
-                session.client,
-                session.branch,
-                wt_path,
-                ticket_id,
-            )
-            parked = False
-            if ticket_id:
-                with dev_queue_lock():
-                    store = load_dev_queue()
-                    for task in store.tasks:
-                        if (
-                            task.ticket_id == ticket_id
-                            and task.status == QueueItemStatus.PENDING
-                        ):
-                            transition_task_status(
-                                task,
-                                QueueItemStatus.BLOCKED_ON_USER,
-                                disposition="dirty_worktree",
-                            )
-                            save_dev_queue(store)
-                            parked = True
-                            break
-            # Emitted after dev_queue_lock() releases (#1257): record_event
-            # acquires _inbox_lock, so holding dev_queue_lock while acquiring
-            # it risks deadlock with a concurrent process taking the two locks
-            # in the opposite order (same rationale as this function's
-            # sibling in reconcile/tasks.py, #765).
-            if parked:
-                record_event(
-                    OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-                    {
-                        "session_id": session.id,
-                        "session_name": session.name,
-                        "client": session.client,
-                        "ticket_id": ticket_id,
-                        "claude_session_id": session.claude_session_id,
-                        "paused_status": _DIRTY_WORKTREE_REASON,
-                        "breadcrumbs": wt_path,
-                        "crashed": False,
-                        "lane": session.lane,
-                    },
-                    correlation_id=ticket_id,
-                )
-            return
-        remove_worktree(client, session.branch, force=True)
-    except (CwError, OSError) as exc:
-        _log.warning(
-            "worktree_cleanup_skip: %s/%s: %s",
-            session.client,
-            session.branch,
-            exc,
-        )
-    else:
-        # Audit breadcrumb for a destructive (force=True) removal — a skip is
-        # logged above, so a successful reap leaves a matching record (#404).
-        _log.info("worktree_cleanup_ok: %s/%s", session.client, session.branch)
 
 
 def feature_branch_key(

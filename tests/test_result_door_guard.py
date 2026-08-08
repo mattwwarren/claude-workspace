@@ -51,11 +51,6 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
             "sentinel advance; a real terminal sentinel routed via "
             "_apply_sentinel_to_task, carries 'status'"
         ),
-        'session.last_result = {"paused_status": _SILENTLY_IDLE_REASON}': (
-            "idle/_mutations.py (_apply_idle_state_mutations) — park marker, "
-            "silently-idle; no 'status' key so has_terminal_result() stays "
-            "False"
-        ),
     },
     "reconcile/phantom/_mutations.py": {
         (
@@ -82,46 +77,6 @@ _ALLOWLIST: dict[str, dict[str, str]] = {
             "phantom/_mutations.py (_apply_phantom_routed_mutations) — "
             "routed-sentinel advance; a real terminal sentinel routed via "
             "_apply_sentinel_to_task, carries 'status'"
-        ),
-    },
-    "reconcile/salvage.py": {
-        (
-            "s.last_result = {\n"
-            "**s.last_result,\n"
-            '"paused_status": _NEEDS_SALVAGE_REASON,\n'
-            "}"
-        ): (
-            "salvage.py:306 — park marker, needs-salvage (merge branch: "
-            "preserves existing last_result keys); no 'status' key added"
-        ),
-        's.last_result = {"paused_status": _NEEDS_SALVAGE_REASON}': (
-            "salvage.py:311 — park marker, needs-salvage (fresh branch: no "
-            "pre-existing dict); no 'status' key"
-        ),
-        's.last_result = {**s.last_result, "rescue_attempted": True}': (
-            "salvage.py:420 — rescue bookkeeping flag (merge branch: adds a "
-            "flag onto an existing dict, never touches 'status')"
-        ),
-        's.last_result = {"rescue_attempted": True}': (
-            "salvage.py:422 — rescue bookkeeping flag (fresh branch: no "
-            "pre-existing dict); still no 'status' key"
-        ),
-    },
-    "reconcile/stalled/_mutations.py": {
-        (
-            "session.last_result = {\n"
-            '"paused_status": _FINALIZE_BLOCKED_REASON,\n'
-            '"branch": candidate.branch,\n'
-            "}"
-        ): (
-            "stalled/_mutations.py:133 — park marker, finalize-blocked "
-            "(carries the branch name for rescue_finalize_blocked_sessions); "
-            "no 'status' key"
-        ),
-        'session.last_result = candidate.routed_sentinel.model_dump(mode="json")': (
-            "stalled/_mutations.py:196 — routed-sentinel advance; a real "
-            "terminal sentinel routed via _apply_sentinel_to_task, carries "
-            "'status'"
         ),
     },
     "dev_queue/requeue.py": {

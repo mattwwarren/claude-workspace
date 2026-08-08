@@ -45,11 +45,13 @@ if TYPE_CHECKING:
 CLAUDE_PROJECTS: Path = Path.home() / ".claude/projects"
 CW_STATE: Path = Path.home() / ".local/share/cw/sessions.json"
 
-# Thresholds — absolute (tier-agnostic). The contract enforces a 60-min hard
-# ceiling via HEADLESS_TIMEOUT_SECONDS; the ladder is calibrated against that.
+# Thresholds — absolute (tier-agnostic). Purely advisory: since the
+# process-kill-timeout removal nothing in cw enforces a wall-clock ceiling,
+# so these ages recommend operator attention (peek/stop is the OPERATOR's
+# call), they no longer anticipate an automatic kill.
 WAIT_AGE_MIN: int = 30  # below this, almost always healthy
 PEEK_AGE_MIN: int = 45  # above this, peek even if active
-STOP_AGE_MIN: int = 55  # approaching timeout — stop or hand off
+STOP_AGE_MIN: int = 55  # long-running — worth an operator look/decision
 IDLE_PEEK_MIN: int = 7  # idle this long with no PR → check for stall
 IDLE_STALL_MIN: int = 15  # idle this long → likely stuck
 IDLE_POST_PR_MIN: int = 5  # idle this long after PR shipped → stuck in stage5
