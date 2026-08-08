@@ -6578,6 +6578,7 @@ class TestCodexSpawnDoesNotBlockDispatch:
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
         monkeypatch: pytest.MonkeyPatch,
+        mock_native_daemon: FakeNativeDaemonClient,
     ) -> None:
         """Acceptance item 1: both clients spawn in one tick, codex still ACTIVE."""
         ws_a = make_git_repo("workspace/codex-block-a")
@@ -6608,10 +6609,8 @@ class TestCodexSpawnDoesNotBlockDispatch:
             tick_interval_seconds=30,
             per_client_max_parallel={"client-a": 1, "client-b": 1},
         )
-        daemon = FakeNativeDaemonClient()
-
         try:
-            result = dispatch_tick(config, native_daemon=daemon)
+            result = dispatch_tick(config, native_daemon=mock_native_daemon)
 
             # The codex review is genuinely in flight, not already finished.
             assert blocked_review.entered.wait(timeout=10.0)
@@ -6620,7 +6619,7 @@ class TestCodexSpawnDoesNotBlockDispatch:
             assert result.spawned == 2
             # client-b's task went to the daemon, i.e. the tick was never
             # parked behind client-a's codex subprocess.
-            assert len(daemon.spawn_calls) == 1
+            assert len(mock_native_daemon.spawn_calls) == 1
 
             state = load_state()
             codex_session = next(s for s in state.sessions if s.client == "client-a")
@@ -6639,6 +6638,7 @@ class TestCodexSpawnDoesNotBlockDispatch:
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
         monkeypatch: pytest.MonkeyPatch,
+        mock_native_daemon: FakeNativeDaemonClient,
     ) -> None:
         """R7(b): the loop's shutdown path bounds the join and reports the count."""
         ws_a = make_git_repo("workspace/codex-join-a")
@@ -6675,7 +6675,7 @@ class TestCodexSpawnDoesNotBlockDispatch:
         monkeypatch.setattr("cw.dispatch.loop.record_event", capture_event)
 
         try:
-            run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
+            run_dispatch_loop(once=True, native_daemon=mock_native_daemon)
 
             assert blocked_review.entered.wait(timeout=10.0)
             assert len(captured) == 1
@@ -6689,6 +6689,7 @@ class TestCodexSpawnDoesNotBlockDispatch:
         tmp_dispatch_dirs: Path,
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
+        mock_native_daemon: FakeNativeDaemonClient,
     ) -> None:
         """R7(c): an ACTIVE codex session at boot is parked before the first tick.
 
@@ -6727,7 +6728,7 @@ class TestCodexSpawnDoesNotBlockDispatch:
             )
         )
 
-        run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
+        run_dispatch_loop(once=True, native_daemon=mock_native_daemon)
 
         task = next(t for t in load_dev_queue().tasks if t.ticket_id == "A-3")
         assert task.status is QueueItemStatus.BLOCKED_ON_USER
