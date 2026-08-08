@@ -45,6 +45,9 @@ Severity = Literal["MUST_FIX", "SHOULD_FIX", "NIT", "PRINCIPLE"]
 Disposition = Literal["fixed", "rejected", "deferred"]
 ReviewerHealthStatus = Literal["ok", "degraded", "failed"]
 Confidence = Literal["HIGH", "MEDIUM", "LOW"]
+# The filesystem-capability mode reviewers actually ran under (#1709); see
+# ReviewVerdict.capability_mode.
+CapabilityMode = Literal["capable", "degraded"]
 # The six reasons a finding can be rejected outright (used by
 # :attr:`RejectedFinding.reason` and :func:`_classify_finding`'s return type).
 # Split from the escalation-strip reason (R6): a stripped escalation is a
@@ -337,7 +340,7 @@ class ReviewVerdict(BaseModel):
     agents_run: list[ReviewerRunRecord] = Field(default_factory=list)
     review: Review
     stripped_escalations: list[StrippedEscalation] = Field(default_factory=list)
-    capability_mode: str | None = None
+    capability_mode: CapabilityMode | None = None
     capability_reason: str | None = None
 
 

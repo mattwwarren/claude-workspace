@@ -34,6 +34,7 @@ import subprocess
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, NamedTuple
 
+from cw.atomic import atomic_write_text
 from cw.codex_review._const import _CODEX_VERSION_RE, _is_spawn_error
 from cw.config import diagnostics_dir, state_dir
 
@@ -301,7 +302,7 @@ def _write_cached_capability(capability: _CodexFilesystemCapability) -> None:
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        atomic_write_text(path, json.dumps(payload, indent=2))
     except OSError:
         _log.warning("codex capability cache write failed: %s", path)
 
