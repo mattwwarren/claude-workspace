@@ -25,7 +25,6 @@ class TestWatchdogTick:
             return_value=WatchdogTickResult(
                 escalated_ticket_ids=["GEN-1"],
                 dispatch_loop_dead=False,
-                cycling_ticket_ids=[],
             )
         )
         monkeypatch.setattr("cw.watchdog.run_tick", mock_run_tick)
@@ -36,6 +35,9 @@ class TestWatchdogTick:
         mock_run_tick.assert_called_once_with()
         assert "GEN-1" in result.output
         assert "dispatch_loop_dead: False" in result.output
+        # The park-marker-cycling check is gone with the process-kill
+        # timeouts — the tick output must no longer advertise it.
+        assert "cycling" not in result.output
 
     def test_reports_dispatch_dead(
         self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
@@ -46,7 +48,6 @@ class TestWatchdogTick:
                 return_value=WatchdogTickResult(
                     escalated_ticket_ids=[],
                     dispatch_loop_dead=True,
-                    cycling_ticket_ids=["GEN-2"],
                 )
             ),
         )
@@ -55,7 +56,6 @@ class TestWatchdogTick:
 
         assert result.exit_code == 0
         assert "dispatch_loop_dead: True" in result.output
-        assert "GEN-2" in result.output
 
 
 class TestWatchdogInstall:

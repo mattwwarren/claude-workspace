@@ -175,56 +175,28 @@ class TestDispatchLivenessCheck:
         assert result.dispatch_loop_dead is False
 
 
-class TestParkMarkerCyclingCheck:
-    def test_cycling_ticket_detected_and_notified(
+class TestParkedMarkerSessionLeftAlone:
+    """The park-marker-cycling check was removed with the process-kill
+    timeouts: nothing increments ``consecutive_salvage_skips`` anymore, so a
+    parked-marker session must produce no watchdog detection at all."""
+
+    def test_park_marker_session_produces_no_detection(
         self, tmp_config_dir: Path, mock_desktop_notification: MagicMock
     ) -> None:
         task = _make_task(disposition=None)
         session = _make_session(
             last_result={"paused_status": "silently_idle"},
-            consecutive_salvage_skips=5,
+            consecutive_salvage_skips=10,
         )
-        save_dev_queue(DevQueueStore(tasks=[task]))
-        save_state(CwState(sessions=[session]))
-
-        result = run_tick(
-            now=_NOW, config=OrchestratorConfig(salvage_skip_attention_threshold=5)
-        )
-
-        assert result.cycling_ticket_ids == ["GEN-1"]
-        assert mock_desktop_notification.call_count == 1
-        log_path = state_dir() / "watchdog.log"
-        lines = log_path.read_text().splitlines()
-        assert any(json.loads(line)["check"] == "park_marker_cycling" for line in lines)
-
-    def test_below_threshold_not_flagged(
-        self, tmp_config_dir: Path, mock_desktop_notification: MagicMock
-    ) -> None:
-        task = _make_task(disposition=None)
-        session = _make_session(
-            last_result={"paused_status": "silently_idle"},
-            consecutive_salvage_skips=1,
-        )
-        save_dev_queue(DevQueueStore(tasks=[task]))
-        save_state(CwState(sessions=[session]))
-
-        result = run_tick(
-            now=_NOW, config=OrchestratorConfig(salvage_skip_attention_threshold=5)
-        )
-
-        assert result.cycling_ticket_ids == []
-
-    def test_no_park_marker_not_flagged(
-        self, tmp_config_dir: Path, mock_desktop_notification: MagicMock
-    ) -> None:
-        task = _make_task(disposition=None)
-        session = _make_session(last_result=None, consecutive_salvage_skips=10)
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[session]))
 
         result = run_tick(now=_NOW)
 
-        assert result.cycling_ticket_ids == []
+        assert result.escalated_ticket_ids == []
+        assert result.dispatch_loop_dead is False
+        mock_desktop_notification.assert_not_called()
+        assert not (state_dir() / "watchdog.log").exists()
 
 
 class TestLogAppendOnlyOnDetection:
