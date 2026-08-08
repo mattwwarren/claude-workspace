@@ -30,6 +30,7 @@ from cw.codex_review import (
     run_review,
     synthesize_codex_review_result,
 )
+from cw.codex_review._capability import _PROBE_ARGV
 from cw.codex_runner import CodexRunResult
 from cw.executor_diagnostics import diagnostics_bundle_dir
 from cw.local_runner import make_blocked
@@ -951,7 +952,11 @@ class TestFixLoopDisabledGate:
         assert loop_runner.fix_calls == 0
         # One review pass worth of per-role calls (however many roles
         # run_review selects) — no re-review, since no fix cycle ran.
-        assert loop_runner.review_calls == plain_runner.review_calls
+        # +1 for the #1709 filesystem-capability probe: loop_runner runs first
+        # on a cold per-test cache and pays the probe; plain_runner's later call
+        # is a warm cache hit. The probe's argv has no "workspace-write", so
+        # _FixLoopRunner books it as a review call.
+        assert loop_runner.review_calls == plain_runner.review_calls + 1
         assert loop_result.review.fix_cycles_used == 0
         # No commits landed — the disabled gate never invoked the fix loop.
         assert _head(worktree) == head_before
@@ -1378,3 +1383,27 @@ class TestFixLoopCarriesAuditMetrics:
         assert verdict is not None
         assert verdict.agents_run
         assert all(r.thread_id == "<THREAD_ID>" for r in verdict.agents_run)
+
+
+# ---------------------------------------------------------------------------
+# Filesystem-capability probe is spent once per invocation (#1709)
+# ---------------------------------------------------------------------------
+
+
+class TestCapabilityProbeIsCachedAcrossCycles:
+    """The probe is a real ``codex exec`` round-trip, so a fix loop that
+    re-prepares a review pass every cycle must not pay for it every cycle."""
+
+    def test_probe_runs_exactly_once_across_a_two_cycle_loop(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-probe-once")
+        runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC], [_editor()])
+        out, _verdict = _run_loop(runner, worktree, session_id="s-probe-once")
+
+        assert out.status == "stage_complete"
+        # Cycle 0's review pass plus _rereview's per-cycle pass both call
+        # _prepare_review_pass; only the first misses the cache.
+        assert runner.fix_calls == 1
+        probe_calls = [c for c in runner.calls if c["argv"] == list(_PROBE_ARGV)]
+        assert len(probe_calls) == 1

@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.auto_dev_result import Review
+    from cw.codex_review._capability import _CodexFilesystemCapability
     from cw.models import TicketTask
     from cw.review_findings import (
         CapturedDiff,
@@ -91,6 +92,26 @@ def _derive_health(documents: list[ReviewerFindingsDocument]) -> Health:
     )
 
 
+def _with_capability(
+    verdict: ReviewVerdict, capability: _CodexFilesystemCapability | None
+) -> ReviewVerdict:
+    """Return *verdict* with the probed capability mode recorded on it (#1709).
+
+    ``consolidate_verdict`` is executor-neutral and knows nothing about codex
+    sandboxes, so the two fields are stamped on afterwards rather than threaded
+    through it. ``None`` in, unchanged verdict out — a caller that never probed
+    must not be reported as having run in some mode.
+    """
+    if capability is None:
+        return verdict
+    return verdict.model_copy(
+        update={
+            "capability_mode": "capable" if capability.capable else "degraded",
+            "capability_reason": capability.reason,
+        }
+    )
+
+
 def synthesize_codex_review_result(
     *,
     task: TicketTask,
@@ -103,6 +124,7 @@ def synthesize_codex_review_result(
     default_branch: str,
     fix_loop_enabled: bool,
     metrics_by_role: dict[str, ReviewerRunMetrics] | None = None,
+    capability: _CodexFilesystemCapability | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Map consolidated review documents to a typed AutoDevResult.
 
@@ -128,6 +150,13 @@ def synthesize_codex_review_result(
     is built there, so the telemetry has nowhere to attach. Nothing in the
     disposition table or :func:`_derive_health` reads it (R2).
 
+    ``capability`` (#1709) is the probed filesystem-capability verdict the
+    reviewer prompts were built against. Same shape and same non-influence as
+    ``metrics_by_role``: recorded onto the ``ReviewVerdict``, never read by the
+    disposition table or :func:`_derive_health`. It is optional so callers with
+    no such concept (and the direct-synthesis tests) record nothing rather than
+    a mode nobody probed.
+
     ``fix_loop_enabled`` (#1705) is the caller's own already-known fix-loop
     state, threaded only as far as :func:`render_verdict_comment` on the
     blocking branch — it discriminates a fix-loop-disabled single pass from a
@@ -146,13 +175,16 @@ def synthesize_codex_review_result(
             stage_reached=STAGE3_REVIEW,
         )
         return result, None
-    verdict = consolidate_verdict(
-        documents,
-        diff,
-        reviewed_sha,
-        worktree=worktree,
-        failed_reviewers=failures,
-        metrics_by_role=metrics_by_role,
+    verdict = _with_capability(
+        consolidate_verdict(
+            documents,
+            diff,
+            reviewed_sha,
+            worktree=worktree,
+            failed_reviewers=failures,
+            metrics_by_role=metrics_by_role,
+        ),
+        capability,
     )
     if verdict.blocking:
         blocked = make_blocked(
