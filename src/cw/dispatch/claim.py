@@ -39,9 +39,6 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
 )
-from cw.reconcile import (
-    resolve_headless_budget,
-)
 from cw.worktree import (
     check_not_main_checkout,
     create_worktree,
@@ -622,7 +619,6 @@ def _spawn_claimed_task(
     task: TicketTask,
     client: ClientConfig,
     *,
-    config: OrchestratorConfig,
     resolved_native_daemon: NativeDaemonClient,
     parent: str | None,
     emit: Callable[[str], None] | None,
@@ -713,13 +709,17 @@ def _spawn_claimed_task(
         _invalidate_stale_context_json(task, client, worktree_path)
 
         executor = resolve_executor(task, client, native_daemon=resolved_native_daemon)
+        # wall_clock_budget_seconds is always None since the process-kill-
+        # timeout removal: no executor is handed a kill deadline. The codex
+        # backend treats None as unlimited (no proc.kill on a timer), and the
+        # value written into cw-context.json is informational only.
         session_id = executor.spawn(
             stage=task.stage,
             task=task,
             worktree=worktree_path,
             client=client,
             parent=parent,
-            wall_clock_budget_seconds=resolve_headless_budget(task, None, config),
+            wall_clock_budget_seconds=None,
         )
 
         # Stamp session_id on the queued task so the completion

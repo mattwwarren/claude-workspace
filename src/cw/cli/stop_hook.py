@@ -20,16 +20,9 @@ from cw.cli._base import handle_errors, main
 from cw.cli._hook_io import _read_cw_context, _read_hook_stdin_json
 from cw.cli._sentinels import _parse_sentinel_from_transcript
 from cw.config import (
-    load_orchestrator_config,
     load_state,
     save_state,
     sessions_lock,
-)
-from cw.dev_queue import (
-    dev_queue_lock,
-    load_dev_queue,
-    save_dev_queue,
-    transition_task_status,
 )
 from cw.events import record_event
 from cw.exceptions import EmitSessionNotFoundError, EmitValidationError
@@ -37,7 +30,6 @@ from cw.models import (
     CompletionReason,
     LastResultSource,
     OrchestratorEventType,
-    QueueItemStatus,
     SessionOrigin,
     SessionStatus,
 )
@@ -45,14 +37,13 @@ from cw.native_daemon import get_native_daemon_client
 from cw.reconcile import (
     _apply_sentinel_to_task,
     _has_terminal_sentinel,
-    resolve_headless_budget,
 )
 from cw.result import emit_result_locked
 from cw.worktree import reconcile_result_scope, resolve_scope_guard_default_branch
 
 if TYPE_CHECKING:
     from cw.auto_dev_result import BlockedResult
-    from cw.models import CwState, Session, TicketTask
+    from cw.models import CwState, Session
 
 logger = logging.getLogger(__name__)
 
@@ -162,48 +153,19 @@ def _reconstruct_emitted_sentinel(session: Session) -> AutoDevResult | None:
         return None
 
 
-def _handle_headless_no_sentinel(
-    state: CwState,
-    session: Session,
-    *,
-    now: datetime,
-    claude_session_id: object,
-    context: dict[str, object],
-    ticket_id_value: object,
-    hook_payload: dict[str, object],
-) -> bool:
-    """Resolve a sentinel-less headless Stop hook: defer or time out.
+def _handle_headless_no_sentinel() -> bool:
+    """Resolve a sentinel-less headless Stop hook: always defer.
 
-    Under the resolved headless budget the call defers (returns True without
-    mutating state) so a later Stop hook or reconcile can retry. Over budget
-    it records a TIMED_OUT transition via :func:`_record_headless_timeout`.
-    Returns True in both cases — the caller must stop processing.
+    Historically this checked the resolved headless wall-clock budget and, on
+    expiry, marked the session TIMED_OUT, reverted its task, and stopped the
+    daemon — killing whatever the worker was mid-way through. That
+    process-kill timeout is removed: a Stop hook with no sentinel simply
+    defers, unconditionally. A later Stop hook can still land the sentinel; a
+    genuinely dead worker is caught by the phantom sweep (roster absence —
+    evidence, not a timer); a quiet-but-live worker surfaces to the operator
+    via the liveness distress signal. Returns True — the caller must stop
+    processing.
     """
-    elapsed = (now - session.started_at).total_seconds()
-    headless_config = load_orchestrator_config()
-    stop_task: TicketTask | None = None
-    if isinstance(ticket_id_value, str):
-        stop_store = load_dev_queue()
-        stop_task = next(
-            (t for t in stop_store.tasks if t.ticket_id == ticket_id_value),
-            None,
-        )
-    budget = resolve_headless_budget(stop_task, session, headless_config)
-    if elapsed < budget:
-        # Under budget — defer. Another Stop hook turn will fire, or
-        # reconcile will eventually catch a phantom and CRASH it.
-        return True
-    # Budget exceeded without sentinel → TIMED_OUT (loud, retry-eligible).
-    _record_headless_timeout(
-        state,
-        session,
-        now=now,
-        elapsed=elapsed,
-        claude_session_id=claude_session_id,
-        context=context,
-        ticket_id_value=ticket_id_value,
-        hook_payload=hook_payload,
-    )
     return True
 
 
@@ -258,8 +220,6 @@ def _resolve_and_complete_headless_session(
     state: CwState,
     session: Session,
     *,
-    hook_payload: dict[str, object],
-    context: dict[str, object],
     cwd_value: str,
     claude_session_id: object,
     ticket_id_value: object,
@@ -273,8 +233,9 @@ def _resolve_and_complete_headless_session(
     session mutation + ``save_state``.
 
     Returns a ``_HeadlessResolution`` with ``rescued=None`` when the caller
-    must bail without any further action: either no sentinel was found under
-    budget (``_handle_headless_no_sentinel`` already ran its own transition),
+    must bail without any further action: either no sentinel was found
+    (``_handle_headless_no_sentinel`` defers unconditionally — there is no
+    wall-clock budget anymore),
     or the shared staged-advance authority refused the route on a stage
     mismatch (GitHub #1031, the #986 incident — extends #1019's phantom-path
     guard to the Stop-hook path) or a #1189 raced-to-terminal lookup miss. A
@@ -302,15 +263,7 @@ def _resolve_and_complete_headless_session(
             session, cwd_value, claude_session_id
         )
         if parsed_sentinel is None:
-            _handle_headless_no_sentinel(
-                state,
-                session,
-                now=now,
-                claude_session_id=claude_session_id,
-                context=context,
-                ticket_id_value=ticket_id_value,
-                hook_payload=hook_payload,
-            )
+            _handle_headless_no_sentinel()
             return _HeadlessResolution(rescued=None, landed_terminal=False)
 
     # Issue #251: directly update the dev-queue task *before* marking the
@@ -374,59 +327,6 @@ def _handle_user_origin_stop(
         session.claude_session_id = claude_session_id
     save_state(state)
     return True
-
-
-def _record_headless_timeout(
-    state: CwState,
-    session: Session,
-    *,
-    now: datetime,
-    elapsed: float,
-    claude_session_id: object,
-    context: dict[str, object],
-    ticket_id_value: object,
-    hook_payload: dict[str, object],
-) -> None:
-    """Mark a budget-exceeded headless session TIMED_OUT and revert its task.
-
-    Transitions *session* to TIMED_OUT, persists state, emits
-    ``SESSION_TIMED_OUT``, reverts the owning RUNNING TicketTask to PENDING so
-    the dispatch loop can retry, and best-effort stops the daemon worker.
-    See issue #176.
-    """
-    last_msg = hook_payload.get("last_assistant_message", "")
-    excerpt = str(last_msg)[:500] if last_msg else ""
-    session.status = SessionStatus.TIMED_OUT
-    session.completed_at = now
-    session.completed_reason = CompletionReason.TIMED_OUT
-    if isinstance(claude_session_id, str):
-        session.claude_session_id = claude_session_id
-    save_state(state)
-    timed_out_payload: dict[str, object] = {
-        "session_id": session.id,
-        "session_name": session.name,
-        "client": context.get("client"),
-        "ticket_id": ticket_id_value,
-        "claude_session_id": claude_session_id,
-        "elapsed_seconds": elapsed,
-        "last_assistant_message_excerpt": excerpt,
-    }
-    record_event(OrchestratorEventType.SESSION_TIMED_OUT, timed_out_payload)
-    # Revert the owning TicketTask from RUNNING → PENDING so the
-    # dispatch loop can retry this ticket on the next tick.
-    with dev_queue_lock():
-        store = load_dev_queue()
-        for task in store.tasks:
-            if (
-                task.ticket_id == ticket_id_value
-                and task.status == QueueItemStatus.RUNNING
-            ):
-                transition_task_status(task, QueueItemStatus.PENDING)
-                task.session_id = None
-                break
-        save_dev_queue(store)
-    if session.surface_ref is not None:
-        get_native_daemon_client().stop(session.surface_ref)
 
 
 @main.command(name="signal-stop")
@@ -563,8 +463,6 @@ def signal_stop() -> None:
         resolution = _resolve_and_complete_headless_session(
             state,
             session,
-            hook_payload=hook_payload,
-            context=context,
             cwd_value=cwd_value,
             claude_session_id=claude_session_id,
             ticket_id_value=ticket_id_value,

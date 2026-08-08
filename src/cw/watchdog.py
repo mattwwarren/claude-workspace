@@ -6,7 +6,7 @@ a launchd agent on macOS) so an operator gets paged even when the daemon
 dispatch loop itself has stalled or was never started — the loop being dead
 is exactly one of the conditions this module exists to detect.
 
-``run_tick`` performs three checks, in order:
+``run_tick`` performs two checks, in order:
 
 1. **Parked-row ages** — calls :func:`cw.reconcile.escalation.run_escalation_sweep`
    directly (it is explicitly standalone-callable, no ``sessions_lock``
@@ -17,13 +17,9 @@ is exactly one of the conditions this module exists to detect.
    evidence (zero ``dispatch.tick`` events ever) is treated as "nothing to
    alarm on" rather than "dead" — a machine that has simply never run
    ``cw dev-queue dispatch`` is not a failure.
-3. **Park-marker cycling** — a BLOCKED_ON_USER row behind a session whose
-   park marker (``silently_idle``/``needs_salvage``) has persisted for
-   ``consecutive_salvage_skips >= salvage_skip_attention_threshold`` ticks;
-   this is the same threshold the stalled-sweep's own
-   ``session.needs_attention(salvage_skip_escalated)`` event uses, read here
-   independently so it still fires even when the dispatch loop producing
-   that event is the very thing that's down.
+(A third check — park-marker cycling — was removed along with the
+process-kill timeouts: nothing increments ``consecutive_salvage_skips``
+anymore, so the counter it watched can no longer move.)
 
 Every detection appends one line to ``watchdog.log`` (state_dir) and fires
 :func:`cw.notify.send_desktop_notification` — log-on-detection only, never
@@ -53,17 +49,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from cw.config import load_orchestrator_config, load_state, state_dir
-from cw.dev_queue import load_dev_queue
+from cw.config import load_orchestrator_config, state_dir
 from cw.events import read_events
 from cw.exceptions import CwError
-from cw.models import OrchestratorEventType, QueueItemStatus
+from cw.models import OrchestratorEventType
 from cw.notify import send_desktop_notification
-from cw.reconcile.concierge import _find_session_for_ticket, _has_park_marker
 from cw.reconcile.escalation import ESCALATION_PARK_MINUTES, run_escalation_sweep
 
 if TYPE_CHECKING:
-    from cw.models import CwState, OrchestratorConfig, TicketTask
+    from cw.models import OrchestratorConfig
 
 # Dead-man's-switch thresholds for the dispatch-loop-liveness check. The
 # larger of (a fixed floor) and (a multiple of the configured tick interval)
@@ -87,7 +81,6 @@ class WatchdogTickResult:
 
     escalated_ticket_ids: list[str] = field(default_factory=list)
     dispatch_loop_dead: bool = False
-    cycling_ticket_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -146,30 +139,6 @@ def _check_dispatch_loop_liveness(
     )
 
 
-def _detect_park_marker_cycling(
-    state: CwState,
-    tasks: list[TicketTask],
-    config: OrchestratorConfig,
-) -> list[str]:
-    """Return ticket IDs stuck behind a repeatedly-observed park marker.
-
-    Reuses ``cw.reconcile.concierge``'s reverse-lookup and park-marker check
-    (same fields the stalled-sweep's own salvage-skip-escalation event
-    watches) so this fires independently of whether the dispatch loop that
-    would normally emit that event is even running.
-    """
-    cycling: list[str] = []
-    for task in tasks:
-        if task.status != QueueItemStatus.BLOCKED_ON_USER:
-            continue
-        session = _find_session_for_ticket(state, task.client, task.ticket_id)
-        if session is None or not _has_park_marker(session):
-            continue
-        if session.consecutive_salvage_skips >= config.salvage_skip_attention_threshold:
-            cycling.append(task.ticket_id)
-    return cycling
-
-
 def run_tick(
     *,
     now: datetime | None = None,
@@ -202,23 +171,12 @@ def run_tick(
             _log_line(resolved_now, "dispatch_liveness", None, dispatch_dead_message)
         )
 
-    state = load_state()
-    tasks = load_dev_queue().tasks
-    cycling = _detect_park_marker_cycling(state, tasks, resolved_config)
-    for ticket_id in cycling:
-        message = f"{ticket_id} is cycling through park-marker recovery repeatedly."
-        send_desktop_notification("cw watchdog: park-marker cycling", message)
-        log_lines.append(
-            _log_line(resolved_now, "park_marker_cycling", ticket_id, message)
-        )
-
     if log_lines:
         _append_watchdog_log(log_lines)
 
     return WatchdogTickResult(
         escalated_ticket_ids=escalated,
         dispatch_loop_dead=dispatch_dead_message is not None,
-        cycling_ticket_ids=cycling,
     )
 
 

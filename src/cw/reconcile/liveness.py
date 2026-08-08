@@ -2,10 +2,19 @@
 
 Classifies each live DAEMON session's transcript-mtime staleness into one of
 four latched buckets (:class:`~cw.models.LivenessBucket`) and emits
-``session.liveness_changed`` on each crossing. Pure observability: unlike the
-idle/stalled sweeps in this package, this sweep never dispositions a session
-or mutates the dev queue — it only stamps ``Session.liveness_bucket`` and
-records an event. See GitHub #1001.
+``session.liveness_changed`` on each crossing. Pure observability: this sweep
+never dispositions a session or mutates the dev queue — it only stamps
+``Session.liveness_bucket`` and records events. See GitHub #1001.
+
+Since the process-kill-timeout removal, this sweep is also the home of the
+operator distress signal the destructive timers used to provide as a side
+effect: a session crossing INTO the top staleness bucket while it is still in
+the daemon roster, has emitted no sentinel, and is not merely awaiting a
+subagent additionally emits ``SESSION_NEEDS_ATTENTION`` + a push
+notification. Multi-dimensional evidence (roster presence, transcript
+staleness, sentinel absence, subagent-await), edge-triggered by the bucket
+crossing itself, and zero mutation beyond the bucket latch — the operator is
+educated; nothing is killed.
 """
 
 from __future__ import annotations
@@ -22,8 +31,12 @@ from cw.models import (
     OrchestratorEventType,
     SessionOrigin,
 )
+from cw.reconcile import _deps
 from cw.reconcile._shared import (
     _LIVE_STATUSES,
+    _SESSION_UNRESPONSIVE_REASON,
+    _awaiting_subagent,
+    _has_terminal_sentinel,
     _transcript_age_seconds,
     ticket_id_for_session,
 )
@@ -64,6 +77,12 @@ class LivenessCandidate:
     old_bucket: LivenessBucket
     new_bucket: LivenessBucket
     stale_minutes: float
+    # Signal-only operator distress flag: True when this crossing enters the
+    # top bucket AND the session has emitted no sentinel AND is not awaiting a
+    # subagent (multi-dimensional evidence, not bare elapsed time). Drives a
+    # SESSION_NEEDS_ATTENTION + push in the act phase; never a disposition.
+    distress: bool = False
+    elapsed_seconds: float = 0.0
 
 
 def _classify_liveness_bucket(
@@ -164,6 +183,15 @@ def _detect_liveness_candidates(
         )
         if new_bucket == session.liveness_bucket:
             continue
+        # Distress evaluation (signal-only): only a crossing INTO the top
+        # bucket qualifies, and only when the quietness is not explained by an
+        # already-emitted sentinel or a pending subagent at the transcript
+        # tail. All reads — detect-phase purity preserved (ADR-0006 inv. 1).
+        distress = (
+            new_bucket is LivenessBucket.STALE_45M
+            and not _has_terminal_sentinel(session)
+            and not _awaiting_subagent(session, now)
+        )
         candidates.append(
             LivenessCandidate(
                 session_id=session.id,
@@ -173,6 +201,8 @@ def _detect_liveness_candidates(
                 old_bucket=session.liveness_bucket,
                 new_bucket=new_bucket,
                 stale_minutes=stale_minutes,
+                distress=distress,
+                elapsed_seconds=(now - session.started_at).total_seconds(),
             )
         )
     return candidates
@@ -213,6 +243,30 @@ def _act_on_liveness_candidates(
             },
             correlation_id=candidate.ticket_id,
         )
+        if candidate.distress:
+            record_event(
+                OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+                {
+                    "session_id": session.id,
+                    "session_name": session.name,
+                    "client": session.client,
+                    "ticket_id": candidate.ticket_id,
+                    "claude_session_id": session.claude_session_id,
+                    "paused_status": _SESSION_UNRESPONSIVE_REASON,
+                    "breadcrumbs": (
+                        f"transcript flat {candidate.stale_minutes:.0f}m at stage "
+                        f"{candidate.stage.value}; elapsed "
+                        f"{candidate.elapsed_seconds:.0f}s; no sentinel, no "
+                        "pending subagent; session left running"
+                    ),
+                    "crashed": False,
+                    "stage": candidate.stage.value,
+                    "stale_minutes": candidate.stale_minutes,
+                    "elapsed_seconds": candidate.elapsed_seconds,
+                },
+                correlation_id=candidate.ticket_id,
+            )
+            _deps.fire_push_notification(session.name, session.client)
     save_state(state)
 
 

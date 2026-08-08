@@ -26,13 +26,12 @@ failure coverage.
 - queue.session_idled: session ACTIVE->IDLE (session_id, session_name)
 - queue.session_reaped: reconcile disposed of a session (session_id, \
 surface_ref or null, origin, reason, from_status, to_status)
-  reason values: phantom_surface (dead daemon surface), idle_stall (watchdog \
-recover, retried), usage_limit_cutoff (usage-limit hit, retried), \
-retry_cap_parked (retry cap reached, BLOCKED_ON_USER), wall_clock_budget \
-(wall-clock budget exceeded, retried), completed_backstop (backstop revert of \
-TIMED_OUT or COMPLETED session with no prior reason), salvage_completed \
-(git-state HIGH-path auto-PR), salvage_parked (git-state LOW-path flagged \
-for human)
+  current reason values: phantom_surface (dead daemon surface — evidence, \
+not a timer), usage_limit_cutoff (usage-limit hit), completed_backstop \
+(backstop revert of a TIMED_OUT or COMPLETED session with no prior reason).
+  Historical-only reason values that may still appear in old event logs but \
+are no longer produced (removed with the process-kill timeouts): idle_stall, \
+retry_cap_parked, wall_clock_budget, salvage_completed, salvage_parked.
 RUNNING->CANCELLED: no event (system-driven cleanup)\
 """
 

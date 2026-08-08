@@ -48,23 +48,12 @@ _PLAN_APPROVED_MARKER = "<!-- auto-dev-plan-approved -->"
 @click.option("--client", "-c", default=None, help="Target client name.")
 @click.option("--priority", "-p", type=int, default=0, help="Priority (higher=sooner).")
 @click.option(
-    "--timeout",
-    "-t",
-    "headless_timeout_override",
-    type=int,
-    default=None,
-    help="Override headless timeout (seconds) for this ticket.",
-)
-@click.option(
     "--scope",
     "-s",
     "scope_hint",
     type=click.Choice(["small", "large"]),
     default=None,
-    help=(
-        "Scope tier for headless budget resolution. Used as a fallback when the "
-        "session has no prior result (pre-Stage-1). Accepts 'small' or 'large'."
-    ),
+    help="Scope tier hint for this ticket. Accepts 'small' or 'large'.",
 )
 @click.option(
     "--lane",
@@ -100,7 +89,6 @@ def dev_queue_add(
     tickets: tuple[str, ...],
     client: str | None,
     priority: int,
-    headless_timeout_override: int | None,
     scope_hint: str | None,
     lane_name: str,
     signoff: Literal["operator"] | None,
@@ -119,7 +107,6 @@ def dev_queue_add(
                 ticket_id=ticket_id,
                 client=resolved,
                 priority=priority,
-                headless_timeout_override=headless_timeout_override,
                 scope_hint=scope_hint,
                 lane=lane_name,
                 signoff=signoff,

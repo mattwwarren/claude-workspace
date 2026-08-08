@@ -496,7 +496,6 @@ def _dispatch_client_lanes(
             outcome = _spawn_claimed_task(
                 task,
                 client,
-                config=config,
                 resolved_native_daemon=resolved_native_daemon,
                 parent=parent,
                 emit=emit,
