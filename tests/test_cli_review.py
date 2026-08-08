@@ -408,6 +408,10 @@ class TestReviewConsolidateCommand:
             "fix_cycles_used",
             "deferred",
             "agents_run",
+            # #1723: OR-across-cycles marker for whether the fix loop
+            # actually committed a change, vs. converging on an all-no-op
+            # run.
+            "had_real_commit",
         }
 
     def test_empty_documents_all_failed_yields_zero_agents_run(
