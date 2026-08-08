@@ -9513,7 +9513,11 @@ class TestApplyStagedDecision:
             STAGE_FAILURE_STATUSES,
         )
         from cw.dispatch import (
+            _APPROVAL_GATE_REASON,
             _AWAITING_OPERATOR_REASON,
+            _FINALIZE_HOLD_REASON,
+            _REVIEW_HEALTH_GATE_REASON,
+            _SIGNOFF_GATE_REASON,
             BREADCRUMB_ELIGIBLE_PAUSED_STATUSES,
         )
 
@@ -9544,13 +9548,15 @@ class TestApplyStagedDecision:
         # gate-class exclusion (#1729): each of these hardcodes breadcrumbs=""
         # at its _park_* call site (routing.py), so membership here would not
         # change what gets emitted -- their paused_status must stay excluded.
-        for gate_paused_status in (
-            "review_health_gate",
-            "finalize_hold",
-            "signoff_gate",
-            "approval_gate",
-        ):
-            assert gate_paused_status not in BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+        assert not (
+            {
+                _REVIEW_HEALTH_GATE_REASON,
+                _FINALIZE_HOLD_REASON,
+                _SIGNOFF_GATE_REASON,
+                _APPROVAL_GATE_REASON,
+            }
+            & BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+        )
 
     # -- review-health gate (#1702) --------------------------------------
 
