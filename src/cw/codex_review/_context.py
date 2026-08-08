@@ -415,26 +415,16 @@ def _load_sensitive_hits(
     return []
 
 
-def _parse_review_policy(text: str) -> dict[str, str]:
-    """Parse ``review-policy.md`` H2 sections into a role-keyed map.
-
-    Warn-and-skip: an H2 heading that is not a known reviewer name is logged
-    and dropped; the parse never raises.
-    """
-    policy: dict[str, str] = {}
+def _parse_markdown_h2_sections(text: str) -> list[tuple[str, str]]:
+    """Parse Markdown H2 sections into ``(heading, body)`` pairs."""
+    sections: list[tuple[str, str]] = []
     heading: str | None = None
     body: list[str] = []
 
     def _commit() -> None:
         if heading is None:
             return
-        if heading in _REVIEWER_ROLE_AGENT_FILES:
-            policy[heading] = "\n".join(body).strip()
-        else:
-            _log.warning(
-                'review-policy.md: unmatched section "%s" — skipped (typo?)',
-                heading,
-            )
+        sections.append((heading, "\n".join(body).strip()))
 
     for line in text.splitlines():
         if line.startswith("## "):
@@ -444,6 +434,24 @@ def _parse_review_policy(text: str) -> dict[str, str]:
         elif heading is not None:
             body.append(line)
     _commit()
+    return sections
+
+
+def _parse_review_policy(text: str) -> dict[str, str]:
+    """Parse ``review-policy.md`` H2 sections into a role-keyed map.
+
+    Warn-and-skip: an H2 heading that is not a known reviewer name is logged
+    and dropped; the parse never raises.
+    """
+    policy: dict[str, str] = {}
+    for heading, body in _parse_markdown_h2_sections(text):
+        if heading not in _REVIEWER_ROLE_AGENT_FILES:
+            _log.warning(
+                'review-policy.md: unmatched section "%s" — skipped (typo?)',
+                heading,
+            )
+            continue
+        policy[heading] = body
     return policy
 
 
@@ -508,23 +516,17 @@ def _load_ruff_lint_config(worktree: Path) -> _RuffLintConfig | None:
 def _extract_markdown_section(text: str, heading: str) -> str | None:
     """Extract the body of *text*'s ``## {heading}`` H2 section, or ``None``.
 
-    Line-scan structurally modeled on :func:`_parse_review_policy`, simplified
-    to a single target heading with no role-matching and no logging: collects
-    body lines from the matching ``## {heading}`` line until the next ``## ``
-    line or EOF.
+    Uses the same H2 parser as ``review-policy.md`` so section boundaries have
+    one implementation.
     """
-    target = f"## {heading}"
-    body: list[str] | None = None
-    for line in text.splitlines():
-        if line.startswith("## "):
-            if body is not None:
-                break
-            if line == target:
-                body = []
-            continue
-        if body is not None:
-            body.append(line)
-    return "\n".join(body).strip() if body is not None else None
+    return next(
+        (
+            body
+            for section_heading, body in _parse_markdown_h2_sections(text)
+            if section_heading == heading
+        ),
+        None,
+    )
 
 
 def _load_claude_md_quality_gates(worktree: Path) -> str | None:
@@ -532,7 +534,7 @@ def _load_claude_md_quality_gates(worktree: Path) -> str | None:
     text = _load_optional_text(worktree / "CLAUDE.md")
     if text is None:
         return None
-    return _extract_markdown_section(text, "Quality Gates")
+    return _extract_markdown_section(text=text, heading="Quality Gates")
 
 
 def _load_agent_spec(worktree: Path, role: str) -> str:
@@ -722,7 +724,10 @@ def _prepare_review_pass(
     plan_text, ticket_text = _load_ticket_context(worktree)
     ruff_lint_config = _load_ruff_lint_config(worktree)
     quality_gates_text = _load_claude_md_quality_gates(worktree)
-    lint_grounding = _render_lint_grounding_block(ruff_lint_config, quality_gates_text)
+    lint_grounding = _render_lint_grounding_block(
+        ruff_config=ruff_lint_config,
+        quality_gates_text=quality_gates_text,
+    )
     mutates_persisted_state = (
         bool(sensitive_hits) or categories.python or categories.frontend
     )

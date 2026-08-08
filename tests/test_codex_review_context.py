@@ -454,40 +454,69 @@ class TestLoadClaudeMdQualityGates:
 class TestRenderLintGroundingBlock:
     def test_both_present_includes_ignore_list_and_quality_gates_text(self) -> None:
         config = _RuffLintConfig(ignore=("PLR0913",), pylint_overrides={})
-        result = _render_lint_grounding_block(config, "QUALITY GATES BODY")
+        result = _render_lint_grounding_block(
+            ruff_config=config,
+            quality_gates_text="QUALITY GATES BODY",
+        )
         assert result is not None
         assert "PLR0913" in result
         assert "QUALITY GATES BODY" in result
 
     def test_ruff_config_only_omits_quality_gates_subsection(self) -> None:
         config = _RuffLintConfig(ignore=("PLR0913",), pylint_overrides={})
-        result = _render_lint_grounding_block(config, None)
+        result = _render_lint_grounding_block(
+            ruff_config=config,
+            quality_gates_text=None,
+        )
         assert result is not None
         assert "PLR0913" in result
         assert "Quality Gates" not in result
 
     def test_quality_gates_only_omits_ruff_subsection(self) -> None:
-        result = _render_lint_grounding_block(None, "QUALITY GATES BODY")
+        result = _render_lint_grounding_block(
+            ruff_config=None,
+            quality_gates_text="QUALITY GATES BODY",
+        )
         assert result is not None
         assert "QUALITY GATES BODY" in result
         assert "Globally Ignored Ruff Rules" not in result
 
     def test_both_absent_returns_none(self) -> None:
-        assert _render_lint_grounding_block(None, None) is None
+        assert (
+            _render_lint_grounding_block(
+                ruff_config=None,
+                quality_gates_text=None,
+            )
+            is None
+        )
         empty_config = _RuffLintConfig(ignore=(), pylint_overrides={})
-        assert _render_lint_grounding_block(empty_config, None) is None
-        assert _render_lint_grounding_block(empty_config, "") is None
+        assert (
+            _render_lint_grounding_block(
+                ruff_config=empty_config,
+                quality_gates_text=None,
+            )
+            is None
+        )
+        assert (
+            _render_lint_grounding_block(
+                ruff_config=empty_config,
+                quality_gates_text="",
+            )
+            is None
+        )
 
     def test_always_states_not_a_must_fix_instruction_when_rendered(self) -> None:
         result = _render_lint_grounding_block(
-            _RuffLintConfig(ignore=("X",), pylint_overrides={}), None
+            ruff_config=_RuffLintConfig(ignore=("X",), pylint_overrides={}),
+            quality_gates_text=None,
         )
         assert result is not None
         assert "is not a MUST_FIX" in result
 
     def test_distinguishes_statements_from_lines(self) -> None:
         result = _render_lint_grounding_block(
-            _RuffLintConfig(ignore=("X",), pylint_overrides={}), None
+            ruff_config=_RuffLintConfig(ignore=("X",), pylint_overrides={}),
+            quality_gates_text=None,
         )
         assert result is not None
         assert "PLR0915" in result
@@ -499,7 +528,8 @@ class TestRenderLintGroundingBlock:
         self,
     ) -> None:
         result = _render_lint_grounding_block(
-            _RuffLintConfig(ignore=("PLR0913",), pylint_overrides={}), None
+            ruff_config=_RuffLintConfig(ignore=("PLR0913",), pylint_overrides={}),
+            quality_gates_text=None,
         )
         assert result is not None
         assert "ruff default (not overridden in pyproject.toml)" in result
