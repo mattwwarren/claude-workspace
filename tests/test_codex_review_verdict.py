@@ -12,6 +12,7 @@ from cw.codex_review import (
     CODEX_BUDGET_EXHAUSTED,
     CODEX_ERROR,
     CODEX_MUST_FIX_FINDINGS,
+    CODEX_MUST_FIX_MECHANICALLY_REJECTED,
     CODEX_REVIEW_PARTIAL,
     CODEX_REVIEW_UNPARSEABLE,
     CODEX_TIMEOUT,
@@ -37,6 +38,8 @@ from tests.conftest import _make_diff, _make_finding, _make_reviewer_doc
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    from cw.review_findings import ReviewerFindingsDocument
 
 
 # ---------------------------------------------------------------------------
@@ -448,11 +451,163 @@ class TestSynthesizeCodexReviewResultMetrics:
 
 
 # ---------------------------------------------------------------------------
+# synthesize_codex_review_result — mechanically-rejected MUST_FIX (#1714)
+# ---------------------------------------------------------------------------
+
+
+def _mechanically_rejected_must_fix_doc() -> ReviewerFindingsDocument:
+    """A doc whose single MUST_FIX finding cites a file absent from the diff.
+
+    ``_make_diff()`` only knows ``src/cw/foo.py``, so this finding is rejected
+    ``unknown_file`` before adjudication — a *mechanical* rejection, the exact
+    shape #1714 is about.
+    """
+    return _make_reviewer_doc(
+        _make_finding(
+            severity="MUST_FIX",
+            file="src/cw/never_in_the_diff.py",
+            line_start=None,
+            line_end=None,
+            summary="dropped before adjudication",
+        )
+    )
+
+
+class TestSynthesizeCodexReviewResultMechanicalRejection:
+    def test_mechanically_rejected_must_fix_blocks(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        # #1714 fleet regression: this used to fall through to stage_complete.
+        worktree = make_git_repo("wt-synth-mech-reject")
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[_mechanically_rejected_must_fix_doc()],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-synth-mech",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+        assert result.status != "stage_complete"
+        assert result.status == "blocked"
+        assert result.blocker is not None
+        assert result.blocker.reason == CODEX_MUST_FIX_MECHANICALLY_REJECTED
+        assert verdict is not None
+        # R4: the signal is carried by rejected_must_fix, NOT by flipping
+        # `blocking` — a mechanically-rejected finding's anchor is unreliable
+        # and must never enter the autofix loop.
+        assert verdict.blocking is False
+        assert len(verdict.rejected_must_fix) == 1
+        assert "dropped before adjudication" in result.blocker.details
+
+    def test_partial_vs_mechanical_rejection_precedence(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        # Pins the branch ordering: the mechanical-rejection branch sits
+        # between the `blocking` branch and the `failures` (partial) branch, so
+        # a run that would otherwise report CODEX_REVIEW_PARTIAL reports the
+        # dropped MUST_FIX instead — the stronger, more specific signal.
+        worktree = make_git_repo("wt-synth-mech-partial")
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[_mechanically_rejected_must_fix_doc()],
+            failures=[ReviewerRunFailure(role="Performance Reviewer", reason="crash")],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-synth-mech-partial",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+        assert result.blocker is not None
+        assert result.blocker.reason == CODEX_MUST_FIX_MECHANICALLY_REJECTED
+        assert result.blocker.reason != CODEX_REVIEW_PARTIAL
+        assert verdict is not None
+
+    def test_accepted_must_fix_still_reports_the_original_reason(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        # Regression guard: the new branch must not steal the blocking path.
+        worktree = make_git_repo("wt-synth-mech-mixed")
+        doc = _make_reviewer_doc(
+            _make_finding(severity="MUST_FIX"),
+            _make_finding(
+                severity="MUST_FIX",
+                file="src/cw/never_in_the_diff.py",
+                line_start=None,
+                line_end=None,
+                summary="dropped one",
+            ),
+        )
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-synth-mech-mixed",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+        assert result.blocker is not None
+        assert result.blocker.reason == CODEX_MUST_FIX_FINDINGS
+        assert verdict is not None
+        assert verdict.blocking is True
+        assert len(verdict.rejected_must_fix) == 1
+
+
+# ---------------------------------------------------------------------------
 # render_verdict_comment
 # ---------------------------------------------------------------------------
 
 
 class TestRenderVerdictComment:
+    def test_render_verdict_comment_shows_mechanically_rejected_must_fix(self) -> None:
+        # #1714's second silence: _render_findings iterates verdict.accepted
+        # only, so a mechanically-rejected MUST_FIX was invisible on the posted
+        # comment even once the sentinel blocked on it.
+        verdict = consolidate_verdict(
+            [_mechanically_rejected_must_fix_doc()], _make_diff(), reviewed_sha="sha"
+        )
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "Non-blocking" not in body
+        assert "MUST_FIX REJECTED" in body
+        assert "dropped before adjudication" in body
+        assert "src/cw/never_in_the_diff.py" in body
+        assert "unknown_file" in body
+
+    def test_rejected_must_fix_section_renders_alongside_blocking(self) -> None:
+        # The section is rendered unconditionally, so the (rarer) mixed case
+        # surfaces both the blocking findings and the dropped one.
+        doc = _make_reviewer_doc(
+            _make_finding(severity="MUST_FIX", summary="bad thing"),
+            _make_finding(
+                severity="MUST_FIX",
+                file="src/cw/never_in_the_diff.py",
+                line_start=None,
+                line_end=None,
+                summary="dropped one",
+            ),
+        )
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "BLOCKING" in body
+        assert "bad thing" in body
+        assert "dropped one" in body
+
+    def test_clean_verdict_has_no_rejected_must_fix_section(self) -> None:
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_make_finding(severity="NIT"))],
+            _make_diff(),
+            reviewed_sha="sha",
+        )
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "MUST_FIX REJECTED" not in body
+        assert "Non-blocking" in body
+
     def test_blocking_lists_must_fix(self) -> None:
         diff = _make_diff()
         doc = _make_reviewer_doc(

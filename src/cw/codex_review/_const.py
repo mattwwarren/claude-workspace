@@ -74,6 +74,22 @@ CODEX_REVIEW_PARTIAL = "codex_review_partial"
 # successful-but-out-of-policy fix, a distinct axis.
 CODEX_FIX_SCOPE_VIOLATION = "codex_fix_scope_violation"
 
+# A review whose only MUST_FIX finding(s) were MECHANICALLY rejected — dropped
+# by review_findings' validation (bad file/line anchor, evidence absent from
+# the diff, ...) before any adjudication could weigh them on their merits
+# (#1714). Sibling of CODEX_MUST_FIX_FINDINGS above, deliberately NOT the same
+# reason: that one means "a real MUST_FIX survived validation and is open",
+# this one means "something MUST_FIX-shaped was thrown away unread".
+#
+# The distinction is load-bearing for the fix loop. codex_fix_loop's entry gate
+# reads ReviewVerdict.blocking, which stays False here by design — a finding
+# rejected because its anchor could not be trusted must never be handed to a
+# fix agent, which would ask codex to patch code the finding may not even
+# describe. So this reason parks for an operator instead of autofixing.
+# Same reason it is also NOT in _TRANSIENT_FAILURE_REASONS: retrying the
+# identical review pass reproduces the identical rejection.
+CODEX_MUST_FIX_MECHANICALLY_REJECTED = "codex_must_fix_mechanically_rejected"
+
 # Failure reasons transient enough that a retry might succeed without any
 # code/config change on our side (the role either never got a turn at all, or
 # codex itself timed out) — used to set Blocker.retry_eligible so reconcile

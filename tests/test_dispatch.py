@@ -9661,6 +9661,130 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.PENDING
         assert task.stage == Stage.FINALIZE
 
+    # -- mechanically-rejected MUST_FIX gate (#1714) -----------------------
+
+    @staticmethod
+    def _mech_rejected_result(stage: str = "stage3_review") -> dict[str, object]:
+        from cw.codex_review import CODEX_MUST_FIX_MECHANICALLY_REJECTED
+
+        return {
+            "status": "blocked",
+            "blocker": {
+                "stage": stage,
+                "reason": CODEX_MUST_FIX_MECHANICALLY_REJECTED,
+            },
+        }
+
+    def test_blocked_must_fix_mechanically_rejected_parks_with_dedicated_disposition(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """#1714: Rule 5's sole reason-keyed override stamps its own disposition.
+
+        Mirrors ``test_stage_complete_review_health_gate_parks_without_signoff``
+        (task-state + SESSION_NEEDS_ATTENTION payload assertions), adapted to
+        Rule 5's blocked-status entry point.
+        """
+        from cw.codex_review import CODEX_MUST_FIX_MECHANICALLY_REJECTED
+        from cw.dev_queue import REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION
+        from cw.dispatch import apply_staged_decision
+
+        attention = capture_events(
+            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+
+        task = self._make_running_task("MFR-1", stage=Stage.REVIEW)
+        apply_staged_decision(
+            task, "blocked", self._mech_rejected_result(), self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION
+        assert task.disposition == "codex_must_fix_mechanically_rejected"
+        assert task.blocked_reason == CODEX_MUST_FIX_MECHANICALLY_REJECTED
+        assert task.stage == Stage.REVIEW
+
+        assert len(attention) == 1
+        event_type, payload, correlation_id = attention[0]
+        assert event_type == OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        assert payload["paused_status"] == "codex_must_fix_mechanically_rejected"
+        # Unlike the review-health gate, this park genuinely originates from a
+        # populated blocker dict, so breadcrumbs carries the real reason.
+        assert payload["breadcrumbs"] == CODEX_MUST_FIX_MECHANICALLY_REJECTED
+        assert payload["ticket_id"] == "MFR-1"
+        assert correlation_id == "MFR-1"
+
+    def test_blocked_must_fix_mechanically_rejected_disposition_is_not_verbatim_blocked(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """#1714: proves the override bypasses the generic verbatim-status stamp.
+
+        ``_hold_aware_disposition("blocked", <this reason>)`` returns the literal
+        ``"blocked"`` (asserted directly in test_dev_queue.py) — so if the
+        routing call site ever regressed to the generic path, this would be
+        ``"blocked"`` and the park would be indistinguishable from any other.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("MFR-2", stage=Stage.REVIEW)
+        apply_staged_decision(
+            task, "blocked", self._mech_rejected_result(), self._clients(tmp_path)
+        )
+
+        assert task.disposition != "blocked"
+
+    def test_blocked_other_reason_still_uses_generic_disposition(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """#1714 regression guard: every other blocker_reason is untouched."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("MFR-3", stage=Stage.REVIEW)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "stage3_review", "reason": "agent_block"},
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "blocked"
+        assert task.blocked_reason == "agent_block"
+
+    def test_blocked_must_fix_mechanically_rejected_never_finalize_regresses(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """#1714: the new branch returns before Rule 5a's self-heal regress.
+
+        The reason is not a member of ``FINALIZE_REGRESS_BLOCKER_REASONS``
+        (``{"agent_block"}``) so no collision is possible today, but the branch
+        is placed first and returns immediately so that fact need not hold
+        forever. Driven at FINALIZE because 5a is the only FINALIZE-gated path.
+        """
+        from cw.dev_queue import REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION
+        from cw.dispatch import apply_staged_decision
+
+        requeued = capture_events(
+            "cw.dispatch.routing", OrchestratorEventType.TICKET_REQUEUED
+        )
+
+        task = self._make_running_task("MFR-4", stage=Stage.FINALIZE)
+        apply_staged_decision(
+            task,
+            "blocked",
+            self._mech_rejected_result(stage="stage4_finalize"),
+            self._clients(tmp_path),
+        )
+
+        assert requeued == []
+        assert task.stage == Stage.FINALIZE
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION
+
     def test_review_pending_approval_small_tier_review_health_gate_parks(
         self, tmp_dispatch_dirs: Path, tmp_path: Path
     ) -> None:

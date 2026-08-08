@@ -16,6 +16,7 @@ from cw.auto_dev_result import AutoDevResult, Health, Scope
 from cw.codex_review._const import (
     _TRANSIENT_FAILURE_REASONS,
     CODEX_MUST_FIX_FINDINGS,
+    CODEX_MUST_FIX_MECHANICALLY_REJECTED,
     CODEX_REVIEW_PARTIAL,
     CODEX_REVIEW_UNPARSEABLE,
     STAGE3_REVIEW,
@@ -134,6 +135,14 @@ def synthesize_codex_review_result(
       at least one failure is transient (``codex_timeout``/``budget_exhausted``)
       (MUST_FIX 2, #1236).
     - consolidated verdict is blocking            → blocked/CODEX_MUST_FIX_FINDINGS
+    - verdict carries a mechanically-rejected MUST_FIX (validation dropped it
+      before adjudication) → blocked/CODEX_MUST_FIX_MECHANICALLY_REJECTED
+      (#1714). Ordered AFTER the blocking check (a surviving MUST_FIX is the
+      stronger, actionable signal and keeps its own reason) and BEFORE the
+      partial check (a MUST_FIX thrown away unread is more specific than "the
+      roster was incomplete"). ``verdict.blocking`` stays False on this path by
+      design — see ``_const.CODEX_MUST_FIX_MECHANICALLY_REJECTED`` for why the
+      fix loop must not be entered.
     - documents present but at least one selected role skipped/errored without
       producing one (a partial review) → blocked/CODEX_REVIEW_PARTIAL — a
       review that silently proceeded on an incomplete roster would be exactly
@@ -195,6 +204,15 @@ def synthesize_codex_review_result(
             stage_reached=STAGE3_REVIEW,
         )
         return blocked.model_copy(update={"review": verdict.review}), verdict
+    if verdict.rejected_must_fix:
+        dropped = make_blocked(
+            ticket_id=task.ticket_id,
+            worktree=worktree,
+            reason=CODEX_MUST_FIX_MECHANICALLY_REJECTED,
+            details=render_verdict_comment(verdict, fix_loop_enabled=fix_loop_enabled),
+            stage_reached=STAGE3_REVIEW,
+        )
+        return dropped.model_copy(update={"review": verdict.review}), verdict
     if failures:
         partial = make_blocked(
             ticket_id=task.ticket_id,
@@ -340,6 +358,34 @@ def _render_failed_roles_note(verdict: ReviewVerdict) -> list[str]:
     ]
 
 
+def _render_rejected_must_fix(verdict: ReviewVerdict) -> list[str]:
+    """Render the MUST_FIX findings validation dropped before adjudication.
+
+    ``_render_findings`` iterates ``verdict.accepted`` only, so before #1714 a
+    mechanically-rejected MUST_FIX was invisible on the posted comment even
+    when it was the reason the pipeline blocked — the reader saw a park with no
+    findings behind it. Rendered unconditionally (mirroring
+    ``_render_failed_roles_note``'s empty-list-returns-``[]`` shape) so the
+    mixed case, where an accepted MUST_FIX also blocks, still surfaces both.
+
+    ``RejectedFinding.raw`` is the pre-validation ``Finding.model_dump()``, so
+    it carries ``Finding``'s field names — but read via ``.get()`` because a
+    rejected payload is by definition one that failed validation.
+    """
+    if not verdict.rejected_must_fix:
+        return []
+    lines = ["### MUST_FIX — mechanically rejected (not adjudicated)", ""]
+    for rf in verdict.rejected_must_fix:
+        loc = str(rf.raw.get("file", "<unknown file>"))
+        line_start = rf.raw.get("line_start")
+        if line_start is not None:
+            loc = f"{loc}:{line_start}"
+        summary = str(rf.raw.get("summary", "<no summary>"))
+        lines.append(f"- **{loc}** — {summary} (rejected: {rf.reason})")
+    lines.append("")
+    return lines
+
+
 def render_verdict_comment(verdict: ReviewVerdict, *, fix_loop_enabled: bool) -> str:
     """Render a consolidated verdict into a GitHub-issue-comment markdown body.
 
@@ -348,6 +394,11 @@ def render_verdict_comment(verdict: ReviewVerdict, *, fix_loop_enabled: bool) ->
     to a wrong default (#1705). It discriminates fix-loop-disabled from
     fix-loop-enabled-but-unneeded histories that would otherwise render
     identically from ``verdict.review`` alone.
+
+    The headline is three-way as of #1714: blocking, mechanically-rejected-
+    MUST_FIX, or clean. The rejected-MUST_FIX *section* is rendered
+    unconditionally regardless of which headline won, so the mixed case
+    (something blocking AND something dropped) reports both.
     """
     lines = ["## Codex Review Verdict", ""]
     if verdict.blocking:
@@ -358,12 +409,25 @@ def render_verdict_comment(verdict: ReviewVerdict, *, fix_loop_enabled: bool) ->
         lines.extend(
             _render_history_note(verdict.review, fix_loop_enabled=fix_loop_enabled)
         )
+    elif verdict.rejected_must_fix:
+        # #1714: never render the clean headline here. Nothing survived to
+        # block on, but a MUST_FIX was dropped unread -- "Non-blocking, no
+        # MUST_FIX findings" would be the exact false all-clear this branch
+        # exists to prevent.
+        lines.append(
+            f"**MUST_FIX REJECTED — OPERATOR REVIEW REQUIRED** — "
+            f"{len(verdict.rejected_must_fix)} MUST_FIX finding(s) were "
+            "mechanically rejected before adjudication (dropped, not evaluated "
+            "on their merits) and require operator review before this branch "
+            "can proceed."
+        )
     else:
         lines.append(
             _render_clean_headline(verdict.review, fix_loop_enabled=fix_loop_enabled)
         )
     lines.append("")
     lines.extend(_render_failed_roles_note(verdict))
+    lines.extend(_render_rejected_must_fix(verdict))
     lines.extend(_render_findings(verdict, "MUST_FIX", "MUST_FIX"))
     lines.extend(_render_findings(verdict, "SHOULD_FIX", "SHOULD_FIX"))
     return "\n".join(lines).rstrip() + "\n"

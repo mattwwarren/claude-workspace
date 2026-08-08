@@ -8,6 +8,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A mechanically-rejected MUST_FIX no longer reads as a clean review
+  (#1714):** `consolidate_verdict` computed `blocking` from accepted findings
+  only, so a MUST_FIX rejected for a mechanical reason (bad line anchor,
+  evidence not found in the diff, unknown file) landed in `rejected`, never
+  reached `must_fix`, and the codex path fell through to `stage_complete`. The
+  posted comment then read "Non-blocking — no MUST_FIX findings", and
+  `_render_findings` iterates only `accepted`, so the discarded findings
+  appeared nowhere at all. In a 9-pass fleet sample, 4 of 4 MUST_FIX findings
+  were rejected this way and the review reported clean. `ReviewVerdict` gains
+  `rejected_must_fix` — the MUST_FIX-severity subset of `rejected`, selected
+  by severity rather than by rejection reason, so any future
+  `RejectedFindingReason` is covered by construction — and the codex path now
+  exits `blocked` with its own reason and its own park disposition rather than
+  reporting success. Deliberately a *second* signal rather than a widening of
+  `blocking`: the fix loop gates on `verdict.blocking`, and a finding whose
+  anchor could not be located is precisely what must never be handed to an
+  autofix loop. The Claude-native coordinator's instruction to discard
+  `.rejected` from adjudication is narrowed to non-MUST_FIX severities, since
+  the same `consolidate_verdict` serves both backends.
+
 - **The #1709 capability probe reported every host incapable, and cached it
   (#1732):** the probe deliberately runs in its own scratch dir under
   `state_dir()` rather than the review worktree — so it is never inside a git

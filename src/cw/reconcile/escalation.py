@@ -36,6 +36,7 @@ from datetime import UTC, datetime
 from cw.auto_dev_result import PAUSED_FOR_USER_INPUT_STATUSES
 from cw.dev_queue import (
     REVIEW_HEALTH_GATE_DISPOSITION,
+    REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
     dev_queue_lock,
     load_dev_queue,
     save_dev_queue,
@@ -92,10 +93,19 @@ ESCALATION_PARK_MINUTES = 45
 # members above -- not a deliberately-armed operator stop (signoff_gate,
 # finalize_gate_held), which are intentionally absent from this set because
 # their clock does not start until an operator chooses to act.
+#
+# GitHub #1714 joins as a FOURTH union term on identical reasoning to #1702's:
+# a mechanically-rejected MUST_FIX park is an unresolved, non-operator-
+# initiated quality signal, so its escalation clock starts immediately. Also
+# kept out of _REAP_ELIGIBLE_DISPOSITIONS_BASE for the same reason -- concierge
+# auto-requeuing it would misread a dropped finding as a session glitch.
 _ELIGIBLE_DISPOSITIONS: frozenset[str | None] = frozenset(
     (PAUSED_FOR_USER_INPUT_STATUSES - {"premises_pending_verification"})
     | _REAP_ELIGIBLE_DISPOSITIONS_BASE
-    | {REVIEW_HEALTH_GATE_DISPOSITION}
+    | {
+        REVIEW_HEALTH_GATE_DISPOSITION,
+        REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
+    }
 )
 
 # Status branch: disposition is irrelevant for these two statuses.

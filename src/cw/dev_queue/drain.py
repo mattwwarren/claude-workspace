@@ -23,6 +23,7 @@ from cw.dev_queue.lifecycle import (
     FINALIZE_GATE_HELD_DISPOSITION,
     HOLD_DISPOSITIONS,
     REVIEW_HEALTH_GATE_DISPOSITION,
+    REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
 )
 from cw.dev_queue.requeue import requeue_ticket
 from cw.dev_queue.storage import load_dev_queue
@@ -67,9 +68,18 @@ class DrainOutcome(TypedDict):
 # not vouch for its own coverage", which clears by re-running review -- exactly
 # what drain does. Including it here does NOT make it concierge-false-park-
 # eligible; those sets are independent by design.
+# #1714 joins on the same terms as #1702's union above and for the same reason:
+# a mechanically-rejected MUST_FIX park says "review dropped a finding before
+# adjudicating it", which clears by re-running review -- exactly what drain
+# does. Also not an operator stop, so batch-releasing it overrides nobody.
 DRAIN_DISPOSITIONS: frozenset[str] = (
     HOLD_DISPOSITIONS - frozenset({FINALIZE_GATE_HELD_DISPOSITION})
-) | frozenset({REVIEW_HEALTH_GATE_DISPOSITION})
+) | frozenset(
+    {
+        REVIEW_HEALTH_GATE_DISPOSITION,
+        REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
+    }
+)
 
 
 def select_held_tickets(client: str, *, lane: str | None = None) -> list[TicketTask]:

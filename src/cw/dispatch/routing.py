@@ -27,6 +27,7 @@ from cw.auto_dev_result import (
     STAGE_FAILURE_STATUSES,
     STAGE_SUCCESS_STATUSES,
 )
+from cw.codex_review import CODEX_MUST_FIX_MECHANICALLY_REJECTED
 from cw.config import (
     load_effective_config,
     load_state,
@@ -34,6 +35,7 @@ from cw.config import (
 from cw.dev_queue import (
     FINALIZE_GATE_HELD_DISPOSITION,
     REVIEW_HEALTH_GATE_DISPOSITION,
+    REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
     SIGNOFF_GATE_DISPOSITION,
     _advance_task_pointer,
     _extract_pr_url,
@@ -148,6 +150,18 @@ _EARLIER_STAGE_REPORT_REASON = "earlier_stage_report"
 # / FINALIZE_GATE_HELD_DISPOSITION one -- still two constants in two namespaces,
 # do not collapse them.
 _REVIEW_HEALTH_GATE_REASON = "review_health_gate"
+
+
+# paused_status written to SESSION_NEEDS_ATTENTION when the #1714 gate parks a
+# ticket whose blocked sentinel reports that review's only MUST_FIX finding(s)
+# were mechanically rejected before adjudication. Shares its literal string
+# value with dev_queue.lifecycle.REVIEW_MUST_FIX_MECHANICALLY_REJECTED_
+# DISPOSITION (task.disposition) on the same _SIGNOFF_GATE_REASON /
+# _REVIEW_HEALTH_GATE_REASON precedent above -- still two constants in two
+# namespaces, do not collapse them. Distinct in turn from
+# codex_review.CODEX_MUST_FIX_MECHANICALLY_REJECTED, which is the *blocker
+# reason* the sentinel carries; that one is imported, not re-derived.
+_MUST_FIX_MECHANICALLY_REJECTED_REASON = "codex_must_fix_mechanically_rejected"
 
 
 # The single Health.recommendation value that means "the producer does not
@@ -561,6 +575,56 @@ def _park_review_health_gate(task: TicketTask) -> None:
         task,
         QueueItemStatus.BLOCKED_ON_USER,
         disposition=REVIEW_HEALTH_GATE_DISPOSITION,
+    )
+
+
+def _park_must_fix_mechanically_rejected(task: TicketTask) -> None:
+    """Park *task* BLOCKED_ON_USER for a mechanically-rejected MUST_FIX (#1714).
+
+    Rule 5's sole reason-keyed override: every other blocker_reason at the
+    STAGE_FAILURE_STATUSES branch falls through to the generic
+    ``_hold_aware_disposition(status, blocker_reason)`` stamp, which for a
+    blocked status yields the verbatim string ``"blocked"``. This reason is
+    neither an operator-unavailability hold nor an ordinary block -- the review
+    ran and found something, but the finding was mechanically dropped before
+    adjudication, which is a quality signal that must stay distinguishable from
+    both.
+
+    Field-for-field mirror of ``_park_review_health_gate`` above (same
+    emit-before-transition ordering, same payload shape) with one deliberate
+    difference: ``breadcrumbs`` carries the real ``blocker.reason`` here,
+    because -- unlike the health gate -- this park genuinely originates from a
+    populated blocker dict. That matches Rule 5's own generic breadcrumbs
+    semantics further down this module.
+
+    BLOCKED_ON_USER, not a hold disposition:
+    ``REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION`` is deliberately
+    excluded from ``HOLD_DISPOSITIONS`` -- it clears by re-running review with
+    the finding adjudicated, not by an operator saying "proceed anyway",
+    mirroring ``REVIEW_HEALTH_GATE_DISPOSITION``'s identical reasoning. Stamping
+    it directly here (rather than teaching ``_hold_aware_disposition`` about the
+    reason) is what guarantees it can never resolve to a hold.
+    """
+    record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {
+            "session_id": task.session_id or "",
+            "session_name": "",
+            "client": task.client,
+            "ticket_id": task.ticket_id,
+            "claude_session_id": None,
+            "paused_status": _MUST_FIX_MECHANICALLY_REJECTED_REASON,
+            "breadcrumbs": CODEX_MUST_FIX_MECHANICALLY_REJECTED,
+            "crashed": False,
+            "lane": task.lane,
+        },
+        correlation_id=task.ticket_id,
+    )
+    transition_task_status(
+        task,
+        QueueItemStatus.BLOCKED_ON_USER,
+        disposition=REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
+        blocked_reason=CODEX_MUST_FIX_MECHANICALLY_REJECTED,
     )
 
 
@@ -1246,6 +1310,20 @@ def _route_staged_decision(
         # "agent_block" reported at, say, stage1_plan never actually failed at
         # FINALIZE, so self-healing off it would mask the sentinel's real,
         # earlier failure behind a fresh, doomed-to-repeat IMPL dispatch.
+        if (
+            status == "blocked"
+            and blocker_reason == CODEX_MUST_FIX_MECHANICALLY_REJECTED
+        ):
+            # #1714: dedicated override -- see
+            # _park_must_fix_mechanically_rejected's docstring for why this
+            # reason cannot use the generic _hold_aware_disposition stamp
+            # computed above. The reason is never a member of
+            # FINALIZE_REGRESS_BLOCKER_REASONS ({"agent_block"}), so there is
+            # no ordering conflict with 5a below, but the branch is placed
+            # first and returns immediately so that fact does not have to hold
+            # forever.
+            _park_must_fix_mechanically_rejected(task)
+            return True
         if (
             status == "blocked"
             and task.stage == Stage.FINALIZE
