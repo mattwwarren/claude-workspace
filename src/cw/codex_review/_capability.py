@@ -29,13 +29,12 @@ from __future__ import annotations
 import json
 import logging
 import platform
-import re
 import shutil
 import subprocess
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, NamedTuple
 
-from cw.codex_review._const import _COMMAND_NOT_FOUND_RETURNCODE
+from cw.codex_review._const import _CODEX_VERSION_RE, _is_spawn_error
 from cw.config import diagnostics_dir, state_dir
 
 if TYPE_CHECKING:
@@ -55,10 +54,6 @@ _PROBE_SANDBOX_MODE = "read-only"
 # sandbox itself rather than any flag an older codex-cli might reject.
 _PROBE_ARGV = ("codex", "exec", "--sandbox", _PROBE_SANDBOX_MODE)
 
-# Matches a dotted major.minor.patch anywhere in a `codex --version` banner
-# (real banners are name-prefixed, e.g. ``codex-cli 0.147.0``).
-_CODEX_VERSION_RE = re.compile(r"\d+(?:\.\d+){2}")
-
 _VERSION_PROBE_TIMEOUT_SECONDS = 10
 
 # The live probe is a real model round-trip on a one-line prompt. Generous
@@ -73,9 +68,9 @@ _PROBE_SENTINEL_FILENAME = "sentinel.txt"
 _PROBE_SENTINEL = "CW_CODEX_FS_PROBE_5F3A9C2E7B14"
 
 _PROBE_PROMPT = (
-    "Read the file `sentinel.txt` in your current working directory and reply "
-    "with its exact contents and nothing else. If you cannot read it for any "
-    "reason, reply with exactly NO_FILESYSTEM_ACCESS."
+    f"Read the file `{_PROBE_SENTINEL_FILENAME}` in your current working "
+    "directory and reply with its exact contents and nothing else. If you "
+    "cannot read it for any reason, reply with exactly NO_FILESYSTEM_ACCESS."
 )
 
 _CAPABILITY_CACHE_FILENAME = "capability-cache.json"
@@ -228,10 +223,7 @@ def _classify_capability_failure(result: CodexRunResult) -> str:
 
 def _is_probe_error(result: CodexRunResult) -> bool:
     """True when the probe never produced an answer (vs. answering "no")."""
-    return result.timed_out or (
-        result.returncode == _COMMAND_NOT_FOUND_RETURNCODE
-        and "command not found" in result.stderr
-    )
+    return result.timed_out or _is_spawn_error(result)
 
 
 def _capability_cache_path() -> Path:

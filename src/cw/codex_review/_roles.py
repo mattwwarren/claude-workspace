@@ -28,9 +28,9 @@ from cw.codex_review._audit_events import (
 )
 from cw.codex_review._const import (
     _CATEGORY_TO_REASON,
-    _COMMAND_NOT_FOUND_RETURNCODE,
     _MIN_ROLE_TIMEOUT_SECONDS,
     CODEX_BUDGET_EXHAUSTED,
+    _is_spawn_error,
 )
 from cw.codex_review._context import _parse_reviewer_document
 from cw.config import state_dir
@@ -163,10 +163,7 @@ def _classify_codex_failure(result: CodexRunResult) -> ExecutorFailureCategory:
     """
     if result.timed_out:
         return "timeout"
-    if (
-        result.returncode == _COMMAND_NOT_FOUND_RETURNCODE
-        and "command not found" in result.stderr
-    ):
+    if _is_spawn_error(result):
         return "spawn_error"
     if result.returncode != 0:
         return "nonzero_exit"

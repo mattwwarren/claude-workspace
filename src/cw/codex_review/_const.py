@@ -8,10 +8,12 @@ the fine-grained :class:`ExecutorFailureCategory` -> reason mapping. Imported by
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from cw.auto_dev_result import StageReached
+    from cw.codex_runner import CodexRunResult
     from cw.executor_diagnostics import ExecutorFailureCategory
 
 STAGE3_REVIEW: StageReached = "stage3_review"
@@ -22,6 +24,33 @@ STAGE3_REVIEW: StageReached = "stage3_review"
 # rather than in ``_roles`` because ``_capability`` needs it too and cannot
 # import ``_roles`` (``_roles`` -> ``_context`` -> ``_capability`` would cycle).
 _COMMAND_NOT_FOUND_RETURNCODE = 127
+
+# Matches a dotted major.minor.patch version number anywhere in a
+# `codex --version` output line (#1238). Real CLI banners are name-prefixed
+# (e.g. ``codex-cli 0.136.0``, confirmed live), not a bare version string —
+# search the whole line rather than assuming the version is the first
+# whitespace token. Shared by ``cw.executor``'s binary-presence probe and
+# ``_capability``'s filesystem-capability probe (#1709) — both parse the same
+# ``codex --version`` banner shape, so the pattern lives once, here.
+_CODEX_VERSION_RE = re.compile(r"\d+(?:\.\d+){2}")
+
+
+def _is_spawn_error(result: CodexRunResult) -> bool:
+    """True when *result* is codex failing to spawn at all (binary missing).
+
+    Shared by ``_roles._classify_codex_failure`` (the fine-grained diagnostics
+    taxonomy) and ``_capability._is_probe_error`` (#1709) — both need to
+    recognize the same "codex binary not on PATH" signature, and a predicate
+    kept in two places can silently drift as codex's failure signatures
+    change. Does not check ``result.timed_out``: callers that also need to
+    treat a timeout as "no answer" check that separately, since a spawn
+    failure and a timeout are distinct outcomes worth telling apart upstream.
+    """
+    return (
+        result.returncode == _COMMAND_NOT_FOUND_RETURNCODE
+        and "command not found" in result.stderr
+    )
+
 
 # Per-role failure reason codes (Resolution 4: reuse the existing coarse
 # vocabulary per role rather than building a new typed taxonomy). These are
