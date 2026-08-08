@@ -448,7 +448,10 @@ def _park_survivors(
         ticket_id=task.ticket_id,
         worktree=worktree,
         reason=reason,
-        details=render_verdict_comment(survivors),
+        # Literal True: reached only after the fix loop has actually engaged
+        # (survivors are cross-cycle-tracked open findings), so the fix loop
+        # was, by construction, enabled for this run.
+        details=render_verdict_comment(survivors, fix_loop_enabled=True),
         retry_eligible=retry_eligible,
         stage_reached=STAGE3_REVIEW,
     )
@@ -495,6 +498,7 @@ def _park_scope_violation(
         open_findings=open_findings,
         cycle_count=cycle,
     )
+    verdict = verdict.model_copy(update={"review": review})
     lines = [f"- {hit.path} ({hit.category}): {hit.reason}" for hit in violations]
     details = "\n".join(
         [
@@ -535,13 +539,22 @@ def _clean_exit(
     cycle: int,
     snapshot_pointer: str,
 ) -> tuple[AutoDevResult, ReviewVerdict]:
-    """Return the clean-exit result with the terminal review + escalation patched."""
+    """Return the clean-exit result with the terminal review + escalation patched.
+
+    Stamps the finalized ``review`` onto the returned *verdict* too (not just
+    the returned ``AutoDevResult``) — #1705 bug #2: without this, the
+    ``ReviewVerdict`` that reaches ``render_verdict_comment`` at the
+    executor's Step 4b still carries the terminal ``_rereview()`` pass's own
+    ``fix_cycles_used=0``, numerically indistinguishable from a genuinely
+    clean first pass.
+    """
     review = _finalize_review(
         cycle0_review=cycle0_review,
         final_verdict=verdict,
         open_findings=open_findings,
         cycle_count=cycle,
     )
+    verdict = verdict.model_copy(update={"review": review})
     health = _apply_escalation(result.health, cycle)
     patched = result.model_copy(
         update={
@@ -660,6 +673,9 @@ def _rereview(
         reviewed_sha=prepared.reviewed_sha,
         session_id=session_id,
         default_branch=default_branch,
+        # Literal True: _rereview is only ever called from inside the
+        # already-entered fix loop (run_review_with_fix_loop's for-loop).
+        fix_loop_enabled=True,
         metrics_by_role=metrics_by_role,
     )
 
@@ -678,9 +694,11 @@ def run_review_with_fix_loop(
     """Run the initial review pass plus a bounded MUST_FIX fix loop.
 
     Drop-in replacement for :func:`cw.codex_review.run_review` (identical
-    signature and return shape, plus ``fix_loop_enabled``). One shared
-    wall-clock deadline spans the initial pass, every fix invocation, and
-    every re-review. A non-blocking or unparseable cycle-0 verdict passes
+    signature and return shape — both now take ``fix_loop_enabled``, though
+    this function's own semantics extend beyond just threading it through to
+    the renderer: it also gates whether the fix loop itself engages). One
+    shared wall-clock deadline spans the initial pass, every fix invocation,
+    and every re-review. A non-blocking or unparseable cycle-0 verdict passes
     straight through with zero fix invocations attempted. When
     ``fix_loop_enabled`` is False and cycle 0 blocks, returns cycle 0's tuple
     unchanged with zero fix cycles attempted.
@@ -698,6 +716,7 @@ def run_review_with_fix_loop(
         model=model,
         wall_clock_budget_seconds=wall_clock_budget_seconds,
         session_id=session_id,
+        fix_loop_enabled=fix_loop_enabled,
     )
     if verdict is None or not verdict.blocking or not fix_loop_enabled:
         return result, verdict

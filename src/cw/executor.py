@@ -876,6 +876,11 @@ class CodexExecutor:
         # Step 2: Pre-flight checks (first match assigns result).
         result: AutoDevResult | None = None
         verdict: ReviewVerdict | None = None
+        # Only ever read at Step 4b, which is gated on `verdict is not None` —
+        # true only when Step 3 ran and set this alongside `verdict`. Declared
+        # here (rather than solely inside Step 3's branch) so mypy --strict
+        # sees a definitely-bound `bool`, not a possibly-unbound local.
+        fix_loop_enabled = False
         if stage != Stage.REVIEW:
             result = make_blocked(
                 ticket_id=task.ticket_id,
@@ -901,6 +906,7 @@ class CodexExecutor:
                 # load_effective_config() calls already made in
                 # dispatch/routing.py.
                 config = load_effective_config()
+                fix_loop_enabled = _resolve_codex_fix_loop_enabled(client, task, config)
                 result, verdict = run_review_with_fix_loop(
                     runner=self._runner,
                     task=task,
@@ -909,9 +915,7 @@ class CodexExecutor:
                     model=self._config.model,
                     wall_clock_budget_seconds=wall_clock_budget_seconds,
                     session_id=sid,
-                    fix_loop_enabled=_resolve_codex_fix_loop_enabled(
-                        client, task, config
-                    ),
+                    fix_loop_enabled=fix_loop_enabled,
                 )
 
             # Step 4: Persist result under sessions_lock.
@@ -927,7 +931,7 @@ class CodexExecutor:
             if verdict is not None:
                 _post_review_comment(
                     task.ticket_id,
-                    render_verdict_comment(verdict),
+                    render_verdict_comment(verdict, fix_loop_enabled=fix_loop_enabled),
                     cwd=_git_dir(client),
                 )
 
