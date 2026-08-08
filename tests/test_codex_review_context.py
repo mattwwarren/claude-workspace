@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -13,13 +14,17 @@ import pytest
 from cw.codex_review import (
     _build_reviewer_prompt,
     _categorize_changed_files,
+    _load_claude_md_quality_gates,
     _load_optional_text,
     _load_review_policy,
+    _load_ruff_lint_config,
     _load_sensitive_hits,
     _load_ticket_context,
     _parse_reviewer_document,
     _prepare_review_pass,
     _read_sensitive_manifest,
+    _render_lint_grounding_block,
+    _RuffLintConfig,
     _select_reviewer_roles,
 )
 from cw.codex_review._capability import _PROBE_SENTINEL
@@ -42,7 +47,6 @@ from tests.conftest import _make_diff
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +368,186 @@ class TestLoadReviewPolicy:
 
 
 # ---------------------------------------------------------------------------
+# _load_ruff_lint_config (#1744)
+# ---------------------------------------------------------------------------
+
+
+class TestLoadRuffLintConfig:
+    def test_reads_ignore_list_and_pylint_overrides_when_present(
+        self, tmp_path: Path
+    ) -> None:
+        _write(
+            tmp_path / "pyproject.toml",
+            '[tool.ruff.lint]\nignore = ["PLR0913", "T201"]\n\n'
+            "[tool.ruff.lint.pylint]\nmax-branches = 15\n",
+        )
+        result = _load_ruff_lint_config(tmp_path)
+        assert result is not None
+        assert result.ignore == ("PLR0913", "T201")
+        assert result.pylint_overrides.get("max-branches") == 15
+
+    def test_missing_pylint_subtable_yields_no_overrides(self, tmp_path: Path) -> None:
+        # Mirrors this repo's actual real state: ignore-only, no pylint subtable.
+        _write(tmp_path / "pyproject.toml", '[tool.ruff.lint]\nignore = ["PLR0913"]\n')
+        result = _load_ruff_lint_config(tmp_path)
+        assert result is not None
+        assert result.ignore == ("PLR0913",)
+        assert result.pylint_overrides == {}
+
+    def test_missing_pyproject_returns_none(self, tmp_path: Path) -> None:
+        assert _load_ruff_lint_config(tmp_path) is None
+
+    def test_malformed_toml_returns_none(self, tmp_path: Path) -> None:
+        _write(tmp_path / "pyproject.toml", "not [ valid toml{{{\n")
+        assert _load_ruff_lint_config(tmp_path) is None
+
+    def test_missing_tool_ruff_lint_section_returns_empty_not_none(
+        self, tmp_path: Path
+    ) -> None:
+        _write(tmp_path / "pyproject.toml", '[project]\nname = "x"\n')
+        result = _load_ruff_lint_config(tmp_path)
+        assert result is not None
+        assert result.ignore == ()
+        assert result.pylint_overrides == {}
+
+
+# ---------------------------------------------------------------------------
+# _load_claude_md_quality_gates (#1744)
+# ---------------------------------------------------------------------------
+
+
+class TestLoadClaudeMdQualityGates:
+    def test_extracts_quality_gates_section_verbatim(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path / "CLAUDE.md",
+            "## Quality Gates\nbody line 1\nbody line 2\n## Module Size\nother\n",
+        )
+        result = _load_claude_md_quality_gates(tmp_path)
+        assert result is not None
+        assert "body line 1" in result
+        assert "body line 2" in result
+        assert "Module Size" not in result
+        assert "other" not in result
+
+    def test_missing_claude_md_returns_none(self, tmp_path: Path) -> None:
+        assert _load_claude_md_quality_gates(tmp_path) is None
+
+    def test_missing_heading_returns_none(self, tmp_path: Path) -> None:
+        _write(tmp_path / "CLAUDE.md", "## Some Other Heading\nbody\n")
+        assert _load_claude_md_quality_gates(tmp_path) is None
+
+    def test_against_real_repo_claude_md(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        result = _load_claude_md_quality_gates(repo_root)
+        assert result is not None
+        assert "PLR0912" in result
+        assert "PLR0915" in result
+        assert "PLR0911" in result
+        assert "PLR0913" in result
+
+
+# ---------------------------------------------------------------------------
+# _render_lint_grounding_block (#1744)
+# ---------------------------------------------------------------------------
+
+
+class TestRenderLintGroundingBlock:
+    def test_both_present_includes_ignore_list_and_quality_gates_text(self) -> None:
+        config = _RuffLintConfig(ignore=("PLR0913",), pylint_overrides={})
+        result = _render_lint_grounding_block(
+            ruff_config=config,
+            quality_gates_text="QUALITY GATES BODY",
+        )
+        assert result is not None
+        assert "PLR0913" in result
+        assert "QUALITY GATES BODY" in result
+
+    def test_ruff_config_only_omits_quality_gates_subsection(self) -> None:
+        config = _RuffLintConfig(ignore=("PLR0913",), pylint_overrides={})
+        result = _render_lint_grounding_block(
+            ruff_config=config,
+            quality_gates_text=None,
+        )
+        assert result is not None
+        assert "PLR0913" in result
+        assert "Quality Gates" not in result
+
+    def test_quality_gates_only_omits_ruff_subsection(self) -> None:
+        result = _render_lint_grounding_block(
+            ruff_config=None,
+            quality_gates_text="QUALITY GATES BODY",
+        )
+        assert result is not None
+        assert "QUALITY GATES BODY" in result
+        assert "Globally Ignored Ruff Rules" not in result
+
+    def test_both_absent_returns_none(self) -> None:
+        assert (
+            _render_lint_grounding_block(
+                ruff_config=None,
+                quality_gates_text=None,
+            )
+            is None
+        )
+        empty_config = _RuffLintConfig(ignore=(), pylint_overrides={})
+        assert (
+            _render_lint_grounding_block(
+                ruff_config=empty_config,
+                quality_gates_text=None,
+            )
+            is None
+        )
+        assert (
+            _render_lint_grounding_block(
+                ruff_config=empty_config,
+                quality_gates_text="",
+            )
+            is None
+        )
+
+    def test_always_states_not_a_must_fix_instruction_when_rendered(self) -> None:
+        result = _render_lint_grounding_block(
+            ruff_config=_RuffLintConfig(ignore=("X",), pylint_overrides={}),
+            quality_gates_text=None,
+        )
+        assert result is not None
+        assert "is not a MUST_FIX" in result
+
+    def test_ignored_security_rule_does_not_suppress_concrete_failure(self) -> None:
+        result = _render_lint_grounding_block(
+            ruff_config=_RuffLintConfig(ignore=("S603",), pylint_overrides={}),
+            quality_gates_text=None,
+        )
+        assert result is not None
+        assert "based solely on enforcing a ruff rule" in result
+        assert "concrete security or correctness failure" in result
+        assert "report such a failure as MUST_FIX" in result
+        assert "S603" in result
+
+    def test_distinguishes_statements_from_lines(self) -> None:
+        result = _render_lint_grounding_block(
+            ruff_config=_RuffLintConfig(ignore=("X",), pylint_overrides={}),
+            quality_gates_text=None,
+        )
+        assert result is not None
+        assert "PLR0915" in result
+        lowered = result.lower()
+        assert "statement" in lowered
+        assert "not the number of lines" in lowered or "not lines" in lowered
+
+    def test_no_parallel_thresholds_when_pylint_subtable_absent(self) -> None:
+        result = _render_lint_grounding_block(
+            ruff_config=_RuffLintConfig(ignore=("PLR0913",), pylint_overrides={}),
+            quality_gates_text=None,
+        )
+        assert result is not None
+        assert "Complexity Thresholds" not in result
+        assert "max-branches" not in result
+        assert "max-statements" not in result
+        assert "max-returns" not in result
+
+
+# ---------------------------------------------------------------------------
 # _build_reviewer_prompt
 # ---------------------------------------------------------------------------
 
@@ -409,6 +593,26 @@ class TestBuildReviewerPrompt:
         assert "## Ticket Context" not in prompt
         assert "## Project Rubrics" not in prompt
         assert "ELEVATED SCRUTINY" not in prompt
+        assert "## Repo Lint Configuration" not in prompt
+
+    def test_lint_grounding_section_included_when_provided(self) -> None:
+        prompt = _build_reviewer_prompt(
+            "SysAdmin Reviewer",
+            agent_spec_text="SPEC",
+            diff=_make_diff(),
+            changed_files=["src/cw/foo.py"],
+            plan_text=None,
+            ticket_text=None,
+            project_rubrics=None,
+            repo_policy_section=None,
+            sensitive_hits=[],
+            lint_grounding="GROUNDING BODY",
+        )
+        assert "## Repo Lint Configuration" in prompt
+        assert "GROUNDING BODY" in prompt
+        assert prompt.index("## Repo Lint Configuration") < prompt.index(
+            "advisory here, not blocking"
+        )
 
     def test_output_instructions_override_agent_spec_preconditions(self) -> None:
         """_OUTPUT_INSTRUCTIONS must countermand the inlined agent spec's own
@@ -713,3 +917,58 @@ class TestPrepareReviewPass:
         assert prepared.capability.capable is False
         for role in prepared.roles:
             assert _INLINED_ONLY_MARKER in prepared.prompts_by_role[role]
+
+    def test_lint_grounding_included_when_pyproject_and_claude_md_present(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = make_git_repo("wt-prepare-lint-grounding")
+        _write(
+            repo / "pyproject.toml",
+            '[tool.ruff.lint]\nignore = ["ZZZ9999_DISTINCTIVE_IGNORE"]\n',
+        )
+        _write(
+            repo / "CLAUDE.md",
+            "## Quality Gates\nDISTINCTIVE_QUALITY_GATE_MARKER_TEXT\n"
+            "## Module Size\nother\n",
+        )
+        _git(repo, "add", "pyproject.toml", "CLAUDE.md")
+        _git(repo, "commit", "-m", "add lint config")
+        _git(repo, "checkout", "-b", "feature")
+        (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
+        _git(repo, "add", "mod.py")
+        _git(repo, "commit", "-m", "add mod.py")
+
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-prepare-lint-grounding",
+        )
+
+        assert prepared.roles
+        for role in prepared.roles:
+            prompt = prepared.prompts_by_role[role]
+            assert "ZZZ9999_DISTINCTIVE_IGNORE" in prompt
+            assert "DISTINCTIVE_QUALITY_GATE_MARKER_TEXT" in prompt
+
+    def test_lint_grounding_absent_when_repo_files_missing(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = make_git_repo("wt-prepare-no-lint-grounding")
+        _git(repo, "checkout", "-b", "feature")
+        (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
+        _git(repo, "add", "mod.py")
+        _git(repo, "commit", "-m", "add mod.py")
+
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-prepare-no-lint-grounding",
+        )
+
+        assert prepared.roles
+        for role in prepared.roles:
+            assert "## Repo Lint Configuration" not in prepared.prompts_by_role[role]
