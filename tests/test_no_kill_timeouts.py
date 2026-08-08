@@ -139,7 +139,9 @@ def _run_liveness(state: CwState) -> None:
 def _distress_events() -> list[dict[str, object]]:
     return [
         dict(e.payload)
-        for e in read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+        for e in read_events(
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION]
+        )
         if e.payload.get("paused_status") == _SESSION_UNRESPONSIVE_REASON
     ]
 

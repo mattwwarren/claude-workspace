@@ -101,7 +101,9 @@ def test_quiet_session_is_never_dispositioned_on_elapsed_time(
     sess = _mk_headless_daemon_session("T-9", tmp_path / "wt", _STARTED_AT)
     assert sess.last_result is None
 
-    candidates = _detect_stalled_candidates(state=CwState(sessions=[sess]), task_by_ticket={})
+    candidates = _detect_stalled_candidates(
+        state=CwState(sessions=[sess]), task_by_ticket={}
+    )
 
     assert candidates == []
     assert sess.status is SessionStatus.ACTIVE
@@ -112,7 +114,9 @@ def test_non_headless_session_is_skipped(tmp_config_dir: Path, tmp_path: Path) -
     (tmp_path / "wt" / ".claude" / "cw-context.json").write_text('{"headless": false}')
     sess.last_result = _shipped_salvage_payload()
 
-    candidates = _detect_stalled_candidates(state=CwState(sessions=[sess]), task_by_ticket={})
+    candidates = _detect_stalled_candidates(
+        state=CwState(sessions=[sess]), task_by_ticket={}
+    )
 
     assert candidates == []
 
@@ -123,7 +127,9 @@ def test_act_completes_session_routes_task_and_stops_surface(
     state = _foreign_result_session(tmp_path, _shipped_salvage_payload())
     store = load_dev_queue()
     store.tasks.append(
-        TicketTask(ticket_id="salv-1", client="client-a", status=QueueItemStatus.RUNNING)
+        TicketTask(
+            ticket_id="salv-1", client="client-a", status=QueueItemStatus.RUNNING
+        )
     )
     save_dev_queue(store)
     candidates = _detect_stalled_candidates(state, task_by_ticket={})
