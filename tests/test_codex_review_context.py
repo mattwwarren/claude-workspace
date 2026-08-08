@@ -513,6 +513,17 @@ class TestRenderLintGroundingBlock:
         assert result is not None
         assert "is not a MUST_FIX" in result
 
+    def test_ignored_security_rule_does_not_suppress_concrete_failure(self) -> None:
+        result = _render_lint_grounding_block(
+            ruff_config=_RuffLintConfig(ignore=("S603",), pylint_overrides={}),
+            quality_gates_text=None,
+        )
+        assert result is not None
+        assert "based solely on enforcing a ruff rule" in result
+        assert "concrete security or correctness failure" in result
+        assert "report such a failure as MUST_FIX" in result
+        assert "S603" in result
+
     def test_distinguishes_statements_from_lines(self) -> None:
         result = _render_lint_grounding_block(
             ruff_config=_RuffLintConfig(ignore=("X",), pylint_overrides={}),

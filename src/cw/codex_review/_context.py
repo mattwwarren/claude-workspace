@@ -72,9 +72,12 @@ _SENSITIVE_HEADER = (
 # (PLR0915 gates statements, not lines — the exact #1729 failure mode).
 _LINT_GROUNDING_INSTRUCTION = (
     "REPO LINT CONFIGURATION — GROUND FINDINGS IN THE REPO'S ACTUAL RUFF SETUP\n\n"
-    "A finding that contradicts a ruff rule this repo has explicitly opted out "
-    "of below, or that treats an unmodified ruff default as if it were a "
-    "repo-configured threshold, is not a MUST_FIX — downgrade it or drop it. "
+    "A finding based solely on enforcing a ruff rule this repo has explicitly "
+    "opted out of below, or on treating an unmodified ruff default as if it "
+    "were a repo-configured threshold, is not a MUST_FIX — downgrade it or "
+    "drop it. An ignored ruff rule does not shield a concrete security or "
+    "correctness failure: report such a failure as MUST_FIX when warranted, "
+    "even when a related rule such as S603 is ignored. "
     "In particular, PLR0915 (too-many-statements) gates on the number of "
     "STATEMENTS in a function body, not the number of lines — a long "
     "function built from short, simple statements can sit well under the "
