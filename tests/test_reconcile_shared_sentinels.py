@@ -30,7 +30,6 @@ from cw.config import (
     save_state,
 )
 from cw.dev_queue import load_dev_queue, save_dev_queue
-from cw.events import read_events
 from cw.models import (
     ClientConfig,
     CompletionReason,
@@ -46,23 +45,18 @@ from cw.models import (
 )
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.reconcile import (
-    _SALVAGE_SKIP_REASON,
-    _SILENTLY_IDLE_REASON,
     _STAGE_REVIEW_COMPLETE,
-    HEADLESS_TIMEOUT_SECONDS,
     SPAWN_GRACE_SECONDS,
     _claude_agents_json,
     _has_terminal_sentinel,
     compute_drift,
     reconcile,
     revert_completed_silent_tasks,
-    revert_stalled_headless_sessions,
     revert_timed_out_tasks,
 )
 from tests._reconcile_helpers import (
     SCOPE_GUARD_FILES,
     SCOPE_GUARD_LINES,
-    _auto_config,
     _inflate_scope,
     _make_stale_base_repo,
     _make_terminal_payload,
@@ -1282,184 +1276,6 @@ def test_salvage_merge_pending_from_phantom_routes_to_blocked_on_user(
     )
 
 
-@pytest.mark.parametrize(
-    "status",
-    [
-        "scope_exceeded",
-        "forbidden_area",
-        "merge_gate_blocked",
-    ],
-)
-def test_salvage_all_terminal_statuses_from_stalled(
-    status: str,
-    tmp_config_dir: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Stalled (wall-clock expired) headless session with each non-retry terminal
-    status in transcript must be salvaged and routed to BLOCKED_ON_USER, NOT
-    reverted to PENDING and NOT silently marked COMPLETED (#431, #1566)."""
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-
-    ticket_id = f"431s-{status}"
-    worktree = tmp_path / f"wts-{status}"
-    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
-    now = datetime(2026, 1, 1, 1, 5, 0, tzinfo=UTC)  # past HEADLESS_TIMEOUT_SECONDS
-    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
-
-    sess = _mk_headless_daemon_session(ticket_id, worktree, started_at)
-    payload = _make_terminal_payload(status, ticket_id)
-    _write_salvage_transcript(home, worktree, f"uuid-s-{status}", payload)
-
-    save_state(CwState(sessions=[sess]))
-    save_dev_queue(
-        DevQueueStore(
-            tasks=[
-                TicketTask(
-                    ticket_id=ticket_id,
-                    client="client-a",
-                    status=QueueItemStatus.RUNNING,
-                    session_id=ticket_id,
-                )
-            ]
-        )
-    )
-
-    reverted = revert_stalled_headless_sessions(
-        state=load_state(), now=now, config=_auto_config()
-    )
-
-    assert ticket_id not in reverted, (
-        f"status={status!r}: ticket must NOT be reverted to PENDING (salvaged terminal)"
-    )
-    reloaded = next(s for s in load_state().sessions if s.id == ticket_id)
-    assert reloaded.status == SessionStatus.COMPLETED, (
-        f"status={status!r}: session must be COMPLETED after salvage"
-    )
-    task = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
-    assert task.status == QueueItemStatus.BLOCKED_ON_USER, (
-        f"status={status!r}: queue task must be BLOCKED_ON_USER, not "
-        "silently marked COMPLETED (#1566)"
-    )
-
-
-@pytest.mark.parametrize(
-    "status",
-    [
-        "ambiguities_pending_resolution",
-        "premises_pending_verification",
-        "plan_pending_approval",
-        "review_pending_approval",
-    ],
-)
-def test_salvage_paused_statuses_from_stalled_route_to_blocked_on_user(
-    status: str,
-    tmp_config_dir: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Stalled headless session with a paused status in transcript must be salvaged
-    and the queue task set to BLOCKED_ON_USER, not COMPLETED (#471)."""
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-
-    ticket_id = f"471s-{status}"
-    worktree = tmp_path / f"wts-{status}"
-    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
-    now = datetime(2026, 1, 1, 1, 5, 0, tzinfo=UTC)  # past HEADLESS_TIMEOUT_SECONDS
-    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
-
-    sess = _mk_headless_daemon_session(ticket_id, worktree, started_at)
-    payload = _make_terminal_payload(status, ticket_id)
-    _write_salvage_transcript(home, worktree, f"uuid-s-{status}", payload)
-
-    save_state(CwState(sessions=[sess]))
-    save_dev_queue(
-        DevQueueStore(
-            tasks=[
-                TicketTask(
-                    ticket_id=ticket_id,
-                    client="client-a",
-                    status=QueueItemStatus.RUNNING,
-                    session_id=ticket_id,
-                )
-            ]
-        )
-    )
-
-    reverted = revert_stalled_headless_sessions(
-        state=load_state(), now=now, config=_auto_config()
-    )
-
-    assert ticket_id not in reverted, (
-        f"status={status!r}: ticket must NOT be reverted to PENDING (salvaged paused)"
-    )
-    reloaded = next(s for s in load_state().sessions if s.id == ticket_id)
-    assert reloaded.status == SessionStatus.COMPLETED, (
-        f"status={status!r}: session must be COMPLETED after salvage"
-    )
-    task = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
-    assert task.status == QueueItemStatus.BLOCKED_ON_USER, (
-        f"status={status!r}: queue task must be BLOCKED_ON_USER for paused status"
-    )
-
-
-def test_salvage_merge_pending_from_stalled_routes_to_blocked_on_user(
-    tmp_config_dir: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Stalled headless session emitting merge_pending must be salvaged to
-    BLOCKED_ON_USER via revert_stalled_headless_sessions (#899, #1566)."""
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-
-    status = "merge_pending"
-    ticket_id = "899s-merge_pending"
-    worktree = tmp_path / f"wts-{status}"
-    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
-    now = datetime(2026, 1, 1, 1, 5, 0, tzinfo=UTC)  # past HEADLESS_TIMEOUT_SECONDS
-    assert (now - started_at).total_seconds() > HEADLESS_TIMEOUT_SECONDS
-
-    sess = _mk_headless_daemon_session(ticket_id, worktree, started_at)
-    payload = _make_terminal_payload(status, ticket_id)
-    _write_salvage_transcript(home, worktree, f"uuid-s-{status}", payload)
-
-    save_state(CwState(sessions=[sess]))
-    save_dev_queue(
-        DevQueueStore(
-            tasks=[
-                TicketTask(
-                    ticket_id=ticket_id,
-                    client="client-a",
-                    status=QueueItemStatus.RUNNING,
-                    session_id=ticket_id,
-                )
-            ]
-        )
-    )
-
-    reverted = revert_stalled_headless_sessions(
-        state=load_state(), now=now, config=_auto_config()
-    )
-
-    assert ticket_id not in reverted, (
-        "merge_pending ticket must NOT be reverted to PENDING (salvaged terminal)"
-    )
-    reloaded = next(s for s in load_state().sessions if s.id == ticket_id)
-    assert reloaded.status == SessionStatus.COMPLETED, (
-        "session must be COMPLETED after salvage"
-    )
-    task = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
-    assert task.status == QueueItemStatus.BLOCKED_ON_USER, (
-        "merge_pending queue task must be BLOCKED_ON_USER, matching dispatch Rule 3b"
-    )
-
-
 def test_salvage_terminal_statuses_constant_is_single_source_of_truth() -> None:
     """Drift guard: _SALVAGE_TERMINAL_STATUSES in reconcile.py must equal
     SALVAGE_TERMINAL_STATUSES from auto_dev_result.py (#431).
@@ -1509,8 +1325,7 @@ def test_salvage_dispatch_hold_membership_is_single_source_of_truth() -> None:
         ), f"status={status!r}: salvage classifier vs dispatch Rule 1/2/5/3b diverge"
 
 
-# Frozen time for backfill tests: session started_at is 60s before frozen now
-# (well within HEADLESS_TIMEOUT_SECONDS=3600) so revert_stalled does not fire.
+# Frozen time for backfill tests: session started_at is 60s before frozen now.
 _BACKFILL_FROZEN_NOW = "2026-06-01T12:00:00+00:00"
 _BACKFILL_STARTED_AT = datetime(2026, 6, 1, 11, 59, 0, tzinfo=UTC)
 
@@ -2534,90 +2349,6 @@ def test_dirty_worktree_push_fires_once_not_per_tick_completed_silent(
     )
 
 
-# ---------------------------------------------------------------------------
-# session.salvage_skipped event tests (GitHub issue #459)
-# ---------------------------------------------------------------------------
-
-
-def test_salvage_skipped_emitted_for_park_marker(
-    tmp_config_dir: Path,
-    tmp_path: Path,
-) -> None:
-    """Park-marker session emits session.salvage_skipped."""
-    worktree = tmp_path / "wt-parked-sk"
-    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
-    now = datetime(2026, 1, 1, 1, 5, 0, tzinfo=UTC)
-
-    sess = _mk_headless_daemon_session("salvage-skip-1", worktree, started_at)
-    sess.last_result = {"paused_status": _SILENTLY_IDLE_REASON}
-    state = CwState(sessions=[sess])
-    save_state(state)
-
-    task = TicketTask(
-        ticket_id="salvage-skip-1",
-        client="client-a",
-        status=QueueItemStatus.BLOCKED_ON_USER,
-        session_id="salvage-skip-1",
-    )
-    save_dev_queue(DevQueueStore(tasks=[task]))
-
-    revert_stalled_headless_sessions(state=state, now=now, config=_auto_config())
-
-    events = read_events(
-        consumer="test-salvage-skipped",
-        event_types=[OrchestratorEventType.SESSION_SALVAGE_SKIPPED],
-    )
-    assert len(events) == 1
-    p = events[0].payload
-    assert p["session_id"] == "salvage-skip-1"
-    assert p["reason"] == _SALVAGE_SKIP_REASON
-    assert p["paused_status"] == _SILENTLY_IDLE_REASON
-    assert events[0].correlation_id == "salvage-skip-1"
-
-
-def test_salvage_skipped_not_emitted_for_terminal_sentinel(
-    tmp_config_dir: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Session with a real terminal sentinel does NOT emit session.salvage_skipped."""
-    worktree = tmp_path / "wt-salvaged"
-    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
-    now = datetime(2026, 1, 1, 1, 5, 0, tzinfo=UTC)
-
-    sess = _mk_headless_daemon_session("salvage-real-1", worktree, started_at)
-    # last_result is None → no park marker; salvage will find a sentinel
-    state = CwState(sessions=[sess])
-    save_state(state)
-
-    task = TicketTask(
-        ticket_id="salvage-real-1",
-        client="client-a",
-        status=QueueItemStatus.RUNNING,
-        session_id="salvage-real-1",
-    )
-    save_dev_queue(DevQueueStore(tasks=[task]))
-
-    # Mock _salvage_terminal_result to return a real terminal result so the
-    # session bypasses the salvage-skipped gate entirely. A real AutoDevResult
-    # (not a MagicMock) is required now that _apply_salvaged_completion routes
-    # the salvaged result through the validating door (emit_result_on), which
-    # re-validates result.model_dump() against the AutoDevResult schema (#1459).
-    fake_result = AutoDevResult.model_validate(_shipped_salvage_payload())
-    monkeypatch.setattr(
-        "cw.reconcile._shared.salvage_terminal_result",
-        lambda *_args, **_kwargs: (fake_result, "fake-claude-id"),
-    )
-
-    revert_stalled_headless_sessions(state=state, now=now, config=_auto_config())
-
-    events = read_events(
-        consumer="test-no-salvage-skip",
-        event_types=[OrchestratorEventType.SESSION_SALVAGE_SKIPPED],
-    )
-    assert len(events) == 0
-
-
 def test_compute_worktree_dirty_returns_false_when_get_client_raises(
     tmp_config_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2630,56 +2361,6 @@ def test_compute_worktree_dirty_returns_false_when_get_client_raises(
         lambda _name: (_ for _ in ()).throw(ValueError("no such client")),
     )
     assert _compute_worktree_dirty("missing-client", "some-branch") is False
-
-
-def test_salvage_skipped_emitted_with_null_ticket_id(
-    tmp_config_dir: Path,
-    tmp_path: Path,
-) -> None:
-    """Park-marked session without auto-dev/ prefix: salvage_skipped, ticket_id=None."""
-    worktree = tmp_path / "wt-no-tid"
-    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
-    now = datetime(2026, 1, 1, 1, 5, 0, tzinfo=UTC)
-
-    # Session name without auto-dev/ prefix → ticket_id_for_session returns None.
-    # _is_headless requires a cw-context.json with "headless": true.
-    context_dir = worktree / ".claude"
-    context_dir.mkdir(parents=True, exist_ok=True)
-    (context_dir / "cw-context.json").write_text(
-        '{"headless": true, "session_id": "no-tid-sess"}'
-    )
-    sess = Session(
-        id="no-tid-sess",
-        name="client-a/impl",
-        client="client-a",
-        purpose=SessionPurpose.IMPL,
-        origin=SessionOrigin.DAEMON,
-        status=SessionStatus.ACTIVE,
-        workspace_path=tmp_path / "ws",
-        worktree_path=worktree,
-        started_at=started_at,
-        last_result={"paused_status": _SILENTLY_IDLE_REASON},
-    )
-    state = CwState(sessions=[sess])
-    save_state(state)
-    save_dev_queue(DevQueueStore(tasks=[]))
-
-    revert_stalled_headless_sessions(state=state, now=now, config=_auto_config())
-
-    events = read_events(
-        consumer="test-salvage-skip-null-tid",
-        event_types=[OrchestratorEventType.SESSION_SALVAGE_SKIPPED],
-    )
-    assert len(events) == 1
-    p = events[0].payload
-    assert p["ticket_id"] is None
-    assert p["reason"] == _SALVAGE_SKIP_REASON
-    assert events[0].correlation_id is None
-
-
-# ---------------------------------------------------------------------------
-# TestSalvageCommittedNoPrSessions (GitHub issue #497)
-# ---------------------------------------------------------------------------
 
 
 class TestDetectPostReviewClean:

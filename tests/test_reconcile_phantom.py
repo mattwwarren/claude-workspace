@@ -519,6 +519,13 @@ def test_phantom_reverted_event_emitted_with_dirty_worktree(
         "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
+    # Hermetic gh: the reconcile() pre-pass must not shell out to a real gh
+    # binary (absent/misconfigured hosts would route the ticket to gh_blocked
+    # and mask the phantom disposition under test).
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
     monkeypatch.setattr(
         "cw.reconcile._deps.checked_out_branch",
         lambda _p: "auto-dev/TICK-PD",
@@ -575,6 +582,13 @@ def test_phantom_reverted_event_emitted_with_clean_worktree(
     monkeypatch.setattr(
         "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
+    )
+    # Hermetic gh: the reconcile() pre-pass must not shell out to a real gh
+    # binary (absent/misconfigured hosts would route the ticket to gh_blocked
+    # and mask the phantom disposition under test).
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
     )
     monkeypatch.setattr(
         "cw.reconcile._deps.checked_out_branch",
@@ -722,6 +736,13 @@ def test_phantom_clean_worktree_routes_to_pending(
         "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
+    # Hermetic gh: the reconcile() pre-pass must not shell out to a real gh
+    # binary (absent/misconfigured hosts would route the ticket to gh_blocked
+    # and mask the phantom disposition under test).
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
     monkeypatch.setattr(
         "cw.reconcile._deps.checked_out_branch",
         lambda _p: "auto-dev/TICK-421C",
@@ -777,6 +798,13 @@ def test_dirty_phantom_task_not_re_claimable(
         "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
+    # Hermetic gh: the reconcile() pre-pass must not shell out to a real gh
+    # binary (absent/misconfigured hosts would route the ticket to gh_blocked
+    # and mask the phantom disposition under test).
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
     monkeypatch.setattr(
         "cw.reconcile._deps.checked_out_branch",
         lambda _p: "auto-dev/TICK-421N",
@@ -827,6 +855,13 @@ def test_phantom_reverted_event_carries_queue_status_blocked(
         "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
+    # Hermetic gh: the reconcile() pre-pass must not shell out to a real gh
+    # binary (absent/misconfigured hosts would route the ticket to gh_blocked
+    # and mask the phantom disposition under test).
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
+    )
     monkeypatch.setattr(
         "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/TICK-QSD"
     )
@@ -874,6 +909,13 @@ def test_phantom_reverted_event_carries_queue_status_pending(
     monkeypatch.setattr(
         "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
+    )
+    # Hermetic gh: the reconcile() pre-pass must not shell out to a real gh
+    # binary (absent/misconfigured hosts would route the ticket to gh_blocked
+    # and mask the phantom disposition under test).
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda _tid, **_kw: (False, True),
     )
     monkeypatch.setattr(
         "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/TICK-QSC"
@@ -2412,12 +2454,6 @@ def test_sentinel_mismatch_veto_cap_exhaustion_emits_immediate_needs_attention(
         "cw.reconcile._deps.fire_push_notification",
         lambda *a, **kw: push_calls.append((a, kw)),
     )
-    removed: list[object] = []
-    monkeypatch.setattr(
-        "cw.reconcile._shared.remove_worktree",
-        lambda *a, **kw: removed.append((a, kw)),
-    )
-
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -2466,10 +2502,9 @@ def test_sentinel_mismatch_veto_cap_exhaustion_emits_immediate_needs_attention(
     # ReapCandidate default of None.
     assert attn[0].payload["stale_minutes"] == pytest.approx(0.5)
     assert len(push_calls) == 1
-    # Non-destructive escalation: SIGNAL_ONLY never stops the daemon or removes
-    # the worktree on this path.
+    # Non-destructive escalation: SIGNAL_ONLY never stops the daemon on this
+    # path (and reconcile no longer removes worktrees at all).
     assert daemon.stop_calls == []
-    assert removed == []
 
 
 def test_sentinel_mismatch_veto_escalation_fires_once_not_every_tick(
