@@ -76,6 +76,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rather than deriving it, so gating IMPL would have permanently stalled
   unattended `IMPL → REVIEW` auto-advance on LOCAL-backend clients.
 
+- **The posted review comment could not distinguish "found nothing" from
+  "found and fixed" (#1705):** `render_verdict_comment` only inspected
+  `verdict.blocking`/`must_fix`/`accepted`, never `verdict.review` — so a
+  fix-loop cycle that converged on a real MUST_FIX finding and a genuinely
+  clean first pass both rendered the same "Non-blocking — no MUST_FIX
+  findings" string. Root cause was two bugs: `_clean_exit` and
+  `_park_scope_violation` (`codex_fix_loop.py`) reconstructed the correct
+  cross-cycle `Review` and patched it onto the returned `AutoDevResult`, but
+  not onto the returned `ReviewVerdict` — the object `render_verdict_comment`
+  actually reads — so the posted comment kept reading the terminal
+  re-review's own `fix_cycles_used=0`. Both now stamp the finalized `Review`
+  onto the verdict they return, mirroring `_survivors_only_verdict`'s
+  existing pattern. Separately, `Review.fix_cycles_used == 0` is produced
+  identically by a fix-loop-disabled single pass and a fix-loop-enabled pass
+  whose cycle-0 review was already clean — no `Review`-only signal can tell
+  these apart, so `render_verdict_comment` (and
+  `synthesize_codex_review_result`/`run_review`, which now forward it) takes
+  a new required `fix_loop_enabled: bool` parameter to render each history as
+  its own state rather than lumping fix-loop-off in with the others. The
+  comment also now surfaces a "PARTIAL COVERAGE" note when a reviewer role
+  failed to run, reusing `verdict.agents_run` (#1710) — previously that
+  signal only reached `Blocker.details` on the zero-documents path, never the
+  posted GitHub comment.
 - **Reviewer findings with a near-line anchor or a stray diff-marker in
   evidence were wrongly rejected (#1715):** two false-positive rejections on
   top of #1632's diff-anchoring. First, `invalid_line_reference` used exact
