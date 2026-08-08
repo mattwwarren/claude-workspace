@@ -57,7 +57,7 @@ if TYPE_CHECKING:
     from cw.codex_runner import CodexRunner
     from cw.review_findings import ReviewerFindingsDocument
 
-    _FixBehavior = CodexRunResult | Callable[[Path, list[str]], CodexRunResult]
+    _FixBehavior = CodexRunResult | Callable[[Path, list[str]], CodexRunResult] | None
 
 # ---------------------------------------------------------------------------
 # Fixtures / doubles
