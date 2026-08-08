@@ -24,6 +24,7 @@ from cw.review_findings import (
     ReviewerRunRecord,
     ReviewVerdict,
     StrippedEscalation,
+    _select_rejected_must_fix,
     consolidate_verdict,
     dedupe_findings,
     derive_review_counts,
@@ -892,6 +893,76 @@ class TestConsolidateVerdict:
         verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
         assert verdict.blocking is False
         assert verdict.rejected[0].reason == "unknown_file"
+
+    def test_mechanically_rejected_must_fix_populates_rejected_must_fix_field(
+        self, tmp_path: Path
+    ) -> None:
+        # #1714: the fleet reproduction. A MUST_FIX rejected for a MECHANICAL
+        # reason (here unknown_file) is dropped before adjudication, so
+        # `blocking` stays False by design (R4 -- an unreliable anchor must
+        # never enter the autofix loop). `rejected_must_fix` is the separate
+        # signal that says "something MUST_FIX-shaped was silently dropped".
+        (tmp_path / "docs.md").write_text("x")
+        finding = _make_finding(
+            severity="MUST_FIX", file="docs.md", line_start=None, line_end=None
+        )
+        doc = _make_reviewer_doc(finding)
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        assert verdict.blocking is False
+        assert verdict.must_fix == []
+        assert len(verdict.rejected_must_fix) == 1
+        assert verdict.rejected_must_fix[0].reason == "unknown_file"
+        assert verdict.rejected_must_fix[0].raw["severity"] == "MUST_FIX"
+
+    def test_should_fix_mechanical_rejection_does_not_populate_rejected_must_fix(
+        self,
+    ) -> None:
+        # #1714 AC#4: only MUST_FIX-severity rejections raise the new signal;
+        # a mechanically-rejected SHOULD_FIX stays purely informational.
+        finding = _make_finding(
+            severity="SHOULD_FIX", file="docs.md", line_start=None, line_end=None
+        )
+        doc = _make_reviewer_doc(finding)
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        assert verdict.rejected[0].reason == "unknown_file"
+        assert verdict.rejected_must_fix == []
+
+    def test_rejected_must_fix_keyed_on_category_not_enumerated_reason(self) -> None:
+        # #1714 AC#3: the selection is keyed on the finding's SEVERITY, never on
+        # an enumerated set of RejectedFindingReason values -- so a reason value
+        # that does not exist today is covered by construction. model_construct
+        # bypasses the Literal so a synthetic reason can be exercised at all.
+        synthetic = RejectedFinding.model_construct(
+            raw=_finding_kwargs(severity="MUST_FIX"),
+            reviewer_role="Test Reviewer",
+            reason="a_synthetic_reason_never_seen_before",
+            detail="",
+        )
+        benign = RejectedFinding.model_construct(
+            raw=_finding_kwargs(severity="NIT"),
+            reviewer_role="Test Reviewer",
+            reason="a_synthetic_reason_never_seen_before",
+            detail="",
+        )
+        assert _select_rejected_must_fix([synthetic, benign]) == [synthetic]
+
+    def test_mixed_blocking_and_rejected_must_fix(self) -> None:
+        # #1714: the two signals are independent and can coexist -- an accepted
+        # MUST_FIX still blocks while a mechanically-rejected one is reported.
+        doc = _make_reviewer_doc(
+            _make_finding(severity="MUST_FIX"),
+            _make_finding(
+                severity="MUST_FIX",
+                file="not/in/diff.py",
+                line_start=None,
+                line_end=None,
+                summary="dropped one",
+            ),
+        )
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        assert verdict.blocking is True
+        assert len(verdict.must_fix) == 1
+        assert len(verdict.rejected_must_fix) == 1
 
     def test_aggregate_near_line_and_multiline_via_consolidate_verdict(self) -> None:
         # #1715 integration: three findings through the full

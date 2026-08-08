@@ -6480,6 +6480,44 @@ class TestDrainHeldTickets:
         assert t.status == QueueItemStatus.PENDING
         assert t.stage == Stage.REVIEW
 
+    def test_drain_includes_must_fix_mechanically_rejected(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#1714: a mechanically-rejected-MUST_FIX park IS batch-releasable.
+
+        Same reasoning as ``test_drain_includes_review_health_gate`` above: the
+        park says "review dropped a MUST_FIX before adjudicating it", which
+        clears by re-running review — exactly what drain does. It is not a
+        deliberate operator stop.
+        """
+        from cw.dev_queue import (
+            REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
+            drain_held_tickets,
+            select_held_tickets,
+        )
+
+        assert (
+            REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION
+            == "codex_must_fix_mechanically_rejected"
+        )
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        parked = _make_blocked_task(
+            ticket_id="GEN-503",
+            stage=Stage.REVIEW,
+            session_id="sess-mech-1",
+            disposition=REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
+        )
+        save_dev_queue(DevQueueStore(tasks=[parked]))
+
+        assert [t.ticket_id for t in select_held_tickets("genhealth")] == ["GEN-503"]
+        outcomes = drain_held_tickets("genhealth")
+
+        assert [o["status"] for o in outcomes] == ["requeued"]
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-503")
+        assert t.status == QueueItemStatus.PENDING
+        assert t.stage == Stage.REVIEW
+
     def test_no_outer_lock_held_during_batch(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
@@ -7965,6 +8003,54 @@ class TestHoldAwareDisposition:
         from cw.dev_queue import AWAITING_OPERATOR_DISPOSITION
 
         assert AWAITING_OPERATOR_DISPOSITION == "awaiting_operator"
+
+
+# ---------------------------------------------------------------------------
+# TestMustFixMechanicallyRejectedDisposition (#1714)
+# ---------------------------------------------------------------------------
+
+
+class TestMustFixMechanicallyRejectedDisposition:
+    """Set-membership contract for REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION.
+
+    Deliberately NOT inside ``TestHoldAwareDisposition``: #1714 does not extend
+    ``_hold_aware_disposition``. The new disposition is stamped directly by
+    ``dispatch.routing._park_must_fix_mechanically_rejected``, never derived
+    from a (status, blocker_reason) pair.
+    """
+
+    def test_disposition_value(self) -> None:
+        from cw.dev_queue import REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION
+
+        assert (
+            REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION
+            == "codex_must_fix_mechanically_rejected"
+        )
+
+    def test_disposition_excluded_from_hold(self) -> None:
+        # R2.2: a hold means "parked pending a human/dependency, not pending a
+        # fix". A dropped MUST_FIX IS pending a fix (re-run review with the
+        # finding adjudicated), so it must not join the hold namespace — which
+        # would also make it concierge-false-park-eligible.
+        from cw.dev_queue import (
+            HOLD_DISPOSITIONS,
+            REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
+        )
+
+        assert REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION not in HOLD_DISPOSITIONS
+        # Unchanged by #1714 — this ticket adds no HOLD_DISPOSITIONS member.
+        assert len(HOLD_DISPOSITIONS) == 2
+
+    def test_hold_aware_disposition_is_not_extended(self) -> None:
+        # Negative proof that the round-1 mechanism was NOT implemented: the
+        # generic verbatim stamp still applies to this reason, which is exactly
+        # why routing.py needs its own dedicated park helper.
+        from cw.dev_queue import _hold_aware_disposition
+
+        assert (
+            _hold_aware_disposition("blocked", "codex_must_fix_mechanically_rejected")
+            == "blocked"
+        )
 
 
 # ---------------------------------------------------------------------------

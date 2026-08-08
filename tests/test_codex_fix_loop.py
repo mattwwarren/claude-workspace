@@ -25,6 +25,7 @@ from cw.codex_review import (
     CODEX_BUDGET_EXHAUSTED,
     CODEX_FIX_SCOPE_VIOLATION,
     CODEX_MUST_FIX_FINDINGS,
+    CODEX_MUST_FIX_MECHANICALLY_REJECTED,
     CODEX_REVIEW_UNPARSEABLE,
     render_verdict_comment,
     run_review,
@@ -142,11 +143,22 @@ def _doc(findings: list[dict[str, object]]) -> str:
     )
 
 
+# #1714: a MUST_FIX whose evidence is absent from the diff is rejected
+# `evidence_not_in_diff` — a MECHANICAL rejection, so it never reaches
+# `verdict.must_fix` and must never enter the fix loop.
+_MF_BAD_EVIDENCE = _finding_dict(
+    severity="MUST_FIX",
+    line=1,
+    evidence="this string appears nowhere in the captured diff",
+    summary="MFX-mechanically-rejected",
+)
+
 _MF_DOC = _doc([_MF_A])
 _MF_AB_DOC = _doc([_MF_A, _MF_B])
 _MF_SF_DOC = _doc([_MF_A, _SF])
 _SF_DOC = _doc([_SF])
 _CLEAN_DOC = _doc([])
+_MF_MECH_REJECTED_DOC = _doc([_MF_BAD_EVIDENCE])
 
 
 class _FixLoopRunner:
@@ -894,6 +906,29 @@ class TestFixLoopNonBlockingPassthrough:
         assert out.blocker is not None
         assert out.blocker.reason == CODEX_REVIEW_UNPARSEABLE
         assert verdict is None
+
+    def test_mechanically_rejected_must_fix_does_not_enter_fix_loop(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """#1714 R4: a mechanically-rejected MUST_FIX blocks but never autofixes.
+
+        The finding's line/evidence anchor is by definition unreliable (that is
+        *why* it was rejected), so handing it to a fix agent would ask codex to
+        patch code the finding may not even describe. The fix-loop gate reads
+        ``verdict.blocking``, which stays False — the park is carried by the
+        separate ``rejected_must_fix`` signal instead.
+        """
+        worktree = _worktree(make_git_repo, "wt-mech-reject")
+        runner = _FixLoopRunner([_MF_MECH_REJECTED_DOC])
+        out, verdict = _run_loop(runner, worktree, session_id="s-mech-reject")
+
+        assert runner.fix_calls == 0
+        assert out.status == "blocked"
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_MUST_FIX_MECHANICALLY_REJECTED
+        assert verdict is not None
+        assert verdict.blocking is False
+        assert len(verdict.rejected_must_fix) == 1
 
 
 # ---------------------------------------------------------------------------

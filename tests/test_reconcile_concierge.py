@@ -297,6 +297,33 @@ class TestRecipeFalseParkRequeue:
         assert store.tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
         assert store.tasks[0].disposition == "review_health_gate"
 
+    def test_must_fix_mechanically_rejected_disposition_untouched(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """#1714: a dead-session row parked ``codex_must_fix_mechanically_rejected``
+        is NOT auto-recovered by the false-park requeue recipe.
+
+        Mirror of ``test_review_health_gate_disposition_untouched``: auto-
+        recovering it would misclassify a dropped MUST_FIX finding as a
+        technical/session-death glitch, defeating the gate's purpose.
+        """
+        task = _make_task(
+            disposition="codex_must_fix_mechanically_rejected", attempts=1
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[]))
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config()
+        )
+
+        assert recovered == []
+        store = load_dev_queue()
+        assert store.tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+        assert (
+            store.tasks[0].disposition == "codex_must_fix_mechanically_rejected"
+        )
+
     def test_ceiling_refusal_leaves_row_parked(self, tmp_config_dir: Path) -> None:
         """A1/A2: at the global attempt ceiling, the row is refused, not requeued."""
         task = _make_task(disposition="stalled_retry_cap_parked", attempts=10)
