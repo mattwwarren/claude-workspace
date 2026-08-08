@@ -48,6 +48,7 @@ from cw.models import (
     StagePipelineConfig,
     TicketTask,
 )
+from tests._codex_review_helpers import _mk_codex_proc
 from tests.conftest import find_completed_session
 
 if TYPE_CHECKING:
@@ -219,7 +220,10 @@ def test_codex_executor_clean_stage_complete(
     # Every selected role invoked codex exec and returned a clean document, so
     # agents_run tracks the per-role loop's call count exactly (#1194 wiring
     # ported onto the per-role path, #1236 Blocker Resolution).
-    assert result.review.agents_run == len(runner.calls)
+    # -1 for the filesystem-capability probe call (#1709): this test starts on
+    # a cold per-test cache, so the first _prepare_review_pass spends one extra
+    # runner.run() on the probe before any role runs.
+    assert result.review.agents_run == len(runner.calls) - 1
     # Round-trips through the strict validator.
     AutoDevResult.model_validate(result.model_dump(mode="json"))
 
@@ -366,7 +370,9 @@ def test_codex_executor_should_fix_only_stays_complete(
     assert result.review.must_fix_initial == 0
     assert result.review.should_fix == 1
     assert result.review.deferred == 0
-    assert result.review.agents_run == len(runner.calls)
+    # -1 for the filesystem-capability probe call (#1709) — see
+    # test_codex_executor_clean_stage_complete for the same adjustment.
+    assert result.review.agents_run == len(runner.calls) - 1
 
 
 def test_spawn_delegates_to_fix_loop_not_bare_run_review(
@@ -668,14 +674,6 @@ def test_make_blocked_stage_reached_override(tmp_path: Path) -> None:
     assert result.stage_reached == "stage3_review"
     assert result.blocker is not None
     assert result.blocker.stage == "stage3_review"
-
-
-def _mk_codex_proc(
-    stdout: str = "", returncode: int = 0
-) -> subprocess.CompletedProcess[str]:
-    return subprocess.CompletedProcess(
-        args=[], returncode=returncode, stdout=stdout, stderr=""
-    )
 
 
 class TestCodexCapabilityDiagnosis:

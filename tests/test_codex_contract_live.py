@@ -488,7 +488,13 @@ class TestCodexContractProductionPromptCanary:
         )
         _install_agent_specs(repo)
 
-        prepared = _prepare_review_pass(_task(), repo, "main")
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=_RecordingCodexRunner(),
+            session_id="s-production-prompt-canary",
+        )
         # R2: a seeded .py defect under small-scope (_task()'s default
         # scope_hint=None) selects Code Quality + SysAdmin (mandatory)
         # plus Data Safety (categories.python forces
