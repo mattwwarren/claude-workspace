@@ -225,7 +225,13 @@ class TestProbeFilesystemCapability:
     def test_probe_argv_is_bare_read_only_exec(self) -> None:
         runner = _sentinel_runner()
         _probe_filesystem_capability(runner=runner, session_id="s-argv")
-        assert runner.calls[0]["argv"] == ["codex", "exec", "--sandbox", "read-only"]
+        assert runner.calls[0]["argv"] == [
+            "codex",
+            "exec",
+            "--sandbox",
+            "read-only",
+            "--skip-git-repo-check",
+        ]
         assert list(_PROBE_ARGV) == runner.calls[0]["argv"]
         assert runner.calls[0]["timeout"] == _CAPABILITY_PROBE_TIMEOUT_SECONDS
         # The sentinel VALUE must never appear in the prompt — otherwise codex
@@ -233,6 +239,17 @@ class TestProbeFilesystemCapability:
         stdin = runner.calls[0]["stdin"]
         assert isinstance(stdin, str)
         assert _PROBE_SENTINEL not in stdin
+
+    def test_probe_argv_skips_the_git_repo_check(self) -> None:
+        """#1732: without this flag the probe cannot run anywhere.
+
+        ``_probe_scratch_dir()`` is deliberately not the review worktree, so it
+        is never a git repo, and ``codex exec`` refuses to start outside one
+        before any sandbox work happens. Asserted separately from the full-argv
+        test so the reason survives even if the argv is reordered — the
+        original argv assertion pinned the broken invocation in place.
+        """
+        assert "--skip-git-repo-check" in _PROBE_ARGV
 
     def test_probe_runs_in_its_own_scratch_dir_under_state_dir(self) -> None:
         """The probe writes a sentinel file, so it must run in its own scratch
@@ -296,6 +313,50 @@ class TestProbeFilesystemCapability:
         capability = _probe_filesystem_capability(runner=runner, session_id="s-spawn")
         assert capability.reason == _REASON_PROBE_ERROR
         assert not _capability_cache_path().exists()
+
+    def test_refusal_to_start_degrades_and_is_not_cached(self) -> None:
+        """#1732: codex exiting before it answers is not an answer.
+
+        The real regression: the probe's scratch dir is not a git repo, so
+        ``codex exec`` refused to start (exit 1, empty stdout) — which was
+        classified as a determinate ``unknown`` and written to a cache with no
+        TTL, permanently marking a fully capable host incapable.
+        """
+        runner = FakeCodexRunner(
+            returncode=1,
+            stdout="",
+            stderr=(
+                "Reading prompt from stdin...\nNot inside a trusted directory "
+                "and --skip-git-repo-check was not specified.\n"
+            ),
+        )
+        capability = _probe_filesystem_capability(runner=runner, session_id="s-refuse")
+        assert capability.capable is False
+        assert capability.reason == _REASON_PROBE_ERROR
+        assert not _capability_cache_path().exists()
+
+        # The next call must re-probe rather than inherit the degrade.
+        second = _sentinel_runner()
+        again = _probe_filesystem_capability(runner=second, session_id="s-refuse")
+        assert len(second.calls) == 1
+        assert again.capable is True
+
+    def test_incapable_sandbox_that_replies_is_still_a_real_verdict(self) -> None:
+        """The guard must not swallow a genuine incapable answer.
+
+        A truly sandbox-incapable runtime *replies*, so it has stdout and must
+        still be classified and cached rather than treated as a never-ran
+        probe. This is the direction #1732's fix could silently break.
+        """
+        runner = FakeCodexRunner(
+            returncode=1,
+            stdout="NO_FILESYSTEM_ACCESS\n",
+            stderr="bubblewrap is unavailable: no system bwrap was found on PATH",
+        )
+        capability = _probe_filesystem_capability(runner=runner, session_id="s-real")
+        assert capability.capable is False
+        assert capability.reason == _REASON_SANDBOX_INCAPABLE
+        assert _capability_cache_path().exists()
 
 
 # ---------------------------------------------------------------------------
