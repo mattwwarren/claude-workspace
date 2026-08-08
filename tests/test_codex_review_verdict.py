@@ -787,6 +787,22 @@ class TestRenderVerdictComment:
         body = render_verdict_comment(fixed_verdict, fix_loop_enabled=True)
         assert "UNVERIFIED" not in body
 
+    def test_unknown_real_commit_never_renders_unverified(self) -> None:
+        """Legacy payloads with an unknown commit outcome retain prior prose."""
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="NIT"))
+        clean_verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        legacy_verdict = clean_verdict.model_copy(
+            update={
+                "review": clean_verdict.review.model_copy(
+                    update={"must_fix_initial": 2, "fix_cycles_used": 2}
+                )
+            }
+        )
+        body = render_verdict_comment(legacy_verdict, fix_loop_enabled=True)
+        assert legacy_verdict.review.had_real_commit is None
+        assert "UNVERIFIED" not in body
+
     def test_blocking_capped_exit_shows_resolved_vs_open_counts(self) -> None:
         diff = _make_diff()
         doc = _make_reviewer_doc(_make_finding(severity="MUST_FIX"))

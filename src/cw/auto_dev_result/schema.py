@@ -312,10 +312,10 @@ class Review(BaseModel):
     # commit (OR'd across cycles) — distinguishes a genuinely-fixed cycle-0
     # blocker from a fix loop that converged (no MUST_FIX survivors) purely
     # because every cycle's codex fix invocation was a no-op. Advisory
-    # optional field; defaults to True (backward compatible — a payload from
-    # a producer that predates this field never reported a flaked
-    # convergence, so treating it as a genuine fix preserves prior rendering).
-    had_real_commit: bool = True
+    # optional field; defaults to None so payloads from producers that predate
+    # this field remain explicitly unknown. Finalized fix-loop results always
+    # populate a concrete bool.
+    had_real_commit: bool | None = None
 
 
 class AgentHealthEntry(BaseModel):

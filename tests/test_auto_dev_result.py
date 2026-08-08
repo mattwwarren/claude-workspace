@@ -3877,10 +3877,10 @@ class TestReviewDeferred:
 class TestReviewHadRealCommit:
     """Issue #1723 — Review.had_real_commit field (fix-loop no-op-flake detection)."""
 
-    def test_review_had_real_commit_defaults_true(self) -> None:
-        """Omitting `had_real_commit` defaults to True (backward-compatible)."""
+    def test_review_had_real_commit_defaults_unknown(self) -> None:
+        """Omitting `had_real_commit` preserves the legacy outcome as unknown."""
         review = Review(must_fix_initial=0, should_fix=0, fix_cycles_used=0)
-        assert review.had_real_commit is True
+        assert review.had_real_commit is None
 
     def test_review_had_real_commit_round_trips_false(self) -> None:
         """An explicit `had_real_commit=False` round-trips through dump/validate."""

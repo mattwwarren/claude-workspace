@@ -305,7 +305,7 @@ def _render_clean_headline(review: Review, *, fix_loop_enabled: bool) -> str:
     """
     if review.fix_cycles_used > 0:
         resolved = review.must_fix_initial - review.deferred
-        if not review.had_real_commit:
+        if review.had_real_commit is False:
             return (
                 f"**UNVERIFIED** — the fix loop converged without changing "
                 f"any file: {resolved} of {review.must_fix_initial} "
