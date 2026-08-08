@@ -430,6 +430,127 @@ class TestValidateReviewerDocument:
         assert len(accepted) == 1
         assert not rejected
 
+    # -- #1715: near-line anchor tolerance -----------------------------
+
+    def test_near_line_anchor_within_tolerance_retained(self) -> None:
+        # Anchor is 2 lines off the real added line (10) — within the
+        # +/-3 tolerance bound. Evidence text is correct, so the finding
+        # should be retained rather than rejected invalid_line_reference.
+        diff = _make_diff("def broken():", files={"src/cw/foo.py": [10]})
+        f = _make_finding(line_start=12, line_end=12, evidence="def broken():")
+        accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
+        assert len(accepted) == 1
+        assert not rejected
+        # The accepted finding's anchor is snapped to the real added line
+        # (10), not left at the reviewer's raw off-by-2 claim (12) — a
+        # downstream renderer showing this location must point at real
+        # source, not the reviewer's drift (#1715).
+        assert accepted[0].line_start == 10
+        assert accepted[0].line_end == 10
+
+    def test_near_line_range_anchor_retained(self) -> None:
+        # line_start=8 is 2 lines off added line 10; line_end=13 is 2 lines
+        # off added line 11 — each endpoint independently within tolerance.
+        diff = _make_diff("line one", "line two", files={"src/cw/foo.py": [10, 11]})
+        f = _make_finding(line_start=8, line_end=13, evidence="line one\nline two")
+        accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
+        assert len(accepted) == 1
+        assert not rejected
+        assert accepted[0].line_start == 10
+        assert accepted[0].line_end == 11
+
+    # -- #1715: multiline evidence prefix normalization -----------------
+
+    def test_file_level_multiline_evidence_matches_after_prefix_normalization(
+        self,
+    ) -> None:
+        # File-level finding (no line anchor) falls back to file_diffs, which
+        # stores raw hunk text with a "+" marker on every line. A reviewer's
+        # genuine multiline quote carries no such markers at all (that's the
+        # real-world shape of Bug B: a plain source-code quote, not a
+        # diff-rendered one) — the *second* line's missing "+" breaks
+        # contiguous substring matching against "+line one\n+line two" even
+        # though the content is identical. MUST fail red pre-fix (verified:
+        # "line one\nline two" is NOT a substring of the raw
+        # "+++ b/...\n+line one\n+line two\n" hunk text).
+        diff = _make_diff("line one", "line two", files={"src/cw/foo.py": [10, 11]})
+        f = _make_finding(line_start=None, line_end=None, evidence="line one\nline two")
+        accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
+        assert len(accepted) == 1
+        assert not rejected
+
+    def test_windowed_multiline_evidence_with_prefix_still_matches(self) -> None:
+        # Windowed finding (explicit line_start/line_end) builds its window
+        # from file_line_text, which is already prefix-free. Here the
+        # REVIEWER's evidence itself carries diff-style "+" markers (plausible
+        # if copied from a rendered diff view) — the latent exposure noted in
+        # Bug B's second half. MUST fail red pre-fix: "+line one\n+line two"
+        # is not a substring of the prefix-free window "line one\nline two".
+        diff = _make_diff("line one", "line two", files={"src/cw/foo.py": [10, 11]})
+        f = _make_finding(line_start=10, line_end=11, evidence="+line one\n+line two")
+        accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
+        assert len(accepted) == 1
+        assert not rejected
+
+    # -- #1715: regression guards (mutation-proof) -----------------------
+
+    def test_anchor_outside_tolerance_still_rejected(self) -> None:
+        # Distance 4 from the only added line (10) — outside the +/-3 bound.
+        diff = _make_diff("def broken():", files={"src/cw/foo.py": [10]})
+        f = _make_finding(line_start=14, line_end=14, evidence="def broken():")
+        accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
+        assert not accepted
+        assert rejected[0].reason == "invalid_line_reference"
+
+    def test_near_line_content_mismatch_still_rejected(self) -> None:
+        # line_start=12 resolves to added line 10 (distance 2, within
+        # tolerance), but the evidence text is not that line's real content —
+        # the loosened anchor bound must not loosen the evidence check.
+        diff = _make_diff("def broken():", files={"src/cw/foo.py": [10]})
+        f = _make_finding(line_start=12, line_end=12, evidence="totally unrelated text")
+        accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
+        assert not accepted
+        assert rejected[0].reason == "evidence_not_in_diff"
+
+    def test_widened_range_window_does_not_admit_third_unrelated_line(self) -> None:
+        # line_start=8 snaps to 10 (distance 2); line_end=15 snaps to 16
+        # (distance 1) -> resolved window is 10-16 inclusive, wider than a
+        # single +/-3 span (the deliberate, tested compounding effect from
+        # independently-snapped endpoints). Evidence genuinely inside that
+        # window (line 13's real content) is accepted.
+        diff = _make_diff(
+            "first line content",
+            "second line content",
+            "third line content",
+            "fourth line content",
+            files={"src/cw/foo.py": [10, 13, 16, 20]},
+        )
+        f = _make_finding(line_start=8, line_end=15, evidence="second line content")
+        accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
+        assert len(accepted) == 1
+        assert not rejected
+        assert accepted[0].line_start == 10
+        assert accepted[0].line_end == 16
+
+    def test_widened_range_window_rejects_evidence_outside_resolved_window(
+        self,
+    ) -> None:
+        # Same widened window (10-16) as above, but the evidence is the real
+        # content of line 20 — a genuine added line, just outside the
+        # resolved window. Proves the widened window is still bounded, not an
+        # unbounded escape hatch.
+        diff = _make_diff(
+            "first line content",
+            "second line content",
+            "third line content",
+            "fourth line content",
+            files={"src/cw/foo.py": [10, 13, 16, 20]},
+        )
+        f = _make_finding(line_start=8, line_end=15, evidence="fourth line content")
+        accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
+        assert not accepted
+        assert rejected[0].reason == "evidence_not_in_diff"
+
 
 class TestUnanchoredFindings:
     """#1632: a finding whose file is not in the diff but does resolve to a
@@ -771,6 +892,47 @@ class TestConsolidateVerdict:
         verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
         assert verdict.blocking is False
         assert verdict.rejected[0].reason == "unknown_file"
+
+    def test_aggregate_near_line_and_multiline_via_consolidate_verdict(self) -> None:
+        # #1715 integration: three findings through the full
+        # consolidate_verdict pipeline. (1) file not in diff, no worktree ->
+        # still unknown_file (#1632 mechanism untouched). (2) near-line
+        # anchor (distance 2, within tolerance) with matching evidence ->
+        # accepted. (3) file-level multiline evidence with no diff markers,
+        # matched against raw "+"-prefixed file_diffs text via normalization
+        # -> accepted. MUST fail red pre-fix (findings 2 and 3 both rejected
+        # under exact-match/raw-substring behavior).
+        diff = _make_diff(
+            "def broken():",
+            "line one",
+            "line two",
+            files={"src/cw/foo.py": [10], "src/cw/bar.py": [20, 21]},
+        )
+        findings = [
+            _make_finding(
+                file="src/cw/other.py",
+                line_start=None,
+                line_end=None,
+                evidence="whatever",
+            ),
+            _make_finding(
+                file="src/cw/foo.py",
+                line_start=12,
+                line_end=12,
+                evidence="def broken():",
+            ),
+            _make_finding(
+                file="src/cw/bar.py",
+                line_start=None,
+                line_end=None,
+                evidence="line one\nline two",
+            ),
+        ]
+        doc = _make_reviewer_doc(*findings, reviewer_role="Reviewer A")
+        verdict = consolidate_verdict([doc], diff, "deadbeef")
+        assert len(verdict.rejected) == 1
+        assert verdict.rejected[0].reason == "unknown_file"
+        assert len(verdict.accepted) == 2
 
 
 class TestConsolidateVerdictFailedReviewers:
