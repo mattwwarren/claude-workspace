@@ -319,6 +319,13 @@ class ReviewVerdict(BaseModel):
 
     ``blocking``/``must_fix``/``reviewed_sha`` are the exact 3 keys #1108
     requires; the rest is the executor-neutral superset.
+
+    ``capability_mode``/``capability_reason`` record which filesystem-capability
+    mode the reviewers actually ran under (#1709) — ``"capable"`` or
+    ``"degraded"``, with the classified reason on the degraded branch. Both stay
+    ``None`` for executors that have no such concept (LocalExecutor) rather than
+    defaulting to a mode nobody probed. Purely recorded: nothing in
+    ``consolidate_verdict`` or the health derivation reads them.
     """
 
     schema_version: Literal[1] = _REVIEW_VERDICT_SCHEMA_VERSION
@@ -330,6 +337,8 @@ class ReviewVerdict(BaseModel):
     agents_run: list[ReviewerRunRecord] = Field(default_factory=list)
     review: Review
     stripped_escalations: list[StrippedEscalation] = Field(default_factory=list)
+    capability_mode: str | None = None
+    capability_reason: str | None = None
 
 
 class CapturedDiff(BaseModel):
