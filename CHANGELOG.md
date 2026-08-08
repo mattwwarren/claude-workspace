@@ -6,6 +6,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The #1709 capability probe reported every host incapable, and cached it
+  (#1732):** the probe deliberately runs in its own scratch dir under
+  `state_dir()` rather than the review worktree — so it is never inside a git
+  repo, and `codex exec` refuses to start outside one ("Not inside a trusted
+  directory and `--skip-git-repo-check` was not specified", exit 1) before any
+  sandbox work happens. `_is_probe_error` classified that as neither a timeout
+  nor a spawn error, so it fell through to `_classify_capability_failure`,
+  matched no known marker, and returned a determinate `unknown` — which was
+  then written to a cache that has no TTL. Every codex review would have been
+  marked degraded, and #1702 hard-parks the REVIEW stage on degraded health:
+  the exact failure #1709 was filed to eliminate, reproduced through a new
+  mechanism. The probe now passes `--skip-git-repo-check`, and
+  `_is_probe_error` additionally treats "codex exited non-zero having written
+  nothing to stdout" as a probe error — degrading this one run, logged, and
+  never cached — per R7's requirement that a transient failure must not become
+  silently permanent. Keyed on empty stdout rather than on any particular
+  message, so a new refusal reason inherits the safe behavior; a genuinely
+  incapable sandbox still *replies*, so it is still classified and cached as a
+  real verdict. Operators who ran a codex review between #1709 and this fix
+  must clear the poisoned cache at
+  `~/.local/share/cw/codex-review/capability-cache.json`. Found by running the
+  shipped probe end-to-end against merged main while the unit suite was fully
+  green — every probe test used a fake runner, so nothing exercised a real
+  `codex exec` invocation.
+
 ### Added
 
 - **Codex filesystem capability is now probed, not assumed (#1709):** the

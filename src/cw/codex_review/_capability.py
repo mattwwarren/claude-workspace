@@ -53,7 +53,20 @@ _PROBE_SANDBOX_MODE = "read-only"
 # The probe invocation: a bare ``codex exec`` with no ``--output-schema``/``-o``
 # and none of ``_AUDIT_ARGV_FLAGS``. Kept minimal so the probe exercises the
 # sandbox itself rather than any flag an older codex-cli might reject.
-_PROBE_ARGV = ("codex", "exec", "--sandbox", _PROBE_SANDBOX_MODE)
+#
+# ``--skip-git-repo-check`` is load-bearing (#1732), not defensive. The probe
+# deliberately runs in ``_probe_scratch_dir()`` rather than the review worktree,
+# so by construction it is never inside a git repo — and ``codex exec`` refuses
+# to start outside one ("Not inside a trusted directory and
+# --skip-git-repo-check was not specified", exit 1) before any sandbox work
+# happens. Without this flag the probe answers "incapable" on every host.
+_PROBE_ARGV = (
+    "codex",
+    "exec",
+    "--sandbox",
+    _PROBE_SANDBOX_MODE,
+    "--skip-git-repo-check",
+)
 
 _VERSION_PROBE_TIMEOUT_SECONDS = 10
 
@@ -223,8 +236,24 @@ def _classify_capability_failure(result: CodexRunResult) -> str:
 
 
 def _is_probe_error(result: CodexRunResult) -> bool:
-    """True when the probe never produced an answer (vs. answering "no")."""
-    return result.timed_out or _is_spawn_error(result)
+    """True when the probe never produced an answer (vs. answering "no").
+
+    The third arm (#1732) is the one that matters for cache safety. Codex can
+    refuse to start *before* any sandbox work happens — an unreadable config,
+    an auth failure, a rejected flag — exiting non-zero with nothing on stdout.
+    That is not the runtime answering "I cannot read files"; it is the runtime
+    never being asked. Treating it as a determinate verdict wrote a permanent
+    ``incapable`` into a cache that has no TTL, which is exactly the
+    "transient failure becomes silently permanent" outcome R7 forbids.
+
+    Keyed on empty stdout rather than on any particular message, so a new
+    refusal reason inherits the safe behavior instead of being misfiled as an
+    answer. A genuinely incapable sandbox still *replies* (with the prompt's
+    ``NO_FILESYSTEM_ACCESS`` fallback or a panic on stderr), so it produces
+    stdout and is correctly classified below rather than caught here.
+    """
+    produced_no_answer = result.returncode != 0 and not result.stdout.strip()
+    return result.timed_out or _is_spawn_error(result) or produced_no_answer
 
 
 def _capability_cache_path() -> Path:
