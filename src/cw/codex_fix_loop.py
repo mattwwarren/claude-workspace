@@ -144,9 +144,13 @@ def _build_fix_prompt(
 
     Only MUST_FIX findings ever reach the fix loop's ``open_findings`` tracker,
     so no severity filtering is needed here — every rendered finding is a
-    MUST_FIX one. Plan/ticket context is inlined when present (codex has no
-    filesystem access to ``.cw/*``), and the prompt ends with an explicit
-    minimal-fix instruction.
+    MUST_FIX one. Plan/ticket context is inlined when present for the same
+    reason the review path inlines it: a fix pass should read the same
+    authoritative context regardless of runtime, not go hunting for ``.cw/*``.
+    That is a consistency choice, NOT a capability workaround — this very
+    function's invocation runs under ``--sandbox workspace-write`` (see
+    :func:`_build_fix_codex_argv`), which by construction can reach the
+    worktree (#1709). The prompt ends with an explicit minimal-fix instruction.
     """
     parts = [
         f"# Codex Fix Cycle {cycle}",
@@ -641,7 +645,9 @@ def _rereview(
     session_id: str,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run a fresh full per-role review pass for one fix cycle."""
-    prepared = _prepare_review_pass(task, worktree, default_branch)
+    prepared = _prepare_review_pass(
+        task, worktree, default_branch, runner=runner, session_id=session_id
+    )
     documents, failures, metrics_by_role = run_codex_roles(
         runner=runner,
         worktree=worktree,
@@ -661,6 +667,7 @@ def _rereview(
         session_id=session_id,
         default_branch=default_branch,
         metrics_by_role=metrics_by_role,
+        capability=prepared.capability,
     )
 
 

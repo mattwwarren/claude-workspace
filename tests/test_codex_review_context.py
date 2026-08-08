@@ -569,7 +569,10 @@ class TestSelectOutputInstructions:
         assert _OUTPUT_INSTRUCTIONS == _OUTPUT_INSTRUCTIONS_INLINED_ONLY
 
     def test_both_variants_keep_the_shared_schema_and_precedence_rules(self) -> None:
-        for variant in (_OUTPUT_INSTRUCTIONS_CAPABLE, _OUTPUT_INSTRUCTIONS_INLINED_ONLY):
+        for variant in (
+            _OUTPUT_INSTRUCTIONS_CAPABLE,
+            _OUTPUT_INSTRUCTIONS_INLINED_ONLY,
+        ):
             assert 'status="degraded"' in variant
             assert 'confidence: "LOW"' in variant
             assert "advisory here, not blocking" in variant

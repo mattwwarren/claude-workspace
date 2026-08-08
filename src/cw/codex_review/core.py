@@ -40,7 +40,9 @@ def run_review(
     diff, select reviewers, materialize prompts, run the shared-deadline loop,
     and synthesize the typed result.
     """
-    prepared = _prepare_review_pass(task, worktree, default_branch)
+    prepared = _prepare_review_pass(
+        task, worktree, default_branch, runner=runner, session_id=session_id
+    )
     documents, failures, metrics_by_role = run_codex_roles(
         runner=runner,
         worktree=worktree,
@@ -60,4 +62,5 @@ def run_review(
         session_id=session_id,
         default_branch=default_branch,
         metrics_by_role=metrics_by_role,
+        capability=prepared.capability,
     )
