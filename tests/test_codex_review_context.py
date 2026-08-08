@@ -491,8 +491,9 @@ class TestRenderLintGroundingBlock:
         )
         assert result is not None
         assert "PLR0915" in result
-        assert "statement" in result.lower()
-        assert "not the number of lines" in result.lower() or "not lines" in result.lower()
+        lowered = result.lower()
+        assert "statement" in lowered
+        assert "not the number of lines" in lowered or "not lines" in lowered
 
     def test_default_thresholds_labeled_not_overridden_when_pylint_subtable_absent(
         self,

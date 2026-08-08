@@ -23,6 +23,7 @@ from __future__ import annotations
 import fnmatch
 import json
 import logging
+import tomllib
 from typing import TYPE_CHECKING, NamedTuple
 
 import yaml
@@ -64,6 +65,34 @@ _SENSITIVE_HEADER = (
     "scope changes, missing auth checks, new external write paths, error "
     "handling gaps, cross-org data leakage, and regression risk."
 )
+
+# #1744: grounds reviewers in the repo's actual ruff opt-outs and complexity
+# thresholds so they stop raising MUST_FIX findings against rules the repo
+# has explicitly ignored, or against a complexity metric they've misread
+# (PLR0915 gates statements, not lines — the exact #1729 failure mode).
+_LINT_GROUNDING_INSTRUCTION = (
+    "REPO LINT CONFIGURATION — GROUND FINDINGS IN THE REPO'S ACTUAL RUFF SETUP\n\n"
+    "A finding that contradicts a ruff rule this repo has explicitly opted out "
+    "of below, or that treats an unmodified ruff default as if it were a "
+    "repo-configured threshold, is not a MUST_FIX — downgrade it or drop it. "
+    "In particular, PLR0915 (too-many-statements) gates on the number of "
+    "STATEMENTS in a function body, not the number of lines — a long "
+    "function built from short, simple statements can sit well under the "
+    "statement threshold while spanning many lines; do not flag line count "
+    "as if it were the gated metric."
+)
+
+# ruff's built-in pylint-refactor defaults (max-branches/max-statements/
+# max-returns). These are NOT expressed in pyproject.toml unless a
+# [tool.ruff.lint.pylint] override is present — the renderer must label them
+# as ruff defaults, not as repo-configured values, whenever no override
+# exists for that key.
+_DEFAULT_PYLINT_THRESHOLDS: dict[str, tuple[str, int]] = {
+    "max-branches": ("PLR0912", 12),
+    "max-statements": ("PLR0915", 50),
+    "max-returns": ("PLR0911", 6),
+}
+_RUFF_DEFAULT_LABEL = "ruff default (not overridden in pyproject.toml)"
 
 # The one sentence that differs between the two `_OUTPUT_INSTRUCTIONS`
 # variants, named so the prompt text and its regression tests cannot drift
@@ -226,6 +255,13 @@ class _SensitiveHit(NamedTuple):
     path: str
     category: str
     reason: str
+
+
+class _RuffLintConfig(NamedTuple):
+    """The repo's ``[tool.ruff.lint]`` opt-outs and pylint-threshold overrides."""
+
+    ignore: tuple[str, ...]
+    pylint_overrides: dict[str, int]
 
 
 def _categorize_changed_files(files: Iterable[str]) -> _FileCategories:
@@ -449,6 +485,56 @@ def _load_ticket_context(worktree: Path) -> tuple[str | None, str | None]:
     return plan_text, ticket_text
 
 
+def _load_ruff_lint_config(worktree: Path) -> _RuffLintConfig | None:
+    """Read ``[tool.ruff.lint]`` from *worktree*'s ``pyproject.toml`` (#1744).
+
+    Fails safe to ``None`` on a missing file or malformed TOML — same
+    ``tomllib.load`` + fail-safe idiom as ``cw.doctor.versions``' source-version
+    read. A valid TOML file with no ``[tool.ruff.lint]`` section at all still
+    returns a ``_RuffLintConfig`` with empty ``ignore``/``pylint_overrides``:
+    absence of ruff-lint config is a fact about the repo, not a read failure.
+    """
+    try:
+        with (worktree / "pyproject.toml").open("rb") as fh:
+            data = tomllib.load(fh)
+    except (FileNotFoundError, KeyError, tomllib.TOMLDecodeError, OSError):
+        return None
+    lint = data.get("tool", {}).get("ruff", {}).get("lint", {})
+    ignore = lint.get("ignore", [])
+    pylint = lint.get("pylint", {})
+    return _RuffLintConfig(ignore=tuple(ignore), pylint_overrides=dict(pylint))
+
+
+def _extract_markdown_section(text: str, heading: str) -> str | None:
+    """Extract the body of *text*'s ``## {heading}`` H2 section, or ``None``.
+
+    Line-scan structurally modeled on :func:`_parse_review_policy`, simplified
+    to a single target heading with no role-matching and no logging: collects
+    body lines from the matching ``## {heading}`` line until the next ``## ``
+    line or EOF.
+    """
+    target = f"## {heading}"
+    body: list[str] | None = None
+    for line in text.splitlines():
+        if line.startswith("## "):
+            if body is not None:
+                break
+            if line == target:
+                body = []
+            continue
+        if body is not None:
+            body.append(line)
+    return "\n".join(body).strip() if body is not None else None
+
+
+def _load_claude_md_quality_gates(worktree: Path) -> str | None:
+    """Return *worktree*'s ``CLAUDE.md`` ``## Quality Gates`` section, verbatim."""
+    text = _load_optional_text(worktree / "CLAUDE.md")
+    if text is None:
+        return None
+    return _extract_markdown_section(text, "Quality Gates")
+
+
 def _load_agent_spec(worktree: Path, role: str) -> str:
     """Return the authoritative agent spec for *role*, inlined verbatim."""
     filename = _REVIEWER_ROLE_AGENT_FILES[role]
@@ -463,6 +549,50 @@ def _render_sensitive_block(hits: list[_SensitiveHit]) -> str:
     return "\n".join(lines)
 
 
+def _render_ruff_ignore_section(ignore: tuple[str, ...]) -> str:
+    lines = [
+        "## Globally Ignored Ruff Rules (pyproject.toml `[tool.ruff.lint].ignore`)"
+    ]
+    lines.extend(f"- {code}" for code in ignore)
+    return "\n".join(lines)
+
+
+def _render_pylint_thresholds_section(overrides: dict[str, int]) -> str:
+    lines = ["## Complexity Thresholds (PLR0912 / PLR0915 / PLR0911)"]
+    for key, (code, default) in _DEFAULT_PYLINT_THRESHOLDS.items():
+        if key in overrides:
+            value, label = overrides[key], "configured in pyproject.toml"
+        else:
+            value, label = default, _RUFF_DEFAULT_LABEL
+        lines.append(f"- {code} ({key}): {value} ({label})")
+    return "\n".join(lines)
+
+
+def _render_lint_grounding_block(
+    ruff_config: _RuffLintConfig | None, quality_gates_text: str | None
+) -> str | None:
+    """Render the ``## Repo Lint Configuration`` grounding block (#1744).
+
+    Returns ``None`` when there is nothing to ground against: no
+    ``[tool.ruff.lint].ignore`` entries, no pylint-threshold overrides, and no
+    ``CLAUDE.md`` Quality Gates text. Otherwise assembles the not-a-MUST_FIX
+    instruction, the ignore list (when non-empty), the PLR0912/PLR0915/PLR0911
+    thresholds (repo-configured where overridden, else the documented ruff
+    defaults), and the verbatim Quality Gates text.
+    """
+    ignore = ruff_config.ignore if ruff_config is not None else ()
+    overrides = ruff_config.pylint_overrides if ruff_config is not None else {}
+    if not ignore and not overrides and not quality_gates_text:
+        return None
+    parts = [_LINT_GROUNDING_INSTRUCTION]
+    if ignore:
+        parts.append(_render_ruff_ignore_section(ignore))
+    parts.append(_render_pylint_thresholds_section(overrides))
+    if quality_gates_text:
+        parts.append(f"## CLAUDE.md Quality Gates (verbatim)\n{quality_gates_text}")
+    return "\n\n".join(parts)
+
+
 def _build_reviewer_prompt(
     role: str,
     *,
@@ -475,6 +605,7 @@ def _build_reviewer_prompt(
     repo_policy_section: str | None,
     sensitive_hits: list[_SensitiveHit],
     capable: bool = False,
+    lint_grounding: str | None = None,
 ) -> str:
     """Materialize one reviewer's full prompt, inlining every needed section.
 
@@ -483,6 +614,13 @@ def _build_reviewer_prompt(
     function's variant-agnostic unit tests stay byte-identical; the sole
     production caller (:func:`_prepare_review_pass`) always passes the probed
     value explicitly, so the default never fires in production.
+
+    *lint_grounding* (#1744) is the rendered repo-lint-configuration block —
+    the repo's ruff opt-outs and complexity thresholds — so reviewers stop
+    raising MUST_FIX findings against rules the repo has explicitly ignored.
+    Same safe-default convention as *capable*: defaults to ``None`` for the
+    variant-agnostic unit tests; :func:`_prepare_review_pass` always passes it
+    explicitly.
     """
     parts = [
         f"# Reviewer Role: {role}",
@@ -499,6 +637,8 @@ def _build_reviewer_prompt(
         parts.append(f"## Project Rubrics\n{project_rubrics}")
     if repo_policy_section:
         parts.append(f"## Repo Policy for {role}\n{repo_policy_section}")
+    if lint_grounding:
+        parts.append(f"## Repo Lint Configuration\n{lint_grounding}")
     if sensitive_hits:
         parts.append(_render_sensitive_block(sensitive_hits))
     parts.append("## Changed Files\n" + "\n".join(changed_files))
@@ -580,6 +720,9 @@ def _prepare_review_pass(
     repo_policy = _load_review_policy(worktree, scope_tier)
     project_rubrics = _load_optional_text(worktree / ".claude" / "review-extras.md")
     plan_text, ticket_text = _load_ticket_context(worktree)
+    ruff_lint_config = _load_ruff_lint_config(worktree)
+    quality_gates_text = _load_claude_md_quality_gates(worktree)
+    lint_grounding = _render_lint_grounding_block(ruff_lint_config, quality_gates_text)
     mutates_persisted_state = (
         bool(sensitive_hits) or categories.python or categories.frontend
     )
@@ -601,6 +744,7 @@ def _prepare_review_pass(
             repo_policy_section=repo_policy.get(role),
             sensitive_hits=sensitive_hits,
             capable=capability.capable,
+            lint_grounding=lint_grounding,
         )
         for role in roles
     }
