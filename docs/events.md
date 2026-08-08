@@ -594,6 +594,24 @@ open enum; consumers MUST tolerate unknown values. Known values:
   review — `cw dev-queue requeue` (or `cw dev-queue drain`, which selects this
   disposition); `cw dev-queue approve` deliberately fails closed here, because
   there is nothing shippable to authorize until review is re-run. See #1702.
+- `"codex_must_fix_mechanically_rejected"` — Rule 5: a `blocked` sentinel whose
+  `blocker.reason` is `codex_must_fix_mechanically_rejected`. Review produced a
+  MUST_FIX finding, but `review_findings`' validation dropped it before
+  adjudication (its file/line anchor was invalid, or its evidence quote was
+  absent from the diff), so it was never weighed on its merits — previously
+  this fell through to a silently clean `stage_complete`. The task is
+  BLOCKED_ON_USER with `disposition="codex_must_fix_mechanically_rejected"`,
+  at its unchanged stage. Unlike `"review_health_gate"` above, `breadcrumbs` is
+  **non-empty**: it carries the verbatim `blocker.reason`, since this park
+  genuinely originates from a populated `blocker` dict. Rule 5's only
+  reason-keyed disposition override — every other `blocker_reason` gets the
+  generic `_hold_aware_disposition` stamp. Deliberately **not** a
+  `HOLD_DISPOSITIONS` member and deliberately **not** fix-loop-eligible: a
+  finding rejected because its anchor could not be trusted must never be handed
+  to a fix agent. Operator recovery is to read the rejected finding on the
+  posted review comment (rendered under "MUST_FIX — mechanically rejected") and
+  re-run review — `cw dev-queue requeue`, or `cw dev-queue drain`, which selects
+  this disposition. See #1714.
 
 `correlation_id` is the `ticket_id` when resolvable, `null` otherwise.
 A push notification is fired for most emissions (via `fire_push_notification`)

@@ -258,6 +258,7 @@ where one already existed:
 | salvage LOW-path flag | `_NEEDS_SALVAGE_REASON` |
 | terminal-sibling park (`tasks.py`) | `ReapReason.TERMINAL_SIBLING` |
 | unknown client / invalid pipeline stage (`dispatch.py`) | `"unknown_client"` / `"invalid_stage_config"` (deliberately excluded from concierge/escalation eligibility — config errors, not recoverable states) |
+| mechanically-rejected MUST_FIX park (`dispatch/routing.py`, #1714) | `REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION` ("codex_must_fix_mechanically_rejected") — stamped directly by `_park_must_fix_mechanically_rejected`, Rule 5's only reason-keyed override, rather than derived via `_hold_aware_disposition`. Escalation-eligible and drain-eligible; deliberately excluded from `HOLD_DISPOSITIONS` and from concierge's false-park requeue |
 
 `cw.reconcile.escalation`'s `_ELIGIBLE_DISPOSITIONS` and
 `cw.reconcile.concierge`'s `_FALSE_PARK_ELIGIBLE_DISPOSITIONS` were updated
