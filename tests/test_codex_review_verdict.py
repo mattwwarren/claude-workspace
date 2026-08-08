@@ -731,7 +731,11 @@ class TestRenderVerdictComment:
     def test_found_and_fixed_headline_differs_from_found_nothing(self) -> None:
         diff = _make_diff()
         doc = _make_reviewer_doc(_make_finding(severity="NIT"))
-        clean_verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        clean_verdict = consolidate_verdict(
+            documents=[doc],
+            diff=diff,
+            reviewed_sha="sha",
+        )
         fixed_verdict = clean_verdict.model_copy(
             update={
                 "review": clean_verdict.review.model_copy(
@@ -750,7 +754,11 @@ class TestRenderVerdictComment:
         an UNVERIFIED headline instead of the resolved-N-of-M claim."""
         diff = _make_diff()
         doc = _make_reviewer_doc(_make_finding(severity="NIT"))
-        clean_verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        clean_verdict = consolidate_verdict(
+            documents=[doc],
+            diff=diff,
+            reviewed_sha="sha",
+        )
         flaked_verdict = clean_verdict.model_copy(
             update={
                 "review": clean_verdict.review.model_copy(
@@ -772,7 +780,11 @@ class TestRenderVerdictComment:
         headline, regardless of how many cycles it took."""
         diff = _make_diff()
         doc = _make_reviewer_doc(_make_finding(severity="NIT"))
-        clean_verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        clean_verdict = consolidate_verdict(
+            documents=[doc],
+            diff=diff,
+            reviewed_sha="sha",
+        )
         fixed_verdict = clean_verdict.model_copy(
             update={
                 "review": clean_verdict.review.model_copy(
@@ -791,7 +803,11 @@ class TestRenderVerdictComment:
         """Legacy payloads with an unknown commit outcome retain prior prose."""
         diff = _make_diff()
         doc = _make_reviewer_doc(_make_finding(severity="NIT"))
-        clean_verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        clean_verdict = consolidate_verdict(
+            documents=[doc],
+            diff=diff,
+            reviewed_sha="sha",
+        )
         legacy_verdict = clean_verdict.model_copy(
             update={
                 "review": clean_verdict.review.model_copy(

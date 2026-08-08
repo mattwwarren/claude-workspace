@@ -662,7 +662,11 @@ def _run_fix_and_commit(
             None,
         )
     try:
-        sha = _commit_fix_cycle(worktree, cycle, findings)
+        sha = _commit_fix_cycle(
+            worktree=worktree,
+            cycle=cycle,
+            findings=findings,
+        )
     except subprocess.CalledProcessError as exc:
         return (
             _park_fix_failure(

@@ -831,9 +831,19 @@ class TestRealCommitTracking:
     def test_clean_exit_with_editor_fix_marks_had_real_commit_true(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
-        worktree = _worktree(make_git_repo, "wt-had-commit-true")
-        runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor()])
-        out, verdict = _run_loop(runner, worktree, session_id="s-had-commit-true")
+        worktree = _worktree(
+            make_git_repo=make_git_repo,
+            name="wt-had-commit-true",
+        )
+        runner = _FixLoopRunner(
+            review_docs=[_MF_DOC, _CLEAN_DOC],
+            fix_behaviors=[_editor()],
+        )
+        out, verdict = _run_loop(
+            runner=runner,
+            worktree=worktree,
+            session_id="s-had-commit-true",
+        )
 
         assert out.status == "stage_complete"
         assert out.review.had_real_commit is True
@@ -843,9 +853,18 @@ class TestRealCommitTracking:
     def test_clean_exit_with_default_noop_fix_marks_had_real_commit_false(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
-        worktree = _worktree(make_git_repo, "wt-had-commit-false")
-        runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC])  # no-op fix, then clean
-        out, _verdict = _run_loop(runner, worktree, session_id="s-had-commit-false")
+        worktree = _worktree(
+            make_git_repo=make_git_repo,
+            name="wt-had-commit-false",
+        )
+        runner = _FixLoopRunner(
+            review_docs=[_MF_DOC, _CLEAN_DOC]
+        )  # no-op fix, then clean
+        out, _verdict = _run_loop(
+            runner=runner,
+            worktree=worktree,
+            session_id="s-had-commit-false",
+        )
 
         assert out.review.had_real_commit is False
         assert out.status == "stage_complete"
@@ -854,21 +873,36 @@ class TestRealCommitTracking:
     def test_multi_cycle_any_real_commit_marks_true_even_if_later_cycle_is_noop(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
-        worktree = _worktree(make_git_repo, "wt-had-commit-or")
+        worktree = _worktree(
+            make_git_repo=make_git_repo,
+            name="wt-had-commit-or",
+        )
         # cycle 1: real edit; cycle 2: no-op (default fix behavior).
         runner = _FixLoopRunner(
-            [_MF_DOC, _MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor(), None]
+            review_docs=[_MF_DOC, _MF_DOC, _CLEAN_DOC],
+            fix_behaviors=[_editor(), None],
         )
-        out, _verdict = _run_loop(runner, worktree, session_id="s-had-commit-or")
+        out, _verdict = _run_loop(
+            runner=runner,
+            worktree=worktree,
+            session_id="s-had-commit-or",
+        )
 
         assert out.review.had_real_commit is True
 
     def test_capped_park_reports_had_real_commit_false_when_every_cycle_is_noop(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
-        worktree = _worktree(make_git_repo, "wt-had-commit-capped")
-        runner = _FixLoopRunner([_MF_DOC])
-        out, _verdict = _run_loop(runner, worktree, session_id="s-had-commit-capped")
+        worktree = _worktree(
+            make_git_repo=make_git_repo,
+            name="wt-had-commit-capped",
+        )
+        runner = _FixLoopRunner(review_docs=[_MF_DOC])
+        out, _verdict = _run_loop(
+            runner=runner,
+            worktree=worktree,
+            session_id="s-had-commit-capped",
+        )
 
         assert out.status == "blocked"
         assert out.review.had_real_commit is False
@@ -1344,6 +1378,35 @@ class TestScopeViolationGate:
 # ---------------------------------------------------------------------------
 
 
+def _render_fix_loop_history(
+    *,
+    make_git_repo: Callable[..., Path],
+    name: str,
+    review_docs: list[str],
+    fix_behaviors: list[_FixBehavior] | None,
+    fix_loop_enabled: bool,
+) -> str:
+    worktree = _worktree(
+        make_git_repo=make_git_repo,
+        name=f"wt-history-{name}",
+    )
+    runner = _FixLoopRunner(
+        review_docs=review_docs,
+        fix_behaviors=fix_behaviors,
+    )
+    _, verdict = _run_loop(
+        runner=runner,
+        worktree=worktree,
+        session_id=f"s-history-{name}",
+        fix_loop_enabled=fix_loop_enabled,
+    )
+    assert verdict is not None
+    return render_verdict_comment(
+        verdict,
+        fix_loop_enabled=fix_loop_enabled,
+    )
+
+
 class TestVerdictCommentDistinguishesHistories:
     """render_verdict_comment must render four distinct comments for four
     operationally different histories, even when the underlying Review can
@@ -1352,81 +1415,41 @@ class TestVerdictCommentDistinguishesHistories:
     what tells them apart (#1705), and ``had_real_commit`` further
     distinguishes a genuine fix from a no-op/flaked convergence (#1723)."""
 
-    def test_converged_clean_off_render_three_distinct_comments(
+    def test_converged_clean_off_and_flaked_render_four_distinct_comments(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
-        # (a) converged: a real fix cycle clears the MUST_FIX finding.
-        converged_worktree = _worktree(make_git_repo, "wt-history-converged")
-        converged_runner = _FixLoopRunner(
-            [_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor()]
+        histories = (
+            (
+                "converged",
+                [_MF_DOC, _CLEAN_DOC],
+                [_editor()],
+                True,
+                ("resolved across 1 fix cycle",),
+            ),
+            ("clean", [_CLEAN_DOC], None, True, ("available",)),
+            ("off", [_CLEAN_DOC], None, False, ("disabled",)),
+            (
+                "flaked",
+                [_MF_DOC, _CLEAN_DOC],
+                None,
+                True,
+                ("UNVERIFIED", "without changing any file"),
+            ),
         )
-        _, converged_verdict = _run_loop(
-            converged_runner,
-            converged_worktree,
-            session_id="s-history-converged",
-            fix_loop_enabled=True,
-        )
+        bodies = {
+            name: _render_fix_loop_history(
+                make_git_repo=make_git_repo,
+                name=name,
+                review_docs=review_docs,
+                fix_behaviors=fix_behaviors,
+                fix_loop_enabled=fix_loop_enabled,
+            )
+            for name, review_docs, fix_behaviors, fix_loop_enabled, _ in histories
+        }
 
-        # (b) genuinely-clean: cycle 0 is already clean, loop never engages.
-        clean_worktree = _worktree(make_git_repo, "wt-history-clean")
-        clean_runner = _FixLoopRunner([_CLEAN_DOC])
-        _, clean_verdict = _run_loop(
-            clean_runner,
-            clean_worktree,
-            session_id="s-history-clean",
-            fix_loop_enabled=True,
-        )
-
-        # (c) fix-loop-off: same clean cycle 0, but the lane disables the
-        # fix loop entirely — must render as its own state, never as flaked.
-        off_worktree = _worktree(make_git_repo, "wt-history-off")
-        off_runner = _FixLoopRunner([_CLEAN_DOC])
-        _, off_verdict = _run_loop(
-            off_runner,
-            off_worktree,
-            session_id="s-history-off",
-            fix_loop_enabled=False,
-        )
-
-        # (d) flaked: the loop converges (no MUST_FIX survivors) but every
-        # fix cycle was a no-op — no real commit ever landed.
-        flaked_worktree = _worktree(make_git_repo, "wt-history-flaked")
-        flaked_runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC])
-        _, flaked_verdict = _run_loop(
-            flaked_runner,
-            flaked_worktree,
-            session_id="s-history-flaked",
-            fix_loop_enabled=True,
-        )
-
-        assert converged_verdict is not None
-        assert clean_verdict is not None
-        assert off_verdict is not None
-        assert flaked_verdict is not None
-
-        converged_body = render_verdict_comment(
-            converged_verdict, fix_loop_enabled=True
-        )
-        clean_body = render_verdict_comment(clean_verdict, fix_loop_enabled=True)
-        off_body = render_verdict_comment(off_verdict, fix_loop_enabled=False)
-        flaked_body = render_verdict_comment(flaked_verdict, fix_loop_enabled=True)
-
-        # R3's literal requirement: pairwise inequality.
-        assert converged_body != clean_body
-        assert converged_body != off_body
-        assert clean_body != off_body
-        assert flaked_body != converged_body
-        assert flaked_body != clean_body
-        assert flaked_body != off_body
-
-        # Substring pins so the test still fails informatively if two
-        # message families accidentally converge on wording rather than
-        # just differing by whitespace.
-        assert "resolved across 1 fix cycle" in converged_body
-        assert "available" in clean_body.lower()
-        assert "disabled" in off_body.lower()
-        assert "UNVERIFIED" in flaked_body
-        assert "no file" in flaked_body.lower() or "changing" in flaked_body.lower()
+        assert len(set(bodies.values())) == len(histories)
+        for name, _, _, _, expected_markers in histories:
+            assert all(marker in bodies[name] for marker in expected_markers)
 
 
 # ---------------------------------------------------------------------------
