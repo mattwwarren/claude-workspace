@@ -208,10 +208,16 @@ def _compute_fingerprint() -> _CodexFingerprint:
 def _classify_capability_failure(result: CodexRunResult) -> str:
     """Name *why* a completed probe failed to read the sentinel.
 
-    Three live classes, in specificity order. ``unknown`` is the catch-all for
-    a failure signature nobody has captured yet — deliberately a real bucket,
-    not a placeholder: a probe that failed for an unrecognized reason is still
-    a determinate "this runtime cannot read the repo" answer.
+    Three live classes. ``unknown`` is the catch-all for a failure signature
+    nobody has captured yet — deliberately a real bucket, not a placeholder: a
+    probe that failed for an unrecognized reason is still a determinate "this
+    runtime cannot read the repo" answer.
+
+    The bubblewrap check is deliberately first. The two markers are expected to
+    be disjoint in practice (they were captured on different installs), but if
+    both appear the panic wins: it is a hard, verbatim-observed sandbox failure
+    with a specific remedy (do not use a snap-confined codex), while the
+    code-mode marker is a broader warning about a missing host binary.
     """
     if _SANDBOX_INCAPABLE_MARKER in result.stderr:
         return _REASON_SANDBOX_INCAPABLE
