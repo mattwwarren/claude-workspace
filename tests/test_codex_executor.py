@@ -208,6 +208,11 @@ def test_codex_executor_clean_stage_complete(
     post_mock.assert_called_once()
     assert post_mock.call_args.args[0] == "T-1"
     assert "Non-blocking" in post_mock.call_args.args[1]
+    # #1705: default lane has no codex_fix_loop_enabled override, so it
+    # resolves to the global default (False) — the posted comment must state
+    # this history as its own state ("single-pass"/"disabled"), never as
+    # flaked/degraded.
+    assert "disabled" in post_mock.call_args.args[1].lower()
     result = _persisted_result()
     assert result.status == "stage_complete"
     assert result.stage_reached == "stage3_review"
@@ -289,6 +294,52 @@ def test_codex_executor_must_fix_blocked(
     # The survivor verdict is still posted as a blocking comment.
     post_mock.assert_called_once()
     assert "BLOCKING" in post_mock.call_args.args[1]
+    # #1705: FakeCodexRunner here never edits the worktree, so 0 of the 1
+    # originally-found finding was ever actually resolved across all 5 capped
+    # cycles — the posted comment must say so honestly, not silently omit it.
+    assert "0 of 1" in post_mock.call_args.args[1]
+
+
+def test_codex_executor_clean_stage_complete_fix_loop_enabled_states_available(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """#1705: a clean review with the fix loop enabled for the lane states
+    "available but not needed" — distinct from the disabled-lane wording in
+    ``test_codex_executor_clean_stage_complete`` — proving fix_loop_enabled
+    threads correctly all the way from ``_resolve_codex_fix_loop_enabled``
+    through to the posted GitHub comment, not just through the renderer's own
+    unit tests."""
+    worktree = _worktree_with_change(
+        make_git_repo,
+        "wt-codex-clean-loop-enabled",
+        filename="new.py",
+        content="def broken():\n",
+    )
+    runner = FakeCodexRunner(returncode=0, output_file_content=_reviewer_doc())
+    config = StageExecutorConfig(backend=CODEX_BACKEND)
+    executor = CodexExecutor(config=config, runner=runner)
+    client = ClientConfig(
+        name="test",
+        workspace_path=worktree,
+        default_branch="main",
+        lanes=[LaneConfig(name="mf-lane", codex_fix_loop_enabled=True)],
+    )
+    task = TicketTask(
+        ticket_id="T-1", client="test", stage=Stage.REVIEW, lane="mf-lane"
+    )
+
+    with (
+        patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+        patch("cw.executor._post_review_comment") as post_mock,
+    ):
+        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+
+    post_mock.assert_called_once()
+    enabled_body = post_mock.call_args.args[1]
+    assert "available" in enabled_body.lower()
+    result = _persisted_result()
+    assert result.status == "stage_complete"
 
 
 def test_codex_executor_all_roles_fail_blocked(

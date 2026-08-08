@@ -28,6 +28,7 @@ from cw.worktree import compute_branch_diff_scope
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from cw.auto_dev_result import Review
     from cw.codex_review._capability import _CodexFilesystemCapability
     from cw.models import TicketTask
     from cw.review_findings import (
@@ -121,6 +122,7 @@ def synthesize_codex_review_result(
     reviewed_sha: str,
     session_id: str,
     default_branch: str,
+    fix_loop_enabled: bool,
     metrics_by_role: dict[str, ReviewerRunMetrics] | None = None,
     capability: _CodexFilesystemCapability | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
@@ -154,6 +156,13 @@ def synthesize_codex_review_result(
     disposition table or :func:`_derive_health`. It is optional so callers with
     no such concept (and the direct-synthesis tests) record nothing rather than
     a mode nobody probed.
+
+    ``fix_loop_enabled`` (#1705) is the caller's own already-known fix-loop
+    state, threaded only as far as :func:`render_verdict_comment` on the
+    blocking branch — it discriminates a fix-loop-disabled single pass from a
+    fix-loop-enabled pass whose cycle-0 review was already clean, a history
+    ``ReviewVerdict.review`` alone cannot distinguish (R1). Like
+    ``metrics_by_role``, it is unused on the zero-documents branch.
     """
     if not documents:
         transient = any(f.reason in _TRANSIENT_FAILURE_REASONS for f in failures)
@@ -182,7 +191,7 @@ def synthesize_codex_review_result(
             ticket_id=task.ticket_id,
             worktree=worktree,
             reason=CODEX_MUST_FIX_FINDINGS,
-            details=render_verdict_comment(verdict),
+            details=render_verdict_comment(verdict, fix_loop_enabled=fix_loop_enabled),
             stage_reached=STAGE3_REVIEW,
         )
         return blocked.model_copy(update={"review": verdict.review}), verdict
@@ -261,17 +270,100 @@ def _render_findings(
     return lines
 
 
-def render_verdict_comment(verdict: ReviewVerdict) -> str:
-    """Render a consolidated verdict into a GitHub-issue-comment markdown body."""
+def _render_clean_headline(review: Review, *, fix_loop_enabled: bool) -> str:
+    """Render the non-blocking headline, distinguishing three histories (#1705).
+
+    ``Review.fix_cycles_used``/``must_fix_initial``/``deferred`` alone cannot
+    tell a fix-loop-disabled single pass apart from a fix-loop-enabled pass
+    whose cycle-0 review was already clean — both produce
+    ``fix_cycles_used == 0``. ``fix_loop_enabled`` (caller-known, threaded in
+    via ``synthesize_codex_review_result``) is the discriminator (R1).
+    """
+    if review.fix_cycles_used > 0:
+        resolved = review.must_fix_initial - review.deferred
+        return (
+            f"**Non-blocking** — {resolved} of {review.must_fix_initial} "
+            f"originally-found MUST_FIX finding(s) resolved across "
+            f"{review.fix_cycles_used} fix cycle(s); none remain open. "
+            "(Note: fix-cycle commit outcomes not individually tracked — this "
+            "reflects the loop's own cycle/finding accounting, not per-commit "
+            "diffing.)"
+        )
+    if fix_loop_enabled:
+        return (
+            "**Non-blocking** — no MUST_FIX findings. The fix loop was "
+            "available for this run; none were needed."
+        )
+    return (
+        "**Non-blocking** — no MUST_FIX findings. Single-pass review "
+        "(fix loop disabled for this lane)."
+    )
+
+
+def _render_history_note(review: Review, *, fix_loop_enabled: bool) -> list[str]:
+    """Render the blocking-branch history note (R1's blocking-branch half).
+
+    Mirrors ``_render_clean_headline``'s discrimination for the still-blocking
+    case: a fix-loop-disabled block must state its own single-pass state
+    rather than silently looking like a fix loop that made no progress.
+    """
+    if not fix_loop_enabled:
+        return ["_Single-pass review — fix loop disabled for this lane._", ""]
+    if review.fix_cycles_used > 0:
+        resolved = review.must_fix_initial - review.deferred
+        return [
+            f"_{resolved} of {review.must_fix_initial} originally-found "
+            f"MUST_FIX finding(s) resolved across {review.fix_cycles_used} "
+            f"fix cycle(s); {review.deferred} still open._",
+            "",
+        ]
+    return []
+
+
+def _render_failed_roles_note(verdict: ReviewVerdict) -> list[str]:
+    """Render a "PARTIAL COVERAGE" note naming any role that failed to run.
+
+    Reads ``verdict.agents_run`` (#1710's ``ReviewerRunRecord`` list) directly
+    — no new plumbing needed. Surfaces reviewer-run failure onto the posted
+    GitHub comment; previously only reached ``Blocker.details`` internally via
+    ``_format_failures_detail`` on the zero-documents path.
+    """
+    failed_roles = [r.reviewer_role for r in verdict.agents_run if r.status == "failed"]
+    if not failed_roles:
+        return []
+    roles = ", ".join(failed_roles)
+    plural = "" if len(failed_roles) == 1 else "s"
+    return [
+        f"**PARTIAL COVERAGE** — {len(failed_roles)} role{plural} failed to run: "
+        f"{roles}.",
+        "",
+    ]
+
+
+def render_verdict_comment(verdict: ReviewVerdict, *, fix_loop_enabled: bool) -> str:
+    """Render a consolidated verdict into a GitHub-issue-comment markdown body.
+
+    ``fix_loop_enabled`` is the caller's own already-known fix-loop state for
+    this run — required (not optional) so no call site can silently fall back
+    to a wrong default (#1705). It discriminates fix-loop-disabled from
+    fix-loop-enabled-but-unneeded histories that would otherwise render
+    identically from ``verdict.review`` alone.
+    """
     lines = ["## Codex Review Verdict", ""]
     if verdict.blocking:
         lines.append(
             f"**BLOCKING** — {len(verdict.must_fix)} MUST_FIX finding(s) must be "
             "addressed before this branch can proceed."
         )
+        lines.extend(
+            _render_history_note(verdict.review, fix_loop_enabled=fix_loop_enabled)
+        )
     else:
-        lines.append("**Non-blocking** — no MUST_FIX findings.")
+        lines.append(
+            _render_clean_headline(verdict.review, fix_loop_enabled=fix_loop_enabled)
+        )
     lines.append("")
+    lines.extend(_render_failed_roles_note(verdict))
     lines.extend(_render_findings(verdict, "MUST_FIX", "MUST_FIX"))
     lines.extend(_render_findings(verdict, "SHOULD_FIX", "SHOULD_FIX"))
     return "\n".join(lines).rstrip() + "\n"

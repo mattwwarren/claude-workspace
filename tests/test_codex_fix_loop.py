@@ -26,6 +26,7 @@ from cw.codex_review import (
     CODEX_FIX_SCOPE_VIOLATION,
     CODEX_MUST_FIX_FINDINGS,
     CODEX_REVIEW_UNPARSEABLE,
+    render_verdict_comment,
     run_review,
     synthesize_codex_review_result,
 )
@@ -373,6 +374,7 @@ def _stage_complete(worktree: Path) -> tuple[AutoDevResult, ReviewVerdict]:
         reviewed_sha="sha-clean",
         session_id="s-stage-complete",
         default_branch="main",
+        fix_loop_enabled=True,
     )
     assert verdict is not None
     return result, verdict
@@ -673,13 +675,20 @@ class TestFixLoopCapAndEscalation:
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-clean2")
         runner = _FixLoopRunner([_MF_DOC, _MF_DOC, _CLEAN_DOC])
-        out, _verdict = _run_loop(runner, worktree, session_id="s-clean2")
+        out, verdict = _run_loop(runner, worktree, session_id="s-clean2")
 
         assert out.status == "stage_complete"
         assert out.blocker is None
         assert out.review.fix_cycles_used == 2
         assert out.health.fix_loop_escalated is False
         assert runner.fix_calls == 2
+        # #1705 bug #2: the returned *verdict* (not just out.review) must
+        # carry the finalized cross-cycle counts — _clean_exit previously
+        # stamped review onto the AutoDevResult but returned the stale
+        # cycle-terminal ReviewVerdict unchanged.
+        assert verdict is not None
+        assert verdict.review.must_fix_initial == 1
+        assert verdict.review.fix_cycles_used == 2
 
     def test_clean_exit_cycle_three_is_escalated(
         self, make_git_repo: Callable[..., Path]
@@ -865,6 +874,7 @@ class TestFixLoopNonBlockingPassthrough:
             model=None,
             wall_clock_budget_seconds=None,
             session_id="s-pass-plain",
+            fix_loop_enabled=False,
         )
         assert loop_runner.fix_calls == 0
         assert loop_result.status == plain_result.status == "stage_complete"
@@ -925,6 +935,7 @@ class TestFixLoopDisabledGate:
             model=None,
             wall_clock_budget_seconds=None,
             session_id="s-gate",
+            fix_loop_enabled=False,
         )
 
         assert loop_result == plain_result
@@ -1197,6 +1208,109 @@ class TestScopeViolationGate:
         assert out.review.fix_cycles_used == 1
         assert out.review.must_fix_initial == 1
         assert out.blocker.retry_eligible is None
+
+    def test_out_of_scope_sensitive_modification_parks_verdict_stamped(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        # #1705 Decisions #2 regression pin: _park_scope_violation must stamp
+        # the finalized Review onto the returned *verdict* too, not just the
+        # returned AutoDevResult — mirrors _clean_exit's bug #2 fix, applied
+        # to the scope-violation park path.
+        worktree = _worktree(
+            make_git_repo,
+            "wt-scope-outsens-stamp",
+            manifest={
+                ".claude/sensitive-files.yml": _MANIFEST,
+                "pyproject.toml": _PYPROJECT_CONTENT,
+            },
+        )
+        runner = _FixLoopRunner(
+            [_MF_DOC],
+            fix_behaviors=[
+                _editor(filename="pyproject.toml", content='[project]\nname = "z"\n')
+            ],
+        )
+        out, verdict = _run_loop(runner, worktree, session_id="s-scope-outsens-stamp")
+
+        assert out.status == "blocked"
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_FIX_SCOPE_VIOLATION
+        assert verdict is not None
+        assert verdict.review.must_fix_initial == out.review.must_fix_initial
+        assert verdict.review.fix_cycles_used == out.review.fix_cycles_used
+        assert verdict.review.must_fix_initial == 1
+        assert verdict.review.fix_cycles_used == 1
+
+
+# ---------------------------------------------------------------------------
+# TestVerdictCommentDistinguishesHistories — #1705 R3
+# ---------------------------------------------------------------------------
+
+
+class TestVerdictCommentDistinguishesHistories:
+    """render_verdict_comment must render three distinct comments for three
+    operationally different histories, even when the underlying Review can
+    look alike (e.g. fix_cycles_used == 0 for both a genuinely-clean cycle 0
+    and a fix-loop-disabled pass) — the fix_loop_enabled discriminator is
+    what tells them apart (#1705)."""
+
+    def test_converged_clean_off_render_three_distinct_comments(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        # (a) converged: a real fix cycle clears the MUST_FIX finding.
+        converged_worktree = _worktree(make_git_repo, "wt-history-converged")
+        converged_runner = _FixLoopRunner(
+            [_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor()]
+        )
+        _, converged_verdict = _run_loop(
+            converged_runner,
+            converged_worktree,
+            session_id="s-history-converged",
+            fix_loop_enabled=True,
+        )
+
+        # (b) genuinely-clean: cycle 0 is already clean, loop never engages.
+        clean_worktree = _worktree(make_git_repo, "wt-history-clean")
+        clean_runner = _FixLoopRunner([_CLEAN_DOC])
+        _, clean_verdict = _run_loop(
+            clean_runner,
+            clean_worktree,
+            session_id="s-history-clean",
+            fix_loop_enabled=True,
+        )
+
+        # (c) fix-loop-off: same clean cycle 0, but the lane disables the
+        # fix loop entirely — must render as its own state, never as flaked.
+        off_worktree = _worktree(make_git_repo, "wt-history-off")
+        off_runner = _FixLoopRunner([_CLEAN_DOC])
+        _, off_verdict = _run_loop(
+            off_runner,
+            off_worktree,
+            session_id="s-history-off",
+            fix_loop_enabled=False,
+        )
+
+        assert converged_verdict is not None
+        assert clean_verdict is not None
+        assert off_verdict is not None
+
+        converged_body = render_verdict_comment(
+            converged_verdict, fix_loop_enabled=True
+        )
+        clean_body = render_verdict_comment(clean_verdict, fix_loop_enabled=True)
+        off_body = render_verdict_comment(off_verdict, fix_loop_enabled=False)
+
+        # R3's literal requirement: pairwise inequality.
+        assert converged_body != clean_body
+        assert converged_body != off_body
+        assert clean_body != off_body
+
+        # Substring pins so the test still fails informatively if two
+        # message families accidentally converge on wording rather than
+        # just differing by whitespace.
+        assert "resolved across 1 fix cycle" in converged_body
+        assert "available" in clean_body.lower()
+        assert "disabled" in off_body.lower()
 
 
 # ---------------------------------------------------------------------------

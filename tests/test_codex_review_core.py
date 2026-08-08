@@ -44,6 +44,7 @@ def test_run_review_threads_session_id_to_run_codex_role(
         model=None,
         wall_clock_budget_seconds=None,
         session_id="sess-thread",
+        fix_loop_enabled=False,
     )
     assert captured["session_id"] == "sess-thread"
 
@@ -89,6 +90,7 @@ class TestPrepareReviewPass:
             model=None,
             wall_clock_budget_seconds=None,
             session_id="sess-prepare-run",
+            fix_loop_enabled=False,
         )
         assert result.status == "stage_complete"
         assert verdict is not None
@@ -137,6 +139,7 @@ def test_run_review_threads_metrics_onto_verdict_agents_run(
         model=None,
         wall_clock_budget_seconds=None,
         session_id="sess-run-review-metrics",
+        fix_loop_enabled=False,
     )
     assert verdict is not None
     assert verdict.agents_run
