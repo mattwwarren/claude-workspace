@@ -177,15 +177,31 @@ _DEGRADED_HEALTH_RECOMMENDATION = "EXIT_FOR_HUMAN_REVIEW"
 # below (GitHub #1511) -- every STAGE_FAILURE_STATUSES member for which the
 # schema allows a non-null blocker (schema.py's #777 exception:
 # "blocked"/"merge_gate_blocked" only -- scope_exceeded/forbidden_area never
-# carry one, by design), plus the _AWAITING_OPERATOR_REASON substitute the
-# ternary below writes when that blocker's reason is in
-# OPERATOR_UNAVAILABLE_BLOCKER_REASONS. Named + anchored so
+# carry one, by design), plus two substitutes: _AWAITING_OPERATOR_REASON,
+# which the ternary below writes when that blocker's reason is in
+# OPERATOR_UNAVAILABLE_BLOCKER_REASONS, and (#1729)
+# _MUST_FIX_MECHANICALLY_REJECTED_REASON, stamped by
+# _park_must_fix_mechanically_rejected above -- the one gate-class park whose
+# breadcrumbs is genuinely populated from blocker.reason rather than a
+# hardcoded "" literal. Named + anchored so
 # .claude/skills/orchestrate-sprint/scripts/attention_monitor.sh's
 # hand-transcribed Python set (which runs outside src/cw and cannot import
-# this constant) has one file:line to keep in sync against. See #1597.
+# this constant) has one file to keep in sync against. See #1597.
+#
+# IMPORTANT: this constant has no runtime reader anywhere in src/cw -- it is
+# the canonical *declaration* consumed only by attention_monitor.sh (an
+# out-of-repo hand-copy) and by the pinning test below. Adding a paused_status
+# here does NOT by itself cause a breadcrumb to be emitted for it: the
+# producing _park_* helper must independently stamp non-empty breadcrumbs
+# content at its own call site. Every gate-class park other than
+# _park_must_fix_mechanically_rejected (_park_finalize_hold,
+# _park_signoff_gate, _park_scope_hint_gate, _park_review_health_gate, and the
+# _stage_advance_unchecked config-error paths) hardcodes breadcrumbs="" and is
+# deliberately excluded from this set -- membership for one of those would be
+# cosmetic, not a fix (#1729).
 BREADCRUMB_ELIGIBLE_PAUSED_STATUSES: frozenset[str] = (
     STAGE_FAILURE_STATUSES - {"scope_exceeded", "forbidden_area"}
-) | {_AWAITING_OPERATOR_REASON}
+) | {_AWAITING_OPERATOR_REASON, _MUST_FIX_MECHANICALLY_REJECTED_REASON}
 
 
 def _accumulate_task_cost(task: TicketTask, session_id: str | None) -> None:

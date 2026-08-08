@@ -9491,25 +9491,48 @@ class TestApplyStagedDecision:
         that can carry a non-null blocker (schema.py's #777 exception --
         'blocked'/'merge_gate_blocked' only) plus the _AWAITING_OPERATOR_REASON
         substitute Rule 5 writes when blocker_reason is in
-        OPERATOR_UNAVAILABLE_BLOCKER_REASONS.
+        OPERATOR_UNAVAILABLE_BLOCKER_REASONS, plus (#1729) the
+        "codex_must_fix_mechanically_rejected" substitute -- the one gate-class
+        park (#1714's _park_must_fix_mechanically_rejected) whose breadcrumbs
+        genuinely originate from a populated blocker dict rather than a
+        hardcoded breadcrumbs="" literal.
+
+        Membership in BREADCRUMB_ELIGIBLE_PAUSED_STATUSES does not by itself
+        cause a breadcrumb to be emitted: every producing _park_* helper must
+        independently stamp non-empty breadcrumbs content (the constant has no
+        runtime reader in src/ -- see the block comment above its definition
+        in routing.py). The exclusion assertions below prove the other
+        gate-class parks (review_health_gate, finalize_hold, signoff_gate,
+        approval_gate -- the last also covering scope_hint_gate, which reuses
+        approval_gate's paused_status literal) stay out of this set: they
+        hardcode breadcrumbs="", so adding their paused_status here would be
+        cosmetic, not a fix.
         """
         from cw.auto_dev_result import (
             OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
             STAGE_FAILURE_STATUSES,
         )
         from cw.dispatch import (
+            _APPROVAL_GATE_REASON,
             _AWAITING_OPERATOR_REASON,
+            _FINALIZE_HOLD_REASON,
+            _REVIEW_HEALTH_GATE_REASON,
+            _SIGNOFF_GATE_REASON,
             BREADCRUMB_ELIGIBLE_PAUSED_STATUSES,
         )
+
+        must_fix_mechanically_rejected = "codex_must_fix_mechanically_rejected"
 
         assert {
             "blocked",
             "merge_gate_blocked",
             "awaiting_operator_availability",
+            must_fix_mechanically_rejected,
         } == BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
         # every non-substitute member is drawn from STAGE_FAILURE_STATUSES
         assert (
-            BREADCRUMB_ELIGIBLE_PAUSED_STATUSES - {_AWAITING_OPERATOR_REASON}
+            BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+            - {_AWAITING_OPERATOR_REASON, must_fix_mechanically_rejected}
         ) <= STAGE_FAILURE_STATUSES
         # scope_exceeded/forbidden_area excluded by design (#777: never carry a
         # blocker), not oversight
@@ -9520,6 +9543,20 @@ class TestApplyStagedDecision:
         # set is non-empty
         assert OPERATOR_UNAVAILABLE_BLOCKER_REASONS
         assert _AWAITING_OPERATOR_REASON in BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+        assert must_fix_mechanically_rejected in BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+
+        # gate-class exclusion (#1729): each of these hardcodes breadcrumbs=""
+        # at its _park_* call site (routing.py), so membership here would not
+        # change what gets emitted -- their paused_status must stay excluded.
+        assert not (
+            {
+                _REVIEW_HEALTH_GATE_REASON,
+                _FINALIZE_HOLD_REASON,
+                _SIGNOFF_GATE_REASON,
+                _APPROVAL_GATE_REASON,
+            }
+            & BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+        )
 
     # -- review-health gate (#1702) --------------------------------------
 

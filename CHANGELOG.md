@@ -6,6 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Gate parks that do populate breadcrumbs are no longer filtered out of the
+  attention stream (#1729):** `BREADCRUMB_ELIGIBLE_PAUSED_STATUSES` omitted
+  `codex_must_fix_mechanically_rejected`, the park disposition #1714 introduced.
+  That park is the one gate-class park whose breadcrumbs are genuinely populated
+  from `blocker.reason` rather than a hardcoded `""` literal, so excluding it
+  meant an operator-review park emitted an empty breadcrumb — the single case
+  where the operator most needs to know *why* the branch stopped. The constant
+  now includes it, and the surrounding comment records the property that makes
+  the rest of the exclusions correct rather than accidental: membership here
+  does not by itself cause a breadcrumb to be emitted, since the producing
+  `_park_*` helper must independently stamp non-empty content at its own call
+  site. Every other gate-class park hardcodes `breadcrumbs=""`, so adding it
+  here would be cosmetic. The composition test is pinned against the imported
+  constants instead of hand-written string literals, closing the transcription
+  gap that produced this bug.
+
 ## [1.29.0] - 2026-08-08
 
 ### Fixed
