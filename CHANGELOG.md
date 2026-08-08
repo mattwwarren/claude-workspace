@@ -21,6 +21,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   coerced into a false negative; finalized fix-loop results always populate a
   concrete bool.
 
+- **Codex reviewers are grounded in the repo's actual ruff opt-outs and
+  complexity thresholds (#1744):** reviewers were raising MUST_FIX findings
+  against ruff rules the repo has explicitly ignored, and misreading
+  `PLR0915` (too-many-statements) as a line-count metric rather than the
+  statement-count metric it actually gates — the exact #1729 failure mode.
+  The review prompt now injects a lint-grounding block built from the repo's
+  `[tool.ruff.lint]` ignores and pylint-threshold overrides, instructing
+  reviewers to downgrade or drop findings based solely on an opted-out rule
+  or a misread default, while still treating a concrete security or
+  correctness failure as MUST_FIX even when a related rule is ignored.
+
 ### Fixed
 
 - **Gate parks that do populate breadcrumbs are no longer filtered out of the
