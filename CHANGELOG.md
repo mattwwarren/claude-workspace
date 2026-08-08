@@ -8,6 +8,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Codex filesystem capability is now probed, not assumed (#1709):** the
+  codex-review path used to tell every reviewer "do not rely on filesystem
+  access" as a hardcoded constant. That was true of exactly one runtime. The
+  discriminator turns out to be the *install method*, not the OS: a
+  snap-confined codex gets its own PATH/mount namespace, cannot see the host's
+  `bwrap`, and fails closed — while a non-snap install on the same machine
+  reads the worktree fine. A host-side `which bwrap` check answers CAPABLE for
+  the snap install and is wrong, so `cw` now asks codex itself, via a real
+  `codex exec --sandbox read-only` read of a sentinel file whose value never
+  appears in the prompt.
+
+  The verdict is cached on disk at
+  `~/.local/share/cw/codex-review/capability-cache.json`, keyed by a runtime
+  fingerprint (cli version, platform, install type, sandbox mode) and with **no
+  TTL** — the fact only changes when the codex install does, so re-probing on a
+  timer would spend a model round-trip per dispatch tick to re-learn it. Delete
+  the file to force a re-probe. A probe that never *completed* (timeout, spawn
+  failure) degrades that one run and is deliberately not cached, so a transient
+  failure cannot become silently permanent.
+
+  Reviewers on a capable runtime now get a prompt variant that permits reading
+  beyond the inlined diff (consumer search, prior-art search, repo-wide
+  regression verification); write access is neither offered nor possible, and
+  the schema/degraded/escalation rules are shared verbatim between the two
+  variants so capability can never quietly alter the output contract. Failures
+  are classified — `sandbox_incapable`, `install_incomplete`, `unknown` — rather
+  than collapsed into one boolean, because a broken install and a confined
+  sandbox produce the same "cannot read" answer and want opposite remedies. The
+  selected mode is recorded on `ReviewVerdict.capability_mode` /
+  `capability_reason` and in a per-session `codex-capability.json` diagnostics
+  artifact. Rendering it in the verdict comment is deferred to #1725.
+
 - **OpenCode executor backend foundation (#1669):** `opencode` is now a
   first-class executor backend, selectable via `backend: opencode` in
   `StageExecutorConfig`. Spawn is fire-and-forget (mirroring `LocalExecutor`):
