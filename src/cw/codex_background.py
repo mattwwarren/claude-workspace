@@ -34,6 +34,7 @@ from cw.codex_review import STAGE3_REVIEW, render_verdict_comment
 from cw.config import load_effective_config, sessions_lock
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event as _record_orchestrator_event
+from cw.gh import post_issue_comment
 from cw.local_runner import UNEXPECTED_ERROR, make_blocked
 from cw.models import OrchestratorEventType, QueueItemStatus
 from cw.worktree import _git_dir
@@ -43,7 +44,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.codex_runner import CodexRunner
-    from cw.models import ClientConfig, TicketTask
+    from cw.models import ClientConfig, OrchestratorConfig, TicketTask
 
 _log = logging.getLogger(__name__)
 
@@ -161,6 +162,50 @@ def join_outstanding_codex_threads(timeout_seconds: float | None = None) -> int:
         return sum(1 for thread in _outstanding if thread.is_alive())
 
 
+def _resolve_codex_fix_loop_enabled(
+    client: ClientConfig, task: TicketTask, config: OrchestratorConfig
+) -> bool:
+    """Resolve the effective codex_fix_loop_enabled gate for *task* (#1553).
+
+    Precedence (highest to lowest):
+      1. Lane-level LaneConfig.codex_fix_loop_enabled in *client*'s config.
+      2. Global OrchestratorConfig.default_codex_fix_loop_enabled.
+
+    A task whose lane name is not declared in the client's lanes falls
+    through to the global default. Mirrors resolve_reap_policy's lane-then-
+    global fallthrough shape (cw.reconcile._shared).
+    """
+    for lane_cfg in client.effective_lanes:
+        if lane_cfg.name == task.lane and lane_cfg.codex_fix_loop_enabled is not None:
+            return lane_cfg.codex_fix_loop_enabled
+    return config.default_codex_fix_loop_enabled
+
+
+def _post_review_comment(
+    ticket_id: str, review_text: str, *, cwd: Path | None = None
+) -> None:
+    """Post codex review findings as a GitHub issue comment (best-effort, logged).
+
+    Delegates to the shared ``cw.gh.post_issue_comment`` primitive. A failed
+    post is logged at warning (ticket_id, returncode, stderr) rather than
+    swallowed silently — for the CODEX_MUST_FIX_FINDINGS path this comment is
+    the only destination for the finding text (GitHub #1391).
+
+    *cwd* scopes the gh call to the client's repo (GitHub #1269/#1279).
+    """
+    result = post_issue_comment(ticket_id, review_text, cwd=cwd)
+    if result is None:
+        _log.warning("review_comment_post_failed ticket=%s: gh call failed", ticket_id)
+        return
+    if result.returncode != 0:
+        _log.warning(
+            "review_comment_post_failed ticket=%s rc=%s: %s",
+            ticket_id,
+            result.returncode,
+            result.stderr.decode(errors="replace").strip(),
+        )
+
+
 def _run_codex_review_and_complete(
     *,
     runner: CodexRunner,
@@ -181,16 +226,15 @@ def _run_codex_review_and_complete(
     task itself — the recovery dispatch's own ``except`` handler used to
     perform.
     """
-    # Function-level imports break the cw.executor <-> cw.codex_background
-    # cycle: executor.py imports this module at its top, and all three names
-    # below are defined *after* executor.py's own import block, so a
-    # module-level import here would hit a partially initialized module.
-    # Mirrors claim.py's deferred cw.dispatch.gating import (#1310).
-    from cw.executor import (
-        _complete_session_via_door,
-        _post_review_comment,
-        _resolve_codex_fix_loop_enabled,
-    )
+    # Function-level import breaks the cw.executor <-> cw.codex_background
+    # cycle: executor.py imports this module at its top, and the name below is
+    # defined *after* executor.py's own import block, so a module-level import
+    # here would hit a partially initialized module. Mirrors claim.py's
+    # deferred cw.dispatch.gating import (#1310).
+    # ``_complete_session_via_door`` stays in executor.py because it is shared
+    # with LocalExecutor, OpencodeExecutor, and CodexExecutor's own synchronous
+    # pre-flight-failure branch.
+    from cw.executor import _complete_session_via_door
 
     try:
         # Step 3: per-role review pass + bounded fix loop (#1392). The

@@ -27,7 +27,6 @@ from cw.executor_diagnostics import (
     build_executor_failure,
     persist_diagnostics_bundle,
 )
-from cw.gh import post_issue_comment
 from cw.local_runner import (
     AIDER_NOT_FOUND,
     ENDPOINT_NOT_CONFIGURED,
@@ -53,7 +52,6 @@ from cw.models import (
     ClientConfig,
     LastResultSource,
     LocalLivenessHandle,
-    OrchestratorConfig,
     OrchestratorEventType,
     Session,
     SessionOrigin,
@@ -806,25 +804,6 @@ def _complete_session_via_door(
         save_state(state)
 
 
-def _resolve_codex_fix_loop_enabled(
-    client: ClientConfig, task: TicketTask, config: OrchestratorConfig
-) -> bool:
-    """Resolve the effective codex_fix_loop_enabled gate for *task* (#1553).
-
-    Precedence (highest to lowest):
-      1. Lane-level LaneConfig.codex_fix_loop_enabled in *client*'s config.
-      2. Global OrchestratorConfig.default_codex_fix_loop_enabled.
-
-    A task whose lane name is not declared in the client's lanes falls
-    through to the global default. Mirrors resolve_reap_policy's lane-then-
-    global fallthrough shape (cw.reconcile._shared).
-    """
-    for lane_cfg in client.effective_lanes:
-        if lane_cfg.name == task.lane and lane_cfg.codex_fix_loop_enabled is not None:
-            return lane_cfg.codex_fix_loop_enabled
-    return config.default_codex_fix_loop_enabled
-
-
 class CodexExecutor:
     """StageExecutor backed by prompt-driven ``codex exec`` reviewers (#1236).
 
@@ -973,28 +952,3 @@ class CodexExecutor:
 
     def stage_sentinel_schema(self, _stage: Stage) -> dict[str, Any]:
         return AutoDevResult.model_json_schema()
-
-
-def _post_review_comment(
-    ticket_id: str, review_text: str, *, cwd: Path | None = None
-) -> None:
-    """Post codex review findings as a GitHub issue comment (best-effort, logged).
-
-    Delegates to the shared ``cw.gh.post_issue_comment`` primitive. A failed
-    post is logged at warning (ticket_id, returncode, stderr) rather than
-    swallowed silently — for the CODEX_MUST_FIX_FINDINGS path this comment is
-    the only destination for the finding text (GitHub #1391).
-
-    *cwd* scopes the gh call to the client's repo (GitHub #1269/#1279).
-    """
-    result = post_issue_comment(ticket_id, review_text, cwd=cwd)
-    if result is None:
-        _log.warning("review_comment_post_failed ticket=%s: gh call failed", ticket_id)
-        return
-    if result.returncode != 0:
-        _log.warning(
-            "review_comment_post_failed ticket=%s rc=%s: %s",
-            ticket_id,
-            result.returncode,
-            result.stderr.decode(errors="replace").strip(),
-        )

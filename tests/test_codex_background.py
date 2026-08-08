@@ -1,13 +1,16 @@
 """Tests for cw.codex_background — CodexExecutor's backgrounded review worker (#1727).
 
-Covers the three concerns the module owns: the daemon-thread launcher plus its
+Covers the concerns the module owns: the daemon-thread launcher plus its
 outstanding-thread registry, the bounded join the dispatch loop's shutdown path
-drains that registry with, and the moved Step 3/4/4b/5 unit of work
-(``_run_codex_review_and_complete``) on both its success and exception branches.
+drains that registry with, the moved Step 3/4/4b/5 unit of work
+(``_run_codex_review_and_complete``) on both its success and exception branches,
+and the two helpers that unit of work is the sole consumer of —
+``_resolve_codex_fix_loop_enabled`` and ``_post_review_comment``.
 """
 
 from __future__ import annotations
 
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -20,6 +23,8 @@ from cw import codex_background
 from cw.auto_dev_result import AutoDevResult
 from cw.codex_background import (
     _default_background,
+    _post_review_comment,
+    _resolve_codex_fix_loop_enabled,
     _run_codex_review_and_complete,
     _start_daemon_thread,
     join_outstanding_codex_threads,
@@ -31,7 +36,9 @@ from cw.local_runner import UNEXPECTED_ERROR, make_blocked
 from cw.models import (
     ClientConfig,
     CwState,
+    LaneConfig,
     LastResultSource,
+    OrchestratorConfig,
     QueueItemStatus,
     SessionStatus,
     Stage,
@@ -324,7 +331,7 @@ def test_run_codex_review_and_complete_posts_verdict_comment(
             return_value=(result, object()),
         ),
         patch("cw.codex_background.render_verdict_comment", return_value="rendered"),
-        patch("cw.executor._post_review_comment") as post_mock,
+        patch("cw.codex_background._post_review_comment") as post_mock,
     ):
         _run(sid="bg-verdict", task=task, worktree=worktree, client=_client(worktree))
 
@@ -384,3 +391,120 @@ def test_run_codex_review_and_complete_exception_path(
     assert stored.session_id is None
     assert stored.spawn_error_count == 1
     assert stored.next_eligible_at is not None
+
+
+# ---------------------------------------------------------------------------
+# _resolve_codex_fix_loop_enabled precedence (#1553)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_codex_fix_loop_enabled_lane_true_wins_regardless_of_global() -> None:
+    client = ClientConfig(
+        name="test",
+        workspace_path=Path("/tmp/x"),
+        lanes=[LaneConfig(name="trial", codex_fix_loop_enabled=True)],
+    )
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW, lane="trial")
+    config = OrchestratorConfig(default_codex_fix_loop_enabled=False)
+
+    assert _resolve_codex_fix_loop_enabled(client, task, config) is True
+
+
+def test_resolve_codex_fix_loop_enabled_lane_unset_global_true() -> None:
+    client = ClientConfig(
+        name="test",
+        workspace_path=Path("/tmp/x"),
+        lanes=[LaneConfig(name="trial")],
+    )
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW, lane="trial")
+    config = OrchestratorConfig(default_codex_fix_loop_enabled=True)
+
+    assert _resolve_codex_fix_loop_enabled(client, task, config) is True
+
+
+def test_resolve_codex_fix_loop_enabled_lane_unset_global_default_false() -> None:
+    client = ClientConfig(
+        name="test",
+        workspace_path=Path("/tmp/x"),
+        lanes=[LaneConfig(name="trial")],
+    )
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW, lane="trial")
+    config = OrchestratorConfig()
+
+    assert _resolve_codex_fix_loop_enabled(client, task, config) is False
+
+
+def test_resolve_codex_fix_loop_enabled_unmatched_lane_falls_through_to_global() -> (
+    None
+):
+    client = ClientConfig(
+        name="test",
+        workspace_path=Path("/tmp/x"),
+        lanes=[LaneConfig(name="trial", codex_fix_loop_enabled=True)],
+    )
+    task = TicketTask(
+        ticket_id="T-1", client="test", stage=Stage.REVIEW, lane="no-such-lane"
+    )
+    config = OrchestratorConfig(default_codex_fix_loop_enabled=True)
+
+    assert _resolve_codex_fix_loop_enabled(client, task, config) is True
+
+
+# ---------------------------------------------------------------------------
+# _post_review_comment — Step 4b's best-effort GitHub write
+# ---------------------------------------------------------------------------
+
+
+def test_post_review_comment_suppresses_oserror() -> None:
+    """_post_review_comment swallows OSError from a missing gh binary."""
+    with patch("cw.gh._sp.run", side_effect=FileNotFoundError("no gh")):
+        _post_review_comment("T-1", "findings")
+
+
+def test_post_review_comment_suppresses_timeout() -> None:
+    """_post_review_comment swallows TimeoutExpired when gh hangs."""
+    with patch(
+        "cw.gh._sp.run",
+        side_effect=subprocess.TimeoutExpired(cmd="gh", timeout=30),
+    ):
+        _post_review_comment("T-1", "findings")
+
+
+def test_post_review_comment_forwards_cwd() -> None:
+    """#1279: _post_review_comment scopes the gh call to the client's repo."""
+    want_cwd = Path("/some/client-a/repo")
+    with patch("cw.codex_background.post_issue_comment") as post_mock:
+        _post_review_comment("T-1", "findings", cwd=want_cwd)
+    post_mock.assert_called_once_with("T-1", "findings", cwd=want_cwd)
+
+
+def test_post_review_comment_logs_on_none_result(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """gh call couldn't run at all (missing binary / timeout) -> warning, not silent."""
+    with (
+        patch("cw.codex_background.post_issue_comment", return_value=None),
+        caplog.at_level("WARNING"),
+    ):
+        _post_review_comment("T-1", "findings", cwd=None)
+    assert any(
+        "T-1" in r.message and "gh call failed" in r.message for r in caplog.records
+    )
+
+
+def test_post_review_comment_logs_on_nonzero_returncode(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Non-zero gh exit -> warning carries ticket_id, returncode, and stderr."""
+    fake_result = subprocess.CompletedProcess(
+        args=["gh"], returncode=1, stdout=b"", stderr=b"invalid issue format"
+    )
+    with (
+        patch("cw.codex_background.post_issue_comment", return_value=fake_result),
+        caplog.at_level("WARNING"),
+    ):
+        _post_review_comment("T-1", "findings", cwd=None)
+    assert any(
+        "T-1" in r.message and "1" in r.message and "invalid issue format" in r.message
+        for r in caplog.records
+    )
