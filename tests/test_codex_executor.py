@@ -657,6 +657,47 @@ def test_codex_executor_exception_handler_marks_session_completed(
     assert stored.spawn_error_count == 1
 
 
+def test_preflight_failure_persist_error_completes_session_and_reraises(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """The synchronous pre-flight branch keeps its own guard-and-re-raise.
+
+    Unlike the backgrounded path, dispatch is still on this call stack here,
+    so re-raising is correct: dispatch's own handler reverts the claimed task.
+    The session must still be driven out of ACTIVE first.
+    """
+    worktree = make_git_repo("wt-codex-preflight-boom")
+    config = StageExecutorConfig(backend=CODEX_BACKEND)
+    executor = _sync_codex_executor(config, FakeCodexRunner(returncode=0))
+    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+    task = TicketTask(ticket_id="T-pf", client="test", stage=Stage.PLAN)
+
+    calls: list[dict[str, object]] = []
+
+    def _door(**kwargs: object) -> None:
+        calls.append(kwargs)
+        if len(calls) == 1:
+            msg = "door boom"
+            raise OSError(msg)
+
+    with (
+        patch("cw.executor._complete_session_via_door", _door),
+        pytest.raises(OSError, match="door boom"),
+    ):
+        # Stage.PLAN trips the CODEX_REVIEW_ONLY pre-flight guard, so this
+        # never reaches the background path at all.
+        executor.spawn(stage=Stage.PLAN, task=task, worktree=worktree, client=client)
+
+    # Second call is the guarded blocked-result write from the except branch.
+    assert len(calls) == 2
+    assert calls[1]["guard_already_completed"] is True
+    recovery = AutoDevResult.model_validate(calls[1]["payload"])
+    assert recovery.status == "blocked"
+    assert recovery.blocker is not None
+    assert recovery.blocker.reason == UNEXPECTED_ERROR
+
+
 def test_spawn_stamps_session_id_before_backgrounding(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
