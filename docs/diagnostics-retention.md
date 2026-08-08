@@ -42,6 +42,62 @@ The `-schema.json` / `-output.json` copies are the only unredacted tier and are
 `blocker.details` carries only a pointer to the bundle directory, never the raw
 excerpts.
 
+## Codex filesystem-capability artifact and cache (#1709)
+
+Two files sit alongside the failure bundles above, written on **every** codex
+review (not only on failure).
+
+**Per-session artifact** — `codex-capability.json`, in the same
+`sessions/<session_id>/diagnostics/` directory:
+
+```json
+{
+  "session_id": "sess-abc",
+  "capable": false,
+  "reason": "sandbox_incapable",
+  "fingerprint": {
+    "cli_version": "0.146.0",
+    "platform": "Linux",
+    "install_type": "snap",
+    "sandbox_mode": "read-only"
+  },
+  "recorded_at": "2026-08-07T12:00:00+00:00"
+}
+```
+
+`reason` is `null` when capable; otherwise `sandbox_incapable` (codex could not
+reach bubblewrap — typically a snap-confined install), `install_incomplete` (the
+binary is there but a supporting host binary is not), `unknown` (a failure
+signature not yet classified), or `probe_error` (the probe itself timed out or
+could not spawn — this one is never cached). The same mode is also recorded on
+the review verdict as `capability_mode` / `capability_reason`.
+
+**Shared cache** — `~/.local/share/cw/codex-review/capability-cache.json`:
+
+```
+~/.local/share/cw/codex-review/capability-cache.json
+```
+
+This file is **not** swept by the retention window below and has **no TTL**. It
+is keyed by the runtime fingerprint above; only a change to one of those four
+fields invalidates it. That is deliberate: the probe is a real `codex exec`
+round-trip, and the fact it establishes changes only when the codex install
+does — not on a timer.
+
+To force a re-probe (e.g. you just changed how codex is installed and do not
+want to wait for the version/install-type change to be noticed), delete the
+file:
+
+```bash
+rm ~/.local/share/cw/codex-review/capability-cache.json
+```
+
+`cw.codex_review._capability._reset_filesystem_capability_cache()` does the same
+thing in-process. Do not confuse it with `cw.dispatch.claim`'s
+`_reset_codex_capability_cache()` — that clears an unrelated, in-process,
+60-second TTL cache of a *different* question ("is a codex binary present and
+does `--version` parse?").
+
 ## Retention
 
 Bundles are swept on a retention window. Every `dispatch_tick` runs a best-effort
