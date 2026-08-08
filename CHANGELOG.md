@@ -76,6 +76,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rather than deriving it, so gating IMPL would have permanently stalled
   unattended `IMPL → REVIEW` auto-advance on LOCAL-backend clients.
 
+- **Reviewer findings with a near-line anchor or a stray diff-marker in
+  evidence were wrongly rejected (#1715):** two false-positive rejections on
+  top of #1632's diff-anchoring. First, `invalid_line_reference` used exact
+  line-number membership, so a finding whose anchor was off by even one line
+  from the real added line was rejected even with correct evidence text —
+  fleet evidence shows reviewer anchors commonly drift by one to three lines
+  (stale line numbers, off-by-one miscounts). Second, `evidence_not_in_diff`
+  compared evidence against raw per-file hunk text that still carries
+  `+`/`-`/context markers on every line, so a reviewer's genuine multiline
+  quote (no markers) couldn't match past the first line, and the windowed
+  path had the same exposure in reverse when the reviewer's own quote
+  carried diff-style markers (plausible if copied from a rendered diff
+  view). Line anchors now resolve via a fixed `±3` line tolerance
+  (`_nearest_added_line`: exact match first, else nearest candidate within
+  bound), and every evidence-vs-diff substring comparison is routed through
+  a marker/whitespace normalization (`_normalize_diff_text`) on both sides.
+  The bound is a fixed module constant, not derived from hunk/file size, and
+  stays enforced: an anchor farther than 3 lines away, a file not in the
+  diff, or evidence that still isn't a genuine substring after normalization
+  are all still rejected. In a representative before/after aggregate check,
+  2 of 3 findings that were incorrectly rejected pre-fix are now correctly
+  retained post-fix (retained/raw: 0/3 → 2/3).
+
 ## [1.28.0] - 2026-08-07
 
 ### Fixed
