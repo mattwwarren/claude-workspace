@@ -9,6 +9,7 @@ drains that registry with, and the moved Step 3/4/4b/5 unit of work
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -166,6 +167,32 @@ def test_join_returns_count_still_running_past_deadline() -> None:
     assert join_outstanding_codex_threads(timeout_seconds=0.05) == 1
 
     # Release and join for real so the thread does not leak into other tests.
+    release.set()
+    assert join_outstanding_codex_threads(timeout_seconds=5.0) == 0
+
+
+def test_join_budget_is_shared_across_threads_not_per_thread() -> None:
+    """Two blocked threads consume one deadline, not one deadline each.
+
+    Exercises the ``remaining <= 0`` short-circuit: the second thread is never
+    joined at all, because the first already spent the whole budget.
+    """
+    release = threading.Event()
+    started = threading.Barrier(3, timeout=5.0)
+
+    def _blocked() -> None:
+        started.wait()
+        release.wait(timeout=10.0)
+
+    _start_daemon_thread(_blocked, name="codex-slow-1")
+    _start_daemon_thread(_blocked, name="codex-slow-2")
+    started.wait()
+
+    elapsed_start = time.monotonic()
+    assert join_outstanding_codex_threads(timeout_seconds=0.1) == 2
+    # Well under 2 x the budget, i.e. the budget was not spent twice.
+    assert time.monotonic() - elapsed_start < 1.0
+
     release.set()
     assert join_outstanding_codex_threads(timeout_seconds=5.0) == 0
 
