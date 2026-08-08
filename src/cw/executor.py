@@ -9,14 +9,17 @@ import subprocess
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 
 from cw.auto_dev_result import AutoDevResult
-from cw.codex_background import _default_background, _run_codex_review_and_complete
+from cw.codex_background import (
+    _default_background,
+    _run_codex_review_and_complete,
+    _stamp_session_id_on_running_task,
+)
 from cw.codex_review import (
     STAGE3_REVIEW,
 )
 from cw.codex_review._const import _CODEX_VERSION_RE
 from cw.codex_runner import CodexRunner, RealCodexRunner
 from cw.config import load_state, save_state, sessions_lock
-from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event as _record_orchestrator_event
 from cw.exceptions import EmitSessionNotFoundError
 from cw.executor_diagnostics import (
@@ -52,7 +55,6 @@ from cw.models import (
     LocalLivenessHandle,
     OrchestratorConfig,
     OrchestratorEventType,
-    QueueItemStatus,
     Session,
     SessionOrigin,
     SessionPurpose,
@@ -219,22 +221,18 @@ class StageExecutor(Protocol):
     # launches aider fire-and-forget, records the handle, and returns without
     # blocking, so reconcile/local can recover the session if cw dies mid-run.
     #
-    # CodexExecutor is an accepted, documented exception (GitHub #1727). It no
-    # longer blocks the calling thread — it hands its review to a same-process
-    # daemon thread (``cw.codex_background``) and returns — but it still
-    # carries no liveness handle, so its session is not crash-recoverable via
-    # harvest. That is unchanged from when the call was synchronous (a thread
-    # dies with its process exactly as a blocking call did), not a regression
-    # introduced by backgrounding it; closing it properly is Option A/B
-    # territory (a real subprocess/daemon surface), deliberately out of scope.
-    #
-    # The operational blast radius of that gap is bounded, not closed, from two
-    # sides: ``run_dispatch_loop``'s shutdown path bounded-joins outstanding
-    # codex threads before recording DISPATCH_LOOP_EXITED (covering deploy,
-    # restart, and ``--once`` completion), and
-    # ``cw.reconcile.codex_boot.reap_orphaned_codex_sessions_at_boot`` flags
-    # any codex session still ACTIVE at the next process start for operator
-    # attention (covering the crash/SIGKILL path a join cannot reach).
+    # CodexExecutor is an accepted, documented exception (#1727): it no longer
+    # blocks the caller (it hands the review to a ``cw.codex_background`` daemon
+    # thread and returns) but still carries no liveness handle, so its session
+    # is not crash-recoverable via harvest. Unchanged from when the call was
+    # synchronous — a thread dies with its process exactly as a blocking call
+    # did — so this is not a regression; closing it is Option A/B territory (a
+    # real subprocess surface), out of scope. The blast radius is bounded, not
+    # closed, from two sides: ``run_dispatch_loop``'s shutdown path
+    # bounded-joins outstanding codex threads before DISPATCH_LOOP_EXITED
+    # (deploy/restart/``--once``), and ``cw.reconcile.codex_boot`` flags any
+    # codex session still ACTIVE at the next boot (the crash/SIGKILL path a
+    # join cannot reach).
     """
 
     def spawn(
@@ -827,32 +825,6 @@ def _resolve_codex_fix_loop_enabled(
     return config.default_codex_fix_loop_enabled
 
 
-def _stamp_session_id_on_running_task(
-    *, client_name: str, ticket_id: str, session_id: str
-) -> None:
-    """Stamp *session_id* onto the matching RUNNING dev-queue row (#1727 R1).
-
-    Keyword-only because ``client_name``/``ticket_id``/``session_id`` are all
-    plain ``str`` with no type-system distinction between them — mirrors
-    ``_park_running_task_blocked_on_user``'s reasoning.
-
-    A no-op when no RUNNING row matches: CodexExecutor is reachable outside
-    dispatch (direct construction in tests, a future one-off invocation), and
-    there is nothing to attribute in that case.
-    """
-    with dev_queue_lock():
-        store = load_dev_queue()
-        for stored_task in store.tasks:
-            if (
-                stored_task.ticket_id == ticket_id
-                and stored_task.client == client_name
-                and stored_task.status == QueueItemStatus.RUNNING
-            ):
-                stored_task.session_id = session_id
-                break
-        save_dev_queue(store)
-
-
 class CodexExecutor:
     """StageExecutor backed by prompt-driven ``codex exec`` reviewers (#1236).
 
@@ -864,13 +836,12 @@ class CodexExecutor:
     and synthesizes a typed AutoDevResult from the consolidated verdict. The
     consolidated verdict is posted as a GitHub issue comment on a clean run.
 
-    spawn() is NOT synchronous (GitHub #1727). Pre-flight (Steps 1-2) runs on
-    the caller's thread; once it passes, the review itself is handed to a
-    background daemon thread (``cw.codex_background``) and spawn() returns the
-    session id immediately. Blocking here would freeze the shared
-    ``dispatch_tick`` call stack for the whole review — up to the full REVIEW
-    budget — stalling every other client and lane, which is the invariant
-    documented on the StageExecutor Protocol above.
+    spawn() is NOT synchronous (#1727). Pre-flight (Steps 1-2) runs on the
+    caller's thread; once it passes, the review is handed to a
+    ``cw.codex_background`` daemon thread and spawn() returns the session id
+    immediately. Blocking here would freeze the shared ``dispatch_tick`` stack
+    for the whole review, stalling every other client and lane — see the
+    StageExecutor Protocol invariant above.
 
     Like LocalExecutor, it bypasses stdout-sentinel parsing: the
     SESSION_COMPLETED event carries no result payload, so dispatch consumes the

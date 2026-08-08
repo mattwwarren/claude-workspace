@@ -570,7 +570,14 @@ def _run_dispatch_loop_body(
         # is still alive to give an almost-done review a few seconds to land —
         # and an exception unwinding the loop is exactly as likely to strand a
         # half-committed worktree as a clean shutdown is.
-        _codex_threads_still_running = join_outstanding_codex_threads()
+        #
+        # Suppressed for the same reason the event write below is: shutdown
+        # bookkeeping must never replace the exception that is already unwinding
+        # this frame. A failed drain leaves the count at its 0 default rather
+        # than swallowing the real cause of the exit.
+        _codex_threads_still_running = 0
+        with contextlib.suppress(Exception):
+            _codex_threads_still_running = join_outstanding_codex_threads()
         _exc = sys.exc_info()[1]
         _normal = _exc is None or isinstance(_exc, KeyboardInterrupt)
         _payload: dict[str, object] = {

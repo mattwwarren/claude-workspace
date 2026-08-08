@@ -32,9 +32,10 @@ from typing import TYPE_CHECKING
 from cw.codex_fix_loop import run_review_with_fix_loop
 from cw.codex_review import STAGE3_REVIEW, render_verdict_comment
 from cw.config import load_effective_config, sessions_lock
+from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.events import record_event as _record_orchestrator_event
 from cw.local_runner import UNEXPECTED_ERROR, make_blocked
-from cw.models import OrchestratorEventType
+from cw.models import OrchestratorEventType, QueueItemStatus
 from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
@@ -48,7 +49,7 @@ _log = logging.getLogger(__name__)
 
 # Shared budget for draining outstanding review threads on a graceful exit.
 #
-# # Why 10s: long enough for a thread that has already finished its codex
+# Why 10s: long enough for a thread that has already finished its codex
 # subprocesses and its git work and is only doing fast cleanup (the door write,
 # the GitHub verdict comment, the SESSION_COMPLETED event) to land. Far too
 # short to "wait out" a review still mid-subprocess, which can run to the full
@@ -88,6 +89,42 @@ def _start_daemon_thread(fn: Callable[[], None], *, name: str) -> None:
     with _outstanding_lock:
         _outstanding.append(thread)
     thread.start()
+
+
+def _stamp_session_id_on_running_task(
+    *, client_name: str, ticket_id: str, session_id: str
+) -> None:
+    """Stamp *session_id* onto the matching RUNNING dev-queue row (#1727 R1).
+
+    Called by ``CodexExecutor.spawn()`` immediately before it hands the review
+    off, so the queue row already points at the live session by the time this
+    module's thread starts. Dispatch stamps session_id too, but only *after*
+    spawn() returns — a crash in that window would otherwise leave a running
+    codex session with no row attributing it.
+
+    Keyword-only because ``client_name``/``ticket_id``/``session_id`` are all
+    plain ``str`` with no type-system distinction between them — mirrors
+    ``_park_running_task_blocked_on_user``'s reasoning.
+
+    Deliberately narrower than dispatch's own post-spawn stamp: session_id
+    only, no error-counter reset and no stage_base_ref, so backoff semantics
+    keep a single owner in claim.py.
+
+    A no-op when no RUNNING row matches: CodexExecutor is reachable outside
+    dispatch (direct construction in tests, a future one-off invocation), and
+    there is nothing to attribute in that case.
+    """
+    with dev_queue_lock():
+        store = load_dev_queue()
+        for stored_task in store.tasks:
+            if (
+                stored_task.ticket_id == ticket_id
+                and stored_task.client == client_name
+                and stored_task.status == QueueItemStatus.RUNNING
+            ):
+                stored_task.session_id = session_id
+                break
+        save_dev_queue(store)
 
 
 def _default_background(fn: Callable[[], None]) -> None:
