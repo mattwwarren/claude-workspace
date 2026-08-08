@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 import yaml
 
+from cw.codex_background import join_outstanding_codex_threads
 from cw.config import (
     dispatch_loop_lock,
     load_clients,
@@ -50,6 +51,7 @@ from cw.reconcile import (
     _CAUSE_USAGE_LIMIT,
     ticket_id_for_session,
 )
+from cw.reconcile.codex_boot import reap_orphaned_codex_sessions_at_boot
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -453,6 +455,18 @@ def _run_dispatch_loop_body(
     """
     config = load_effective_config()
 
+    # Boot pass (#1727): a codex session still ACTIVE at process start means
+    # the prior process died mid-review (crash/SIGKILL) — the one case the
+    # shutdown join below cannot reach, since the thread died with its process.
+    # Runs once, before the first tick, under the singleton lock (#1362).
+    orphaned_codex = reap_orphaned_codex_sessions_at_boot()
+    if orphaned_codex:
+        _log.warning(
+            "dispatch: %d codex session(s) were ACTIVE at process start;"
+            " parked for operator inspection",
+            orphaned_codex,
+        )
+
     resolved_native_daemon = native_daemon or get_native_daemon_client()
     # Track stale-warn deduplication across all ticks within this run.
     warned_stale: set[tuple[str, str]] = set()
@@ -550,11 +564,21 @@ def _run_dispatch_loop_body(
 
             time.sleep(config.tick_interval_seconds)
     finally:
+        # Bounded drain of in-flight codex review threads (#1727). Deliberately
+        # unconditional rather than gated on a clean exit: every path that
+        # reaches this block at all is, by definition, not a SIGKILL, so Python
+        # is still alive to give an almost-done review a few seconds to land —
+        # and an exception unwinding the loop is exactly as likely to strand a
+        # half-committed worktree as a clean shutdown is.
+        _codex_threads_still_running = join_outstanding_codex_threads()
         _exc = sys.exc_info()[1]
         _normal = _exc is None or isinstance(_exc, KeyboardInterrupt)
         _payload: dict[str, object] = {
             "normal": _normal,
             "exception_type": None if _normal else type(_exc).__name__,
+            # Free observability for #1742: distinguishes "the loop exited" from
+            # "the loop exited while N reviews were still running".
+            "codex_threads_still_running": _codex_threads_still_running,
         }
         with contextlib.suppress(Exception):
             if isinstance(_exc, VersionDriftError):

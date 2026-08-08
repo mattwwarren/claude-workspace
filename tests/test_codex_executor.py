@@ -687,7 +687,9 @@ def test_spawn_stamps_session_id_before_backgrounding(
         seen["stamped_at_handoff"] = load_dev_queue().tasks[0].session_id
         del fn  # deliberately never run: proves spawn() returns without it
 
-    executor = CodexExecutor(config=config, runner=runner, background=_capture_background)
+    executor = CodexExecutor(
+        config=config, runner=runner, background=_capture_background
+    )
     with patch("cw.executor.shutil.which", return_value="/usr/bin/codex"):
         sid = executor.spawn(
             stage=Stage.REVIEW, task=task, worktree=worktree, client=client

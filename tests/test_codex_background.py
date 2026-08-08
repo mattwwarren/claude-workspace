@@ -41,6 +41,8 @@ from tests.conftest import _make_daemon_session
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
+    from cw.codex_runner import CodexRunResult
+
 
 @pytest.fixture(autouse=True)
 def _drain_registry() -> Iterator[None]:
@@ -72,14 +74,25 @@ def test_start_daemon_thread_runs_fn_and_deregisters() -> None:
     assert _registry_len() == 0
 
 
-def test_start_daemon_thread_deregisters_on_exception() -> None:
-    """A raising fn still removes its thread from the registry (finally:)."""
+def test_start_daemon_thread_deregisters_on_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising fn still removes its thread from the registry (finally:).
+
+    In production nothing reaches this branch — the only real caller,
+    ``_run_codex_review_and_complete``, swallows its own exceptions — but the
+    registry must not accumulate dead entries if that ever changes.
+    ``threading.excepthook`` is silenced so the deliberate traceback is not
+    reported by pytest against whichever test happens to run next.
+    """
     entered = threading.Event()
+    msg = "boom"
 
     def _boom() -> None:
         entered.set()
-        raise RuntimeError("boom")
+        raise RuntimeError(msg)
 
+    monkeypatch.setattr(threading, "excepthook", lambda _args: None)
     _start_daemon_thread(_boom, name="codex-test-exc")
 
     assert entered.wait(timeout=5.0)
@@ -184,13 +197,25 @@ def test_module_docstring_names_the_threading_precedent() -> None:
 
 
 def _seed_session(sid: str, client_name: str = "test") -> None:
-    save_state(
-        CwState(sessions=[_make_daemon_session(id=sid, client=client_name)])
-    )
+    save_state(CwState(sessions=[_make_daemon_session(id=sid, client=client_name)]))
 
 
 def _client(worktree: Path) -> ClientConfig:
     return ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+
+
+class _UnusedRunner:
+    """CodexRunner stand-in for tests that patch run_review_with_fix_loop out."""
+
+    def run(
+        self,
+        worktree: Path,
+        argv: list[str],
+        timeout_seconds: int | None,
+        *,
+        stdin: str | None = None,
+    ) -> CodexRunResult:
+        raise AssertionError(self.run.__doc__)
 
 
 def _run(
@@ -201,7 +226,7 @@ def _run(
     client: ClientConfig,
 ) -> None:
     _run_codex_review_and_complete(
-        runner=object(),  # type: ignore[arg-type]
+        runner=_UnusedRunner(),
         task=task,
         worktree=worktree,
         client=client,
@@ -235,7 +260,7 @@ def test_run_codex_review_and_complete_success_path(
         ) as fix_loop_mock,
         patch(
             "cw.codex_background._record_orchestrator_event",
-            side_effect=lambda *a, **kw: events.append(a[0]),
+            side_effect=lambda *args, **_kw: events.append(args[0]),
         ),
     ):
         _run(sid="bg-ok", task=task, worktree=worktree, client=_client(worktree))
@@ -271,9 +296,7 @@ def test_run_codex_review_and_complete_posts_verdict_comment(
             "cw.codex_background.run_review_with_fix_loop",
             return_value=(result, object()),
         ),
-        patch(
-            "cw.codex_background.render_verdict_comment", return_value="rendered"
-        ),
+        patch("cw.codex_background.render_verdict_comment", return_value="rendered"),
         patch("cw.executor._post_review_comment") as post_mock,
     ):
         _run(sid="bg-verdict", task=task, worktree=worktree, client=_client(worktree))
@@ -314,7 +337,7 @@ def test_run_codex_review_and_complete_exception_path(
         ),
         patch(
             "cw.codex_background._record_orchestrator_event",
-            side_effect=lambda *a, **kw: events.append(a[0]),
+            side_effect=lambda *args, **_kw: events.append(args[0]),
         ),
     ):
         # No pytest.raises: the worker must swallow, not propagate.

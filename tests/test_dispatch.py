@@ -65,6 +65,7 @@ from cw.exceptions import (
     VersionDriftError,
     WorktreeError,
 )
+from cw.local_runner import make_blocked
 from cw.models import (
     CODEX_BACKEND,
     DEFAULT_GLOBAL_ATTEMPT_CEILING,
@@ -89,7 +90,6 @@ from cw.models import (
     StageExecutorConfig,
     TicketTask,
 )
-from cw.local_runner import make_blocked
 from cw.native_daemon import FakeNativeDaemonClient
 from tests.conftest import _make_daemon_session, _make_ticket_task
 
@@ -6558,20 +6558,19 @@ class _BlockedCodexReview:
         return self._result, None
 
 
-@pytest.fixture
-def _codex_capable(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make the pre-spawn codex capability gate pass without shelling out."""
-    from cw.executor import CodexCapabilityDiagnosis
-
-    _reset_codex_capability_cache()
-    monkeypatch.setattr(
-        "cw.dispatch.claim.codex_capability_diagnosis",
-        lambda **_kwargs: CodexCapabilityDiagnosis(None, "codex-cli 1.0.0"),
-    )
-
-
 class TestCodexSpawnDoesNotBlockDispatch:
     """#1727: a codex REVIEW in flight must not stall the shared dispatch tick."""
+
+    @pytest.fixture(autouse=True)
+    def _codex_capable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Make the pre-spawn codex capability gate pass without shelling out."""
+        from cw.executor import CodexCapabilityDiagnosis
+
+        _reset_codex_capability_cache()
+        monkeypatch.setattr(
+            "cw.dispatch.claim.codex_capability_diagnosis",
+            lambda **_kwargs: CodexCapabilityDiagnosis(None, "codex-cli 1.0.0"),
+        )
 
     def test_other_client_spawns_while_codex_review_still_running(
         self,
@@ -6579,7 +6578,6 @@ class TestCodexSpawnDoesNotBlockDispatch:
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
         monkeypatch: pytest.MonkeyPatch,
-        _codex_capable: None,
     ) -> None:
         """Acceptance item 1: both clients spawn in one tick, codex still ACTIVE."""
         ws_a = make_git_repo("workspace/codex-block-a")
@@ -6625,9 +6623,7 @@ class TestCodexSpawnDoesNotBlockDispatch:
             assert len(daemon.spawn_calls) == 1
 
             state = load_state()
-            codex_session = next(
-                s for s in state.sessions if s.client == "client-a"
-            )
+            codex_session = next(s for s in state.sessions if s.client == "client-a")
             assert codex_session.status is SessionStatus.ACTIVE
             # R1: session_id is on the RUNNING row before the review finishes.
             tasks = {t.ticket_id: t for t in load_dev_queue().tasks}
@@ -6643,7 +6639,6 @@ class TestCodexSpawnDoesNotBlockDispatch:
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
         monkeypatch: pytest.MonkeyPatch,
-        _codex_capable: None,
     ) -> None:
         """R7(b): the loop's shutdown path bounds the join and reports the count."""
         ws_a = make_git_repo("workspace/codex-join-a")
@@ -6694,7 +6689,6 @@ class TestCodexSpawnDoesNotBlockDispatch:
         tmp_dispatch_dirs: Path,
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
-        _codex_capable: None,
     ) -> None:
         """R7(c): an ACTIVE codex session at boot is parked before the first tick.
 

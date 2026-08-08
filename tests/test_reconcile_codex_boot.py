@@ -140,9 +140,7 @@ def test_ineligible_session_shape_is_skipped(
     assert load_dev_queue().tasks[0].status is QueueItemStatus.RUNNING
 
 
-def test_non_headless_session_is_skipped(
-    tmp_config_dir: Path, tmp_path: Path
-) -> None:
+def test_non_headless_session_is_skipped(tmp_config_dir: Path, tmp_path: Path) -> None:
     """An interactive session's worktree is not a headless orphan."""
     sess = _mk_headless_daemon_session("T-orphan", tmp_path / "wt", _STARTED_AT)
     _seed(tmp_config_dir, tmp_path, session=sess)
@@ -186,7 +184,9 @@ def test_unknown_client_is_skipped(tmp_config_dir: Path, tmp_path: Path) -> None
     """A session whose client is no longer declared cannot resolve a backend."""
     _seed(tmp_config_dir, tmp_path)
     config_dir = tmp_config_dir / ".config" / "cw"
-    (config_dir / "clients.yaml").write_text("clients:\n  other:\n    workspace_path: /tmp\n")
+    (config_dir / "clients.yaml").write_text(
+        "clients:\n  other:\n    workspace_path: /tmp\n"
+    )
 
     assert reap_orphaned_codex_sessions_at_boot() == 0
     assert load_dev_queue().tasks[0].status is QueueItemStatus.RUNNING
