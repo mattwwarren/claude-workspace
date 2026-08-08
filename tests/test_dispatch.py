@@ -6,6 +6,7 @@ import contextlib
 import json
 import logging
 import subprocess
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING
 import pytest
 import yaml
 
+from cw.codex_background import join_outstanding_codex_threads
 from cw.config import (
     _load_concurrency_overrides,
     _save_concurrency_overrides,
@@ -87,6 +89,7 @@ from cw.models import (
     StageExecutorConfig,
     TicketTask,
 )
+from cw.local_runner import make_blocked
 from cw.native_daemon import FakeNativeDaemonClient
 from tests.conftest import _make_daemon_session, _make_ticket_task
 
@@ -182,26 +185,38 @@ def breaker_config() -> OrchestratorConfig:
     )
 
 
-def _make_clients_yaml(tmp_path: Path, client: ClientConfig) -> None:
-    """Write a minimal clients.yaml for the given client."""
+def _make_clients_yaml(
+    tmp_path: Path, *clients: ClientConfig, codex_review_client: str | None = None
+) -> None:
+    """Write a minimal clients.yaml for the given clients.
+
+    Variadic to match ``tests/test_dispatch_host_capacity.py:67``'s same-named
+    helper (#1727 R4), so multi-client dispatch tests don't need a second
+    writer. ``codex_review_client`` pins that one client's REVIEW stage to the
+    codex backend — the only per-client pipeline block these tests need.
+    """
     config_dir = tmp_path / ".config" / "cw"
     config_dir.mkdir(parents=True, exist_ok=True)
     clients_file = config_dir / "clients.yaml"
-    lines = [
-        "clients:\n",
-        f"  {client.name}:\n",
-        f"    workspace_path: {client.workspace_path}\n",
-        f"    default_branch: {client.default_branch}\n",
-    ]
-    if client.worktree_base is not None:
-        lines.append(f"    worktree_base: {client.worktree_base}\n")
-    if client.lanes:
-        lines.append("    lanes:\n")
-        for lane in client.lanes:
-            lines.append(f"      - name: {lane.name}\n")
-            lines.append(f"        max_parallel: {lane.max_parallel}\n")
-            if lane.priority != 0:
-                lines.append(f"        priority: {lane.priority}\n")
+    lines = ["clients:\n"]
+    for client in clients:
+        lines.append(f"  {client.name}:\n")
+        lines.append(f"    workspace_path: {client.workspace_path}\n")
+        lines.append(f"    default_branch: {client.default_branch}\n")
+        if client.worktree_base is not None:
+            lines.append(f"    worktree_base: {client.worktree_base}\n")
+        if client.lanes:
+            lines.append("    lanes:\n")
+            for lane in client.lanes:
+                lines.append(f"      - name: {lane.name}\n")
+                lines.append(f"        max_parallel: {lane.max_parallel}\n")
+                if lane.priority != 0:
+                    lines.append(f"        priority: {lane.priority}\n")
+        if codex_review_client == client.name:
+            lines.append("    pipeline:\n")
+            lines.append("      executors:\n")
+            lines.append("        review:\n")
+            lines.append("          backend: codex\n")
     clients_file.write_text("".join(lines))
 
 
@@ -6511,6 +6526,225 @@ class TestClientFilter:
         result = dispatch_tick(config, native_daemon=daemon)
 
         assert result.spawned == 2
+
+
+# ---------------------------------------------------------------------------
+# TestCodexSpawnDoesNotBlockDispatch — #1727
+# ---------------------------------------------------------------------------
+
+
+class _BlockedCodexReview:
+    """A ``run_review_with_fix_loop`` stand-in that parks until released.
+
+    Stands in for the real blocking unit of work (``codex exec`` subprocesses,
+    up to the full REVIEW budget). Blocking here — rather than inside a
+    ``CodexRunner`` fake — puts the block at exactly the seam #1727 moved off
+    the ``dispatch_tick`` call stack, without needing a real git diff.
+    """
+
+    def __init__(self, worktree: Path, ticket_id: str) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self._result = make_blocked(
+            ticket_id=ticket_id,
+            worktree=worktree,
+            reason="codex_review_unparseable",
+            stage_reached="stage3_review",
+        )
+
+    def __call__(self, **_kwargs: object) -> tuple[object, None]:
+        self.entered.set()
+        self.release.wait(timeout=30.0)
+        return self._result, None
+
+
+@pytest.fixture
+def _codex_capable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the pre-spawn codex capability gate pass without shelling out."""
+    from cw.executor import CodexCapabilityDiagnosis
+
+    _reset_codex_capability_cache()
+    monkeypatch.setattr(
+        "cw.dispatch.claim.codex_capability_diagnosis",
+        lambda **_kwargs: CodexCapabilityDiagnosis(None, "codex-cli 1.0.0"),
+    )
+
+
+class TestCodexSpawnDoesNotBlockDispatch:
+    """#1727: a codex REVIEW in flight must not stall the shared dispatch tick."""
+
+    def test_other_client_spawns_while_codex_review_still_running(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+        _codex_capable: None,
+    ) -> None:
+        """Acceptance item 1: both clients spawn in one tick, codex still ACTIVE."""
+        ws_a = make_git_repo("workspace/codex-block-a")
+        ws_b = make_git_repo("workspace/codex-block-b")
+        client_a = ClientConfig(
+            name="client-a",
+            workspace_path=ws_a,
+            default_branch="main",
+            worktree_base=tmp_path / "worktrees-a",
+        )
+        client_b = ClientConfig(
+            name="client-b",
+            workspace_path=ws_b,
+            default_branch="main",
+            worktree_base=tmp_path / "worktrees-b",
+        )
+        _make_clients_yaml(
+            tmp_dispatch_dirs, client_a, client_b, codex_review_client="client-a"
+        )
+        add_ticket(TicketTask(ticket_id="A-1", client="client-a", stage=Stage.REVIEW))
+        add_ticket(TicketTask(ticket_id="B-1", client="client-b"))
+
+        blocked_review = _BlockedCodexReview(ws_a, "A-1")
+        monkeypatch.setattr(
+            "cw.codex_background.run_review_with_fix_loop", blocked_review
+        )
+        config = OrchestratorConfig(
+            tick_interval_seconds=30,
+            per_client_max_parallel={"client-a": 1, "client-b": 1},
+        )
+        daemon = FakeNativeDaemonClient()
+
+        try:
+            result = dispatch_tick(config, native_daemon=daemon)
+
+            # The codex review is genuinely in flight, not already finished.
+            assert blocked_review.entered.wait(timeout=10.0)
+
+            # Both clients got a spawn out of the same tick.
+            assert result.spawned == 2
+            # client-b's task went to the daemon, i.e. the tick was never
+            # parked behind client-a's codex subprocess.
+            assert len(daemon.spawn_calls) == 1
+
+            state = load_state()
+            codex_session = next(
+                s for s in state.sessions if s.client == "client-a"
+            )
+            assert codex_session.status is SessionStatus.ACTIVE
+            # R1: session_id is on the RUNNING row before the review finishes.
+            tasks = {t.ticket_id: t for t in load_dev_queue().tasks}
+            assert tasks["A-1"].status is QueueItemStatus.RUNNING
+            assert tasks["A-1"].session_id == codex_session.id
+        finally:
+            blocked_review.release.set()
+            join_outstanding_codex_threads(timeout_seconds=10.0)
+
+    def test_shutdown_join_reports_still_running_codex_threads(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+        _codex_capable: None,
+    ) -> None:
+        """R7(b): the loop's shutdown path bounds the join and reports the count."""
+        ws_a = make_git_repo("workspace/codex-join-a")
+        client_a = ClientConfig(
+            name="client-a",
+            workspace_path=ws_a,
+            default_branch="main",
+            worktree_base=tmp_path / "worktrees-join",
+        )
+        _make_clients_yaml(tmp_dispatch_dirs, client_a, codex_review_client="client-a")
+        add_ticket(TicketTask(ticket_id="A-2", client="client-a", stage=Stage.REVIEW))
+
+        blocked_review = _BlockedCodexReview(ws_a, "A-2")
+        monkeypatch.setattr(
+            "cw.codex_background.run_review_with_fix_loop", blocked_review
+        )
+        # Keep the bounded join bounded *and fast* — the point is that it does
+        # not wait the review out, not how many seconds it waits.
+        monkeypatch.setattr(
+            "cw.codex_background._CODEX_BACKGROUND_JOIN_TIMEOUT_SECONDS", 0.05
+        )
+
+        captured: list[dict[str, object]] = []
+
+        def capture_event(
+            event_type: object,
+            payload: dict[str, object] | None = None,
+            **_kwargs: object,
+        ) -> object:
+            if event_type == OrchestratorEventType.DISPATCH_LOOP_EXITED:
+                captured.append(payload or {})
+            return None
+
+        monkeypatch.setattr("cw.dispatch.loop.record_event", capture_event)
+
+        try:
+            run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
+
+            assert blocked_review.entered.wait(timeout=10.0)
+            assert len(captured) == 1
+            assert captured[0]["codex_threads_still_running"] == 1
+        finally:
+            blocked_review.release.set()
+            join_outstanding_codex_threads(timeout_seconds=10.0)
+
+    def test_boot_pass_flags_codex_session_orphaned_by_a_crash(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+        _codex_capable: None,
+    ) -> None:
+        """R7(c): an ACTIVE codex session at boot is parked before the first tick.
+
+        No live thread exists — that is the point: a SIGKILL leaves nothing to
+        join, so only a boot pass can notice the orphan.
+        """
+        from cw.reconcile.codex_boot import CODEX_ORPHANED_AT_BOOT_DISPOSITION
+
+        ws_a = make_git_repo("workspace/codex-boot-a")
+        client_a = ClientConfig(
+            name="client-a",
+            workspace_path=ws_a,
+            default_branch="main",
+            worktree_base=tmp_path / "worktrees-boot",
+        )
+        _make_clients_yaml(tmp_dispatch_dirs, client_a, codex_review_client="client-a")
+
+        worktree = tmp_path / "orphan-wt"
+        (worktree / ".claude").mkdir(parents=True)
+        (worktree / ".claude" / "cw-context.json").write_text('{"headless": true}')
+        orphan = _make_daemon_session(
+            id="orphan-sid",
+            name="client-a/auto-dev/A-3",
+            client="client-a",
+            status=SessionStatus.ACTIVE,
+            worktree_path=worktree,
+        )
+        save_state(CwState(sessions=[orphan]))
+        add_ticket(
+            TicketTask(
+                ticket_id="A-3",
+                client="client-a",
+                stage=Stage.REVIEW,
+                status=QueueItemStatus.RUNNING,
+                session_id="orphan-sid",
+            )
+        )
+
+        run_dispatch_loop(once=True, native_daemon=FakeNativeDaemonClient())
+
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == "A-3")
+        assert task.status is QueueItemStatus.BLOCKED_ON_USER
+        events = read_events(
+            consumer="test-codex-boot-e2e",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert any(
+            e.payload["paused_status"] == CODEX_ORPHANED_AT_BOOT_DISPOSITION
+            for e in events
+        )
 
 
 # ---------------------------------------------------------------------------

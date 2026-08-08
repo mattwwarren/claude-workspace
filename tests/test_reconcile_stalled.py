@@ -19,6 +19,7 @@ from cw.models import (
     CwState,
     QueueItemStatus,
     SessionStatus,
+    Stage,
     TicketTask,
 )
 from cw.reconcile import _deps
@@ -103,6 +104,35 @@ def test_quiet_session_is_never_dispositioned_on_elapsed_time(
 
     candidates = _detect_stalled_candidates(
         state=CwState(sessions=[sess]), task_by_ticket={}
+    )
+
+    assert candidates == []
+    assert sess.status is SessionStatus.ACTIVE
+
+
+def test_in_flight_codex_review_is_never_dispositioned(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """#1727: a healthy backgrounded codex REVIEW is not swept out from under itself.
+
+    Before #1727 a codex review ran inside ``dispatch_tick``'s own call stack,
+    so this sweep could never observe one mid-flight. Now that the review runs
+    on a background thread, the session sits ACTIVE with no ``last_result``
+    for the whole review — exactly the shape a wall-clock sweep would have
+    reaped. Pinned here against a REVIEW-stage task so a future
+    re-introduction of elapsed-time dispositioning has to break this test.
+    """
+    sess = _mk_headless_daemon_session("T-review", tmp_path / "wt", _STARTED_AT)
+    assert sess.last_result is None
+    task = TicketTask(
+        ticket_id="T-review",
+        client="client-a",
+        stage=Stage.REVIEW,
+        status=QueueItemStatus.RUNNING,
+    )
+
+    candidates = _detect_stalled_candidates(
+        state=CwState(sessions=[sess]), task_by_ticket={"T-review": task}
     )
 
     assert candidates == []

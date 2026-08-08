@@ -13,16 +13,20 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
 
+from cw import codex_background
 from cw.auto_dev_result import AutoDevResult
+from cw.codex_background import join_outstanding_codex_threads
 from cw.codex_review import CODEX_MUST_FIX_FINDINGS, CODEX_REVIEW_UNPARSEABLE
 from cw.codex_runner import FakeCodexRunner
 from cw.config import load_state
+from cw.dev_queue import add_ticket, load_dev_queue
 from cw.executor import (
     CODEX_NOT_FOUND,
     CODEX_REVIEW_ONLY,
@@ -42,6 +46,7 @@ from cw.models import (
     LaneConfig,
     LastResultSource,
     OrchestratorConfig,
+    QueueItemStatus,
     SessionStatus,
     Stage,
     StageExecutorConfig,
@@ -53,6 +58,23 @@ from tests.conftest import find_completed_session
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from cw.codex_runner import CodexRunner
+
+
+def _sync_codex_executor(
+    config: StageExecutorConfig, runner: CodexRunner | None = None
+) -> CodexExecutor:
+    """A CodexExecutor whose background seam runs inline (#1727).
+
+    Since spawn() hands Step 3/4/4b/5 to a daemon thread, every assertion in
+    this file about persisted state / emitted events / posted comments would
+    otherwise race the worker. Injecting ``background=lambda fn: fn()`` keeps
+    these tests deterministic and keeps them asserting the same observable
+    outcomes they asserted when spawn() was synchronous end-to-end. The
+    threading seam itself is covered in tests/test_codex_background.py.
+    """
+    return CodexExecutor(config=config, runner=runner, background=lambda fn: fn())
 
 
 def _persisted_result() -> AutoDevResult:
@@ -140,7 +162,7 @@ def test_codex_executor_wrong_stage_blocked(
     worktree = make_git_repo("wt-codex-wrong-stage")
     runner = FakeCodexRunner(returncode=0)
     config = StageExecutorConfig(backend=CODEX_BACKEND)
-    executor = CodexExecutor(config=config, runner=runner)
+    executor = _sync_codex_executor(config, runner)
     client = ClientConfig(name="test", workspace_path=worktree)
     task = TicketTask(ticket_id="T-1", client="test", stage=Stage.PLAN)
 
@@ -162,7 +184,7 @@ def test_codex_executor_codex_not_found(
     worktree = make_git_repo("wt-codex-missing")
     runner = FakeCodexRunner(returncode=0)
     config = StageExecutorConfig(backend=CODEX_BACKEND)
-    executor = CodexExecutor(config=config, runner=runner)
+    executor = _sync_codex_executor(config, runner)
     client = ClientConfig(name="test", workspace_path=worktree)
     task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
 
@@ -192,7 +214,7 @@ def test_codex_executor_clean_stage_complete(
     )
     runner = FakeCodexRunner(returncode=0, output_file_content=_reviewer_doc())
     config = StageExecutorConfig(backend=CODEX_BACKEND)
-    executor = CodexExecutor(config=config, runner=runner)
+    executor = _sync_codex_executor(config, runner)
     client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
     task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
 
@@ -263,7 +285,7 @@ def test_codex_executor_must_fix_blocked(
     )
     runner = FakeCodexRunner(returncode=0, output_file_content=doc)
     config = StageExecutorConfig(backend=CODEX_BACKEND)
-    executor = CodexExecutor(config=config, runner=runner)
+    executor = _sync_codex_executor(config, runner)
     client = ClientConfig(
         name="test",
         workspace_path=worktree,
@@ -318,7 +340,7 @@ def test_codex_executor_clean_stage_complete_fix_loop_enabled_states_available(
     )
     runner = FakeCodexRunner(returncode=0, output_file_content=_reviewer_doc())
     config = StageExecutorConfig(backend=CODEX_BACKEND)
-    executor = CodexExecutor(config=config, runner=runner)
+    executor = _sync_codex_executor(config, runner)
     client = ClientConfig(
         name="test",
         workspace_path=worktree,
@@ -352,7 +374,7 @@ def test_codex_executor_all_roles_fail_blocked(
     )
     runner = FakeCodexRunner(returncode=0, output_file_content="not json{{")
     config = StageExecutorConfig(backend=CODEX_BACKEND)
-    executor = CodexExecutor(config=config, runner=runner)
+    executor = _sync_codex_executor(config, runner)
     client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
     task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
 
@@ -378,7 +400,7 @@ def test_codex_executor_all_roles_fail_blocked(
 def test_codex_executor_stage_sentinel_schema(tmp_path: Path) -> None:
     """stage_sentinel_schema returns the AutoDevResult JSON schema."""
     config = StageExecutorConfig(backend=CODEX_BACKEND)
-    executor = CodexExecutor(config=config)
+    executor = _sync_codex_executor(config)
 
     schema = executor.stage_sentinel_schema(Stage.REVIEW)
 
@@ -409,7 +431,7 @@ def test_codex_executor_should_fix_only_stays_complete(
     )
     runner = FakeCodexRunner(returncode=0, output_file_content=doc)
     config = StageExecutorConfig(backend=CODEX_BACKEND)
-    executor = CodexExecutor(config=config, runner=runner)
+    executor = _sync_codex_executor(config, runner)
     client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
     task = TicketTask(ticket_id="T-1", client="test", stage=Stage.REVIEW)
 
@@ -434,7 +456,7 @@ def test_spawn_delegates_to_fix_loop_not_bare_run_review(
     worktree = make_git_repo("wt-codex-wiring")
     runner = FakeCodexRunner(returncode=0)
     config = StageExecutorConfig(backend=CODEX_BACKEND)
-    executor = CodexExecutor(config=config, runner=runner)
+    executor = _sync_codex_executor(config, runner)
     client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
     task = TicketTask(ticket_id="T-wire", client="test", stage=Stage.REVIEW)
 
@@ -447,7 +469,7 @@ def test_spawn_delegates_to_fix_loop_not_bare_run_review(
     with (
         patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
         patch(
-            "cw.executor.run_review_with_fix_loop", return_value=(blocked, None)
+            "cw.codex_background.run_review_with_fix_loop", return_value=(blocked, None)
         ) as fix_loop_mock,
     ):
         executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
@@ -474,7 +496,7 @@ def test_spawn_threads_codex_fix_loop_enabled_true_from_lane(
     worktree = make_git_repo("wt-codex-wiring-enabled")
     runner = FakeCodexRunner(returncode=0)
     config = StageExecutorConfig(backend=CODEX_BACKEND)
-    executor = CodexExecutor(config=config, runner=runner)
+    executor = _sync_codex_executor(config, runner)
     client = ClientConfig(
         name="test",
         workspace_path=worktree,
@@ -494,7 +516,7 @@ def test_spawn_threads_codex_fix_loop_enabled_true_from_lane(
     with (
         patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
         patch(
-            "cw.executor.run_review_with_fix_loop", return_value=(blocked, None)
+            "cw.codex_background.run_review_with_fix_loop", return_value=(blocked, None)
         ) as fix_loop_mock,
     ):
         executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
@@ -583,26 +605,42 @@ def test_codex_executor_exception_handler_marks_session_completed(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """Uncaught exception in Step 3 → session COMPLETED, exception re-raised."""
+    """Exception in Step 3 → session COMPLETED and the claimed task reverted.
+
+    #1727: Step 3 now runs on a background thread with no caller left to catch
+    for it, so the exception is swallowed rather than re-raised — and the
+    revert-to-PENDING that dispatch's own ``except`` handler used to perform
+    moves into the worker. spawn() itself returns the sid normally.
+    """
     worktree = make_git_repo("wt-codex-exc-handler")
     runner = FakeCodexRunner(returncode=0)
     config = StageExecutorConfig(backend=CODEX_BACKEND)
-    executor = CodexExecutor(config=config, runner=runner)
+    executor = _sync_codex_executor(config, runner)
     client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
     task = TicketTask(ticket_id="T-exc", client="test", stage=Stage.REVIEW)
+    add_ticket(
+        TicketTask(
+            ticket_id="T-exc",
+            client="test",
+            stage=Stage.REVIEW,
+            status=QueueItemStatus.RUNNING,
+        )
+    )
 
     with (
         patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
         patch(
-            "cw.executor.run_review_with_fix_loop",
+            "cw.codex_background.run_review_with_fix_loop",
             side_effect=RuntimeError("git boom"),
         ),
-        pytest.raises(RuntimeError, match="git boom"),
     ):
-        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+        sid = executor.spawn(
+            stage=Stage.REVIEW, task=task, worktree=worktree, client=client
+        )
 
     state = load_state()
     session = find_completed_session(state)
+    assert session.id == sid
     assert session.status == SessionStatus.COMPLETED
     assert session.last_result_source == LastResultSource.EXECUTOR_DIRECT
     result = AutoDevResult.model_validate(session.last_result)
@@ -611,6 +649,110 @@ def test_codex_executor_exception_handler_marks_session_completed(
     assert result.blocker.reason == UNEXPECTED_ERROR
     assert result.stage_reached == "stage3_review"
     assert result.blocker.stage == "stage3_review"
+    # R1: session_id was stamped before backgrounding, then cleared by the
+    # revert — the task is available for a later tick, not orphaned RUNNING.
+    stored = load_dev_queue().tasks[0]
+    assert stored.status is QueueItemStatus.PENDING
+    assert stored.session_id is None
+    assert stored.spawn_error_count == 1
+
+
+def test_spawn_stamps_session_id_before_backgrounding(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """R1: the RUNNING row carries session_id by the time the worker starts.
+
+    Without this, a crash between spawn() returning and dispatch's own
+    post-spawn stamp would leave a live codex session with no queue row
+    pointing at it — the failure-observability hole #1727 must not open.
+    """
+    worktree = make_git_repo("wt-codex-stamp")
+    runner = FakeCodexRunner(returncode=0)
+    config = StageExecutorConfig(backend=CODEX_BACKEND)
+    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+    task = TicketTask(ticket_id="T-stamp", client="test", stage=Stage.REVIEW)
+    add_ticket(
+        TicketTask(
+            ticket_id="T-stamp",
+            client="test",
+            stage=Stage.REVIEW,
+            status=QueueItemStatus.RUNNING,
+        )
+    )
+
+    seen: dict[str, object] = {}
+
+    def _capture_background(fn: Callable[[], None]) -> None:
+        seen["stamped_at_handoff"] = load_dev_queue().tasks[0].session_id
+        del fn  # deliberately never run: proves spawn() returns without it
+
+    executor = CodexExecutor(config=config, runner=runner, background=_capture_background)
+    with patch("cw.executor.shutil.which", return_value="/usr/bin/codex"):
+        sid = executor.spawn(
+            stage=Stage.REVIEW, task=task, worktree=worktree, client=client
+        )
+
+    assert seen["stamped_at_handoff"] == sid
+    # spawn() returned without the review having run at all.
+    assert len(runner.calls) == 0
+
+
+def test_spawn_returns_before_background_work_completes(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """The ticket's core claim: spawn() does not wait on the review (#1727).
+
+    Uses the real ``_default_background`` daemon thread and blocks the review
+    on an Event that is only released after spawn() has already returned.
+    """
+    worktree = make_git_repo("wt-codex-async")
+    runner = FakeCodexRunner(returncode=0)
+    config = StageExecutorConfig(backend=CODEX_BACKEND)
+    executor = CodexExecutor(config=config, runner=runner)
+    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+    task = TicketTask(ticket_id="T-async", client="test", stage=Stage.REVIEW)
+
+    entered = threading.Event()
+    release = threading.Event()
+    blocked = make_blocked(
+        ticket_id="T-async",
+        worktree=worktree,
+        reason=CODEX_REVIEW_UNPARSEABLE,
+        stage_reached="stage3_review",
+    )
+
+    def _blocking_review(**_kwargs: object) -> tuple[AutoDevResult, None]:
+        entered.set()
+        release.wait(timeout=10.0)
+        return blocked, None
+
+    try:
+        with (
+            patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+            patch("cw.codex_background.run_review_with_fix_loop", _blocking_review),
+        ):
+            executor.spawn(
+                stage=Stage.REVIEW, task=task, worktree=worktree, client=client
+            )
+
+            # spawn() already returned while the review is still blocked.
+            assert entered.wait(timeout=5.0)
+            assert load_state().sessions[0].status is SessionStatus.ACTIVE
+            # R7(b): the in-flight thread is visible to the shutdown drain.
+            with codex_background._outstanding_lock:
+                assert len(codex_background._outstanding) == 1
+
+            release.set()
+            assert join_outstanding_codex_threads(timeout_seconds=5.0) == 0
+
+        assert load_state().sessions[0].status is SessionStatus.COMPLETED
+        with codex_background._outstanding_lock:
+            assert codex_background._outstanding == []
+    finally:
+        release.set()
+        join_outstanding_codex_threads(timeout_seconds=5.0)
 
 
 def test_spawn_threads_real_session_id_into_run_review(
@@ -622,7 +764,7 @@ def test_spawn_threads_real_session_id_into_run_review(
     worktree = make_git_repo("wt-codex-sid-thread")
     runner = FakeCodexRunner(returncode=0)
     config = StageExecutorConfig(backend=CODEX_BACKEND)
-    executor = CodexExecutor(config=config, runner=runner)
+    executor = _sync_codex_executor(config, runner)
     client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
     task = TicketTask(ticket_id="T-sid", client="test", stage=Stage.REVIEW)
 
@@ -640,7 +782,7 @@ def test_spawn_threads_real_session_id_into_run_review(
 
     with (
         patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
-        patch("cw.executor.run_review_with_fix_loop", _spy_run_review),
+        patch("cw.codex_background.run_review_with_fix_loop", _spy_run_review),
     ):
         sid = executor.spawn(
             stage=Stage.REVIEW, task=task, worktree=worktree, client=client
