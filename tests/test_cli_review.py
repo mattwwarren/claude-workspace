@@ -390,6 +390,10 @@ class TestReviewConsolidateCommand:
             "agents_run",
             "review",
             "stripped_escalations",
+            # #1714: the MUST_FIX-severity subset of `rejected`. Reaches the
+            # Claude-native coordinator through this passthrough with no
+            # Python-side change beyond the field itself.
+            "rejected_must_fix",
         }
         assert set(verdict["review"]) == {
             "must_fix_initial",
