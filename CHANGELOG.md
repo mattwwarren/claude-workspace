@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.29.0] - 2026-08-08
+
 ### Fixed
 
 - **A mechanically-rejected MUST_FIX no longer reads as a clean review
