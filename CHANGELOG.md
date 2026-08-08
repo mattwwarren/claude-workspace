@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **A converged fix loop is distinguished from a no-op one (#1723):** the loop
+  reported convergence whenever no MUST_FIX findings survived, without regard
+  for whether any fix cycle had actually changed a file. A run in which every
+  cycle's codex fix invocation was a tolerated no-op was therefore
+  indistinguishable from one that genuinely resolved the cycle-0 blockers — the
+  two render identically while meaning opposite things. `Review` gains
+  `had_real_commit`, OR'd across cycles, and the verdict headline now reads
+  **UNVERIFIED** for a loop that converged without committing anything rather
+  than claiming the findings were resolved. The field defaults to `None` so
+  payloads from producers predating it stay explicitly unknown instead of being
+  coerced into a false negative; finalized fix-loop results always populate a
+  concrete bool.
+
 ### Fixed
 
 - **Gate parks that do populate breadcrumbs are no longer filtered out of the
