@@ -21,6 +21,12 @@ import pytest
 
 from cw.codex_review._capability import (
     _CAPABILITY_PROBE_TIMEOUT_SECONDS,
+    _PROBE_ARGV,
+    _PROBE_SENTINEL,
+    _REASON_INSTALL_INCOMPLETE,
+    _REASON_PROBE_ERROR,
+    _REASON_SANDBOX_INCAPABLE,
+    _REASON_UNKNOWN,
     _capability_cache_path,
     _classify_capability_failure,
     _CodexFilesystemCapability,
@@ -28,12 +34,6 @@ from cw.codex_review._capability import (
     _detect_install_type,
     _persist_capability_diagnostics,
     _probe_filesystem_capability,
-    _PROBE_ARGV,
-    _PROBE_SENTINEL,
-    _REASON_INSTALL_INCOMPLETE,
-    _REASON_PROBE_ERROR,
-    _REASON_SANDBOX_INCAPABLE,
-    _REASON_UNKNOWN,
     _reset_filesystem_capability_cache,
 )
 from cw.codex_runner import CodexRunResult
@@ -108,9 +108,7 @@ class TestComputeFingerprint:
     def test_binary_absent_yields_unknown_install_and_no_version(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(
-            "cw.codex_review._capability._which_codex", lambda: None
-        )
+        monkeypatch.setattr("cw.codex_review._capability._which_codex", lambda: None)
         fingerprint = _compute_fingerprint()
         assert fingerprint.cli_version is None
         assert fingerprint.install_type == "unknown"
@@ -121,20 +119,18 @@ class TestComputeFingerprint:
         def _boom(_timeout_seconds: int) -> subprocess.CompletedProcess[str]:
             raise subprocess.TimeoutExpired(cmd="codex", timeout=10)
 
-        monkeypatch.setattr(
-            "cw.codex_review._capability._run_codex_version", _boom
-        )
+        monkeypatch.setattr("cw.codex_review._capability._run_codex_version", _boom)
         assert _compute_fingerprint().cli_version is None
 
     def test_version_filenotfound_yields_no_version(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        def _boom(_timeout_seconds: int) -> subprocess.CompletedProcess[str]:
-            raise FileNotFoundError("gone")
+        gone = "gone"
 
-        monkeypatch.setattr(
-            "cw.codex_review._capability._run_codex_version", _boom
-        )
+        def _boom(_timeout_seconds: int) -> subprocess.CompletedProcess[str]:
+            raise FileNotFoundError(gone)
+
+        monkeypatch.setattr("cw.codex_review._capability._run_codex_version", _boom)
         assert _compute_fingerprint().cli_version is None
 
     def test_version_nonzero_exit_yields_no_version(
@@ -155,9 +151,7 @@ class TestComputeFingerprint:
         )
         assert _compute_fingerprint().cli_version is None
 
-    def test_version_parsed_from_banner(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_version_parsed_from_banner(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             "cw.codex_review._capability._run_codex_version",
             lambda _t: _mk_codex_proc(stdout="codex-cli 0.147.0\n"),
@@ -301,9 +295,7 @@ class TestProbeFilesystemCapability:
 
     def test_spawn_error_degrades_and_is_not_cached(self) -> None:
         runner = _ProbeRunner(
-            CodexRunResult(
-                returncode=127, stdout="", stderr="codex: command not found"
-            )
+            CodexRunResult(returncode=127, stdout="", stderr="codex: command not found")
         )
         capability = _probe_filesystem_capability(runner=runner, session_id="s-spawn")
         assert capability.reason == _REASON_PROBE_ERROR
@@ -440,15 +432,17 @@ class TestCapabilityDiagnostics:
         """Mirrors ``persist_diagnostics_bundle``'s never-raise contract: a
         review must not die because a diagnostics write failed."""
 
-        def _boom(_session_id: str) -> Path:
-            raise OSError("read-only filesystem")
+        message = "read-only filesystem"
 
-        monkeypatch.setattr(
-            "cw.codex_review._capability.diagnostics_dir", _boom
-        )
+        def _boom(_session_id: str) -> Path:
+            raise OSError(message)
+
+        monkeypatch.setattr("cw.codex_review._capability.diagnostics_dir", _boom)
         _persist_capability_diagnostics(
             "s-diag-fail",
             _CodexFilesystemCapability(
-                capable=False, reason=_REASON_UNKNOWN, fingerprint=_compute_fingerprint()
+                capable=False,
+                reason=_REASON_UNKNOWN,
+                fingerprint=_compute_fingerprint(),
             ),
         )

@@ -16,6 +16,13 @@ if TYPE_CHECKING:
 
 STAGE3_REVIEW: StageReached = "stage3_review"
 
+# Exit code Popen/RealCodexRunner reports when the codex binary is not on PATH
+# (FileNotFoundError -> CodexRunResult(returncode=127, ...)); paired with a
+# "command not found" stderr it classifies as a spawn_error (#1239). Lives here
+# rather than in ``_roles`` because ``_capability`` needs it too and cannot
+# import ``_roles`` (``_roles`` -> ``_context`` -> ``_capability`` would cycle).
+_COMMAND_NOT_FOUND_RETURNCODE = 127
+
 # Per-role failure reason codes (Resolution 4: reuse the existing coarse
 # vocabulary per role rather than building a new typed taxonomy). These are
 # owned here, not re-exported by executor.py — callers (including
