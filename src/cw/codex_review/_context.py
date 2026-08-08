@@ -85,17 +85,14 @@ _LINT_GROUNDING_INSTRUCTION = (
     "as if it were the gated metric."
 )
 
-# ruff's built-in pylint-refactor defaults (max-branches/max-statements/
-# max-returns). These are NOT expressed in pyproject.toml unless a
-# [tool.ruff.lint.pylint] override is present — the renderer must label them
-# as ruff defaults, not as repo-configured values, whenever no override
-# exists for that key.
-_DEFAULT_PYLINT_THRESHOLDS: dict[str, tuple[str, int]] = {
-    "max-branches": ("PLR0912", 12),
-    "max-statements": ("PLR0915", 50),
-    "max-returns": ("PLR0911", 6),
+# Ruff's pylint-refactor setting names and corresponding rule codes. Numeric
+# policy comes only from pyproject.toml overrides or the injected CLAUDE.md
+# Quality Gates section; do not duplicate it here.
+_PYLINT_THRESHOLD_CODES: dict[str, str] = {
+    "max-branches": "PLR0912",
+    "max-statements": "PLR0915",
+    "max-returns": "PLR0911",
 }
-_RUFF_DEFAULT_LABEL = "ruff default (not overridden in pyproject.toml)"
 
 # The one sentence that differs between the two `_OUTPUT_INSTRUCTIONS`
 # variants, named so the prompt text and its regression tests cannot drift
@@ -564,12 +561,11 @@ def _render_ruff_ignore_section(ignore: tuple[str, ...]) -> str:
 
 def _render_pylint_thresholds_section(overrides: dict[str, int]) -> str:
     lines = ["## Complexity Thresholds (PLR0912 / PLR0915 / PLR0911)"]
-    for key, (code, default) in _DEFAULT_PYLINT_THRESHOLDS.items():
+    for key, code in _PYLINT_THRESHOLD_CODES.items():
         if key in overrides:
-            value, label = overrides[key], "configured in pyproject.toml"
-        else:
-            value, label = default, _RUFF_DEFAULT_LABEL
-        lines.append(f"- {code} ({key}): {value} ({label})")
+            lines.append(
+                f"- {code} ({key}): {overrides[key]} (configured in pyproject.toml)"
+            )
     return "\n".join(lines)
 
 
@@ -581,9 +577,10 @@ def _render_lint_grounding_block(
     Returns ``None`` when there is nothing to ground against: no
     ``[tool.ruff.lint].ignore`` entries, no pylint-threshold overrides, and no
     ``CLAUDE.md`` Quality Gates text. Otherwise assembles the not-a-MUST_FIX
-    instruction, the ignore list (when non-empty), the PLR0912/PLR0915/PLR0911
-    thresholds (repo-configured where overridden, else the documented ruff
-    defaults), and the verbatim Quality Gates text.
+    instruction, the ignore list (when non-empty), repo-configured
+    PLR0912/PLR0915/PLR0911 threshold overrides (when present), and the
+    verbatim Quality Gates text. When no overrides exist, Quality Gates is the
+    sole authoritative source for numeric thresholds.
     """
     ignore = ruff_config.ignore if ruff_config is not None else ()
     overrides = ruff_config.pylint_overrides if ruff_config is not None else {}
@@ -592,7 +589,8 @@ def _render_lint_grounding_block(
     parts = [_LINT_GROUNDING_INSTRUCTION]
     if ignore:
         parts.append(_render_ruff_ignore_section(ignore))
-    parts.append(_render_pylint_thresholds_section(overrides))
+    if overrides:
+        parts.append(_render_pylint_thresholds_section(overrides))
     if quality_gates_text:
         parts.append(f"## CLAUDE.md Quality Gates (verbatim)\n{quality_gates_text}")
     return "\n\n".join(parts)

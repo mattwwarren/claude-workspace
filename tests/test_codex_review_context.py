@@ -535,15 +535,16 @@ class TestRenderLintGroundingBlock:
         assert "statement" in lowered
         assert "not the number of lines" in lowered or "not lines" in lowered
 
-    def test_default_thresholds_labeled_not_overridden_when_pylint_subtable_absent(
-        self,
-    ) -> None:
+    def test_no_parallel_thresholds_when_pylint_subtable_absent(self) -> None:
         result = _render_lint_grounding_block(
             ruff_config=_RuffLintConfig(ignore=("PLR0913",), pylint_overrides={}),
             quality_gates_text=None,
         )
         assert result is not None
-        assert "ruff default (not overridden in pyproject.toml)" in result
+        assert "Complexity Thresholds" not in result
+        assert "max-branches" not in result
+        assert "max-statements" not in result
+        assert "max-returns" not in result
 
 
 # ---------------------------------------------------------------------------
