@@ -731,7 +731,11 @@ class TestRenderVerdictComment:
     def test_found_and_fixed_headline_differs_from_found_nothing(self) -> None:
         diff = _make_diff()
         doc = _make_reviewer_doc(_make_finding(severity="NIT"))
-        clean_verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        clean_verdict = consolidate_verdict(
+            documents=[doc],
+            diff=diff,
+            reviewed_sha="sha",
+        )
         fixed_verdict = clean_verdict.model_copy(
             update={
                 "review": clean_verdict.review.model_copy(
@@ -743,8 +747,77 @@ class TestRenderVerdictComment:
         fixed_body = render_verdict_comment(fixed_verdict, fix_loop_enabled=True)
         assert fixed_body != clean_body
         assert "2" in fixed_body
-        # Honesty caveat: individual fix-cycle commit outcomes are not tracked.
-        assert "commit outcomes not individually tracked" in fixed_body
+        assert "UNVERIFIED" not in fixed_body
+
+    def test_flaked_fix_loop_renders_unverified_not_resolved(self) -> None:
+        """#1723 — a fix loop that converged without any real commit renders
+        an UNVERIFIED headline instead of the resolved-N-of-M claim."""
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="NIT"))
+        clean_verdict = consolidate_verdict(
+            documents=[doc],
+            diff=diff,
+            reviewed_sha="sha",
+        )
+        flaked_verdict = clean_verdict.model_copy(
+            update={
+                "review": clean_verdict.review.model_copy(
+                    update={
+                        "must_fix_initial": 2,
+                        "fix_cycles_used": 2,
+                        "had_real_commit": False,
+                    }
+                )
+            }
+        )
+        body = render_verdict_comment(flaked_verdict, fix_loop_enabled=True)
+        assert "UNVERIFIED" in body
+        assert "commit outcomes not individually tracked" not in body
+        assert "2" in body
+
+    def test_had_real_commit_true_never_renders_unverified(self) -> None:
+        """#1723 — a genuine fix-cycle commit never renders the UNVERIFIED
+        headline, regardless of how many cycles it took."""
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="NIT"))
+        clean_verdict = consolidate_verdict(
+            documents=[doc],
+            diff=diff,
+            reviewed_sha="sha",
+        )
+        fixed_verdict = clean_verdict.model_copy(
+            update={
+                "review": clean_verdict.review.model_copy(
+                    update={
+                        "must_fix_initial": 2,
+                        "fix_cycles_used": 2,
+                        "had_real_commit": True,
+                    }
+                )
+            }
+        )
+        body = render_verdict_comment(fixed_verdict, fix_loop_enabled=True)
+        assert "UNVERIFIED" not in body
+
+    def test_unknown_real_commit_never_renders_unverified(self) -> None:
+        """Legacy payloads with an unknown commit outcome retain prior prose."""
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="NIT"))
+        clean_verdict = consolidate_verdict(
+            documents=[doc],
+            diff=diff,
+            reviewed_sha="sha",
+        )
+        legacy_verdict = clean_verdict.model_copy(
+            update={
+                "review": clean_verdict.review.model_copy(
+                    update={"must_fix_initial": 2, "fix_cycles_used": 2}
+                )
+            }
+        )
+        body = render_verdict_comment(legacy_verdict, fix_loop_enabled=True)
+        assert legacy_verdict.review.had_real_commit is None
+        assert "UNVERIFIED" not in body
 
     def test_blocking_capped_exit_shows_resolved_vs_open_counts(self) -> None:
         diff = _make_diff()

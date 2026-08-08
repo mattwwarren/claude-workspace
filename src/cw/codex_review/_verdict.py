@@ -296,16 +296,28 @@ def _render_clean_headline(review: Review, *, fix_loop_enabled: bool) -> str:
     whose cycle-0 review was already clean — both produce
     ``fix_cycles_used == 0``. ``fix_loop_enabled`` (caller-known, threaded in
     via ``synthesize_codex_review_result``) is the discriminator (R1).
+
+    Within the ``fix_cycles_used > 0`` (genuine fix-loop engagement) branch,
+    ``Review.had_real_commit`` (#1723) further discriminates a converged loop
+    that actually committed a change from one that converged purely because
+    every fix cycle was a tolerated no-op — the latter renders an UNVERIFIED
+    headline rather than claiming findings were resolved.
     """
     if review.fix_cycles_used > 0:
         resolved = review.must_fix_initial - review.deferred
+        if review.had_real_commit is False:
+            return (
+                f"**UNVERIFIED** — the fix loop converged without changing "
+                f"any file: {resolved} of {review.must_fix_initial} "
+                f"originally-found MUST_FIX finding(s) show as resolved "
+                f"across {review.fix_cycles_used} fix cycle(s), but no fix "
+                "cycle actually committed a change. Treat this as unverified "
+                "rather than genuinely fixed."
+            )
         return (
             f"**Non-blocking** — {resolved} of {review.must_fix_initial} "
             f"originally-found MUST_FIX finding(s) resolved across "
-            f"{review.fix_cycles_used} fix cycle(s); none remain open. "
-            "(Note: fix-cycle commit outcomes not individually tracked — this "
-            "reflects the loop's own cycle/finding accounting, not per-commit "
-            "diffing.)"
+            f"{review.fix_cycles_used} fix cycle(s); none remain open."
         )
     if fix_loop_enabled:
         return (

@@ -293,6 +293,7 @@ def _finalize_review(
     final_verdict: ReviewVerdict,
     open_findings: dict[_DedupKey, AcceptedFinding],
     cycle_count: int,
+    had_real_commit: bool,
 ) -> Review:
     """Reconstruct the terminal published ``Review`` from authoritative sources.
 
@@ -303,12 +304,15 @@ def _finalize_review(
     loop's own cycle counter — set explicitly here rather than inherited from
     ``final_verdict.review`` because ``synthesize_codex_review_result`` does not
     thread the cycle index through its internal ``consolidate_verdict`` call.
+    ``had_real_commit`` is the loop's OR-across-cycles real-commit tracker
+    (#1723) — true iff at least one fix cycle actually committed a change.
     """
     return final_verdict.review.model_copy(
         update={
             "must_fix_initial": cycle0_review.must_fix_initial,
             "deferred": len(open_findings),
             "fix_cycles_used": cycle_count,
+            "had_real_commit": had_real_commit,
         }
     )
 
@@ -443,6 +447,7 @@ def _park_survivors(
     cycle_count: int,
     retry_eligible: bool | None,
     snapshot_pointer: str,
+    had_real_commit: bool,
 ) -> tuple[AutoDevResult, ReviewVerdict]:
     """Park a still-blocking review (cap or budget exhausted) with survivor detail.
 
@@ -455,6 +460,7 @@ def _park_survivors(
         final_verdict=verdict,
         open_findings=open_findings,
         cycle_count=cycle_count,
+        had_real_commit=had_real_commit,
     )
     survivors = _survivors_only_verdict(verdict, open_findings, review)
     blocked = make_blocked(
@@ -493,6 +499,7 @@ def _park_scope_violation(
     open_findings: dict[_DedupKey, AcceptedFinding],
     verdict: ReviewVerdict,
     snapshot_pointer: str,
+    had_real_commit: bool,
 ) -> tuple[AutoDevResult, ReviewVerdict]:
     """Park a fix cycle whose commit would touch a sensitive out-of-scope path.
 
@@ -503,13 +510,17 @@ def _park_scope_violation(
     leaving it implicit. Follows ``_park_survivors``'s pattern verbatim:
     reconstruct the terminal ``Review`` via ``_finalize_review``, build the
     ``Blocker`` via ``make_blocked``, then patch review/health onto the
-    result.
+    result. ``had_real_commit`` is the pre-this-cycle OR-across-cycles
+    real-commit tracker (#1723) — this cycle's own commit never landed (that
+    is why it is being parked), so the caller's already-accumulated value is
+    what is forwarded, not a fresh computation.
     """
     review = _finalize_review(
         cycle0_review=cycle0_review,
         final_verdict=verdict,
         open_findings=open_findings,
         cycle_count=cycle,
+        had_real_commit=had_real_commit,
     )
     verdict = verdict.model_copy(update={"review": review})
     lines = [f"- {hit.path} ({hit.category}): {hit.reason}" for hit in violations]
@@ -551,6 +562,7 @@ def _clean_exit(
     open_findings: dict[_DedupKey, AcceptedFinding],
     cycle: int,
     snapshot_pointer: str,
+    had_real_commit: bool,
 ) -> tuple[AutoDevResult, ReviewVerdict]:
     """Return the clean-exit result with the terminal review + escalation patched.
 
@@ -566,6 +578,7 @@ def _clean_exit(
         final_verdict=verdict,
         open_findings=open_findings,
         cycle_count=cycle,
+        had_real_commit=had_real_commit,
     )
     verdict = verdict.model_copy(update={"review": review})
     health = _apply_escalation(result.health, cycle)
@@ -598,14 +611,17 @@ def _run_fix_and_commit(
     scope_tier: ScopeTier,
     cycle0_review: Review,
     snapshot_pointer: str,
-) -> tuple[AutoDevResult, ReviewVerdict | None] | None:
-    """Run one cycle's fix invocation and commit; return a park tuple or ``None``.
+    had_real_commit_so_far: bool,
+) -> tuple[tuple[AutoDevResult, ReviewVerdict | None] | None, str | None]:
+    """Run one cycle's fix invocation and commit; return ``(park, commit_sha)``.
 
-    ``None`` means the fix invocation succeeded (its commit may have been a
-    no-op) and the caller should proceed to re-review. A non-``None`` return is
-    the terminal park result for a failed fix invocation, a scope violation
+    ``park`` is ``None`` iff the fix invocation and commit both succeeded —
+    the caller should proceed to re-review, using ``commit_sha`` (the new
+    commit sha, or ``None`` if the cycle's commit was a tolerated no-op) to
+    update its cross-cycle real-commit tracker (#1723). A non-``None`` ``park``
+    is the terminal park result for a failed fix invocation, a scope violation
     (an out-of-scope change that also matches the sensitive-files registry),
-    or a failed commit.
+    or a failed commit — ``commit_sha`` is always ``None`` alongside it.
     """
     findings = [af.finding for af in open_findings.values()]
     prompt = _build_fix_prompt(
@@ -614,46 +630,60 @@ def _run_fix_and_commit(
     argv = _build_fix_codex_argv(model=model)
     result = runner.run(worktree, argv, timeout_seconds, stdin=prompt)
     if result.timed_out or result.returncode != 0:
-        return _park_fix_failure(
-            task=task,
-            worktree=worktree,
-            session_id=session_id,
-            cycle=cycle,
-            category=_classify_codex_failure(result),
-            stdout=result.stdout,
-            stderr=result.stderr,
-            exit_code=result.returncode,
-            verdict=verdict,
-            snapshot_pointer=snapshot_pointer,
+        return (
+            _park_fix_failure(
+                task=task,
+                worktree=worktree,
+                session_id=session_id,
+                cycle=cycle,
+                category=_classify_codex_failure(result),
+                stdout=result.stdout,
+                stderr=result.stderr,
+                exit_code=result.returncode,
+                verdict=verdict,
+                snapshot_pointer=snapshot_pointer,
+            ),
+            None,
         )
     violations = _scope_violations(worktree, cycle0_files, scope_tier)
     if violations:
-        return _park_scope_violation(
-            task=task,
-            worktree=worktree,
-            cycle=cycle,
-            violations=violations,
-            cycle0_review=cycle0_review,
-            open_findings=open_findings,
-            verdict=verdict,
-            snapshot_pointer=snapshot_pointer,
+        return (
+            _park_scope_violation(
+                task=task,
+                worktree=worktree,
+                cycle=cycle,
+                violations=violations,
+                cycle0_review=cycle0_review,
+                open_findings=open_findings,
+                verdict=verdict,
+                snapshot_pointer=snapshot_pointer,
+                had_real_commit=had_real_commit_so_far,
+            ),
+            None,
         )
     try:
-        _commit_fix_cycle(worktree, cycle, findings)
-    except subprocess.CalledProcessError as exc:
-        return _park_fix_failure(
-            task=task,
+        sha = _commit_fix_cycle(
             worktree=worktree,
-            session_id=session_id,
             cycle=cycle,
-            category="runtime_error",
-            stdout=exc.stdout or "",
-            stderr=exc.stderr or str(exc),
-            exit_code=exc.returncode,
-            verdict=verdict,
-            snapshot_pointer=snapshot_pointer,
+            findings=findings,
         )
-    return None
+    except subprocess.CalledProcessError as exc:
+        return (
+            _park_fix_failure(
+                task=task,
+                worktree=worktree,
+                session_id=session_id,
+                cycle=cycle,
+                category="runtime_error",
+                stdout=exc.stdout or "",
+                stderr=exc.stderr or str(exc),
+                exit_code=exc.returncode,
+                verdict=verdict,
+                snapshot_pointer=snapshot_pointer,
+            ),
+            None,
+        )
+    return None, sha
 
 
 def _rereview(
@@ -744,6 +774,10 @@ def run_review_with_fix_loop(
     plan_text, ticket_text = _load_ticket_context(worktree)
     open_findings = _track_open_findings({}, verdict.accepted)
     snapshot_pointer = _persist_cycle0_snapshot(verdict, session_id=session_id)
+    # #1723: true iff at least one fix cycle so far produced a real commit
+    # (OR'd across cycles) — distinguishes a genuine fix from a fix loop
+    # that converged purely because every cycle's fix invocation was a no-op.
+    had_real_commit = False
 
     for cycle in range(1, _MAX_FIX_CYCLES + 1):
         remaining = _remaining_budget(deadline)
@@ -758,8 +792,9 @@ def run_review_with_fix_loop(
                 cycle_count=cycle - 1,
                 retry_eligible=True,
                 snapshot_pointer=snapshot_pointer,
+                had_real_commit=had_real_commit,
             )
-        park = _run_fix_and_commit(
+        park, commit_sha = _run_fix_and_commit(
             runner=runner,
             task=task,
             worktree=worktree,
@@ -775,9 +810,11 @@ def run_review_with_fix_loop(
             scope_tier=scope_tier,
             cycle0_review=cycle0_review,
             snapshot_pointer=snapshot_pointer,
+            had_real_commit_so_far=had_real_commit,
         )
         if park is not None:
             return park
+        had_real_commit = had_real_commit or commit_sha is not None
         result, verdict = _rereview(
             runner=runner,
             task=task,
@@ -801,7 +838,13 @@ def run_review_with_fix_loop(
         open_findings = _track_open_findings(open_findings, verdict.accepted)
         if not open_findings:
             return _clean_exit(
-                result, verdict, cycle0_review, open_findings, cycle, snapshot_pointer
+                result,
+                verdict,
+                cycle0_review,
+                open_findings,
+                cycle,
+                snapshot_pointer,
+                had_real_commit=had_real_commit,
             )
 
     return _park_survivors(
@@ -814,4 +857,5 @@ def run_review_with_fix_loop(
         cycle_count=_MAX_FIX_CYCLES,
         retry_eligible=None,
         snapshot_pointer=snapshot_pointer,
+        had_real_commit=had_real_commit,
     )
