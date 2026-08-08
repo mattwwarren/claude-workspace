@@ -382,6 +382,15 @@ def _park_fix_failure(
     timeout parks retry-eligible while a hard error parks for the operator, and
     writes the typed ``ExecutorFailure`` bundle under ``reviewer_role`` =
     ``fix-cycle-N`` (mirroring ``_persist_codex_role_diagnostics``).
+
+    Why: unlike ``_clean_exit``/``_park_scope_violation``, this function does
+    NOT stamp a finalized ``review`` onto the returned ``verdict`` (#1705) —
+    it never calls ``_finalize_review`` and has no ``cycle0_review``/
+    ``open_findings`` in scope to build one from. Enriching it would need a
+    signature change plus updates to both call sites in
+    ``_run_fix_and_commit``, which exceeds #1705's one-line-stamp scope; the
+    operator explicitly deferred it as a candidate fast-follow ticket rather
+    than expanding that diff (see #1705 Decisions #2).
     """
     reason = _CATEGORY_TO_REASON[category]
     failure = build_executor_failure(
