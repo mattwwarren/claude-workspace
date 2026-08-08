@@ -34,6 +34,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A codex review no longer freezes the shared dispatch tick (#1727):**
+  `CodexExecutor.spawn()` ran the whole review — per-role `codex exec`
+  subprocesses plus the bounded fix loop, up to the full REVIEW budget —
+  inside `dispatch_tick`'s own call stack, so one client's review stalled
+  spawns for every other client and lane. Pre-flight (session creation and
+  the REVIEW-stage/binary-presence checks) still runs on the caller's thread,
+  but once it passes the review is handed to a `cw.codex_background` daemon
+  thread and `spawn()` returns the session id immediately. The session's
+  `session_id` is stamped onto the still-RUNNING dev-queue row *before* the
+  handoff, so a crash in the window before dispatch's own post-spawn stamp
+  cannot leave a live codex session with no row attributing it. Backgrounding
+  costs the two recovery paths a synchronous caller, so both are replaced:
+  `run_dispatch_loop`'s shutdown path bounded-joins outstanding review threads
+  against one shared deadline and reports the still-running count on
+  `DISPATCH_LOOP_EXITED`, and a boot pass parks any codex session left ACTIVE
+  by a crash or SIGKILL, which no join can reach. The boot pass keys its
+  dev-queue lookup on `(ticket_id, client)`, matching
+  `_park_running_task_blocked_on_user`: ticket numbering is per-client, so a
+  ticket 21 in two clients would otherwise collide.
+
 - **Gate parks that do populate breadcrumbs are no longer filtered out of the
   attention stream (#1729):** `BREADCRUMB_ELIGIBLE_PAUSED_STATUSES` omitted
   `codex_must_fix_mechanically_rejected`, the park disposition #1714 introduced.
