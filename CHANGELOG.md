@@ -97,7 +97,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   diff, or evidence that still isn't a genuine substring after normalization
   are all still rejected. In a representative before/after aggregate check,
   2 of 3 findings that were incorrectly rejected pre-fix are now correctly
-  retained post-fix (retained/raw: 0/3 → 2/3).
+  retained post-fix (retained/raw: 0/3 → 2/3). An accepted finding's
+  `line_start`/`line_end` are also snapped onto the resolved anchor before
+  the finding is returned, not left at the reviewer's raw off-by-up-to-3
+  claim — otherwise the verdict comment and fix-loop prompt would keep
+  pointing at the wrong line even after this fix retains the finding.
 
 ## [1.28.0] - 2026-08-07
 

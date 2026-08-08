@@ -453,6 +453,30 @@ def _line_reference_valid(diff: CapturedDiff, finding: Finding) -> bool:
     return True
 
 
+def _resolve_line_window(
+    diff: CapturedDiff, file: str, line_start: int | None, line_end: int | None
+) -> tuple[int, int] | None:
+    """Resolve a claimed (``line_start``, ``line_end``) pair to real added lines.
+
+    Callers must not pass both endpoints ``None`` (that's the file-level case,
+    handled separately). A set endpoint resolves via :func:`_nearest_added_line`;
+    an unset endpoint mirrors the other before resolving, matching the
+    single-line-claim behavior ``_evidence_in_claimed_lines`` has always had.
+    Returns the resolved ``(start, end)`` in ascending order, or ``None`` if
+    either endpoint fails to resolve within tolerance (#1715).
+    """
+    raw_start = line_start if line_start is not None else line_end
+    raw_end = line_end if line_end is not None else line_start
+    if raw_start is None or raw_end is None:
+        msg = "_resolve_line_window requires at least one endpoint set"
+        raise ValueError(msg)
+    resolved_start = _nearest_added_line(diff, file, raw_start)
+    resolved_end = _nearest_added_line(diff, file, raw_end)
+    if resolved_start is None or resolved_end is None:
+        return None
+    return min(resolved_start, resolved_end), max(resolved_start, resolved_end)
+
+
 def _evidence_in_claimed_lines(
     diff: CapturedDiff,
     file: str,
@@ -467,40 +491,60 @@ def _evidence_in_claimed_lines(
     (``file_diffs``), the same fallback ``_line_reference_valid`` already grants
     file-level findings today.
 
-    When a line window is claimed, each endpoint resolves via
-    :func:`_nearest_added_line` (the same near-line tolerance
-    ``_line_reference_valid`` applies) before *text* is checked against the
-    joined content of exactly those added lines (``file_line_text``) — an
-    endpoint that fails to resolve makes the whole check fail. The two
-    resolved endpoints are min/max-ordered before building the window, guarding
-    against an inverted snap (e.g. ``line_start`` snapping above ``line_end``).
-    Both sides of every substring comparison are routed through
-    :func:`_normalize_diff_text` so a stray ``+``/``-`` diff marker on either
-    the evidence or the diff-derived text cannot break an otherwise-genuine
-    match (#1715).
+    When a line window is claimed, :func:`_resolve_line_window` snaps both
+    endpoints (the same near-line tolerance ``_line_reference_valid`` applies)
+    and orders them ascending before *text* is checked against the joined
+    content of exactly those added lines (``file_line_text``) — an endpoint
+    that fails to resolve makes the whole check fail. Both sides of every
+    substring comparison are routed through :func:`_normalize_diff_text` so a
+    stray ``+``/``-`` diff marker on either the evidence or the diff-derived
+    text cannot break an otherwise-genuine match (#1715).
 
     A quote whose true origin is a removed/context line — which has no
     new-file line number — is correctly rejected here rather than accepted via
     a whole-file or whole-diff fallback.
     """
-    if line_start is not None and line_end is not None:
-        raw_start, raw_end = line_start, line_end
-    elif line_start is not None:
-        raw_start = raw_end = line_start
-    elif line_end is not None:
-        raw_start = raw_end = line_end
-    else:
+    if line_start is None and line_end is None:
         return _normalize_diff_text(text) in _normalize_diff_text(
             diff.file_diffs.get(file, "")
         )
-    resolved_start = _nearest_added_line(diff, file, raw_start)
-    resolved_end = _nearest_added_line(diff, file, raw_end)
-    if resolved_start is None or resolved_end is None:
+    resolved = _resolve_line_window(diff, file, line_start, line_end)
+    if resolved is None:
         return False
-    start, end = min(resolved_start, resolved_end), max(resolved_start, resolved_end)
+    start, end = resolved
     line_text = diff.file_line_text.get(file, {})
     window = "\n".join(line_text[n] for n in range(start, end + 1) if n in line_text)
     return _normalize_diff_text(text) in _normalize_diff_text(window)
+
+
+def _resolved_finding(diff: CapturedDiff, finding: Finding) -> Finding:
+    """Return *finding* with its line anchors snapped onto the resolved window.
+
+    A file-level finding (both endpoints ``None``) passes through unchanged.
+    Any other finding reaching this point has already passed
+    ``_line_reference_valid``/``_evidence_in_claimed_lines``, so
+    :func:`_resolve_line_window` is expected to succeed — persisting the
+    resolved anchor (rather than the reviewer's raw, possibly
+    ``_LINE_ANCHOR_TOLERANCE``-lines-off claim) keeps downstream consumers of
+    an accepted finding (the verdict comment, the fix-loop prompt) pointed at
+    the real changed line. The unlikely resolution-failure case (e.g. an
+    unanchored finding whose file isn't in the diff at all) returns *finding*
+    unchanged rather than raising (#1715).
+    """
+    if finding.line_start is None and finding.line_end is None:
+        return finding
+    resolved = _resolve_line_window(
+        diff, finding.file, finding.line_start, finding.line_end
+    )
+    if resolved is None:
+        return finding
+    start, end = resolved
+    updates: dict[str, int | None] = {}
+    if finding.line_start is not None:
+        updates["line_start"] = start
+    if finding.line_end is not None:
+        updates["line_end"] = end
+    return finding.model_copy(update=updates)
 
 
 def _classify_unanchored_file(
@@ -609,6 +653,7 @@ def validate_reviewer_document(
                 index,
                 finding.file,
             )
+        resolved_finding = _resolved_finding(diff, finding)
         escalation = finding.escalation
         if escalation is not None and not _substring_in_diff(
             diff, escalation.evidence_quote
@@ -631,9 +676,9 @@ def validate_reviewer_document(
                     reason=_ESCALATION_STRIP_REASON,
                 )
             )
-            accepted.append(finding.model_copy(update={"escalation": None}))
+            accepted.append(resolved_finding.model_copy(update={"escalation": None}))
         else:
-            accepted.append(finding)
+            accepted.append(resolved_finding)
 
     return accepted, rejected, stripped
 

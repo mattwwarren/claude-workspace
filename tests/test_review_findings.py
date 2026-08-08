@@ -441,6 +441,12 @@ class TestValidateReviewerDocument:
         accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
         assert len(accepted) == 1
         assert not rejected
+        # The accepted finding's anchor is snapped to the real added line
+        # (10), not left at the reviewer's raw off-by-2 claim (12) — a
+        # downstream renderer showing this location must point at real
+        # source, not the reviewer's drift (#1715).
+        assert accepted[0].line_start == 10
+        assert accepted[0].line_end == 10
 
     def test_near_line_range_anchor_retained(self) -> None:
         # line_start=8 is 2 lines off added line 10; line_end=13 is 2 lines
@@ -450,6 +456,8 @@ class TestValidateReviewerDocument:
         accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
         assert len(accepted) == 1
         assert not rejected
+        assert accepted[0].line_start == 10
+        assert accepted[0].line_end == 11
 
     # -- #1715: multiline evidence prefix normalization -----------------
 
@@ -521,6 +529,8 @@ class TestValidateReviewerDocument:
         accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
         assert len(accepted) == 1
         assert not rejected
+        assert accepted[0].line_start == 10
+        assert accepted[0].line_end == 16
 
     def test_widened_range_window_rejects_evidence_outside_resolved_window(
         self,
