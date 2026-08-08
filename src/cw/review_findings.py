@@ -330,6 +330,12 @@ class ReviewVerdict(BaseModel):
     agents_run: list[ReviewerRunRecord] = Field(default_factory=list)
     review: Review
     stripped_escalations: list[StrippedEscalation] = Field(default_factory=list)
+    # #1714: the subset of ``rejected`` whose raw payload claimed MUST_FIX
+    # severity. Deliberately independent of ``blocking``/``must_fix``, which
+    # are computed from ACCEPTED findings only -- see
+    # :func:`_select_rejected_must_fix` for why this is a second signal rather
+    # than a widening of the first.
+    rejected_must_fix: list[RejectedFinding] = Field(default_factory=list)
 
 
 class CapturedDiff(BaseModel):
@@ -767,6 +773,27 @@ def derive_review_counts(
     )
 
 
+def _select_rejected_must_fix(rejected: list[RejectedFinding]) -> list[RejectedFinding]:
+    """Select the MUST_FIX-severity members of *rejected* (#1714).
+
+    Keyed on the finding's own claimed SEVERITY, never on an enumerated set of
+    :data:`RejectedFindingReason` values — so a reason added later is covered by
+    construction rather than by remembering to extend a set here. ``raw`` is the
+    pre-validation ``Finding.model_dump()``, read defensively via ``.get()``
+    because a rejected payload is by definition one that failed validation.
+
+    Why this is a SECOND signal and not a widening of ``blocking``: a
+    mechanically-rejected finding was dropped precisely because its file/line/
+    evidence anchor could not be trusted, so it must never be handed to the
+    autofix loop (which gates on ``ReviewVerdict.blocking``; see
+    ``cw.codex_fix_loop``). It still must not vanish silently, though — a
+    MUST_FIX nobody ever evaluated on its merits is not a clean review. So the
+    two travel separately: ``blocking`` drives autofix, this drives an operator
+    park (``cw.codex_review._verdict``).
+    """
+    return [rf for rf in rejected if rf.raw.get("severity") == "MUST_FIX"]
+
+
 def consolidate_verdict(
     documents: list[ReviewerFindingsDocument],
     diff: CapturedDiff,
@@ -791,6 +818,12 @@ def consolidate_verdict(
     ``stripped_escalations`` is the concatenation of every document's strip list
     in document order. ``blocking`` is True iff at least one accepted,
     non-deferred MUST_FIX finding exists.
+
+    ``rejected_must_fix`` (#1714) is the MUST_FIX-severity subset of
+    ``rejected`` — see :func:`_select_rejected_must_fix`. It is computed
+    independently of ``blocking``/``must_fix``, which continue to read accepted
+    findings only: a mechanically-rejected finding must block the pipeline for
+    an operator without ever entering the autofix loop.
 
     ``review.agents_run`` (the int count, distinct from the
     ``verdict.agents_run`` list above) counts only roles that actually
@@ -870,6 +903,7 @@ def consolidate_verdict(
         agents_run=run_records,
         review=review,
         stripped_escalations=all_stripped,
+        rejected_must_fix=_select_rejected_must_fix(all_rejected),
     )
 
 
