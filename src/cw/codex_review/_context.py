@@ -524,7 +524,7 @@ def _parse_reviewer_document(
 
 
 class _ReviewPassInputs(NamedTuple):
-    """Assembled, side-effect-free inputs for one per-role review pass (#1392).
+    """Assembled inputs for one per-role review pass (#1392).
 
     The output of :func:`_prepare_review_pass` — everything ``run_codex_roles``
     needs (selected ``roles`` and their materialized ``prompts_by_role``) plus
@@ -555,8 +555,8 @@ def _prepare_review_pass(
 ) -> _ReviewPassInputs:
     """Assemble one review pass's inputs: capture diff, select roles, build prompts.
 
-    Pure extraction of ``run_review``'s former input-assembly body (everything
-    before ``run_codex_roles`` was called) — no logic change, no side effects
+    Extracted from ``run_review``'s former input-assembly body (everything
+    before ``run_codex_roles`` was called). Before #1709 it had no side effects
     beyond the read-only git/\u200bfilesystem reads it already performed. Shared by
     ``run_review`` and ``cw.codex_fix_loop``'s per-cycle re-review (#1392).
 
@@ -566,10 +566,11 @@ def _prepare_review_pass(
     module, which only intercepts same-module bare-name calls.
 
     ``runner``/``session_id`` (#1709) drive the filesystem-capability probe,
-    which is no longer side-effect-free in the strictest sense: on a cold
-    fingerprint cache it spends one real ``codex exec`` round-trip. Every
-    subsequent call in the same process — notably the fix loop's per-cycle
-    re-review — is a cache hit that runs nothing.
+    which is what changed that: on a cold fingerprint cache it spends one real
+    ``codex exec`` round-trip and writes the verdict to disk. Every subsequent
+    call — notably the fix loop's per-cycle re-review — is a cache hit that
+    runs nothing, which is why the probe lives here rather than at each call
+    site.
     """
     capability = _probe_filesystem_capability(runner=runner, session_id=session_id)
     diff, reviewed_sha, changed_files = _capture_diff(worktree, default_branch)

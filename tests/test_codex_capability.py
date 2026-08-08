@@ -16,6 +16,7 @@ import json
 import platform
 import subprocess
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 
@@ -35,6 +36,8 @@ from cw.codex_review._capability import (
     _persist_capability_diagnostics,
     _probe_filesystem_capability,
     _reset_filesystem_capability_cache,
+    _run_codex_version,
+    _which_codex,
 )
 from cw.codex_runner import CodexRunResult
 from cw.config import diagnostics_dir
@@ -179,6 +182,33 @@ class TestComputeFingerprint:
 # ---------------------------------------------------------------------------
 # _classify_capability_failure — the 3-way reason taxonomy
 # ---------------------------------------------------------------------------
+
+
+class TestProbeSeams:
+    """The two seams the autouse fixture replaces everywhere else.
+
+    Imported by name here, so these bindings are the real functions rather than
+    the fixture's stand-ins. Patched inside a ``with`` block — a scoped patch of
+    the global ``subprocess``/``shutil`` modules is the established idiom in
+    ``test_codex_executor.py``; only an *autouse* one would leak process-wide.
+    """
+
+    def test_which_codex_delegates_to_shutil(self) -> None:
+        with patch(
+            "cw.codex_review._capability.shutil.which", return_value="/usr/bin/codex"
+        ) as which:
+            assert _which_codex() == "/usr/bin/codex"
+        which.assert_called_once_with("codex")
+
+    def test_run_codex_version_invokes_the_version_flag(self) -> None:
+        proc = _mk_codex_proc(stdout="codex-cli 0.147.0\n")
+        with patch(
+            "cw.codex_review._capability.subprocess.run", return_value=proc
+        ) as run:
+            assert _run_codex_version(7) is proc
+        assert run.call_args.args[0] == ["codex", "--version"]
+        assert run.call_args.kwargs["timeout"] == 7
+        assert run.call_args.kwargs["check"] is False
 
 
 class TestClassifyCapabilityFailure:
@@ -373,13 +403,49 @@ class TestCapabilityCache:
         assert second.calls == []
         assert capability.capable is True
 
-    def test_corrupt_cache_reprobes(self) -> None:
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "{not json",  # unparseable
+            "[]",  # parseable, but not the object shape
+            '{"fingerprint": {}, "capable": "yes", "reason": null}',  # wrong types
+        ],
+        ids=["unparseable", "not-an-object", "wrong-types"],
+    )
+    def test_unusable_cache_reprobes(self, body: str) -> None:
+        """A cache we cannot trust is a miss, never a silent capability answer."""
         path = _capability_cache_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("{not json", encoding="utf-8")
+        path.write_text(body, encoding="utf-8")
         runner = _ProbeRunner(_sentinel_result())
         capability = _probe_filesystem_capability(runner=runner, session_id="s-corrupt")
         assert len(runner.calls) == 1
+        assert capability.capable is True
+
+    def test_cache_with_matching_fingerprint_but_bad_reason_type_reprobes(self) -> None:
+        runner = _ProbeRunner(_sentinel_result())
+        _probe_filesystem_capability(runner=runner, session_id="s-badreason")
+        path = _capability_cache_path()
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["reason"] = 42
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+        second = _ProbeRunner(_sentinel_result())
+        _probe_filesystem_capability(runner=second, session_id="s-badreason")
+        assert len(second.calls) == 1
+
+    def test_cache_write_failure_is_swallowed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unwritable cache costs a re-probe next run, never the review."""
+        blocker = tmp_path / "not-a-dir"
+        blocker.write_text("", encoding="utf-8")
+        monkeypatch.setattr(
+            "cw.codex_review._capability._capability_cache_path",
+            lambda: blocker / "capability-cache.json",
+        )
+        runner = _ProbeRunner(_sentinel_result())
+        capability = _probe_filesystem_capability(runner=runner, session_id="s-nowrite")
         assert capability.capable is True
 
     def test_reset_clears_cache_and_forces_reprobe(self) -> None:
