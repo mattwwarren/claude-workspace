@@ -3874,6 +3874,25 @@ class TestReviewDeferred:
         assert review.deferred == 3
 
 
+class TestReviewHadRealCommit:
+    """Issue #1723 — Review.had_real_commit field (fix-loop no-op-flake detection)."""
+
+    def test_review_had_real_commit_defaults_true(self) -> None:
+        """Omitting `had_real_commit` defaults to True (backward-compatible)."""
+        review = Review(must_fix_initial=0, should_fix=0, fix_cycles_used=0)
+        assert review.had_real_commit is True
+
+    def test_review_had_real_commit_round_trips_false(self) -> None:
+        """An explicit `had_real_commit=False` round-trips through dump/validate."""
+        review = Review(
+            must_fix_initial=0, should_fix=0, fix_cycles_used=0, had_real_commit=False
+        )
+        dumped = review.model_dump()
+        assert dumped["had_real_commit"] is False
+        reloaded = Review.model_validate(dumped)
+        assert reloaded.had_real_commit is False
+
+
 class TestOperatorUnavailableBlockerReasons:
     """RFC 0011 A1 — distinct `awaiting_operator` park class (issue #1155).
 

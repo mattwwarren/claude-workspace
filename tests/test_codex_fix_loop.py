@@ -819,6 +819,62 @@ class TestFixLoopCapAndEscalation:
 
 
 # ---------------------------------------------------------------------------
+# TestRealCommitTracking — #1723
+# ---------------------------------------------------------------------------
+
+
+class TestRealCommitTracking:
+    """``Review.had_real_commit`` — true iff at least one fix cycle produced a
+    real commit (OR'd across cycles), so a no-op/flaked fix-loop convergence
+    is positively distinguishable from a genuine fix (#1723)."""
+
+    def test_clean_exit_with_editor_fix_marks_had_real_commit_true(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-had-commit-true")
+        runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor()])
+        out, verdict = _run_loop(runner, worktree, session_id="s-had-commit-true")
+
+        assert out.status == "stage_complete"
+        assert out.review.had_real_commit is True
+        assert verdict is not None
+        assert verdict.review.had_real_commit is True
+
+    def test_clean_exit_with_default_noop_fix_marks_had_real_commit_false(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-had-commit-false")
+        runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC])  # no-op fix, then clean
+        out, _verdict = _run_loop(runner, worktree, session_id="s-had-commit-false")
+
+        assert out.review.had_real_commit is False
+        assert out.status == "stage_complete"
+        assert out.review.fix_cycles_used == 1
+
+    def test_multi_cycle_any_real_commit_marks_true_even_if_later_cycle_is_noop(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-had-commit-or")
+        # cycle 1: real edit; cycle 2: no-op (default fix behavior).
+        runner = _FixLoopRunner(
+            [_MF_DOC, _MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor(), None]
+        )
+        out, _verdict = _run_loop(runner, worktree, session_id="s-had-commit-or")
+
+        assert out.review.had_real_commit is True
+
+    def test_capped_park_reports_had_real_commit_false_when_every_cycle_is_noop(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-had-commit-capped")
+        runner = _FixLoopRunner([_MF_DOC])
+        out, _verdict = _run_loop(runner, worktree, session_id="s-had-commit-capped")
+
+        assert out.status == "blocked"
+        assert out.review.had_real_commit is False
+
+
+# ---------------------------------------------------------------------------
 # TestFixLoopReviewParity
 # ---------------------------------------------------------------------------
 
@@ -1289,11 +1345,12 @@ class TestScopeViolationGate:
 
 
 class TestVerdictCommentDistinguishesHistories:
-    """render_verdict_comment must render three distinct comments for three
+    """render_verdict_comment must render four distinct comments for four
     operationally different histories, even when the underlying Review can
     look alike (e.g. fix_cycles_used == 0 for both a genuinely-clean cycle 0
     and a fix-loop-disabled pass) — the fix_loop_enabled discriminator is
-    what tells them apart (#1705)."""
+    what tells them apart (#1705), and ``had_real_commit`` further
+    distinguishes a genuine fix from a no-op/flaked convergence (#1723)."""
 
     def test_converged_clean_off_render_three_distinct_comments(
         self, make_git_repo: Callable[..., Path]
@@ -1331,20 +1388,36 @@ class TestVerdictCommentDistinguishesHistories:
             fix_loop_enabled=False,
         )
 
+        # (d) flaked: the loop converges (no MUST_FIX survivors) but every
+        # fix cycle was a no-op — no real commit ever landed.
+        flaked_worktree = _worktree(make_git_repo, "wt-history-flaked")
+        flaked_runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC])
+        _, flaked_verdict = _run_loop(
+            flaked_runner,
+            flaked_worktree,
+            session_id="s-history-flaked",
+            fix_loop_enabled=True,
+        )
+
         assert converged_verdict is not None
         assert clean_verdict is not None
         assert off_verdict is not None
+        assert flaked_verdict is not None
 
         converged_body = render_verdict_comment(
             converged_verdict, fix_loop_enabled=True
         )
         clean_body = render_verdict_comment(clean_verdict, fix_loop_enabled=True)
         off_body = render_verdict_comment(off_verdict, fix_loop_enabled=False)
+        flaked_body = render_verdict_comment(flaked_verdict, fix_loop_enabled=True)
 
         # R3's literal requirement: pairwise inequality.
         assert converged_body != clean_body
         assert converged_body != off_body
         assert clean_body != off_body
+        assert flaked_body != converged_body
+        assert flaked_body != clean_body
+        assert flaked_body != off_body
 
         # Substring pins so the test still fails informatively if two
         # message families accidentally converge on wording rather than
@@ -1352,6 +1425,8 @@ class TestVerdictCommentDistinguishesHistories:
         assert "resolved across 1 fix cycle" in converged_body
         assert "available" in clean_body.lower()
         assert "disabled" in off_body.lower()
+        assert "UNVERIFIED" in flaked_body
+        assert "no file" in flaked_body.lower() or "changing" in flaked_body.lower()
 
 
 # ---------------------------------------------------------------------------
