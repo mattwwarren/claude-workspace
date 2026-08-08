@@ -466,9 +466,7 @@ class TestValidateReviewerDocument:
         # "line one\nline two" is NOT a substring of the raw
         # "+++ b/...\n+line one\n+line two\n" hunk text).
         diff = _make_diff("line one", "line two", files={"src/cw/foo.py": [10, 11]})
-        f = _make_finding(
-            line_start=None, line_end=None, evidence="line one\nline two"
-        )
+        f = _make_finding(line_start=None, line_end=None, evidence="line one\nline two")
         accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
         assert len(accepted) == 1
         assert not rejected
@@ -481,9 +479,7 @@ class TestValidateReviewerDocument:
         # Bug B's second half. MUST fail red pre-fix: "+line one\n+line two"
         # is not a substring of the prefix-free window "line one\nline two".
         diff = _make_diff("line one", "line two", files={"src/cw/foo.py": [10, 11]})
-        f = _make_finding(
-            line_start=10, line_end=11, evidence="+line one\n+line two"
-        )
+        f = _make_finding(line_start=10, line_end=11, evidence="+line one\n+line two")
         accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
         assert len(accepted) == 1
         assert not rejected
@@ -503,9 +499,7 @@ class TestValidateReviewerDocument:
         # tolerance), but the evidence text is not that line's real content —
         # the loosened anchor bound must not loosen the evidence check.
         diff = _make_diff("def broken():", files={"src/cw/foo.py": [10]})
-        f = _make_finding(
-            line_start=12, line_end=12, evidence="totally unrelated text"
-        )
+        f = _make_finding(line_start=12, line_end=12, evidence="totally unrelated text")
         accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
         assert not accepted
         assert rejected[0].reason == "evidence_not_in_diff"
@@ -523,9 +517,7 @@ class TestValidateReviewerDocument:
             "fourth line content",
             files={"src/cw/foo.py": [10, 13, 16, 20]},
         )
-        f = _make_finding(
-            line_start=8, line_end=15, evidence="second line content"
-        )
+        f = _make_finding(line_start=8, line_end=15, evidence="second line content")
         accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
         assert len(accepted) == 1
         assert not rejected
@@ -544,9 +536,7 @@ class TestValidateReviewerDocument:
             "fourth line content",
             files={"src/cw/foo.py": [10, 13, 16, 20]},
         )
-        f = _make_finding(
-            line_start=8, line_end=15, evidence="fourth line content"
-        )
+        f = _make_finding(line_start=8, line_end=15, evidence="fourth line content")
         accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
         assert not accepted
         assert rejected[0].reason == "evidence_not_in_diff"
@@ -893,9 +883,7 @@ class TestConsolidateVerdict:
         assert verdict.blocking is False
         assert verdict.rejected[0].reason == "unknown_file"
 
-    def test_aggregate_unknown_file_near_line_and_multiline_prefix_via_consolidate_verdict(
-        self,
-    ) -> None:
+    def test_aggregate_near_line_and_multiline_via_consolidate_verdict(self) -> None:
         # #1715 integration: three findings through the full
         # consolidate_verdict pipeline. (1) file not in diff, no worktree ->
         # still unknown_file (#1632 mechanism untouched). (2) near-line
@@ -917,8 +905,12 @@ class TestConsolidateVerdict:
                 line_end=None,
                 evidence="whatever",
             ),
-            _make_finding(file="src/cw/foo.py", line_start=12, line_end=12,
-                           evidence="def broken():"),
+            _make_finding(
+                file="src/cw/foo.py",
+                line_start=12,
+                line_end=12,
+                evidence="def broken():",
+            ),
             _make_finding(
                 file="src/cw/bar.py",
                 line_start=None,

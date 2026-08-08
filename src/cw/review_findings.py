@@ -404,10 +404,9 @@ def _normalize_diff_text(text: str) -> str:
     this cannot merge or reorder content (#1715).
     """
     normalized_lines = []
-    for line in text.split("\n"):
-        if line[:1] in ("+", "-"):
-            line = line[1:]
-        normalized_lines.append(line.strip())
+    for raw_line in text.split("\n"):
+        stripped_marker = raw_line[1:] if raw_line[:1] in ("+", "-") else raw_line
+        normalized_lines.append(stripped_marker.strip())
     return "\n".join(normalized_lines)
 
 
@@ -431,10 +430,10 @@ def _nearest_added_line(
         distance = abs(candidate - line)
         if distance > tolerance:
             continue
-        if best is None:
-            best, best_distance = candidate, distance
-        elif distance < best_distance or (
-            distance == best_distance and candidate < best
+        if (
+            best is None
+            or distance < best_distance
+            or (distance == best_distance and candidate < best)
         ):
             best, best_distance = candidate, distance
     return best
