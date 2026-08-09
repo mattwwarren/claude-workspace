@@ -8,6 +8,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`cw event tail` gains `--limit`/`-n` to bound output to the most recent N
+  matching events (#1694):** the flag composes with the existing `--type`/
+  `--client`/`--lane`/`--since` filters (filter-then-limit) and is rejected
+  together with `--follow`, which streams unboundedly. The default
+  (non-`--json`) output format also changed to compact: nested dict/
+  list-of-dict payload fields — e.g. `dispatch.tick`'s `lanes` and
+  `lane_occupants` — are now omitted, keeping only scalar fields and
+  scalar-lists (no length limit — the filter is shape-based, not size-based).
+  `--json` output is untouched and remains full-fidelity.
+
+### Fixed
+
+- **`read_events(limit=...)` returned the OLDEST N matching events instead of
+  the most recent N (#1694):** the function already accepted a `limit`
+  parameter but head-sliced (`events[:limit]`) a list that's in ascending
+  chronological order, so `limit=N` silently returned the N *earliest*
+  events. No production caller passed `limit=` yet, so this was latent —
+  surfaced while wiring up `cw event tail --limit`. Fixed to tail-slice
+  (`events[-limit:]`), with `limit=0` special-cased to `[]` (`list[-0:]` is
+  a Python trap that returns the whole list, not an empty one).
 - **A structural finding anchored on an enclosing def/class is no longer
   dropped as unverifiable (#1743):** `_line_reference_valid`'s existing
   tolerance check only accepts a finding whose cited line sits within a
@@ -46,6 +66,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   correctness failure as MUST_FIX even when a related rule is ignored.
 
 ### Fixed
+
+- **`test_worktree_path_finds_transcript_via_csid` and 5 sibling tests wrote
+  into the real `~/.claude/projects/` (#1736):** `claude_project_dir()`
+  resolves via `Path.home()` directly, bypassing the `patched_peek` fixture's
+  redirection of `CLAUDE_PROJECTS`/`CW_STATE`. `patched_peek` now also
+  redirects `HOME`; a new session-scoped `conftest.py` guard fails on any
+  leaked `tmp-pytest`/`pytest-of`-named directory under the real path and
+  warns (without failing) on any other unexpected new entry, so unrelated
+  concurrent Claude Code usage can't flake the suite.
 
 - **A codex review no longer freezes the shared dispatch tick (#1727):**
   `CodexExecutor.spawn()` ran the whole review — per-role `codex exec`
