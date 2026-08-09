@@ -2801,3 +2801,249 @@ def test_cli_event_tail_follow_streams_compact_format_line_buffered(
     assert marker not in result.output
     assert "claimed=" in result.output
     assert "dispatch.tick" in result.output
+
+
+# ---------------------------------------------------------------------------
+# --collapse-repeats (issue #1754)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_event_tail_collapse_repeats_consecutive_run_collapses_to_one_line(
+    tmp_events_dir: Path,
+) -> None:
+    """3 consecutive same-type/same-payload events collapse to one `x3` line."""
+    for _ in range(3):
+        events_record_event(
+            OrchestratorEventType.DISPATCH_TICK, {"client": "acme", "n": 1}
+        )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--collapse-repeats"])
+    assert result.exit_code == 0, result.output
+    assert result.output.count("dispatch.tick") == 1
+    assert "x3" in result.output
+
+
+def test_cli_event_tail_collapse_repeats_run_interrupted_reopens(
+    tmp_events_dir: Path,
+) -> None:
+    """A run broken by an unrelated event re-opens instead of merging across it."""
+    for _ in range(2):
+        events_record_event(
+            OrchestratorEventType.DISPATCH_TICK, {"client": "acme", "n": 1}
+        )
+    events_record_event(OrchestratorEventType.PR_REGISTERED, {"pr": 1})
+    for _ in range(2):
+        events_record_event(
+            OrchestratorEventType.DISPATCH_TICK, {"client": "acme", "n": 1}
+        )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--collapse-repeats"])
+    assert result.exit_code == 0, result.output
+    assert result.output.count("dispatch.tick x2") == 2
+    assert "x4" not in result.output
+    assert "pr.registered" in result.output
+
+
+def test_cli_event_tail_collapse_repeats_differing_payload_does_not_collapse(
+    tmp_events_dir: Path,
+) -> None:
+    """Consecutive same-type events with differing scalar payloads do not merge."""
+    events_record_event(
+        OrchestratorEventType.DISPATCH_TICK, {"client": "acme", "n": 1}
+    )
+    events_record_event(
+        OrchestratorEventType.DISPATCH_TICK, {"client": "acme", "n": 2}
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--collapse-repeats"])
+    assert result.exit_code == 0, result.output
+    assert "x2" not in result.output
+    assert result.output.count("dispatch.tick") == 2
+
+
+def test_cli_event_tail_collapse_repeats_ignores_non_salient_nested_fields(
+    tmp_events_dir: Path,
+) -> None:
+    """Identical scalar fields but differing nested dict fields still collapse."""
+    events_record_event(
+        OrchestratorEventType.DISPATCH_TICK,
+        {"client": "acme", "n": 1, "lanes": {"l1": {"claimed": 1}}},
+    )
+    events_record_event(
+        OrchestratorEventType.DISPATCH_TICK,
+        {"client": "acme", "n": 1, "lanes": {"l2": {"claimed": 2}}},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--collapse-repeats"])
+    assert result.exit_code == 0, result.output
+    assert result.output.count("dispatch.tick") == 1
+    assert "x2" in result.output
+
+
+def test_cli_event_tail_collapse_repeats_singleton_run_prints_normally(
+    tmp_events_dir: Path,
+) -> None:
+    """A run of length 1 prints via the normal full per-event line, not `x1`."""
+    ev = events_record_event(OrchestratorEventType.PR_REGISTERED, {"pr": 1})
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--collapse-repeats"])
+    assert result.exit_code == 0, result.output
+    assert ev.id in result.output
+    assert ev.created_at.strftime("%Y-%m-%dT%H:%M:%S") in result.output
+    assert "x1" not in result.output
+
+
+def test_cli_event_tail_collapse_repeats_line_format_matches_ticket_example(
+    tmp_events_dir: Path,
+) -> None:
+    """Collapsed line matches `TYPE xN over Mm  k=v ...`, span computed in minutes."""
+    base = datetime(2025, 6, 1, 12, 0, 0, tzinfo=UTC)
+    for i in range(3):
+        with freeze_time(base + timedelta(minutes=i)):
+            events_record_event(
+                OrchestratorEventType.DISPATCH_TICK, {"client": "acme", "n": 1}
+            )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--collapse-repeats"])
+    assert result.exit_code == 0, result.output
+    assert "dispatch.tick x3 over 2m  client=acme n=1" in result.output
+
+
+def test_cli_event_tail_collapse_repeats_json_unaffected(tmp_events_dir: Path) -> None:
+    """--json --collapse-repeats is a no-op: one JSON line per original event."""
+    recorded = [
+        events_record_event(OrchestratorEventType.DISPATCH_TICK, {"client": "acme"})
+        for _ in range(3)
+    ]
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["event", "tail", "--json", "--collapse-repeats"]
+    )
+    assert result.exit_code == 0, result.output
+    lines = [ln for ln in result.output.splitlines() if ln.strip()]
+    ids = [json.loads(ln)["id"] for ln in lines]
+    assert ids == [ev.id for ev in recorded]
+
+
+def test_cli_event_tail_collapse_repeats_rejects_with_follow(
+    tmp_events_dir: Path,
+) -> None:
+    """--collapse-repeats with --follow exits non-zero via CwError."""
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["event", "tail", "--collapse-repeats", "--follow"]
+    )
+    assert result.exit_code != 0
+    assert "follow" in result.output.lower()
+    assert (
+        "buffering" in result.output.lower()
+        or "flush" in result.output.lower()
+    )
+
+
+def test_cli_event_tail_collapse_repeats_composes_with_dedup_terminal(
+    tmp_events_dir: Path,
+) -> None:
+    """--dedup-terminal runs first; --collapse-repeats then summarizes the rest."""
+    for _ in range(3):
+        events_record_event(
+            OrchestratorEventType.SESSION_TIMED_OUT, {"session_id": "s1"}
+        )
+    for _ in range(3):
+        events_record_event(
+            OrchestratorEventType.DISPATCH_TICK, {"client": "acme", "n": 1}
+        )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["event", "tail", "--dedup-terminal", "--collapse-repeats"]
+    )
+    assert result.exit_code == 0, result.output
+    assert result.output.count("session.timed_out") == 1
+    assert result.output.count("dispatch.tick") == 1
+    assert "x3" in result.output
+
+
+def test_cli_event_tail_collapse_repeats_composes_with_limit(
+    tmp_events_dir: Path,
+) -> None:
+    """--limit applies server-side before --collapse-repeats groups the window."""
+    events_record_event(
+        OrchestratorEventType.DISPATCH_TICK, {"client": "acme", "n": 1}
+    )
+    for _ in range(4):
+        events_record_event(
+            OrchestratorEventType.DISPATCH_TICK, {"client": "acme", "n": 2}
+        )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["event", "tail", "--limit", "4", "--collapse-repeats"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "x4" in result.output
+    assert "n=1" not in result.output
+
+
+def test_cli_event_tail_collapse_repeats_composes_with_client_filter(
+    tmp_events_dir: Path,
+) -> None:
+    """--client filters before --collapse-repeats groups the surviving events."""
+    for _ in range(3):
+        events_record_event(
+            OrchestratorEventType.DISPATCH_TICK, {"client": "alpha", "n": 1}
+        )
+    events_record_event(
+        OrchestratorEventType.DISPATCH_TICK, {"client": "beta", "n": 1}
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["event", "tail", "--client", "alpha", "--collapse-repeats"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "x3" in result.output
+    assert "beta" not in result.output
+
+
+def test_cli_event_tail_collapse_repeats_empty_events_no_crash(
+    tmp_events_dir: Path,
+) -> None:
+    """No matching events + --collapse-repeats still prints the empty-path message."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--collapse-repeats"])
+    assert result.exit_code == 0, result.output
+    assert "No events." in result.output
+
+
+def test_cli_event_tail_collapse_repeats_mixed_types_no_cross_type_grouping(
+    tmp_events_dir: Path,
+) -> None:
+    """Type is part of the grouping key: never merges across types."""
+    events_record_event(OrchestratorEventType.DISPATCH_TICK, {})
+    events_record_event(OrchestratorEventType.PR_REGISTERED, {})
+    events_record_event(OrchestratorEventType.DISPATCH_TICK, {})
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--collapse-repeats"])
+    assert result.exit_code == 0, result.output
+    assert "x2" not in result.output
+    assert result.output.count("dispatch.tick") == 2
+    assert result.output.count("pr.registered") == 1
+
+
+def test_cli_event_tail_collapse_repeats_help_text_documents_flag(
+    tmp_events_dir: Path,
+) -> None:
+    """`cw event tail --help` mentions --collapse-repeats."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "--collapse-repeats" in result.output
