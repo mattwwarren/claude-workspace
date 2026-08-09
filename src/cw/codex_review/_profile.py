@@ -23,9 +23,9 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import NamedTuple
 
 from pydantic import BaseModel, ConfigDict
 
@@ -36,15 +36,9 @@ _log = logging.getLogger(__name__)
 
 # Bump when the argv block below changes shape, so a diagnostics artifact from
 # an older run is not mistaken for one produced by the current profile.
-_PROFILE_VERSION = 2
+_PROFILE_VERSION = 3
 
 _PROFILE_DIAGNOSTICS_FILENAME = "codex-review-profile.json"
-
-_SUPPORTED_CODEX_CLI_VERSION = "0.147.0"
-_UNSUPPORTED_CODEX_CLI_VERSION_ERROR = (
-    "unsupported codex CLI version for lean reviewer profile: expected {expected}, "
-    "got {actual}"
-)
 
 
 class _LeanProfileDisposition(StrEnum):
@@ -52,10 +46,11 @@ class _LeanProfileDisposition(StrEnum):
     DISABLE = "disable"
 
 
-class _CodexFeatureRecord(NamedTuple):
+@dataclass(frozen=True, kw_only=True)
+class _CodexFeatureRecord:
     name: str
     default_enabled: bool
-    lean_profile_disposition: _LeanProfileDisposition
+    lean_profile_disposition: _LeanProfileDisposition = _LeanProfileDisposition.ALLOW
 
 
 # Complete metadata for the CLI version against which this profile was
@@ -63,160 +58,158 @@ class _CodexFeatureRecord(NamedTuple):
 # versioned collection instead of being silently treated as covered by this
 # one. Inventory, defaults, and lean-profile disables are all derived below.
 _CODEX_FEATURE_METADATA_0_147_0: tuple[_CodexFeatureRecord, ...] = (
-    _CodexFeatureRecord("apply_patch_freeform", False, _LeanProfileDisposition.ALLOW),
+    _CodexFeatureRecord(name="apply_patch_freeform", default_enabled=False),
+    _CodexFeatureRecord(name="apply_patch_streaming_events", default_enabled=False),
+    _CodexFeatureRecord(name="apps", default_enabled=True),
+    _CodexFeatureRecord(name="apps_mcp_path_override", default_enabled=False),
+    _CodexFeatureRecord(name="artifact", default_enabled=False),
+    _CodexFeatureRecord(name="auth_elicitation", default_enabled=True),
     _CodexFeatureRecord(
-        "apply_patch_streaming_events", False, _LeanProfileDisposition.ALLOW
-    ),
-    _CodexFeatureRecord("apps", True, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("apps_mcp_path_override", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("artifact", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("auth_elicitation", True, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("browser_use", True, _LeanProfileDisposition.DISABLE),
-    _CodexFeatureRecord("browser_use_external", True, _LeanProfileDisposition.DISABLE),
-    _CodexFeatureRecord(
-        "browser_use_full_cdp_access", True, _LeanProfileDisposition.DISABLE
-    ),
-    _CodexFeatureRecord("chronicle", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("code_mode", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord(
-        "code_mode_buffered_exec", False, _LeanProfileDisposition.ALLOW
-    ),
-    _CodexFeatureRecord("code_mode_host", True, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("code_mode_only", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("codex_git_commit", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("collaboration_modes", True, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("computer_use", True, _LeanProfileDisposition.DISABLE),
-    _CodexFeatureRecord(
-        "concurrent_reasoning_summaries", False, _LeanProfileDisposition.ALLOW
-    ),
-    _CodexFeatureRecord("current_time_reminder", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord(
-        "default_mode_request_user_input", False, _LeanProfileDisposition.ALLOW
-    ),
-    _CodexFeatureRecord("deferred_executor", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord(
-        "deferred_tool_world_state", False, _LeanProfileDisposition.ALLOW
+        name="browser_use",
+        default_enabled=True,
+        lean_profile_disposition=_LeanProfileDisposition.DISABLE,
     ),
     _CodexFeatureRecord(
-        "elevated_windows_sandbox", False, _LeanProfileDisposition.ALLOW
-    ),
-    _CodexFeatureRecord("enable_fanout", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("enable_mcp_apps", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord(
-        "enable_request_compression", True, _LeanProfileDisposition.ALLOW
+        name="browser_use_external",
+        default_enabled=True,
+        lean_profile_disposition=_LeanProfileDisposition.DISABLE,
     ),
     _CodexFeatureRecord(
-        "exec_permission_approvals", False, _LeanProfileDisposition.ALLOW
+        name="browser_use_full_cdp_access",
+        default_enabled=True,
+        lean_profile_disposition=_LeanProfileDisposition.DISABLE,
+    ),
+    _CodexFeatureRecord(name="chronicle", default_enabled=False),
+    _CodexFeatureRecord(name="code_mode", default_enabled=False),
+    _CodexFeatureRecord(name="code_mode_buffered_exec", default_enabled=False),
+    _CodexFeatureRecord(name="code_mode_host", default_enabled=True),
+    _CodexFeatureRecord(name="code_mode_only", default_enabled=False),
+    _CodexFeatureRecord(name="codex_git_commit", default_enabled=False),
+    _CodexFeatureRecord(name="collaboration_modes", default_enabled=True),
+    _CodexFeatureRecord(
+        name="computer_use",
+        default_enabled=True,
+        lean_profile_disposition=_LeanProfileDisposition.DISABLE,
+    ),
+    _CodexFeatureRecord(name="concurrent_reasoning_summaries", default_enabled=False),
+    _CodexFeatureRecord(name="current_time_reminder", default_enabled=False),
+    _CodexFeatureRecord(name="default_mode_request_user_input", default_enabled=False),
+    _CodexFeatureRecord(name="deferred_executor", default_enabled=False),
+    _CodexFeatureRecord(name="deferred_tool_world_state", default_enabled=False),
+    _CodexFeatureRecord(name="elevated_windows_sandbox", default_enabled=False),
+    _CodexFeatureRecord(name="enable_fanout", default_enabled=False),
+    _CodexFeatureRecord(name="enable_mcp_apps", default_enabled=False),
+    _CodexFeatureRecord(name="enable_request_compression", default_enabled=True),
+    _CodexFeatureRecord(name="exec_permission_approvals", default_enabled=False),
+    _CodexFeatureRecord(name="executed_tool_call_metadata", default_enabled=False),
+    _CodexFeatureRecord(name="executor_capability_discovery", default_enabled=False),
+    _CodexFeatureRecord(name="experimental_windows_sandbox", default_enabled=False),
+    _CodexFeatureRecord(name="external_agent_memory_import", default_enabled=False),
+    _CodexFeatureRecord(name="external_migration", default_enabled=False),
+    _CodexFeatureRecord(name="fast_mode", default_enabled=True),
+    _CodexFeatureRecord(name="goals", default_enabled=True),
+    _CodexFeatureRecord(name="guardian_approval", default_enabled=True),
+    _CodexFeatureRecord(name="guardianv2", default_enabled=False),
+    _CodexFeatureRecord(
+        name="hooks",
+        default_enabled=True,
+        lean_profile_disposition=_LeanProfileDisposition.DISABLE,
+    ),
+    _CodexFeatureRecord(name="image_detail_original", default_enabled=False),
+    _CodexFeatureRecord(name="image_generation", default_enabled=True),
+    _CodexFeatureRecord(name="image_resize_notice", default_enabled=False),
+    _CodexFeatureRecord(name="in_app_browser", default_enabled=True),
+    _CodexFeatureRecord(name="in_app_updates", default_enabled=True),
+    _CodexFeatureRecord(name="item_ids", default_enabled=True),
+    _CodexFeatureRecord(name="js_repl", default_enabled=False),
+    _CodexFeatureRecord(name="js_repl_tools_only", default_enabled=False),
+    _CodexFeatureRecord(name="local_thread_store_compression", default_enabled=False),
+    _CodexFeatureRecord(name="mcp_2026_07_28", default_enabled=False),
+    _CodexFeatureRecord(
+        name="memories",
+        default_enabled=False,
+        lean_profile_disposition=_LeanProfileDisposition.DISABLE,
+    ),
+    _CodexFeatureRecord(name="mentions_v2", default_enabled=True),
+    _CodexFeatureRecord(
+        name="multi_agent",
+        default_enabled=True,
+        lean_profile_disposition=_LeanProfileDisposition.DISABLE,
+    ),
+    _CodexFeatureRecord(name="multi_agent_mode", default_enabled=False),
+    _CodexFeatureRecord(
+        name="multi_agent_v2",
+        default_enabled=False,
+        lean_profile_disposition=_LeanProfileDisposition.DISABLE,
+    ),
+    _CodexFeatureRecord(name="network_proxy", default_enabled=False),
+    _CodexFeatureRecord(name="non_prefixed_mcp_tool_names", default_enabled=False),
+    _CodexFeatureRecord(
+        name="personality",
+        default_enabled=True,
+        lean_profile_disposition=_LeanProfileDisposition.DISABLE,
+    ),
+    _CodexFeatureRecord(name="plugin_hooks", default_enabled=False),
+    _CodexFeatureRecord(
+        name="plugin_sharing",
+        default_enabled=True,
+        lean_profile_disposition=_LeanProfileDisposition.DISABLE,
     ),
     _CodexFeatureRecord(
-        "executed_tool_call_metadata", False, _LeanProfileDisposition.ALLOW
+        name="plugins",
+        default_enabled=True,
+        lean_profile_disposition=_LeanProfileDisposition.DISABLE,
     ),
+    _CodexFeatureRecord(name="prevent_idle_sleep", default_enabled=False),
+    _CodexFeatureRecord(name="realtime_conversation", default_enabled=False),
+    _CodexFeatureRecord(name="recommended_plugins", default_enabled=False),
+    _CodexFeatureRecord(name="remote_compaction_v2", default_enabled=True),
+    _CodexFeatureRecord(name="remote_control", default_enabled=False),
+    _CodexFeatureRecord(name="remote_models", default_enabled=False),
+    _CodexFeatureRecord(name="remote_plugin", default_enabled=True),
+    _CodexFeatureRecord(name="request_permissions_tool", default_enabled=False),
+    _CodexFeatureRecord(name="request_rule", default_enabled=False),
+    _CodexFeatureRecord(name="resize_all_images", default_enabled=True),
+    _CodexFeatureRecord(name="respect_system_proxy", default_enabled=False),
+    _CodexFeatureRecord(name="responses_websockets", default_enabled=False),
+    _CodexFeatureRecord(name="responses_websockets_v2", default_enabled=False),
+    _CodexFeatureRecord(name="rollout_budget", default_enabled=False),
+    _CodexFeatureRecord(name="runtime_metrics", default_enabled=False),
+    _CodexFeatureRecord(name="search_tool", default_enabled=False),
+    _CodexFeatureRecord(name="secret_auth_storage", default_enabled=False),
+    _CodexFeatureRecord(name="shell_snapshot", default_enabled=True),
+    _CodexFeatureRecord(name="shell_tool", default_enabled=True),
+    _CodexFeatureRecord(name="shell_zsh_fork", default_enabled=False),
+    _CodexFeatureRecord(name="skill_env_var_dependency_prompt", default_enabled=False),
+    _CodexFeatureRecord(name="skill_mcp_dependency_install", default_enabled=True),
+    _CodexFeatureRecord(name="skill_search", default_enabled=True),
+    _CodexFeatureRecord(name="sqlite", default_enabled=True),
+    _CodexFeatureRecord(name="standalone_web_search", default_enabled=False),
+    _CodexFeatureRecord(name="steer", default_enabled=True),
+    _CodexFeatureRecord(name="terminal_resize_reflow", default_enabled=True),
     _CodexFeatureRecord(
-        "executor_capability_discovery", False, _LeanProfileDisposition.ALLOW
+        name="terminal_visualization_instructions", default_enabled=False
     ),
+    _CodexFeatureRecord(name="token_budget", default_enabled=False),
+    _CodexFeatureRecord(name="tool_call_mcp_elicitation", default_enabled=True),
+    _CodexFeatureRecord(name="tool_search", default_enabled=False),
     _CodexFeatureRecord(
-        "experimental_windows_sandbox", False, _LeanProfileDisposition.ALLOW
+        name="tool_search_always_defer_mcp_tools", default_enabled=True
     ),
-    _CodexFeatureRecord(
-        "external_agent_memory_import", False, _LeanProfileDisposition.ALLOW
-    ),
-    _CodexFeatureRecord("external_migration", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("fast_mode", True, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("goals", True, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("guardian_approval", True, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("guardianv2", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("hooks", True, _LeanProfileDisposition.DISABLE),
-    _CodexFeatureRecord("image_detail_original", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("image_generation", True, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("image_resize_notice", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("in_app_browser", True, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("in_app_updates", True, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("item_ids", True, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("js_repl", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("js_repl_tools_only", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord(
-        "local_thread_store_compression", False, _LeanProfileDisposition.ALLOW
-    ),
-    _CodexFeatureRecord("mcp_2026_07_28", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("memories", False, _LeanProfileDisposition.DISABLE),
-    _CodexFeatureRecord("mentions_v2", True, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("multi_agent", True, _LeanProfileDisposition.DISABLE),
-    _CodexFeatureRecord("multi_agent_mode", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("multi_agent_v2", False, _LeanProfileDisposition.DISABLE),
-    _CodexFeatureRecord("network_proxy", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord(
-        "non_prefixed_mcp_tool_names", False, _LeanProfileDisposition.ALLOW
-    ),
-    _CodexFeatureRecord("personality", True, _LeanProfileDisposition.DISABLE),
-    _CodexFeatureRecord("plugin_hooks", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("plugin_sharing", True, _LeanProfileDisposition.DISABLE),
-    _CodexFeatureRecord("plugins", True, _LeanProfileDisposition.DISABLE),
-    _CodexFeatureRecord("prevent_idle_sleep", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("realtime_conversation", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("recommended_plugins", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("remote_compaction_v2", True, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("remote_control", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("remote_models", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("remote_plugin", True, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord(
-        "request_permissions_tool", False, _LeanProfileDisposition.ALLOW
-    ),
-    _CodexFeatureRecord("request_rule", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("resize_all_images", True, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("respect_system_proxy", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("responses_websockets", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord(
-        "responses_websockets_v2", False, _LeanProfileDisposition.ALLOW
-    ),
-    _CodexFeatureRecord("rollout_budget", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("runtime_metrics", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("search_tool", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("secret_auth_storage", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("shell_snapshot", True, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("shell_tool", True, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("shell_zsh_fork", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord(
-        "skill_env_var_dependency_prompt", False, _LeanProfileDisposition.ALLOW
-    ),
-    _CodexFeatureRecord(
-        "skill_mcp_dependency_install", True, _LeanProfileDisposition.ALLOW
-    ),
-    _CodexFeatureRecord("skill_search", True, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("sqlite", True, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("standalone_web_search", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("steer", True, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("terminal_resize_reflow", True, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord(
-        "terminal_visualization_instructions", False, _LeanProfileDisposition.ALLOW
-    ),
-    _CodexFeatureRecord("token_budget", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord(
-        "tool_call_mcp_elicitation", True, _LeanProfileDisposition.ALLOW
-    ),
-    _CodexFeatureRecord("tool_search", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord(
-        "tool_search_always_defer_mcp_tools", True, _LeanProfileDisposition.ALLOW
-    ),
-    _CodexFeatureRecord("tool_suggest", True, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("tui_app_server", True, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord(
-        "unavailable_dummy_tools", False, _LeanProfileDisposition.ALLOW
-    ),
-    _CodexFeatureRecord("undo", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("unified_exec", True, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("unified_exec_zsh_fork", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("use_agent_identity", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("use_legacy_landlock", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord(
-        "use_linux_sandbox_bwrap", False, _LeanProfileDisposition.ALLOW
-    ),
-    _CodexFeatureRecord("view_image", True, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("web_search_cached", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("web_search_request", False, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord("workspace_dependencies", True, _LeanProfileDisposition.ALLOW),
-    _CodexFeatureRecord(
-        "workspace_owner_usage_nudge", False, _LeanProfileDisposition.ALLOW
-    ),
+    _CodexFeatureRecord(name="tool_suggest", default_enabled=True),
+    _CodexFeatureRecord(name="tui_app_server", default_enabled=True),
+    _CodexFeatureRecord(name="unavailable_dummy_tools", default_enabled=False),
+    _CodexFeatureRecord(name="undo", default_enabled=False),
+    _CodexFeatureRecord(name="unified_exec", default_enabled=True),
+    _CodexFeatureRecord(name="unified_exec_zsh_fork", default_enabled=False),
+    _CodexFeatureRecord(name="use_agent_identity", default_enabled=False),
+    _CodexFeatureRecord(name="use_legacy_landlock", default_enabled=False),
+    _CodexFeatureRecord(name="use_linux_sandbox_bwrap", default_enabled=False),
+    _CodexFeatureRecord(name="view_image", default_enabled=True),
+    _CodexFeatureRecord(name="web_search_cached", default_enabled=False),
+    _CodexFeatureRecord(name="web_search_request", default_enabled=False),
+    _CodexFeatureRecord(name="workspace_dependencies", default_enabled=True),
+    _CodexFeatureRecord(name="workspace_owner_usage_nudge", default_enabled=False),
 )
 
 _CODEX_FEATURES_0_147_0: tuple[str, ...] = tuple(
@@ -240,10 +233,6 @@ def _lean_profile_argv(*, reasoning_effort: str | None) -> list[str]:
 
     ``--ignore-user-config`` drops ``~/.codex/config.toml`` so the operator's
     personal codex setup cannot leak into a cw-owned review.
-
-    ``--ignore-rules`` closes the separate execpolicy-rules channel so a local
-    rules file cannot change which commands the same cw-owned invocation may
-    run.
 
     ``--strict-config`` makes codex *reject* an unknown ``-c`` key instead of
     ignoring it, which is what makes the overrides below trustworthy rather
@@ -270,7 +259,6 @@ def _lean_profile_argv(*, reasoning_effort: str | None) -> list[str]:
     """
     argv = [
         "--ignore-user-config",
-        "--ignore-rules",
         "--strict-config",
         "-c",
         "project_doc_max_bytes=0",
@@ -314,16 +302,9 @@ def _enabled_tool_classes() -> list[str]:
     ]
 
 
-def _validate_runtime_profile() -> str:
-    """Return the supported runtime version or fail before codex is launched."""
-    cli_version = _capability.probe_codex_cli_version()
-    if cli_version != _SUPPORTED_CODEX_CLI_VERSION:
-        message = _UNSUPPORTED_CODEX_CLI_VERSION_ERROR.format(
-            expected=_SUPPORTED_CODEX_CLI_VERSION,
-            actual=cli_version or "unknown",
-        )
-        raise RuntimeError(message)
-    return cli_version
+def _validate_runtime_profile() -> str | None:
+    """Return the runtime CLI version for diagnostics without pinning it."""
+    return _capability.probe_codex_cli_version()
 
 
 def _persist_profile_diagnostics(

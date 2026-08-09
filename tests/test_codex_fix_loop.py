@@ -1643,7 +1643,7 @@ class TestFixArgvSharesTheLeanProfile:
         assert "project_doc_max_bytes=0" in overrides
         assert "model_reasoning_effort=high" in overrides
         assert "--ignore-user-config" in argv
-        assert "--ignore-rules" in argv
+        assert "--ignore-rules" not in argv
         assert "--strict-config" in argv
         # Fix invocations stay write-capable and document-free.
         assert argv[:4] == ["codex", "exec", "--sandbox", "workspace-write"]

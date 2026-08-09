@@ -4,6 +4,7 @@ profile argv block and its per-session diagnostics artifact (#1711)."""
 from __future__ import annotations
 
 import json
+from dataclasses import FrozenInstanceError
 
 import pytest
 
@@ -14,7 +15,7 @@ from cw.codex_review import (
     _DISABLED_FEATURES,
     _PROFILE_DIAGNOSTICS_FILENAME,
     _PROFILE_VERSION,
-    _SUPPORTED_CODEX_CLI_VERSION,
+    _CodexFeatureRecord,
     _InstructionSource,
     _lean_profile_argv,
     _LeanProfileDisposition,
@@ -151,6 +152,16 @@ def _disabled(argv: list[str]) -> list[str]:
 
 
 class TestDisabledFeatures:
+    def test_feature_records_are_keyword_only_frozen_and_allow_by_default(
+        self,
+    ) -> None:
+        feature = _CodexFeatureRecord(name="example", default_enabled=False)
+        assert feature.lean_profile_disposition is _LeanProfileDisposition.ALLOW
+        with pytest.raises(TypeError):
+            _CodexFeatureRecord("example", False)  # type: ignore[misc]
+        with pytest.raises(FrozenInstanceError):
+            feature.name = "changed"  # type: ignore[misc]
+
     def test_versioned_inventory_matches_captured_features_list(self) -> None:
         captured_names = tuple(
             line.split()[0] for line in _FEATURES_LIST_0_147_0.splitlines()
@@ -202,14 +213,14 @@ class TestDisabledFeatures:
 
 
 class TestLeanProfileArgv:
-    def test_profile_version_tracks_ignore_rules_addition(self) -> None:
-        assert _PROFILE_VERSION == 2
+    def test_profile_version_tracks_execpolicy_preservation(self) -> None:
+        assert _PROFILE_VERSION == 3
 
     @pytest.mark.parametrize("effort", [None, "medium", "high"])
     def test_unconditional_flags_always_present(self, effort: str | None) -> None:
         argv = _lean_profile_argv(reasoning_effort=effort)
         assert "--ignore-user-config" in argv
-        assert "--ignore-rules" in argv
+        assert "--ignore-rules" not in argv
         assert "--strict-config" in argv
         overrides = _config_override_values(argv)
         assert "project_doc_max_bytes=0" in overrides
@@ -318,23 +329,15 @@ class TestPersistProfileDiagnostics:
 
 
 class TestValidateRuntimeProfile:
-    def test_accepts_supported_version(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(
-            "cw.codex_review._profile._capability.probe_codex_cli_version",
-            lambda: _SUPPORTED_CODEX_CLI_VERSION,
-        )
-        assert _validate_runtime_profile() == _SUPPORTED_CODEX_CLI_VERSION
-
-    @pytest.mark.parametrize("version", [None, "0.146.0", "0.148.0"])
-    def test_rejects_unknown_or_mismatched_version(
+    @pytest.mark.parametrize("version", [None, "0.146.0", "0.147.0", "0.148.0"])
+    def test_records_runtime_version_without_enforcing_an_exact_match(
         self, monkeypatch: pytest.MonkeyPatch, version: str | None
     ) -> None:
         monkeypatch.setattr(
             "cw.codex_review._profile._capability.probe_codex_cli_version",
             lambda: version,
         )
-        with pytest.raises(RuntimeError, match="unsupported codex CLI version"):
-            _validate_runtime_profile()
+        assert _validate_runtime_profile() == version
 
 
 # ---------------------------------------------------------------------------

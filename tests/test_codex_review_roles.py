@@ -932,7 +932,7 @@ class TestBuildGenericCodexArgvLeanProfile:
             reasoning_effort="high",
         )
         assert "--ignore-user-config" in argv
-        assert "--ignore-rules" in argv
+        assert "--ignore-rules" not in argv
         assert "--strict-config" in argv
         overrides = _config_override_values(argv)
         assert "project_doc_max_bytes=0" in overrides
@@ -1119,7 +1119,7 @@ class TestRunCodexRolesProfileThreading:
             json.loads(path.read_text(encoding="utf-8"))["instruction_sources"] is None
         )
 
-    def test_unsupported_cli_fails_before_role_launch(
+    def test_floating_cli_version_is_recorded_without_blocking_role_launch(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
@@ -1127,14 +1127,15 @@ class TestRunCodexRolesProfileThreading:
             lambda: "0.148.0",
         )
         runner = _SequencedRunner([_ok_result()])
-        with pytest.raises(RuntimeError, match="unsupported codex CLI version"):
-            run_codex_roles(
-                runner=runner,
-                worktree=tmp_path,
-                roles=["Code Quality Reviewer"],
-                prompts_by_role={"Code Quality Reviewer": "p1"},
-                model=None,
-                wall_clock_budget_seconds=None,
-                session_id="s-unsupported-profile",
-            )
-        assert runner.calls == []
+        run_codex_roles(
+            runner=runner,
+            worktree=tmp_path,
+            roles=["Code Quality Reviewer"],
+            prompts_by_role={"Code Quality Reviewer": "p1"},
+            model=None,
+            wall_clock_budget_seconds=None,
+            session_id="s-floating-profile",
+        )
+        assert len(runner.calls) == 1
+        path = diagnostics_dir("s-floating-profile") / _PROFILE_DIAGNOSTICS_FILENAME
+        assert json.loads(path.read_text(encoding="utf-8"))["cli_version"] == "0.148.0"

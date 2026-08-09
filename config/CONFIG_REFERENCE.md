@@ -419,8 +419,9 @@ the following eleven ticket-defined surfaces via `--disable <feature>`
 `browser_use_external`, `browser_use_full_cdp_access`, `computer_use`,
 `personality`. A captured, complete `codex features list` contract test pins
 that inventory to its CLI version. Before any reviewer role launches, `cw`
-requires the runtime CLI version to be exactly 0.147.0; an unknown or different
-version fails closed until its feature inventory and profile are reviewed.
+records the floating runtime CLI version in profile diagnostics. Strict config
+validation, rather than an exact-version gate, rejects profile flags that the
+installed CLI does not recognize.
 
 **MCP servers are disabled separately**, via `-c mcp_servers={}` — *not* via
 `--disable`. MCP servers are not a member of codex's `features` list, so
@@ -428,10 +429,8 @@ version fails closed until its feature inventory and profile are reviewed.
 them; a direct config override is the only mechanism that can. This is why the
 flag is listed apart from the eleven above rather than folded in with them.
 
-Plus three whole-channel closures:
+Plus two whole-channel closures:
 - `--ignore-user-config` — drops `~/.codex/config.toml`.
-- `--ignore-rules` — drops the separate execpolicy-rules configuration
-  channel, preventing operator-local command rules from changing a run.
 - `-c project_doc_max_bytes=0` — stops codex inlining the repo's
   `AGENTS.md`/project doc. `cw` already inlines every instruction the reviewer
   should see; a second, unversioned instruction channel is the thing this
