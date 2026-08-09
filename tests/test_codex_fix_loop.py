@@ -1482,7 +1482,10 @@ class TestVerdictCommentDistinguishesHistories:
     def test_converged_clean_off_and_flaked_render_four_distinct_comments(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
-        histories = (
+        histories: tuple[
+            tuple[str, list[str], list[_FixBehavior] | None, bool, tuple[str, ...]],
+            ...,
+        ] = (
             (
                 "converged",
                 [_MF_DOC, _CLEAN_DOC],
