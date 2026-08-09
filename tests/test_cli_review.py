@@ -434,10 +434,13 @@ class TestReviewConsolidateCommand:
         assert len(verdict["agents_run"]) == 2
 
     def test_build_captured_diff_matches_parse_unified_diff(self) -> None:
-        file_diffs, file_line_text, _changed = _parse_unified_diff(_CONSOLIDATE_DIFF)
+        file_diffs, file_line_text, file_window_text, _changed = _parse_unified_diff(
+            _CONSOLIDATE_DIFF
+        )
         diff = _build_captured_diff(_CONSOLIDATE_DIFF)
         assert diff.file_diffs == file_diffs
         assert diff.file_line_text == file_line_text
+        assert diff.file_window_text == file_window_text
         assert diff.files == {f: sorted(lines) for f, lines in file_line_text.items()}
 
 

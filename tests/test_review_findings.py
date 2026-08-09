@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 import pytest
 from pydantic import ValidationError
 
+from cw.codex_review import _parse_unified_diff
 from cw.review_findings import (
     AcceptedFinding,
     CapturedDiff,
@@ -41,6 +42,138 @@ from tests.conftest import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+# -- #1738 fixtures: real #1729 diagnostics artifact -----------------------
+#
+# Redacted from the unrotated session diagnostics located at
+# /home/matthew/.local/share/cw/sessions/dc7cf73e/diagnostics/
+# cycle0-review-verdict.json (reviewed_sha b5c8119e... matches the real
+# commit b5c8119e "chore(#1729): mark Stage 2 implementation complete"),
+# per the fixtures-for-external-systems rule (real capture, not invented).
+# The diff text below is verbatim `git diff 494414f8^ 494414f8 --
+# tests/test_dispatch.py` output from this repo.
+
+_PR1729_TEST_DISPATCH_DIFF = '''diff --git a/tests/test_dispatch.py b/tests/test_dispatch.py
+index 21cc6981..043f6a49 100644
+--- a/tests/test_dispatch.py
++++ b/tests/test_dispatch.py
+@@ -9491,7 +9491,22 @@ class TestApplyStagedDecision:
+         that can carry a non-null blocker (schema.py's #777 exception --
+         'blocked'/'merge_gate_blocked' only) plus the _AWAITING_OPERATOR_REASON
+         substitute Rule 5 writes when blocker_reason is in
+-        OPERATOR_UNAVAILABLE_BLOCKER_REASONS.
++        OPERATOR_UNAVAILABLE_BLOCKER_REASONS, plus (#1729) the
++        "codex_must_fix_mechanically_rejected" substitute -- the one gate-class
++        park (#1714's _park_must_fix_mechanically_rejected) whose breadcrumbs
++        genuinely originate from a populated blocker dict rather than a
++        hardcoded breadcrumbs="" literal.
++
++        Membership in BREADCRUMB_ELIGIBLE_PAUSED_STATUSES does not by itself
++        cause a breadcrumb to be emitted: every producing _park_* helper must
++        independently stamp non-empty breadcrumbs content (the constant has no
++        runtime reader in src/ -- see the block comment above its definition
++        in routing.py). The exclusion assertions below prove the other
++        gate-class parks (review_health_gate, finalize_hold, signoff_gate,
++        approval_gate -- the last also covering scope_hint_gate, which reuses
++        approval_gate's paused_status literal) stay out of this set: they
++        hardcode breadcrumbs="", so adding their paused_status here would be
++        cosmetic, not a fix.
+         """
+         from cw.auto_dev_result import (
+             OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
+@@ -9502,14 +9517,18 @@ class TestApplyStagedDecision:
+             BREADCRUMB_ELIGIBLE_PAUSED_STATUSES,
+         )
+
++        must_fix_mechanically_rejected = "codex_must_fix_mechanically_rejected"
++
+         assert {
+             "blocked",
+             "merge_gate_blocked",
+             "awaiting_operator_availability",
++            must_fix_mechanically_rejected,
+         } == BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+         # every non-substitute member is drawn from STAGE_FAILURE_STATUSES
+         assert (
+-            BREADCRUMB_ELIGIBLE_PAUSED_STATUSES - {_AWAITING_OPERATOR_REASON}
++            BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
++            - {_AWAITING_OPERATOR_REASON, must_fix_mechanically_rejected}
+         ) <= STAGE_FAILURE_STATUSES
+         # scope_exceeded/forbidden_area excluded by design (#777: never carry a
+         # blocker), not oversight
+@@ -9520,6 +9539,18 @@ class TestApplyStagedDecision:
+         # set is non-empty
+         assert OPERATOR_UNAVAILABLE_BLOCKER_REASONS
+         assert _AWAITING_OPERATOR_REASON in BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
++        assert must_fix_mechanically_rejected in BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
++
++        # gate-class exclusion (#1729): each of these hardcodes breadcrumbs=""
++        # at its _park_* call site (routing.py), so membership here would not
++        # change what gets emitted -- their paused_status must stay excluded.
++        for gate_paused_status in (
++            "review_health_gate",
++            "finalize_hold",
++            "signoff_gate",
++            "approval_gate",
++        ):
++            assert gate_paused_status not in BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+
+     # -- review-health gate (#1702) --------------------------------------
+
+'''
+
+# The real Finding field values from the rejected #1729 SysAdmin Reviewer
+# finding, quoted verbatim from the diagnostics artifact above.
+_PR1729_REJECTED_FINDING_KWARGS: dict[str, object] = {
+    "severity": "SHOULD_FIX",
+    "file": "tests/test_dispatch.py",
+    "line_start": 9522,
+    "line_end": 9527,
+    "summary": "The pinning test does not pin the duplicated monitor allowlist",
+    "consequence": (
+        "This assertion validates only the Python constant. A future edit can "
+        "update `routing.py` without updating `_BLOCKER_REASON_PAUSED_STATUSES` "
+        "in `attention_monitor.sh`, and the test will remain green while the "
+        "attention stream silently omits blocker reasons—the same drift this "
+        "change repairs."
+    ),
+    "suggested_fix": (
+        "Add a synchronization assertion that reads and parses "
+        "`_BLOCKER_REASON_PAUSED_STATUSES` from `attention_monitor.sh` and "
+        "compares it with `BREADCRUMB_ELIGIBLE_PAUSED_STATUSES`, or generate "
+        "both representations from one source."
+    ),
+    "evidence": (
+        'assert {\n'
+        '            "blocked",\n'
+        '            "merge_gate_blocked",\n'
+        '            "awaiting_operator_availability",\n'
+        "            must_fix_mechanically_rejected,\n"
+        "        } == BREADCRUMB_ELIGIBLE_PAUSED_STATUSES"
+    ),
+    "confidence": "HIGH",
+    "escalation": None,
+}
+
+
+def _pr1729_captured_diff() -> CapturedDiff:
+    """Build the real #1729 ``CapturedDiff`` via the unmodified diff parser.
+
+    Uses :func:`cw.codex_review._parse_unified_diff` against the verbatim
+    diff fixture (NOT ``_make_diff``, which never generates context lines) —
+    the #1738 hunk-context-window tests need real context-line content.
+    """
+    file_diffs, file_line_text, file_window_text, _changed = _parse_unified_diff(
+        _PR1729_TEST_DISPATCH_DIFF
+    )
+    files = {f: sorted(lines) for f, lines in file_line_text.items()}
+    return CapturedDiff(
+        text=_PR1729_TEST_DISPATCH_DIFF,
+        files=files,
+        file_diffs=file_diffs,
+        file_line_text=file_line_text,
+        file_window_text=file_window_text,
+    )
 
 
 class TestSeverityAndDispositionLiterals:
@@ -552,6 +685,75 @@ class TestValidateReviewerDocument:
         assert not accepted
         assert rejected[0].reason == "evidence_not_in_diff"
 
+    # -- #1738: hunk-context evidence window (mode 4) --------------------
+
+    def test_hunk_context_window_evidence_retained(self) -> None:
+        # Real #1729 diagnostics artifact (see module fixtures above): a
+        # SHOULD_FIX finding whose evidence is a verbatim 6-line quote of the
+        # post-change source (lines 9522-9527), but only line 9526 of that
+        # span is a diff-added line -- the other five are unchanged context
+        # that _resolve_line_window's added-line-only window used to drop,
+        # rejecting a genuine, fully-verbatim quote as evidence_not_in_diff.
+        # MUST fail red pre-fix: CapturedDiff has no file_window_text field
+        # yet, and _evidence_in_claimed_lines still routes through
+        # _resolve_line_window/file_line_text (added-only), which snaps this
+        # claim's window down to (9521, 9526) and drops the tail of the quote.
+        diff = _pr1729_captured_diff()
+        finding = Finding(**_PR1729_REJECTED_FINDING_KWARGS)
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        assert not rejected
+        assert len(accepted) == 1
+        # The persisted anchor stays snapped to the genuine added line (9526),
+        # not the reviewer's raw claimed endpoints (9522/9527) -- both of
+        # which are context lines. _resolved_finding deliberately keeps
+        # calling the unchanged _resolve_line_window (added-only), not the
+        # new _resolve_hunk_window.
+        assert accepted[0].line_start == 9521
+        assert accepted[0].line_end == 9526
+
+    def test_hunk_context_window_unrelated_line_still_rejected(self) -> None:
+        # Negative control: widening the window to include context-line
+        # content must not turn it into "match anything nearby". Real diff,
+        # real content -- but neither variant's evidence is the true content
+        # of the claimed 9522-9527 window.
+        diff = _pr1729_captured_diff()
+
+        # (a) genuine CONTEXT-line content from elsewhere in the same file
+        # (line 9511, "from cw.auto_dev_result import ("), claimed at the
+        # #1729 finding's line range. Only visible in file_window_text at
+        # all post-fix -- proves the widened map is still bounded to the
+        # claimed window, not a whole-file search.
+        unrelated_context = _make_finding(
+            file="tests/test_dispatch.py",
+            line_start=9522,
+            line_end=9527,
+            evidence="from cw.auto_dev_result import (",
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(unrelated_context), diff
+        )
+        assert not accepted
+        assert rejected[0].reason == "evidence_not_in_diff"
+
+        # (b) evidence that only ever existed on a REMOVED line -- no
+        # new-file line number at all, so it can never be in file_window_text
+        # regardless of window width. line_start/line_end=9494 is itself a
+        # genuine added line (exact hit, no snapping), so this fails on the
+        # evidence check, not invalid_line_reference.
+        removed_line_evidence = _make_finding(
+            file="tests/test_dispatch.py",
+            line_start=9494,
+            line_end=9494,
+            evidence="OPERATOR_UNAVAILABLE_BLOCKER_REASONS.",
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(removed_line_evidence), diff
+        )
+        assert not accepted
+        assert rejected[0].reason == "evidence_not_in_diff"
+
 
 class TestUnanchoredFindings:
     """#1632: a finding whose file is not in the diff but does resolve to a
@@ -1005,6 +1207,66 @@ class TestConsolidateVerdict:
         assert verdict.rejected[0].reason == "unknown_file"
         assert len(verdict.accepted) == 2
 
+    def test_aggregate_hunk_context_and_negative_control_via_consolidate_verdict(
+        self,
+    ) -> None:
+        # #1738 integration, mirroring
+        # test_aggregate_near_line_and_multiline_via_consolidate_verdict's
+        # shape: four findings through the full consolidate_verdict pipeline
+        # combining (1) the real #1729 hunk-context finding (mode 4, this
+        # ticket's fix), (2) its negative control (must stay rejected even
+        # with the widened window), and (3) the two existing #1715 fixtures
+        # (near-line anchor, multiline-prefix normalization) -- unaffected by
+        # this fix, re-run here to prove the two widenings compose cleanly.
+        # MUST fail red pre-fix: (1) is rejected (evidence_not_in_diff)
+        # before the fix. Retained/raw: 2/4 pre-fix -> 3/4 post-fix.
+        pr1729_diff = _pr1729_captured_diff()
+        legacy_diff = _make_diff(
+            "def broken():",
+            "line one",
+            "line two",
+            files={"src/cw/foo.py": [10], "src/cw/bar.py": [20, 21]},
+        )
+        diff = CapturedDiff(
+            text=pr1729_diff.text + "\n" + legacy_diff.text,
+            files={**pr1729_diff.files, **legacy_diff.files},
+            file_diffs={**pr1729_diff.file_diffs, **legacy_diff.file_diffs},
+            file_line_text={
+                **pr1729_diff.file_line_text,
+                **legacy_diff.file_line_text,
+            },
+            file_window_text={
+                **pr1729_diff.file_window_text,
+                **legacy_diff.file_window_text,
+            },
+        )
+        findings = [
+            Finding(**_PR1729_REJECTED_FINDING_KWARGS),
+            _make_finding(
+                file="tests/test_dispatch.py",
+                line_start=9522,
+                line_end=9527,
+                evidence="from cw.auto_dev_result import (",
+            ),
+            _make_finding(
+                file="src/cw/foo.py",
+                line_start=12,
+                line_end=12,
+                evidence="def broken():",
+            ),
+            _make_finding(
+                file="src/cw/bar.py",
+                line_start=None,
+                line_end=None,
+                evidence="line one\nline two",
+            ),
+        ]
+        doc = _make_reviewer_doc(*findings, reviewer_role="Reviewer A")
+        verdict = consolidate_verdict([doc], diff, "deadbeef")
+        assert len(verdict.accepted) == 3
+        assert len(verdict.rejected) == 1
+        assert verdict.rejected[0].reason == "evidence_not_in_diff"
+
 
 class TestConsolidateVerdictFailedReviewers:
     def test_default_no_failed_reviewers(self) -> None:
@@ -1340,6 +1602,9 @@ class TestCapturedDiffStructure:
         reloaded = CapturedDiff.model_validate_json(diff.model_dump_json())
         assert reloaded.file_line_text == diff.file_line_text
         assert reloaded.file_diffs == diff.file_diffs
+        # #1738: file_window_text (the hunk-context superset of
+        # file_line_text) round-trips the same way.
+        assert reloaded.file_window_text == diff.file_window_text
 
     def test_files_matches_file_line_text_keys(self) -> None:
         # The _make_diff invariant the production _capture_diff also upholds:
