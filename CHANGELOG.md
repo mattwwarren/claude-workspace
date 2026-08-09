@@ -52,7 +52,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   by a crash or SIGKILL, which no join can reach. The boot pass keys its
   dev-queue lookup on `(ticket_id, client)`, matching
   `_park_running_task_blocked_on_user`: ticket numbering is per-client, so a
-  ticket 21 in two clients would otherwise collide.
+  ticket 21 in two clients would otherwise collide. It additionally requires
+  the matched row's recorded `session_id` to *be* the orphaned session, so a
+  zombie ACTIVE record from an earlier crashed boot cannot park the healthy
+  review that has since claimed the same ticket.
 
 - **Gate parks that do populate breadcrumbs are no longer filtered out of the
   attention stream (#1729):** `BREADCRUMB_ELIGIBLE_PAUSED_STATUSES` omitted
