@@ -573,10 +573,12 @@ def _hide_optional_binaries(
     forced_present = set(marker.args) if marker is not None else set()
     real_which = shutil.which
 
-    def _guarded_which(cmd: str, *args: object, **kwargs: object) -> str | None:
+    def _guarded_which(
+        cmd: str, mode: int = os.F_OK | os.X_OK, path: str | None = None
+    ) -> str | None:
         if cmd in _OPTIONAL_BINARY_DENYLIST:
             return f"/usr/bin/{cmd}" if cmd in forced_present else None
-        return real_which(cmd, *args, **kwargs)  # type: ignore[arg-type]
+        return real_which(cmd, mode, path)
 
     monkeypatch.setattr("shutil.which", _guarded_which)
 

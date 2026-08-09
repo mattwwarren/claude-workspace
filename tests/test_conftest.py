@@ -27,6 +27,7 @@ from cw.models import (
     SessionStatus,
 )
 from tests.conftest import (
+    _OPTIONAL_BINARY_DENYLIST,
     _make_daemon_session,
     _make_ticket_task,
     _seed_daemon_session,
@@ -186,23 +187,19 @@ class TestOptionalBinaryAbsenceGuard:
     (not blanket), and that ``@pytest.mark.integration`` exempts the guard.
     """
 
+    @pytest.mark.parametrize("binary", sorted(_OPTIONAL_BINARY_DENYLIST))
     def test_denylisted_binary_absent_by_default(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, binary: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A genuinely-present ``codex`` on PATH still resolves to None."""
-        bin_dir = _make_fake_binary(tmp_path, "codex")
+        """A genuinely-present denylisted binary on PATH still resolves to None.
+
+        Parametrized over the whole denylist so adding a third entry gets
+        this coverage for free instead of a copy-pasted test method.
+        """
+        bin_dir = _make_fake_binary(tmp_path, binary)
         monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
 
-        assert shutil.which("codex") is None
-
-    def test_opencode_also_absent_by_default(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Pins the denylist's second member so dropping it silently is caught."""
-        bin_dir = _make_fake_binary(tmp_path, "opencode")
-        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-
-        assert shutil.which("opencode") is None
+        assert shutil.which(binary) is None
 
     @pytest.mark.binary_on_path("codex")
     def test_binary_on_path_marker_forces_present(self) -> None:
