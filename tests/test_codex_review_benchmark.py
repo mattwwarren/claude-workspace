@@ -9,6 +9,7 @@ comparison, not codex itself.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ from cw.codex_review._benchmark import (
     run_reasoning_effort_benchmark,
 )
 from cw.codex_runner import CodexRunResult
+from cw.config import diagnostics_dir
 from tests._codex_review_helpers import (
     _config_override_values,
     _doc_json,
@@ -114,6 +116,12 @@ class TestRunReasoningEffortBenchmark:
         assert efforts.count("high") == len(_ROLES)
         assert comparison.medium.effort == "medium"
         assert comparison.high.effort == "high"
+
+        diagnostics = diagnostics_dir("s-benchmark") / "codex-review-profile.json"
+        assert (
+            json.loads(diagnostics.read_text(encoding="utf-8"))["instruction_sources"]
+            is None
+        )
 
     def test_halves_are_distinguishable(self, tmp_path: Path) -> None:
         comparison = _run(_EffortAwareRunner(), tmp_path)

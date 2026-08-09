@@ -38,11 +38,173 @@ _PROFILE_VERSION = 2
 
 _PROFILE_DIAGNOSTICS_FILENAME = "codex-review-profile.json"
 
-# Complete captured inventory for the CLI version against which this profile
+_SUPPORTED_CODEX_CLI_VERSION = "0.147.0"
+_UNSUPPORTED_CODEX_CLI_VERSION_ERROR = (
+    "unsupported codex CLI version for lean reviewer profile: expected {expected}, "
+    "got {actual}"
+)
+
+# Complete 104-feature inventory for the CLI version against which this profile
 # was verified. The version is part of the name deliberately: a newer Codex
 # feature list must be reviewed and added as a new inventory instead of being
 # silently treated as covered by this one.
 _CODEX_FEATURES_0_147_0: tuple[str, ...] = (
+    "apply_patch_freeform",
+    "apply_patch_streaming_events",
+    "apps",
+    "apps_mcp_path_override",
+    "artifact",
+    "auth_elicitation",
+    "browser_use",
+    "browser_use_external",
+    "browser_use_full_cdp_access",
+    "chronicle",
+    "code_mode",
+    "code_mode_buffered_exec",
+    "code_mode_host",
+    "code_mode_only",
+    "codex_git_commit",
+    "collaboration_modes",
+    "computer_use",
+    "concurrent_reasoning_summaries",
+    "current_time_reminder",
+    "default_mode_request_user_input",
+    "deferred_executor",
+    "deferred_tool_world_state",
+    "elevated_windows_sandbox",
+    "enable_fanout",
+    "enable_mcp_apps",
+    "enable_request_compression",
+    "exec_permission_approvals",
+    "executed_tool_call_metadata",
+    "executor_capability_discovery",
+    "experimental_windows_sandbox",
+    "external_agent_memory_import",
+    "external_migration",
+    "fast_mode",
+    "goals",
+    "guardian_approval",
+    "guardianv2",
+    "hooks",
+    "image_detail_original",
+    "image_generation",
+    "image_resize_notice",
+    "in_app_browser",
+    "in_app_updates",
+    "item_ids",
+    "js_repl",
+    "js_repl_tools_only",
+    "local_thread_store_compression",
+    "mcp_2026_07_28",
+    "memories",
+    "mentions_v2",
+    "multi_agent",
+    "multi_agent_mode",
+    "multi_agent_v2",
+    "network_proxy",
+    "non_prefixed_mcp_tool_names",
+    "personality",
+    "plugin_hooks",
+    "plugin_sharing",
+    "plugins",
+    "prevent_idle_sleep",
+    "realtime_conversation",
+    "recommended_plugins",
+    "remote_compaction_v2",
+    "remote_control",
+    "remote_models",
+    "remote_plugin",
+    "request_permissions_tool",
+    "request_rule",
+    "resize_all_images",
+    "respect_system_proxy",
+    "responses_websockets",
+    "responses_websockets_v2",
+    "rollout_budget",
+    "runtime_metrics",
+    "search_tool",
+    "secret_auth_storage",
+    "shell_snapshot",
+    "shell_tool",
+    "shell_zsh_fork",
+    "skill_env_var_dependency_prompt",
+    "skill_mcp_dependency_install",
+    "skill_search",
+    "sqlite",
+    "standalone_web_search",
+    "steer",
+    "terminal_resize_reflow",
+    "terminal_visualization_instructions",
+    "token_budget",
+    "tool_call_mcp_elicitation",
+    "tool_search",
+    "tool_search_always_defer_mcp_tools",
+    "tool_suggest",
+    "tui_app_server",
+    "unavailable_dummy_tools",
+    "undo",
+    "unified_exec",
+    "unified_exec_zsh_fork",
+    "use_agent_identity",
+    "use_legacy_landlock",
+    "use_linux_sandbox_bwrap",
+    "view_image",
+    "web_search_cached",
+    "web_search_request",
+    "workspace_dependencies",
+    "workspace_owner_usage_nudge",
+)
+
+# Features reported enabled by default in the same captured output. User config
+# is ignored, so this set minus the explicit denylist is the truthful runtime
+# value for ``enabled_tool_classes``.
+_CODEX_DEFAULT_ENABLED_FEATURES_0_147_0: frozenset[str] = frozenset(
+    {
+        "apps",
+        "auth_elicitation",
+        "browser_use",
+        "browser_use_external",
+        "browser_use_full_cdp_access",
+        "code_mode_host",
+        "collaboration_modes",
+        "computer_use",
+        "enable_request_compression",
+        "fast_mode",
+        "goals",
+        "guardian_approval",
+        "hooks",
+        "image_generation",
+        "in_app_browser",
+        "in_app_updates",
+        "item_ids",
+        "mentions_v2",
+        "multi_agent",
+        "personality",
+        "plugin_sharing",
+        "plugins",
+        "remote_compaction_v2",
+        "remote_plugin",
+        "resize_all_images",
+        "shell_snapshot",
+        "shell_tool",
+        "skill_mcp_dependency_install",
+        "skill_search",
+        "sqlite",
+        "steer",
+        "terminal_resize_reflow",
+        "tool_call_mcp_elicitation",
+        "tool_search_always_defer_mcp_tools",
+        "tool_suggest",
+        "tui_app_server",
+        "unified_exec",
+        "view_image",
+        "workspace_dependencies",
+    }
+)
+
+# The ticket intentionally denies these eleven optional surfaces. This is a
+# denylist, not the complete Codex feature inventory above.
+_LEAN_PROFILE_FEATURE_DENYLIST: tuple[str, ...] = (
     "hooks",
     "memories",
     "multi_agent",
@@ -55,16 +217,7 @@ _CODEX_FEATURES_0_147_0: tuple[str, ...] = (
     "computer_use",
     "personality",
 )
-
-# A lean reviewer needs no optional Codex feature. Keep the allowlist explicit
-# so both the disable argv and diagnostics are honest complements of the
-# versioned inventory rather than two names for the same tuple.
-_LEAN_PROFILE_FEATURE_ALLOWLIST: frozenset[str] = frozenset()
-_DISABLED_FEATURES: tuple[str, ...] = tuple(
-    feature
-    for feature in _CODEX_FEATURES_0_147_0
-    if feature not in _LEAN_PROFILE_FEATURE_ALLOWLIST
-)
+_DISABLED_FEATURES = _LEAN_PROFILE_FEATURE_DENYLIST
 
 
 def _lean_profile_argv(*, reasoning_effort: str | None) -> list[str]:
@@ -125,19 +278,37 @@ class _ProfileDiagnostics(BaseModel):
     reasoning_effort: str | None
     effective_model: str | None
     cli_version: str | None
-    # Versioned-inventory feature classes allowed by this profile. Empty by
-    # construction today — see _LEAN_PROFILE_FEATURE_ALLOWLIST.
+    # Features reported enabled by default by the supported CLI, excluding the
+    # explicit lean-profile denylist.
     enabled_tool_classes: list[str]
     # Which prompt-instruction channels actually contributed content, unioned
-    # across every role in the pass. Vocabulary: role_spec,
+    # across every role in the pass. None means the caller did not compute
+    # provenance; [] means it computed that no channel fired. Vocabulary: role_spec,
     # output_format_supplement, ticket_context, approved_plan, project_rubrics,
     # repo_policy, lint_grounding, sensitive_files.
-    instruction_sources: list[_context._InstructionSource]
+    instruction_sources: list[_context._InstructionSource] | None
 
 
 def _enabled_tool_classes() -> list[str]:
-    """Return the versioned-inventory complement of the disable argv."""
-    return [name for name in _CODEX_FEATURES_0_147_0 if name not in _DISABLED_FEATURES]
+    """Return supported-CLI defaults left enabled after the denylist."""
+    return [
+        name
+        for name in _CODEX_FEATURES_0_147_0
+        if name in _CODEX_DEFAULT_ENABLED_FEATURES_0_147_0
+        and name not in _DISABLED_FEATURES
+    ]
+
+
+def _validate_runtime_profile() -> str:
+    """Return the supported runtime version or fail before codex is launched."""
+    cli_version = _capability.probe_codex_cli_version()
+    if cli_version != _SUPPORTED_CODEX_CLI_VERSION:
+        message = _UNSUPPORTED_CODEX_CLI_VERSION_ERROR.format(
+            expected=_SUPPORTED_CODEX_CLI_VERSION,
+            actual=cli_version or "unknown",
+        )
+        raise RuntimeError(message)
+    return cli_version
 
 
 def _persist_profile_diagnostics(
@@ -145,7 +316,8 @@ def _persist_profile_diagnostics(
     session_id: str,
     model: str | None,
     reasoning_effort: str | None,
-    instruction_sources: list[_context._InstructionSource],
+    cli_version: str | None,
+    instruction_sources: list[_context._InstructionSource] | None,
 ) -> None:
     """Record this pass's profile under *session_id*'s diagnostics dir.
 
@@ -158,9 +330,11 @@ def _persist_profile_diagnostics(
         profile_version=_PROFILE_VERSION,
         reasoning_effort=reasoning_effort,
         effective_model=model,
-        cli_version=_capability.probe_codex_cli_version(),
+        cli_version=cli_version,
         enabled_tool_classes=_enabled_tool_classes(),
-        instruction_sources=list(instruction_sources),
+        instruction_sources=(
+            None if instruction_sources is None else list(instruction_sources)
+        ),
     )
     _log.info(
         "codex_review_profile: session=%s model=%s reasoning_effort=%s sources=%s",

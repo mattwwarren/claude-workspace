@@ -1037,13 +1037,15 @@ class TestRunCodexRolesProfileThreading:
             session_id: str,
             model: str | None,
             reasoning_effort: str | None,
-            instruction_sources: list[_InstructionSource],
+            cli_version: str | None,
+            instruction_sources: list[_InstructionSource] | None,
         ) -> None:
             seen.append(
                 {
                     "session_id": session_id,
                     "model": model,
                     "reasoning_effort": reasoning_effort,
+                    "cli_version": cli_version,
                     "instruction_sources": instruction_sources,
                 }
             )
@@ -1070,6 +1072,7 @@ class TestRunCodexRolesProfileThreading:
                 "session_id": "s-profile-diag",
                 "model": "gpt-5-codex",
                 "reasoning_effort": "high",
+                "cli_version": "0.147.0",
                 "instruction_sources": ["role_spec", "approved_plan"],
             }
         ]
@@ -1092,7 +1095,9 @@ class TestRunCodexRolesProfileThreading:
         assert data["reasoning_effort"] == "high"
         assert data["instruction_sources"] == ["ticket_context"]
 
-    def test_defaults_omit_effort_and_sources(self, tmp_path: Path) -> None:
+    def test_defaults_omit_effort_and_mark_sources_unknown(
+        self, tmp_path: Path
+    ) -> None:
         runner = _SequencedRunner([_ok_result()])
         run_codex_roles(
             runner=runner,
@@ -1110,4 +1115,26 @@ class TestRunCodexRolesProfileThreading:
             for o in _config_override_values(argv)
         )
         path = diagnostics_dir("s-profile-defaults") / _PROFILE_DIAGNOSTICS_FILENAME
-        assert json.loads(path.read_text(encoding="utf-8"))["instruction_sources"] == []
+        assert (
+            json.loads(path.read_text(encoding="utf-8"))["instruction_sources"] is None
+        )
+
+    def test_unsupported_cli_fails_before_role_launch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.codex_review._profile._capability.probe_codex_cli_version",
+            lambda: "0.148.0",
+        )
+        runner = _SequencedRunner([_ok_result()])
+        with pytest.raises(RuntimeError, match="unsupported codex CLI version"):
+            run_codex_roles(
+                runner=runner,
+                worktree=tmp_path,
+                roles=["Code Quality Reviewer"],
+                prompts_by_role={"Code Quality Reviewer": "p1"},
+                model=None,
+                wall_clock_budget_seconds=None,
+                session_id="s-unsupported-profile",
+            )
+        assert runner.calls == []

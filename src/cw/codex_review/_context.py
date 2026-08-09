@@ -614,16 +614,7 @@ class _InstructionSource(StrEnum):
     SENSITIVE_FILES = "sensitive_files"
 
 
-_INSTRUCTION_CHANNEL_ORDER: tuple[_InstructionSource, ...] = (
-    _InstructionSource.ROLE_SPEC,
-    _InstructionSource.OUTPUT_FORMAT_SUPPLEMENT,
-    _InstructionSource.TICKET_CONTEXT,
-    _InstructionSource.APPROVED_PLAN,
-    _InstructionSource.PROJECT_RUBRICS,
-    _InstructionSource.REPO_POLICY,
-    _InstructionSource.LINT_GROUNDING,
-    _InstructionSource.SENSITIVE_FILES,
-)
+_INSTRUCTION_CHANNEL_ORDER: tuple[_InstructionSource, ...] = tuple(_InstructionSource)
 
 
 def _fired_instruction_channels(

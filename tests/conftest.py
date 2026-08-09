@@ -538,7 +538,7 @@ def _mock_codex_capability_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "cw.codex_review._capability._run_codex_version",
         lambda _timeout_seconds: subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="codex-cli 0.144.5\n", stderr=""
+            args=[], returncode=0, stdout="codex-cli 0.147.0\n", stderr=""
         ),
     )
 

@@ -390,7 +390,7 @@ class TestCapabilityCache:
         ("which_value", "version_stdout"),
         [
             ("/snap/bin/codex", "codex-cli 0.144.5\n"),  # install_type changed
-            ("/usr/bin/codex", "codex-cli 0.147.0\n"),  # cli_version changed
+            ("/usr/bin/codex", "codex-cli 0.148.0\n"),  # cli_version changed
         ],
     )
     def test_fingerprint_change_invalidates_cache(

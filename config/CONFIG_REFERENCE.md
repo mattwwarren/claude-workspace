@@ -410,16 +410,17 @@ clients:
 
 **What the profile disables**
 
-The complete optional-feature inventory captured from codex-cli 0.147.0 is
-versioned in code. The lean profile's explicit allowlist is empty, so it
-disables the inventory complement — currently all eleven surfaces — via
-`--disable <feature>` (documented sugar for `-c features.<name>=false`):
+The complete 104-feature inventory and default-enabled set captured from
+codex-cli 0.147.0 are versioned in code. The lean profile explicitly denies
+the following eleven ticket-defined surfaces via `--disable <feature>`
+(documented sugar for `-c features.<name>=false`):
 `hooks`, `memories`, `multi_agent`,
 `multi_agent_v2`, `plugins`, `plugin_sharing`, `browser_use`,
 `browser_use_external`, `browser_use_full_cdp_access`, `computer_use`,
-`personality`. A captured `codex features list` contract test pins that
-inventory to its CLI version so a later inventory change cannot silently move
-with the disable list.
+`personality`. A captured, complete `codex features list` contract test pins
+that inventory to its CLI version. Before any reviewer role launches, `cw`
+requires the runtime CLI version to be exactly 0.147.0; an unknown or different
+version fails closed until its feature inventory and profile are reviewed.
 
 **MCP servers are disabled separately**, via `-c mcp_servers={}` — *not* via
 `--disable`. MCP servers are not a member of codex's `features` list, so
@@ -459,17 +460,18 @@ profile did *this* review actually run under":
 - `reasoning_effort` — the resolved value (`null` if unpinned).
 - `effective_model` — the model `cw` resolved and passed on the argv. No codex
   event carries a model field, so this is `cw`'s answer, not codex's.
-- `cli_version` — parsed `codex --version` (`null` if unanswerable).
-- `enabled_tool_classes` — candidate tool classes the profile left enabled.
-  Empty today because the explicit allowlist is empty; it is derived from the
-  complement against the codex-cli 0.147.0 feature inventory.
+- `cli_version` — parsed `codex --version`; the review only launches when this
+  matches the supported profile version.
+- `enabled_tool_classes` — features reported enabled by default by the
+  supported CLI, excluding the eleven explicit profile denials.
 - `instruction_sources` — which prompt-instruction channels actually
   contributed content, unioned across every role in the pass, in a fixed
   canonical order. Vocabulary: `role_spec`, `output_format_supplement`,
   `ticket_context`, `approved_plan`, `project_rubrics`, `repo_policy`,
   `lint_grounding`, `sensitive_files`. A channel appears only when its content
   was non-empty — a zero-byte `.cw/plan.md` does not put `approved_plan` in the
-  list.
+  list. `null` means the caller did not compute source provenance; `[]` is
+  reserved for a computed result in which no channel contributed content.
 
 Writing this artifact never blocks a review: a failed write is logged at
 WARNING and swallowed, matching the capability-probe diagnostics' contract.
