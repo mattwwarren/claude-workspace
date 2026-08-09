@@ -21,14 +21,43 @@ _AGENT_TEAM_GUIDANCE = (
     "- Feed review findings back as follow-up work items."
 )
 
+_DEFAULT_QUALITY_GATES = "ruff check, mypy, pytest"
+
+_IMPL_PROMPT_BASE = (
+    "You are in the IMPLEMENTATION session. "
+    "Write code, implement features, and fix bugs. "
+    "If you notice quality issues (linting, types, duplication, docs), "
+    "note them for later cleanup but stay focused on implementation. "
+)
+
+_DEBT_PROMPT_BASE = (
+    "You are in the TECH DEBT session. "
+    "Fix linting violations, type errors, duplication, and documentation gaps. "
+    "Do not implement new features or change behavior. "
+    "Keep changes minimal and focused on quality. "
+)
+
+
+def _quality_gate_sentence(commands: str) -> str:
+    """Render the gate sentence naming *commands* as the gate list."""
+    return (
+        "Before finishing any unit of work, run quality gates "
+        f"({commands}) and fix all issues."
+    )
+
+
+# Purposes whose prompt carries a quality-gate sentence, keyed to the base text
+# the sentence is appended to. "idea" is absent: it has no gate sentence.
+_GATED_PROMPT_BASES: dict[str, str] = {
+    "impl": _IMPL_PROMPT_BASE,
+    "debt": _DEBT_PROMPT_BASE,
+}
+
 PURPOSE_PROMPTS: dict[str, str] = {
     "impl": (
-        "You are in the IMPLEMENTATION session. "
-        "Write code, implement features, and fix bugs. "
-        "If you notice quality issues (linting, types, duplication, docs), "
-        "note them for later cleanup but stay focused on implementation. "
-        "Before finishing any unit of work, run quality gates "
-        "(ruff check, mypy, pytest) and fix all issues." + _AGENT_TEAM_GUIDANCE
+        _IMPL_PROMPT_BASE
+        + _quality_gate_sentence(_DEFAULT_QUALITY_GATES)
+        + _AGENT_TEAM_GUIDANCE
     ),
     "idea": (
         "You are in the IDEA session. "
@@ -41,12 +70,9 @@ PURPOSE_PROMPTS: dict[str, str] = {
         + _AGENT_TEAM_GUIDANCE
     ),
     "debt": (
-        "You are in the TECH DEBT session. "
-        "Fix linting violations, type errors, duplication, and documentation gaps. "
-        "Do not implement new features or change behavior. "
-        "Keep changes minimal and focused on quality. "
-        "Before finishing any unit of work, run quality gates "
-        "(ruff check, mypy, pytest) and fix all issues." + _AGENT_TEAM_GUIDANCE
+        _DEBT_PROMPT_BASE
+        + _quality_gate_sentence(_DEFAULT_QUALITY_GATES)
+        + _AGENT_TEAM_GUIDANCE
     ),
 }
 
@@ -77,6 +103,7 @@ def get_purpose_prompt(
     *,
     client_name: str | None = None,
     workspace_path: str | None = None,
+    quality_gate_commands: str | None = None,
 ) -> str | None:
     """Resolve the system prompt for a given purpose.
 
@@ -87,6 +114,16 @@ def get_purpose_prompt(
     prompt is prefixed with a ``[cw identity]`` block so the LLM knows
     which client/purpose it belongs to.
 
+    *quality_gate_commands* replaces the gate list named in the ``impl`` and
+    ``debt`` prompts, for clients whose stack is not the Python default:
+
+    - ``None`` (default): keep the default ``ruff check, mypy, pytest`` triad.
+    - ``""``: omit the gate sentence entirely.
+    - any other string: substitute it verbatim into the gate sentence.
+
+    It has no effect on ``idea`` (no gate sentence) and is superseded by a
+    whole-prompt entry in *client_overrides*.
+
     Raises ValueError if only one of *client_name* / *workspace_path*
     is provided.
     """
@@ -96,6 +133,13 @@ def get_purpose_prompt(
 
     if client_overrides and purpose in client_overrides:
         prompt: str | None = client_overrides[purpose]
+    elif purpose in _GATED_PROMPT_BASES and quality_gate_commands is not None:
+        gate_sentence = (
+            _quality_gate_sentence(quality_gate_commands)
+            if quality_gate_commands
+            else ""
+        )
+        prompt = _GATED_PROMPT_BASES[purpose] + gate_sentence + _AGENT_TEAM_GUIDANCE
     else:
         prompt = PURPOSE_PROMPTS.get(purpose)
 
