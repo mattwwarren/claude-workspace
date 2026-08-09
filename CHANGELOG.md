@@ -73,6 +73,60 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   constants instead of hand-written string literals, closing the transcription
   gap that produced this bug.
 
+- **A valid, fully-verbatim evidence quote spanning hunk context lines was
+  wrongly rejected as `evidence_not_in_diff` (#1738):** the real #1729
+  diagnostics artifact still on disk showed a `SysAdmin Reviewer` SHOULD_FIX
+  finding on `tests/test_dispatch.py` claiming lines 9522-9527 rejected, even
+  though its 6-line evidence quote is a genuine, byte-exact copy of the
+  post-change source at those exact lines — a fourth mechanical rejection
+  mode distinct from #1715's near-line-anchor/marker-normalization fixes and
+  from the ticket's own (unverifiable, likely fabricated) "no quotable
+  evidence span" hypothesis. Two compounding bugs: `_parse_unified_diff`
+  only ever recorded content for `+`-prefixed added lines, so the 5 of 6
+  claimed lines that were unchanged context had no entry at all in the
+  line-content map; and `_resolve_line_window` snapped *every* claimed
+  endpoint onto the nearest *added* line even when the endpoint was already
+  exactly correct, silently shrinking `(9522, 9527)` down to `(9521, 9526)`
+  and discarding the tail of the quote. `CapturedDiff` gains a second map,
+  `file_window_text`, alongside (not replacing) `file_line_text` — it also
+  captures context-line content at its real new-file line number (a removed
+  line still has no new-file position and stays excluded). A new sibling
+  resolver pair, `_nearest_hunk_line`/`_resolve_hunk_window`, mirrors the
+  existing `_nearest_added_line`/`_resolve_line_window` but draws candidates
+  from `file_window_text`; `_evidence_in_claimed_lines`'s windowed branch
+  routes through the new pair, while `_line_reference_valid`'s
+  anchor-*validity* gate and `_resolved_finding`'s persisted-anchor snap both
+  keep calling the original added-line-only functions, unchanged — an
+  accepted finding's `line_start`/`line_end` still snap onto the nearest
+  genuine added line (`9521`/`9526` for this fixture), not the reviewer's raw
+  claimed endpoints, so downstream consumers keep pointing at real changed
+  source. In a representative before/after aggregate check combining this
+  fixture, its negative control, and the two existing #1715 fixtures, 1 of 4
+  findings that was incorrectly rejected pre-fix is now correctly retained
+  post-fix (retained/raw: 2/4 → 3/4).
+
+  Mutation-proof seam check (#1628 convention): with the fix applied,
+  `test_hunk_context_window_evidence_retained` passes —
+
+  ```
+  tests/test_review_findings.py::TestValidateReviewerDocument::test_hunk_context_window_evidence_retained PASSED [100%]
+  1 passed in 0.12s
+  ```
+
+  Reverting only `_nearest_hunk_line`/`_resolve_hunk_window` and their
+  `_evidence_in_claimed_lines` wiring (test file untouched) reproduces the
+  original rejection —
+
+  ```
+  E       ValueError: not enough values to unpack (expected 4, got 3)
+  tests/test_review_findings.py::TestValidateReviewerDocument::test_hunk_context_window_evidence_retained FAILED [100%]
+  1 failed in 0.22s
+  ```
+
+  (the `_parse_unified_diff` 3-tuple→4-tuple signature change is itself part
+  of the fix, so the pre-fix run fails at the unpack rather than at the
+  evidence-containment assertion — both are the same underlying revert.)
+
 ## [1.29.0] - 2026-08-08
 
 ### Fixed
