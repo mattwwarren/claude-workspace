@@ -26,6 +26,7 @@ from cw.codex_review._capability import (
 )
 from cw.executor_diagnostics import diagnostics_bundle_dir
 from cw.review_findings import (
+    AgentSpecSource,
     AgentSpecStatus,
     ReviewerRunFailure,
     consolidate_verdict,
@@ -912,11 +913,14 @@ _RECOVERED_NOTE = (
 
 
 def _spec_status(
-    source: str, empty: bool, empty_repo_file: bool, role: str = "Code Quality Reviewer"
+    source: AgentSpecSource,
+    empty: bool,
+    empty_repo_file: bool,
+    role: str = "Code Quality Reviewer",
 ) -> AgentSpecStatus:
     return AgentSpecStatus(
         role=role,
-        source=source,  # type: ignore[arg-type]
+        source=source,
         empty=empty,
         empty_repo_file=empty_repo_file,
     )
