@@ -61,6 +61,20 @@ class ClientConfig(BaseModel):
     # Default ``None`` inherits the user's logged-in default model.
     # See issue #248.
     worker_model: str | None = None
+    # Per-client override for the gate command(s) named in the impl/debt session
+    # prompts (default: "ruff check, mypy, pytest"). Opaque, unvalidated string,
+    # consumed only by get_purpose_prompt(). None = inherit the default triad;
+    # "" = omit the gate sentence entirely.
+    #
+    # There are three unrelated "quality gates" concepts in this codebase —
+    # if you are the fourth, read this first:
+    #   1. project-config.yaml `quality_gates:` — dead, deleted by #1616,
+    #      read by nothing.
+    #   2. clients.yaml `quality_gate_commands` (this field) — feeds the
+    #      worker session prompt.
+    #   3. CLAUDE.md "## Quality Gates" section — #1744, feeds codex-review
+    #      lint grounding.
+    quality_gate_commands: str | None = None
     # RFC 0011 S1 D-S2b — override for the GitHub login used in counterparty
     # (self|external) and self-identity resolution (see
     # cw.operator_identity.resolve_operator_login). Opaque string — no

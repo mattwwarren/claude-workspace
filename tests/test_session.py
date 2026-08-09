@@ -84,14 +84,20 @@ class TestIsNativeSurfaceRef:
 
 class TestStartSession:
     def _write_clients_file(
-        self, tmp_config_dir: Path, sample_client: ClientConfig
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        quality_gate_commands: str | None = None,
     ) -> None:
         clients_file = tmp_config_dir / ".config" / "cw" / "clients.yaml"
-        clients_file.write_text(
+        body = (
             f"clients:\n"
             f"  test-client:\n"
             f"    workspace_path: {sample_client.workspace_path}\n"
         )
+        if quality_gate_commands is not None:
+            body += f'    quality_gate_commands: "{quality_gate_commands}"\n'
+        clients_file.write_text(body)
 
     def test_new_session_creates_and_saves(
         self,
@@ -128,6 +134,36 @@ class TestStartSession:
         start_session("test-client", "impl", native_daemon=mock_native_daemon)
 
         assert len(mock_native_daemon.spawn_calls) == 1
+
+    def test_start_session_threads_quality_gate_commands(
+        self,
+        tmp_config_dir: Path,
+        sample_client: ClientConfig,
+        mock_native_daemon: FakeNativeDaemonClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._write_clients_file(
+            tmp_config_dir=tmp_config_dir,
+            sample_client=sample_client,
+            quality_gate_commands="npm run lint && npm test",
+        )
+        monkeypatch.setattr(target="cw.session._write_hook_context", name=_noop)
+        monkeypatch.setattr(target="cw.session._attach_session", name=_noop)
+
+        start_session(
+            client_name="test-client",
+            purpose="impl",
+            native_daemon=mock_native_daemon,
+        )
+
+        _cwd, prompt = mock_native_daemon.spawn_calls[0]
+        assert "(npm run lint && npm test)" in prompt
+        # The default Python triad must be gone from the gate sentence. A bare
+        # "pytest" check is unusable here: pytest's own tmp_path lands in the
+        # [cw identity] block (".../pytest-of-<user>/...").
+        assert "(ruff check, mypy, pytest)" not in prompt
+        assert "ruff" not in prompt
+        assert "mypy" not in prompt
 
     def test_new_session_surface_ref_is_short_id(
         self,

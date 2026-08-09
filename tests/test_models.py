@@ -291,6 +291,26 @@ class TestClientConfig:
         restored = ClientConfig.model_validate(data)
         assert restored.worker_model == "claude-haiku-4-5-20251001"
 
+    def test_quality_gate_commands_defaults_to_none(self) -> None:
+        c = ClientConfig(name="test", workspace_path=Path("/dev/null"))
+        assert c.quality_gate_commands is None
+
+    def test_quality_gate_commands_accepts_opaque_string(self) -> None:
+        c = ClientConfig(
+            name="test",
+            workspace_path=Path("/dev/null"),
+            quality_gate_commands="npm run lint",
+        )
+        assert c.quality_gate_commands == "npm run lint"
+
+    def test_quality_gate_commands_accepts_empty_string(self) -> None:
+        c = ClientConfig(
+            name="test",
+            workspace_path=Path("/dev/null"),
+            quality_gate_commands="",
+        )
+        assert c.quality_gate_commands == ""
+
     def test_unknown_key_raises(self) -> None:
         """extra='forbid' rejects an unrecognized top-level key (#1200)."""
         with pytest.raises(ValidationError):

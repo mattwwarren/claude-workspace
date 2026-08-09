@@ -18,6 +18,10 @@ clients:
   #   notifications: true                   # desktop notifications on session events
   #   auto_background_threshold: 50         # auto-background after N conversation turns
   #   worker_model: claude-sonnet-4-6-20251015  # pin Sonnet for auto-dev workers
+  #   quality_gate_commands: "npm run lint && npm test"
+  #                                         # non-Python client: replaces the
+  #                                         # ruff/mypy/pytest gate sentence in
+  #                                         # the impl/debt prompts ("" omits it)
   #   purpose_prompts:                      # override default session prompts
   #     impl: "Custom implementation instructions..."
   #     idea: "Custom ideation instructions..."
