@@ -24,6 +24,9 @@ This package was split out of a single module; the public import surface
 Submodules:
 
 - ``_audit_events`` — ``codex exec --json`` JSONL event-stream parsing.
+- ``_benchmark`` — the reasoning-effort comparison harness (#1711). Not
+  re-exported: nothing in the review path calls it, and importing it is an
+  explicit act by whoever wants the numbers.
 - ``_capability`` — the filesystem-capability probe and its on-disk,
   fingerprint-keyed, no-TTL cache.
 - ``_const`` — reason vocabulary, transient-failure set, and category mapping.
