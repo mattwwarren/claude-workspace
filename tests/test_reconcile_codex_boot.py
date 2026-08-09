@@ -242,6 +242,43 @@ def test_same_ticket_id_on_two_clients_does_not_collide(
     assert payloads[0]["client"] == "client-b"
 
 
+def test_zombie_session_does_not_park_a_newer_sessions_task(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """A stale ACTIVE record must not park the row a *later* session now owns.
+
+    An earlier boot's crash orphan can linger in state as an ACTIVE Session
+    long after its task was parked, recovered, and re-dispatched onto a fresh,
+    healthy session. Matching on (ticket_id, client) alone re-finds that zombie
+    on every subsequent boot and parks the live review as a false-positive
+    orphan. Only the row whose recorded session_id *is* the orphaned session is
+    this pass's business.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_clients_yaml(tmp_config_dir, workspace, "codex")
+
+    zombie = _mk_headless_daemon_session("T-orphan", tmp_path / "wt", _STARTED_AT)
+    save_state(CwState(sessions=[zombie]))
+    add_ticket(
+        TicketTask(
+            ticket_id="T-orphan",
+            client="client-a",
+            stage=Stage.REVIEW,
+            status=QueueItemStatus.RUNNING,
+            session_id="live-successor",
+        )
+    )
+
+    assert reap_orphaned_codex_sessions_at_boot() == 0
+
+    task = load_dev_queue().tasks[0]
+    assert task.status is QueueItemStatus.RUNNING
+    assert task.session_id == "live-successor"
+    assert task.disposition is None
+    assert _attention_events("test-codex-boot-zombie") == []
+
+
 def test_unknown_client_is_skipped(tmp_config_dir: Path, tmp_path: Path) -> None:
     """A session whose client is no longer declared cannot resolve a backend."""
     _seed(tmp_config_dir, tmp_path)

@@ -93,6 +93,13 @@ def reap_orphaned_codex_sessions_at_boot() -> int:
         client = clients.get(session.client)
         if task is None or client is None:
             continue
+        # Identity, not coincidence of (ticket_id, client): an earlier boot's
+        # orphan can linger in state as an ACTIVE record long after its task was
+        # parked, recovered, and re-dispatched onto a fresh session. Without this
+        # check that zombie re-matches on every later boot and parks whatever
+        # healthy review now owns the row.
+        if task.session_id != session.id:
+            continue
         if resolve_executor_config(task.stage, task, client).backend != CODEX_BACKEND:
             continue
         _log.warning(
