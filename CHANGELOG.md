@@ -208,6 +208,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `capability_reason` and in a per-session `codex-capability.json` diagnostics
   artifact. Rendering it in the verdict comment is deferred to #1725.
 
+- **The probed capability mode now renders in the verdict comment (#1725):**
+  closes the loop #1709 opened — `render_verdict_comment` gains
+  `_render_capability_note`, which prints a one-line `capable`/`degraded`
+  (with reason) annotation when `ReviewVerdict.capability_mode` is set, and
+  renders nothing for a verdict that never probed (`capability_mode is
+  None`), so an unprobed run is never mistaken for a probed-and-unknown one.
+
 - **OpenCode executor backend foundation (#1669):** `opencode` is now a
   first-class executor backend, selectable via `backend: opencode` in
   `StageExecutorConfig`. Spawn is fire-and-forget (mirroring `LocalExecutor`):

@@ -370,6 +370,30 @@ def _render_failed_roles_note(verdict: ReviewVerdict) -> list[str]:
     ]
 
 
+def _render_capability_note(verdict: ReviewVerdict) -> list[str]:
+    """Render the probed filesystem-capability mode the review ran under.
+
+    Deferred from #1709 pending #1705's rewrite of this function (#1725).
+    ``capability_mode`` is ``None`` for any run that never probed (e.g. the
+    LocalExecutor path, or a test verdict built without capability wiring) --
+    that must render nothing, not "unknown", per #1709/#1725: an unprobed run
+    and a probed-but-unclassifiable run are different facts, and only the
+    probe (``_classify_capability_failure``) is allowed to say "unknown".
+    """
+    if verdict.capability_mode is None:
+        return []
+    if verdict.capability_mode == "capable":
+        return ["_Reviewed with repo filesystem access (capable)._", ""]
+    reason_suffix = (
+        f" (reason: {verdict.capability_reason})" if verdict.capability_reason else ""
+    )
+    return [
+        "_Reviewed in degraded mode — inlined-diff-only, no repo filesystem "
+        f"access{reason_suffix}._",
+        "",
+    ]
+
+
 def _render_rejected_must_fix(verdict: ReviewVerdict) -> list[str]:
     """Render the MUST_FIX findings validation dropped before adjudication.
 
@@ -439,6 +463,7 @@ def render_verdict_comment(verdict: ReviewVerdict, *, fix_loop_enabled: bool) ->
         )
     lines.append("")
     lines.extend(_render_failed_roles_note(verdict))
+    lines.extend(_render_capability_note(verdict))
     lines.extend(_render_rejected_must_fix(verdict))
     lines.extend(_render_findings(verdict, "MUST_FIX", "MUST_FIX"))
     lines.extend(_render_findings(verdict, "SHOULD_FIX", "SHOULD_FIX"))
