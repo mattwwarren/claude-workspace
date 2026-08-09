@@ -7,10 +7,8 @@ whatever MCP servers the operator has configured, and enables an evolving set
 of optional feature surfaces. None of that is an input cw chose, yet all of it
 changes what a reviewer sees.
 
-This module owns the argv blocks that close those channels. The reviewer path
-also closes project-document discovery because cw explicitly assembles its
-prompt. The independently gated write-capable fix path retains repository
-instruction discovery so applicable project policy is not lost.
+This module owns the argv block that closes those channels for both reviewer
+and fix-cycle invocations.
 
 It also owns the per-session ``codex-review-profile.json`` diagnostics artifact
 (plus pass-discriminated benchmark variants), answering "what profile did THIS
@@ -28,6 +26,7 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict
 
 from cw.codex_review import _capability, _context
+from cw.codex_review._const import _COMMAND_EXECUTION_ITEM_TYPE
 from cw.codex_review._diagnostics import _persist_session_diagnostics_json
 
 _log = logging.getLogger(__name__)
@@ -37,7 +36,6 @@ _log = logging.getLogger(__name__)
 _PROFILE_VERSION = 6
 
 _PROFILE_DIAGNOSTICS_FILENAME = "codex-review-profile.json"
-_FIX_PROFILE_DIAGNOSTICS_FILENAME = "codex-fix-profile.json"
 
 
 class _LeanProfileDisposition(StrEnum):
@@ -233,88 +231,33 @@ _DISABLED_FEATURES: tuple[str, ...] = tuple(
 # profile. ``command_execution`` is the observed audit-event class for the
 # read-only shell; browser, computer, MCP, plugin, and multi-agent tools are
 # closed by the profile. Feature flags are deliberately not reported here.
-_ENABLED_TOOL_CLASSES: tuple[str, ...] = ("command_execution",)
+_ENABLED_TOOL_CLASSES: tuple[str, ...] = (_COMMAND_EXECUTION_ITEM_TYPE,)
 
 
-def _profile_argv(
-    *, reasoning_effort: str | None, disable_project_docs: bool
-) -> list[str]:
-    """Return the common lean-profile argv, optionally closing project docs."""
+def _lean_profile_argv(*, reasoning_effort: str | None) -> list[str]:
+    """Return the cw-owned lean-profile argv fragment.
+
+    Both read-only reviewer roles and write-capable fix cycles use this exact
+    fragment. Fix prompts already inline the approved plan and ticket context;
+    project-document discovery is therefore closed consistently on both paths.
+
+    ``--strict-config`` makes codex reject unknown ``-c`` keys. Verified with
+    codex-cli 0.147.0: ``-c bogus_key_xyz=1`` exits 1 with ``Error loading
+    config.toml: unknown configuration field `bogus_key_xyz` in -c/--config
+    override``.
+
+    ``mcp_servers={}`` is separate from ``_DISABLED_FEATURES`` because MCP
+    servers are not a codex feature identifier; ``--disable`` cannot target
+    them. ``reasoning_effort=None`` omits the model-effort override.
+    """
     argv = ["--ignore-user-config", "--strict-config"]
-    if disable_project_docs:
-        argv += ["-c", "project_doc_max_bytes=0"]
+    argv += ["-c", "project_doc_max_bytes=0"]
     argv += ["-c", "mcp_servers={}"]
     if reasoning_effort is not None:
         argv += ["-c", f"model_reasoning_effort={reasoning_effort}"]
     for feature in _DISABLED_FEATURES:
         argv += ["--disable", feature]
     return argv
-
-
-def _lean_profile_argv(*, reasoning_effort: str | None) -> list[str]:
-    """Return the read-only reviewer lean-profile argv fragment.
-
-    ``--ignore-user-config`` drops ``~/.codex/config.toml`` so the operator's
-    personal codex setup cannot leak into a cw-owned review.
-
-    ``--strict-config`` makes codex *reject* an unknown ``-c`` key instead of
-    ignoring it, which is what makes the overrides below trustworthy rather
-    than decorative. Verified against codex-cli 0.147.0: ``-c bogus_key_xyz=1``
-    exits 1 with ``Error loading config.toml: unknown configuration field
-    `bogus_key_xyz` in -c/--config override``. Every key emitted here was
-    live-checked under this flag and accepted (EXIT=0).
-
-    ``-c project_doc_max_bytes=0`` stops codex inlining the repo's own
-    ``AGENTS.md``/project doc. The reviewer prompt explicitly selects its
-    instruction sources, so discovery would be an untracked second channel.
-
-    ``-c mcp_servers={}`` is a *separate* override rather than one of the
-    ``--disable`` flags because MCP servers are not a codex "feature": the
-    identifiers `codex features list` enumerates (see ``_DISABLED_FEATURES``)
-    contain no ``mcp_servers``/``mcp`` entry, so ``--disable`` — being
-    ``-c features.<name>=false`` sugar — structurally cannot target them. A
-    direct config override is the only mechanism that can, and ticket AC3
-    names MCP servers among what must be disabled.
-
-    ``-c model_reasoning_effort=<effort>`` is emitted only when *effort* is
-    not ``None``; ``None`` means "do not pin it", leaving codex's own default.
-    """
-    return _profile_argv(reasoning_effort=reasoning_effort, disable_project_docs=True)
-
-
-def _fix_lean_profile_argv(*, reasoning_effort: str | None) -> list[str]:
-    """Return the gated fix-path profile while retaining repository policy.
-
-    Fix cycles are write-capable and their prompt does not inline the full
-    applicable repository instruction chain. Omitting
-    ``project_doc_max_bytes=0`` deliberately keeps Codex's project-document
-    discovery active while the other operator-owned surfaces remain closed.
-    """
-    return _profile_argv(reasoning_effort=reasoning_effort, disable_project_docs=False)
-
-
-def _persist_fix_profile_rollout_diagnostics(
-    *,
-    session_id: str,
-    cycle: int,
-    mode: str,
-    actual_argv: list[str],
-    proposed_argv: list[str],
-) -> None:
-    """Audit one shadowed or enabled write-profile activation; never raise."""
-    _persist_session_diagnostics_json(
-        session_id=session_id,
-        filename=_FIX_PROFILE_DIAGNOSTICS_FILENAME,
-        payload={
-            "profile_version": _PROFILE_VERSION,
-            "mode": mode,
-            "applied": mode == "enabled",
-            "actual_argv": list(actual_argv),
-            "proposed_argv": list(proposed_argv),
-        },
-        log_label="codex fix profile rollout",
-        discriminator=f"cycle-{cycle}",
-    )
 
 
 class _ProfileDiagnostics(BaseModel):

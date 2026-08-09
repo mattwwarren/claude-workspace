@@ -23,6 +23,8 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, ConfigDict
 
 from cw.codex_review._roles import run_codex_roles
+from cw.models import ReasoningEffort
+from cw.review_findings import ReviewerHealthStatus
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -35,10 +37,14 @@ if TYPE_CHECKING:
         ReviewerRunMetrics,
     )
 
-_DEFAULT_EFFORT_VALUES: tuple[str, str] = ("medium", "high")
-_DEGRADED = "degraded"
-
-_EFFORT_VALUES_ERROR = 'effort_values must be exactly ("medium", "high")'
+_DEFAULT_EFFORT_VALUES: tuple[ReasoningEffort, ReasoningEffort] = (
+    ReasoningEffort.MEDIUM,
+    ReasoningEffort.HIGH,
+)
+_EFFORT_VALUES_ERROR = (
+    "effort_values must be exactly "
+    f"{tuple(effort.value for effort in _DEFAULT_EFFORT_VALUES)!r}"
+)
 
 
 class _EffortRunResult(BaseModel):
@@ -46,7 +52,7 @@ class _EffortRunResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    effort: str
+    effort: ReasoningEffort
     findings_count: int
     # Roles whose document came back with status="degraded" — a reviewer that
     # ran but told us its own coverage was incomplete. Distinct from
@@ -88,7 +94,7 @@ def _sum_metric(
 
 def _fold(
     *,
-    effort: str,
+    effort: ReasoningEffort,
     documents: list[ReviewerFindingsDocument],
     failures: list[ReviewerRunFailure],
     metrics_by_role: dict[str, ReviewerRunMetrics],
@@ -103,7 +109,9 @@ def _fold(
         effort=effort,
         findings_count=sum(len(doc.findings) for doc in documents),
         degraded_roles=[
-            doc.reviewer_role for doc in documents if doc.status == _DEGRADED
+            doc.reviewer_role
+            for doc in documents
+            if doc.status is ReviewerHealthStatus.DEGRADED
         ],
         failed_roles=[failure.role for failure in failures],
         # Sum, not max: roles run sequentially under one shared deadline, so
@@ -134,7 +142,7 @@ def run_reasoning_effort_benchmark(
     model: str | None,
     wall_clock_budget_seconds: int | None,
     session_id: str,
-    effort_values: tuple[str, ...] = _DEFAULT_EFFORT_VALUES,
+    effort_values: tuple[ReasoningEffort | str, ...] = _DEFAULT_EFFORT_VALUES,
 ) -> BenchmarkComparison:
     """Run *roles* once per entry in *effort_values*; return the comparison.
 
@@ -152,7 +160,7 @@ def run_reasoning_effort_benchmark(
     if effort_values != _DEFAULT_EFFORT_VALUES:
         raise ValueError(_EFFORT_VALUES_ERROR)
     sides: list[_EffortRunResult] = []
-    for effort in effort_values:
+    for effort in _DEFAULT_EFFORT_VALUES:
         documents, failures, metrics_by_role = run_codex_roles(
             runner=runner,
             worktree=worktree,

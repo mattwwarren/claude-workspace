@@ -242,7 +242,6 @@ def _run_loop(
     fix_loop_enabled: bool = True,
     task: TicketTask | None = None,
     reasoning_effort: str | None = None,
-    fix_lean_profile_mode: str = "off",
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     return run_review_with_fix_loop(
         runner=runner,
@@ -254,7 +253,6 @@ def _run_loop(
         session_id=session_id,
         fix_loop_enabled=fix_loop_enabled,
         reasoning_effort=reasoning_effort,
-        fix_lean_profile_mode=fix_lean_profile_mode,
     )
 
 
@@ -1631,29 +1629,14 @@ class TestCapabilityProbeIsCachedAcrossCycles:
 # ---------------------------------------------------------------------------
 
 
-class TestFixArgvLeanProfileRollout:
-    def test_profile_is_default_off(self) -> None:
+class TestFixArgvLeanProfile:
+    def test_profile_is_unconditional_and_shared(self) -> None:
         argv = _build_fix_codex_argv(model="gpt-x", reasoning_effort="high")
-        assert argv == [
-            "codex",
-            "exec",
-            "--sandbox",
-            "workspace-write",
-            "-m",
-            "gpt-x",
-        ]
-
-    def test_enabled_profile_retains_repository_instruction_discovery(self) -> None:
-        argv = _build_fix_codex_argv(
-            model="gpt-x", reasoning_effort="high", apply_lean_profile=True
-        )
         for feature in _DISABLED_FEATURES:
             assert argv[argv.index(feature) - 1] == "--disable"
         overrides = _config_override_values(argv)
         assert "mcp_servers={}" in overrides
-        # Unlike read-only reviewers, the fix prompt does not inline the full
-        # applicable repository policy. Discovery must remain available.
-        assert "project_doc_max_bytes=0" not in overrides
+        assert "project_doc_max_bytes=0" in overrides
         assert "model_reasoning_effort=high" in overrides
         assert "--ignore-user-config" in argv
         assert "--ignore-rules" not in argv
@@ -1688,7 +1671,6 @@ class TestParkFixFailureRecordsRealEffort:
             worktree,
             session_id="s-fix-effort",
             reasoning_effort="minimal",
-            fix_lean_profile_mode="enabled",
         )
 
         assert out.status == "blocked"
@@ -1712,7 +1694,6 @@ class TestParkFixFailureRecordsRealEffort:
             worktree,
             session_id="s-fix-effort-live",
             reasoning_effort="minimal",
-            fix_lean_profile_mode="enabled",
         )
 
         fix_call = next(c for c in runner.calls if "workspace-write" in c["argv"])
@@ -1743,60 +1724,3 @@ class TestParkFixFailureRecordsRealEffort:
             argv = call["argv"]
             assert isinstance(argv, list)
             assert "model_reasoning_effort=minimal" in _config_override_values(argv)
-
-
-class TestFixLeanProfileRolloutDiagnostics:
-    @pytest.mark.parametrize(
-        ("mode", "applied"), [("shadow", False), ("enabled", True)]
-    )
-    def test_shadow_and_activation_are_audited(
-        self,
-        make_git_repo: Callable[..., Path],
-        mode: str,
-        applied: bool,
-    ) -> None:
-        worktree = _worktree(make_git_repo, f"wt-fix-profile-{mode}")
-        runner = _FixLoopRunner(
-            [_MF_DOC],
-            fix_behaviors=[CodexRunResult(returncode=1, stdout="", stderr="boom")],
-        )
-        session_id = f"s-fix-profile-{mode}"
-
-        _run_loop(
-            runner,
-            worktree,
-            session_id=session_id,
-            reasoning_effort="minimal",
-            fix_lean_profile_mode=mode,
-        )
-
-        fix_call = next(c for c in runner.calls if "workspace-write" in c["argv"])
-        actual_argv = fix_call["argv"]
-        assert isinstance(actual_argv, list)
-        artifact = diagnostics_bundle_dir(session_id) / (
-            "codex-fix-profile-cycle-1.json"
-        )
-        payload = json.loads(artifact.read_text(encoding="utf-8"))
-        assert payload["mode"] == mode
-        assert payload["applied"] is applied
-        assert payload["actual_argv"] == actual_argv
-        assert "--ignore-user-config" in payload["proposed_argv"]
-        assert "project_doc_max_bytes=0" not in _config_override_values(
-            payload["proposed_argv"]
-        )
-        assert ("--ignore-user-config" in actual_argv) is applied
-
-    def test_off_mode_writes_no_rollout_artifact(
-        self, make_git_repo: Callable[..., Path]
-    ) -> None:
-        worktree = _worktree(make_git_repo, "wt-fix-profile-off")
-        runner = _FixLoopRunner(
-            [_MF_DOC],
-            fix_behaviors=[CodexRunResult(returncode=1, stdout="", stderr="boom")],
-        )
-
-        _run_loop(runner, worktree, session_id="s-fix-profile-off")
-
-        assert not list(
-            diagnostics_bundle_dir("s-fix-profile-off").glob("codex-fix-profile-*.json")
-        )

@@ -368,13 +368,13 @@ the repo's own `AGENTS.md`/project doc, whatever MCP servers the operator has
 configured, and an evolving set of optional feature surfaces. None of those
 are inputs `cw` chose, so two operators running the same review can get
 different reviewers. The lean profile closes those channels unconditionally on
-the read-only reviewer path (`_build_generic_codex_argv`). Its write-capable
-fix-path variant is independently rollout-gated as documented below.
+both the read-only reviewer path (`_build_generic_codex_argv`) and the
+write-capable fix path (`_build_fix_codex_argv`).
 
 **`reasoning_effort` (`StageExecutorConfig` field, default `"high"`)**
 
-Pins `-c model_reasoning_effort=<value>` on reviewer invocations and on fix
-invocations whose fix profile is enabled. It resolves through
+Pins `-c model_reasoning_effort=<value>` on reviewer and fix invocations. It
+resolves through
 `resolve_executor_config()`'s **three-level** lane > client > default
 precedence — the same path `backend` and `endpoint` take (see that function's
 docstring). This is *not* the 4-level precedence documented under "4-Level
@@ -400,7 +400,6 @@ clients:
         review:
           backend: codex
           reasoning_effort: high
-          codex_fix_lean_profile_mode: shadow
     lanes:
       - name: cheap-review
         pipeline:
@@ -408,23 +407,7 @@ clients:
             review:
               backend: codex
               reasoning_effort: medium   # lane wins over the client value
-              codex_fix_lean_profile_mode: enabled
 ```
-
-**Write-capable fix-path rollout gate**
-
-`codex_fix_lean_profile_mode` is a `StageExecutorConfig` field with the same
-lane > client > default precedence and an independent default of `off`:
-
-- `off` — use the pre-profile fix argv and write no rollout artifact.
-- `shadow` — use the pre-profile fix argv, but record the argv the profile
-  would have applied in `codex-fix-profile-cycle-N.json`.
-- `enabled` — apply that argv and record the same audit artifact.
-
-The enabled fix profile retains Codex's repository project-document discovery;
-unlike the reviewer prompt, the fix prompt does not explicitly inline the full
-applicable repository instruction chain. The fix path therefore never emits
-`-c project_doc_max_bytes=0`.
 
 **What the profile disables**
 
@@ -447,13 +430,12 @@ installed CLI does not recognize.
 them; a direct config override is the only mechanism that can. This is why the
 flag is listed apart from the eleven above rather than folded in with them.
 
-Plus two whole-channel closures on the reviewer path:
+Plus two whole-channel closures on both paths:
 - `--ignore-user-config` — drops `~/.codex/config.toml`.
 - `-c project_doc_max_bytes=0` — stops codex inlining the repo's
   `AGENTS.md`/project doc. `cw` already inlines every instruction the reviewer
   should see; a second, unversioned instruction channel is the thing this
-  profile exists to close. The gated fix profile deliberately omits this one
-  override so repository policy remains available during writes.
+  profile exists to close.
 
 **Why the `-c` overrides are trustworthy: `--strict-config`**
 

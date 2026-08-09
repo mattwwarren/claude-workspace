@@ -140,6 +140,16 @@ class Stage(StrEnum):
     FINALIZE = "finalize"
 
 
+class ReasoningEffort(StrEnum):
+    """Reasoning-effort values accepted by codex model configuration."""
+
+    MINIMAL = "minimal"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    XHIGH = "xhigh"
+
+
 class LivenessBucket(StrEnum):
     """RFC 0008 W2 transcript-staleness bucket, latched onto ``Session``.
 

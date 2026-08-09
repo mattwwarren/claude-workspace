@@ -34,6 +34,11 @@ _COMMAND_NOT_FOUND_RETURNCODE = 127
 # ``codex --version`` banner shape, so the pattern lives once, here.
 _CODEX_VERSION_RE = re.compile(r"\d+(?:\.\d+){2}")
 
+# The audit-event item type whose presence proves codex executed a command.
+# Shared by the event parser and lean-profile diagnostics so the reported tool
+# class cannot drift from the evidence used to recognize it.
+_COMMAND_EXECUTION_ITEM_TYPE = "command_execution"
+
 
 def _is_spawn_error(result: CodexRunResult) -> bool:
     """True when *result* is codex failing to spawn at all (binary missing).

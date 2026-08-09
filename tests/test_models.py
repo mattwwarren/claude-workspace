@@ -1651,6 +1651,7 @@ class TestPackageExportCompleteness:
             "QueueItemStatus",
             "ReapPolicy",
             "ReapReason",
+            "ReasoningEffort",
             "Session",
             "SessionOrigin",
             "SessionPurpose",

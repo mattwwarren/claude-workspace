@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 
+from cw.codex_review._const import _COMMAND_EXECUTION_ITEM_TYPE
 from cw.review_findings import ReviewerRunMetrics
 
 # Item types a read-only reviewer role legitimately produces. Grounded in live
@@ -41,7 +42,7 @@ from cw.review_findings import ReviewerRunMetrics
 # item types of the same stream. Anything else is recorded as an unexpected
 # tool attempt rather than silently accepted.
 _EXPECTED_REVIEWER_ITEM_TYPES = frozenset(
-    {"agent_message", "command_execution", "reasoning", "error"}
+    {"agent_message", _COMMAND_EXECUTION_ITEM_TYPE, "reasoning", "error"}
 )
 
 # Wire event names.
@@ -51,8 +52,7 @@ _TURN_FAILED = "turn.failed"
 _ITEM_STARTED = "item.started"
 _ITEM_COMPLETED = "item.completed"
 
-# The item type whose presence proves the role actually executed a command.
-_COMMAND_ITEM_TYPE = "command_execution"
+_COMMAND_ITEM_TYPE = _COMMAND_EXECUTION_ITEM_TYPE
 
 
 def _as_int(value: object) -> int | None:

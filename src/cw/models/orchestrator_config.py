@@ -19,6 +19,7 @@ from cw.models.enums import (
     OrchestratorEventType,
     QueueItemStatus,
     ReapPolicy,
+    ReasoningEffort,
     Stage,
 )
 from cw.models.tasks import _validate_gate_recipe_keys, _validate_review_recipe_keys
@@ -105,12 +106,7 @@ class StageExecutorConfig(BaseModel):
     # "high" is a starting position, not a benchmarked optimum — see
     # config/CONFIG_REFERENCE.md's Codex Reviewer Profile section. Explicit
     # None means "do not pin it", leaving codex's own default in force.
-    reasoning_effort: str | None = "high"
-    # Write-capable fix cycles have an independent, default-off rollout gate
-    # for the lean profile. ``shadow`` records the argv cw would use without
-    # applying it; ``enabled`` applies and records it. Like the other executor
-    # fields, this resolves through lane > client > default precedence.
-    codex_fix_lean_profile_mode: Literal["off", "shadow", "enabled"] = "off"
+    reasoning_effort: ReasoningEffort | None = ReasoningEffort.HIGH
 
 
 class StagePipelineConfig(BaseModel):

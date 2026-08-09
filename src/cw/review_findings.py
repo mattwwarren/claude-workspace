@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import ast
 import logging
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, get_args
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -44,7 +45,16 @@ _log = logging.getLogger(__name__)
 
 Severity = Literal["MUST_FIX", "SHOULD_FIX", "NIT", "PRINCIPLE"]
 Disposition = Literal["fixed", "rejected", "deferred"]
-ReviewerHealthStatus = Literal["ok", "degraded", "failed"]
+
+
+class ReviewerHealthStatus(StrEnum):
+    """Health states shared by reviewer documents and benchmark reporting."""
+
+    OK = "ok"
+    DEGRADED = "degraded"
+    FAILED = "failed"
+
+
 Confidence = Literal["HIGH", "MEDIUM", "LOW"]
 # The filesystem-capability mode reviewers actually ran under (#1709); see
 # ReviewVerdict.capability_mode.
@@ -193,14 +203,18 @@ class ReviewerFindingsDocument(BaseModel):
 
     @model_validator(mode="after")
     def _check_failed_has_no_findings(self) -> ReviewerFindingsDocument:
-        if self.status == "failed" and self.findings:
+        if self.status is ReviewerHealthStatus.FAILED and self.findings:
             msg = "a reviewer with status='failed' must not carry findings"
             raise ValueError(msg)
         return self
 
     @model_validator(mode="after")
     def _check_ok_empty_findings_has_justification(self) -> ReviewerFindingsDocument:
-        if self.status == "ok" and not self.findings and _is_blank(self.detail):
+        if (
+            self.status is ReviewerHealthStatus.OK
+            and not self.findings
+            and _is_blank(self.detail)
+        ):
             msg = (
                 "a reviewer with status='ok' and no findings must state what "
                 "it checked in `detail` (or use status='degraded' if a "
@@ -1055,7 +1069,7 @@ def consolidate_verdict(
     run_records.extend(
         ReviewerRunRecord(
             reviewer_role=failure.role,
-            status="failed",
+            status=ReviewerHealthStatus.FAILED,
             finding_count=0,
             **metrics.get(failure.role, {}),
         )

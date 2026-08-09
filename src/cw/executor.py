@@ -938,7 +938,6 @@ class CodexExecutor:
                 sess_name=sess.name,
                 config_model=self._config.model,
                 config_reasoning_effort=self._config.reasoning_effort,
-                config_fix_lean_profile_mode=(self._config.codex_fix_lean_profile_mode),
             )
         )
         return sid

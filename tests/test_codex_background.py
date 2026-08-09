@@ -301,7 +301,6 @@ def test_run_codex_review_and_complete_success_path(
 
     fix_loop_mock.assert_called_once()
     assert fix_loop_mock.call_args.kwargs["session_id"] == "bg-ok"
-    assert fix_loop_mock.call_args.kwargs["fix_lean_profile_mode"] == "off"
     session = load_state().sessions[0]
     assert session.status is SessionStatus.COMPLETED
     assert session.last_result_source is LastResultSource.EXECUTOR_DIRECT

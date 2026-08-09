@@ -244,7 +244,6 @@ def _run_codex_review_and_complete(
     sess_name: str,
     config_model: str | None,
     config_reasoning_effort: str | None = None,
-    config_fix_lean_profile_mode: str = "off",
 ) -> None:
     """Run the review, persist its result, post the verdict, emit completion.
 
@@ -281,7 +280,6 @@ def _run_codex_review_and_complete(
             session_id=sid,
             fix_loop_enabled=fix_loop_enabled,
             reasoning_effort=config_reasoning_effort,
-            fix_lean_profile_mode=config_fix_lean_profile_mode,
         )
 
         # Step 4: persist result under sessions_lock.
