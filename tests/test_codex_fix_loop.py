@@ -11,13 +11,13 @@ from typing import TYPE_CHECKING
 import pytest
 
 from cw.codex_fix_loop import (
-    _CYCLE0_SNAPSHOT_FILENAME,
     _ESCALATE_AT_CYCLE,
     _FIX_CYCLE_FLOOR_SECONDS,
     _MAX_FIX_CYCLES,
     _build_fix_codex_argv,
     _build_fix_prompt,
     _track_open_findings,
+    _verdict_snapshot_filename,
     run_review_with_fix_loop,
 )
 from cw.codex_review import (
@@ -41,6 +41,7 @@ from cw.review_findings import (
     ReviewVerdict,
     _dedup_key,
     consolidate_verdict,
+    write_review_verdict,
 )
 from tests._codex_review_helpers import _Clock, _SequencedRunner, _write
 from tests.conftest import (
@@ -473,7 +474,7 @@ class TestFixInvocation:
 
         assert out.status == "blocked"
         bundle = diagnostics_bundle_dir("s-fix-error-snapshot")
-        assert (bundle / _CYCLE0_SNAPSHOT_FILENAME).exists()
+        assert (bundle / _verdict_snapshot_filename(0)).exists()
         assert any("[diagnostics:" in h for h in out.friction_highlights)
 
     def test_successful_fix_with_change_commits_with_conventional_message(
@@ -724,7 +725,7 @@ class TestFixLoopCapAndEscalation:
         assert out.review.deferred == 1
         assert out.review.fix_cycles_used == 5
 
-    def test_clean_exit_persists_cycle0_snapshot(
+    def test_clean_exit_persists_snapshot_for_every_cycle(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-clean2-snapshot")
@@ -732,11 +733,21 @@ class TestFixLoopCapAndEscalation:
         out, _verdict = _run_loop(runner, worktree, session_id="s-clean2-snapshot")
 
         assert out.status == "stage_complete"
+        assert out.review.fix_cycles_used == 2
         bundle = diagnostics_bundle_dir("s-clean2-snapshot")
-        assert (bundle / _CYCLE0_SNAPSHOT_FILENAME).exists()
+        # Every cycle (0 through the terminal cycle) gets its own snapshot,
+        # not just cycle 0 — the pointer in friction_highlights now names the
+        # latest (terminal) cycle's file, cycle 2.
+        assert (bundle / _verdict_snapshot_filename(0)).exists()
+        assert (bundle / _verdict_snapshot_filename(1)).exists()
+        assert (bundle / _verdict_snapshot_filename(2)).exists()
         assert any("[diagnostics:" in h for h in out.friction_highlights)
+        assert any(
+            "cycle-2 MUST_FIX findings snapshot persisted" in h
+            for h in out.friction_highlights
+        )
 
-    def test_capped_run_persists_cycle0_snapshot(
+    def test_capped_run_persists_latest_cycle_snapshot(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-cap-snapshot")
@@ -745,8 +756,14 @@ class TestFixLoopCapAndEscalation:
 
         assert out.status == "blocked"
         bundle = diagnostics_bundle_dir("s-cap-snapshot")
-        assert (bundle / _CYCLE0_SNAPSHOT_FILENAME).exists()
+        # A capped run exhausts every cycle up to the cap, so the terminal
+        # pointer names the last (cycle _MAX_FIX_CYCLES) snapshot, not cycle 0.
+        assert (bundle / _verdict_snapshot_filename(_MAX_FIX_CYCLES)).exists()
         assert any("[diagnostics:" in h for h in out.friction_highlights)
+        assert any(
+            f"cycle-{_MAX_FIX_CYCLES} MUST_FIX findings snapshot persisted" in h
+            for h in out.friction_highlights
+        )
 
     def test_cycle0_snapshot_content_matches_original_findings_after_fix(
         self, make_git_repo: Callable[..., Path]
@@ -760,7 +777,7 @@ class TestFixLoopCapAndEscalation:
         assert not verdict.must_fix  # terminal state cleared the finding
 
         bundle = diagnostics_bundle_dir("s-snapshot-content")
-        snapshot_path = bundle / _CYCLE0_SNAPSHOT_FILENAME
+        snapshot_path = bundle / _verdict_snapshot_filename(0)
         snapshot = ReviewVerdict.model_validate_json(snapshot_path.read_text())
         assert any(f.summary == "MFA" for f in snapshot.must_fix)
         assert any(af.finding.summary == "MFA" for af in snapshot.accepted)
@@ -779,7 +796,10 @@ class TestFixLoopCapAndEscalation:
         assert out.blocker.reason == CODEX_REVIEW_UNPARSEABLE
         assert verdict is None
         bundle = diagnostics_bundle_dir("s-rereview-fail-snapshot")
-        assert (bundle / _CYCLE0_SNAPSHOT_FILENAME).exists()
+        # The failed rereview never reaches the per-cycle persist call, so the
+        # pointer still names cycle 0's snapshot — the only one written.
+        assert (bundle / _verdict_snapshot_filename(0)).exists()
+        assert not (bundle / _verdict_snapshot_filename(1)).exists()
         assert any("[diagnostics:" in h for h in out.friction_highlights)
 
     def test_cycle0_snapshot_write_failure_does_not_block_loop(
@@ -788,7 +808,7 @@ class TestFixLoopCapAndEscalation:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """``_persist_cycle0_snapshot`` never-raises: an ``OSError`` during the
+        """``_persist_cycle_snapshot`` never-raises: an ``OSError`` during the
         write is logged and swallowed, and the loop still returns its normal
         parked result with the pointer text in ``friction_highlights`` (the
         pointer is returned unconditionally per the plan's Adopted
@@ -814,6 +834,47 @@ class TestFixLoopCapAndEscalation:
         assert any("[diagnostics:" in h for h in out.friction_highlights)
         assert any(
             "cycle-0 findings snapshot write failed" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_later_cycle_snapshot_write_failure_does_not_block_loop(
+        self,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A write failure on a fix-cycle snapshot (not just cycle 0) is
+        equally never-raising: cycle 0's write succeeds, cycle 1's is made to
+        fail, and the loop still completes with cycle 0's snapshot on disk,
+        no cycle-1 snapshot, and the failure logged for the correct cycle."""
+        worktree = _worktree(make_git_repo, "wt-snapshot-write-fail-later")
+        real_write = write_review_verdict
+
+        def _fail_after_cycle0(verdict: ReviewVerdict, path: Path) -> None:
+            if path.name == _verdict_snapshot_filename(0):
+                real_write(verdict, path)
+                return
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr(
+            "cw.codex_fix_loop.write_review_verdict", _fail_after_cycle0
+        )
+        runner = _FixLoopRunner([_MF_DOC])
+
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            out, _verdict = _run_loop(
+                runner, worktree, session_id="s-snapshot-write-fail-later"
+            )
+
+        assert out.status == "blocked"
+        bundle = diagnostics_bundle_dir("s-snapshot-write-fail-later")
+        assert (bundle / _verdict_snapshot_filename(0)).exists()
+        assert not (bundle / _verdict_snapshot_filename(1)).exists()
+        assert any(
+            "cycle-1 findings snapshot write failed" in r.getMessage()
             for r in caplog.records
         )
 
@@ -1242,7 +1303,10 @@ class TestScopeViolationGate:
         assert out.blocker is not None
         assert out.blocker.reason == CODEX_FIX_SCOPE_VIOLATION
         bundle = diagnostics_bundle_dir("s-scope-outsens-snapshot")
-        assert (bundle / _CYCLE0_SNAPSHOT_FILENAME).exists()
+        # The scope violation parks before the cycle-1 rereview/persist call
+        # runs, so only cycle 0's snapshot exists.
+        assert (bundle / _verdict_snapshot_filename(0)).exists()
+        assert not (bundle / _verdict_snapshot_filename(1)).exists()
         assert any("[diagnostics:" in h for h in out.friction_highlights)
 
     def test_untracked_sensitive_addition_parks_small_tier(
