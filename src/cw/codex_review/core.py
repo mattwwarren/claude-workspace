@@ -69,4 +69,5 @@ def run_review(
         fix_loop_enabled=fix_loop_enabled,
         metrics_by_role=metrics_by_role,
         capability=prepared.capability,
+        agent_spec_status=prepared.agent_spec_status,
     )

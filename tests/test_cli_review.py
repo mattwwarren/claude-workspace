@@ -399,6 +399,12 @@ class TestReviewConsolidateCommand:
             # consumer can tell "not probed" from "probed and degraded".
             "capability_mode",
             "capability_reason",
+            # #1773: per-role record of where each reviewer's agent
+            # specification resolved from. Always emitted (empty list for
+            # paths that never resolve specs, e.g. this consolidate command)
+            # so a consumer can tell "not resolved here" from "resolved and
+            # unspecified".
+            "agent_spec_status",
         }
         assert verdict["capability_mode"] is None
         assert verdict["capability_reason"] is None
