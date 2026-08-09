@@ -148,13 +148,14 @@ def _resolve_event_types(
 
 
 def _compact_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """Drop nested dict/list-of-dict fields; keep scalars and short scalar-lists.
+    """Drop nested dict/list-of-dict fields; keep scalars and scalar-lists.
 
-    Generic scalar/short-list filter — no per-event-type hardcoding. This is
-    what makes the default (non-json) ``event tail`` output compact: it drops
-    e.g. ``dispatch.tick``'s ``lanes`` (dict) and ``lane_occupants``
-    (list[dict]) while keeping scalars (``client``, ``claimed``, ...) and
-    short scalar-lists like ``pr.ci_failed``'s ``failing_checks: list[str]``.
+    Generic shape-based filter (not size-based, no per-event-type
+    hardcoding). This is what makes the default (non-json) ``event tail``
+    output compact: it drops e.g. ``dispatch.tick``'s ``lanes`` (dict) and
+    ``lane_occupants`` (list[dict]) while keeping scalars (``client``,
+    ``claimed``, ...) and scalar-lists like ``pr.ci_failed``'s
+    ``failing_checks: list[str]``, regardless of list length.
     """
     return {
         key: value
@@ -330,8 +331,9 @@ def event_tail(
     (filter-then-limit); it is not supported with --follow, which streams
     unboundedly. The default (non-json) output format is compact: nested
     dict/list-of-dict payload fields (e.g. dispatch.tick's lanes and
-    lane_occupants) are omitted, while scalar fields and short scalar-lists
-    are kept. --json is unaffected and always emits the full event.
+    lane_occupants) are omitted, while scalar fields and scalar-lists are
+    kept regardless of length. --json is unaffected and always emits the
+    full event.
     """
     _validate_tail_limit(limit, follow=follow)
 

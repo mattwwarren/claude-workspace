@@ -14,8 +14,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   together with `--follow`, which streams unboundedly. The default
   (non-`--json`) output format also changed to compact: nested dict/
   list-of-dict payload fields — e.g. `dispatch.tick`'s `lanes` and
-  `lane_occupants` — are now omitted, keeping only scalar fields and short
-  scalar-lists. `--json` output is untouched and remains full-fidelity.
+  `lane_occupants` — are now omitted, keeping only scalar fields and
+  scalar-lists (no length limit — the filter is shape-based, not size-based).
+  `--json` output is untouched and remains full-fidelity.
 
 ### Fixed
 

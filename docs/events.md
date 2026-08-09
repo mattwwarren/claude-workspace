@@ -1430,8 +1430,9 @@ at the end of the inbox (no history replay) instead of replaying everything.
 is not supported with `--follow`, which streams unboundedly. The default
 (non-`--json`) output format is compact: nested dict/list-of-dict payload
 fields — e.g. `dispatch.tick`'s `lanes` and `lane_occupants` — are omitted,
-while scalar fields and short scalar-lists are kept. `--json` is unaffected
-and always emits the full event, nested fields included.
+while scalar fields and scalar-lists are kept regardless of length (the
+filter is shape-based, not size-based). `--json` is unaffected and always
+emits the full event, nested fields included.
 
 ### Follow mode
 
