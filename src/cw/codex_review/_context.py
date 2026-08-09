@@ -596,6 +596,63 @@ def _render_lint_grounding_block(
     return "\n\n".join(parts)
 
 
+# Canonical order of the prompt-instruction channels, matching the order
+# :func:`_build_reviewer_prompt` renders them in. Fixed so
+# ``instruction_sources`` in the #1711 profile diagnostics is deterministic
+# across runs and comparable across sessions.
+_INSTRUCTION_CHANNEL_ORDER: tuple[str, ...] = (
+    "role_spec",
+    "output_format_supplement",
+    "ticket_context",
+    "approved_plan",
+    "project_rubrics",
+    "repo_policy",
+    "lint_grounding",
+    "sensitive_files",
+)
+
+
+def _fired_instruction_channels(
+    *,
+    agent_spec_text: str,
+    supplement: str | None,
+    ticket_text: str | None,
+    plan_text: str | None,
+    project_rubrics: str | None,
+    repo_policy_section: str | None,
+    lint_grounding: str | None,
+    sensitive_hits: list[_SensitiveHit],
+) -> list[str]:
+    """Return which instruction channels actually contributed content (#1711).
+
+    The single source of truth for "did this context channel fire", consulted
+    by both :func:`_build_reviewer_prompt` (to decide what to render) and
+    :func:`_prepare_review_pass` (to record it in the profile diagnostics), so
+    the reported ``instruction_sources`` cannot drift from what the prompt
+    actually contained.
+
+    Every predicate is **bare truthiness**, not ``is not None``, because that
+    is exactly what the render-time conditions it replaces were: a zero-byte
+    ``.cw/plan.md`` loads as ``""`` — falsy but not ``None`` — and contributes
+    nothing to the prompt, so it must not be reported as a source.
+
+    ``role_spec`` is the one channel whose section is rendered unconditionally
+    (the ``## Agent Specification`` heading always appears). It still fires
+    only on non-empty spec text: an empty heading is not a contribution.
+    """
+    fired = {
+        "role_spec": bool(agent_spec_text),
+        "output_format_supplement": bool(supplement),
+        "ticket_context": bool(ticket_text),
+        "approved_plan": bool(plan_text),
+        "project_rubrics": bool(project_rubrics),
+        "repo_policy": bool(repo_policy_section),
+        "lint_grounding": bool(lint_grounding),
+        "sensitive_files": bool(sensitive_hits),
+    }
+    return [name for name in _INSTRUCTION_CHANNEL_ORDER if fired[name]]
+
+
 def _build_reviewer_prompt(
     role: str,
     *,
@@ -630,19 +687,35 @@ def _build_reviewer_prompt(
         f"## Agent Specification\n{agent_spec_text}",
     ]
     supplement = _codex_output_format_supplement(role)
-    if supplement:
+    # Every conditional section below is gated on the SAME predicate the #1711
+    # diagnostics report, so "what the prompt contained" and "what we said it
+    # contained" have one implementation. Each membership check is logically
+    # identical to the bare truthiness check it replaced — output is unchanged.
+    channels = _fired_instruction_channels(
+        agent_spec_text=agent_spec_text,
+        supplement=supplement,
+        ticket_text=ticket_text,
+        plan_text=plan_text,
+        project_rubrics=project_rubrics,
+        repo_policy_section=repo_policy_section,
+        lint_grounding=lint_grounding,
+        sensitive_hits=sensitive_hits,
+    )
+    # The `is not None` companions below are narrowing for the type checker
+    # only — the channel membership already implies a truthy value.
+    if "output_format_supplement" in channels and supplement is not None:
         parts.append(supplement)
-    if ticket_text:
+    if "ticket_context" in channels:
         parts.append(f"## Ticket Context\n{ticket_text}")
-    if plan_text:
+    if "approved_plan" in channels:
         parts.append(f"## Approved Plan\n{plan_text}")
-    if project_rubrics:
+    if "project_rubrics" in channels:
         parts.append(f"## Project Rubrics\n{project_rubrics}")
-    if repo_policy_section:
+    if "repo_policy" in channels:
         parts.append(f"## Repo Policy for {role}\n{repo_policy_section}")
-    if lint_grounding:
+    if "lint_grounding" in channels:
         parts.append(f"## Repo Lint Configuration\n{lint_grounding}")
-    if sensitive_hits:
+    if "sensitive_files" in channels:
         parts.append(_render_sensitive_block(sensitive_hits))
     parts.append("## Changed Files\n" + "\n".join(changed_files))
     parts.append(f"## Diff\n{diff.text}")
@@ -679,6 +752,12 @@ class _ReviewPassInputs(NamedTuple):
     ``capability`` (#1709) is the probed filesystem-capability verdict the
     prompts were built against — returned so the caller can record it on the
     verdict rather than re-deriving (or, worse, re-probing) it.
+
+    ``instruction_sources`` (#1711) is the union, across every role in the
+    pass, of the instruction channels that actually contributed content, in
+    :data:`_INSTRUCTION_CHANNEL_ORDER`. Recorded in the per-session profile
+    diagnostics so "what did this reviewer actually read" is answerable
+    without re-deriving it from the prompts.
     """
 
     roles: list[str]
@@ -686,6 +765,7 @@ class _ReviewPassInputs(NamedTuple):
     diff: CapturedDiff
     reviewed_sha: str
     capability: _CodexFilesystemCapability
+    instruction_sources: list[str]
 
 
 def _prepare_review_pass(
@@ -738,10 +818,11 @@ def _prepare_review_pass(
         mutates_persisted_state=mutates_persisted_state,
         has_ticket_context=ticket_text is not None,
     )
+    agent_specs = {role: _load_agent_spec(worktree, role) for role in roles}
     prompts_by_role = {
         role: _build_reviewer_prompt(
             role,
-            agent_spec_text=_load_agent_spec(worktree, role),
+            agent_spec_text=agent_specs[role],
             diff=diff,
             changed_files=changed_files,
             plan_text=plan_text,
@@ -754,10 +835,30 @@ def _prepare_review_pass(
         )
         for role in roles
     }
+    # Per-role, then unioned: repo_policy and the output-format supplement are
+    # role-specific, so a channel that fired for one reviewer and not another
+    # still belongs in the pass's answer to "what instructions were in play".
+    fired_by_role = {
+        role: _fired_instruction_channels(
+            agent_spec_text=agent_specs[role],
+            supplement=_codex_output_format_supplement(role),
+            ticket_text=ticket_text,
+            plan_text=plan_text,
+            project_rubrics=project_rubrics,
+            repo_policy_section=repo_policy.get(role),
+            lint_grounding=lint_grounding,
+            sensitive_hits=sensitive_hits,
+        )
+        for role in roles
+    }
+    union = {name for fired in fired_by_role.values() for name in fired}
     return _ReviewPassInputs(
         roles=roles,
         prompts_by_role=prompts_by_role,
         diff=diff,
         reviewed_sha=reviewed_sha,
         capability=capability,
+        instruction_sources=[
+            name for name in _INSTRUCTION_CHANNEL_ORDER if name in union
+        ],
     )

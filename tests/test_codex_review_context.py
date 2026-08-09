@@ -26,16 +26,20 @@ from cw.codex_review import (
     _render_lint_grounding_block,
     _RuffLintConfig,
     _select_reviewer_roles,
+    _SensitiveHit,
 )
 from cw.codex_review._capability import _PROBE_SENTINEL
 from cw.codex_review._context import (
     _CAPABLE_ONLY_MARKER,
     _INLINED_ONLY_MARKER,
+    _INSTRUCTION_CHANNEL_ORDER,
     _OUTPUT_INSTRUCTIONS_CAPABLE,
     _OUTPUT_INSTRUCTIONS_INLINED_ONLY,
+    _fired_instruction_channels,
     _select_output_instructions,
 )
 from cw.codex_runner import FakeCodexRunner
+from cw.models import Stage
 from tests._codex_review_helpers import (
     _doc_json,
     _finding_payload,
@@ -43,7 +47,7 @@ from tests._codex_review_helpers import (
     _task,
     _write,
 )
-from tests.conftest import _make_diff
+from tests.conftest import _make_diff, _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -972,3 +976,158 @@ class TestPrepareReviewPass:
         assert prepared.roles
         for role in prepared.roles:
             assert "## Repo Lint Configuration" not in prepared.prompts_by_role[role]
+
+
+# ---------------------------------------------------------------------------
+# _fired_instruction_channels (#1711)
+# ---------------------------------------------------------------------------
+
+
+def _fired(
+    *,
+    agent_spec_text: str = "",
+    supplement: str | None = None,
+    ticket_text: str | None = None,
+    plan_text: str | None = None,
+    project_rubrics: str | None = None,
+    repo_policy_section: str | None = None,
+    lint_grounding: str | None = None,
+    sensitive_hits: list[_SensitiveHit] | None = None,
+) -> list[str]:
+    """Call ``_fired_instruction_channels`` with every channel absent by default."""
+    return _fired_instruction_channels(
+        agent_spec_text=agent_spec_text,
+        supplement=supplement,
+        ticket_text=ticket_text,
+        plan_text=plan_text,
+        project_rubrics=project_rubrics,
+        repo_policy_section=repo_policy_section,
+        lint_grounding=lint_grounding,
+        sensitive_hits=sensitive_hits if sensitive_hits is not None else [],
+    )
+
+
+_A_SENSITIVE_HIT = _SensitiveHit("src/cw/foo.py", "core", "why")
+
+
+class TestFiredInstructionChannels:
+    def test_all_absent_fires_nothing(self) -> None:
+        assert _fired() == []
+
+    def test_all_present_fires_every_channel_in_canonical_order(self) -> None:
+        channels = _fired(
+            agent_spec_text="SPEC",
+            supplement="SUPP",
+            ticket_text="TICKET",
+            plan_text="PLAN",
+            project_rubrics="RUBRICS",
+            repo_policy_section="POLICY",
+            lint_grounding="LINT",
+            sensitive_hits=[_A_SENSITIVE_HIT],
+        )
+        assert channels == list(_INSTRUCTION_CHANNEL_ORDER)
+
+    @pytest.mark.parametrize(
+        ("call", "channel"),
+        [
+            (lambda: _fired(agent_spec_text="SPEC"), "role_spec"),
+            (lambda: _fired(supplement="SUPP"), "output_format_supplement"),
+            (lambda: _fired(ticket_text="TICKET"), "ticket_context"),
+            (lambda: _fired(plan_text="PLAN"), "approved_plan"),
+            (lambda: _fired(project_rubrics="RUBRICS"), "project_rubrics"),
+            (lambda: _fired(repo_policy_section="POLICY"), "repo_policy"),
+            (lambda: _fired(lint_grounding="LINT"), "lint_grounding"),
+            (lambda: _fired(sensitive_hits=[_A_SENSITIVE_HIT]), "sensitive_files"),
+        ],
+    )
+    def test_each_channel_fires_alone(
+        self, call: Callable[[], list[str]], channel: str
+    ) -> None:
+        assert call() == [channel]
+
+    def test_empty_string_inputs_do_not_fire(self) -> None:
+        # A zero-byte .cw/plan.md yields "" — falsy but not None. The predicate
+        # must be bare truthiness, not `is not None`, or an empty plan file
+        # would be reported as a contributing instruction channel.
+        assert _fired(plan_text="") == []
+        assert _fired(ticket_text="") == []
+        assert _fired(agent_spec_text="") == []
+
+
+class TestPrepareReviewPassInstructionSources:
+    def test_union_across_roles_in_canonical_order(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """A pass with plan/ticket/rubrics/repo-policy present reports the
+        union of every role's fired channels, in canonical order.
+
+        Repo policy is deliberately declared for ONE role only, so the union
+        (rather than any single role's set) is what makes it appear.
+        """
+        repo = make_git_repo("wt-instruction-sources")
+        _write(repo / ".claude" / "review-extras.md", "RUBRIC BODY")
+        _write(
+            repo / ".claude" / "review-policy.md",
+            "## Code Quality Reviewer\nPOLICY BODY FOR CODE QUALITY ONLY\n",
+        )
+        _git(repo, "add", ".claude")
+        _git(repo, "commit", "-m", "add review extras and policy")
+        _git(repo, "checkout", "-b", "feature")
+        _write(repo / ".cw" / "plan.md", "PLAN BODY")
+        _write(
+            repo / ".cw" / "context.json",
+            json.dumps({"title": "T", "body": "TICKET BODY"}),
+        )
+        (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
+        _git(repo, "add", "mod.py")
+        _git(repo, "commit", "-m", "add mod.py")
+
+        prepared = _prepare_review_pass(
+            _make_ticket_task(
+                ticket_id="T-1", client="test", stage=Stage.REVIEW, scope_hint="large"
+            ),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-instruction-sources",
+        )
+
+        assert len(prepared.roles) >= 2
+        # Deterministic union, canonical order, no duplicates.
+        assert prepared.instruction_sources == [
+            name
+            for name in _INSTRUCTION_CHANNEL_ORDER
+            if name
+            in {
+                "output_format_supplement",
+                "ticket_context",
+                "approved_plan",
+                "project_rubrics",
+                "repo_policy",
+            }
+        ]
+        # repo_policy fired for exactly one role but still reached the union.
+        assert "repo_policy" in prepared.instruction_sources
+
+    def test_absent_channels_are_omitted(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = make_git_repo("wt-instruction-sources-bare")
+        _git(repo, "checkout", "-b", "feature")
+        (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
+        _git(repo, "add", "mod.py")
+        _git(repo, "commit", "-m", "add mod.py")
+
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-instruction-sources-bare",
+        )
+
+        assert "approved_plan" not in prepared.instruction_sources
+        assert "ticket_context" not in prepared.instruction_sources
+        assert "project_rubrics" not in prepared.instruction_sources
+        assert "repo_policy" not in prepared.instruction_sources
+        assert "sensitive_files" not in prepared.instruction_sources

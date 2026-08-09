@@ -65,6 +65,7 @@ from cw.codex_review._const import (
     STAGE3_REVIEW,
 )
 from cw.codex_review._context import (
+    _INSTRUCTION_CHANNEL_ORDER,
     _OUTPUT_INSTRUCTIONS,
     _OUTPUT_INSTRUCTIONS_CAPABLE,
     _OUTPUT_INSTRUCTIONS_INLINED_ONLY,
@@ -73,6 +74,7 @@ from cw.codex_review._context import (
     _build_reviewer_prompt,
     _categorize_changed_files,
     _FileCategories,
+    _fired_instruction_channels,
     _hit_from_entry,
     _load_agent_spec,
     _load_claude_md_quality_gates,
@@ -152,6 +154,7 @@ __all__ = [
     "_EXPECTED_REVIEWER_ITEM_TYPES",
     "_FLAG_REJECTION_MARKERS",
     "_HUNK_RE",
+    "_INSTRUCTION_CHANNEL_ORDER",
     "_MIN_ROLE_TIMEOUT_SECONDS",
     "_OUTPUT_INSTRUCTIONS",
     "_OUTPUT_INSTRUCTIONS_CAPABLE",
@@ -176,6 +179,7 @@ __all__ = [
     "_classify_codex_failure",
     "_classify_codex_output_failure",
     "_codex_scratch_dir",
+    "_fired_instruction_channels",
     "_format_failures_detail",
     "_hit_from_entry",
     "_is_audit_flag_rejection",
