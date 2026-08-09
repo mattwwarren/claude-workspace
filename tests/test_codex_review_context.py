@@ -562,9 +562,7 @@ class TestCodeReviewerAgentSpecFunctionLengthGate:
 
     def _spec_text(self) -> str:
         repo_root = Path(__file__).resolve().parents[1]
-        return (
-            repo_root / ".claude" / "agents" / "code-reviewer.md"
-        ).read_text()
+        return (repo_root / ".claude" / "agents" / "code-reviewer.md").read_text()
 
     def test_function_length_row_does_not_assert_bare_line_count(self) -> None:
         text = self._spec_text()
@@ -589,10 +587,7 @@ class TestCodeReviewerAgentSpecFunctionLengthGate:
 
     def test_positional_args_row_no_longer_bare_must_fix(self) -> None:
         text = self._spec_text()
-        assert (
-            "Function calls with 2+ positional args | any | MUST_FIX"
-            not in text
-        )
+        assert "Function calls with 2+ positional args | any | MUST_FIX" not in text
 
     def test_positional_args_row_is_non_blocking(self) -> None:
         text = self._spec_text()
