@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.30.0] - 2026-08-09
+
 ### Added
 
 - **`cw event tail` gains `--limit`/`-n` to bound output to the most recent N
