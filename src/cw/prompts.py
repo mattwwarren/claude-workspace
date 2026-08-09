@@ -85,7 +85,10 @@ _PROMPT_SPECS: dict[SessionPurpose, _PromptSpec] = {
 }
 
 PURPOSE_PROMPTS: dict[str, str] = {
-    purpose.value: _render_prompt(spec, _DEFAULT_QUALITY_GATES)
+    purpose.value: _render_prompt(
+        spec=spec,
+        quality_gate_commands=_DEFAULT_QUALITY_GATES,
+    )
     for purpose, spec in _PROMPT_SPECS.items()
 }
 
@@ -152,7 +155,10 @@ def get_purpose_prompt(
     if client_overrides and purpose in client_overrides:
         prompt: str | None = client_overrides[purpose]
     elif prompt_spec and prompt_spec.gated and quality_gate_commands is not None:
-        prompt = _render_prompt(prompt_spec, quality_gate_commands)
+        prompt = _render_prompt(
+            spec=prompt_spec,
+            quality_gate_commands=quality_gate_commands,
+        )
     else:
         prompt = PURPOSE_PROMPTS.get(purpose)
 
