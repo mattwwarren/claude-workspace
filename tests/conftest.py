@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import warnings
 from datetime import UTC, datetime
@@ -47,6 +48,11 @@ CapturedEvent = tuple[OrchestratorEventType, dict[str, Any], str | None]
 # scan-specific `_run_scan` driver stays file-local.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SRC_ROOT = _REPO_ROOT / "src"
+
+# Optional external CLIs whose presence a test must not silently assume
+# (#1753). git is intentionally excluded — universally present, and much
+# of the suite shells out to it directly.
+_OPTIONAL_BINARY_DENYLIST: frozenset[str] = frozenset({"codex", "opencode"})
 
 
 def _iter_src_files() -> list[Path]:
@@ -527,6 +533,54 @@ def _mock_codex_capability_probe(monkeypatch: pytest.MonkeyPatch) -> None:
             args=[], returncode=0, stdout="codex-cli 0.144.5\n", stderr=""
         ),
     )
+
+
+@pytest.fixture(autouse=True)
+def _hide_optional_binaries(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default optional external CLIs to ABSENT so tests reproduce CI (#1753).
+
+    Sibling of ``_mock_codex_capability_probe``, but at a different layer:
+    ``CodexExecutor.spawn()``'s pre-flight (``cw.executor.shutil.which`` at
+    ``src/cw/executor.py:884``) and ``codex_capability_diagnosis()``
+    (``executor.py:141``) call the bare ``shutil.which("codex")`` directly —
+    there is no bespoke seam function to patch the way the fixtures above
+    patch ``_which_codex``. ``opencode_runner.opencode_available()``
+    (``src/cw/opencode_runner.py:96``) does the same for ``"opencode"``.
+    Since ``import shutil`` binds every call site to the one process-wide
+    ``shutil`` module object, patching ``shutil.which`` itself — filtered by
+    ``_OPTIONAL_BINARY_DENYLIST`` — covers every unseamed call site at once,
+    without a real ``codex``/``opencode`` on the dev machine's ``PATH``
+    silently masking the exact CODEX_NOT_FOUND branch that shipped red in CI
+    (#1727/#1752). This fixture subsumes and replaces the local
+    ``cw.executor.shutil.which`` monkeypatch that used to live in
+    ``tests/test_dispatch.py``'s ``TestCodexSpawnDoesNotBlockDispatch``.
+
+    Escape hatch: ``@pytest.mark.binary_on_path("codex")`` makes a
+    denylisted binary look present (a deterministic ``/usr/bin/<name>``),
+    not merely un-hidden — a test that just stops hiding it would still
+    depend on the *real* binary being installed, reintroducing the original
+    bug for any runner that opts in without one.
+
+    ``@pytest.mark.integration``-marked tests are exempt entirely: those
+    tests intentionally shell out to real external tools (tmux, cmux,
+    ``claude --bg``), so this fixture no-ops for them.
+    """
+    if request.node.get_closest_marker("integration") is not None:
+        return
+    marker = request.node.get_closest_marker("binary_on_path")
+    forced_present = set(marker.args) if marker is not None else set()
+    real_which = shutil.which
+
+    def _guarded_which(
+        cmd: str, mode: int = os.F_OK | os.X_OK, path: str | None = None
+    ) -> str | None:
+        if cmd in _OPTIONAL_BINARY_DENYLIST:
+            return f"/usr/bin/{cmd}" if cmd in forced_present else None
+        return real_which(cmd, mode, path)
+
+    monkeypatch.setattr("shutil.which", _guarded_which)
 
 
 @pytest.fixture(scope="session", autouse=True)

@@ -9,6 +9,8 @@ behavior.
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,6 +27,7 @@ from cw.models import (
     SessionStatus,
 )
 from tests.conftest import (
+    _OPTIONAL_BINARY_DENYLIST,
     _make_daemon_session,
     _make_ticket_task,
     _seed_daemon_session,
@@ -43,6 +46,21 @@ def _head_ok(repo: Path) -> bool:
         check=False,
     )
     return proc.returncode == 0 and bool(proc.stdout.strip())
+
+
+def _make_fake_binary(tmp_path: Path, name: str) -> Path:
+    """Create a real, executable *name* script under a fresh dir in *tmp_path*.
+
+    Returns the containing directory (not the script itself), ready to be
+    prepended to ``PATH`` so ``shutil.which(name)`` would resolve it for
+    real absent the guard under test.
+    """
+    bin_dir = tmp_path / f"fakebin-{name}"
+    bin_dir.mkdir()
+    script = bin_dir / name
+    script.write_text("#!/bin/sh\nexit 0\n")
+    script.chmod(script.stat().st_mode | 0o111)
+    return bin_dir
 
 
 class TestMakeGitRepoBase:
@@ -153,3 +171,55 @@ class TestSeedDaemonSession:
         assert len(loaded.sessions) == 1
         assert loaded.sessions[0].id == sess.id
         assert loaded.sessions[0].purpose is SessionPurpose.IDEA
+
+
+class TestOptionalBinaryAbsenceGuard:
+    """The autouse ``_hide_optional_binaries`` fixture + ``binary_on_path`` (#1753).
+
+    Regression coverage for the incident behind #1727/#1752: dispatch tests
+    were only ever exercised on developer machines that happened to have the
+    ``codex`` CLI installed, so ``CodexExecutor.spawn()``'s real
+    ``shutil.which("codex")`` pre-flight (``src/cw/executor.py:884``) never
+    ran its CODEX_NOT_FOUND branch locally — only in CI, where it shipped
+    red. These tests prove the denylist genuinely masks a *present* binary
+    (not just a naturally-absent one), that the escape hatch makes a binary
+    look present without a real one on ``PATH``, that the denylist is scoped
+    (not blanket), and that ``@pytest.mark.integration`` exempts the guard.
+    """
+
+    @pytest.mark.parametrize("binary", sorted(_OPTIONAL_BINARY_DENYLIST))
+    def test_denylisted_binary_absent_by_default(
+        self, binary: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A genuinely-present denylisted binary on PATH still resolves to None.
+
+        Parametrized over the whole denylist so adding a third entry gets
+        this coverage for free instead of a copy-pasted test method.
+        """
+        bin_dir = _make_fake_binary(tmp_path, binary)
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+        assert shutil.which(binary) is None
+
+    @pytest.mark.binary_on_path("codex")
+    def test_binary_on_path_marker_forces_present(self) -> None:
+        """The marker makes a denylisted binary look present with none on PATH."""
+        result = shutil.which("codex")
+        assert result is not None
+        # Deterministic canned value, not a real resolution off a bare PATH.
+        assert result == "/usr/bin/codex"
+
+    def test_non_denylisted_binary_passes_through(self) -> None:
+        """A non-denylisted binary (``git``) still resolves normally under the guard."""
+        assert shutil.which("git") is not None
+
+    @pytest.mark.integration
+    def test_integration_marker_exempts_guard(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``integration``-marked tests see the real, unguarded ``shutil.which``."""
+        bin_dir = _make_fake_binary(tmp_path, "codex")
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+        result = shutil.which("codex")
+        assert result == str(bin_dir / "codex")
