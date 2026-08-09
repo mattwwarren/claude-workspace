@@ -50,11 +50,20 @@ class _CodexFeatureRecord:
     lean_profile_disposition: _LeanProfileDisposition = _LeanProfileDisposition.ALLOW
 
 
+@dataclass(frozen=True, kw_only=True)
+class _CodexCliInventory:
+    feature_metadata: tuple[_CodexFeatureRecord, ...]
+    enabled_tool_classes: tuple[str, ...]
+
+
+_VERIFIED_CODEX_CLI_VERSION = "0.147.0"
+
+
 # Complete metadata for the CLI version against which this profile was
 # verified. A newer Codex feature list must be reviewed and added as a new
 # versioned collection instead of being silently treated as covered by this
 # one. Inventory, defaults, and lean-profile disables are all derived below.
-_CODEX_FEATURE_METADATA_0_147_0: tuple[_CodexFeatureRecord, ...] = (
+_CODEX_FEATURE_METADATA_CAPTURE_0_147_0: tuple[_CodexFeatureRecord, ...] = (
     _CodexFeatureRecord(name="apply_patch_freeform", default_enabled=False),
     _CodexFeatureRecord(name="apply_patch_streaming_events", default_enabled=False),
     _CodexFeatureRecord(name="apps", default_enabled=True),
@@ -209,6 +218,18 @@ _CODEX_FEATURE_METADATA_0_147_0: tuple[_CodexFeatureRecord, ...] = (
     _CodexFeatureRecord(name="workspace_owner_usage_nudge", default_enabled=False),
 )
 
+_CODEX_CLI_INVENTORY_BY_VERSION: dict[str, _CodexCliInventory] = {
+    _VERIFIED_CODEX_CLI_VERSION: _CodexCliInventory(
+        feature_metadata=_CODEX_FEATURE_METADATA_CAPTURE_0_147_0,
+        enabled_tool_classes=(_COMMAND_EXECUTION_ITEM_TYPE,),
+    )
+}
+
+# Compatibility views for callers that consume the original captured-version
+# names. Their values come from the single version-keyed inventory above.
+_CODEX_FEATURE_METADATA_0_147_0 = _CODEX_CLI_INVENTORY_BY_VERSION[
+    _VERIFIED_CODEX_CLI_VERSION
+].feature_metadata
 _CODEX_FEATURES_0_147_0: tuple[str, ...] = tuple(
     feature.name for feature in _CODEX_FEATURE_METADATA_0_147_0
 )
@@ -217,9 +238,6 @@ _CODEX_DEFAULT_ENABLED_FEATURES_0_147_0: frozenset[str] = frozenset(
     for feature in _CODEX_FEATURE_METADATA_0_147_0
     if feature.default_enabled
 )
-_CODEX_FEATURE_METADATA_BY_CLI_VERSION: dict[str, tuple[_CodexFeatureRecord, ...]] = {
-    "0.147.0": _CODEX_FEATURE_METADATA_0_147_0
-}
 # The sole canonical lean-profile denylist; argv is generated from this value.
 _DISABLED_FEATURES: tuple[str, ...] = tuple(
     feature.name
@@ -232,12 +250,9 @@ _DISABLED_FEATURES: tuple[str, ...] = tuple(
 # class for the read-only shell; browser, computer, MCP, plugin, and multi-agent
 # tools are closed by the profile. Feature flags are deliberately not reported
 # here. Unknown CLI versions must not inherit a stale inventory.
-_CODEX_ENABLED_TOOL_CLASSES_BY_CLI_VERSION: dict[str, tuple[str, ...]] = {
-    "0.147.0": (_COMMAND_EXECUTION_ITEM_TYPE,)
-}
-_ENABLED_TOOL_CLASSES: tuple[str, ...] = _CODEX_ENABLED_TOOL_CLASSES_BY_CLI_VERSION[
-    "0.147.0"
-]
+_ENABLED_TOOL_CLASSES = _CODEX_CLI_INVENTORY_BY_VERSION[
+    _VERIFIED_CODEX_CLI_VERSION
+].enabled_tool_classes
 
 
 def _lean_profile_argv(*, reasoning_effort: str | None) -> list[str]:
@@ -289,7 +304,7 @@ class _ProfileDiagnostics(BaseModel):
 
 def _feature_inventory_version(cli_version: str | None) -> str | None:
     """Return the matching captured feature-inventory version, if any."""
-    if cli_version in _CODEX_FEATURE_METADATA_BY_CLI_VERSION:
+    if cli_version in _CODEX_CLI_INVENTORY_BY_VERSION:
         return cli_version
     return None
 
@@ -317,10 +332,10 @@ def _persist_profile_diagnostics(
     ``pass_discriminator`` preserves multiple passes in the same real session.
     """
     inventory_version = _feature_inventory_version(cli_version)
-    enabled_tool_classes = (
+    inventory = (
         None
         if inventory_version is None
-        else _CODEX_ENABLED_TOOL_CLASSES_BY_CLI_VERSION.get(inventory_version)
+        else _CODEX_CLI_INVENTORY_BY_VERSION[inventory_version]
     )
     diagnostics = _ProfileDiagnostics(
         profile_version=_PROFILE_VERSION,
@@ -329,7 +344,7 @@ def _persist_profile_diagnostics(
         cli_version=cli_version,
         feature_inventory_cli_version=inventory_version,
         enabled_tool_classes=(
-            None if enabled_tool_classes is None else list(enabled_tool_classes)
+            None if inventory is None else list(inventory.enabled_tool_classes)
         ),
         instruction_sources=(
             None if instruction_sources is None else list(instruction_sources)
