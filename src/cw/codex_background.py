@@ -243,6 +243,7 @@ def _run_codex_review_and_complete(
     sid: str,
     sess_name: str,
     config_model: str | None,
+    config_reasoning_effort: str | None = None,
 ) -> None:
     """Run the review, persist its result, post the verdict, emit completion.
 
@@ -278,6 +279,7 @@ def _run_codex_review_and_complete(
             wall_clock_budget_seconds=wall_clock_budget_seconds,
             session_id=sid,
             fix_loop_enabled=fix_loop_enabled,
+            reasoning_effort=config_reasoning_effort,
         )
 
         # Step 4: persist result under sessions_lock.

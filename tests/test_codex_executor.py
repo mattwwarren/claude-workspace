@@ -774,6 +774,66 @@ def test_spawn_threads_real_session_id_into_run_review(
     assert captured["session_id"] == sid
 
 
+def test_spawn_threads_reasoning_effort_from_resolved_config(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """#1711: CodexExecutor.spawn reads self._config.reasoning_effort and hands
+    it to run_review_with_fix_loop — it is not re-derived downstream."""
+    worktree = make_git_repo("wt-codex-effort-thread")
+    runner = FakeCodexRunner(returncode=0)
+    config = StageExecutorConfig(backend=CODEX_BACKEND, reasoning_effort="medium")
+    executor = _sync_codex_executor(config, runner)
+    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+    task = TicketTask(ticket_id="T-effort", client="test", stage=Stage.REVIEW)
+
+    blocked = make_blocked(
+        ticket_id="T-effort",
+        worktree=worktree,
+        reason=CODEX_REVIEW_UNPARSEABLE,
+        stage_reached="stage3_review",
+    )
+    with (
+        patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+        patch(
+            "cw.codex_background.run_review_with_fix_loop", return_value=(blocked, None)
+        ) as fix_loop_mock,
+    ):
+        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+
+    fix_loop_mock.assert_called_once()
+    assert fix_loop_mock.call_args.kwargs["reasoning_effort"] == "medium"
+
+
+def test_spawn_threads_default_reasoning_effort(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """A config that never mentions reasoning_effort still pins the field
+    default — "high" is the resolved value, not an omission."""
+    worktree = make_git_repo("wt-codex-effort-default")
+    runner = FakeCodexRunner(returncode=0)
+    executor = _sync_codex_executor(StageExecutorConfig(backend=CODEX_BACKEND), runner)
+    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+    task = TicketTask(ticket_id="T-effort-d", client="test", stage=Stage.REVIEW)
+
+    blocked = make_blocked(
+        ticket_id="T-effort-d",
+        worktree=worktree,
+        reason=CODEX_REVIEW_UNPARSEABLE,
+        stage_reached="stage3_review",
+    )
+    with (
+        patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+        patch(
+            "cw.codex_background.run_review_with_fix_loop", return_value=(blocked, None)
+        ) as fix_loop_mock,
+    ):
+        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+
+    assert fix_loop_mock.call_args.kwargs["reasoning_effort"] == "high"
+
+
 def test_make_blocked_backward_compat(tmp_path: Path) -> None:
     """make_blocked without stage_reached defaults to stage2_impl."""
     result = make_blocked(ticket_id="T-1", worktree=tmp_path, reason="some_reason")

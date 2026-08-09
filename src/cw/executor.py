@@ -937,6 +937,7 @@ class CodexExecutor:
                 sid=sid,
                 sess_name=sess.name,
                 config_model=self._config.model,
+                config_reasoning_effort=self._config.reasoning_effort,
             )
         )
         return sid

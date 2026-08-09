@@ -39,6 +39,7 @@ from cw.local_runner import (
 )
 from cw.models import (
     CLAUDE_NATIVE_BACKEND,
+    CODEX_BACKEND,
     LOCAL_BACKEND,
     OPENCODE_BACKEND,
     ClientConfig,
@@ -349,6 +350,54 @@ def test_resolve_executor_config_lane_override(
     config = resolve_executor_config(Stage.IMPL, task, client)
 
     assert config.model == "haiku"
+
+
+def test_resolve_executor_config_lane_reasoning_effort_beats_client(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """#1711: reasoning_effort rides the SAME lane > client > default precedence
+    every other StageExecutorConfig field does — no separate resolution path."""
+    client = ClientConfig(
+        name="test",
+        workspace_path=tmp_path,
+        pipeline=StagePipelineConfig(
+            executors={
+                Stage.REVIEW: StageExecutorConfig(
+                    backend=CODEX_BACKEND, reasoning_effort="high"
+                )
+            }
+        ),
+        lanes=[
+            LaneConfig(
+                name="debt",
+                pipeline=StagePipelineConfig(
+                    executors={
+                        Stage.REVIEW: StageExecutorConfig(
+                            backend=CODEX_BACKEND, reasoning_effort="medium"
+                        )
+                    }
+                ),
+            )
+        ],
+    )
+    task = TicketTask(ticket_id="T-1", client="test", lane="debt")
+
+    assert (
+        resolve_executor_config(Stage.REVIEW, task, client).reasoning_effort == "medium"
+    )
+
+
+def test_resolve_executor_config_reasoning_effort_default_tier_is_high(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """Neither lane nor client configures REVIEW → the bare StageExecutorConfig()
+    fallback IS the "default" tier, so the field default resolves."""
+    client = ClientConfig(name="test", workspace_path=tmp_path)
+    task = TicketTask(ticket_id="T-1", client="test")
+
+    assert (
+        resolve_executor_config(Stage.REVIEW, task, client).reasoning_effort == "high"
+    )
 
 
 def test_resolve_executor_config_lane_missing_stage_falls_back_to_client(

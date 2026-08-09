@@ -21,6 +21,7 @@ from cw.codex_fix_loop import (
     run_review_with_fix_loop,
 )
 from cw.codex_review import (
+    _DISABLED_FEATURES,
     _MIN_ROLE_TIMEOUT_SECONDS,
     CODEX_BUDGET_EXHAUSTED,
     CODEX_FIX_SCOPE_VIOLATION,
@@ -234,6 +235,7 @@ def _run_loop(
     session_id: str = "sess-fix",
     fix_loop_enabled: bool = True,
     task: TicketTask | None = None,
+    reasoning_effort: str | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     return run_review_with_fix_loop(
         runner=runner,
@@ -244,6 +246,7 @@ def _run_loop(
         wall_clock_budget_seconds=budget,
         session_id=session_id,
         fix_loop_enabled=fix_loop_enabled,
+        reasoning_effort=reasoning_effort,
     )
 
 
@@ -1613,3 +1616,114 @@ class TestCapabilityProbeIsCachedAcrossCycles:
         assert runner.fix_calls == 1
         probe_calls = [c for c in runner.calls if c["argv"] == list(_PROBE_ARGV)]
         assert len(probe_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Lean reviewer profile on the fix path (#1711)
+# ---------------------------------------------------------------------------
+
+
+def _fix_overrides(argv: list[str]) -> list[str]:
+    """Return every ``-c <override>`` value in *argv*, in order."""
+    return [
+        argv[i + 1] for i, tok in enumerate(argv) if tok == "-c" and i + 1 < len(argv)
+    ]
+
+
+class TestFixArgvSharesTheLeanProfile:
+    def test_same_disabled_features_and_mcp_override_as_the_reviewer_path(
+        self,
+    ) -> None:
+        argv = _build_fix_codex_argv(model="gpt-x", reasoning_effort="high")
+        # Asserted via the shared constant, never a hand-copied literal: the
+        # point is that both builders emit the SAME block.
+        for feature in _DISABLED_FEATURES:
+            assert argv[argv.index(feature) - 1] == "--disable"
+        overrides = _fix_overrides(argv)
+        assert "mcp_servers={}" in overrides
+        assert "project_doc_max_bytes=0" in overrides
+        assert "model_reasoning_effort=high" in overrides
+        assert "--ignore-user-config" in argv
+        assert "--strict-config" in argv
+        # Fix invocations stay write-capable and document-free.
+        assert argv[:4] == ["codex", "exec", "--sandbox", "workspace-write"]
+        assert "--output-schema" not in argv
+        assert argv[-2:] == ["-m", "gpt-x"]
+
+    def test_effort_omitted_by_default(self) -> None:
+        argv = _build_fix_codex_argv(model=None)
+        assert not any(
+            o.startswith("model_reasoning_effort=") for o in _fix_overrides(argv)
+        )
+
+
+class TestParkFixFailureRecordsRealEffort:
+    def test_diagnostics_argv_carries_the_threaded_effort(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """MUST_FIX 3 (#1711): _park_fix_failure reconstructs the fix argv for
+        the diagnostics bundle. That reconstruction must reflect the effort the
+        run actually used, not the default and not an omission."""
+        worktree = _worktree(make_git_repo, "wt-fix-effort")
+        runner = _FixLoopRunner(
+            [_MF_DOC],
+            fix_behaviors=[CodexRunResult(returncode=1, stdout="", stderr="boom")],
+        )
+        out, _ = _run_loop(
+            runner,
+            worktree,
+            session_id="s-fix-effort",
+            reasoning_effort="minimal",
+        )
+
+        assert out.status == "blocked"
+        bundle = diagnostics_bundle_dir("s-fix-effort")
+        failures = list(bundle.glob("fix-cycle-1-nonzero_exit-*.json"))
+        assert failures
+        payload = json.loads(failures[0].read_text(encoding="utf-8"))
+        argv = payload["argv_sanitized"]
+        assert "model_reasoning_effort=minimal" in _fix_overrides(argv)
+
+    def test_live_fix_invocation_carries_the_threaded_effort(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-fix-effort-live")
+        runner = _FixLoopRunner(
+            [_MF_DOC],
+            fix_behaviors=[CodexRunResult(returncode=1, stdout="", stderr="boom")],
+        )
+        _run_loop(
+            runner,
+            worktree,
+            session_id="s-fix-effort-live",
+            reasoning_effort="minimal",
+        )
+
+        fix_call = next(c for c in runner.calls if "workspace-write" in c["argv"])  # type: ignore[operator]
+        argv = fix_call["argv"]
+        assert isinstance(argv, list)
+        assert "model_reasoning_effort=minimal" in _fix_overrides(argv)
+
+    def test_rereview_roles_carry_the_threaded_effort(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """_rereview never touches _build_fix_codex_argv — it calls
+        run_codex_roles directly, so the effort must reach it that way."""
+        worktree = _worktree(make_git_repo, "wt-rereview-effort")
+        runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC], fix_behaviors=[_editor()])
+        _run_loop(
+            runner,
+            worktree,
+            session_id="s-rereview-effort",
+            reasoning_effort="minimal",
+        )
+
+        review_calls = [c for c in runner.calls if "read-only" in c["argv"]]  # type: ignore[operator]
+        # The capability probe plus every reviewer role invocation.
+        assert len(review_calls) > 1
+        role_calls = [c for c in review_calls if "--output-schema" in c["argv"]]  # type: ignore[operator]
+        assert role_calls
+        for call in role_calls:
+            argv = call["argv"]
+            assert isinstance(argv, list)
+            assert "model_reasoning_effort=minimal" in _fix_overrides(argv)
