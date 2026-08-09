@@ -881,7 +881,11 @@ def _prepare_review_pass(
     capability = _probe_filesystem_capability(runner=runner, session_id=session_id)
     diff, reviewed_sha, changed_files = _capture_diff(worktree, default_branch)
     prompt_inputs = _load_pass_prompt_inputs(
-        task, worktree, diff, changed_files, capable=capability.capable
+        task=task,
+        worktree=worktree,
+        diff=diff,
+        changed_files=changed_files,
+        capable=capability.capable,
     )
     rendered_by_role = {
         role: _assemble_reviewer_prompt(

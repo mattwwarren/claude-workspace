@@ -110,16 +110,17 @@ def _fold(
         # the pass's cost is their total, not its longest leg.
         wall_clock_seconds=sum(d for d in durations if d is not None),
         total_input_tokens=_sum_metric(
-            metrics_by_role, lambda bag: bag.get("input_tokens")
+            metrics=metrics_by_role, extract=lambda bag: bag.get("input_tokens")
         ),
         total_cached_input_tokens=_sum_metric(
-            metrics_by_role, lambda bag: bag.get("cached_input_tokens")
+            metrics=metrics_by_role,
+            extract=lambda bag: bag.get("cached_input_tokens"),
         ),
         total_output_tokens=_sum_metric(
-            metrics_by_role, lambda bag: bag.get("output_tokens")
+            metrics=metrics_by_role, extract=lambda bag: bag.get("output_tokens")
         ),
         total_reasoning_tokens=_sum_metric(
-            metrics_by_role, lambda bag: bag.get("reasoning_tokens")
+            metrics=metrics_by_role, extract=lambda bag: bag.get("reasoning_tokens")
         ),
     )
 

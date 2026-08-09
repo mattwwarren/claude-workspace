@@ -7,10 +7,10 @@ whatever MCP servers the operator has configured, and enables an evolving set
 of optional feature surfaces. None of that is an input cw chose, yet all of it
 changes what a reviewer sees.
 
-This module owns the argv block that closes those channels, shared by both
-codex argv builders — ``_roles._build_generic_codex_argv`` (the reviewer path)
-and ``codex_fix_loop._build_fix_codex_argv`` (the fix path). Both paths close
-project-doc discovery so codex cannot add instructions cw did not select.
+This module owns the argv blocks that close those channels. The reviewer path
+also closes project-document discovery because cw explicitly assembles its
+prompt. The independently gated write-capable fix path retains repository
+instruction discovery so applicable project policy is not lost.
 
 It also owns the per-session ``codex-review-profile.json`` diagnostics artifact
 (plus pass-discriminated benchmark variants), answering "what profile did THIS
@@ -34,9 +34,10 @@ _log = logging.getLogger(__name__)
 
 # Bump when the argv block below changes shape, so a diagnostics artifact from
 # an older run is not mistaken for one produced by the current profile.
-_PROFILE_VERSION = 5
+_PROFILE_VERSION = 6
 
 _PROFILE_DIAGNOSTICS_FILENAME = "codex-review-profile.json"
+_FIX_PROFILE_DIAGNOSTICS_FILENAME = "codex-fix-profile.json"
 
 
 class _LeanProfileDisposition(StrEnum):
@@ -235,8 +236,23 @@ _DISABLED_FEATURES: tuple[str, ...] = tuple(
 _ENABLED_TOOL_CLASSES: tuple[str, ...] = ("command_execution",)
 
 
+def _profile_argv(
+    *, reasoning_effort: str | None, disable_project_docs: bool
+) -> list[str]:
+    """Return the common lean-profile argv, optionally closing project docs."""
+    argv = ["--ignore-user-config", "--strict-config"]
+    if disable_project_docs:
+        argv += ["-c", "project_doc_max_bytes=0"]
+    argv += ["-c", "mcp_servers={}"]
+    if reasoning_effort is not None:
+        argv += ["-c", f"model_reasoning_effort={reasoning_effort}"]
+    for feature in _DISABLED_FEATURES:
+        argv += ["--disable", feature]
+    return argv
+
+
 def _lean_profile_argv(*, reasoning_effort: str | None) -> list[str]:
-    """Return the lean-profile argv fragment shared by both codex builders.
+    """Return the read-only reviewer lean-profile argv fragment.
 
     ``--ignore-user-config`` drops ``~/.codex/config.toml`` so the operator's
     personal codex setup cannot leak into a cw-owned review.
@@ -249,8 +265,8 @@ def _lean_profile_argv(*, reasoning_effort: str | None) -> list[str]:
     live-checked under this flag and accepted (EXIT=0).
 
     ``-c project_doc_max_bytes=0`` stops codex inlining the repo's own
-    ``AGENTS.md``/project doc. It is unconditional on both reviewer and fix
-    paths so every instruction source is explicitly chosen by cw.
+    ``AGENTS.md``/project doc. The reviewer prompt explicitly selects its
+    instruction sources, so discovery would be an untracked second channel.
 
     ``-c mcp_servers={}`` is a *separate* override rather than one of the
     ``--disable`` flags because MCP servers are not a codex "feature": the
@@ -263,19 +279,42 @@ def _lean_profile_argv(*, reasoning_effort: str | None) -> list[str]:
     ``-c model_reasoning_effort=<effort>`` is emitted only when *effort* is
     not ``None``; ``None`` means "do not pin it", leaving codex's own default.
     """
-    argv = [
-        "--ignore-user-config",
-        "--strict-config",
-        "-c",
-        "project_doc_max_bytes=0",
-        "-c",
-        "mcp_servers={}",
-    ]
-    if reasoning_effort is not None:
-        argv += ["-c", f"model_reasoning_effort={reasoning_effort}"]
-    for feature in _DISABLED_FEATURES:
-        argv += ["--disable", feature]
-    return argv
+    return _profile_argv(reasoning_effort=reasoning_effort, disable_project_docs=True)
+
+
+def _fix_lean_profile_argv(*, reasoning_effort: str | None) -> list[str]:
+    """Return the gated fix-path profile while retaining repository policy.
+
+    Fix cycles are write-capable and their prompt does not inline the full
+    applicable repository instruction chain. Omitting
+    ``project_doc_max_bytes=0`` deliberately keeps Codex's project-document
+    discovery active while the other operator-owned surfaces remain closed.
+    """
+    return _profile_argv(reasoning_effort=reasoning_effort, disable_project_docs=False)
+
+
+def _persist_fix_profile_rollout_diagnostics(
+    *,
+    session_id: str,
+    cycle: int,
+    mode: str,
+    actual_argv: list[str],
+    proposed_argv: list[str],
+) -> None:
+    """Audit one shadowed or enabled write-profile activation; never raise."""
+    _persist_session_diagnostics_json(
+        session_id=session_id,
+        filename=_FIX_PROFILE_DIAGNOSTICS_FILENAME,
+        payload={
+            "profile_version": _PROFILE_VERSION,
+            "mode": mode,
+            "applied": mode == "enabled",
+            "actual_argv": list(actual_argv),
+            "proposed_argv": list(proposed_argv),
+        },
+        log_label="codex fix profile rollout",
+        discriminator=f"cycle-{cycle}",
+    )
 
 
 class _ProfileDiagnostics(BaseModel):

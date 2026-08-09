@@ -400,6 +400,45 @@ def test_resolve_executor_config_reasoning_effort_default_tier_is_high(
     )
 
 
+def test_resolve_executor_config_fix_profile_mode_lane_beats_client(
+    tmp_path: Path,
+) -> None:
+    """The write-profile rollout gate uses lane > client > default resolution."""
+    client = ClientConfig(
+        name="test",
+        workspace_path=tmp_path,
+        pipeline=StagePipelineConfig(
+            executors={
+                Stage.REVIEW: StageExecutorConfig(
+                    backend=CODEX_BACKEND,
+                    codex_fix_lean_profile_mode="shadow",
+                )
+            }
+        ),
+        lanes=[
+            LaneConfig(
+                name="canary",
+                pipeline=StagePipelineConfig(
+                    executors={
+                        Stage.REVIEW: StageExecutorConfig(
+                            backend=CODEX_BACKEND,
+                            codex_fix_lean_profile_mode="enabled",
+                        )
+                    }
+                ),
+            )
+        ],
+    )
+    task = TicketTask(
+        ticket_id="T-fix-profile", client="test", stage=Stage.REVIEW, lane="canary"
+    )
+
+    resolved = resolve_executor_config(Stage.REVIEW, task, client)
+
+    assert resolved.codex_fix_lean_profile_mode == "enabled"
+    assert StageExecutorConfig().codex_fix_lean_profile_mode == "off"
+
+
 def test_resolve_executor_config_lane_missing_stage_falls_back_to_client(
     tmp_config_dir: Path, tmp_path: Path
 ) -> None:

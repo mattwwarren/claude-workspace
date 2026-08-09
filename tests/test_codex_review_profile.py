@@ -221,7 +221,7 @@ class TestDisabledFeatures:
 
 class TestLeanProfileArgv:
     def test_profile_version_tracks_unconditional_project_doc_closure(self) -> None:
-        assert _PROFILE_VERSION == 5
+        assert _PROFILE_VERSION == 6
 
     @pytest.mark.parametrize("effort", [None, "medium", "high"])
     def test_unconditional_flags_always_present(self, effort: str | None) -> None:

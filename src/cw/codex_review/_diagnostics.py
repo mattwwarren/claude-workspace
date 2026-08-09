@@ -37,9 +37,9 @@ def _persist_session_diagnostics_json(
     try:
         target = diagnostics_dir(session_id)
         target.mkdir(parents=True, exist_ok=True)
-        target.joinpath(_discriminated_filename(filename, discriminator)).write_text(
-            json.dumps(record, indent=2), encoding="utf-8"
-        )
+        target.joinpath(
+            _discriminated_filename(filename=filename, discriminator=discriminator)
+        ).write_text(json.dumps(record, indent=2), encoding="utf-8")
     except OSError:
         _log.warning(
             "%s diagnostics write failed for session %s", log_label, session_id

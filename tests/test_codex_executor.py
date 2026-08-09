@@ -834,6 +834,36 @@ def test_spawn_threads_default_reasoning_effort(
     assert fix_loop_mock.call_args.kwargs["reasoning_effort"] == "high"
 
 
+def test_spawn_threads_fix_lean_profile_mode(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    worktree = make_git_repo("wt-codex-fix-profile-thread")
+    runner = FakeCodexRunner(returncode=0)
+    config = StageExecutorConfig(
+        backend=CODEX_BACKEND, codex_fix_lean_profile_mode="shadow"
+    )
+    executor = _sync_codex_executor(config, runner)
+    client = ClientConfig(name="test", workspace_path=worktree, default_branch="main")
+    task = TicketTask(ticket_id="T-fix-profile", client="test", stage=Stage.REVIEW)
+    blocked = make_blocked(
+        ticket_id="T-fix-profile",
+        worktree=worktree,
+        reason=CODEX_REVIEW_UNPARSEABLE,
+        stage_reached="stage3_review",
+    )
+
+    with (
+        patch("cw.executor.shutil.which", return_value="/usr/bin/codex"),
+        patch(
+            "cw.codex_background.run_review_with_fix_loop", return_value=(blocked, None)
+        ) as fix_loop_mock,
+    ):
+        executor.spawn(stage=Stage.REVIEW, task=task, worktree=worktree, client=client)
+
+    assert fix_loop_mock.call_args.kwargs["fix_lean_profile_mode"] == "shadow"
+
+
 def test_make_blocked_backward_compat(tmp_path: Path) -> None:
     """make_blocked without stage_reached defaults to stage2_impl."""
     result = make_blocked(ticket_id="T-1", worktree=tmp_path, reason="some_reason")

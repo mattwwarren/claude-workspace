@@ -44,9 +44,10 @@ from cw.codex_review import (
     STAGE3_REVIEW,
     _capture_diff,
     _classify_codex_failure,
-    _lean_profile_argv,
+    _fix_lean_profile_argv,
     _load_sensitive_hits,
     _load_ticket_context,
+    _persist_fix_profile_rollout_diagnostics,
     _prepare_review_pass,
     render_verdict_comment,
     run_codex_roles,
@@ -126,7 +127,10 @@ def _with_snapshot_pointer(highlights: list[str], snapshot_pointer: str) -> list
 
 
 def _build_fix_codex_argv(
-    *, model: str | None, reasoning_effort: str | None = None
+    *,
+    model: str | None,
+    reasoning_effort: str | None = None,
+    apply_lean_profile: bool = False,
 ) -> list[str]:
     """Return the ``codex exec`` argv for a fix invocation (write-capable).
 
@@ -135,21 +139,18 @@ def _build_fix_codex_argv(
     would be wrong) and omits ``--output-schema``/``-o`` entirely — a fix
     invocation mutates the worktree, it does not emit a structured document.
 
-    What the two builders DO share is the lean profile (#1711): a fix cycle
-    that ran under the operator's personal ``~/.codex/config.toml``, or with
-    MCP servers and optional feature surfaces live, would not be the same
-    reproducible, cw-owned invocation the reviewer path is — so the block comes
-    from the one shared :func:`_lean_profile_argv` rather than being restated.
-    Project-doc discovery is disabled here too: all instruction channels must
-    be explicitly selected and inlined by cw rather than discovered by codex.
+    The write-path profile is independently rollout-gated and default-off.
+    When applied, it retains Codex project-document discovery because the fix
+    prompt does not inline the full applicable repository instruction chain.
     """
     argv = [
         "codex",
         "exec",
         "--sandbox",
         "workspace-write",
-        *_lean_profile_argv(reasoning_effort=reasoning_effort),
     ]
+    if apply_lean_profile:
+        argv += _fix_lean_profile_argv(reasoning_effort=reasoning_effort)
     if model:
         argv += ["-m", model]
     return argv
@@ -406,6 +407,7 @@ def _park_fix_failure(
     verdict: ReviewVerdict | None,
     snapshot_pointer: str,
     reasoning_effort: str | None,
+    apply_lean_profile: bool,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Park the ticket on a failed fix invocation, persisting a diagnostics bundle.
 
@@ -425,17 +427,22 @@ def _park_fix_failure(
 
     The ``argv`` below is a *reconstruction*: the failed subprocess's own argv
     is not threaded back here. That makes it a claim about what ran, so it must
-    be true — hence ``reasoning_effort`` is the real value this run used,
-    passed down from :func:`_run_fix_and_commit`, not a default stand-in
-    (#1711). ``model=None`` is pre-existing and separate: this helper has never
-    known the model, and #1711 does not change that.
+    be true — hence both the resolved ``reasoning_effort`` and whether the
+    gated profile was actually applied are passed down from
+    :func:`_run_fix_and_commit`, not reconstructed from defaults. ``model=None``
+    is pre-existing and separate: this helper has never known the model, and
+    #1711 does not change that.
     """
     reason = _CATEGORY_TO_REASON[category]
     failure = build_executor_failure(
         category=category,
         executor_name="codex",
         session_id=session_id,
-        argv=_build_fix_codex_argv(model=None, reasoning_effort=reasoning_effort),
+        argv=_build_fix_codex_argv(
+            model=None,
+            reasoning_effort=reasoning_effort,
+            apply_lean_profile=apply_lean_profile,
+        ),
         stdout_excerpt=stdout,
         stderr_excerpt=stderr,
         reviewer_role=f"fix-cycle-{cycle}",
@@ -643,6 +650,7 @@ def _run_fix_and_commit(
     snapshot_pointer: str,
     had_real_commit_so_far: bool,
     reasoning_effort: str | None = None,
+    fix_lean_profile_mode: str = "off",
 ) -> tuple[tuple[AutoDevResult, ReviewVerdict | None] | None, str | None]:
     """Run one cycle's fix invocation and commit; return ``(park, commit_sha)``.
 
@@ -658,7 +666,24 @@ def _run_fix_and_commit(
     prompt = _build_fix_prompt(
         findings, plan_text=plan_text, ticket_text=ticket_text, cycle=cycle
     )
-    argv = _build_fix_codex_argv(model=model, reasoning_effort=reasoning_effort)
+    apply_lean_profile = fix_lean_profile_mode == "enabled"
+    argv = _build_fix_codex_argv(
+        model=model,
+        reasoning_effort=reasoning_effort,
+        apply_lean_profile=apply_lean_profile,
+    )
+    if fix_lean_profile_mode in {"shadow", "enabled"}:
+        _persist_fix_profile_rollout_diagnostics(
+            session_id=session_id,
+            cycle=cycle,
+            mode=fix_lean_profile_mode,
+            actual_argv=argv,
+            proposed_argv=_build_fix_codex_argv(
+                model=model,
+                reasoning_effort=reasoning_effort,
+                apply_lean_profile=True,
+            ),
+        )
     result = runner.run(worktree, argv, timeout_seconds, stdin=prompt)
     if result.timed_out or result.returncode != 0:
         return (
@@ -674,6 +699,7 @@ def _run_fix_and_commit(
                 verdict=verdict,
                 snapshot_pointer=snapshot_pointer,
                 reasoning_effort=reasoning_effort,
+                apply_lean_profile=apply_lean_profile,
             ),
             None,
         )
@@ -713,6 +739,7 @@ def _run_fix_and_commit(
                 verdict=verdict,
                 snapshot_pointer=snapshot_pointer,
                 reasoning_effort=reasoning_effort,
+                apply_lean_profile=apply_lean_profile,
             ),
             None,
         )
@@ -778,6 +805,7 @@ def run_review_with_fix_loop(
     session_id: str,
     fix_loop_enabled: bool,
     reasoning_effort: str | None = None,
+    fix_lean_profile_mode: str = "off",
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run the initial review pass plus a bounded MUST_FIX fix loop.
 
@@ -791,10 +819,10 @@ def run_review_with_fix_loop(
     ``fix_loop_enabled`` is False and cycle 0 blocks, returns cycle 0's tuple
     unchanged with zero fix cycles attempted.
 
-    ``reasoning_effort`` (#1711) is the resolved ``StageExecutorConfig`` value,
-    threaded to every codex invocation this loop makes — the initial review,
-    each fix invocation, and each re-review — so all three run under one
-    profile rather than the fix cycle silently diverging from the review.
+    ``fix_lean_profile_mode`` independently gates the write-capable fix path:
+    ``off`` preserves its prior argv, ``shadow`` records the proposed profile
+    without applying it, and ``enabled`` records and applies it. Reviewer
+    passes remain unconditionally lean-profiled.
     """
     deadline = (
         None
@@ -860,6 +888,7 @@ def run_review_with_fix_loop(
             snapshot_pointer=snapshot_pointer,
             had_real_commit_so_far=had_real_commit,
             reasoning_effort=reasoning_effort,
+            fix_lean_profile_mode=fix_lean_profile_mode,
         )
         if park is not None:
             return park
