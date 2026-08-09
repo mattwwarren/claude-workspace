@@ -8,6 +8,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A structural finding anchored on an enclosing def/class is no longer
+  dropped as unverifiable (#1743):** `_line_reference_valid`'s existing
+  tolerance check only accepts a finding whose cited line sits within a
+  small distance of a changed diff line — but a structural finding (e.g. a
+  missing type hint, a naming issue) is legitimately anchored on the
+  enclosing `def`/`class` line, which is itself rarely a changed line and so
+  was silently rejected. When a `worktree` is supplied, validation now falls
+  back to `_anchor_in_enclosing_def`, which parses the file's AST and accepts
+  the finding if its cited line falls anywhere inside the enclosing
+  def/class span (innermost span wins for nested defs). A missing/unreadable
+  file or a line with no enclosing definition still returns `False`, so the
+  fallback only rescues genuinely structural findings.
+
 - **A converged fix loop is distinguished from a no-op one (#1723):** the loop
   reported convergence whenever no MUST_FIX findings survived, without regard
   for whether any fix cycle had actually changed a file. A run in which every
