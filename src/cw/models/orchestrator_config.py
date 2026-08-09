@@ -144,7 +144,7 @@ class LaneConfig(BaseModel):
     # Lane-level override for the codex backend's autonomous MUST_FIX fix loop
     # (#1553, superseding the removed ClientConfig.codex_fix_loop_enabled from
     # #1465). None defers to OrchestratorConfig.default_codex_fix_loop_enabled.
-    # Resolved by cw.executor._resolve_codex_fix_loop_enabled, mirroring
+    # Resolved by cw.codex_background._resolve_codex_fix_loop_enabled, mirroring
     # resolve_reap_policy's lane-then-global fallthrough shape. Literal[True]
     # (not bool): a lane can only opt IN to the fix loop, never opt a client's
     # global-True default back OUT -- the same asymmetry finalize_gate/signoff
@@ -432,7 +432,8 @@ class OrchestratorConfig(BaseModel):
     # concierge_enabled's fail-safe defaults: enabling `review: {backend:
     # codex}` must not implicitly enable autonomous fix commits. Superseded
     # the removed ClientConfig.codex_fix_loop_enabled (#1465) with a 2-tier
-    # (lane -> global) resolver -- see cw.executor._resolve_codex_fix_loop_enabled.
+    # (lane -> global) resolver -- see
+    # cw.codex_background._resolve_codex_fix_loop_enabled.
     default_codex_fix_loop_enabled: bool = False
     # RFC 0008 W2 — global ladder of transcript-staleness thresholds (minutes),
     # ordered [stale_15m, stale_30m, stale_45m]. A session's transcript-mtime

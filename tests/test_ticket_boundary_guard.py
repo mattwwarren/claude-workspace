@@ -168,7 +168,10 @@ class TestAllowlistStaysHonest:
     def test_gh_py_is_imported_by_its_known_callers(self) -> None:
         """Spot-check real call sites still import from cw.gh, not bypass it."""
         known_callers = (
-            "cw/executor.py",
+            # cw/codex_background.py, not cw/executor.py: _post_review_comment
+            # (executor.py's only cw.gh consumer) moved here with #1727's
+            # module-size split.
+            "cw/codex_background.py",
             "cw/pr_hydrate.py",
             "cw/reconcile/gate_recipes.py",
         )

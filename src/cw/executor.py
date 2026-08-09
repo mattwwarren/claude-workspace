@@ -9,14 +9,18 @@ import subprocess
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 
 from cw.auto_dev_result import AutoDevResult
-from cw.codex_fix_loop import run_review_with_fix_loop
+from cw.codex_background import (
+    _complete_session_as_unexpected_error,
+    _default_background,
+    _run_codex_review_and_complete,
+    _stamp_session_id_on_running_task,
+)
 from cw.codex_review import (
     STAGE3_REVIEW,
-    render_verdict_comment,
 )
 from cw.codex_review._const import _CODEX_VERSION_RE
 from cw.codex_runner import CodexRunner, RealCodexRunner
-from cw.config import load_effective_config, load_state, save_state, sessions_lock
+from cw.config import load_state, save_state, sessions_lock
 from cw.events import record_event as _record_orchestrator_event
 from cw.exceptions import EmitSessionNotFoundError
 from cw.executor_diagnostics import (
@@ -24,7 +28,6 @@ from cw.executor_diagnostics import (
     build_executor_failure,
     persist_diagnostics_bundle,
 )
-from cw.gh import post_issue_comment
 from cw.local_runner import (
     AIDER_NOT_FOUND,
     ENDPOINT_NOT_CONFIGURED,
@@ -50,7 +53,6 @@ from cw.models import (
     ClientConfig,
     LastResultSource,
     LocalLivenessHandle,
-    OrchestratorConfig,
     OrchestratorEventType,
     Session,
     SessionOrigin,
@@ -79,13 +81,12 @@ from cw.reconcile import AUTO_DEV_LABEL_PREFIX
 from cw.result import emit_result_locked
 from cw.spawn import spawn_create_impl
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
-from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from cw.native_daemon import NativeDaemonClient
-    from cw.review_findings import ReviewVerdict
 
 _log = logging.getLogger(__name__)
 
@@ -218,6 +219,19 @@ class StageExecutor(Protocol):
     # satisfies this via ``Session.local_liveness`` (RFC 0005 F3, #888): it
     # launches aider fire-and-forget, records the handle, and returns without
     # blocking, so reconcile/local can recover the session if cw dies mid-run.
+    #
+    # CodexExecutor is an accepted, documented exception (#1727): it no longer
+    # blocks the caller (it hands the review to a ``cw.codex_background`` daemon
+    # thread and returns) but still carries no liveness handle, so its session
+    # is not crash-recoverable via harvest. Unchanged from when the call was
+    # synchronous — a thread dies with its process exactly as a blocking call
+    # did — so this is not a regression; closing it is Option A/B territory (a
+    # real subprocess surface), out of scope. The blast radius is bounded, not
+    # closed, from two sides: ``run_dispatch_loop``'s shutdown path
+    # bounded-joins outstanding codex threads before DISPATCH_LOOP_EXITED
+    # (deploy/restart/``--once``), and ``cw.reconcile.codex_boot`` flags any
+    # codex session still ACTIVE at the next boot (the crash/SIGKILL path a
+    # join cannot reach).
     """
 
     def spawn(
@@ -791,25 +805,6 @@ def _complete_session_via_door(
         save_state(state)
 
 
-def _resolve_codex_fix_loop_enabled(
-    client: ClientConfig, task: TicketTask, config: OrchestratorConfig
-) -> bool:
-    """Resolve the effective codex_fix_loop_enabled gate for *task* (#1553).
-
-    Precedence (highest to lowest):
-      1. Lane-level LaneConfig.codex_fix_loop_enabled in *client*'s config.
-      2. Global OrchestratorConfig.default_codex_fix_loop_enabled.
-
-    A task whose lane name is not declared in the client's lanes falls
-    through to the global default. Mirrors resolve_reap_policy's lane-then-
-    global fallthrough shape (cw.reconcile._shared).
-    """
-    for lane_cfg in client.effective_lanes:
-        if lane_cfg.name == task.lane and lane_cfg.codex_fix_loop_enabled is not None:
-            return lane_cfg.codex_fix_loop_enabled
-    return config.default_codex_fix_loop_enabled
-
-
 class CodexExecutor:
     """StageExecutor backed by prompt-driven ``codex exec`` reviewers (#1236).
 
@@ -821,11 +816,17 @@ class CodexExecutor:
     and synthesizes a typed AutoDevResult from the consolidated verdict. The
     consolidated verdict is posted as a GitHub issue comment on a clean run.
 
-    Like LocalExecutor, spawn() is synchronous and bypasses stdout-sentinel
-    parsing: the SESSION_COMPLETED event carries no result payload, so dispatch
-    consumes the last_result written here via the door (``emit_result_locked``,
-    source=EXECUTOR_DIRECT — RFC 0012 A2, #1458) as-is. Appropriate only for
-    max_parallel=1 lanes.
+    spawn() is NOT synchronous (#1727). Pre-flight (Steps 1-2) runs on the
+    caller's thread; once it passes, the review is handed to a
+    ``cw.codex_background`` daemon thread and spawn() returns the session id
+    immediately. Blocking here would freeze the shared ``dispatch_tick`` stack
+    for the whole review, stalling every other client and lane — see the
+    StageExecutor Protocol invariant above.
+
+    Like LocalExecutor, it bypasses stdout-sentinel parsing: the
+    SESSION_COMPLETED event carries no result payload, so dispatch consumes the
+    last_result written via the door (``emit_result_locked``,
+    source=EXECUTOR_DIRECT — RFC 0012 A2, #1458) as-is.
     """
 
     def __init__(
@@ -833,9 +834,14 @@ class CodexExecutor:
         *,
         config: StageExecutorConfig,
         runner: CodexRunner | None = None,
+        background: Callable[[Callable[[], None]], None] | None = None,
     ) -> None:
         self._config = config
         self._runner: CodexRunner = runner if runner is not None else RealCodexRunner()
+        # Testability seam for the threading handoff: tests inject
+        # ``lambda fn: fn()`` to run the review inline and keep their
+        # assertions deterministic.
+        self._background = background if background is not None else _default_background
 
     def spawn(
         self,
@@ -868,12 +874,6 @@ class CodexExecutor:
 
         # Step 2: Pre-flight checks (first match assigns result).
         result: AutoDevResult | None = None
-        verdict: ReviewVerdict | None = None
-        # Only ever read at Step 4b, which is gated on `verdict is not None` —
-        # true only when Step 3 ran and set this alongside `verdict`. Declared
-        # here (rather than solely inside Step 3's branch) so mypy --strict
-        # sees a definitely-bound `bool`, not a possibly-unbound local.
-        fix_loop_enabled = False
         if stage != Stage.REVIEW:
             result = make_blocked(
                 ticket_id=task.ticket_id,
@@ -889,100 +889,57 @@ class CodexExecutor:
                 stage_reached=STAGE3_REVIEW,
             )
 
-        try:
-            if result is None:
-                # Step 3: Run the per-role review pass + bounded fix loop
-                # (delegated to codex_fix_loop, #1392). Lazily loaded here
-                # (not threaded through the StageExecutor Protocol) so the
-                # lane-scoped fix_loop_enabled gate (#1553) resolves without
-                # widening spawn()'s signature -- mirrors the ad hoc
-                # load_effective_config() calls already made in
-                # dispatch/routing.py.
-                config = load_effective_config()
-                fix_loop_enabled = _resolve_codex_fix_loop_enabled(client, task, config)
-                result, verdict = run_review_with_fix_loop(
-                    runner=self._runner,
-                    task=task,
-                    worktree=worktree,
-                    default_branch=client.default_branch,
-                    model=self._config.model,
-                    wall_clock_budget_seconds=wall_clock_budget_seconds,
-                    session_id=sid,
-                    fix_loop_enabled=fix_loop_enabled,
+        if result is not None:
+            # Pre-flight failed: nothing to review, so persist + emit inline.
+            # This branch is cheap and has no subprocess in it, so keeping it
+            # on the caller's thread costs dispatch nothing.
+            try:
+                with sessions_lock():
+                    _complete_session_via_door(
+                        sid=sid, payload=result.model_dump(mode="json")
+                    )
+                _record_orchestrator_event(
+                    OrchestratorEventType.SESSION_COMPLETED,
+                    {
+                        "session_id": sid,
+                        "ticket_id": task.ticket_id,
+                        "session_name": sess.name,
+                    },
                 )
+            except Exception:
+                # Never leave the session ACTIVE on an unexpected error. The
+                # re-raise is correct *here* (unlike on the background path):
+                # dispatch is still on this stack and its own handler reverts
+                # the claimed task to PENDING.
+                _complete_session_as_unexpected_error(sid, task, worktree)
+                raise
+            return sid
 
-            # Step 4: Persist result under sessions_lock.
-            with sessions_lock():
-                _complete_session_via_door(
-                    sid=sid, payload=result.model_dump(mode="json")
-                )
+        # Pre-flight passed. Stamp session_id onto the still-RUNNING dev-queue
+        # row *before* backgrounding (#1727 R1): dispatch stamps it too, but
+        # only after spawn() returns, so a crash in that window would otherwise
+        # leave a live codex session with no queue row pointing at it and no
+        # way to attribute the failure. Deliberately narrower than dispatch's
+        # own post-spawn stamp — session_id only, not the error-counter reset
+        # or stage_base_ref — so backoff semantics keep a single owner.
+        _stamp_session_id_on_running_task(
+            client_name=client.name, ticket_id=task.ticket_id, session_id=sid
+        )
 
-            # Step 4b: Post the consolidated verdict as an issue comment
-            # (best-effort). Runs after save_state so a retry on save_state
-            # failure does not post a duplicate comment. verdict is None only
-            # when every reviewer failed (no documents to render).
-            if verdict is not None:
-                _post_review_comment(
-                    task.ticket_id,
-                    render_verdict_comment(verdict, fix_loop_enabled=fix_loop_enabled),
-                    cwd=_git_dir(client),
-                )
-
-            # Step 5: Emit SESSION_COMPLETED — no result payload; dispatch reads
-            # the last_result written through the door in Step 4.
-            _record_orchestrator_event(
-                OrchestratorEventType.SESSION_COMPLETED,
-                {
-                    "session_id": sid,
-                    "ticket_id": task.ticket_id,
-                    "session_name": sess.name,
-                },
+        # Steps 3/4/4b/5 run off the dispatch_tick call stack (#1727).
+        self._background(
+            lambda: _run_codex_review_and_complete(
+                runner=self._runner,
+                task=task,
+                worktree=worktree,
+                client=client,
+                wall_clock_budget_seconds=wall_clock_budget_seconds,
+                sid=sid,
+                sess_name=sess.name,
+                config_model=self._config.model,
             )
-        except Exception:
-            # Ensure the session is never left ACTIVE on unexpected errors (e.g.
-            # git CalledProcessError from run_review's diff capture). Mark it
-            # COMPLETED with a blocked result so reconcile can clean it up.
-            # SESSION_COMPLETED is NOT emitted; dispatch's exception handler
-            # reverts the task to PENDING, which is the correct recovery path.
-            with sessions_lock():
-                _complete_session_via_door(
-                    sid=sid,
-                    payload=make_blocked(
-                        ticket_id=task.ticket_id,
-                        worktree=worktree,
-                        reason=UNEXPECTED_ERROR,
-                        stage_reached=STAGE3_REVIEW,
-                    ).model_dump(mode="json"),
-                    guard_already_completed=True,
-                )
-            raise
-
+        )
         return sid
 
     def stage_sentinel_schema(self, _stage: Stage) -> dict[str, Any]:
         return AutoDevResult.model_json_schema()
-
-
-def _post_review_comment(
-    ticket_id: str, review_text: str, *, cwd: Path | None = None
-) -> None:
-    """Post codex review findings as a GitHub issue comment (best-effort, logged).
-
-    Delegates to the shared ``cw.gh.post_issue_comment`` primitive. A failed
-    post is logged at warning (ticket_id, returncode, stderr) rather than
-    swallowed silently — for the CODEX_MUST_FIX_FINDINGS path this comment is
-    the only destination for the finding text (GitHub #1391).
-
-    *cwd* scopes the gh call to the client's repo (GitHub #1269/#1279).
-    """
-    result = post_issue_comment(ticket_id, review_text, cwd=cwd)
-    if result is None:
-        _log.warning("review_comment_post_failed ticket=%s: gh call failed", ticket_id)
-        return
-    if result.returncode != 0:
-        _log.warning(
-            "review_comment_post_failed ticket=%s rc=%s: %s",
-            ticket_id,
-            result.returncode,
-            result.stderr.decode(errors="replace").strip(),
-        )
