@@ -8,6 +8,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`cw event tail` gains `--limit`/`-n` to bound output to the most recent N
+  matching events (#1694):** the flag composes with the existing `--type`/
+  `--client`/`--lane`/`--since` filters (filter-then-limit) and is rejected
+  together with `--follow`, which streams unboundedly. The default
+  (non-`--json`) output format also changed to compact: nested dict/
+  list-of-dict payload fields — e.g. `dispatch.tick`'s `lanes` and
+  `lane_occupants` — are now omitted, keeping only scalar fields and
+  scalar-lists (no length limit — the filter is shape-based, not size-based).
+  `--json` output is untouched and remains full-fidelity.
+
+### Fixed
+
+- **`read_events(limit=...)` returned the OLDEST N matching events instead of
+  the most recent N (#1694):** the function already accepted a `limit`
+  parameter but head-sliced (`events[:limit]`) a list that's in ascending
+  chronological order, so `limit=N` silently returned the N *earliest*
+  events. No production caller passed `limit=` yet, so this was latent —
+  surfaced while wiring up `cw event tail --limit`. Fixed to tail-slice
+  (`events[-limit:]`), with `limit=0` special-cased to `[]` (`list[-0:]` is
+  a Python trap that returns the whole list, not an empty one).
 - **A structural finding anchored on an enclosing def/class is no longer
   dropped as unverifiable (#1743):** `_line_reference_valid`'s existing
   tolerance check only accepts a finding whose cited line sits within a

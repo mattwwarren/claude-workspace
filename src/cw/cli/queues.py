@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 from datetime import UTC, datetime
+from typing import Any
 
 import click
 
@@ -146,14 +147,38 @@ def _resolve_event_types(
     return [OrchestratorEventType(t) for t in expanded]
 
 
+def _compact_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Drop nested dict/list-of-dict fields; keep scalars and scalar-lists.
+
+    Generic shape-based filter (not size-based, no per-event-type
+    hardcoding). This is what makes the default (non-json) ``event tail``
+    output compact: it drops e.g. ``dispatch.tick``'s ``lanes`` (dict) and
+    ``lane_occupants`` (list[dict]) while keeping scalars (``client``,
+    ``claimed``, ...) and scalar-lists like ``pr.ci_failed``'s
+    ``failing_checks: list[str]``, regardless of list length.
+    """
+    return {
+        key: value
+        for key, value in payload.items()
+        if not isinstance(value, dict)
+        and not (isinstance(value, list) and any(isinstance(v, dict) for v in value))
+    }
+
+
+def _format_event_line(ev: OrchestratorEvent) -> str:
+    """Render a single event as a compact, human-readable line."""
+    ts = ev.created_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+    corr = f" corr={ev.correlation_id}" if ev.correlation_id else ""
+    payload = " ".join(f"{k}={v}" for k, v in _compact_payload(ev.payload).items())
+    return f"{ts}  {ev.id}  {ev.type}{corr}  {payload}"
+
+
 def _print_event(ev: OrchestratorEvent, *, as_json: bool) -> None:
     """Print a single event to stdout and flush immediately (line-buffered output)."""
     if as_json:
         click.echo(ev.model_dump_json())
     else:
-        ts = ev.created_at.strftime("%Y-%m-%dT%H:%M:%SZ")
-        corr = f" corr={ev.correlation_id}" if ev.correlation_id else ""
-        click.echo(f"{ts}  {ev.id}  {ev.type}{corr}  {ev.payload}")
+        click.echo(_format_event_line(ev))
     sys.stdout.flush()
 
 
@@ -227,6 +252,16 @@ def _follow_loop(
         raise click.exceptions.Exit(0) from None
 
 
+def _validate_tail_limit(limit: int | None, *, follow: bool) -> None:
+    """Raise CwError if --limit is non-positive or combined with --follow."""
+    if limit is not None and limit < 1:
+        msg = "--limit must be a positive integer."
+        raise CwError(msg)
+    if limit is not None and follow:
+        msg = "--limit is not supported with --follow (follow streams unboundedly)."
+        raise CwError(msg)
+
+
 @event.command(name="tail")
 @click.option(
     "--since",
@@ -262,6 +297,13 @@ def _follow_loop(
         "a single emission."
     ),
 )
+@click.option(
+    "--limit",
+    "-n",
+    type=int,
+    default=None,
+    help="Return only the most recent N matching events. Not supported with --follow.",
+)
 @handle_errors
 def event_tail(
     since: str | None,
@@ -271,6 +313,7 @@ def event_tail(
     as_json: bool,
     follow: bool,
     dedup_terminal: bool,
+    limit: int | None,
 ) -> None:
     """Read events from the inbox.
 
@@ -283,7 +326,17 @@ def event_tail(
 
     --client filters by payload.client; --lane filters by payload.lane.
     Both are repeatable and accept comma-separated values.
+
+    --limit/-n bounds the already-filtered set to the most recent N events
+    (filter-then-limit); it is not supported with --follow, which streams
+    unboundedly. The default (non-json) output format is compact: nested
+    dict/list-of-dict payload fields (e.g. dispatch.tick's lanes and
+    lane_occupants) are omitted, while scalar fields and scalar-lists are
+    kept regardless of length. --json is unaffected and always emits the
+    full event.
     """
+    _validate_tail_limit(limit, follow=follow)
+
     consumer: str | None = None
     since_ts: datetime | None = None
     if since is not None:
@@ -333,6 +386,7 @@ def event_tail(
         event_types=etype_filter,
         client_names=client_names,
         lane_names=lane_names,
+        limit=limit,
     )
 
     if dedup_terminal:
