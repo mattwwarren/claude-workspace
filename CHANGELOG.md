@@ -47,6 +47,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`test_worktree_path_finds_transcript_via_csid` and 5 sibling tests wrote
+  into the real `~/.claude/projects/` (#1736):** `claude_project_dir()`
+  resolves via `Path.home()` directly, bypassing the `patched_peek` fixture's
+  redirection of `CLAUDE_PROJECTS`/`CW_STATE`. `patched_peek` now also
+  redirects `HOME`; a new session-scoped `conftest.py` guard fails on any
+  leaked `tmp-pytest`/`pytest-of`-named directory under the real path and
+  warns (without failing) on any other unexpected new entry, so unrelated
+  concurrent Claude Code usage can't flake the suite.
+
 - **A codex review no longer freezes the shared dispatch tick (#1727):**
   `CodexExecutor.spawn()` ran the whole review — per-role `codex exec`
   subprocesses plus the bounded fix loop, up to the full REVIEW budget —
