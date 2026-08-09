@@ -30,6 +30,8 @@ Submodules:
 - ``_diff`` — unified-diff capture and parsing.
 - ``_context`` — reviewer selection and prompt-context assembly (+ doc parsing),
   including ``_prepare_review_pass`` (co-located with ``_load_optional_text``).
+- ``_profile`` — the lean, cw-owned reviewer profile argv block (#1711) shared
+  by both codex argv builders, plus its per-session diagnostics artifact.
 - ``_roles`` — per-role codex execution and failure classification.
 - ``_verdict`` — verdict synthesis and review-comment rendering.
 - ``core`` — ``run_review`` orchestration.
@@ -98,6 +100,15 @@ from cw.codex_review._diff import (
     _parse_hunk_new_start,
     _parse_unified_diff,
 )
+from cw.codex_review._profile import (
+    _CANDIDATE_TOOL_CLASSES,
+    _DISABLED_FEATURES,
+    _PROFILE_DIAGNOSTICS_FILENAME,
+    _PROFILE_VERSION,
+    _lean_profile_argv,
+    _persist_profile_diagnostics,
+    _ProfileDiagnostics,
+)
 from cw.codex_review._roles import (
     _AUDIT_ARGV_FLAGS,
     _FLAG_REJECTION_MARKERS,
@@ -132,10 +143,12 @@ __all__ = [
     "CODEX_TIMEOUT",
     "STAGE3_REVIEW",
     "_AUDIT_ARGV_FLAGS",
+    "_CANDIDATE_TOOL_CLASSES",
     "_CATEGORY_TO_REASON",
     "_COMMAND_NOT_FOUND_RETURNCODE",
     "_CONFIDENCE_ANNOTATION",
     "_DIFF_GIT_HEADER_RE",
+    "_DISABLED_FEATURES",
     "_EXPECTED_REVIEWER_ITEM_TYPES",
     "_FLAG_REJECTION_MARKERS",
     "_HUNK_RE",
@@ -143,6 +156,8 @@ __all__ = [
     "_OUTPUT_INSTRUCTIONS",
     "_OUTPUT_INSTRUCTIONS_CAPABLE",
     "_OUTPUT_INSTRUCTIONS_INLINED_ONLY",
+    "_PROFILE_DIAGNOSTICS_FILENAME",
+    "_PROFILE_VERSION",
     "_REVIEWER_ROLE_AGENT_FILES",
     "_SENSITIVE_HEADER",
     "_TERMINAL_EVENTS",
@@ -150,6 +165,7 @@ __all__ = [
     "_CodexFilesystemCapability",
     "_CodexFingerprint",
     "_FileCategories",
+    "_ProfileDiagnostics",
     "_ReviewPassInputs",
     "_RuffLintConfig",
     "_SensitiveHit",
@@ -163,6 +179,7 @@ __all__ = [
     "_format_failures_detail",
     "_hit_from_entry",
     "_is_audit_flag_rejection",
+    "_lean_profile_argv",
     "_load_agent_spec",
     "_load_claude_md_quality_gates",
     "_load_optional_text",
@@ -176,6 +193,7 @@ __all__ = [
     "_parse_reviewer_document",
     "_parse_unified_diff",
     "_persist_codex_role_diagnostics",
+    "_persist_profile_diagnostics",
     "_prepare_review_pass",
     "_probe_filesystem_capability",
     "_read_sensitive_manifest",

@@ -98,6 +98,14 @@ class StageExecutorConfig(BaseModel):
     backend: str = CLAUDE_NATIVE_BACKEND
     model: str | None = None
     endpoint: str | None = None  # OpenAI-compatible base URL for local backend
+    # Reasoning effort pinned on the codex reviewer profile (#1711), emitted as
+    # `-c model_reasoning_effort=<value>`. This field-level default IS the
+    # "default" tier of resolve_executor_config()'s lane > client > default
+    # precedence, so a bare StageExecutorConfig() already resolves to "high".
+    # "high" is a starting position, not a benchmarked optimum — see
+    # config/CONFIG_REFERENCE.md's Codex Reviewer Profile section. Explicit
+    # None means "do not pin it", leaving codex's own default in force.
+    reasoning_effort: str | None = "high"
 
 
 class StagePipelineConfig(BaseModel):

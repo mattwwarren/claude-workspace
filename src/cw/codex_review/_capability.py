@@ -203,6 +203,20 @@ def _codex_cli_version(resolved: str | None) -> str | None:
     return match.group(0) if match else None
 
 
+def probe_codex_cli_version() -> str | None:
+    """Resolve the codex binary and return its parsed ``--version``, or ``None``.
+
+    The composition of :func:`_which_codex` and :func:`_codex_cli_version` as a
+    single public entry point, so callers outside this module (``_profile``'s
+    per-session diagnostics, #1711) do not have to reach through two private
+    names to ask one question. Both calls are bare-name and therefore resolve
+    through this module's globals at call time, which is what keeps the
+    autouse test seam (``tests/conftest.py``'s ``_mock_codex_capability_probe``)
+    effective for this path too.
+    """
+    return _codex_cli_version(_which_codex())
+
+
 def _compute_fingerprint() -> _CodexFingerprint:
     """Snapshot the runtime facts this probe's verdict is keyed by."""
     resolved = _which_codex()
