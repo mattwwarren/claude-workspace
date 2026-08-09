@@ -228,13 +228,19 @@ def test_read_events_limit_composes_with_type_and_since_ts_filters(
     with freeze_time(base):
         events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 0})
     with freeze_time(base + timedelta(minutes=1)):
-        matching.append(events_record_event(OrchestratorEventType.PR_CI_FAILED, {"n": 1}))
+        matching.append(
+            events_record_event(OrchestratorEventType.PR_CI_FAILED, {"n": 1})
+        )
     with freeze_time(base + timedelta(minutes=2)):
         events_record_event(OrchestratorEventType.PR_MERGED, {"n": 2})
     with freeze_time(base + timedelta(minutes=3)):
-        matching.append(events_record_event(OrchestratorEventType.PR_CI_FAILED, {"n": 3}))
+        matching.append(
+            events_record_event(OrchestratorEventType.PR_CI_FAILED, {"n": 3})
+        )
     with freeze_time(base + timedelta(minutes=4)):
-        matching.append(events_record_event(OrchestratorEventType.PR_CI_FAILED, {"n": 4}))
+        matching.append(
+            events_record_event(OrchestratorEventType.PR_CI_FAILED, {"n": 4})
+        )
 
     cutoff = base + timedelta(seconds=30)
     result = read_events(
@@ -2644,7 +2650,7 @@ def test_cli_event_tail_limit_rejects_non_positive(tmp_events_dir: Path) -> None
 
 
 def test_cli_event_tail_limit_incompatible_with_follow(tmp_events_dir: Path) -> None:
-    """--limit with --follow exits non-zero via CwError mentioning follow is unbounded."""
+    """--limit with --follow exits non-zero via CwError mentioning unbounded follow."""
     runner = CliRunner()
     result = runner.invoke(main, ["event", "tail", "--limit", "5", "--follow"])
     assert result.exit_code != 0
@@ -2760,7 +2766,7 @@ def test_cli_event_tail_default_format_keeps_short_list_fields(
 
 
 def test_cli_event_tail_json_still_full_fidelity(tmp_events_dir: Path) -> None:
-    """--json retains the full dispatch.tick payload verbatim, nested fields included."""
+    """--json retains the full dispatch.tick payload verbatim, nested fields kept."""
     marker = "lane-zebra-unique"
     payload = _dispatch_tick_payload_with_marker(marker)
     events_record_event(OrchestratorEventType.DISPATCH_TICK, payload)
