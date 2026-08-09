@@ -166,6 +166,60 @@ def config_concurrency_clear(key: str | None) -> None:
         click.echo(f"Cleared override for {key!r}.")
 
 
+# Legacy ``cw lane <cmd> CLIENT NAME`` form: exactly two positional args.
+_LANE_CLIENT_AND_NAME_POSITIONAL_COUNT = 2
+_lane_client_option = click.option(
+    "--client",
+    "-c",
+    "client_option",
+    default=None,
+    help="Client name (alternative to the CLIENT positional).",
+)
+_lane_client_and_name_argument = click.argument(
+    "positional", nargs=-1, metavar="[CLIENT] NAME"
+)
+
+
+def _resolve_lane_client(
+    client_positional: str | None, client_option: str | None
+) -> str:
+    """Resolve a lane subcommand's CLIENT from the positional arg or -c/--client.
+
+    Exactly one form must be given. ``cw lane`` historically took CLIENT
+    positionally only, unlike nearly every other client-scoped subcommand
+    (#1607).
+    """
+    if client_positional is not None and client_option is not None:
+        msg = "Pass CLIENT either positionally or via -c/--client, not both."
+        raise CwError(msg)
+    if client_positional is not None:
+        return client_positional
+    if client_option is not None:
+        return client_option
+    msg = "Missing CLIENT: pass it positionally or via -c/--client."
+    raise CwError(msg)
+
+
+def _resolve_lane_client_and_name(
+    positional: tuple[str, ...], client_option: str | None
+) -> tuple[str, str]:
+    """Resolve a lane subcommand's (CLIENT, NAME) from positional args and/or -c.
+
+    The legacy two-positional form (``CLIENT NAME``) keeps working. When
+    -c/--client is given, exactly one positional (``NAME``) is expected
+    instead (#1607).
+    """
+    if client_option is not None:
+        if len(positional) != 1:
+            msg = "With -c/--client, pass exactly one positional argument (NAME)."
+            raise CwError(msg)
+        return client_option, positional[0]
+    if len(positional) != _LANE_CLIENT_AND_NAME_POSITIONAL_COUNT:
+        msg = "Pass CLIENT NAME positionally, or NAME with -c/--client."
+        raise CwError(msg)
+    return positional[0], positional[1]
+
+
 # --- Lane command group ---
 
 
@@ -175,12 +229,16 @@ def lane() -> None:
 
 
 @lane.command("ls", help="List lanes for a client.")
-@click.argument("client")
+@click.argument("client", required=False, default=None)
+@_lane_client_option
 @click.option("--json", "as_json", is_flag=True, default=False)
 @handle_errors
-def lane_ls(client: str, as_json: bool) -> None:
-    """List declared lanes for CLIENT."""
-    client_cfg = get_effective_client(client)
+def lane_ls(client: str | None, client_option: str | None, as_json: bool) -> None:
+    """List declared lanes for CLIENT (positional or -c/--client)."""
+    resolved_client = _resolve_lane_client(
+        client_positional=client, client_option=client_option
+    )
+    client_cfg = get_effective_client(resolved_client)
     lanes = client_cfg.effective_lanes
     if as_json:
         click.echo(json.dumps([ln.model_dump() for ln in lanes], indent=2))
@@ -194,18 +252,21 @@ def lane_ls(client: str, as_json: bool) -> None:
 
 
 @lane.command("add", help="Add a lane to a client.")
-@click.argument("client")
-@click.argument("name")
+@_lane_client_and_name_argument
+@_lane_client_option
 @click.option("--max-parallel", type=int, default=None)
 @click.option("--priority", type=int, default=None)
 @handle_errors
 def lane_add(
-    client: str,
-    name: str,
+    positional: tuple[str, ...],
+    client_option: str | None,
     max_parallel: int | None,
     priority: int | None,
 ) -> None:
-    """Add a lane named NAME to CLIENT."""
+    """Add a lane named NAME to CLIENT (CLIENT NAME, or NAME with -c/--client)."""
+    client, name = _resolve_lane_client_and_name(
+        positional=positional, client_option=client_option
+    )
     effective_max_parallel = max_parallel if max_parallel is not None else 1
     effective_priority = priority if priority is not None else 0
 
@@ -258,15 +319,18 @@ def lane_add(
 
 
 @lane.command("rm", help="Remove a lane from a client.")
-@click.argument("client")
-@click.argument("name")
+@_lane_client_and_name_argument
+@_lane_client_option
 @handle_errors
-def lane_rm(client: str, name: str) -> None:
-    """Remove lane NAME from CLIENT.
+def lane_rm(positional: tuple[str, ...], client_option: str | None) -> None:
+    """Remove lane NAME from CLIENT (CLIENT NAME, or NAME with -c/--client).
 
     Fails if any PENDING, RUNNING, BLOCKED_ON_USER, or AWAITING_OPERATOR_SIGNOFF
     tasks are in that lane.
     """
+    client, name = _resolve_lane_client_and_name(
+        positional=positional, client_option=client_option
+    )
     # Composition, not a byte-identical swap: OCCUPIED_LANE_STATUSES alone
     # omits PENDING (never occupies a lane slot), but lane removal must still
     # block on PENDING work waiting in the lane (#990).
@@ -326,11 +390,17 @@ def lane_rm(client: str, name: str) -> None:
 
 
 @lane.command("pause", help="Pause a lane.")
-@click.argument("client")
-@click.argument("name")
+@_lane_client_and_name_argument
+@_lane_client_option
 @handle_errors
-def lane_pause(client: str, name: str) -> None:
-    """Pause lane NAME for CLIENT (stops new dispatches to this lane)."""
+def lane_pause(positional: tuple[str, ...], client_option: str | None) -> None:
+    """Pause lane NAME for CLIENT (stops new dispatches to this lane).
+
+    CLIENT NAME positionally, or NAME with -c/--client.
+    """
+    client, name = _resolve_lane_client_and_name(
+        positional=positional, client_option=client_option
+    )
     client_cfg = get_client(client)
     declared_names = [ln.name for ln in client_cfg.effective_lanes]
     if name not in declared_names:
@@ -353,11 +423,14 @@ def lane_pause(client: str, name: str) -> None:
 
 
 @lane.command("resume", help="Resume a paused lane.")
-@click.argument("client")
-@click.argument("name")
+@_lane_client_and_name_argument
+@_lane_client_option
 @handle_errors
-def lane_resume(client: str, name: str) -> None:
-    """Resume paused lane NAME for CLIENT."""
+def lane_resume(positional: tuple[str, ...], client_option: str | None) -> None:
+    """Resume paused lane NAME for CLIENT (CLIENT NAME, or NAME with -c/--client)."""
+    client, name = _resolve_lane_client_and_name(
+        positional=positional, client_option=client_option
+    )
     client_cfg = get_client(client)
     declared_names = [ln.name for ln in client_cfg.effective_lanes]
     if name not in declared_names:
