@@ -42,6 +42,16 @@ class _PromptSpec:
     gated: bool = False
 
 
+def _render_prompt(spec: _PromptSpec, quality_gate_commands: str) -> str:
+    """Render a prompt spec with the configured quality gate commands."""
+    gate_sentence = (
+        _quality_gate_sentence(quality_gate_commands)
+        if spec.gated and quality_gate_commands
+        else ""
+    )
+    return spec.base + gate_sentence + _AGENT_TEAM_GUIDANCE
+
+
 _PROMPT_SPECS: dict[SessionPurpose, _PromptSpec] = {
     SessionPurpose.IMPL: _PromptSpec(
         base=(
@@ -75,9 +85,7 @@ _PROMPT_SPECS: dict[SessionPurpose, _PromptSpec] = {
 }
 
 PURPOSE_PROMPTS: dict[str, str] = {
-    purpose.value: spec.base
-    + (_quality_gate_sentence(_DEFAULT_QUALITY_GATES) if spec.gated else "")
-    + _AGENT_TEAM_GUIDANCE
+    purpose.value: _render_prompt(spec, _DEFAULT_QUALITY_GATES)
     for purpose, spec in _PROMPT_SPECS.items()
 }
 
@@ -144,12 +152,7 @@ def get_purpose_prompt(
     if client_overrides and purpose in client_overrides:
         prompt: str | None = client_overrides[purpose]
     elif prompt_spec and prompt_spec.gated and quality_gate_commands is not None:
-        gate_sentence = (
-            _quality_gate_sentence(quality_gate_commands)
-            if quality_gate_commands
-            else ""
-        )
-        prompt = prompt_spec.base + gate_sentence + _AGENT_TEAM_GUIDANCE
+        prompt = _render_prompt(prompt_spec, quality_gate_commands)
     else:
         prompt = PURPOSE_PROMPTS.get(purpose)
 
