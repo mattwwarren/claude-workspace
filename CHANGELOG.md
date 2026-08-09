@@ -115,6 +115,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   constants instead of hand-written string literals, closing the transcription
   gap that produced this bug.
 
+- **The fix loop only persisted cycle 0's review-verdict snapshot, not the
+  cycle that actually produced the park (#1739):** `_persist_cycle0_snapshot`
+  generalizes to `_persist_cycle_snapshot`, called once per fix cycle (0
+  through the terminal cycle) instead of only before the loop starts. Every
+  exit path now threads the latest cycle's pointer, so whichever cycle's
+  `ReviewVerdict` actually produced a park (e.g.
+  `codex_must_fix_mechanically_rejected` on a later cycle, as in #1729) is
+  the one an operator finds referenced in `friction_highlights`, instead of a
+  stale cycle-0 snapshot that may not even contain the offending finding.
+
 ## [1.29.0] - 2026-08-08
 
 ### Fixed

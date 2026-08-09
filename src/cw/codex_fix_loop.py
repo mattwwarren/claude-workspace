@@ -12,11 +12,11 @@ This is the multi-pass counterpart to ``run_review``'s single pass (#1236) built
 on the executor-neutral finding contract (#1237). ``CodexExecutor.spawn()``'s
 Step 3 delegates to :func:`run_review_with_fix_loop` instead of ``run_review``.
 
-Cycle 0's full ``ReviewVerdict`` (findings intact, before any fix cycle runs)
-is persisted once per invocation under the diagnostics bundle dir, and a
-pointer to it is threaded into ``friction_highlights`` on every exit path, so
-the original MUST_FIX findings stay discoverable from the sentinel even after
-later cycles clear or defer them (#1485).
+Every cycle's full ``ReviewVerdict`` (findings intact) is persisted under the
+diagnostics bundle dir as it completes, and a pointer to the latest persisted
+cycle is threaded into ``friction_highlights`` on every exit path, so whichever
+cycle's verdict actually produced the terminal disposition — not just cycle
+0's — stays discoverable from the sentinel (#1485, #1739).
 
 Cross-cycle finding identity is tracked by ``review_findings._dedup_key`` so a
 finding that survives every cycle (or flaps out and back) is counted exactly
@@ -89,14 +89,17 @@ _DedupKey = tuple[str, str, int, int, str]
 
 _MUST_FIX = "MUST_FIX"
 
-# Filename for cycle 0's persisted findings snapshot (#1485) — fixed,
-# non-timestamped: one snapshot per session.
-_CYCLE0_SNAPSHOT_FILENAME = "cycle0-review-verdict.json"
+
+def _verdict_snapshot_filename(cycle: int) -> str:
+    """Return the persisted-verdict filename for *cycle* (0 = the initial pass)."""
+    return f"cycle{cycle}-review-verdict.json"
 
 
-def _persist_cycle0_snapshot(verdict: ReviewVerdict, *, session_id: str) -> str:
-    """Persist cycle 0's full verdict (findings intact) once, before any fix
-    cycle runs, and return a ``friction_highlights`` pointer to it.
+def _persist_cycle_snapshot(
+    verdict: ReviewVerdict, *, session_id: str, cycle: int
+) -> str:
+    """Persist *cycle*'s full verdict (findings intact) and return a
+    ``friction_highlights`` pointer to it.
 
     Mirrors ``persist_diagnostics_bundle``'s never-raise contract: a write
     failure is logged and swallowed rather than blocking the fix loop.
@@ -104,13 +107,15 @@ def _persist_cycle0_snapshot(verdict: ReviewVerdict, *, session_id: str) -> str:
     bundle = diagnostics_bundle_dir(session_id)
     try:
         bundle.mkdir(parents=True, exist_ok=True)
-        write_review_verdict(verdict, bundle / _CYCLE0_SNAPSHOT_FILENAME)
+        write_review_verdict(verdict, bundle / _verdict_snapshot_filename(cycle))
     except OSError:
         _log.warning(
-            "cycle-0 findings snapshot write failed for session %s", session_id
+            "cycle-%d findings snapshot write failed for session %s",
+            cycle,
+            session_id,
         )
     return append_diagnostics_pointer(
-        "cycle-0 MUST_FIX findings snapshot persisted", session_id=session_id
+        f"cycle-{cycle} MUST_FIX findings snapshot persisted", session_id=session_id
     )
 
 
@@ -773,7 +778,7 @@ def run_review_with_fix_loop(
     scope_tier = resolve_tier(task.scope_hint)
     plan_text, ticket_text = _load_ticket_context(worktree)
     open_findings = _track_open_findings({}, verdict.accepted)
-    snapshot_pointer = _persist_cycle0_snapshot(verdict, session_id=session_id)
+    snapshot_pointer = _persist_cycle_snapshot(verdict, session_id=session_id, cycle=0)
     # #1723: true iff at least one fix cycle so far produced a real commit
     # (OR'd across cycles) — distinguishes a genuine fix from a fix loop
     # that converged purely because every cycle's fix invocation was a no-op.
@@ -835,6 +840,9 @@ def run_review_with_fix_loop(
                 ),
                 None,
             )
+        snapshot_pointer = _persist_cycle_snapshot(
+            verdict, session_id=session_id, cycle=cycle
+        )
         open_findings = _track_open_findings(open_findings, verdict.accepted)
         if not open_findings:
             return _clean_exit(
