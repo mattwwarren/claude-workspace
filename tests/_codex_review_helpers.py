@@ -160,5 +160,19 @@ def _write(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def _populate_global_agents_dir(path: Path, **role_to_content: str) -> None:
+    """Write fake global agent-spec files into *path* (#1773).
+
+    Keyword names are the agent-spec FILE stems under
+    ``_REVIEWER_ROLE_AGENT_FILES`` with ``-`` written as ``_`` (a Python
+    keyword cannot carry a dash), e.g. ``code_reviewer="SPEC"`` writes
+    ``<path>/code-reviewer.md``. Lets ``_resolve_agent_spec``'s
+    global-fallback cases populate a controlled directory without repeating
+    the mkdir/write boilerplate.
+    """
+    for stem, content in role_to_content.items():
+        _write(path / f"{stem.replace('_', '-')}.md", content)
+
+
 def _task() -> TicketTask:
     return _make_ticket_task(ticket_id="T-1", client="test", stage=Stage.REVIEW)

@@ -25,7 +25,11 @@ from cw.codex_review._capability import (
     _CodexFingerprint,
 )
 from cw.executor_diagnostics import diagnostics_bundle_dir
-from cw.review_findings import ReviewerRunFailure, consolidate_verdict
+from cw.review_findings import (
+    AgentSpecStatus,
+    ReviewerRunFailure,
+    consolidate_verdict,
+)
 from tests._codex_review_helpers import _task
 from tests._reconcile_helpers import (
     SCOPE_GUARD_BRANCH,
@@ -893,6 +897,205 @@ class TestRenderVerdictComment:
         body = render_verdict_comment(verdict, fix_loop_enabled=False)
         assert "capability" not in body.lower()
         assert "degraded" not in body.lower()
+
+
+# ---------------------------------------------------------------------------
+# #1773 — agent-spec resolution status on the verdict and its rendered note
+# ---------------------------------------------------------------------------
+
+
+_RECOVERED_NOTE = (
+    "**NOTE:** Code Quality Reviewer's repo-tracked spec was present but "
+    "empty — recovered via the global fallback; the repo-tracked file may be "
+    "truncated or need attention."
+)
+
+
+def _spec_status(
+    source: str, empty: bool, empty_repo_file: bool, role: str = "Code Quality Reviewer"
+) -> AgentSpecStatus:
+    return AgentSpecStatus(
+        role=role,
+        source=source,  # type: ignore[arg-type]
+        empty=empty,
+        empty_repo_file=empty_repo_file,
+    )
+
+
+def _body_with_specs(statuses: list[AgentSpecStatus]) -> str:
+    diff = _make_diff()
+    doc = _make_reviewer_doc(_make_finding(severity="NIT"))
+    verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+    verdict = verdict.model_copy(update={"agent_spec_status": statuses})
+    return render_verdict_comment(verdict, fix_loop_enabled=False)
+
+
+class TestRenderAgentSpecNote:
+    def test_repo_present_renders_fully_specified_headline(self) -> None:
+        body = _body_with_specs([_spec_status("repo", empty=False, empty_repo_file=False)])
+        assert "_Agent specs loaded for all 1 reviewer role(s)._" in body
+        assert "UNSPECIFIED" not in body
+        assert "**NOTE:**" not in body
+
+    def test_repo_empty_with_gate_disabled_names_the_role(self) -> None:
+        body = _body_with_specs(
+            [
+                _spec_status("repo", empty=True, empty_repo_file=True),
+                _spec_status(
+                    "repo", empty=False, empty_repo_file=False, role="SysAdmin Reviewer"
+                ),
+            ]
+        )
+        assert "**AGENT SPEC(S) UNSPECIFIED** — 1 of 2 role(s) ran without a " in body
+        assert "Code Quality Reviewer (present but empty, no usable fallback)." in body
+        assert "**NOTE:**" not in body
+
+    def test_global_present_renders_fully_specified_headline(self) -> None:
+        body = _body_with_specs(
+            [_spec_status("global", empty=False, empty_repo_file=False)]
+        )
+        assert "_Agent specs loaded for all 1 reviewer role(s)._" in body
+        assert "**NOTE:**" not in body
+
+    def test_recovered_empty_repo_file_appends_the_addendum(self) -> None:
+        body = _body_with_specs(
+            [_spec_status("global", empty=False, empty_repo_file=True)]
+        )
+        assert "_Agent specs loaded for all 1 reviewer role(s)._" in body
+        assert _RECOVERED_NOTE in body
+
+    def test_global_found_but_empty_label(self) -> None:
+        body = _body_with_specs(
+            [
+                _spec_status("global", empty=True, empty_repo_file=False),
+                _spec_status(
+                    "repo", empty=False, empty_repo_file=False, role="SysAdmin Reviewer"
+                ),
+            ]
+        )
+        assert "**AGENT SPEC(S) UNSPECIFIED** — 1 of 2 role(s) ran without a " in body
+        assert "Code Quality Reviewer (global spec found but empty)." in body
+        assert "**NOTE:**" not in body
+
+    def test_global_empty_with_empty_repo_file_uses_no_usable_fallback_label(
+        self,
+    ) -> None:
+        body = _body_with_specs(
+            [
+                _spec_status("global", empty=True, empty_repo_file=True),
+                _spec_status(
+                    "repo", empty=False, empty_repo_file=False, role="SysAdmin Reviewer"
+                ),
+            ]
+        )
+        assert (
+            "Code Quality Reviewer (present but empty, no usable fallback)." in body
+        )
+        assert "**NOTE:**" not in body
+
+    def test_absent_label(self) -> None:
+        body = _body_with_specs(
+            [
+                _spec_status("none", empty=True, empty_repo_file=False),
+                _spec_status(
+                    "repo", empty=False, empty_repo_file=False, role="SysAdmin Reviewer"
+                ),
+            ]
+        )
+        assert "Code Quality Reviewer (absent)." in body
+        assert "**NOTE:**" not in body
+
+    def test_none_with_empty_repo_file_uses_no_usable_fallback_label(self) -> None:
+        body = _body_with_specs(
+            [
+                _spec_status("none", empty=True, empty_repo_file=True),
+                _spec_status(
+                    "repo", empty=False, empty_repo_file=False, role="SysAdmin Reviewer"
+                ),
+            ]
+        )
+        assert (
+            "Code Quality Reviewer (present but empty, no usable fallback)." in body
+        )
+        assert "**NOTE:**" not in body
+
+    def test_recovered_addendum_renders_alongside_a_degraded_headline(self) -> None:
+        body = _body_with_specs(
+            [
+                _spec_status("global", empty=False, empty_repo_file=True),
+                _spec_status(
+                    "none", empty=True, empty_repo_file=False, role="SysAdmin Reviewer"
+                ),
+            ]
+        )
+        assert "**AGENT SPEC(S) UNSPECIFIED** — 1 of 2 role(s) ran without a " in body
+        assert "SysAdmin Reviewer (absent)." in body
+        assert _RECOVERED_NOTE in body
+
+    def test_all_roles_unspecified_renders_the_fail_open_headline(self) -> None:
+        body = _body_with_specs(
+            [
+                _spec_status("none", empty=True, empty_repo_file=False),
+                _spec_status(
+                    "none", empty=True, empty_repo_file=False, role="SysAdmin Reviewer"
+                ),
+            ]
+        )
+        assert (
+            "**ALL AGENT SPECS UNSPECIFIED** — no reviewer role in this pass "
+            "had a loaded agent specification (repo or global); every prompt's "
+            "`## Agent Specification` section was empty." in body
+        )
+        assert "**NOTE:**" not in body
+
+    def test_unset_renders_nothing(self) -> None:
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="NIT"))
+        verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        assert verdict.agent_spec_status == []
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "AGENT SPEC" not in body
+        assert "Agent specs loaded" not in body
+
+
+class TestVerdictRecordsAgentSpecStatus:
+    def test_agent_spec_status_recorded_verbatim(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-spec-status")
+        statuses = [_spec_status("global", empty=False, empty_repo_file=True)]
+        _result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[_make_reviewer_doc()],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-spec-status",
+            default_branch="main",
+            fix_loop_enabled=False,
+            agent_spec_status=statuses,
+        )
+        assert verdict is not None
+        assert verdict.agent_spec_status == statuses
+
+    def test_omitted_kwarg_leaves_the_field_empty(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-spec-status-absent")
+        _result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[_make_reviewer_doc()],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-spec-status-absent",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+        assert verdict is not None
+        assert verdict.agent_spec_status == []
 
 
 def test_format_failures_detail_includes_diagnostics_path() -> None:

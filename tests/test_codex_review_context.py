@@ -14,6 +14,7 @@ import pytest
 from cw.codex_review import (
     _build_reviewer_prompt,
     _categorize_changed_files,
+    _load_agent_spec_fallback_gate,
     _load_claude_md_quality_gates,
     _load_optional_text,
     _load_review_policy,
@@ -24,6 +25,7 @@ from cw.codex_review import (
     _prepare_review_pass,
     _read_sensitive_manifest,
     _render_lint_grounding_block,
+    _resolve_agent_spec,
     _RuffLintConfig,
     _select_reviewer_roles,
 )
@@ -33,6 +35,7 @@ from cw.codex_review._context import (
     _INLINED_ONLY_MARKER,
     _OUTPUT_INSTRUCTIONS_CAPABLE,
     _OUTPUT_INSTRUCTIONS_INLINED_ONLY,
+    _REVIEWER_ROLE_AGENT_FILES,
     _select_output_instructions,
 )
 from cw.codex_runner import FakeCodexRunner
@@ -40,6 +43,7 @@ from tests._codex_review_helpers import (
     _doc_json,
     _finding_payload,
     _git,
+    _populate_global_agents_dir,
     _task,
     _write,
 )
@@ -831,6 +835,265 @@ class TestBuildReviewerPromptCapability:
 
 
 # ---------------------------------------------------------------------------
+# _load_agent_spec_fallback_gate (#1773)
+# ---------------------------------------------------------------------------
+
+
+class TestLoadAgentSpecFallbackGate:
+    def test_missing_pyproject_defaults_to_enabled(self, tmp_path: Path) -> None:
+        assert _load_agent_spec_fallback_gate(tmp_path) is True
+
+    def test_missing_table_defaults_to_enabled(self, tmp_path: Path) -> None:
+        _write(tmp_path / "pyproject.toml", '[project]\nname = "x"\n')
+        assert _load_agent_spec_fallback_gate(tmp_path) is True
+
+    def test_explicit_false_disables_the_fallback(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path / "pyproject.toml",
+            "[tool.cw.codex_review]\nagent_spec_global_fallback = false\n",
+        )
+        assert _load_agent_spec_fallback_gate(tmp_path) is False
+
+    def test_explicit_true_keeps_the_fallback_enabled(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path / "pyproject.toml",
+            "[tool.cw.codex_review]\nagent_spec_global_fallback = true\n",
+        )
+        assert _load_agent_spec_fallback_gate(tmp_path) is True
+
+    def test_malformed_toml_fails_safe_to_enabled(self, tmp_path: Path) -> None:
+        _write(tmp_path / "pyproject.toml", "not [ valid toml{{{\n")
+        assert _load_agent_spec_fallback_gate(tmp_path) is True
+
+
+# ---------------------------------------------------------------------------
+# _resolve_agent_spec (#1773)
+# ---------------------------------------------------------------------------
+
+
+_ROLE = "Code Quality Reviewer"
+_ROLE_FILE = "code-reviewer.md"
+
+
+def _write_repo_spec(worktree: Path, content: str) -> None:
+    _write(worktree / ".claude" / "agents" / _ROLE_FILE, content)
+
+
+def _patch_global_agents(
+    monkeypatch: pytest.MonkeyPatch, path: Path
+) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("cw.codex_review._context._GLOBAL_AGENTS_DIR", path)
+
+
+class TestResolveAgentSpec:
+    """Repo-local -> global fallback resolution, its gate, and its diagnostics.
+
+    Relies on conftest's autouse ``_isolate_global_agents_dir`` for the
+    global-absent cases; the fallback-succeeds cases re-patch the same name
+    with a populated directory.
+    """
+
+    def test_repo_local_present_wins_and_never_reads_global(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = tmp_path / "wt"
+        _write_repo_spec(worktree, "REPO SPEC BODY\n")
+        _patch_global_agents(monkeypatch, tmp_path / "global")
+        _populate_global_agents_dir(
+            tmp_path / "global", code_reviewer="GLOBAL SPEC BODY\n"
+        )
+
+        resolved = _resolve_agent_spec(worktree, _ROLE, global_fallback_enabled=True)
+
+        assert resolved.text == "REPO SPEC BODY\n"
+        assert resolved.status.source == "repo"
+        assert resolved.status.empty is False
+        assert resolved.status.empty_repo_file is False
+
+    def test_repo_absent_falls_back_to_global(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = tmp_path / "wt"
+        _patch_global_agents(monkeypatch, tmp_path / "global")
+        _populate_global_agents_dir(
+            tmp_path / "global", code_reviewer="GLOBAL SPEC BODY\n"
+        )
+
+        resolved = _resolve_agent_spec(worktree, _ROLE, global_fallback_enabled=True)
+
+        assert resolved.text == "GLOBAL SPEC BODY\n"
+        assert resolved.status.source == "global"
+        assert resolved.status.empty is False
+        assert resolved.status.empty_repo_file is False
+
+    def test_repo_absent_with_gate_disabled_ignores_a_usable_global(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = tmp_path / "wt"
+        _patch_global_agents(monkeypatch, tmp_path / "global")
+        _populate_global_agents_dir(
+            tmp_path / "global", code_reviewer="GLOBAL SPEC BODY\n"
+        )
+
+        resolved = _resolve_agent_spec(worktree, _ROLE, global_fallback_enabled=False)
+
+        assert resolved.text == ""
+        assert resolved.status.source == "none"
+        assert resolved.status.empty is True
+        assert resolved.status.empty_repo_file is False
+
+    def test_repo_and_global_both_absent(self, tmp_path: Path) -> None:
+        resolved = _resolve_agent_spec(
+            tmp_path / "wt", _ROLE, global_fallback_enabled=True
+        )
+
+        assert resolved.text == ""
+        assert resolved.status.source == "none"
+        assert resolved.status.empty is True
+        assert resolved.status.empty_repo_file is False
+
+    def test_empty_repo_file_recovers_via_global(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = tmp_path / "wt"
+        _write_repo_spec(worktree, "   \n")
+        _patch_global_agents(monkeypatch, tmp_path / "global")
+        _populate_global_agents_dir(
+            tmp_path / "global", code_reviewer="GLOBAL SPEC BODY\n"
+        )
+
+        resolved = _resolve_agent_spec(worktree, _ROLE, global_fallback_enabled=True)
+
+        assert resolved.text == "GLOBAL SPEC BODY\n"
+        assert resolved.status.source == "global"
+        assert resolved.status.empty is False
+        assert resolved.status.empty_repo_file is True
+
+    def test_empty_repo_file_with_global_absent_stays_unspecified(
+        self, tmp_path: Path
+    ) -> None:
+        worktree = tmp_path / "wt"
+        _write_repo_spec(worktree, "")
+
+        resolved = _resolve_agent_spec(worktree, _ROLE, global_fallback_enabled=True)
+
+        assert resolved.text == ""
+        assert resolved.status.source == "none"
+        assert resolved.status.empty is True
+        assert resolved.status.empty_repo_file is True
+
+    def test_empty_repo_file_with_empty_global_reports_global_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = tmp_path / "wt"
+        _write_repo_spec(worktree, "\n")
+        _patch_global_agents(monkeypatch, tmp_path / "global")
+        _populate_global_agents_dir(tmp_path / "global", code_reviewer="  \n")
+
+        resolved = _resolve_agent_spec(worktree, _ROLE, global_fallback_enabled=True)
+
+        assert resolved.text == ""
+        assert resolved.status.source == "global"
+        assert resolved.status.empty is True
+        assert resolved.status.empty_repo_file is True
+
+    def test_empty_repo_file_with_gate_disabled_stays_repo_sourced(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = tmp_path / "wt"
+        _write_repo_spec(worktree, "\n")
+        _patch_global_agents(monkeypatch, tmp_path / "global")
+        _populate_global_agents_dir(
+            tmp_path / "global", code_reviewer="GLOBAL SPEC BODY\n"
+        )
+
+        resolved = _resolve_agent_spec(worktree, _ROLE, global_fallback_enabled=False)
+
+        assert resolved.text == ""
+        assert resolved.status.source == "repo"
+        assert resolved.status.empty is True
+        assert resolved.status.empty_repo_file is True
+
+    def test_global_present_but_empty_with_repo_absent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = tmp_path / "wt"
+        _patch_global_agents(monkeypatch, tmp_path / "global")
+        _populate_global_agents_dir(tmp_path / "global", code_reviewer="")
+
+        resolved = _resolve_agent_spec(worktree, _ROLE, global_fallback_enabled=True)
+
+        assert resolved.text == ""
+        assert resolved.status.source == "global"
+        assert resolved.status.empty is True
+        assert resolved.status.empty_repo_file is False
+
+    def test_genuine_absence_logs_a_warning_naming_role_and_paths(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        worktree = tmp_path / "wt"
+        with caplog.at_level(logging.WARNING):
+            resolved = _resolve_agent_spec(
+                worktree, _ROLE, global_fallback_enabled=True
+            )
+        assert resolved.status.source == "none"
+        warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert warnings
+        joined = "\n".join(warnings)
+        assert _ROLE in joined
+        assert str(worktree / ".claude" / "agents" / _ROLE_FILE) in joined
+
+    def test_gate_disabled_absence_warning_names_only_the_repo_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        worktree = tmp_path / "wt"
+        global_dir = tmp_path / "global"
+        _patch_global_agents(monkeypatch, global_dir)
+        with caplog.at_level(logging.WARNING):
+            resolved = _resolve_agent_spec(
+                worktree, _ROLE, global_fallback_enabled=False
+            )
+        assert resolved.status.source == "none"
+        joined = "\n".join(
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        )
+        assert str(worktree / ".claude" / "agents" / _ROLE_FILE) in joined
+        assert str(global_dir / _ROLE_FILE) not in joined
+
+    def test_empty_but_resolved_source_does_not_warn(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        worktree = tmp_path / "wt"
+        _patch_global_agents(monkeypatch, tmp_path / "global")
+        _populate_global_agents_dir(tmp_path / "global", code_reviewer="")
+        with caplog.at_level(logging.WARNING):
+            resolved = _resolve_agent_spec(
+                worktree, _ROLE, global_fallback_enabled=True
+            )
+        assert resolved.status.empty is True
+        assert resolved.status.source == "global"
+        assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+    def test_successful_global_fallback_does_not_warn(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        worktree = tmp_path / "wt"
+        _write_repo_spec(worktree, "\n")
+        _patch_global_agents(monkeypatch, tmp_path / "global")
+        _populate_global_agents_dir(
+            tmp_path / "global", code_reviewer="GLOBAL SPEC BODY\n"
+        )
+        with caplog.at_level(logging.WARNING):
+            resolved = _resolve_agent_spec(
+                worktree, _ROLE, global_fallback_enabled=True
+            )
+        assert resolved.status.source == "global"
+        assert resolved.status.empty_repo_file is True
+        assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+# ---------------------------------------------------------------------------
 # _prepare_review_pass extraction (#1392)
 # ---------------------------------------------------------------------------
 
@@ -972,3 +1235,70 @@ class TestPrepareReviewPass:
         assert prepared.roles
         for role in prepared.roles:
             assert "## Repo Lint Configuration" not in prepared.prompts_by_role[role]
+
+    def test_agent_spec_status_threaded_for_every_selected_role(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#1773: every selected role carries a resolved spec status, and a
+        repo whose ``.claude/agents/`` copy exists reports ``source="repo"``."""
+        repo = make_git_repo("wt-prepare-agent-spec")
+        _git(repo, "checkout", "-b", "feature")
+        (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
+        _git(repo, "add", "mod.py")
+        _git(repo, "commit", "-m", "add mod.py")
+
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-prepare-agent-spec-repo",
+        )
+        for role in prepared.roles:
+            _write(
+                repo / ".claude" / "agents" / _REVIEWER_ROLE_AGENT_FILES[role],
+                f"SPEC FOR {role}\n",
+            )
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-prepare-agent-spec-repo",
+        )
+
+        assert prepared.roles
+        assert [s.role for s in prepared.agent_spec_status] == prepared.roles
+        assert all(s.source == "repo" for s in prepared.agent_spec_status)
+        assert all(s.empty is False for s in prepared.agent_spec_status)
+        for role in prepared.roles:
+            assert f"SPEC FOR {role}" in prepared.prompts_by_role[role]
+
+    def test_no_agents_dir_at_all_fails_open_and_marks_every_role_unspecified(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """#1773 fail-open: an absent ``.claude/agents/`` (with the global
+        fallback isolated to an empty dir) still produces prompts — it is
+        diagnosed, not fatal."""
+        repo = make_git_repo("wt-prepare-agent-spec-none")
+        _git(repo, "checkout", "-b", "feature")
+        (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
+        _git(repo, "add", "mod.py")
+        _git(repo, "commit", "-m", "add mod.py")
+
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-prepare-agent-spec-none",
+        )
+
+        assert prepared.roles
+        assert set(prepared.prompts_by_role) == set(prepared.roles)
+        assert [s.role for s in prepared.agent_spec_status] == prepared.roles
+        assert all(s.source == "none" for s in prepared.agent_spec_status)
+        assert all(s.empty is True for s in prepared.agent_spec_status)
+        assert all(
+            s.empty_repo_file is False for s in prepared.agent_spec_status
+        )
