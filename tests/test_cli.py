@@ -9990,10 +9990,13 @@ class TestLaneLs:
     ) -> None:
         """cw lane ls -c/--client acme works like the CLIENT positional (#1607)."""
         _write_clients_yaml_with_lanes(
-            tmp_config_dir, tmp_path, "acme", ["default", "urgent"]
+            tmp_config_dir=tmp_config_dir,
+            tmp_path=tmp_path,
+            client_name="acme",
+            lanes=["default", "urgent"],
         )
         runner = CliRunner()
-        result = runner.invoke(main, ["lane", "ls", "-c", "acme"])
+        result = runner.invoke(cli=main, args=["lane", "ls", "-c", "acme"])
         assert result.exit_code == 0, result.output
         assert "default" in result.output
         assert "urgent" in result.output
@@ -10002,10 +10005,13 @@ class TestLaneLs:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         _write_clients_yaml_with_lanes(
-            tmp_config_dir, tmp_path, "acme", ["default", "urgent"]
+            tmp_config_dir=tmp_config_dir,
+            tmp_path=tmp_path,
+            client_name="acme",
+            lanes=["default", "urgent"],
         )
         runner = CliRunner()
-        result = runner.invoke(main, ["lane", "ls", "acme", "-c", "acme"])
+        result = runner.invoke(cli=main, args=["lane", "ls", "acme", "-c", "acme"])
         assert result.exit_code != 0
         out = result.output.lower()
         assert "positional" in out
@@ -10015,7 +10021,7 @@ class TestLaneLs:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         runner = CliRunner()
-        result = runner.invoke(main, ["lane", "ls"])
+        result = runner.invoke(cli=main, args=["lane", "ls"])
         assert result.exit_code != 0
         assert "missing" in result.output.lower()
 
@@ -10069,10 +10075,14 @@ class TestLaneAdd:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         """cw lane add fast -c acme works like the CLIENT positional (#1607)."""
-        _write_clients_yaml_no_lanes(tmp_config_dir, tmp_path, "acme")
+        _write_clients_yaml_no_lanes(
+            tmp_config_dir=tmp_config_dir,
+            tmp_path=tmp_path,
+            client_name="acme",
+        )
 
         runner = CliRunner()
-        result = runner.invoke(main, ["lane", "add", "fast", "-c", "acme"])
+        result = runner.invoke(cli=main, args=["lane", "add", "fast", "-c", "acme"])
         assert result.exit_code == 0, result.output
 
         from cw.config import load_clients
@@ -10147,10 +10157,13 @@ class TestLaneRm:
     ) -> None:
         """cw lane rm fast -c acme works like the CLIENT positional (#1607)."""
         _write_clients_yaml_with_lanes(
-            tmp_config_dir, tmp_path, "acme", ["default", "fast"]
+            tmp_config_dir=tmp_config_dir,
+            tmp_path=tmp_path,
+            client_name="acme",
+            lanes=["default", "fast"],
         )
         runner = CliRunner()
-        result = runner.invoke(main, ["lane", "rm", "fast", "-c", "acme"])
+        result = runner.invoke(cli=main, args=["lane", "rm", "fast", "-c", "acme"])
         assert result.exit_code == 0, result.output
 
         from cw.config import load_clients
@@ -10163,17 +10176,23 @@ class TestLaneRm:
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         _write_clients_yaml_with_lanes(
-            tmp_config_dir, tmp_path, "acme", ["default", "fast"]
+            tmp_config_dir=tmp_config_dir,
+            tmp_path=tmp_path,
+            client_name="acme",
+            lanes=["default", "fast"],
         )
         runner = CliRunner()
-        result = runner.invoke(main, ["lane", "rm", "acme", "fast", "-c", "beta"])
+        result = runner.invoke(
+            cli=main,
+            args=["lane", "rm", "acme", "fast", "-c", "beta"],
+        )
         assert result.exit_code != 0
 
     def test_lane_rm_rejects_missing_client(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
         runner = CliRunner()
-        result = runner.invoke(main, ["lane", "rm", "fast"])
+        result = runner.invoke(cli=main, args=["lane", "rm", "fast"])
         assert result.exit_code != 0
 
 
@@ -10259,13 +10278,16 @@ class TestLanePauseResume:
     ) -> None:
         """cw lane pause slow -c acme works like the CLIENT positional (#1607)."""
         _write_clients_yaml_with_lanes(
-            tmp_config_dir, tmp_path, "acme", ["default", "slow"]
+            tmp_config_dir=tmp_config_dir,
+            tmp_path=tmp_path,
+            client_name="acme",
+            lanes=["default", "slow"],
         )
         from cw.events import read_events
         from cw.models import OrchestratorEventType
 
         runner = CliRunner()
-        result = runner.invoke(main, ["lane", "pause", "slow", "-c", "acme"])
+        result = runner.invoke(cli=main, args=["lane", "pause", "slow", "-c", "acme"])
         assert result.exit_code == 0, result.output
 
         events = read_events()
@@ -10281,14 +10303,17 @@ class TestLanePauseResume:
     ) -> None:
         """cw lane resume slow -c acme works like the CLIENT positional (#1607)."""
         _write_clients_yaml_with_lanes(
-            tmp_config_dir, tmp_path, "acme", ["default", "slow"]
+            tmp_config_dir=tmp_config_dir,
+            tmp_path=tmp_path,
+            client_name="acme",
+            lanes=["default", "slow"],
         )
         from cw.events import read_events
         from cw.models import OrchestratorEventType
 
         runner = CliRunner()
-        runner.invoke(main, ["lane", "pause", "slow", "-c", "acme"])
-        result = runner.invoke(main, ["lane", "resume", "slow", "-c", "acme"])
+        runner.invoke(cli=main, args=["lane", "pause", "slow", "-c", "acme"])
+        result = runner.invoke(cli=main, args=["lane", "resume", "slow", "-c", "acme"])
         assert result.exit_code == 0, result.output
 
         events = read_events()
