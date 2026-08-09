@@ -548,6 +548,58 @@ class TestRenderLintGroundingBlock:
 
 
 # ---------------------------------------------------------------------------
+# code-reviewer.md "Concrete Numeric Thresholds" table (#1774)
+# ---------------------------------------------------------------------------
+
+
+class TestCodeReviewerAgentSpecFunctionLengthGate:
+    """Regression guard for #1774: a row in the Concrete Numeric Thresholds
+    table may assert MUST_FIX only if it cites a gate this repo actually
+    configures; Function length, Nesting depth, Parameter count, and the
+    positional-args row must not assert a bare/unbacked MUST_FIX threshold.
+    See the inline #1774 note in the table's prose for the full rationale.
+    """
+
+    def _spec_text(self) -> str:
+        repo_root = Path(__file__).resolve().parents[1]
+        return (repo_root / ".claude" / "agents" / "code-reviewer.md").read_text()
+
+    def test_function_length_row_does_not_assert_bare_line_count(self) -> None:
+        text = self._spec_text()
+        assert "| Function length | 50 lines | MUST_FIX" not in text
+
+    def test_function_length_row_cites_configured_gate(self) -> None:
+        text = self._spec_text()
+        assert "PLR0915" in text
+
+    def test_parameter_count_row_cites_configured_gate(self) -> None:
+        text = self._spec_text()
+        assert "PLR0913" in text
+
+    def test_nesting_depth_row_no_longer_bare_must_fix(self) -> None:
+        text = self._spec_text()
+        assert "Nesting depth (if/for/with) | 4 levels | MUST_FIX" not in text
+
+    def test_nesting_depth_row_is_non_blocking(self) -> None:
+        text = self._spec_text()
+        assert "Nesting depth (if/for/with) | 4 levels" in text
+        assert "SHOULD_FIX only, as a readability suggestion" in text
+
+    def test_positional_args_row_no_longer_bare_must_fix(self) -> None:
+        text = self._spec_text()
+        assert "Function calls with 2+ positional args | any | MUST_FIX" not in text
+
+    def test_positional_args_row_is_non_blocking(self) -> None:
+        text = self._spec_text()
+        assert "Function calls with 2+ positional args | any" in text
+        assert "SHOULD_FIX missing-named-args" in text
+
+    def test_table_carries_1774_regression_note(self) -> None:
+        text = self._spec_text()
+        assert "#1774" in text
+
+
+# ---------------------------------------------------------------------------
 # _build_reviewer_prompt
 # ---------------------------------------------------------------------------
 

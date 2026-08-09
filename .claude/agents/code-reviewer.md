@@ -54,18 +54,35 @@ implementation.
 Use these as hard defaults. A project's CLAUDE.md may override; otherwise
 apply uniformly.
 
+A row in this table may assert **MUST_FIX** only if it cites a gate this
+repo actually configures, naming the specific config key (e.g. a ruff rule
+ID plus the `pyproject.toml` setting, or a CLAUDE.md Quality Gates entry).
+Every other row is expressible only at non-blocking severity (SHOULD_FIX or
+below) — downgrade the severity, never the concern: long functions, deep
+nesting, high complexity, and long argument lists are all still worth a
+reviewer raising. **#1774: an earlier version of this table asserted
+several rows as MUST_FIX with no backing configured gate (Nesting depth,
+positional args) or with a real gate mismeasured (Function length: "50
+lines" vs `PLR0915`'s statement count) — both defect shapes manufacture
+false MUST_FIX findings against code that passes `ruff check` cleanly. If
+you are editing this table: before keeping or adding a MUST_FIX row, name
+the actual linter rule ID and the config key that enables it in this repo.
+If you cannot, the row belongs at SHOULD_FIX or lower.**
+
 | Metric | Threshold | Severity if exceeded |
 |---|---|---|
-| Function length | 50 lines | MUST_FIX (refactor into smaller functions) |
-| Nesting depth (if/for/with) | 4 levels | MUST_FIX (extract helpers or use early returns) |
+| Function length | Cite the project's actual configured gate (e.g. ruff `PLR0915` max-statements, from CLAUDE.md's Quality Gates or `pyproject.toml`) — never a bare line count | MUST_FIX only with a cited gate + rule + measured value exceeding it; otherwise NIT or PRINCIPLE (readability concern, not a fabricated numeric gate) |
+| Nesting depth (if/for/with) | 4 levels — advisory heuristic; no ruff rule backs this in this repo's config (no `C901`/mccabe selected) | SHOULD_FIX only, as a readability suggestion (extract helpers or use early returns); MUST_FIX only if the project selects and cites a specific mccabe/complexity rule |
 | Cyclomatic complexity | 10 | SHOULD_FIX |
-| Parameter count | 5 | SHOULD_FIX (consider a dataclass/Pydantic model) |
-| Function calls with 2+ positional args | any | MUST_FIX missing-named-args (Python) |
+| Parameter count | Cite the project's actual configured gate (e.g. ruff `PLR0913` max-args, if enabled) — never a bare arg count | SHOULD_FIX only, with a cited gate + rule + measured value exceeding it (e.g. suggest a dataclass/Pydantic model); if the rule is disabled or absent, not a finding at all — never MUST_FIX |
+| Function calls with 2+ positional args | any — advisory heuristic; no ruff rule backs this in this repo's config (a style convention, not an enforced gate) | SHOULD_FIX missing-named-args (Python) only; MUST_FIX only if the project configures and cites a specific lint rule for this |
 
-These are floors, not ceilings on judgment. A 51-line function that's
-obviously cohesive is not the same as a 51-line function with three
-unrelated responsibilities — but the threshold exists so agents don't soften
-into vague "consider splitting" suggestions.
+These are floors, not ceilings on judgment. A long function or deeply
+nested block that's obviously cohesive is not the same as one with several
+unrelated responsibilities — but for the gate-shaped rows above, the floor
+itself must be the project's real configured number, not a guess; and for
+the heuristic-only rows, the severity ceiling is SHOULD_FIX unless a real
+configured gate says otherwise.
 
 ## Focus Areas
 
