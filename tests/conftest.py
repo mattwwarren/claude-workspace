@@ -531,7 +531,7 @@ def _mock_codex_capability_probe(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(scope="session", autouse=True)
 def _guard_no_real_claude_projects_writes() -> Iterator[None]:
-    """Fail the suite if a test leaked a directory into the REAL ``~/.claude/projects/``.
+    """Fail the suite if a test leaked a directory into the REAL projects dir.
 
     ``cw._util.claude_project_dir()`` resolves via ``Path.home()`` directly,
     not through ``queue_peek.CLAUDE_PROJECTS`` / ``queue_peek.CW_STATE`` — so a
@@ -557,7 +557,7 @@ def _guard_no_real_claude_projects_writes() -> Iterator[None]:
     Nothing is deleted here (out of scope). A structurally stronger fix —
     redirecting ``HOME`` for the entire suite by construction, so this class
     of leak becomes impossible rather than caught after the fact — is tracked
-    as a follow-up: GH #1751.
+    as a follow-up: GH #1756.
     """
     real_projects = Path.home() / ".claude" / "projects"
     before = (
@@ -568,9 +568,7 @@ def _guard_no_real_claude_projects_writes() -> Iterator[None]:
         {p.name for p in real_projects.iterdir()} if real_projects.exists() else set()
     )
     leaked = after - before
-    suspect = {
-        name for name in leaked if "tmp-pytest" in name or "pytest-of" in name
-    }
+    suspect = {name for name in leaked if "tmp-pytest" in name or "pytest-of" in name}
     other = leaked - suspect
     if other:
         warnings.warn(

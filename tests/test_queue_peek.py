@@ -21,7 +21,19 @@ from tests.conftest import _make_ticket_task as _cw_make_ticket_task
 
 @pytest.fixture
 def patched_peek(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Redirect CLAUDE_PROJECTS and CW_STATE to tmp_path for isolation."""
+    """Redirect CLAUDE_PROJECTS, CW_STATE, and Path.home() to tmp_path.
+
+    find_transcript_for_ticket's worktree_path branch resolves the project
+    dir via cw._util.claude_project_dir(), which calls Path.home() directly
+    rather than reading CLAUDE_PROJECTS -- so redirecting only the two
+    module constants below leaves that branch writing into the real
+    ~/.claude/projects/ (GH #1736). Patching HOME is the seam: every
+    module's own Path.home() binding reads it, so it protects
+    claude_project_dir today and any future caller reached the same way.
+    """
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
     projects_dir = tmp_path / "projects"
     projects_dir.mkdir()
     state_file = tmp_path / "sessions.json"
@@ -388,7 +400,7 @@ class TestFindTranscriptForTicketWorktreePath:
         proj = claude_project_dir(worktree)
         csid = "dead1234-0000-0000-0000-000000000000"
         jsonl = proj / f"{csid}.jsonl"
-        proj.mkdir(parents=True)
+        proj.mkdir(parents=True, exist_ok=True)
         jsonl.write_text("")
 
         session_id = "deadbeef"
@@ -410,7 +422,7 @@ class TestFindTranscriptForTicketWorktreePath:
         worktree = tmp_path / ".cw" / "wt" / "abc123" / "dev-501"
         worktree.mkdir(parents=True)
         proj = claude_project_dir(worktree)
-        proj.mkdir(parents=True)
+        proj.mkdir(parents=True, exist_ok=True)
         surface_ref = "cafe1234"
         jsonl = proj / f"{surface_ref}-full-uuid.jsonl"
         jsonl.write_text("")
@@ -441,7 +453,7 @@ class TestFindTranscriptForTicketWorktreePath:
         worktree = tmp_path / ".cw" / "wt" / "abc123" / "dev-502"
         worktree.mkdir(parents=True)
         proj = claude_project_dir(worktree)
-        proj.mkdir(parents=True)
+        proj.mkdir(parents=True, exist_ok=True)
         jsonl = proj / "some-transcript.jsonl"
         jsonl.write_text("")
 
@@ -493,7 +505,7 @@ class TestFindTranscriptForTicketDaemonWorktreePath:
         worktree = tmp_path / ".cw" / "wt" / "abc123" / "dev-816"
         worktree.mkdir(parents=True)
         proj = claude_project_dir(worktree)
-        proj.mkdir(parents=True)
+        proj.mkdir(parents=True, exist_ok=True)
         csid = "feed0000-0000-0000-0000-000000000000"
         jsonl = proj / f"{csid}.jsonl"
         jsonl.write_text("")
@@ -2016,7 +2028,7 @@ class TestBlindRow:
         wt = tmp_path / "dev-900"
         wt.mkdir()
         proj = claude_project_dir(wt)
-        proj.mkdir(parents=True)
+        proj.mkdir(parents=True, exist_ok=True)
         jsonl = proj / "session.jsonl"
         jsonl.touch()
         # Set mtime to 10 minutes before _NOW
@@ -2038,7 +2050,7 @@ class TestBlindRow:
         wt = tmp_path / "dev-901"
         wt.mkdir()
         proj = claude_project_dir(wt)
-        proj.mkdir(parents=True)
+        proj.mkdir(parents=True, exist_ok=True)
         # No .jsonl files
 
         task = _make_ticket_task("901", worktree_path=wt)
