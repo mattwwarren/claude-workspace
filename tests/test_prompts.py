@@ -90,6 +90,70 @@ class TestGetPurposePrompt:
         with pytest.raises(ValueError, match="both be provided"):
             get_purpose_prompt("impl", workspace_path="/opt/foo")
 
+    def test_default_impl_prompt_unchanged_with_no_client_value(self) -> None:
+        prompt = get_purpose_prompt("impl")
+        assert prompt == PURPOSE_PROMPTS["impl"]
+        assert prompt is not None
+        assert "(ruff check, mypy, pytest)" in prompt
+
+    def test_default_debt_prompt_unchanged_with_no_client_value(self) -> None:
+        prompt = get_purpose_prompt("debt")
+        assert prompt == PURPOSE_PROMPTS["debt"]
+        assert prompt is not None
+        assert "(ruff check, mypy, pytest)" in prompt
+
+    def test_quality_gate_commands_substituted_for_impl(self) -> None:
+        prompt = get_purpose_prompt(
+            "impl",
+            quality_gate_commands="npm run lint && npm test",
+        )
+        assert prompt is not None
+        assert "(npm run lint && npm test)" in prompt
+        assert "ruff" not in prompt
+        assert "mypy" not in prompt
+        assert "pytest" not in prompt
+
+    def test_quality_gate_commands_substituted_for_debt(self) -> None:
+        prompt = get_purpose_prompt(
+            "debt",
+            quality_gate_commands="npm run lint && npm test",
+        )
+        assert prompt is not None
+        assert "(npm run lint && npm test)" in prompt
+        assert "ruff" not in prompt
+        assert "mypy" not in prompt
+        assert "pytest" not in prompt
+
+    def test_empty_quality_gate_commands_omits_sentence(self) -> None:
+        prompt = get_purpose_prompt("impl", quality_gate_commands="")
+        assert prompt is not None
+        assert "run quality gates" not in prompt
+        assert "IMPLEMENTATION" in prompt
+
+    def test_quality_gate_commands_ignored_for_idea(self) -> None:
+        prompt = get_purpose_prompt("idea", quality_gate_commands="npm test")
+        assert prompt == PURPOSE_PROMPTS["idea"]
+
+    def test_client_override_takes_precedence_over_quality_gate_commands(self) -> None:
+        prompt = get_purpose_prompt(
+            "impl",
+            {"impl": "Custom text"},
+            quality_gate_commands="npm test",
+        )
+        assert prompt == "Custom text"
+
+    def test_quality_gate_commands_with_client_context(self) -> None:
+        prompt = get_purpose_prompt(
+            "impl",
+            client_name="health",
+            workspace_path="/opt/health",
+            quality_gate_commands="npm test",
+        )
+        assert prompt is not None
+        assert prompt.startswith("[cw identity]")
+        assert "health" in prompt
+        assert "(npm test)" in prompt
+
 
 class TestBuildSessionContext:
     def test_returns_expected_format(self) -> None:
