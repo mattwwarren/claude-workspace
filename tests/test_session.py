@@ -143,14 +143,18 @@ class TestStartSession:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         self._write_clients_file(
-            tmp_config_dir,
-            sample_client,
+            tmp_config_dir=tmp_config_dir,
+            sample_client=sample_client,
             quality_gate_commands="npm run lint && npm test",
         )
-        monkeypatch.setattr("cw.session._write_hook_context", _noop)
-        monkeypatch.setattr("cw.session._attach_session", _noop)
+        monkeypatch.setattr(target="cw.session._write_hook_context", name=_noop)
+        monkeypatch.setattr(target="cw.session._attach_session", name=_noop)
 
-        start_session("test-client", "impl", native_daemon=mock_native_daemon)
+        start_session(
+            client_name="test-client",
+            purpose="impl",
+            native_daemon=mock_native_daemon,
+        )
 
         _cwd, prompt = mock_native_daemon.spawn_calls[0]
         assert "(npm run lint && npm test)" in prompt

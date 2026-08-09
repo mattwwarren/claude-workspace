@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+from cw.models.enums import SessionPurpose
+
 CW_COMMAND_REFERENCE = """\
 [cw commands]
 - cw dev-queue add <ticket> — enqueue a ticket for the auto-dev pipeline
@@ -23,20 +27,6 @@ _AGENT_TEAM_GUIDANCE = (
 
 _DEFAULT_QUALITY_GATES = "ruff check, mypy, pytest"
 
-_IMPL_PROMPT_BASE = (
-    "You are in the IMPLEMENTATION session. "
-    "Write code, implement features, and fix bugs. "
-    "If you notice quality issues (linting, types, duplication, docs), "
-    "note them for later cleanup but stay focused on implementation. "
-)
-
-_DEBT_PROMPT_BASE = (
-    "You are in the TECH DEBT session. "
-    "Fix linting violations, type errors, duplication, and documentation gaps. "
-    "Do not implement new features or change behavior. "
-    "Keep changes minimal and focused on quality. "
-)
-
 
 def _quality_gate_sentence(commands: str) -> str:
     """Render the gate sentence naming *commands* as the gate list."""
@@ -46,34 +36,49 @@ def _quality_gate_sentence(commands: str) -> str:
     )
 
 
-# Purposes whose prompt carries a quality-gate sentence, keyed to the base text
-# the sentence is appended to. "idea" is absent: it has no gate sentence.
-_GATED_PROMPT_BASES: dict[str, str] = {
-    "impl": _IMPL_PROMPT_BASE,
-    "debt": _DEBT_PROMPT_BASE,
+@dataclass(frozen=True)
+class _PromptSpec:
+    base: str
+    gated: bool = False
+
+
+_PROMPT_SPECS: dict[SessionPurpose, _PromptSpec] = {
+    SessionPurpose.IMPL: _PromptSpec(
+        base=(
+            "You are in the IMPLEMENTATION session. "
+            "Write code, implement features, and fix bugs. "
+            "If you notice quality issues (linting, types, duplication, docs), "
+            "note them for later cleanup but stay focused on implementation. "
+        ),
+        gated=True,
+    ),
+    SessionPurpose.IDEA: _PromptSpec(
+        base=(
+            "You are in the IDEA session. "
+            "Brainstorm approaches, explore design options, and prototype solutions. "
+            "Think creatively about architecture and features. "
+            "Document ideas clearly for the implementation session to pick up.\n\n"
+            "CRITICAL: Never clear context when exiting plan mode. "
+            "Clearing context drops all delegation work on the floor. "
+            "Always continue in the same context after plan approval."
+        )
+    ),
+    SessionPurpose.DEBT: _PromptSpec(
+        base=(
+            "You are in the TECH DEBT session. "
+            "Fix linting violations, type errors, duplication, and documentation gaps. "
+            "Do not implement new features or change behavior. "
+            "Keep changes minimal and focused on quality. "
+        ),
+        gated=True,
+    ),
 }
 
 PURPOSE_PROMPTS: dict[str, str] = {
-    "impl": (
-        _IMPL_PROMPT_BASE
-        + _quality_gate_sentence(_DEFAULT_QUALITY_GATES)
-        + _AGENT_TEAM_GUIDANCE
-    ),
-    "idea": (
-        "You are in the IDEA session. "
-        "Brainstorm approaches, explore design options, and prototype solutions. "
-        "Think creatively about architecture and features. "
-        "Document ideas clearly for the implementation session to pick up.\n\n"
-        "CRITICAL: Never clear context when exiting plan mode. "
-        "Clearing context drops all delegation work on the floor. "
-        "Always continue in the same context after plan approval."
-        + _AGENT_TEAM_GUIDANCE
-    ),
-    "debt": (
-        _DEBT_PROMPT_BASE
-        + _quality_gate_sentence(_DEFAULT_QUALITY_GATES)
-        + _AGENT_TEAM_GUIDANCE
-    ),
+    purpose.value: spec.base
+    + (_quality_gate_sentence(_DEFAULT_QUALITY_GATES) if spec.gated else "")
+    + _AGENT_TEAM_GUIDANCE
+    for purpose, spec in _PROMPT_SPECS.items()
 }
 
 
@@ -131,15 +136,20 @@ def get_purpose_prompt(
         msg = "client_name and workspace_path must both be provided or both omitted"
         raise ValueError(msg)
 
+    try:
+        prompt_spec = _PROMPT_SPECS.get(SessionPurpose(purpose))
+    except ValueError:
+        prompt_spec = None
+
     if client_overrides and purpose in client_overrides:
         prompt: str | None = client_overrides[purpose]
-    elif purpose in _GATED_PROMPT_BASES and quality_gate_commands is not None:
+    elif prompt_spec and prompt_spec.gated and quality_gate_commands is not None:
         gate_sentence = (
             _quality_gate_sentence(quality_gate_commands)
             if quality_gate_commands
             else ""
         )
-        prompt = _GATED_PROMPT_BASES[purpose] + gate_sentence + _AGENT_TEAM_GUIDANCE
+        prompt = prompt_spec.base + gate_sentence + _AGENT_TEAM_GUIDANCE
     else:
         prompt = PURPOSE_PROMPTS.get(purpose)
 

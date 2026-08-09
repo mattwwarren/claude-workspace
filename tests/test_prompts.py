@@ -136,8 +136,8 @@ class TestGetPurposePrompt:
 
     def test_client_override_takes_precedence_over_quality_gate_commands(self) -> None:
         prompt = get_purpose_prompt(
-            "impl",
-            {"impl": "Custom text"},
+            purpose="impl",
+            client_overrides={"impl": "Custom text"},
             quality_gate_commands="npm test",
         )
         assert prompt == "Custom text"
