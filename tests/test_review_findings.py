@@ -7,15 +7,17 @@ escalation strip-on-invalid-evidence rule, and the #1108 artifact writer.
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 from cw.codex_review import _parse_unified_diff
 from cw.review_findings import (
+    _LINE_ANCHOR_TOLERANCE,
     AcceptedFinding,
     CapturedDiff,
     Finding,
@@ -25,6 +27,10 @@ from cw.review_findings import (
     ReviewerRunRecord,
     ReviewVerdict,
     StrippedEscalation,
+    _anchor_in_enclosing_def,
+    _classify_finding,
+    _enclosing_def_span,
+    _line_reference_valid,
     _select_rejected_must_fix,
     consolidate_verdict,
     dedupe_findings,
@@ -39,9 +45,6 @@ from tests.conftest import (
     _make_finding,
     _make_reviewer_doc,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 # -- #1738 fixtures: real #1729 diagnostics artifact -----------------------
 #
@@ -848,6 +851,343 @@ class TestUnanchoredFindings:
         assert not rejected2
         assert accepted2[0].escalation is None
         assert len(stripped2) == 1
+
+
+# Shared fixture source for TestEnclosingDefSpan and TestAnchorInEnclosingDef.
+_ENCLOSING_DEF_SHORT_SOURCE = (
+    "def helper():\n"
+    "    return 1\n"
+    "\n"
+    "def target_function(a, b, c, d, e):\n"
+    "    x = a + b\n"
+    "    y = c + d\n"
+    "    return x + y + e\n"
+)
+
+# Shared fixture source for TestEnclosingDefAnchor and
+# TestLineReferenceValidWorktreeParam. Deliberately spaced so the anchor
+# (target_function's def line, 6) sits MORE than _LINE_ANCHOR_TOLERANCE (3)
+# lines from every changed line used in those tests — otherwise
+# _nearest_added_line's own near-miss tolerance (#1715) would already resolve
+# the endpoint and the new enclosing-def fallback would never actually be
+# exercised.
+_ENCLOSING_DEF_SOURCE = (
+    "def helper():\n"  # 1
+    "    return 1\n"  # 2
+    "\n"  # 3
+    "\n"  # 4
+    "\n"  # 5
+    "def target_function(a, b, c, d, e):\n"  # 6
+    "    x = a + b\n"  # 7
+    "    y = c + d\n"  # 8
+    "    z = x + y\n"  # 9
+    "    w = z + e\n"  # 10
+    "    v = w * 2\n"  # 11
+    "    return v\n"  # 12
+)
+
+
+def _write_enclosing_def_source(tmp_path: Path, source: str) -> None:
+    (tmp_path / "src" / "pkg").mkdir(parents=True)
+    (tmp_path / "src" / "pkg" / "mod.py").write_text(source)
+
+
+class TestEnclosingDefSpan:
+    """Pure unit tests of ``_enclosing_def_span`` (#1743): resolve a source
+    line to the ``(start, end)`` line span of its innermost enclosing
+    function/class, or ``None`` if no such enclosing definition exists.
+    """
+
+    def test_line_at_def_itself_returns_span(self) -> None:
+        assert _enclosing_def_span(_ENCLOSING_DEF_SHORT_SOURCE, 4) == (4, 7)
+
+    def test_line_inside_body_returns_same_span(self) -> None:
+        assert _enclosing_def_span(_ENCLOSING_DEF_SHORT_SOURCE, 6) == (4, 7)
+
+    def test_module_scope_line_returns_none(self) -> None:
+        # Line 3 is the blank line between the two top-level defs — module
+        # scope, no enclosing function/class.
+        assert _enclosing_def_span(_ENCLOSING_DEF_SHORT_SOURCE, 3) is None
+
+    def test_nested_function_innermost_span_wins(self) -> None:
+        source = (
+            "def outer():\n    def inner():\n        return 1\n    return inner()\n"
+        )
+        # Line 3 is inside both outer (1-4) and inner (2-3) — inner must win.
+        assert _enclosing_def_span(source, 3) == (2, 3)
+
+    def test_class_definition_span_covers_whole_body(self) -> None:
+        source = "class Foo:\n    def bar(self):\n        return 1\n"
+        assert _enclosing_def_span(source, 1) == (1, 3)
+
+    def test_decorator_line_has_no_enclosing_span(self) -> None:
+        source = "@staticmethod\ndef foo():\n    return 1\n"
+        assert _enclosing_def_span(source, 1) is None
+        assert _enclosing_def_span(source, 2) == (2, 3)
+
+    def test_syntax_error_source_returns_none(self) -> None:
+        assert _enclosing_def_span("def foo(:\n    pass\n", 1) is None
+
+    def test_line_past_eof_returns_none(self) -> None:
+        assert _enclosing_def_span(_ENCLOSING_DEF_SHORT_SOURCE, 999) is None
+
+
+class TestAnchorInEnclosingDef:
+    """Unit tests of ``_anchor_in_enclosing_def`` (#1743): the I/O-touching
+    wrapper that reads *file* under *worktree*, resolves *line*'s enclosing
+    def/class span, and checks whether any of *diff*'s changed lines for
+    *file* fall inside that span.
+    """
+
+    def test_missing_file_returns_false(self, tmp_path: Path) -> None:
+        diff = _make_diff("    y = c + d", files={"src/pkg/mod.py": [6]})
+        assert _anchor_in_enclosing_def(diff, tmp_path, "src/pkg/mod.py", 4) is False
+
+    def test_changed_line_inside_span_returns_true(self, tmp_path: Path) -> None:
+        _write_enclosing_def_source(tmp_path, _ENCLOSING_DEF_SHORT_SOURCE)
+        diff = _make_diff("    y = c + d", files={"src/pkg/mod.py": [6]})
+        assert _anchor_in_enclosing_def(diff, tmp_path, "src/pkg/mod.py", 4) is True
+
+    def test_no_changed_line_inside_span_returns_false(self, tmp_path: Path) -> None:
+        _write_enclosing_def_source(tmp_path, _ENCLOSING_DEF_SHORT_SOURCE)
+        # Line 2 (inside helper(), span 1-2) is changed, but the anchor is
+        # target_function's def line (span 4-7) — no overlap.
+        diff = _make_diff("    return 1", files={"src/pkg/mod.py": [2]})
+        assert _anchor_in_enclosing_def(diff, tmp_path, "src/pkg/mod.py", 4) is False
+
+
+class TestEnclosingDefAnchor:
+    """Integration tests through ``validate_reviewer_document`` (#1743): a
+    finding anchored on an enclosing ``def``/``class`` line that is not
+    itself changed is no longer mechanically rejected ``invalid_line_reference``
+    when a changed line falls inside that definition's span AND a worktree is
+    supplied — it instead proceeds to the evidence check, which (since these
+    findings don't quote the changed line's real content) currently lands on
+    ``evidence_not_in_diff``. That reclassification is an intentional
+    side-effect of this ticket; #1738 owns evidence-quote matching itself.
+    """
+
+    _CLASS_SOURCE = (
+        "class Foo:\n"
+        "    def bar(self):\n"
+        "        return 1\n"
+        "\n"
+        "    def baz(self):\n"
+        "        return 2\n"
+    )
+
+    def test_def_line_anchor_accepted_with_worktree(self, tmp_path: Path) -> None:
+        _write_enclosing_def_source(tmp_path, _ENCLOSING_DEF_SOURCE)
+        diff = _make_diff("    v = w * 2", files={"src/pkg/mod.py": [11]})
+        finding = _make_finding(
+            file="src/pkg/mod.py",
+            line_start=6,
+            line_end=6,
+            evidence="target_function does too many things",
+        )
+        _, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff, worktree=tmp_path
+        )
+        assert rejected[0].reason == "evidence_not_in_diff"
+
+    def test_def_line_anchor_rejected_without_worktree(self, tmp_path: Path) -> None:
+        _write_enclosing_def_source(tmp_path, _ENCLOSING_DEF_SOURCE)
+        diff = _make_diff("    v = w * 2", files={"src/pkg/mod.py": [11]})
+        finding = _make_finding(
+            file="src/pkg/mod.py",
+            line_start=6,
+            line_end=6,
+            evidence="target_function does too many things",
+        )
+        _, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff, worktree=None
+        )
+        assert rejected[0].reason == "invalid_line_reference"
+
+    def test_def_span_with_no_changed_line_inside_still_rejected(
+        self, tmp_path: Path
+    ) -> None:
+        _write_enclosing_def_source(tmp_path, _ENCLOSING_DEF_SOURCE)
+        # Changed line 1 sits inside helper()'s span (1-2), not
+        # target_function's (6-12) — the anchor's own span has no changed
+        # line, so the fallback correctly declines to rescue it.
+        diff = _make_diff("def helper():", files={"src/pkg/mod.py": [1]})
+        finding = _make_finding(
+            file="src/pkg/mod.py",
+            line_start=6,
+            line_end=6,
+            evidence="target_function does too many things",
+        )
+        _, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff, worktree=tmp_path
+        )
+        assert rejected[0].reason == "invalid_line_reference"
+
+    def test_anchor_with_no_enclosing_def_still_rejected(self, tmp_path: Path) -> None:
+        _write_enclosing_def_source(tmp_path, _ENCLOSING_DEF_SOURCE)
+        # Line 4 (one of the blank lines between the two top-level defs) has
+        # no enclosing function/class at all, regardless of where the changed
+        # lines are.
+        diff = _make_diff("    v = w * 2", files={"src/pkg/mod.py": [11]})
+        finding = _make_finding(
+            file="src/pkg/mod.py",
+            line_start=4,
+            line_end=4,
+            evidence="module scope finding",
+        )
+        _, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff, worktree=tmp_path
+        )
+        assert rejected[0].reason == "invalid_line_reference"
+
+    def test_class_def_anchor_accepted(self, tmp_path: Path) -> None:
+        _write_enclosing_def_source(tmp_path, self._CLASS_SOURCE)
+        diff = _make_diff("        return 2", files={"src/pkg/mod.py": [6]})
+        finding = _make_finding(
+            file="src/pkg/mod.py",
+            line_start=1,
+            line_end=1,
+            evidence="Foo does too many things",
+        )
+        _, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff, worktree=tmp_path
+        )
+        assert rejected[0].reason == "evidence_not_in_diff"
+
+    def test_syntax_error_source_falls_back_to_invalid_line_reference(
+        self, tmp_path: Path
+    ) -> None:
+        _write_enclosing_def_source(tmp_path, "def foo(:\n    pass\n")
+        # Changed line (100) is far outside tolerance of the anchor (1), so
+        # the fallback is actually exercised (and hits the parse failure).
+        diff = _make_diff("    pass", files={"src/pkg/mod.py": [100]})
+        finding = _make_finding(
+            file="src/pkg/mod.py",
+            line_start=1,
+            line_end=1,
+            evidence="foo does too many things",
+        )
+        _, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff, worktree=tmp_path
+        )
+        assert rejected[0].reason == "invalid_line_reference"
+
+
+class TestEnclosingDefAnchorRealFileRegression:
+    """Reproduces the ticket's exact evidence: a structural finding anchored
+    on ``_run_fix_and_commit``'s real ``def`` line in
+    ``src/cw/codex_fix_loop.py``, which is not itself a changed line. The
+    function's real span is discovered dynamically via ``ast.parse`` in this
+    test's own setup (not the helper under test) so the assertion stays
+    correct if the function is refactored — #1743 explicitly rejects
+    hardcoding the line numbers observed at plan time.
+    """
+
+    def _discover_span(self, repo_root: Path) -> tuple[int, int]:
+        source_path = repo_root / "src" / "cw" / "codex_fix_loop.py"
+        tree = ast.parse(source_path.read_text())
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == "_run_fix_and_commit"
+            ):
+                assert node.end_lineno is not None
+                return node.lineno, node.end_lineno
+        msg = "_run_fix_and_commit not found in codex_fix_loop.py"
+        raise AssertionError(msg)
+
+    def _changed_line_beyond_tolerance(self, def_line: int, end_line: int) -> int:
+        # Must sit more than _LINE_ANCHOR_TOLERANCE (3) lines from def_line so
+        # _nearest_added_line's own near-miss tolerance (#1715) doesn't
+        # already resolve the anchor before the new fallback is exercised.
+        changed_line = def_line + _LINE_ANCHOR_TOLERANCE + 1
+        assert changed_line <= end_line, (
+            "_run_fix_and_commit is too short for this regression test's "
+            "assumption — pick a line closer to end_line"
+        )
+        return changed_line
+
+    def test_def_line_anchor_accepted_with_worktree(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        def_line, end_line = self._discover_span(repo_root)
+        changed_line = self._changed_line_beyond_tolerance(def_line, end_line)
+        diff = _make_diff(
+            "some changed line inside the function",
+            files={"src/cw/codex_fix_loop.py": [changed_line]},
+        )
+        finding = _make_finding(
+            file="src/cw/codex_fix_loop.py",
+            line_start=def_line,
+            line_end=def_line,
+            evidence="_run_fix_and_commit does too many things",
+        )
+        _, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff, worktree=repo_root
+        )
+        assert rejected[0].reason == "evidence_not_in_diff"
+
+    def test_def_line_anchor_rejected_without_worktree(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        def_line, end_line = self._discover_span(repo_root)
+        changed_line = self._changed_line_beyond_tolerance(def_line, end_line)
+        diff = _make_diff(
+            "some changed line inside the function",
+            files={"src/cw/codex_fix_loop.py": [changed_line]},
+        )
+        finding = _make_finding(
+            file="src/cw/codex_fix_loop.py",
+            line_start=def_line,
+            line_end=def_line,
+            evidence="_run_fix_and_commit does too many things",
+        )
+        _, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff, worktree=None
+        )
+        assert rejected[0].reason == "invalid_line_reference"
+
+
+class TestLineReferenceValidWorktreeParam:
+    """Direct unit tests of ``_line_reference_valid``'s new ``worktree``
+    parameter and ``_classify_finding``'s pass-through of it (#1743).
+    """
+
+    def test_line_reference_valid_defaults_to_no_worktree(self, tmp_path: Path) -> None:
+        _write_enclosing_def_source(tmp_path, _ENCLOSING_DEF_SOURCE)
+        diff = _make_diff("    v = w * 2", files={"src/pkg/mod.py": [11]})
+        finding = _make_finding(
+            file="src/pkg/mod.py", line_start=6, line_end=6, evidence="x"
+        )
+        assert _line_reference_valid(diff, finding) is False
+
+    def test_line_reference_valid_with_worktree_rescues_def_anchor(
+        self, tmp_path: Path
+    ) -> None:
+        _write_enclosing_def_source(tmp_path, _ENCLOSING_DEF_SOURCE)
+        diff = _make_diff("    v = w * 2", files={"src/pkg/mod.py": [11]})
+        finding = _make_finding(
+            file="src/pkg/mod.py", line_start=6, line_end=6, evidence="x"
+        )
+        assert _line_reference_valid(diff, finding, tmp_path) is True
+
+    def test_classify_finding_passes_worktree_through(self, tmp_path: Path) -> None:
+        _write_enclosing_def_source(tmp_path, _ENCLOSING_DEF_SOURCE)
+        diff = _make_diff("    v = w * 2", files={"src/pkg/mod.py": [11]})
+        finding = _make_finding(
+            file="src/pkg/mod.py",
+            line_start=6,
+            line_end=6,
+            evidence="target_function does too many things",
+        )
+        changed = frozenset(diff.files)
+        # evidence doesn't match the changed line's real text, so the def-line
+        # anchor is rescued and classification proceeds to the evidence check.
+        assert (
+            _classify_finding(finding, diff, changed, tmp_path)
+            == "evidence_not_in_diff"
+        )
+        assert _classify_finding(finding, diff, changed, None) == (
+            "invalid_line_reference"
+        )
 
 
 class TestEscalationStripOnInvalidEvidence:

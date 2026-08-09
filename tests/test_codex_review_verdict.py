@@ -862,6 +862,38 @@ class TestRenderVerdictComment:
         assert "single-pass" in body.lower()
         assert "disabled" in body.lower()
 
+    def test_capability_note_renders_when_degraded(self) -> None:
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="NIT"))
+        verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        verdict = verdict.model_copy(
+            update={"capability_mode": "degraded", "capability_reason": "unknown"}
+        )
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "degraded" in body.lower()
+        assert "unknown" in body
+
+    def test_capability_note_renders_when_capable(self) -> None:
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="NIT"))
+        verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        verdict = verdict.model_copy(
+            update={"capability_mode": "capable", "capability_reason": None}
+        )
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "capable" in body.lower()
+
+    def test_capability_note_absent_when_mode_unset(self) -> None:
+        # capability_mode defaults to None (nobody probed) -- must not render
+        # "unknown" or any placeholder, per the ticket's explicit instruction.
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="NIT"))
+        verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        assert verdict.capability_mode is None
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "capability" not in body.lower()
+        assert "degraded" not in body.lower()
+
 
 def test_format_failures_detail_includes_diagnostics_path() -> None:
     failures = [ReviewerRunFailure(role="Code Quality Reviewer", reason=CODEX_TIMEOUT)]

@@ -8,6 +8,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`cw event tail` gains `--limit`/`-n` to bound output to the most recent N
+  matching events (#1694):** the flag composes with the existing `--type`/
+  `--client`/`--lane`/`--since` filters (filter-then-limit) and is rejected
+  together with `--follow`, which streams unboundedly. The default
+  (non-`--json`) output format also changed to compact: nested dict/
+  list-of-dict payload fields — e.g. `dispatch.tick`'s `lanes` and
+  `lane_occupants` — are now omitted, keeping only scalar fields and
+  scalar-lists (no length limit — the filter is shape-based, not size-based).
+  `--json` output is untouched and remains full-fidelity.
+
+### Fixed
+
+- **`read_events(limit=...)` returned the OLDEST N matching events instead of
+  the most recent N (#1694):** the function already accepted a `limit`
+  parameter but head-sliced (`events[:limit]`) a list that's in ascending
+  chronological order, so `limit=N` silently returned the N *earliest*
+  events. No production caller passed `limit=` yet, so this was latent —
+  surfaced while wiring up `cw event tail --limit`. Fixed to tail-slice
+  (`events[-limit:]`), with `limit=0` special-cased to `[]` (`list[-0:]` is
+  a Python trap that returns the whole list, not an empty one).
+- **A structural finding anchored on an enclosing def/class is no longer
+  dropped as unverifiable (#1743):** `_line_reference_valid`'s existing
+  tolerance check only accepts a finding whose cited line sits within a
+  small distance of a changed diff line — but a structural finding (e.g. a
+  missing type hint, a naming issue) is legitimately anchored on the
+  enclosing `def`/`class` line, which is itself rarely a changed line and so
+  was silently rejected. When a `worktree` is supplied, validation now falls
+  back to `_anchor_in_enclosing_def`, which parses the file's AST and accepts
+  the finding if its cited line falls anywhere inside the enclosing
+  def/class span (innermost span wins for nested defs). A missing/unreadable
+  file or a line with no enclosing definition still returns `False`, so the
+  fallback only rescues genuinely structural findings.
+
 - **A converged fix loop is distinguished from a no-op one (#1723):** the loop
   reported convergence whenever no MUST_FIX findings survived, without regard
   for whether any fix cycle had actually changed a file. A run in which every
@@ -33,6 +66,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   correctness failure as MUST_FIX even when a related rule is ignored.
 
 ### Fixed
+
+- **`test_worktree_path_finds_transcript_via_csid` and 5 sibling tests wrote
+  into the real `~/.claude/projects/` (#1736):** `claude_project_dir()`
+  resolves via `Path.home()` directly, bypassing the `patched_peek` fixture's
+  redirection of `CLAUDE_PROJECTS`/`CW_STATE`. `patched_peek` now also
+  redirects `HOME`; a new session-scoped `conftest.py` guard fails on any
+  leaked `tmp-pytest`/`pytest-of`-named directory under the real path and
+  warns (without failing) on any other unexpected new entry, so unrelated
+  concurrent Claude Code usage can't flake the suite.
 
 - **A codex review no longer freezes the shared dispatch tick (#1727):**
   `CodexExecutor.spawn()` ran the whole review — per-role `codex exec`
@@ -131,6 +173,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   since the signature change is part of the same seam being proven, not a
   separate one.
 
+- **The fix loop only persisted cycle 0's review-verdict snapshot, not the
+  cycle that actually produced the park (#1739):** `_persist_cycle0_snapshot`
+  generalizes to `_persist_cycle_snapshot`, called once per fix cycle (0
+  through the terminal cycle) instead of only before the loop starts. Every
+  exit path now threads the latest cycle's pointer, so whichever cycle's
+  `ReviewVerdict` actually produced a park (e.g.
+  `codex_must_fix_mechanically_rejected` on a later cycle, as in #1729) is
+  the one an operator finds referenced in `friction_highlights`, instead of a
+  stale cycle-0 snapshot that may not even contain the offending finding.
+
 ## [1.29.0] - 2026-08-08
 
 ### Fixed
@@ -213,6 +265,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   selected mode is recorded on `ReviewVerdict.capability_mode` /
   `capability_reason` and in a per-session `codex-capability.json` diagnostics
   artifact. Rendering it in the verdict comment is deferred to #1725.
+
+- **The probed capability mode now renders in the verdict comment (#1725):**
+  closes the loop #1709 opened — `render_verdict_comment` gains
+  `_render_capability_note`, which prints a one-line `capable`/`degraded`
+  (with reason) annotation when `ReviewVerdict.capability_mode` is set, and
+  renders nothing for a verdict that never probed (`capability_mode is
+  None`), so an unprobed run is never mistaken for a probed-and-unknown one.
 
 - **OpenCode executor backend foundation (#1669):** `opencode` is now a
   first-class executor backend, selectable via `backend: opencode` in

@@ -28,6 +28,7 @@ Public surface:
 
 from __future__ import annotations
 
+import ast
 import logging
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, get_args
 
@@ -498,17 +499,98 @@ def _nearest_hunk_line(
     return best
 
 
-def _line_reference_valid(diff: CapturedDiff, finding: Finding) -> bool:
+def _enclosing_def_span(source: str, line: int) -> tuple[int, int] | None:
+    """Return the ``(start, end)`` line span of the innermost function or
+    class in *source* enclosing *line*, or ``None`` if none does.
+
+    Walks every :class:`ast.FunctionDef`/:class:`ast.AsyncFunctionDef`/
+    :class:`ast.ClassDef` node and picks the smallest span containing *line*,
+    so a nested function's span wins over its enclosing function's. A
+    decorated function's span starts at the ``def``/``class`` line itself
+    (Python's ``lineno`` for such nodes, since 3.8, excludes the decorator
+    lines) — a line that only touches a decorator has no enclosing span.
+    *source* that fails to parse (a syntax error, or ``ast.parse``'s
+    ``ValueError`` on embedded null bytes) returns ``None`` rather than
+    raising — the caller (:func:`_anchor_in_enclosing_def`) treats "can't
+    determine a span" the same as "no span" (#1743).
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return None
+    best: tuple[int, int] | None = None
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        end = node.end_lineno
+        if end is None or not (node.lineno <= line <= end):
+            continue
+        if best is None or (end - node.lineno) < (best[1] - best[0]):
+            best = (node.lineno, end)
+    return best
+
+
+def _anchor_in_enclosing_def(
+    diff: CapturedDiff, worktree: Path, file: str, line: int
+) -> bool:
+    """True iff *line*'s enclosing def/class span in *file* contains a
+    changed line of *diff*.
+
+    Reads ``(worktree / file).read_text()`` and resolves *line*'s span via
+    :func:`_enclosing_def_span`; a missing/unreadable file or a line with no
+    enclosing definition both return ``False``. Gives a structural finding
+    (too-long function, too-many-params, does-two-things) anchored on the
+    enclosing ``def``/``class`` line — which is itself rarely a changed line —
+    a legitimate way to anchor: the span, not the single def line, is checked
+    against the diff's changed lines (#1743).
+    """
+    try:
+        source = (worktree / file).read_text()
+    except (OSError, UnicodeDecodeError):
+        return False
+    span = _enclosing_def_span(source, line)
+    if span is None:
+        return False
+    start, end = span
+    return any(start <= changed <= end for changed in diff.files.get(file, []))
+
+
+def _line_reference_valid(
+    diff: CapturedDiff, finding: Finding, worktree: Path | None = None
+) -> bool:
     """Return True iff *finding*'s line references resolve to a changed line.
 
     A file-level finding (both endpoints ``None``) is exempt — it has no line
     anchor to check. A near-miss anchor within ``_LINE_ANCHOR_TOLERANCE`` lines
     of a real changed line resolves via :func:`_nearest_added_line` rather than
     requiring an exact match (#1715).
+
+    ``worktree`` (default ``None``) opts into the #1743 enclosing-def
+    fallback: when an endpoint is not itself near a changed line, and
+    ``worktree`` is given, :func:`_anchor_in_enclosing_def` is tried before
+    giving up on that endpoint — this is what lets a structural finding
+    anchored on a function/class's ``def`` line survive even though that line
+    is rarely itself changed, as long as some changed line falls inside the
+    definition's span. ``worktree=None`` (no caller opted in) disables the
+    fallback entirely, matching today's behavior byte-for-byte — the same
+    opt-in shape as #1632's ``_classify_unanchored_file``.
     """
     for line in (finding.line_start, finding.line_end):
-        if line is not None and _nearest_added_line(diff, finding.file, line) is None:
-            return False
+        if line is None:
+            continue
+        if _nearest_added_line(diff, finding.file, line) is not None:
+            continue
+        if worktree is not None and _anchor_in_enclosing_def(
+            diff, worktree, finding.file, line
+        ):
+            _log.info(
+                "auto-dev: rescued finding anchored on enclosing def/class "
+                "span not itself a changed line (file=%s, line=%d)",
+                finding.file,
+                line,
+            )
+            continue
+        return False
     return True
 
 
@@ -680,6 +762,15 @@ def _classify_finding(
     neither ``_line_reference_valid`` nor ``_evidence_in_claimed_lines`` ever
     runs for an unanchored finding — there is no diff-line window to check it
     against.
+
+    ``worktree`` also threads into :func:`_line_reference_valid` as the
+    #1743 enclosing-def fallback: a structural finding anchored on a
+    function/class's ``def`` line, which is itself rarely a changed line,
+    can now survive this check when a changed line falls inside that
+    definition's span. This can turn a previously ``invalid_line_reference``
+    case into ``evidence_not_in_diff`` at the very next check below —
+    intentional; #1743 owns the anchor-resolution axis, #1738 owns
+    evidence-quote matching.
     """
     if finding.severity not in _VALID_SEVERITIES:
         return "invalid_severity"
@@ -687,7 +778,7 @@ def _classify_finding(
         return "missing_evidence"
     if finding.file not in changed:
         return _classify_unanchored_file(finding.file, worktree)
-    if not _line_reference_valid(diff, finding):
+    if not _line_reference_valid(diff, finding, worktree):
         return "invalid_line_reference"
     if not _evidence_in_claimed_lines(
         diff, finding.file, finding.evidence, finding.line_start, finding.line_end

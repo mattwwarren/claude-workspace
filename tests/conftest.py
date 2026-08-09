@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
+import warnings
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -32,7 +34,7 @@ from cw.review_findings import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
 # A captured record_event invocation: (event_type, payload, correlation_id).
 CapturedEvent = tuple[OrchestratorEventType, dict[str, Any], str | None]
@@ -46,6 +48,11 @@ CapturedEvent = tuple[OrchestratorEventType, dict[str, Any], str | None]
 # scan-specific `_run_scan` driver stays file-local.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SRC_ROOT = _REPO_ROOT / "src"
+
+# Optional external CLIs whose presence a test must not silently assume
+# (#1753). git is intentionally excluded — universally present, and much
+# of the suite shells out to it directly.
+_OPTIONAL_BINARY_DENYLIST: frozenset[str] = frozenset({"codex", "opencode"})
 
 
 def _iter_src_files() -> list[Path]:
@@ -533,6 +540,112 @@ def _mock_codex_capability_probe(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda _timeout_seconds: subprocess.CompletedProcess(
             args=[], returncode=0, stdout="codex-cli 0.144.5\n", stderr=""
         ),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _hide_optional_binaries(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default optional external CLIs to ABSENT so tests reproduce CI (#1753).
+
+    Sibling of ``_mock_codex_capability_probe``, but at a different layer:
+    ``CodexExecutor.spawn()``'s pre-flight (``cw.executor.shutil.which`` at
+    ``src/cw/executor.py:884``) and ``codex_capability_diagnosis()``
+    (``executor.py:141``) call the bare ``shutil.which("codex")`` directly —
+    there is no bespoke seam function to patch the way the fixtures above
+    patch ``_which_codex``. ``opencode_runner.opencode_available()``
+    (``src/cw/opencode_runner.py:96``) does the same for ``"opencode"``.
+    Since ``import shutil`` binds every call site to the one process-wide
+    ``shutil`` module object, patching ``shutil.which`` itself — filtered by
+    ``_OPTIONAL_BINARY_DENYLIST`` — covers every unseamed call site at once,
+    without a real ``codex``/``opencode`` on the dev machine's ``PATH``
+    silently masking the exact CODEX_NOT_FOUND branch that shipped red in CI
+    (#1727/#1752). This fixture subsumes and replaces the local
+    ``cw.executor.shutil.which`` monkeypatch that used to live in
+    ``tests/test_dispatch.py``'s ``TestCodexSpawnDoesNotBlockDispatch``.
+
+    Escape hatch: ``@pytest.mark.binary_on_path("codex")`` makes a
+    denylisted binary look present (a deterministic ``/usr/bin/<name>``),
+    not merely un-hidden — a test that just stops hiding it would still
+    depend on the *real* binary being installed, reintroducing the original
+    bug for any runner that opts in without one.
+
+    ``@pytest.mark.integration``-marked tests are exempt entirely: those
+    tests intentionally shell out to real external tools (tmux, cmux,
+    ``claude --bg``), so this fixture no-ops for them.
+    """
+    if request.node.get_closest_marker("integration") is not None:
+        return
+    marker = request.node.get_closest_marker("binary_on_path")
+    forced_present = set(marker.args) if marker is not None else set()
+    real_which = shutil.which
+
+    def _guarded_which(
+        cmd: str, mode: int = os.F_OK | os.X_OK, path: str | None = None
+    ) -> str | None:
+        if cmd in _OPTIONAL_BINARY_DENYLIST:
+            return f"/usr/bin/{cmd}" if cmd in forced_present else None
+        return real_which(cmd, mode, path)
+
+    monkeypatch.setattr("shutil.which", _guarded_which)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _guard_no_real_claude_projects_writes() -> Iterator[None]:
+    """Fail the suite if a test leaked a directory into the REAL projects dir.
+
+    ``cw._util.claude_project_dir()`` resolves via ``Path.home()`` directly,
+    not through ``queue_peek.CLAUDE_PROJECTS`` / ``queue_peek.CW_STATE`` — so a
+    test fixture that redirects only those two module constants (as
+    ``patched_peek`` did before this guard existed) leaves that call path
+    writing into the real ``~/.claude/projects/`` (GH #1736).
+
+    This fixture is a safety net, not the fix: setup/teardown here run outside
+    any individual test's ``monkeypatch`` context, so ``Path.home()`` is still
+    the real, unpatched home. It snapshots the real directory's entries at
+    session start and again at session end, then splits any new entries by
+    whether their name matches the ``tmp-pytest``/``pytest-of`` signature this
+    bug class produces (``tmp_path``-rooted worktrees run through the
+    unpatched ``claude_project_dir``):
+
+    - Entries matching the signature fail the suite — this is the regression
+      guard for #1736.
+    - Entries not matching it only warn, since concurrent Claude Code sessions
+      routinely write into this same real directory while this suite runs,
+      and failing on that would make suite exit status depend on unrelated
+      activity outside this repo.
+
+    Nothing is deleted here (out of scope). A structurally stronger fix —
+    redirecting ``HOME`` for the entire suite by construction, so this class
+    of leak becomes impossible rather than caught after the fact — is tracked
+    as a follow-up: GH #1756.
+    """
+    real_projects = Path.home() / ".claude" / "projects"
+    before = (
+        {p.name for p in real_projects.iterdir()} if real_projects.exists() else set()
+    )
+    yield
+    after = (
+        {p.name for p in real_projects.iterdir()} if real_projects.exists() else set()
+    )
+    leaked = after - before
+    suspect = {name for name in leaked if "tmp-pytest" in name or "pytest-of" in name}
+    other = leaked - suspect
+    if other:
+        warnings.warn(
+            f"New entries appeared under the real {real_projects} during the "
+            f"test session that don't match the known GH #1736 leak "
+            f"signature: {sorted(other)}. Not failing the suite on these since "
+            "concurrent Claude Code activity routinely writes here.",
+            stacklevel=2,
+        )
+    assert not suspect, (
+        f"Test suite leaked directories into the REAL {real_projects} "
+        f"(GH #1736): {sorted(suspect)}. A test resolved "
+        "cw._util.claude_project_dir() without redirecting Path.home() via "
+        "the HOME env var -- see the patched_peek fixture in "
+        "tests/test_queue_peek.py for the pattern."
     )
 
 

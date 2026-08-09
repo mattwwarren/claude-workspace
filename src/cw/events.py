@@ -369,7 +369,9 @@ def read_events(
         event_types: If set, only return events of these types.
         client_names: If set, only return events whose payload.client is in this set.
         lane_names: If set, only return events whose payload.lane is in this set.
-        limit: Maximum number of events to return.
+        limit: If set, return at most the most recent N matching events
+            (i.e. the tail of the chronologically-ordered result — not the
+            first N). ``limit=0`` returns an empty list.
 
     Returns:
         List of matching events in ascending (chronological) order.
@@ -429,7 +431,9 @@ def read_events(
         ]
 
     if limit is not None:
-        events = events[:limit]
+        # events[-limit:] is correct for limit > 0; limit=0 is a Python trap
+        # (list[-0:] == list[:], i.e. the whole list) so it must be special-cased.
+        events = events[-limit:] if limit > 0 else []
 
     return events
 

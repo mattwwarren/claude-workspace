@@ -388,6 +388,15 @@ When writing or resolving a test that runs code under a "bare" or *different* in
 - **Isolate via flags on the SAME interpreter, not by switching interpreters.** To exercise a bootstrap while keeping compiled deps loadable, use `sys.executable -S` (skips `site` processing so the editable `.pth` doesn't auto-add the package) plus `PYTHONPATH=<venv purelib>` (so deps stay importable) — NOT a foreign `python3`.
 - If you catch yourself reaching for `/usr/bin/python3` (or any non-`sys.executable` interpreter) to "get a clean environment," that IS the cue — stop and ask whether a compiled dep will fail to load there. This pattern shipped a green-locally / red-in-CI test (#671) that the rule would have prevented.
 
+### Optional External Binary Isolation (test pitfall)
+
+A test whose outcome depends on an optional external CLI (`codex`, `opencode`, ...) being installed on the host is invisible to all nine local gates by construction — it's green on any dev machine that happens to have the binary, and only fails where it's genuinely absent (CI). `codex --version` shelling out for real, or a `shutil.which("codex")` pre-flight quietly taking its "found" branch, are the same shape of bug as the interpreter-isolation pitfall above: the test never actually exercised the absent-binary path it claims to cover.
+
+- **Mechanism:** `tests/conftest.py`'s autouse `_hide_optional_binaries` fixture patches `shutil.which` process-wide so every name in `_OPTIONAL_BINARY_DENYLIST` resolves to `None` by default, reproducing CI's binary-absent condition on every local run.
+- **Adding a binary to the denylist:** edit `_OPTIONAL_BINARY_DENYLIST` in `tests/conftest.py` and justify the addition in the PR description — it changes default behavior for every test in the suite, not just the one that motivated it.
+- **Declaring a test needs a binary present:** mark it `@pytest.mark.binary_on_path("codex")` (registered in `pyproject.toml`) — the guard then returns a deterministic `/usr/bin/<name>` for that call instead of `None`, so the test doesn't silently depend on a real binary being installed either.
+- Cite: #1727/#1752/#1753 — the incident that shipped a dispatch test red in CI (real `codex` on the dev machine, absent on the runner) the way #671 shipped a green-locally/red-in-CI interpreter-isolation test.
+
 ## When to Use This Process
 
 **Always:**
