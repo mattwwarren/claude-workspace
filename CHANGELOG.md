@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`clients.yaml` gains a per-client `quality_gate_commands` field (#1703):**
+  the impl/debt worker prompts previously hardcoded `ruff check, mypy, pytest`
+  for every client, which was wrong for non-Python clients. When set, the
+  configured commands are threaded into `start_session`'s generated prompt in
+  place of the hardcoded sentence; clients that don't set it keep the
+  existing default wording.
+
 ## [1.30.0] - 2026-08-09
 
 ### Added
