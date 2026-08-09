@@ -117,8 +117,8 @@ from cw.codex_review._profile import (
     _lean_profile_argv,
     _LeanProfileDisposition,
     _persist_profile_diagnostics,
+    _probe_runtime_cli_version,
     _ProfileDiagnostics,
-    _validate_runtime_profile,
 )
 from cw.codex_review._roles import (
     _AUDIT_ARGV_FLAGS,
@@ -214,6 +214,7 @@ __all__ = [
     "_persist_profile_diagnostics",
     "_prepare_review_pass",
     "_probe_filesystem_capability",
+    "_probe_runtime_cli_version",
     "_read_sensitive_manifest",
     "_render_findings",
     "_render_lint_grounding_block",
@@ -223,7 +224,6 @@ __all__ = [
     "_select_output_instructions",
     "_select_reviewer_roles",
     "_slug",
-    "_validate_runtime_profile",
     "render_verdict_comment",
     "run_codex_roles",
     "run_review",

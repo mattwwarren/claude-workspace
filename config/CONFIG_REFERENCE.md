@@ -459,10 +459,12 @@ profile did *this* review actually run under":
 - `reasoning_effort` — the resolved value (`null` if unpinned).
 - `effective_model` — the model `cw` resolved and passed on the argv. No codex
   event carries a model field, so this is `cw`'s answer, not codex's.
-- `cli_version` — parsed `codex --version`; the review only launches when this
-  matches the supported profile version.
-- `enabled_tool_classes` — features reported enabled by default by the
-  supported CLI, excluding the eleven explicit profile denials.
+- `cli_version` — parsed `codex --version`.
+- `feature_inventory_cli_version` — the CLI version whose captured feature
+  inventory was used; `null` when no inventory matches the probed CLI.
+- `enabled_tool_classes` — features reported enabled by default by that
+  versioned inventory, excluding the eleven explicit profile denials; `null`
+  when the runtime CLI version is unknown or unsupported by the inventory.
 - `instruction_sources` — which prompt-instruction channels actually
   contributed content, unioned across every role in the pass, in a fixed
   canonical order. Vocabulary: `role_spec`, `output_format_supplement`,
@@ -474,6 +476,9 @@ profile did *this* review actually run under":
 
 Writing this artifact never blocks a review: a failed write is logged at
 WARNING and swallowed, matching the capability-probe diagnostics' contract.
+The reasoning-effort benchmark preserves both passes as
+`codex-review-profile-medium.json` and `codex-review-profile-high.json` under
+the same real session directory.
 
 ## Orchestrator Configuration (`~/.claude-workspace/orchestrator.yaml`)
 

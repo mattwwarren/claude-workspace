@@ -4,7 +4,9 @@ profile argv block and its per-session diagnostics artifact (#1711)."""
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError
+from typing import cast
 
 import pytest
 
@@ -20,8 +22,8 @@ from cw.codex_review import (
     _lean_profile_argv,
     _LeanProfileDisposition,
     _persist_profile_diagnostics,
+    _probe_runtime_cli_version,
     _ProfileDiagnostics,
-    _validate_runtime_profile,
 )
 from cw.config import diagnostics_dir
 from tests._codex_review_helpers import _config_override_values
@@ -157,10 +159,14 @@ class TestDisabledFeatures:
     ) -> None:
         feature = _CodexFeatureRecord(name="example", default_enabled=False)
         assert feature.lean_profile_disposition is _LeanProfileDisposition.ALLOW
+        positional_constructor = cast(
+            "Callable[..., _CodexFeatureRecord]", _CodexFeatureRecord
+        )
         with pytest.raises(TypeError):
-            _CodexFeatureRecord("example", False)  # type: ignore[misc]
+            positional_constructor("example", False)
+        field_name = "name"
         with pytest.raises(FrozenInstanceError):
-            feature.name = "changed"  # type: ignore[misc]
+            setattr(feature, field_name, "changed")
 
     def test_versioned_inventory_matches_captured_features_list(self) -> None:
         captured_names = tuple(
@@ -213,8 +219,8 @@ class TestDisabledFeatures:
 
 
 class TestLeanProfileArgv:
-    def test_profile_version_tracks_execpolicy_preservation(self) -> None:
-        assert _PROFILE_VERSION == 3
+    def test_profile_version_tracks_fix_project_doc_discovery(self) -> None:
+        assert _PROFILE_VERSION == 4
 
     @pytest.mark.parametrize("effort", [None, "medium", "high"])
     def test_unconditional_flags_always_present(self, effort: str | None) -> None:
@@ -274,6 +280,7 @@ class TestPersistProfileDiagnostics:
         assert data["reasoning_effort"] == "high"
         assert data["effective_model"] == "gpt-5"
         assert data["cli_version"] == "0.147.0"
+        assert data["feature_inventory_cli_version"] == "0.147.0"
         assert data["enabled_tool_classes"] == [
             feature
             for feature in _CODEX_FEATURES_0_147_0
@@ -296,6 +303,8 @@ class TestPersistProfileDiagnostics:
         assert data["effective_model"] is None
         assert data["reasoning_effort"] is None
         assert data["cli_version"] is None
+        assert data["feature_inventory_cli_version"] is None
+        assert data["enabled_tool_classes"] is None
 
     def test_never_raises_on_oserror(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
@@ -322,13 +331,14 @@ class TestPersistProfileDiagnostics:
             reasoning_effort="medium",
             effective_model=None,
             cli_version=None,
-            enabled_tool_classes=[],
+            feature_inventory_cli_version=None,
+            enabled_tool_classes=None,
             instruction_sources=[_InstructionSource.TICKET_CONTEXT],
         )
         assert diag.model_dump(mode="json")["instruction_sources"] == ["ticket_context"]
 
 
-class TestValidateRuntimeProfile:
+class TestProbeRuntimeCliVersion:
     @pytest.mark.parametrize("version", [None, "0.146.0", "0.147.0", "0.148.0"])
     def test_records_runtime_version_without_enforcing_an_exact_match(
         self, monkeypatch: pytest.MonkeyPatch, version: str | None
@@ -337,7 +347,25 @@ class TestValidateRuntimeProfile:
             "cw.codex_review._profile._capability.probe_codex_cli_version",
             lambda: version,
         )
-        assert _validate_runtime_profile() == version
+        assert _probe_runtime_cli_version() == version
+
+    @pytest.mark.parametrize("version", [None, "0.146.0", "0.148.0"])
+    def test_unknown_cli_has_no_assumed_feature_inventory(
+        self, version: str | None
+    ) -> None:
+        _persist_profile_diagnostics(
+            session_id=f"sess-unknown-{version}",
+            model=None,
+            reasoning_effort="high",
+            cli_version=version,
+            instruction_sources=[],
+        )
+        path = (
+            diagnostics_dir(f"sess-unknown-{version}") / _PROFILE_DIAGNOSTICS_FILENAME
+        )
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["feature_inventory_cli_version"] is None
+        assert data["enabled_tool_classes"] is None
 
 
 # ---------------------------------------------------------------------------

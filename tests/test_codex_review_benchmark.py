@@ -117,11 +117,22 @@ class TestRunReasoningEffortBenchmark:
         assert comparison.medium.effort == "medium"
         assert comparison.high.effort == "high"
 
-        diagnostics = diagnostics_dir("s-benchmark") / "codex-review-profile.json"
-        assert (
-            json.loads(diagnostics.read_text(encoding="utf-8"))["instruction_sources"]
-            is None
+        diagnostics_dir_path = diagnostics_dir("s-benchmark")
+        medium = json.loads(
+            (diagnostics_dir_path / "codex-review-profile-medium.json").read_text(
+                encoding="utf-8"
+            )
         )
+        high = json.loads(
+            (diagnostics_dir_path / "codex-review-profile-high.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert medium["session_id"] == high["session_id"] == "s-benchmark"
+        assert medium["reasoning_effort"] == "medium"
+        assert high["reasoning_effort"] == "high"
+        assert medium["instruction_sources"] is None
+        assert high["instruction_sources"] is None
 
     def test_halves_are_distinguishable(self, tmp_path: Path) -> None:
         comparison = _run(_EffortAwareRunner(), tmp_path)

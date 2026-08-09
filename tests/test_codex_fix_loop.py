@@ -1630,9 +1630,19 @@ class TestCapabilityProbeIsCachedAcrossCycles:
 
 
 class TestFixArgvSharesTheLeanProfile:
-    def test_same_disabled_features_and_mcp_override_as_the_reviewer_path(
-        self,
+    def test_same_controls_except_project_docs_as_the_reviewer_path(
+        self, tmp_path: Path
     ) -> None:
+        project_instruction = "Fix agents must preserve this instruction."
+        (tmp_path / "AGENTS.md").write_text(
+            f"{project_instruction}\n", encoding="utf-8"
+        )
+        prompt = _build_fix_prompt(
+            [_make_finding(severity="MUST_FIX")],
+            plan_text=None,
+            ticket_text=None,
+            cycle=1,
+        )
         argv = _build_fix_codex_argv(model="gpt-x", reasoning_effort="high")
         # Asserted via the shared constant, never a hand-copied literal: the
         # point is that both builders emit the SAME block.
@@ -1640,7 +1650,10 @@ class TestFixArgvSharesTheLeanProfile:
             assert argv[argv.index(feature) - 1] == "--disable"
         overrides = _config_override_values(argv)
         assert "mcp_servers={}" in overrides
-        assert "project_doc_max_bytes=0" in overrides
+        # Fix prompts do not inline complete applicable repository policy.
+        # Keeping this override absent lets codex discover the AGENTS.md above.
+        assert project_instruction not in prompt
+        assert "project_doc_max_bytes=0" not in overrides
         assert "model_reasoning_effort=high" in overrides
         assert "--ignore-user-config" in argv
         assert "--ignore-rules" not in argv

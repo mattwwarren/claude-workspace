@@ -36,7 +36,7 @@ from cw.codex_review._context import _parse_reviewer_document
 from cw.codex_review._profile import (
     _lean_profile_argv,
     _persist_profile_diagnostics,
-    _validate_runtime_profile,
+    _probe_runtime_cli_version,
 )
 from cw.config import state_dir
 from cw.executor_diagnostics import build_executor_failure, persist_diagnostics_bundle
@@ -377,6 +377,7 @@ def run_codex_roles(
     session_id: str,
     reasoning_effort: str | None = None,
     instruction_sources: list[_InstructionSource] | None = None,
+    profile_diagnostics_discriminator: str | None = None,
 ) -> tuple[
     list[ReviewerFindingsDocument],
     list[ReviewerRunFailure],
@@ -407,13 +408,14 @@ def run_codex_roles(
     through still records what it was configured to be. ``reasoning_effort`` is
     additionally threaded into every role's argv.
     """
-    cli_version = _validate_runtime_profile()
+    cli_version = _probe_runtime_cli_version()
     _persist_profile_diagnostics(
         session_id=session_id,
         model=model,
         reasoning_effort=reasoning_effort,
         cli_version=cli_version,
         instruction_sources=instruction_sources,
+        pass_discriminator=profile_diagnostics_discriminator,
     )
     scratch_dir = _codex_scratch_dir(uuid.uuid4().hex)
     try:

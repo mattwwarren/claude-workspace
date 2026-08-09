@@ -1039,6 +1039,7 @@ class TestRunCodexRolesProfileThreading:
             reasoning_effort: str | None,
             cli_version: str | None,
             instruction_sources: list[_InstructionSource] | None,
+            pass_discriminator: str | None,
         ) -> None:
             seen.append(
                 {
@@ -1047,6 +1048,7 @@ class TestRunCodexRolesProfileThreading:
                     "reasoning_effort": reasoning_effort,
                     "cli_version": cli_version,
                     "instruction_sources": instruction_sources,
+                    "pass_discriminator": pass_discriminator,
                 }
             )
 
@@ -1074,6 +1076,7 @@ class TestRunCodexRolesProfileThreading:
                 "reasoning_effort": "high",
                 "cli_version": "0.147.0",
                 "instruction_sources": ["role_spec", "approved_plan"],
+                "pass_discriminator": None,
             }
         ]
 
@@ -1138,4 +1141,7 @@ class TestRunCodexRolesProfileThreading:
         )
         assert len(runner.calls) == 1
         path = diagnostics_dir("s-floating-profile") / _PROFILE_DIAGNOSTICS_FILENAME
-        assert json.loads(path.read_text(encoding="utf-8"))["cli_version"] == "0.148.0"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["cli_version"] == "0.148.0"
+        assert data["feature_inventory_cli_version"] is None
+        assert data["enabled_tool_classes"] is None

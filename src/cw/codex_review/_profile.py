@@ -7,16 +7,17 @@ whatever MCP servers the operator has configured, and enables an evolving set
 of optional feature surfaces. None of that is an input cw chose, yet all of it
 changes what a reviewer sees.
 
-This module owns the one argv block that closes those channels, shared verbatim
-by both codex argv builders — ``_roles._build_generic_codex_argv`` (the
-reviewer path) and ``codex_fix_loop._build_fix_codex_argv`` (the fix path) — so
-the two cannot drift onto different profiles for the same run.
+This module owns the argv block that closes those channels, shared by both
+codex argv builders — ``_roles._build_generic_codex_argv`` (the reviewer path)
+and ``codex_fix_loop._build_fix_codex_argv`` (the fix path). Fix invocations
+retain project-doc discovery because, unlike reviewer prompts, their prompts do
+not inline the repository's complete applicable instructions.
 
-It also owns ``codex-review-profile.json``, the per-session diagnostics
-artifact answering "what profile did THIS review actually run under": the
-resolved model and reasoning effort, the codex CLI version, which optional tool
-classes survived the profile, and which instruction channels actually
-contributed content to the prompts.
+It also owns the per-session ``codex-review-profile.json`` diagnostics artifact
+(plus pass-discriminated benchmark variants), answering "what profile did THIS
+review actually run under": the resolved model and reasoning effort, the codex
+CLI version, which optional tool classes survived the profile, and which
+instruction channels actually contributed content to the prompts.
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ _log = logging.getLogger(__name__)
 
 # Bump when the argv block below changes shape, so a diagnostics artifact from
 # an older run is not mistaken for one produced by the current profile.
-_PROFILE_VERSION = 3
+_PROFILE_VERSION = 4
 
 _PROFILE_DIAGNOSTICS_FILENAME = "codex-review-profile.json"
 
@@ -220,6 +221,9 @@ _CODEX_DEFAULT_ENABLED_FEATURES_0_147_0: frozenset[str] = frozenset(
     for feature in _CODEX_FEATURE_METADATA_0_147_0
     if feature.default_enabled
 )
+_CODEX_FEATURE_METADATA_BY_CLI_VERSION: dict[str, tuple[_CodexFeatureRecord, ...]] = {
+    "0.147.0": _CODEX_FEATURE_METADATA_0_147_0
+}
 # The sole canonical lean-profile denylist; argv is generated from this value.
 _DISABLED_FEATURES: tuple[str, ...] = tuple(
     feature.name
@@ -228,7 +232,9 @@ _DISABLED_FEATURES: tuple[str, ...] = tuple(
 )
 
 
-def _lean_profile_argv(*, reasoning_effort: str | None) -> list[str]:
+def _lean_profile_argv(
+    *, reasoning_effort: str | None, disable_project_docs: bool = True
+) -> list[str]:
     """Return the lean-profile argv fragment shared by both codex builders.
 
     ``--ignore-user-config`` drops ``~/.codex/config.toml`` so the operator's
@@ -241,10 +247,11 @@ def _lean_profile_argv(*, reasoning_effort: str | None) -> list[str]:
     `bogus_key_xyz` in -c/--config override``. Every key emitted here was
     live-checked under this flag and accepted (EXIT=0).
 
-    ``-c project_doc_max_bytes=0`` stops codex inlining the repo's own
-    ``AGENTS.md``/project doc: cw already inlines every instruction the
-    reviewer should see, and a second, unversioned instruction channel is the
-    thing this profile exists to close.
+    When ``disable_project_docs`` is true, ``-c project_doc_max_bytes=0`` stops
+    codex inlining the repo's own ``AGENTS.md``/project doc: cw already inlines
+    every instruction the reviewer should see. The fix path passes false
+    because its prompt does not contain the complete applicable project
+    instructions and must therefore preserve codex's native discovery.
 
     ``-c mcp_servers={}`` is a *separate* override rather than one of the
     ``--disable`` flags because MCP servers are not a codex "feature": the
@@ -261,10 +268,10 @@ def _lean_profile_argv(*, reasoning_effort: str | None) -> list[str]:
         "--ignore-user-config",
         "--strict-config",
         "-c",
-        "project_doc_max_bytes=0",
-        "-c",
         "mcp_servers={}",
     ]
+    if disable_project_docs:
+        argv += ["-c", "project_doc_max_bytes=0"]
     if reasoning_effort is not None:
         argv += ["-c", f"model_reasoning_effort={reasoning_effort}"]
     for feature in _DISABLED_FEATURES:
@@ -281,9 +288,10 @@ class _ProfileDiagnostics(BaseModel):
     reasoning_effort: str | None
     effective_model: str | None
     cli_version: str | None
-    # Features reported enabled by default by the supported CLI, excluding the
-    # explicit lean-profile denylist.
-    enabled_tool_classes: list[str]
+    # The versioned inventory used to calculate enabled_tool_classes. Both are
+    # None when the probed CLI has no inventory in this module.
+    feature_inventory_cli_version: str | None
+    enabled_tool_classes: list[str] | None
     # Which prompt-instruction channels actually contributed content, unioned
     # across every role in the pass. None means the caller did not compute
     # provenance; [] means it computed that no channel fired. Vocabulary: role_spec,
@@ -292,18 +300,27 @@ class _ProfileDiagnostics(BaseModel):
     instruction_sources: list[_context._InstructionSource] | None
 
 
-def _enabled_tool_classes() -> list[str]:
-    """Return supported-CLI defaults left enabled after the denylist."""
-    return [
-        name
-        for name in _CODEX_FEATURES_0_147_0
-        if name in _CODEX_DEFAULT_ENABLED_FEATURES_0_147_0
-        and name not in _DISABLED_FEATURES
+def _enabled_tool_classes(
+    cli_version: str | None,
+) -> tuple[str | None, list[str] | None]:
+    """Return the matching inventory version and defaults left enabled."""
+    metadata = (
+        None
+        if cli_version is None
+        else _CODEX_FEATURE_METADATA_BY_CLI_VERSION.get(cli_version)
+    )
+    if metadata is None:
+        return None, None
+    return cli_version, [
+        feature.name
+        for feature in metadata
+        if feature.default_enabled
+        and feature.lean_profile_disposition is not _LeanProfileDisposition.DISABLE
     ]
 
 
-def _validate_runtime_profile() -> str | None:
-    """Return the runtime CLI version for diagnostics without pinning it."""
+def _probe_runtime_cli_version() -> str | None:
+    """Probe the runtime CLI version for diagnostics without validating it."""
     return _capability.probe_codex_cli_version()
 
 
@@ -314,20 +331,24 @@ def _persist_profile_diagnostics(
     reasoning_effort: str | None,
     cli_version: str | None,
     instruction_sources: list[_context._InstructionSource] | None,
+    pass_discriminator: str | None = None,
 ) -> None:
     """Record this pass's profile under *session_id*'s diagnostics dir.
 
     Never raises: mirrors ``_capability._persist_capability_diagnostics``'s
     contract — a failed diagnostics write must not take the review down with
     it. Called once per ``run_codex_roles`` invocation (not once per role): the
-    profile is a property of the pass, not of any single reviewer.
+    profile is a property of the pass, not of any single reviewer. A non-None
+    ``pass_discriminator`` preserves multiple passes in the same real session.
     """
+    inventory_version, enabled_tool_classes = _enabled_tool_classes(cli_version)
     diagnostics = _ProfileDiagnostics(
         profile_version=_PROFILE_VERSION,
         reasoning_effort=reasoning_effort,
         effective_model=model,
         cli_version=cli_version,
-        enabled_tool_classes=_enabled_tool_classes(),
+        feature_inventory_cli_version=inventory_version,
+        enabled_tool_classes=enabled_tool_classes,
         instruction_sources=(
             None if instruction_sources is None else list(instruction_sources)
         ),
@@ -345,9 +366,10 @@ def _persist_profile_diagnostics(
     try:
         target = diagnostics_dir(session_id)
         target.mkdir(parents=True, exist_ok=True)
-        (target / _PROFILE_DIAGNOSTICS_FILENAME).write_text(
-            json.dumps(payload, indent=2), encoding="utf-8"
-        )
+        filename = _PROFILE_DIAGNOSTICS_FILENAME
+        if pass_discriminator is not None:
+            filename = f"codex-review-profile-{pass_discriminator}.json"
+        (target / filename).write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except OSError:
         _log.warning(
             "codex review profile diagnostics write failed for session %s", session_id

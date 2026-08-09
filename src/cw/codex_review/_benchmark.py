@@ -144,7 +144,9 @@ def run_reasoning_effort_benchmark(
 
     Each pass goes through the ordinary :func:`run_codex_roles` path, so the
     numbers describe the profile production actually uses — including the
-    per-session profile diagnostics each pass writes.
+    per-session profile diagnostics each pass writes. The effort value
+    discriminates those artifacts, preserving both passes under the caller's
+    real ``session_id``.
     """
     if effort_values != _DEFAULT_EFFORT_VALUES:
         raise ValueError(_EFFORT_VALUES_ERROR)
@@ -159,6 +161,7 @@ def run_reasoning_effort_benchmark(
             wall_clock_budget_seconds=wall_clock_budget_seconds,
             session_id=session_id,
             reasoning_effort=effort,
+            profile_diagnostics_discriminator=effort,
         )
         sides.append(
             _fold(
