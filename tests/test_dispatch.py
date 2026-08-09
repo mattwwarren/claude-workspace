@@ -44,6 +44,7 @@ from cw.dispatch import (
     _accumulate_task_cost,
     _cached_codex_capability_diagnosis,
     _codex_capability_gate,
+    _park_running_task_blocked_on_user,
     _reset_codex_capability_cache,
     _resolve_dispatch_skip_reason,
     consume_completed_sessions,
@@ -6740,6 +6741,103 @@ class TestCodexSpawnDoesNotBlockDispatch:
             e.payload["paused_status"] == CODEX_ORPHANED_AT_BOOT_DISPOSITION
             for e in events
         )
+
+
+# ---------------------------------------------------------------------------
+# TestParkRunningTaskExpectedSessionId
+# ---------------------------------------------------------------------------
+
+
+class TestParkRunningTaskExpectedSessionId:
+    """#1727 round 5: ``expected_session_id`` closes the boot-reconcile TOCTOU.
+
+    ``cw.reconcile.codex_boot`` checks ``task.session_id == session.id`` on a
+    snapshot read taken before the lock is acquired. Without a matching check
+    at write time, a row re-claimed by a fresh session between that snapshot
+    and this call could still be parked as a false-positive crash orphan.
+    ``expected_session_id`` re-verifies identity atomically under the same
+    ``dev_queue_lock()`` the transition itself runs under.
+    """
+
+    def test_matching_expected_session_id_parks_as_before(
+        self, tmp_dispatch_dirs: Path
+    ) -> None:
+        add_ticket(
+            TicketTask(
+                ticket_id="PARK-1",
+                client="test-client",
+                status=QueueItemStatus.RUNNING,
+                session_id="sess-current",
+            )
+        )
+
+        _park_running_task_blocked_on_user(
+            ticket_id="PARK-1",
+            client_name="test-client",
+            disposition="codex_review_orphaned_at_boot",
+            breadcrumbs="orphan",
+            expected_session_id="sess-current",
+        )
+
+        task = load_dev_queue().tasks[0]
+        assert task.status is QueueItemStatus.BLOCKED_ON_USER
+        assert task.session_id is None
+
+    def test_mismatched_expected_session_id_skips_the_park(
+        self, tmp_dispatch_dirs: Path
+    ) -> None:
+        """The row was re-claimed by a newer session; the stale caller must not
+        touch it, even though (ticket_id, client, RUNNING) still match."""
+        add_ticket(
+            TicketTask(
+                ticket_id="PARK-2",
+                client="test-client",
+                status=QueueItemStatus.RUNNING,
+                session_id="sess-new-successor",
+            )
+        )
+
+        _park_running_task_blocked_on_user(
+            ticket_id="PARK-2",
+            client_name="test-client",
+            disposition="codex_review_orphaned_at_boot",
+            breadcrumbs="orphan",
+            expected_session_id="sess-stale-snapshot",
+        )
+
+        task = load_dev_queue().tasks[0]
+        assert task.status is QueueItemStatus.RUNNING
+        assert task.session_id == "sess-new-successor"
+        events = read_events(
+            consumer="test-park-mismatch-no-attention",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert events == []
+
+    def test_expected_session_id_omitted_preserves_pre_spawn_behavior(
+        self, tmp_dispatch_dirs: Path
+    ) -> None:
+        """The two pre-spawn callers (dirty-worktree guard, codex capability
+        gate) pass no ``expected_session_id`` — park must proceed exactly as
+        it did before this parameter existed."""
+        add_ticket(
+            TicketTask(
+                ticket_id="PARK-3",
+                client="test-client",
+                status=QueueItemStatus.RUNNING,
+                session_id=None,
+            )
+        )
+
+        _park_running_task_blocked_on_user(
+            ticket_id="PARK-3",
+            client_name="test-client",
+            disposition="dirty_worktree",
+            breadcrumbs="/some/path",
+        )
+
+        task = load_dev_queue().tasks[0]
+        assert task.status is QueueItemStatus.BLOCKED_ON_USER
 
 
 # ---------------------------------------------------------------------------

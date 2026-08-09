@@ -97,7 +97,11 @@ def reap_orphaned_codex_sessions_at_boot() -> int:
         # orphan can linger in state as an ACTIVE record long after its task was
         # parked, recovered, and re-dispatched onto a fresh session. Without this
         # check that zombie re-matches on every later boot and parks whatever
-        # healthy review now owns the row.
+        # healthy review now owns the row. This is a cheap early-exit against
+        # the snapshot read above, not the safety guarantee itself — the row
+        # could still be re-claimed between here and the park call below, so
+        # the same identity is re-verified atomically under the lock via
+        # expected_session_id (#1727 round 5).
         if task.session_id != session.id:
             continue
         if resolve_executor_config(task.stage, task, client).backend != CODEX_BACKEND:
@@ -112,6 +116,7 @@ def reap_orphaned_codex_sessions_at_boot() -> int:
         _park_running_task_blocked_on_user(
             ticket_id=ticket_id,
             client_name=session.client,
+            expected_session_id=session.id,
             disposition=CODEX_ORPHANED_AT_BOOT_DISPOSITION,
             breadcrumbs=_ORPHAN_BREADCRUMBS,
         )
