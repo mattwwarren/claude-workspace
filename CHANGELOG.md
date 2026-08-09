@@ -113,9 +113,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   1 passed in 0.12s
   ```
 
-  Reverting only `_nearest_hunk_line`/`_resolve_hunk_window` and their
-  `_evidence_in_claimed_lines` wiring (test file untouched) reproduces the
-  original rejection —
+  Reverting the full production side of this fix — `CapturedDiff.file_window_text`,
+  `_nearest_hunk_line`/`_resolve_hunk_window`, `_evidence_in_claimed_lines`'s
+  rewiring onto them, and the `_parse_unified_diff` 3-tuple→4-tuple signature
+  change and its call sites (test file untouched) — reproduces the original
+  rejection —
 
   ```
   E       ValueError: not enough values to unpack (expected 4, got 3)
@@ -123,9 +125,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   1 failed in 0.22s
   ```
 
-  (the `_parse_unified_diff` 3-tuple→4-tuple signature change is itself part
-  of the fix, so the pre-fix run fails at the unpack rather than at the
-  evidence-containment assertion — both are the same underlying revert.)
+  The failure surfaces at the `_parse_unified_diff` unpack (the test's own
+  fixture builder calls it directly and always unpacks 4 values) rather than
+  at the evidence-containment assertion the fix is actually about — expected,
+  since the signature change is part of the same seam being proven, not a
+  separate one.
 
 ## [1.29.0] - 2026-08-08
 

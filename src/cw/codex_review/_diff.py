@@ -33,6 +33,33 @@ def _parse_hunk_new_start(header: str) -> int:
     return int(match.group(1)) if match else 0
 
 
+def _apply_hunk_line(
+    raw: str,
+    current_file: str,
+    new_line_no: int,
+    file_line_text: dict[str, dict[int, str]],
+    file_window_text: dict[str, dict[int, str]],
+) -> int:
+    """Classify one hunk-body line and return the next new-file line number.
+
+    Extracted from :func:`_parse_unified_diff` to keep that function's branch
+    count under the repo's ``PLR0912`` ceiling (#1738).
+    """
+    if raw.startswith("@@"):
+        return _parse_hunk_new_start(raw)
+    if raw.startswith("+"):
+        file_line_text[current_file][new_line_no] = raw[1:]
+        file_window_text[current_file][new_line_no] = raw[1:]
+        return new_line_no + 1
+    if raw.startswith("-"):
+        return new_line_no
+    if raw.startswith("\\"):
+        # `\ No newline at end of file` -- diff metadata, not file content.
+        return new_line_no
+    file_window_text[current_file][new_line_no] = raw[1:] if raw[:1] == " " else raw
+    return new_line_no + 1
+
+
 def _parse_unified_diff(
     diff_text: str,
 ) -> tuple[
@@ -85,19 +112,9 @@ def _parse_unified_diff(
         if current_file is None:
             continue
         current_lines.append(raw)
-        if raw.startswith("@@"):
-            new_line_no = _parse_hunk_new_start(raw)
-        elif raw.startswith("+"):
-            file_line_text[current_file][new_line_no] = raw[1:]
-            file_window_text[current_file][new_line_no] = raw[1:]
-            new_line_no += 1
-        elif raw.startswith("-"):
-            continue
-        else:
-            file_window_text[current_file][new_line_no] = (
-                raw[1:] if raw[:1] == " " else raw
-            )
-            new_line_no += 1
+        new_line_no = _apply_hunk_line(
+            raw, current_file, new_line_no, file_line_text, file_window_text
+        )
 
     if current_file is not None:
         file_diffs[current_file] = "\n".join(current_lines)

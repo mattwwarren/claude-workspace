@@ -45,6 +45,18 @@ index 555..000
 -line_two = 2
 """
 
+_NO_TRAILING_NEWLINE_DIFF = """diff --git a/src/cw/baz.py b/src/cw/baz.py
+index 666..777 100644
+--- a/src/cw/baz.py
++++ b/src/cw/baz.py
+@@ -1,2 +1,2 @@
+ unchanged = 0
+-old_tail = 1
+\\ No newline at end of file
++new_tail = 2
+\\ No newline at end of file
+"""
+
 
 class TestParseUnifiedDiff:
     def test_per_file_line_numbers(self) -> None:
@@ -94,6 +106,20 @@ class TestParseUnifiedDiff:
             _MULTI_FILE_DIFF
         )
         assert changed == ["src/cw/foo.py", "src/cw/bar.py"]
+
+    def test_no_newline_at_eof_marker_excluded_from_window_text(self) -> None:
+        # #1738 fix-loop finding: the `\ No newline at end of file` marker is
+        # diff metadata, not file content -- it must not be captured into
+        # file_window_text as if it were a real context/added line.
+        _file_diffs, file_line_text, file_window_text, _changed = _parse_unified_diff(
+            _NO_TRAILING_NEWLINE_DIFF
+        )
+        assert file_window_text["src/cw/baz.py"] == {
+            1: "unchanged = 0",
+            2: "new_tail = 2",
+        }
+        assert file_line_text["src/cw/baz.py"] == {2: "new_tail = 2"}
+        assert "No newline at end of file" not in str(file_window_text)
 
     def test_deleted_file_contributes_no_lines_but_is_changed(self) -> None:
         file_diffs, file_line_text, file_window_text, changed = _parse_unified_diff(
