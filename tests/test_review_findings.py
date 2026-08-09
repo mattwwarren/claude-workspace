@@ -16,6 +16,7 @@ import pytest
 from pydantic import ValidationError
 
 from cw.review_findings import (
+    _LINE_ANCHOR_TOLERANCE,
     AcceptedFinding,
     CapturedDiff,
     Finding,
@@ -678,10 +679,7 @@ class TestEnclosingDefSpan:
 
     def test_nested_function_innermost_span_wins(self) -> None:
         source = (
-            "def outer():\n"
-            "    def inner():\n"
-            "        return 1\n"
-            "    return inner()\n"
+            "def outer():\n    def inner():\n        return 1\n    return inner()\n"
         )
         # Line 3 is inside both outer (1-4) and inner (2-3) — inner must win.
         assert _enclosing_def_span(source, 3) == (2, 3)
@@ -721,9 +719,7 @@ class TestAnchorInEnclosingDef:
 
     def test_missing_file_returns_false(self, tmp_path: Path) -> None:
         diff = _make_diff("    y = c + d", files={"src/pkg/mod.py": [6]})
-        assert (
-            _anchor_in_enclosing_def(diff, tmp_path, "src/pkg/mod.py", 4) is False
-        )
+        assert _anchor_in_enclosing_def(diff, tmp_path, "src/pkg/mod.py", 4) is False
 
     def test_changed_line_inside_span_returns_true(self, tmp_path: Path) -> None:
         (tmp_path / "src" / "pkg").mkdir(parents=True)
@@ -737,9 +733,7 @@ class TestAnchorInEnclosingDef:
         # Line 2 (inside helper(), span 1-2) is changed, but the anchor is
         # target_function's def line (span 4-7) — no overlap.
         diff = _make_diff("    return 1", files={"src/pkg/mod.py": [2]})
-        assert (
-            _anchor_in_enclosing_def(diff, tmp_path, "src/pkg/mod.py", 4) is False
-        )
+        assert _anchor_in_enclosing_def(diff, tmp_path, "src/pkg/mod.py", 4) is False
 
 
 class TestEnclosingDefAnchor:
@@ -753,14 +747,24 @@ class TestEnclosingDefAnchor:
     side-effect of this ticket; #1738 owns evidence-quote matching itself.
     """
 
+    # Deliberately spaced so the anchor (target_function's def line, 6) sits
+    # MORE than _LINE_ANCHOR_TOLERANCE (3) lines from every changed line used
+    # below — otherwise _nearest_added_line's own near-miss tolerance (#1715)
+    # would already resolve the endpoint and the new enclosing-def fallback
+    # would never actually be exercised.
     _SOURCE = (
-        "def helper():\n"
-        "    return 1\n"
-        "\n"
-        "def target_function(a, b, c, d, e):\n"
-        "    x = a + b\n"
-        "    y = c + d\n"
-        "    return x + y + e\n"
+        "def helper():\n"  # 1
+        "    return 1\n"  # 2
+        "\n"  # 3
+        "\n"  # 4
+        "\n"  # 5
+        "def target_function(a, b, c, d, e):\n"  # 6
+        "    x = a + b\n"  # 7
+        "    y = c + d\n"  # 8
+        "    z = x + y\n"  # 9
+        "    w = z + e\n"  # 10
+        "    v = w * 2\n"  # 11
+        "    return v\n"  # 12
     )
 
     _CLASS_SOURCE = (
@@ -778,11 +782,11 @@ class TestEnclosingDefAnchor:
 
     def test_def_line_anchor_accepted_with_worktree(self, tmp_path: Path) -> None:
         self._write_source(tmp_path, self._SOURCE)
-        diff = _make_diff("    y = c + d", files={"src/pkg/mod.py": [6]})
+        diff = _make_diff("    v = w * 2", files={"src/pkg/mod.py": [11]})
         finding = _make_finding(
             file="src/pkg/mod.py",
-            line_start=4,
-            line_end=4,
+            line_start=6,
+            line_end=6,
             evidence="target_function does too many things",
         )
         _, rejected, _ = validate_reviewer_document(
@@ -792,11 +796,11 @@ class TestEnclosingDefAnchor:
 
     def test_def_line_anchor_rejected_without_worktree(self, tmp_path: Path) -> None:
         self._write_source(tmp_path, self._SOURCE)
-        diff = _make_diff("    y = c + d", files={"src/pkg/mod.py": [6]})
+        diff = _make_diff("    v = w * 2", files={"src/pkg/mod.py": [11]})
         finding = _make_finding(
             file="src/pkg/mod.py",
-            line_start=4,
-            line_end=4,
+            line_start=6,
+            line_end=6,
             evidence="target_function does too many things",
         )
         _, rejected, _ = validate_reviewer_document(
@@ -808,13 +812,14 @@ class TestEnclosingDefAnchor:
         self, tmp_path: Path
     ) -> None:
         self._write_source(tmp_path, self._SOURCE)
-        # Changed line 2 sits inside helper()'s span (1-2), not
-        # target_function's (4-7) — the anchor's own span has no changed line.
-        diff = _make_diff("    return 1", files={"src/pkg/mod.py": [2]})
+        # Changed line 1 sits inside helper()'s span (1-2), not
+        # target_function's (6-12) — the anchor's own span has no changed
+        # line, so the fallback correctly declines to rescue it.
+        diff = _make_diff("def helper():", files={"src/pkg/mod.py": [1]})
         finding = _make_finding(
             file="src/pkg/mod.py",
-            line_start=4,
-            line_end=4,
+            line_start=6,
+            line_end=6,
             evidence="target_function does too many things",
         )
         _, rejected, _ = validate_reviewer_document(
@@ -824,13 +829,14 @@ class TestEnclosingDefAnchor:
 
     def test_anchor_with_no_enclosing_def_still_rejected(self, tmp_path: Path) -> None:
         self._write_source(tmp_path, self._SOURCE)
-        # Line 3 (blank line between the two top-level defs) has no enclosing
-        # function/class at all, regardless of where the changed lines are.
-        diff = _make_diff("    y = c + d", files={"src/pkg/mod.py": [6]})
+        # Line 4 (one of the blank lines between the two top-level defs) has
+        # no enclosing function/class at all, regardless of where the changed
+        # lines are.
+        diff = _make_diff("    v = w * 2", files={"src/pkg/mod.py": [11]})
         finding = _make_finding(
             file="src/pkg/mod.py",
-            line_start=3,
-            line_end=3,
+            line_start=4,
+            line_end=4,
             evidence="module scope finding",
         )
         _, rejected, _ = validate_reviewer_document(
@@ -894,11 +900,21 @@ class TestEnclosingDefAnchorRealFileRegression:
         msg = "_run_fix_and_commit not found in codex_fix_loop.py"
         raise AssertionError(msg)
 
+    def _changed_line_beyond_tolerance(self, def_line: int, end_line: int) -> int:
+        # Must sit more than _LINE_ANCHOR_TOLERANCE (3) lines from def_line so
+        # _nearest_added_line's own near-miss tolerance (#1715) doesn't
+        # already resolve the anchor before the new fallback is exercised.
+        changed_line = def_line + _LINE_ANCHOR_TOLERANCE + 1
+        assert changed_line <= end_line, (
+            "_run_fix_and_commit is too short for this regression test's "
+            "assumption — pick a line closer to end_line"
+        )
+        return changed_line
+
     def test_def_line_anchor_accepted_with_worktree(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         def_line, end_line = self._discover_span(repo_root)
-        changed_line = def_line + 1
-        assert changed_line <= end_line
+        changed_line = self._changed_line_beyond_tolerance(def_line, end_line)
         diff = _make_diff(
             "some changed line inside the function",
             files={"src/cw/codex_fix_loop.py": [changed_line]},
@@ -917,8 +933,7 @@ class TestEnclosingDefAnchorRealFileRegression:
     def test_def_line_anchor_rejected_without_worktree(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         def_line, end_line = self._discover_span(repo_root)
-        changed_line = def_line + 1
-        assert changed_line <= end_line
+        changed_line = self._changed_line_beyond_tolerance(def_line, end_line)
         diff = _make_diff(
             "some changed line inside the function",
             files={"src/cw/codex_fix_loop.py": [changed_line]},
@@ -940,22 +955,31 @@ class TestLineReferenceValidWorktreeParam:
     parameter and ``_classify_finding``'s pass-through of it (#1743).
     """
 
+    # Same spacing rationale as TestEnclosingDefAnchor._SOURCE: the anchor (6)
+    # must sit more than _LINE_ANCHOR_TOLERANCE (3) lines from the changed
+    # line (11) so _nearest_added_line's own tolerance doesn't already
+    # resolve it before the new fallback runs.
     _SOURCE = (
-        "def helper():\n"
-        "    return 1\n"
-        "\n"
-        "def target_function(a, b, c, d, e):\n"
-        "    x = a + b\n"
-        "    y = c + d\n"
-        "    return x + y + e\n"
+        "def helper():\n"  # 1
+        "    return 1\n"  # 2
+        "\n"  # 3
+        "\n"  # 4
+        "\n"  # 5
+        "def target_function(a, b, c, d, e):\n"  # 6
+        "    x = a + b\n"  # 7
+        "    y = c + d\n"  # 8
+        "    z = x + y\n"  # 9
+        "    w = z + e\n"  # 10
+        "    v = w * 2\n"  # 11
+        "    return v\n"  # 12
     )
 
     def test_line_reference_valid_defaults_to_no_worktree(self, tmp_path: Path) -> None:
         (tmp_path / "src" / "pkg").mkdir(parents=True)
         (tmp_path / "src" / "pkg" / "mod.py").write_text(self._SOURCE)
-        diff = _make_diff("    y = c + d", files={"src/pkg/mod.py": [6]})
+        diff = _make_diff("    v = w * 2", files={"src/pkg/mod.py": [11]})
         finding = _make_finding(
-            file="src/pkg/mod.py", line_start=4, line_end=4, evidence="x"
+            file="src/pkg/mod.py", line_start=6, line_end=6, evidence="x"
         )
         assert _line_reference_valid(diff, finding) is False
 
@@ -964,20 +988,20 @@ class TestLineReferenceValidWorktreeParam:
     ) -> None:
         (tmp_path / "src" / "pkg").mkdir(parents=True)
         (tmp_path / "src" / "pkg" / "mod.py").write_text(self._SOURCE)
-        diff = _make_diff("    y = c + d", files={"src/pkg/mod.py": [6]})
+        diff = _make_diff("    v = w * 2", files={"src/pkg/mod.py": [11]})
         finding = _make_finding(
-            file="src/pkg/mod.py", line_start=4, line_end=4, evidence="x"
+            file="src/pkg/mod.py", line_start=6, line_end=6, evidence="x"
         )
         assert _line_reference_valid(diff, finding, tmp_path) is True
 
     def test_classify_finding_passes_worktree_through(self, tmp_path: Path) -> None:
         (tmp_path / "src" / "pkg").mkdir(parents=True)
         (tmp_path / "src" / "pkg" / "mod.py").write_text(self._SOURCE)
-        diff = _make_diff("    y = c + d", files={"src/pkg/mod.py": [6]})
+        diff = _make_diff("    v = w * 2", files={"src/pkg/mod.py": [11]})
         finding = _make_finding(
             file="src/pkg/mod.py",
-            line_start=4,
-            line_end=4,
+            line_start=6,
+            line_end=6,
             evidence="target_function does too many things",
         )
         changed = frozenset(diff.files)
