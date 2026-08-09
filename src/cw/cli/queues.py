@@ -128,6 +128,13 @@ def _parse_since(since: str) -> tuple[str | None, datetime | None]:
         return None, since_ts
 
 
+def _parse_multi_filter(raw_values: tuple[str, ...]) -> frozenset[str] | None:
+    """Parse repeatable, comma-separated CLI values into a frozenset, or None."""
+    if not raw_values:
+        return None
+    return frozenset(v for raw in raw_values for v in raw.split(",") if v) or None
+
+
 def _resolve_event_types(
     type_filter: tuple[str, ...],
 ) -> list[OrchestratorEventType] | None:
@@ -219,6 +226,40 @@ def _dedup_terminal(events: list[OrchestratorEvent]) -> list[OrchestratorEvent]:
     return result
 
 
+def _group_consecutive_runs(
+    events: list[OrchestratorEvent],
+) -> list[list[OrchestratorEvent]]:
+    """Group consecutive events sharing (type, compact_payload) into runs."""
+    runs: list[list[OrchestratorEvent]] = []
+    for ev in events:
+        if (
+            runs
+            and runs[-1][0].type == ev.type
+            and (_compact_payload(runs[-1][0].payload) == _compact_payload(ev.payload))
+        ):
+            runs[-1].append(ev)
+        else:
+            runs.append([ev])
+    return runs
+
+
+def _format_collapsed_line(run: list[OrchestratorEvent]) -> str:
+    """Render a collapsed run as one summary line: `type xN over Mm  k=v ...`."""
+    span_minutes = int((run[-1].created_at - run[0].created_at).total_seconds() // 60)
+    payload = " ".join(f"{k}={v}" for k, v in _compact_payload(run[0].payload).items())
+    return f"{run[0].type} x{len(run)} over {span_minutes}m  {payload}"
+
+
+def _print_collapsed(events: list[OrchestratorEvent]) -> None:
+    """Print events grouped into collapsed runs; singleton runs print normally."""
+    for run in _group_consecutive_runs(events):
+        if len(run) == 1:
+            _print_event(run[0], as_json=False)
+        else:
+            click.echo(_format_collapsed_line(run))
+            sys.stdout.flush()
+
+
 def _follow_loop(
     since_cursor: str | None,
     since_ts: datetime | None,
@@ -252,6 +293,29 @@ def _follow_loop(
         raise click.exceptions.Exit(0) from None
 
 
+def _emit_tail_events(
+    events: list[OrchestratorEvent],
+    *,
+    as_json: bool,
+    collapse_repeats: bool,
+    consumer: str | None,
+) -> None:
+    """Print one-shot tail events (or the empty-path message); advance the cursor."""
+    if not events:
+        click.echo("[]" if as_json else "No events.")
+        return
+
+    if collapse_repeats and not as_json:
+        _print_collapsed(events)
+    else:
+        for ev in events:
+            _print_event(ev, as_json=as_json)
+
+    if consumer is not None:
+        advance_cursor(consumer, events[-1].id)
+        click.echo(f"Cursor advanced to: {events[-1].id}", err=True)
+
+
 def _validate_tail_limit(limit: int | None, *, follow: bool) -> None:
     """Raise CwError if --limit is non-positive or combined with --follow."""
     if limit is not None and limit < 1:
@@ -259,6 +323,18 @@ def _validate_tail_limit(limit: int | None, *, follow: bool) -> None:
         raise CwError(msg)
     if limit is not None and follow:
         msg = "--limit is not supported with --follow (follow streams unboundedly)."
+        raise CwError(msg)
+
+
+def _validate_collapse_repeats(collapse_repeats: bool, *, follow: bool) -> None:
+    """Raise CwError if --collapse-repeats is combined with --follow."""
+    if collapse_repeats and follow:
+        msg = (
+            "--collapse-repeats is not supported with --follow: collapsing "
+            "requires buffering a run until it closes, which would delay "
+            "events reaching --follow consumers beyond the immediate-flush "
+            "contract."
+        )
         raise CwError(msg)
 
 
@@ -304,6 +380,15 @@ def _validate_tail_limit(limit: int | None, *, follow: bool) -> None:
     default=None,
     help="Return only the most recent N matching events. Not supported with --follow.",
 )
+@click.option(
+    "--collapse-repeats",
+    is_flag=True,
+    help=(
+        "Collapse consecutive events of the same type with an identical "
+        "compact payload into a single `TYPE xN over Mm` summary line. "
+        "Not supported with --follow."
+    ),
+)
 @handle_errors
 def event_tail(
     since: str | None,
@@ -314,6 +399,7 @@ def event_tail(
     follow: bool,
     dedup_terminal: bool,
     limit: int | None,
+    collapse_repeats: bool,
 ) -> None:
     """Read events from the inbox.
 
@@ -334,8 +420,17 @@ def event_tail(
     lane_occupants) are omitted, while scalar fields and scalar-lists are
     kept regardless of length. --json is unaffected and always emits the
     full event.
+
+    --collapse-repeats merges consecutive events sharing the same type and
+    compact payload into a single `TYPE xN over Mm` summary line; a run
+    broken by an unrelated event re-opens rather than merging across the
+    gap. Not supported with --follow, since collapsing requires buffering a
+    run until it closes. Composes with --dedup-terminal and --limit,
+    applied last in the pipeline. --json is unaffected: passing
+    --collapse-repeats with --json is a no-op, one JSON line per event.
     """
     _validate_tail_limit(limit, follow=follow)
+    _validate_collapse_repeats(collapse_repeats, follow=follow)
 
     consumer: str | None = None
     since_ts: datetime | None = None
@@ -343,16 +438,8 @@ def event_tail(
         consumer, since_ts = _parse_since(since)
 
     etype_filter = _resolve_event_types(type_filter)
-    client_names: frozenset[str] | None = (
-        frozenset(c for raw in client_filter for c in raw.split(",") if c) or None
-        if client_filter
-        else None
-    )
-    lane_names: frozenset[str] | None = (
-        frozenset(v for raw in lane_filter for v in raw.split(",") if v) or None
-        if lane_filter
-        else None
-    )
+    client_names = _parse_multi_filter(client_filter)
+    lane_names = _parse_multi_filter(lane_filter)
 
     if follow:
         since_cursor: str | None = None
@@ -392,20 +479,12 @@ def event_tail(
     if dedup_terminal:
         events = _dedup_terminal(events)
 
-    if not events:
-        if as_json:
-            click.echo("[]")
-        else:
-            click.echo("No events.")
-        return
-
-    for ev in events:
-        _print_event(ev, as_json=as_json)
-
-    # Advance consumer cursor to last event seen
-    if consumer is not None and events:
-        advance_cursor(consumer, events[-1].id)
-        click.echo(f"Cursor advanced to: {events[-1].id}", err=True)
+    _emit_tail_events(
+        events,
+        as_json=as_json,
+        collapse_repeats=collapse_repeats,
+        consumer=consumer,
+    )
 
 
 @event.command(name="wait")
