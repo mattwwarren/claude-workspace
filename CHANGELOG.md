@@ -14,6 +14,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   configured commands are threaded into `start_session`'s generated prompt in
   place of the hardcoded sentence; clients that don't set it keep the
   existing default wording.
+- **`cw event tail` gains `--collapse-repeats` to merge consecutive same-type
+  repeats into a summary line (#1754):** consecutive events sharing the same
+  type and compact payload collapse into a single `TYPE xN over Mm` line; a
+  run broken by an unrelated event re-opens instead of merging across the
+  gap. Rejected together with `--follow` (collapsing requires buffering a run
+  until it closes, which conflicts with the immediate-flush follow
+  contract). Composes with `--dedup-terminal` and `--limit`, applied last in
+  the pipeline. `--json` is unaffected — passing `--collapse-repeats` with
+  `--json` is a no-op, one JSON line per original event.
 
 ## [1.30.0] - 2026-08-09
 
