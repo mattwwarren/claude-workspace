@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import shutil
 import subprocess
 import threading
 from datetime import UTC, datetime, timedelta
@@ -6571,6 +6572,20 @@ class TestCodexSpawnDoesNotBlockDispatch:
         monkeypatch.setattr(
             "cw.dispatch.claim.codex_capability_diagnosis",
             lambda **_kwargs: CodexCapabilityDiagnosis(None, "codex-cli 1.0.0"),
+        )
+        # CodexExecutor.spawn() (src/cw/executor.py) runs its OWN
+        # shutil.which("codex") pre-flight, separate from the capability
+        # gate mocked above. CI runners have no codex binary on PATH, so
+        # without this patch spawn() takes the synchronous CODEX_NOT_FOUND
+        # branch and never reaches _background() — blocked_review.entered
+        # is never set and these tests only passed on a dev machine that
+        # happens to have codex installed.
+        real_which = shutil.which
+        monkeypatch.setattr(
+            "cw.executor.shutil.which",
+            lambda cmd, *args, **kwargs: (
+                "/usr/bin/codex" if cmd == "codex" else real_which(cmd, *args, **kwargs)
+            ),
         )
 
     def test_other_client_spawns_while_codex_review_still_running(
