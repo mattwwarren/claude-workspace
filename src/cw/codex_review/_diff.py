@@ -35,22 +35,30 @@ def _parse_hunk_new_start(header: str) -> int:
 
 def _parse_unified_diff(
     diff_text: str,
-) -> tuple[dict[str, str], dict[str, dict[int, str]], list[str]]:
-    """Split a unified diff into per-file hunk text and per-file added-line text.
+) -> tuple[
+    dict[str, str], dict[str, dict[int, str]], dict[str, dict[int, str]], list[str]
+]:
+    """Split a unified diff into per-file hunk text and per-file line-content maps.
 
     Tracks the new-file line number through each ``@@ -a,b +c,d @@`` header:
     ``+`` and context lines advance the counter, ``-`` lines do not. Deleted
     files (``+++ /dev/null``) contribute no new-file lines. Returns
-    ``(file_diffs, file_line_text, changed_files)``; the caller derives
-    ``files`` from ``file_line_text`` so the two can never drift.
+    ``(file_diffs, file_line_text, file_window_text, changed_files)``; the
+    caller derives ``files`` from ``file_line_text`` so the two can never
+    drift. ``file_window_text`` (#1738) is the superset of ``file_line_text``
+    that also captures unchanged CONTEXT-line content at its real new-file
+    line number — ``file_line_text`` stays added-only, byte-identical to
+    before, since it feeds ``_line_reference_valid``'s anchor-validity gate
+    (``cw.review_findings``), which must not be loosened by this change.
     ``changed_files`` is every path named by a ``diff --git`` header, in diff
     order — including pure deletions, which contribute nothing to
-    ``file_diffs``/``file_line_text`` but must still appear in the changed-file
-    list (SHOULD_FIX 11, #1236: this replaces a second, redundant
-    ``git diff --name-only`` subprocess call).
+    ``file_diffs``/``file_line_text``/``file_window_text`` but must still
+    appear in the changed-file list (SHOULD_FIX 11, #1236: this replaces a
+    second, redundant ``git diff --name-only`` subprocess call).
     """
     file_diffs: dict[str, str] = {}
     file_line_text: dict[str, dict[int, str]] = {}
+    file_window_text: dict[str, dict[int, str]] = {}
     changed_files: list[str] = []
     current_file: str | None = None
     current_lines: list[str] = []
@@ -71,6 +79,7 @@ def _parse_unified_diff(
             current_file = None if path == "/dev/null" else path
             if current_file is not None:
                 file_line_text.setdefault(current_file, {})
+                file_window_text.setdefault(current_file, {})
             current_lines.append(raw)
             continue
         if current_file is None:
@@ -80,15 +89,19 @@ def _parse_unified_diff(
             new_line_no = _parse_hunk_new_start(raw)
         elif raw.startswith("+"):
             file_line_text[current_file][new_line_no] = raw[1:]
+            file_window_text[current_file][new_line_no] = raw[1:]
             new_line_no += 1
         elif raw.startswith("-"):
             continue
         else:
+            file_window_text[current_file][new_line_no] = (
+                raw[1:] if raw[:1] == " " else raw
+            )
             new_line_no += 1
 
     if current_file is not None:
         file_diffs[current_file] = "\n".join(current_lines)
-    return file_diffs, file_line_text, changed_files
+    return file_diffs, file_line_text, file_window_text, changed_files
 
 
 def _capture_diff(
@@ -111,12 +124,15 @@ def _capture_diff(
         cwd=worktree,
         text=True,
     )
-    file_diffs, file_line_text, changed_files = _parse_unified_diff(diff_text)
+    file_diffs, file_line_text, file_window_text, changed_files = _parse_unified_diff(
+        diff_text
+    )
     files = {f: sorted(lines) for f, lines in file_line_text.items()}
     diff = CapturedDiff(
         text=diff_text,
         files=files,
         file_diffs=file_diffs,
         file_line_text=file_line_text,
+        file_window_text=file_window_text,
     )
     return diff, reviewed_sha, changed_files

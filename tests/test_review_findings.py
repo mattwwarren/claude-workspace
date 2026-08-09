@@ -53,7 +53,8 @@ if TYPE_CHECKING:
 # The diff text below is verbatim `git diff 494414f8^ 494414f8 --
 # tests/test_dispatch.py` output from this repo.
 
-_PR1729_TEST_DISPATCH_DIFF = '''diff --git a/tests/test_dispatch.py b/tests/test_dispatch.py
+_PR1729_TEST_DISPATCH_DIFF = '''\
+diff --git a/tests/test_dispatch.py b/tests/test_dispatch.py
 index 21cc6981..043f6a49 100644
 --- a/tests/test_dispatch.py
 +++ b/tests/test_dispatch.py
@@ -144,7 +145,7 @@ _PR1729_REJECTED_FINDING_KWARGS: dict[str, object] = {
         "both representations from one source."
     ),
     "evidence": (
-        'assert {\n'
+        "assert {\n"
         '            "blocked",\n'
         '            "merge_gate_blocked",\n'
         '            "awaiting_operator_availability",\n'
