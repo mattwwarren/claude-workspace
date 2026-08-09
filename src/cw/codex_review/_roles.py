@@ -49,6 +49,7 @@ from cw.review_findings import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from cw.codex_review._context import _InstructionSource
     from cw.codex_runner import CodexRunner, CodexRunResult
     from cw.executor_diagnostics import ExecutorFailureCategory
 
@@ -374,7 +375,7 @@ def run_codex_roles(
     wall_clock_budget_seconds: int | None,
     session_id: str,
     reasoning_effort: str | None = None,
-    instruction_sources: list[str] | None = None,
+    instruction_sources: list[_InstructionSource] | None = None,
 ) -> tuple[
     list[ReviewerFindingsDocument],
     list[ReviewerRunFailure],

@@ -24,6 +24,7 @@ import fnmatch
 import json
 import logging
 import tomllib
+from enum import StrEnum
 from typing import TYPE_CHECKING, NamedTuple
 
 import yaml
@@ -600,15 +601,28 @@ def _render_lint_grounding_block(
 # :func:`_build_reviewer_prompt` renders them in. Fixed so
 # ``instruction_sources`` in the #1711 profile diagnostics is deterministic
 # across runs and comparable across sessions.
-_INSTRUCTION_CHANNEL_ORDER: tuple[str, ...] = (
-    "role_spec",
-    "output_format_supplement",
-    "ticket_context",
-    "approved_plan",
-    "project_rubrics",
-    "repo_policy",
-    "lint_grounding",
-    "sensitive_files",
+class _InstructionSource(StrEnum):
+    """Canonical profile-diagnostics vocabulary for prompt inputs."""
+
+    ROLE_SPEC = "role_spec"
+    OUTPUT_FORMAT_SUPPLEMENT = "output_format_supplement"
+    TICKET_CONTEXT = "ticket_context"
+    APPROVED_PLAN = "approved_plan"
+    PROJECT_RUBRICS = "project_rubrics"
+    REPO_POLICY = "repo_policy"
+    LINT_GROUNDING = "lint_grounding"
+    SENSITIVE_FILES = "sensitive_files"
+
+
+_INSTRUCTION_CHANNEL_ORDER: tuple[_InstructionSource, ...] = (
+    _InstructionSource.ROLE_SPEC,
+    _InstructionSource.OUTPUT_FORMAT_SUPPLEMENT,
+    _InstructionSource.TICKET_CONTEXT,
+    _InstructionSource.APPROVED_PLAN,
+    _InstructionSource.PROJECT_RUBRICS,
+    _InstructionSource.REPO_POLICY,
+    _InstructionSource.LINT_GROUNDING,
+    _InstructionSource.SENSITIVE_FILES,
 )
 
 
@@ -622,7 +636,7 @@ def _fired_instruction_channels(
     repo_policy_section: str | None,
     lint_grounding: str | None,
     sensitive_hits: list[_SensitiveHit],
-) -> list[str]:
+) -> list[_InstructionSource]:
     """Return which instruction channels actually contributed content (#1711).
 
     The single source of truth for "did this context channel fire", consulted
@@ -641,14 +655,14 @@ def _fired_instruction_channels(
     only on non-empty spec text: an empty heading is not a contribution.
     """
     fired = {
-        "role_spec": bool(agent_spec_text),
-        "output_format_supplement": bool(supplement),
-        "ticket_context": bool(ticket_text),
-        "approved_plan": bool(plan_text),
-        "project_rubrics": bool(project_rubrics),
-        "repo_policy": bool(repo_policy_section),
-        "lint_grounding": bool(lint_grounding),
-        "sensitive_files": bool(sensitive_hits),
+        _InstructionSource.ROLE_SPEC: bool(agent_spec_text),
+        _InstructionSource.OUTPUT_FORMAT_SUPPLEMENT: bool(supplement),
+        _InstructionSource.TICKET_CONTEXT: bool(ticket_text),
+        _InstructionSource.APPROVED_PLAN: bool(plan_text),
+        _InstructionSource.PROJECT_RUBRICS: bool(project_rubrics),
+        _InstructionSource.REPO_POLICY: bool(repo_policy_section),
+        _InstructionSource.LINT_GROUNDING: bool(lint_grounding),
+        _InstructionSource.SENSITIVE_FILES: bool(sensitive_hits),
     }
     return [name for name in _INSTRUCTION_CHANNEL_ORDER if fired[name]]
 
@@ -703,19 +717,22 @@ def _build_reviewer_prompt(
     )
     # The `is not None` companions below are narrowing for the type checker
     # only — the channel membership already implies a truthy value.
-    if "output_format_supplement" in channels and supplement is not None:
+    if (
+        _InstructionSource.OUTPUT_FORMAT_SUPPLEMENT in channels
+        and supplement is not None
+    ):
         parts.append(supplement)
-    if "ticket_context" in channels:
+    if _InstructionSource.TICKET_CONTEXT in channels:
         parts.append(f"## Ticket Context\n{ticket_text}")
-    if "approved_plan" in channels:
+    if _InstructionSource.APPROVED_PLAN in channels:
         parts.append(f"## Approved Plan\n{plan_text}")
-    if "project_rubrics" in channels:
+    if _InstructionSource.PROJECT_RUBRICS in channels:
         parts.append(f"## Project Rubrics\n{project_rubrics}")
-    if "repo_policy" in channels:
+    if _InstructionSource.REPO_POLICY in channels:
         parts.append(f"## Repo Policy for {role}\n{repo_policy_section}")
-    if "lint_grounding" in channels:
+    if _InstructionSource.LINT_GROUNDING in channels:
         parts.append(f"## Repo Lint Configuration\n{lint_grounding}")
-    if "sensitive_files" in channels:
+    if _InstructionSource.SENSITIVE_FILES in channels:
         parts.append(_render_sensitive_block(sensitive_hits))
     parts.append("## Changed Files\n" + "\n".join(changed_files))
     parts.append(f"## Diff\n{diff.text}")
@@ -765,7 +782,7 @@ class _ReviewPassInputs(NamedTuple):
     diff: CapturedDiff
     reviewed_sha: str
     capability: _CodexFilesystemCapability
-    instruction_sources: list[str]
+    instruction_sources: list[_InstructionSource]
 
 
 def _prepare_review_pass(

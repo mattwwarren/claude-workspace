@@ -19,7 +19,11 @@ from cw.codex_review._benchmark import (
     run_reasoning_effort_benchmark,
 )
 from cw.codex_runner import CodexRunResult
-from tests._codex_review_helpers import _doc_json, _finding_payload
+from tests._codex_review_helpers import (
+    _config_override_values,
+    _doc_json,
+    _finding_payload,
+)
 
 _AUDIT_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "codex_audit_events"
 
@@ -56,11 +60,9 @@ class _EffortAwareRunner:
     @staticmethod
     def pinned_effort(argv: list[str]) -> str | None:
         """Return the ``-c model_reasoning_effort=<value>`` value in *argv*."""
-        for index, flag in enumerate(argv):
-            if flag == "-c" and index + 1 < len(argv):
-                override = argv[index + 1]
-                if override.startswith("model_reasoning_effort="):
-                    return override.split("=", 1)[1]
+        for override in _config_override_values(argv):
+            if override.startswith("model_reasoning_effort="):
+                return override.split("=", 1)[1]
         return None
 
     def run(
@@ -156,24 +158,14 @@ class TestRunReasoningEffortBenchmark:
         assert sorted(comparison.high.failed_roles) == sorted(_ROLES)
         assert comparison.medium.findings_count == 0
 
-    def test_custom_effort_values_are_honored(self, tmp_path: Path) -> None:
-        runner = _EffortAwareRunner()
-        comparison = run_reasoning_effort_benchmark(
-            runner=runner,
-            worktree=tmp_path,
-            roles=_ROLES[:1],
-            prompts_by_role=_PROMPTS,
-            model=None,
-            wall_clock_budget_seconds=None,
-            session_id="s-benchmark-custom",
-            effort_values=("low", "high"),
-        )
-        assert comparison.medium.effort == "low"
-        assert comparison.high.effort == "high"
-        assert [runner.pinned_effort(argv) for argv in runner.calls] == ["low", "high"]
-
-    def test_rejects_wrong_number_of_effort_values(self, tmp_path: Path) -> None:
-        with pytest.raises(ValueError, match="exactly two"):
+    @pytest.mark.parametrize(
+        "effort_values",
+        [("low", "high"), ("high", "medium"), ("medium", "medium"), ("low",)],
+    )
+    def test_rejects_non_medium_high_pair(
+        self, tmp_path: Path, effort_values: tuple[str, ...]
+    ) -> None:
+        with pytest.raises(ValueError, match="exactly"):
             run_reasoning_effort_benchmark(
                 runner=_EffortAwareRunner(),
                 worktree=tmp_path,
@@ -182,7 +174,7 @@ class TestRunReasoningEffortBenchmark:
                 model=None,
                 wall_clock_budget_seconds=None,
                 session_id="s-benchmark-bad",
-                effort_values=("low",),
+                effort_values=effort_values,
             )
 
     def test_result_model_is_serializable(self) -> None:

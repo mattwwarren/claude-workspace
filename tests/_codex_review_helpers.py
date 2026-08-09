@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from cw.codex_runner import CodexRunResult
 from cw.models import Stage, TicketTask
@@ -20,6 +20,23 @@ from tests.conftest import _make_ticket_task
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+class _RunnerCall(TypedDict):
+    """Recorded arguments for a test ``CodexRunner`` invocation."""
+
+    argv: list[str]
+    timeout: int | None
+    stdin: str | None
+
+
+def _config_override_values(argv: list[str]) -> list[str]:
+    """Return every complete ``-c <override>`` value in *argv*, in order."""
+    return [
+        argv[index + 1]
+        for index, argument in enumerate(argv)
+        if argument == "-c" and index + 1 < len(argv)
+    ]
 
 
 def _mk_codex_proc(
@@ -115,7 +132,7 @@ class _SequencedRunner:
 
     def __init__(self, results: list[CodexRunResult]) -> None:
         self._results = results
-        self.calls: list[dict[str, object]] = []
+        self.calls: list[_RunnerCall] = []
 
     def run(
         self,

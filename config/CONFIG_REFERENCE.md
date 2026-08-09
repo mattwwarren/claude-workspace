@@ -410,12 +410,16 @@ clients:
 
 **What the profile disables**
 
-Eleven optional feature surfaces, via `--disable <feature>` (documented sugar
-for `-c features.<name>=false`): `hooks`, `memories`, `multi_agent`,
+The complete optional-feature inventory captured from codex-cli 0.147.0 is
+versioned in code. The lean profile's explicit allowlist is empty, so it
+disables the inventory complement — currently all eleven surfaces — via
+`--disable <feature>` (documented sugar for `-c features.<name>=false`):
+`hooks`, `memories`, `multi_agent`,
 `multi_agent_v2`, `plugins`, `plugin_sharing`, `browser_use`,
 `browser_use_external`, `browser_use_full_cdp_access`, `computer_use`,
-`personality`. These are exactly the identifiers `codex features list`
-enumerates.
+`personality`. A captured `codex features list` contract test pins that
+inventory to its CLI version so a later inventory change cannot silently move
+with the disable list.
 
 **MCP servers are disabled separately**, via `-c mcp_servers={}` — *not* via
 `--disable`. MCP servers are not a member of codex's `features` list, so
@@ -423,8 +427,10 @@ enumerates.
 them; a direct config override is the only mechanism that can. This is why the
 flag is listed apart from the eleven above rather than folded in with them.
 
-Plus two whole-channel closures:
+Plus three whole-channel closures:
 - `--ignore-user-config` — drops `~/.codex/config.toml`.
+- `--ignore-rules` — drops the separate execpolicy-rules configuration
+  channel, preventing operator-local command rules from changing a run.
 - `-c project_doc_max_bytes=0` — stops codex inlining the repo's
   `AGENTS.md`/project doc. `cw` already inlines every instruction the reviewer
   should see; a second, unversioned instruction channel is the thing this
@@ -455,8 +461,8 @@ profile did *this* review actually run under":
   event carries a model field, so this is `cw`'s answer, not codex's.
 - `cli_version` — parsed `codex --version` (`null` if unanswerable).
 - `enabled_tool_classes` — candidate tool classes the profile left enabled.
-  Empty today by construction: every candidate is in the disable list. That is
-  the honest reading, not a placeholder.
+  Empty today because the explicit allowlist is empty; it is derived from the
+  complement against the codex-cli 0.147.0 feature inventory.
 - `instruction_sources` — which prompt-instruction channels actually
   contributed content, unioned across every role in the pass, in a fixed
   canonical order. Vocabulary: `role_spec`, `output_format_supplement`,

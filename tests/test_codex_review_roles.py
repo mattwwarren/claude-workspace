@@ -20,6 +20,7 @@ from cw.codex_review import (
     _build_generic_codex_argv,
     _classify_codex_failure,
     _codex_scratch_dir,
+    _InstructionSource,
     _is_audit_flag_rejection,
     _run_codex_role,
     run_codex_roles,
@@ -34,6 +35,7 @@ from cw.review_findings import (
 )
 from tests._codex_review_helpers import (
     _Clock,
+    _config_override_values,
     _finding_payload,
     _ok_result,
     _SequencedRunner,
@@ -918,13 +920,6 @@ class TestRunCodexRoleFlagRejectionRetry:
 # ---------------------------------------------------------------------------
 
 
-def _overrides(argv: list[str]) -> list[str]:
-    """Return every ``-c <override>`` value in *argv*, in order."""
-    return [
-        argv[i + 1] for i, tok in enumerate(argv) if tok == "-c" and i + 1 < len(argv)
-    ]
-
-
 class TestBuildGenericCodexArgvLeanProfile:
     @pytest.mark.parametrize("model", [None, "gpt-5"])
     def test_lean_profile_flags_present(
@@ -937,8 +932,9 @@ class TestBuildGenericCodexArgvLeanProfile:
             reasoning_effort="high",
         )
         assert "--ignore-user-config" in argv
+        assert "--ignore-rules" in argv
         assert "--strict-config" in argv
-        overrides = _overrides(argv)
+        overrides = _config_override_values(argv)
         assert "project_doc_max_bytes=0" in overrides
         assert "mcp_servers={}" in overrides
         assert "model_reasoning_effort=high" in overrides
@@ -957,7 +953,8 @@ class TestBuildGenericCodexArgvLeanProfile:
             output_path=tmp_path / "o.json",
         )
         assert not any(
-            o.startswith("model_reasoning_effort=") for o in _overrides(argv)
+            o.startswith("model_reasoning_effort=")
+            for o in _config_override_values(argv)
         )
 
     def test_lean_block_sits_after_the_sandbox_pair(self, tmp_path: Path) -> None:
@@ -1028,7 +1025,7 @@ class TestRunCodexRolesProfileThreading:
         for call in runner.calls:
             argv = call["argv"]
             assert isinstance(argv, list)
-            assert "model_reasoning_effort=medium" in _overrides(argv)
+            assert "model_reasoning_effort=medium" in _config_override_values(argv)
 
     def test_profile_diagnostics_written_once_per_invocation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1040,7 +1037,7 @@ class TestRunCodexRolesProfileThreading:
             session_id: str,
             model: str | None,
             reasoning_effort: str | None,
-            instruction_sources: list[str],
+            instruction_sources: list[_InstructionSource],
         ) -> None:
             seen.append(
                 {
@@ -1062,7 +1059,10 @@ class TestRunCodexRolesProfileThreading:
             wall_clock_budget_seconds=None,
             session_id="s-profile-diag",
             reasoning_effort="high",
-            instruction_sources=["role_spec", "approved_plan"],
+            instruction_sources=[
+                _InstructionSource.ROLE_SPEC,
+                _InstructionSource.APPROVED_PLAN,
+            ],
         )
         # Once per invocation — not once per role.
         assert seen == [
@@ -1085,7 +1085,7 @@ class TestRunCodexRolesProfileThreading:
             wall_clock_budget_seconds=None,
             session_id="s-profile-artifact",
             reasoning_effort="high",
-            instruction_sources=["ticket_context"],
+            instruction_sources=[_InstructionSource.TICKET_CONTEXT],
         )
         path = diagnostics_dir("s-profile-artifact") / _PROFILE_DIAGNOSTICS_FILENAME
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -1106,7 +1106,8 @@ class TestRunCodexRolesProfileThreading:
         argv = runner.calls[0]["argv"]
         assert isinstance(argv, list)
         assert not any(
-            o.startswith("model_reasoning_effort=") for o in _overrides(argv)
+            o.startswith("model_reasoning_effort=")
+            for o in _config_override_values(argv)
         )
         path = diagnostics_dir("s-profile-defaults") / _PROFILE_DIAGNOSTICS_FILENAME
         assert json.loads(path.read_text(encoding="utf-8"))["instruction_sources"] == []

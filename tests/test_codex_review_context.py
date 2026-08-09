@@ -36,6 +36,7 @@ from cw.codex_review._context import (
     _OUTPUT_INSTRUCTIONS_CAPABLE,
     _OUTPUT_INSTRUCTIONS_INLINED_ONLY,
     _fired_instruction_channels,
+    _InstructionSource,
     _select_output_instructions,
 )
 from cw.codex_runner import FakeCodexRunner
@@ -993,7 +994,7 @@ def _fired(
     repo_policy_section: str | None = None,
     lint_grounding: str | None = None,
     sensitive_hits: list[_SensitiveHit] | None = None,
-) -> list[str]:
+) -> list[_InstructionSource]:
     """Call ``_fired_instruction_channels`` with every channel absent by default."""
     return _fired_instruction_channels(
         agent_spec_text=agent_spec_text,
@@ -1030,18 +1031,38 @@ class TestFiredInstructionChannels:
     @pytest.mark.parametrize(
         ("call", "channel"),
         [
-            (lambda: _fired(agent_spec_text="SPEC"), "role_spec"),
-            (lambda: _fired(supplement="SUPP"), "output_format_supplement"),
-            (lambda: _fired(ticket_text="TICKET"), "ticket_context"),
-            (lambda: _fired(plan_text="PLAN"), "approved_plan"),
-            (lambda: _fired(project_rubrics="RUBRICS"), "project_rubrics"),
-            (lambda: _fired(repo_policy_section="POLICY"), "repo_policy"),
-            (lambda: _fired(lint_grounding="LINT"), "lint_grounding"),
-            (lambda: _fired(sensitive_hits=[_A_SENSITIVE_HIT]), "sensitive_files"),
+            (lambda: _fired(agent_spec_text="SPEC"), _InstructionSource.ROLE_SPEC),
+            (
+                lambda: _fired(supplement="SUPP"),
+                _InstructionSource.OUTPUT_FORMAT_SUPPLEMENT,
+            ),
+            (
+                lambda: _fired(ticket_text="TICKET"),
+                _InstructionSource.TICKET_CONTEXT,
+            ),
+            (lambda: _fired(plan_text="PLAN"), _InstructionSource.APPROVED_PLAN),
+            (
+                lambda: _fired(project_rubrics="RUBRICS"),
+                _InstructionSource.PROJECT_RUBRICS,
+            ),
+            (
+                lambda: _fired(repo_policy_section="POLICY"),
+                _InstructionSource.REPO_POLICY,
+            ),
+            (
+                lambda: _fired(lint_grounding="LINT"),
+                _InstructionSource.LINT_GROUNDING,
+            ),
+            (
+                lambda: _fired(sensitive_hits=[_A_SENSITIVE_HIT]),
+                _InstructionSource.SENSITIVE_FILES,
+            ),
         ],
     )
     def test_each_channel_fires_alone(
-        self, call: Callable[[], list[str]], channel: str
+        self,
+        call: Callable[[], list[_InstructionSource]],
+        channel: _InstructionSource,
     ) -> None:
         assert call() == [channel]
 
@@ -1099,15 +1120,15 @@ class TestPrepareReviewPassInstructionSources:
             for name in _INSTRUCTION_CHANNEL_ORDER
             if name
             in {
-                "output_format_supplement",
-                "ticket_context",
-                "approved_plan",
-                "project_rubrics",
-                "repo_policy",
+                _InstructionSource.OUTPUT_FORMAT_SUPPLEMENT,
+                _InstructionSource.TICKET_CONTEXT,
+                _InstructionSource.APPROVED_PLAN,
+                _InstructionSource.PROJECT_RUBRICS,
+                _InstructionSource.REPO_POLICY,
             }
         ]
         # repo_policy fired for exactly one role but still reached the union.
-        assert "repo_policy" in prepared.instruction_sources
+        assert _InstructionSource.REPO_POLICY in prepared.instruction_sources
 
     def test_absent_channels_are_omitted(
         self, make_git_repo: Callable[[str], Path]
@@ -1126,8 +1147,8 @@ class TestPrepareReviewPassInstructionSources:
             session_id="s-instruction-sources-bare",
         )
 
-        assert "approved_plan" not in prepared.instruction_sources
-        assert "ticket_context" not in prepared.instruction_sources
-        assert "project_rubrics" not in prepared.instruction_sources
-        assert "repo_policy" not in prepared.instruction_sources
-        assert "sensitive_files" not in prepared.instruction_sources
+        assert _InstructionSource.APPROVED_PLAN not in prepared.instruction_sources
+        assert _InstructionSource.TICKET_CONTEXT not in prepared.instruction_sources
+        assert _InstructionSource.PROJECT_RUBRICS not in prepared.instruction_sources
+        assert _InstructionSource.REPO_POLICY not in prepared.instruction_sources
+        assert _InstructionSource.SENSITIVE_FILES not in prepared.instruction_sources

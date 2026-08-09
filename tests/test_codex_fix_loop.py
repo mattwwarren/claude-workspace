@@ -44,7 +44,13 @@ from cw.review_findings import (
     consolidate_verdict,
     write_review_verdict,
 )
-from tests._codex_review_helpers import _Clock, _SequencedRunner, _write
+from tests._codex_review_helpers import (
+    _Clock,
+    _config_override_values,
+    _RunnerCall,
+    _SequencedRunner,
+    _write,
+)
 from tests.conftest import (
     _make_diff,
     _make_finding,
@@ -188,7 +194,7 @@ class _FixLoopRunner:
         self._review_stdout = review_stdout
         self._pass = 0
         self._fix_i = 0
-        self.calls: list[dict[str, object]] = []
+        self.calls: list[_RunnerCall] = []
         self.review_calls = 0
         self.fix_calls = 0
 
@@ -350,7 +356,7 @@ class TestFixCycleFloor:
 
         # The fix invocation ran (floor never blocked it) and the loop cleared.
         assert len(runner.calls) == 1
-        assert "workspace-write" in runner.calls[0]["argv"]  # type: ignore[operator]
+        assert "workspace-write" in runner.calls[0]["argv"]
         assert out.status == "stage_complete"
 
     def test_floor_constant_is_two_role_floors(self) -> None:
@@ -409,11 +415,11 @@ class TestFixInvocation:
         runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC])
         _run_loop(runner, worktree, session_id="s-argv")
 
-        fix_calls = [c for c in runner.calls if "workspace-write" in c["argv"]]  # type: ignore[operator]
+        fix_calls = [c for c in runner.calls if "workspace-write" in c["argv"]]
         assert fix_calls
         for call in fix_calls:
-            assert "read-only" not in call["argv"]  # type: ignore[operator]
-            assert "-o" not in call["argv"]  # type: ignore[operator]
+            assert "read-only" not in call["argv"]
+            assert "-o" not in call["argv"]
 
     def test_fix_prompt_excludes_should_fix(
         self, make_git_repo: Callable[..., Path]
@@ -422,7 +428,7 @@ class TestFixInvocation:
         runner = _FixLoopRunner([_MF_SF_DOC, _CLEAN_DOC])
         _run_loop(runner, worktree, session_id="s-prompt")
 
-        fix_call = next(c for c in runner.calls if "workspace-write" in c["argv"])  # type: ignore[operator]
+        fix_call = next(c for c in runner.calls if "workspace-write" in c["argv"])
         prompt = fix_call["stdin"]
         assert isinstance(prompt, str)
         assert "MFA" in prompt  # the MUST_FIX finding's summary
@@ -1623,13 +1629,6 @@ class TestCapabilityProbeIsCachedAcrossCycles:
 # ---------------------------------------------------------------------------
 
 
-def _fix_overrides(argv: list[str]) -> list[str]:
-    """Return every ``-c <override>`` value in *argv*, in order."""
-    return [
-        argv[i + 1] for i, tok in enumerate(argv) if tok == "-c" and i + 1 < len(argv)
-    ]
-
-
 class TestFixArgvSharesTheLeanProfile:
     def test_same_disabled_features_and_mcp_override_as_the_reviewer_path(
         self,
@@ -1639,11 +1638,12 @@ class TestFixArgvSharesTheLeanProfile:
         # point is that both builders emit the SAME block.
         for feature in _DISABLED_FEATURES:
             assert argv[argv.index(feature) - 1] == "--disable"
-        overrides = _fix_overrides(argv)
+        overrides = _config_override_values(argv)
         assert "mcp_servers={}" in overrides
         assert "project_doc_max_bytes=0" in overrides
         assert "model_reasoning_effort=high" in overrides
         assert "--ignore-user-config" in argv
+        assert "--ignore-rules" in argv
         assert "--strict-config" in argv
         # Fix invocations stay write-capable and document-free.
         assert argv[:4] == ["codex", "exec", "--sandbox", "workspace-write"]
@@ -1653,7 +1653,8 @@ class TestFixArgvSharesTheLeanProfile:
     def test_effort_omitted_by_default(self) -> None:
         argv = _build_fix_codex_argv(model=None)
         assert not any(
-            o.startswith("model_reasoning_effort=") for o in _fix_overrides(argv)
+            o.startswith("model_reasoning_effort=")
+            for o in _config_override_values(argv)
         )
 
 
@@ -1682,7 +1683,7 @@ class TestParkFixFailureRecordsRealEffort:
         assert failures
         payload = json.loads(failures[0].read_text(encoding="utf-8"))
         argv = payload["argv_sanitized"]
-        assert "model_reasoning_effort=minimal" in _fix_overrides(argv)
+        assert "model_reasoning_effort=minimal" in _config_override_values(argv)
 
     def test_live_fix_invocation_carries_the_threaded_effort(
         self, make_git_repo: Callable[..., Path]
@@ -1699,10 +1700,10 @@ class TestParkFixFailureRecordsRealEffort:
             reasoning_effort="minimal",
         )
 
-        fix_call = next(c for c in runner.calls if "workspace-write" in c["argv"])  # type: ignore[operator]
+        fix_call = next(c for c in runner.calls if "workspace-write" in c["argv"])
         argv = fix_call["argv"]
         assert isinstance(argv, list)
-        assert "model_reasoning_effort=minimal" in _fix_overrides(argv)
+        assert "model_reasoning_effort=minimal" in _config_override_values(argv)
 
     def test_rereview_roles_carry_the_threaded_effort(
         self, make_git_repo: Callable[..., Path]
@@ -1718,12 +1719,12 @@ class TestParkFixFailureRecordsRealEffort:
             reasoning_effort="minimal",
         )
 
-        review_calls = [c for c in runner.calls if "read-only" in c["argv"]]  # type: ignore[operator]
+        review_calls = [c for c in runner.calls if "read-only" in c["argv"]]
         # The capability probe plus every reviewer role invocation.
         assert len(review_calls) > 1
-        role_calls = [c for c in review_calls if "--output-schema" in c["argv"]]  # type: ignore[operator]
+        role_calls = [c for c in review_calls if "--output-schema" in c["argv"]]
         assert role_calls
         for call in role_calls:
             argv = call["argv"]
             assert isinstance(argv, list)
-            assert "model_reasoning_effort=minimal" in _fix_overrides(argv)
+            assert "model_reasoning_effort=minimal" in _config_override_values(argv)

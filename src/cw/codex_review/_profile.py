@@ -27,23 +27,22 @@ from datetime import UTC, datetime
 
 from pydantic import BaseModel, ConfigDict
 
-from cw.codex_review import _capability
+from cw.codex_review import _capability, _context
 from cw.config import diagnostics_dir
 
 _log = logging.getLogger(__name__)
 
 # Bump when the argv block below changes shape, so a diagnostics artifact from
 # an older run is not mistaken for one produced by the current profile.
-_PROFILE_VERSION = 1
+_PROFILE_VERSION = 2
 
 _PROFILE_DIAGNOSTICS_FILENAME = "codex-review-profile.json"
 
-# Every identifier `codex features list` enumerates on codex-cli 0.147.0.
-# `--disable <feature>` is documented sugar for `-c features.<name>=false`
-# (`codex exec --help`), so this tuple is exactly the closed set of optional
-# feature surfaces the profile can turn off — and it turns off all of them: a
-# reviewer needs the model and the prompt, nothing else.
-_DISABLED_FEATURES: tuple[str, ...] = (
+# Complete captured inventory for the CLI version against which this profile
+# was verified. The version is part of the name deliberately: a newer Codex
+# feature list must be reviewed and added as a new inventory instead of being
+# silently treated as covered by this one.
+_CODEX_FEATURES_0_147_0: tuple[str, ...] = (
     "hooks",
     "memories",
     "multi_agent",
@@ -57,13 +56,15 @@ _DISABLED_FEATURES: tuple[str, ...] = (
     "personality",
 )
 
-# The candidate set `enabled_tool_classes` is computed against. Identical to
-# _DISABLED_FEATURES today (the profile disables every candidate), which is why
-# the diagnostic honestly reports `[]` — not because nothing was checked, but
-# because nothing survived. Kept as a separate name so widening the candidate
-# set later without widening the disable list produces a non-empty, truthful
-# diagnostic instead of a silent one.
-_CANDIDATE_TOOL_CLASSES: tuple[str, ...] = _DISABLED_FEATURES
+# A lean reviewer needs no optional Codex feature. Keep the allowlist explicit
+# so both the disable argv and diagnostics are honest complements of the
+# versioned inventory rather than two names for the same tuple.
+_LEAN_PROFILE_FEATURE_ALLOWLIST: frozenset[str] = frozenset()
+_DISABLED_FEATURES: tuple[str, ...] = tuple(
+    feature
+    for feature in _CODEX_FEATURES_0_147_0
+    if feature not in _LEAN_PROFILE_FEATURE_ALLOWLIST
+)
 
 
 def _lean_profile_argv(*, reasoning_effort: str | None) -> list[str]:
@@ -71,6 +72,10 @@ def _lean_profile_argv(*, reasoning_effort: str | None) -> list[str]:
 
     ``--ignore-user-config`` drops ``~/.codex/config.toml`` so the operator's
     personal codex setup cannot leak into a cw-owned review.
+
+    ``--ignore-rules`` closes the separate execpolicy-rules channel so a local
+    rules file cannot change which commands the same cw-owned invocation may
+    run.
 
     ``--strict-config`` makes codex *reject* an unknown ``-c`` key instead of
     ignoring it, which is what makes the overrides below trustworthy rather
@@ -97,6 +102,7 @@ def _lean_profile_argv(*, reasoning_effort: str | None) -> list[str]:
     """
     argv = [
         "--ignore-user-config",
+        "--ignore-rules",
         "--strict-config",
         "-c",
         "project_doc_max_bytes=0",
@@ -119,19 +125,19 @@ class _ProfileDiagnostics(BaseModel):
     reasoning_effort: str | None
     effective_model: str | None
     cli_version: str | None
-    # Candidate tool classes NOT disabled by this profile. Empty by
-    # construction today — see _CANDIDATE_TOOL_CLASSES.
+    # Versioned-inventory feature classes allowed by this profile. Empty by
+    # construction today — see _LEAN_PROFILE_FEATURE_ALLOWLIST.
     enabled_tool_classes: list[str]
     # Which prompt-instruction channels actually contributed content, unioned
     # across every role in the pass. Vocabulary: role_spec,
     # output_format_supplement, ticket_context, approved_plan, project_rubrics,
     # repo_policy, lint_grounding, sensitive_files.
-    instruction_sources: list[str]
+    instruction_sources: list[_context._InstructionSource]
 
 
 def _enabled_tool_classes() -> list[str]:
-    """Return the candidate tool classes this profile leaves enabled."""
-    return [name for name in _CANDIDATE_TOOL_CLASSES if name not in _DISABLED_FEATURES]
+    """Return the versioned-inventory complement of the disable argv."""
+    return [name for name in _CODEX_FEATURES_0_147_0 if name not in _DISABLED_FEATURES]
 
 
 def _persist_profile_diagnostics(
@@ -139,7 +145,7 @@ def _persist_profile_diagnostics(
     session_id: str,
     model: str | None,
     reasoning_effort: str | None,
-    instruction_sources: list[str],
+    instruction_sources: list[_context._InstructionSource],
 ) -> None:
     """Record this pass's profile under *session_id*'s diagnostics dir.
 

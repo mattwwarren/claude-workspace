@@ -36,10 +36,9 @@ if TYPE_CHECKING:
     )
 
 _DEFAULT_EFFORT_VALUES: tuple[str, str] = ("medium", "high")
-_EXPECTED_EFFORT_VALUES = 2
 _DEGRADED = "degraded"
 
-_EFFORT_VALUES_ERROR = "effort_values must contain exactly two reasoning-effort names"
+_EFFORT_VALUES_ERROR = 'effort_values must be exactly ("medium", "high")'
 
 
 class _EffortRunResult(BaseModel):
@@ -138,17 +137,16 @@ def run_reasoning_effort_benchmark(
 ) -> BenchmarkComparison:
     """Run *roles* once per entry in *effort_values*; return the comparison.
 
-    ``effort_values`` is ordered ``(lower, higher)`` and must hold exactly two
-    names — the comparison has two sides by construction, so a three-way list
-    would silently discard one. The names are not validated against a codex
-    vocabulary: ``--strict-config`` rejects an unknown *key*, and an unknown
-    *value* is codex's to reject at run time, not this harness's to guess at.
+    ``effort_values`` must be exactly ``("medium", "high")`` because those
+    are the names exposed by :class:`BenchmarkComparison`. Rejecting custom
+    pairs prevents a result labelled ``medium`` from actually containing a
+    different effort value.
 
     Each pass goes through the ordinary :func:`run_codex_roles` path, so the
     numbers describe the profile production actually uses — including the
     per-session profile diagnostics each pass writes.
     """
-    if len(effort_values) != _EXPECTED_EFFORT_VALUES:
+    if effort_values != _DEFAULT_EFFORT_VALUES:
         raise ValueError(_EFFORT_VALUES_ERROR)
     sides: list[_EffortRunResult] = []
     for effort in effort_values:
@@ -170,6 +168,4 @@ def run_reasoning_effort_benchmark(
                 metrics_by_role=metrics_by_role,
             )
         )
-    # Positional, not keyed by effort name: two passes that happen to share an
-    # effort name must still yield two distinct sides.
     return BenchmarkComparison(medium=sides[0], high=sides[1])

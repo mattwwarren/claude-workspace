@@ -8,42 +8,35 @@ import json
 import pytest
 
 from cw.codex_review import (
+    _CODEX_FEATURES_0_147_0,
     _DISABLED_FEATURES,
+    _LEAN_PROFILE_FEATURE_ALLOWLIST,
     _PROFILE_DIAGNOSTICS_FILENAME,
     _PROFILE_VERSION,
+    _InstructionSource,
     _lean_profile_argv,
     _persist_profile_diagnostics,
     _ProfileDiagnostics,
 )
 from cw.config import diagnostics_dir
+from tests._codex_review_helpers import _config_override_values
 
-# The 11 identifiers `codex features list` enumerates on codex-cli 0.147.0.
-# Hardcoded here (not imported from the module under test) so a silent edit to
-# _DISABLED_FEATURES fails this test instead of moving with it.
-_EXPECTED_FEATURES = (
-    "hooks",
-    "memories",
-    "multi_agent",
-    "multi_agent_v2",
-    "plugins",
-    "plugin_sharing",
-    "browser_use",
-    "browser_use_external",
-    "browser_use_full_cdp_access",
-    "computer_use",
-    "personality",
-)
-
-
-def _config_overrides(argv: list[str]) -> list[str]:
-    """Return every ``-c <override>`` value in *argv*, in order.
-
-    ``-c key=value`` is two argv tokens, so a bare ``"key=value" in argv``
-    membership check would pass on an override that lost its ``-c`` flag.
-    """
-    return [
-        argv[i + 1] for i, tok in enumerate(argv) if tok == "-c" and i + 1 < len(argv)
-    ]
+# Captured verbatim identifier/status/default columns from
+# ``codex-cli 0.147.0 features list``. Keeping the capture in the contract test
+# makes an inventory edit explain which CLI output superseded it.
+_FEATURES_LIST_0_147_0 = """\
+hooks stable true
+memories stable false
+multi_agent stable true
+multi_agent_v2 stable false
+plugins stable true
+plugin_sharing stable true
+browser_use stable true
+browser_use_external stable true
+browser_use_full_cdp_access stable true
+computer_use stable true
+personality stable true
+"""
 
 
 def _disabled(argv: list[str]) -> list[str]:
@@ -61,8 +54,20 @@ def _disabled(argv: list[str]) -> list[str]:
 
 
 class TestDisabledFeatures:
-    def test_exactly_the_eleven_enumerated_features(self) -> None:
-        assert tuple(_DISABLED_FEATURES) == _EXPECTED_FEATURES
+    def test_versioned_inventory_matches_captured_features_list(self) -> None:
+        captured_names = tuple(
+            line.split()[0] for line in _FEATURES_LIST_0_147_0.splitlines()
+        )
+        assert captured_names == _CODEX_FEATURES_0_147_0
+
+    def test_disabled_features_are_inventory_minus_allowlist(self) -> None:
+        assert frozenset() == _LEAN_PROFILE_FEATURE_ALLOWLIST
+        expected_disabled = tuple(
+            feature
+            for feature in _CODEX_FEATURES_0_147_0
+            if feature not in _LEAN_PROFILE_FEATURE_ALLOWLIST
+        )
+        assert expected_disabled == _DISABLED_FEATURES
 
     def test_mcp_servers_is_not_a_feature(self) -> None:
         # `--disable <feature>` is `-c features.<name>=false` sugar, and MCP
@@ -78,30 +83,34 @@ class TestDisabledFeatures:
 
 
 class TestLeanProfileArgv:
+    def test_profile_version_tracks_ignore_rules_addition(self) -> None:
+        assert _PROFILE_VERSION == 2
+
     @pytest.mark.parametrize("effort", [None, "medium", "high"])
     def test_unconditional_flags_always_present(self, effort: str | None) -> None:
         argv = _lean_profile_argv(reasoning_effort=effort)
         assert "--ignore-user-config" in argv
+        assert "--ignore-rules" in argv
         assert "--strict-config" in argv
-        overrides = _config_overrides(argv)
+        overrides = _config_override_values(argv)
         assert "project_doc_max_bytes=0" in overrides
         assert "mcp_servers={}" in overrides
 
     @pytest.mark.parametrize("effort", [None, "medium", "high"])
     def test_all_eleven_features_disabled(self, effort: str | None) -> None:
         argv = _lean_profile_argv(reasoning_effort=effort)
-        assert _disabled(argv) == list(_EXPECTED_FEATURES)
+        assert _disabled(argv) == list(_CODEX_FEATURES_0_147_0)
 
     @pytest.mark.parametrize("effort", ["low", "medium", "high"])
     def test_reasoning_effort_override_emitted(self, effort: str) -> None:
         argv = _lean_profile_argv(reasoning_effort=effort)
-        assert f"model_reasoning_effort={effort}" in _config_overrides(argv)
+        assert f"model_reasoning_effort={effort}" in _config_override_values(argv)
 
     def test_no_reasoning_effort_override_when_none(self) -> None:
         argv = _lean_profile_argv(reasoning_effort=None)
         assert not any(
             override.startswith("model_reasoning_effort=")
-            for override in _config_overrides(argv)
+            for override in _config_override_values(argv)
         )
 
     def test_every_config_override_is_paired(self) -> None:
@@ -131,7 +140,10 @@ class TestPersistProfileDiagnostics:
             session_id="sess-profile",
             model="gpt-5",
             reasoning_effort="high",
-            instruction_sources=["role_spec", "approved_plan"],
+            instruction_sources=[
+                _InstructionSource.ROLE_SPEC,
+                _InstructionSource.APPROVED_PLAN,
+            ],
         )
         path = diagnostics_dir("sess-profile") / _PROFILE_DIAGNOSTICS_FILENAME
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -192,7 +204,7 @@ class TestPersistProfileDiagnostics:
             effective_model=None,
             cli_version=None,
             enabled_tool_classes=[],
-            instruction_sources=["ticket_context"],
+            instruction_sources=[_InstructionSource.TICKET_CONTEXT],
         )
         assert diag.model_dump(mode="json")["instruction_sources"] == ["ticket_context"]
 
