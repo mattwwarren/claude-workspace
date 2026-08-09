@@ -36,7 +36,8 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from cw.atomic import atomic_write_text
 from cw.codex_review._const import _CODEX_VERSION_RE, _is_spawn_error
-from cw.config import diagnostics_dir, state_dir
+from cw.codex_review._diagnostics import _persist_session_diagnostics_json
+from cw.config import state_dir
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -379,26 +380,16 @@ def _persist_capability_diagnostics(
         capability.reason,
         _fingerprint_payload(capability.fingerprint),
     )
-    try:
-        target = diagnostics_dir(session_id)
-        target.mkdir(parents=True, exist_ok=True)
-        (target / _CAPABILITY_DIAGNOSTICS_FILENAME).write_text(
-            json.dumps(
-                {
-                    "session_id": session_id,
-                    "capable": capability.capable,
-                    "reason": capability.reason,
-                    "fingerprint": _fingerprint_payload(capability.fingerprint),
-                    "recorded_at": datetime.now(UTC).isoformat(),
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-    except OSError:
-        _log.warning(
-            "codex capability diagnostics write failed for session %s", session_id
-        )
+    _persist_session_diagnostics_json(
+        session_id=session_id,
+        filename=_CAPABILITY_DIAGNOSTICS_FILENAME,
+        payload={
+            "capable": capability.capable,
+            "reason": capability.reason,
+            "fingerprint": _fingerprint_payload(capability.fingerprint),
+        },
+        log_label="codex capability",
+    )
 
 
 def _run_capability_probe(

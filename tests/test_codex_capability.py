@@ -524,7 +524,7 @@ class TestCapabilityDiagnostics:
         def _boom(_session_id: str) -> Path:
             raise OSError(message)
 
-        monkeypatch.setattr("cw.codex_review._capability.diagnostics_dir", _boom)
+        monkeypatch.setattr("cw.codex_review._diagnostics.diagnostics_dir", _boom)
         _persist_capability_diagnostics(
             "s-diag-fail",
             _CodexFilesystemCapability(

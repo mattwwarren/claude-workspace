@@ -140,18 +140,15 @@ def _build_fix_codex_argv(
     MCP servers and optional feature surfaces live, would not be the same
     reproducible, cw-owned invocation the reviewer path is — so the block comes
     from the one shared :func:`_lean_profile_argv` rather than being restated.
-    Project-doc discovery is the one intentional difference: fix prompts do
-    not inline complete repository instructions, so codex must still discover
-    applicable ``AGENTS.md`` files on this write-capable path.
+    Project-doc discovery is disabled here too: all instruction channels must
+    be explicitly selected and inlined by cw rather than discovered by codex.
     """
     argv = [
         "codex",
         "exec",
         "--sandbox",
         "workspace-write",
-        *_lean_profile_argv(
-            reasoning_effort=reasoning_effort, disable_project_docs=False
-        ),
+        *_lean_profile_argv(reasoning_effort=reasoning_effort),
     ]
     if model:
         argv += ["-m", model]

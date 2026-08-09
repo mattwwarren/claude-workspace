@@ -9,9 +9,8 @@ changes what a reviewer sees.
 
 This module owns the argv block that closes those channels, shared by both
 codex argv builders — ``_roles._build_generic_codex_argv`` (the reviewer path)
-and ``codex_fix_loop._build_fix_codex_argv`` (the fix path). Fix invocations
-retain project-doc discovery because, unlike reviewer prompts, their prompts do
-not inline the repository's complete applicable instructions.
+and ``codex_fix_loop._build_fix_codex_argv`` (the fix path). Both paths close
+project-doc discovery so codex cannot add instructions cw did not select.
 
 It also owns the per-session ``codex-review-profile.json`` diagnostics artifact
 (plus pass-discriminated benchmark variants), answering "what profile did THIS
@@ -22,22 +21,20 @@ instruction channels actually contributed content to the prompts.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
 
 from cw.codex_review import _capability, _context
-from cw.config import diagnostics_dir
+from cw.codex_review._diagnostics import _persist_session_diagnostics_json
 
 _log = logging.getLogger(__name__)
 
 # Bump when the argv block below changes shape, so a diagnostics artifact from
 # an older run is not mistaken for one produced by the current profile.
-_PROFILE_VERSION = 4
+_PROFILE_VERSION = 5
 
 _PROFILE_DIAGNOSTICS_FILENAME = "codex-review-profile.json"
 
@@ -231,10 +228,14 @@ _DISABLED_FEATURES: tuple[str, ...] = tuple(
     if feature.lean_profile_disposition is _LeanProfileDisposition.DISABLE
 )
 
+# Actual codex JSONL tool-call classes available to a reviewer under this
+# profile. ``command_execution`` is the observed audit-event class for the
+# read-only shell; browser, computer, MCP, plugin, and multi-agent tools are
+# closed by the profile. Feature flags are deliberately not reported here.
+_ENABLED_TOOL_CLASSES: tuple[str, ...] = ("command_execution",)
 
-def _lean_profile_argv(
-    *, reasoning_effort: str | None, disable_project_docs: bool = True
-) -> list[str]:
+
+def _lean_profile_argv(*, reasoning_effort: str | None) -> list[str]:
     """Return the lean-profile argv fragment shared by both codex builders.
 
     ``--ignore-user-config`` drops ``~/.codex/config.toml`` so the operator's
@@ -247,11 +248,9 @@ def _lean_profile_argv(
     `bogus_key_xyz` in -c/--config override``. Every key emitted here was
     live-checked under this flag and accepted (EXIT=0).
 
-    When ``disable_project_docs`` is true, ``-c project_doc_max_bytes=0`` stops
-    codex inlining the repo's own ``AGENTS.md``/project doc: cw already inlines
-    every instruction the reviewer should see. The fix path passes false
-    because its prompt does not contain the complete applicable project
-    instructions and must therefore preserve codex's native discovery.
+    ``-c project_doc_max_bytes=0`` stops codex inlining the repo's own
+    ``AGENTS.md``/project doc. It is unconditional on both reviewer and fix
+    paths so every instruction source is explicitly chosen by cw.
 
     ``-c mcp_servers={}`` is a *separate* override rather than one of the
     ``--disable`` flags because MCP servers are not a codex "feature": the
@@ -268,10 +267,10 @@ def _lean_profile_argv(
         "--ignore-user-config",
         "--strict-config",
         "-c",
+        "project_doc_max_bytes=0",
+        "-c",
         "mcp_servers={}",
     ]
-    if disable_project_docs:
-        argv += ["-c", "project_doc_max_bytes=0"]
     if reasoning_effort is not None:
         argv += ["-c", f"model_reasoning_effort={reasoning_effort}"]
     for feature in _DISABLED_FEATURES:
@@ -288,10 +287,10 @@ class _ProfileDiagnostics(BaseModel):
     reasoning_effort: str | None
     effective_model: str | None
     cli_version: str | None
-    # The versioned inventory used to calculate enabled_tool_classes. Both are
-    # None when the probed CLI has no inventory in this module.
+    # The matching captured feature inventory, if any. Feature flags are kept
+    # separate from the actual tool-call classes reported below.
     feature_inventory_cli_version: str | None
-    enabled_tool_classes: list[str] | None
+    enabled_tool_classes: list[str]
     # Which prompt-instruction channels actually contributed content, unioned
     # across every role in the pass. None means the caller did not compute
     # provenance; [] means it computed that no channel fired. Vocabulary: role_spec,
@@ -300,23 +299,11 @@ class _ProfileDiagnostics(BaseModel):
     instruction_sources: list[_context._InstructionSource] | None
 
 
-def _enabled_tool_classes(
-    cli_version: str | None,
-) -> tuple[str | None, list[str] | None]:
-    """Return the matching inventory version and defaults left enabled."""
-    metadata = (
-        None
-        if cli_version is None
-        else _CODEX_FEATURE_METADATA_BY_CLI_VERSION.get(cli_version)
-    )
-    if metadata is None:
-        return None, None
-    return cli_version, [
-        feature.name
-        for feature in metadata
-        if feature.default_enabled
-        and feature.lean_profile_disposition is not _LeanProfileDisposition.DISABLE
-    ]
+def _feature_inventory_version(cli_version: str | None) -> str | None:
+    """Return the matching captured feature-inventory version, if any."""
+    if cli_version in _CODEX_FEATURE_METADATA_BY_CLI_VERSION:
+        return cli_version
+    return None
 
 
 def _probe_runtime_cli_version() -> str | None:
@@ -341,14 +328,13 @@ def _persist_profile_diagnostics(
     profile is a property of the pass, not of any single reviewer. A non-None
     ``pass_discriminator`` preserves multiple passes in the same real session.
     """
-    inventory_version, enabled_tool_classes = _enabled_tool_classes(cli_version)
     diagnostics = _ProfileDiagnostics(
         profile_version=_PROFILE_VERSION,
         reasoning_effort=reasoning_effort,
         effective_model=model,
         cli_version=cli_version,
-        feature_inventory_cli_version=inventory_version,
-        enabled_tool_classes=enabled_tool_classes,
+        feature_inventory_cli_version=_feature_inventory_version(cli_version),
+        enabled_tool_classes=list(_ENABLED_TOOL_CLASSES),
         instruction_sources=(
             None if instruction_sources is None else list(instruction_sources)
         ),
@@ -360,17 +346,10 @@ def _persist_profile_diagnostics(
         diagnostics.reasoning_effort,
         diagnostics.instruction_sources,
     )
-    payload = diagnostics.model_dump(mode="json")
-    payload["session_id"] = session_id
-    payload["recorded_at"] = datetime.now(UTC).isoformat()
-    try:
-        target = diagnostics_dir(session_id)
-        target.mkdir(parents=True, exist_ok=True)
-        filename = _PROFILE_DIAGNOSTICS_FILENAME
-        if pass_discriminator is not None:
-            filename = f"codex-review-profile-{pass_discriminator}.json"
-        (target / filename).write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    except OSError:
-        _log.warning(
-            "codex review profile diagnostics write failed for session %s", session_id
-        )
+    _persist_session_diagnostics_json(
+        session_id=session_id,
+        filename=_PROFILE_DIAGNOSTICS_FILENAME,
+        payload=diagnostics.model_dump(mode="json"),
+        log_label="codex review profile",
+        discriminator=pass_discriminator,
+    )

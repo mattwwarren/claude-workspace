@@ -15,6 +15,7 @@ from cw.codex_review import (
     _CODEX_FEATURE_METADATA_0_147_0,
     _CODEX_FEATURES_0_147_0,
     _DISABLED_FEATURES,
+    _ENABLED_TOOL_CLASSES,
     _PROFILE_DIAGNOSTICS_FILENAME,
     _PROFILE_VERSION,
     _CodexFeatureRecord,
@@ -219,8 +220,8 @@ class TestDisabledFeatures:
 
 
 class TestLeanProfileArgv:
-    def test_profile_version_tracks_fix_project_doc_discovery(self) -> None:
-        assert _PROFILE_VERSION == 4
+    def test_profile_version_tracks_unconditional_project_doc_closure(self) -> None:
+        assert _PROFILE_VERSION == 5
 
     @pytest.mark.parametrize("effort", [None, "medium", "high"])
     def test_unconditional_flags_always_present(self, effort: str | None) -> None:
@@ -281,12 +282,8 @@ class TestPersistProfileDiagnostics:
         assert data["effective_model"] == "gpt-5"
         assert data["cli_version"] == "0.147.0"
         assert data["feature_inventory_cli_version"] == "0.147.0"
-        assert data["enabled_tool_classes"] == [
-            feature
-            for feature in _CODEX_FEATURES_0_147_0
-            if feature in _CODEX_DEFAULT_ENABLED_FEATURES_0_147_0
-            and feature not in _DISABLED_FEATURES
-        ]
+        assert data["enabled_tool_classes"] == ["command_execution"]
+        assert data["enabled_tool_classes"] == list(_ENABLED_TOOL_CLASSES)
         assert data["instruction_sources"] == ["role_spec", "approved_plan"]
 
     def test_empty_instruction_sources_round_trips(self) -> None:
@@ -304,7 +301,7 @@ class TestPersistProfileDiagnostics:
         assert data["reasoning_effort"] is None
         assert data["cli_version"] is None
         assert data["feature_inventory_cli_version"] is None
-        assert data["enabled_tool_classes"] is None
+        assert data["enabled_tool_classes"] == ["command_execution"]
 
     def test_never_raises_on_oserror(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
@@ -332,7 +329,7 @@ class TestPersistProfileDiagnostics:
             effective_model=None,
             cli_version=None,
             feature_inventory_cli_version=None,
-            enabled_tool_classes=None,
+            enabled_tool_classes=list(_ENABLED_TOOL_CLASSES),
             instruction_sources=[_InstructionSource.TICKET_CONTEXT],
         )
         assert diag.model_dump(mode="json")["instruction_sources"] == ["ticket_context"]
@@ -365,7 +362,7 @@ class TestProbeRuntimeCliVersion:
         )
         data = json.loads(path.read_text(encoding="utf-8"))
         assert data["feature_inventory_cli_version"] is None
-        assert data["enabled_tool_classes"] is None
+        assert data["enabled_tool_classes"] == ["command_execution"]
 
 
 # ---------------------------------------------------------------------------

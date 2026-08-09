@@ -1144,4 +1144,4 @@ class TestRunCodexRolesProfileThreading:
         data = json.loads(path.read_text(encoding="utf-8"))
         assert data["cli_version"] == "0.148.0"
         assert data["feature_inventory_cli_version"] is None
-        assert data["enabled_tool_classes"] is None
+        assert data["enabled_tool_classes"] == ["command_execution"]

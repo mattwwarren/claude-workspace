@@ -658,6 +658,91 @@ def _fired_instruction_channels(
     return [name for name in _INSTRUCTION_CHANNEL_ORDER if fired[name]]
 
 
+class _ReviewerPromptContext(NamedTuple):
+    """Inputs shared by every role prompt in one review pass."""
+
+    diff: CapturedDiff
+    changed_files: tuple[str, ...]
+    plan_text: str | None
+    ticket_text: str | None
+    project_rubrics: str | None
+    sensitive_hits: list[_SensitiveHit]
+    capable: bool
+    lint_grounding: str | None
+
+
+class _RenderedReviewerPrompt(NamedTuple):
+    """One materialized role prompt and its observed instruction sources."""
+
+    text: str
+    instruction_sources: list[_InstructionSource]
+
+
+def _render_optional_prompt_sections(
+    *,
+    role: str,
+    context: _ReviewerPromptContext,
+    repo_policy_section: str | None,
+    supplement: str | None,
+    channels: list[_InstructionSource],
+) -> list[str]:
+    """Render the conditional prompt sections selected by *channels*."""
+    sections: list[str] = []
+    if supplement and _InstructionSource.OUTPUT_FORMAT_SUPPLEMENT in channels:
+        sections.append(supplement)
+    if _InstructionSource.TICKET_CONTEXT in channels:
+        sections.append(f"## Ticket Context\n{context.ticket_text}")
+    if _InstructionSource.APPROVED_PLAN in channels:
+        sections.append(f"## Approved Plan\n{context.plan_text}")
+    if _InstructionSource.PROJECT_RUBRICS in channels:
+        sections.append(f"## Project Rubrics\n{context.project_rubrics}")
+    if _InstructionSource.REPO_POLICY in channels:
+        sections.append(f"## Repo Policy for {role}\n{repo_policy_section}")
+    if _InstructionSource.LINT_GROUNDING in channels:
+        sections.append(f"## Repo Lint Configuration\n{context.lint_grounding}")
+    if _InstructionSource.SENSITIVE_FILES in channels:
+        sections.append(_render_sensitive_block(context.sensitive_hits))
+    return sections
+
+
+def _assemble_reviewer_prompt(
+    role: str,
+    *,
+    agent_spec_text: str,
+    repo_policy_section: str | None,
+    context: _ReviewerPromptContext,
+) -> _RenderedReviewerPrompt:
+    """Render one role once and return the same pass's source provenance."""
+    supplement = _codex_output_format_supplement(role)
+    channels = _fired_instruction_channels(
+        agent_spec_text=agent_spec_text,
+        supplement=supplement,
+        ticket_text=context.ticket_text,
+        plan_text=context.plan_text,
+        project_rubrics=context.project_rubrics,
+        repo_policy_section=repo_policy_section,
+        lint_grounding=context.lint_grounding,
+        sensitive_hits=context.sensitive_hits,
+    )
+    parts = [
+        f"# Reviewer Role: {role}",
+        f"## Agent Specification\n{agent_spec_text}",
+        *_render_optional_prompt_sections(
+            role=role,
+            context=context,
+            repo_policy_section=repo_policy_section,
+            supplement=supplement,
+            channels=channels,
+        ),
+        "## Changed Files\n" + "\n".join(context.changed_files),
+        f"## Diff\n{context.diff.text}",
+        _select_output_instructions(context.capable),
+    ]
+    return _RenderedReviewerPrompt(
+        text="\n\n".join(parts), instruction_sources=channels
+    )
+
+
 def _build_reviewer_prompt(
     role: str,
     *,
@@ -672,63 +757,23 @@ def _build_reviewer_prompt(
     capable: bool = False,
     lint_grounding: str | None = None,
 ) -> str:
-    """Materialize one reviewer's full prompt, inlining every needed section.
-
-    *capable* selects which ``_OUTPUT_INSTRUCTIONS`` variant closes the prompt
-    (#1709). It defaults to ``False`` — the pre-#1709 text — purely so this
-    function's variant-agnostic unit tests stay byte-identical; the sole
-    production caller (:func:`_prepare_review_pass`) always passes the probed
-    value explicitly, so the default never fires in production.
-
-    *lint_grounding* (#1744) is the rendered repo-lint-configuration block —
-    the repo's ruff opt-outs and complexity thresholds — so reviewers stop
-    raising MUST_FIX findings against rules the repo has explicitly ignored.
-    Same safe-default convention as *capable*: defaults to ``None`` for the
-    variant-agnostic unit tests; :func:`_prepare_review_pass` always passes it
-    explicitly.
-    """
-    parts = [
-        f"# Reviewer Role: {role}",
-        f"## Agent Specification\n{agent_spec_text}",
-    ]
-    supplement = _codex_output_format_supplement(role)
-    # Every conditional section below is gated on the SAME predicate the #1711
-    # diagnostics report, so "what the prompt contained" and "what we said it
-    # contained" have one implementation. Each membership check is logically
-    # identical to the bare truthiness check it replaced — output is unchanged.
-    channels = _fired_instruction_channels(
-        agent_spec_text=agent_spec_text,
-        supplement=supplement,
-        ticket_text=ticket_text,
+    """Materialize one reviewer's full prompt, inlining every needed section."""
+    context = _ReviewerPromptContext(
+        diff=diff,
+        changed_files=tuple(changed_files),
         plan_text=plan_text,
+        ticket_text=ticket_text,
         project_rubrics=project_rubrics,
-        repo_policy_section=repo_policy_section,
-        lint_grounding=lint_grounding,
         sensitive_hits=sensitive_hits,
+        capable=capable,
+        lint_grounding=lint_grounding,
     )
-    # The `is not None` companions below are narrowing for the type checker
-    # only — the channel membership already implies a truthy value.
-    if (
-        _InstructionSource.OUTPUT_FORMAT_SUPPLEMENT in channels
-        and supplement is not None
-    ):
-        parts.append(supplement)
-    if _InstructionSource.TICKET_CONTEXT in channels:
-        parts.append(f"## Ticket Context\n{ticket_text}")
-    if _InstructionSource.APPROVED_PLAN in channels:
-        parts.append(f"## Approved Plan\n{plan_text}")
-    if _InstructionSource.PROJECT_RUBRICS in channels:
-        parts.append(f"## Project Rubrics\n{project_rubrics}")
-    if _InstructionSource.REPO_POLICY in channels:
-        parts.append(f"## Repo Policy for {role}\n{repo_policy_section}")
-    if _InstructionSource.LINT_GROUNDING in channels:
-        parts.append(f"## Repo Lint Configuration\n{lint_grounding}")
-    if _InstructionSource.SENSITIVE_FILES in channels:
-        parts.append(_render_sensitive_block(sensitive_hits))
-    parts.append("## Changed Files\n" + "\n".join(changed_files))
-    parts.append(f"## Diff\n{diff.text}")
-    parts.append(_select_output_instructions(capable))
-    return "\n\n".join(parts)
+    return _assemble_reviewer_prompt(
+        role,
+        agent_spec_text=agent_spec_text,
+        repo_policy_section=repo_policy_section,
+        context=context,
+    ).text
 
 
 def _parse_reviewer_document(
@@ -776,6 +821,54 @@ class _ReviewPassInputs(NamedTuple):
     instruction_sources: list[_InstructionSource]
 
 
+class _PassPromptInputs(NamedTuple):
+    """Selected roles and shared context needed to render their prompts."""
+
+    roles: list[str]
+    repo_policy: dict[str, str]
+    context: _ReviewerPromptContext
+
+
+def _load_pass_prompt_inputs(
+    task: TicketTask,
+    worktree: Path,
+    diff: CapturedDiff,
+    changed_files: list[str],
+    *,
+    capable: bool,
+) -> _PassPromptInputs:
+    """Load and resolve every prompt input shared across reviewer roles."""
+    scope_tier = resolve_tier(task.scope_hint)
+    categories = _categorize_changed_files(changed_files)
+    sensitive_hits = _load_sensitive_hits(worktree, changed_files, scope_tier)
+    repo_policy = _load_review_policy(worktree, scope_tier)
+    project_rubrics = _load_optional_text(worktree / ".claude" / "review-extras.md")
+    plan_text, ticket_text = _load_ticket_context(worktree)
+    lint_grounding = _render_lint_grounding_block(
+        ruff_config=_load_ruff_lint_config(worktree),
+        quality_gates_text=_load_claude_md_quality_gates(worktree),
+    )
+    roles = _select_reviewer_roles(
+        scope_tier,
+        categories=categories,
+        mutates_persisted_state=(
+            bool(sensitive_hits) or categories.python or categories.frontend
+        ),
+        has_ticket_context=ticket_text is not None,
+    )
+    context = _ReviewerPromptContext(
+        diff=diff,
+        changed_files=tuple(changed_files),
+        plan_text=plan_text,
+        ticket_text=ticket_text,
+        project_rubrics=project_rubrics,
+        sensitive_hits=sensitive_hits,
+        capable=capable,
+        lint_grounding=lint_grounding,
+    )
+    return _PassPromptInputs(roles=roles, repo_policy=repo_policy, context=context)
+
+
 def _prepare_review_pass(
     task: TicketTask,
     worktree: Path,
@@ -784,85 +877,31 @@ def _prepare_review_pass(
     runner: CodexRunner,
     session_id: str,
 ) -> _ReviewPassInputs:
-    """Assemble one review pass's inputs: capture diff, select roles, build prompts.
-
-    Extracted from ``run_review``'s former input-assembly body (everything
-    before ``run_codex_roles`` was called). Before #1709 it had no side effects
-    beyond the read-only git/\u200bfilesystem reads it already performed. Shared by
-    ``run_review`` and ``cw.codex_fix_loop``'s per-cycle re-review (#1392).
-
-    Lives here (not ``core.py``) so it stays co-located with
-    :func:`_load_optional_text` alongside its other bare-name callers — a test
-    patches ``_load_optional_text`` via module-object ``setattr`` on this
-    module, which only intercepts same-module bare-name calls.
-
-    ``runner``/``session_id`` (#1709) drive the filesystem-capability probe,
-    which is what changed that: on a cold fingerprint cache it spends one real
-    ``codex exec`` round-trip and writes the verdict to disk. Every subsequent
-    call — notably the fix loop's per-cycle re-review — is a cache hit that
-    runs nothing, which is why the probe lives here rather than at each call
-    site.
-    """
+    """Capture, select, and assemble one review pass's inputs."""
     capability = _probe_filesystem_capability(runner=runner, session_id=session_id)
     diff, reviewed_sha, changed_files = _capture_diff(worktree, default_branch)
-    scope_tier = resolve_tier(task.scope_hint)
-    categories = _categorize_changed_files(changed_files)
-    sensitive_hits = _load_sensitive_hits(worktree, changed_files, scope_tier)
-    repo_policy = _load_review_policy(worktree, scope_tier)
-    project_rubrics = _load_optional_text(worktree / ".claude" / "review-extras.md")
-    plan_text, ticket_text = _load_ticket_context(worktree)
-    ruff_lint_config = _load_ruff_lint_config(worktree)
-    quality_gates_text = _load_claude_md_quality_gates(worktree)
-    lint_grounding = _render_lint_grounding_block(
-        ruff_config=ruff_lint_config,
-        quality_gates_text=quality_gates_text,
+    prompt_inputs = _load_pass_prompt_inputs(
+        task, worktree, diff, changed_files, capable=capability.capable
     )
-    mutates_persisted_state = (
-        bool(sensitive_hits) or categories.python or categories.frontend
-    )
-    roles = _select_reviewer_roles(
-        scope_tier,
-        categories=categories,
-        mutates_persisted_state=mutates_persisted_state,
-        has_ticket_context=ticket_text is not None,
-    )
-    agent_specs = {role: _load_agent_spec(worktree, role) for role in roles}
-    prompts_by_role = {
-        role: _build_reviewer_prompt(
+    rendered_by_role = {
+        role: _assemble_reviewer_prompt(
             role,
-            agent_spec_text=agent_specs[role],
-            diff=diff,
-            changed_files=changed_files,
-            plan_text=plan_text,
-            ticket_text=ticket_text,
-            project_rubrics=project_rubrics,
-            repo_policy_section=repo_policy.get(role),
-            sensitive_hits=sensitive_hits,
-            capable=capability.capable,
-            lint_grounding=lint_grounding,
+            agent_spec_text=_load_agent_spec(worktree, role),
+            repo_policy_section=prompt_inputs.repo_policy.get(role),
+            context=prompt_inputs.context,
         )
-        for role in roles
+        for role in prompt_inputs.roles
     }
-    # Per-role, then unioned: repo_policy and the output-format supplement are
-    # role-specific, so a channel that fired for one reviewer and not another
-    # still belongs in the pass's answer to "what instructions were in play".
-    fired_by_role = {
-        role: _fired_instruction_channels(
-            agent_spec_text=agent_specs[role],
-            supplement=_codex_output_format_supplement(role),
-            ticket_text=ticket_text,
-            plan_text=plan_text,
-            project_rubrics=project_rubrics,
-            repo_policy_section=repo_policy.get(role),
-            lint_grounding=lint_grounding,
-            sensitive_hits=sensitive_hits,
-        )
-        for role in roles
+    union = {
+        source
+        for rendered in rendered_by_role.values()
+        for source in rendered.instruction_sources
     }
-    union = {name for fired in fired_by_role.values() for name in fired}
     return _ReviewPassInputs(
-        roles=roles,
-        prompts_by_role=prompts_by_role,
+        roles=prompt_inputs.roles,
+        prompts_by_role={
+            role: rendered.text for role, rendered in rendered_by_role.items()
+        },
         diff=diff,
         reviewed_sha=reviewed_sha,
         capability=capability,

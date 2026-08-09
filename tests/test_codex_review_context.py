@@ -8,6 +8,7 @@ import logging
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
+from unittest.mock import Mock
 
 import pytest
 
@@ -1076,6 +1077,26 @@ class TestFiredInstructionChannels:
 
 
 class TestPrepareReviewPassInstructionSources:
+    def test_assembles_prompt_and_sources_once_per_role(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = make_git_repo("wt-instruction-sources-once")
+        _git(repo, "checkout", "-b", "feature")
+        (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
+        _git(repo, "add", "mod.py")
+        _git(repo, "commit", "-m", "add mod.py")
+        spy = Mock(wraps=_fired_instruction_channels)
+        monkeypatch.setattr("cw.codex_review._context._fired_instruction_channels", spy)
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-instruction-sources-once",
+        )
+
+        assert spy.call_count == len(prepared.roles)
+
     def test_union_across_roles_in_canonical_order(
         self, make_git_repo: Callable[[str], Path]
     ) -> None:
