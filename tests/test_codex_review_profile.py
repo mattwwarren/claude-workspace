@@ -9,14 +9,15 @@ import pytest
 
 from cw.codex_review import (
     _CODEX_DEFAULT_ENABLED_FEATURES_0_147_0,
+    _CODEX_FEATURE_METADATA_0_147_0,
     _CODEX_FEATURES_0_147_0,
     _DISABLED_FEATURES,
-    _LEAN_PROFILE_FEATURE_DENYLIST,
     _PROFILE_DIAGNOSTICS_FILENAME,
     _PROFILE_VERSION,
     _SUPPORTED_CODEX_CLI_VERSION,
     _InstructionSource,
     _lean_profile_argv,
+    _LeanProfileDisposition,
     _persist_profile_diagnostics,
     _ProfileDiagnostics,
     _validate_runtime_profile,
@@ -156,8 +157,27 @@ class TestDisabledFeatures:
         )
         assert captured_names == _CODEX_FEATURES_0_147_0
 
-    def test_disabled_features_are_explicit_denylist(self) -> None:
-        assert _DISABLED_FEATURES == _LEAN_PROFILE_FEATURE_DENYLIST
+    def test_feature_views_are_derived_from_versioned_metadata(self) -> None:
+        assert (
+            tuple(feature.name for feature in _CODEX_FEATURE_METADATA_0_147_0)
+            == _CODEX_FEATURES_0_147_0
+        )
+        assert (
+            frozenset(
+                feature.name
+                for feature in _CODEX_FEATURE_METADATA_0_147_0
+                if feature.default_enabled
+            )
+            == _CODEX_DEFAULT_ENABLED_FEATURES_0_147_0
+        )
+        assert (
+            tuple(
+                feature.name
+                for feature in _CODEX_FEATURE_METADATA_0_147_0
+                if feature.lean_profile_disposition is _LeanProfileDisposition.DISABLE
+            )
+            == _DISABLED_FEATURES
+        )
         assert set(_DISABLED_FEATURES) < set(_CODEX_FEATURES_0_147_0)
 
     def test_captured_defaults_match_full_feature_fixture(self) -> None:
@@ -198,7 +218,7 @@ class TestLeanProfileArgv:
     @pytest.mark.parametrize("effort", [None, "medium", "high"])
     def test_all_eleven_features_disabled(self, effort: str | None) -> None:
         argv = _lean_profile_argv(reasoning_effort=effort)
-        assert _disabled(argv) == list(_LEAN_PROFILE_FEATURE_DENYLIST)
+        assert _disabled(argv) == list(_DISABLED_FEATURES)
 
     @pytest.mark.parametrize("effort", ["low", "medium", "high"])
     def test_reasoning_effort_override_emitted(self, effort: str) -> None:
