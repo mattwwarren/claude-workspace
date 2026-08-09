@@ -97,6 +97,9 @@ class TestPrepareReviewPass:
         assert verdict.blocking is False
         assert verdict.review.should_fix == 1
         assert len(runner.calls) == len(prepared.roles)
+        # #1773: the prepared pass's per-role agent-spec status reaches the
+        # verdict through run_review's synthesis hop.
+        assert {s.role for s in verdict.agent_spec_status} == set(prepared.roles)
 
 
 # ---------------------------------------------------------------------------

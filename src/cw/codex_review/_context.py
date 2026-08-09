@@ -2,9 +2,20 @@
 
 Every reviewer input — the authoritative agent spec, plan/ticket context,
 project rubrics, per-reviewer policy, and sensitive-file hits — is read here by
-``cw`` and inlined into each role's materialized prompt. Inlining is
-unconditional: it is what makes a review pass reproducible and independent of
-where ``.claude/*`` happens to live.
+``cw`` and inlined into each role's materialized prompt. For most inputs the
+source is the worktree and nothing else: inlining from the repo is what makes a
+review pass reproducible and independent of where ``.claude/*`` happens to live.
+
+The agent specification is the one documented exception (#1773). It is still
+repo-local by default and read from the worktree first, but a repo whose
+``.claude/agents/<role>.md`` is missing or blank falls back to the operator's
+own ``~/.claude/agents/<role>.md`` rather than silently running the reviewer
+with an empty ``## Agent Specification`` section. That fallback is gateable
+per-repo via ``[tool.cw.codex_review].agent_spec_global_fallback`` in
+``pyproject.toml`` (default enabled), and every outcome is diagnosed rather
+than swallowed: :func:`_resolve_agent_spec` logs a warning when a spec is
+absent everywhere, and the per-role :class:`AgentSpecStatus` it returns is
+carried onto the verdict and rendered into the posted review comment.
 
 What is **not** unconditional is whether codex can read anything *else*. That
 varies by runtime — a snap-confined install cannot reach ``bwrap`` and fails
@@ -24,6 +35,7 @@ import fnmatch
 import json
 import logging
 import tomllib
+from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
 import yaml
@@ -32,16 +44,15 @@ from cw.codex_review._capability import _probe_filesystem_capability
 from cw.codex_review._diff import _capture_diff
 from cw.local_runner import resolve_tier
 from cw.models import CONTEXT_JSON_RELATIVE_PATH
-from cw.review_findings import ReviewerFindingsDocument
+from cw.review_findings import AgentSpecStatus, ReviewerFindingsDocument
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
-    from pathlib import Path
 
     from cw.codex_review._capability import _CodexFilesystemCapability
     from cw.codex_runner import CodexRunner
     from cw.models import TicketTask
-    from cw.review_findings import CapturedDiff
+    from cw.review_findings import AgentSpecSource, CapturedDiff
 
 _log = logging.getLogger(__name__)
 
@@ -58,6 +69,13 @@ _REVIEWER_ROLE_AGENT_FILES: dict[str, str] = {
     "API Contract Validator": "api-contract-validator.md",
     "Deployment Reviewer": "deployment-reviewer.md",
 }
+
+# The operator's own agent-spec directory, used as the fallback source when a
+# worktree carries no usable ``.claude/agents/<role>.md`` (#1773). Bound at
+# import time so tests can redirect it away from the real home (conftest's
+# autouse ``_isolate_global_agents_dir``) — the fallback must never make a
+# review pass depend on what happens to be installed on the host.
+_GLOBAL_AGENTS_DIR: Path = Path.home() / ".claude" / "agents"
 
 _SENSITIVE_HEADER = (
     "SENSITIVE FILES TOUCHED — APPLY ELEVATED SCRUTINY\n\n"
@@ -513,6 +531,27 @@ def _load_ruff_lint_config(worktree: Path) -> _RuffLintConfig | None:
     return _RuffLintConfig(ignore=tuple(ignore), pylint_overrides=dict(pylint))
 
 
+def _load_agent_spec_fallback_gate(worktree: Path) -> bool:
+    """Read ``[tool.cw.codex_review].agent_spec_global_fallback`` (#1773).
+
+    Same ``tomllib.load`` + fail-safe idiom as :func:`_load_ruff_lint_config`,
+    and the same reason for it: a repo that cannot be parsed must not silently
+    change reviewer behavior. Defaults to ``True`` — a missing file, a missing
+    table, a missing key, a non-boolean value, or malformed TOML all leave the
+    fallback ENABLED. Only an explicit ``false`` turns it off, which is the
+    opt-out for a repo that wants its reviewers grounded exclusively in its own
+    tracked specs.
+    """
+    try:
+        with (worktree / "pyproject.toml").open("rb") as fh:
+            data = tomllib.load(fh)
+    except (FileNotFoundError, KeyError, tomllib.TOMLDecodeError, OSError):
+        return True
+    section = data.get("tool", {}).get("cw", {}).get("codex_review", {})
+    value = section.get("agent_spec_global_fallback", True)
+    return value if isinstance(value, bool) else True
+
+
 def _extract_markdown_section(text: str, heading: str) -> str | None:
     """Extract the body of *text*'s ``## {heading}`` H2 section, or ``None``.
 
@@ -537,11 +576,72 @@ def _load_claude_md_quality_gates(worktree: Path) -> str | None:
     return _extract_markdown_section(text=text, heading="Quality Gates")
 
 
-def _load_agent_spec(worktree: Path, role: str) -> str:
-    """Return the authoritative agent spec for *role*, inlined verbatim."""
+class _AgentSpecResolution(NamedTuple):
+    """One role's resolved agent-spec text plus the status describing it."""
+
+    text: str
+    status: AgentSpecStatus
+
+
+def _resolve_agent_spec(
+    worktree: Path, role: str, *, global_fallback_enabled: bool
+) -> _AgentSpecResolution:
+    """Resolve *role*'s agent spec repo-local-first, then global (#1773).
+
+    Order: the worktree's ``.claude/agents/<role>.md`` wins whenever it exists
+    and is non-blank. A missing OR blank repo copy falls through to
+    ``_GLOBAL_AGENTS_DIR/<role>.md`` when *global_fallback_enabled*; with the
+    gate off, the repo copy's state stands as the answer.
+
+    Never raises and never returns ``None``: an unresolvable spec yields ``""``
+    (the pre-#1773 fail-open behavior — a review pass still runs) but is now
+    reported rather than silent. ``_log.warning`` fires only when the spec is
+    genuinely absent everywhere consulted (``source == "none"``); a file that
+    was found but blank is carried on the returned status for the verdict
+    comment instead, because "present but empty" and "not there at all" are
+    different facts about the repo.
+    """
     filename = _REVIEWER_ROLE_AGENT_FILES[role]
-    text = _load_optional_text(worktree / ".claude" / "agents" / filename)
-    return text if text is not None else ""
+    repo_path = worktree / ".claude" / "agents" / filename
+    repo_text = _load_optional_text(repo_path)
+    empty_repo_file = repo_text is not None and not repo_text.strip()
+
+    def _resolution(text: str, source: AgentSpecSource) -> _AgentSpecResolution:
+        usable = text if text.strip() else ""
+        return _AgentSpecResolution(
+            text=usable,
+            status=AgentSpecStatus(
+                role=role,
+                source=source,
+                empty=not usable,
+                empty_repo_file=empty_repo_file,
+            ),
+        )
+
+    if repo_text is not None and repo_text.strip():
+        return _resolution(repo_text, "repo")
+    if not global_fallback_enabled:
+        if repo_text is None:
+            _warn_agent_spec_absent(role, [repo_path])
+            return _resolution("", "none")
+        return _resolution("", "repo")
+    global_path = _GLOBAL_AGENTS_DIR / filename
+    global_text = _load_optional_text(global_path)
+    if global_text is None:
+        _warn_agent_spec_absent(role, [repo_path, global_path])
+        return _resolution("", "none")
+    return _resolution(global_text, "global")
+
+
+def _warn_agent_spec_absent(role: str, paths: list[Path]) -> None:
+    """Log the genuinely-absent-spec warning naming *role* and every path tried."""
+    _log.warning(
+        "agent_spec_absent: reviewer role %r has no agent specification — "
+        "tried %s; this role's prompt will run with an empty "
+        "`## Agent Specification` section",
+        role,
+        ", ".join(str(p) for p in paths),
+    )
 
 
 def _render_sensitive_block(hits: list[_SensitiveHit]) -> str:
@@ -679,6 +779,11 @@ class _ReviewPassInputs(NamedTuple):
     ``capability`` (#1709) is the probed filesystem-capability verdict the
     prompts were built against — returned so the caller can record it on the
     verdict rather than re-deriving (or, worse, re-probing) it.
+
+    ``agent_spec_status`` (#1773) is the per-role agent-spec resolution record,
+    in ``roles`` order — same shape and same reason as ``capability``: the
+    prompts were built from it, so the caller records it on the verdict rather
+    than re-reading the filesystem to reconstruct where each spec came from.
     """
 
     roles: list[str]
@@ -686,6 +791,7 @@ class _ReviewPassInputs(NamedTuple):
     diff: CapturedDiff
     reviewed_sha: str
     capability: _CodexFilesystemCapability
+    agent_spec_status: list[AgentSpecStatus]
 
 
 def _prepare_review_pass(
@@ -738,10 +844,17 @@ def _prepare_review_pass(
         mutates_persisted_state=mutates_persisted_state,
         has_ticket_context=ticket_text is not None,
     )
+    fallback_enabled = _load_agent_spec_fallback_gate(worktree)
+    resolutions = {
+        role: _resolve_agent_spec(
+            worktree, role, global_fallback_enabled=fallback_enabled
+        )
+        for role in roles
+    }
     prompts_by_role = {
         role: _build_reviewer_prompt(
             role,
-            agent_spec_text=_load_agent_spec(worktree, role),
+            agent_spec_text=resolutions[role].text,
             diff=diff,
             changed_files=changed_files,
             plan_text=plan_text,
@@ -760,4 +873,5 @@ def _prepare_review_pass(
         diff=diff,
         reviewed_sha=reviewed_sha,
         capability=capability,
+        agent_spec_status=[resolutions[role].status for role in roles],
     )

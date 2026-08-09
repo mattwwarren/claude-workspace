@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from cw.codex_review._capability import _CodexFilesystemCapability
     from cw.models import TicketTask
     from cw.review_findings import (
+        AgentSpecStatus,
         CapturedDiff,
         ReviewerFindingsDocument,
         ReviewerRunFailure,
@@ -113,6 +114,22 @@ def _with_capability(
     )
 
 
+def _with_agent_spec_status(
+    verdict: ReviewVerdict, agent_spec_status: list[AgentSpecStatus] | None
+) -> ReviewVerdict:
+    """Return *verdict* with the per-role agent-spec resolution stamped on it.
+
+    Same shape and same reason as :func:`_with_capability` (#1773):
+    ``consolidate_verdict`` is executor-neutral and knows nothing about where
+    ``.claude/agents/`` lives, so the record is stamped on afterwards. ``None``
+    in, unchanged verdict out — a caller that resolved no specs must not be
+    reported as having found none.
+    """
+    if agent_spec_status is None:
+        return verdict
+    return verdict.model_copy(update={"agent_spec_status": agent_spec_status})
+
+
 def synthesize_codex_review_result(
     *,
     task: TicketTask,
@@ -126,6 +143,7 @@ def synthesize_codex_review_result(
     fix_loop_enabled: bool,
     metrics_by_role: dict[str, ReviewerRunMetrics] | None = None,
     capability: _CodexFilesystemCapability | None = None,
+    agent_spec_status: list[AgentSpecStatus] | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Map consolidated review documents to a typed AutoDevResult.
 
@@ -166,6 +184,13 @@ def synthesize_codex_review_result(
     no such concept (and the direct-synthesis tests) record nothing rather than
     a mode nobody probed.
 
+    ``agent_spec_status`` (#1773) is the per-role agent-spec resolution record
+    the reviewer prompts were built from. Same shape and same non-influence as
+    ``capability``: recorded onto the ``ReviewVerdict`` (and from there onto
+    the rendered comment), never read by the disposition table or
+    :func:`_derive_health` — a reviewer that ran unspecified still produced a
+    document, and its degradation is reported, not adjudicated here.
+
     ``fix_loop_enabled`` (#1705) is the caller's own already-known fix-loop
     state, threaded only as far as :func:`render_verdict_comment` on the
     blocking branch — it discriminates a fix-loop-disabled single pass from a
@@ -184,16 +209,19 @@ def synthesize_codex_review_result(
             stage_reached=STAGE3_REVIEW,
         )
         return result, None
-    verdict = _with_capability(
-        consolidate_verdict(
-            documents,
-            diff,
-            reviewed_sha,
-            worktree=worktree,
-            failed_reviewers=failures,
-            metrics_by_role=metrics_by_role,
+    verdict = _with_agent_spec_status(
+        _with_capability(
+            consolidate_verdict(
+                documents,
+                diff,
+                reviewed_sha,
+                worktree=worktree,
+                failed_reviewers=failures,
+                metrics_by_role=metrics_by_role,
+            ),
+            capability,
         ),
-        capability,
+        agent_spec_status,
     )
     if verdict.blocking:
         blocked = make_blocked(
@@ -394,6 +422,66 @@ def _render_capability_note(verdict: ReviewVerdict) -> list[str]:
     ]
 
 
+def _agent_spec_label(status: AgentSpecStatus) -> str:
+    """Name why *status*'s role ran without a loaded specification (#1773).
+
+    ``empty_repo_file`` is checked first and independently of ``source``: once
+    the repo-tracked file was found blank AND nothing usable replaced it, that
+    is the actionable fact for whoever reads the comment, whichever source was
+    consulted last.
+    """
+    if status.empty_repo_file:
+        return "present but empty, no usable fallback"
+    if status.source == "global":
+        return "global spec found but empty"
+    return "absent"
+
+
+def _render_agent_spec_note(verdict: ReviewVerdict) -> list[str]:
+    """Render the per-role agent-spec resolution summary (#1773).
+
+    An empty ``agent_spec_status`` renders nothing: a verdict from a path that
+    never resolved specs (the LocalExecutor path, a directly-synthesized test
+    verdict) has no claim to make either way — same convention as
+    ``_render_capability_note``'s unprobed case.
+
+    A role counts as unspecified iff its final ``empty`` is True, whatever
+    ``source`` says, which yields exactly one of three headlines. The
+    recovered-empty-repo-file addendum is then appended independently of which
+    headline won, so a truncated repo-tracked file still gets reported in a
+    pass where some *other* role was also unspecified.
+    """
+    statuses = verdict.agent_spec_status
+    if not statuses:
+        return []
+    unspecified = [s for s in statuses if s.empty]
+    total = len(statuses)
+    if not unspecified:
+        line = f"_Agent specs loaded for all {total} reviewer role(s)._"
+    elif len(unspecified) == total:
+        line = (
+            "**ALL AGENT SPECS UNSPECIFIED** — no reviewer role in this pass "
+            "had a loaded agent specification (repo or global); every "
+            "prompt's `## Agent Specification` section was empty."
+        )
+    else:
+        named = ", ".join(f"{s.role} ({_agent_spec_label(s)})" for s in unspecified)
+        line = (
+            f"**AGENT SPEC(S) UNSPECIFIED** — {len(unspecified)} of {total} "
+            f"role(s) ran without a loaded specification: {named}."
+        )
+    # A still-unspecified role already carries "(present but empty, no usable
+    # fallback)" above, so only genuinely recovered ones get the addendum.
+    for s in statuses:
+        if s.empty_repo_file and not s.empty:
+            line += (
+                f" **NOTE:** {s.role}'s repo-tracked spec was present but "
+                "empty — recovered via the global fallback; the repo-tracked "
+                "file may be truncated or need attention."
+            )
+    return [line, ""]
+
+
 def _render_rejected_must_fix(verdict: ReviewVerdict) -> list[str]:
     """Render the MUST_FIX findings validation dropped before adjudication.
 
@@ -464,6 +552,7 @@ def render_verdict_comment(verdict: ReviewVerdict, *, fix_loop_enabled: bool) ->
     lines.append("")
     lines.extend(_render_failed_roles_note(verdict))
     lines.extend(_render_capability_note(verdict))
+    lines.extend(_render_agent_spec_note(verdict))
     lines.extend(_render_rejected_must_fix(verdict))
     lines.extend(_render_findings(verdict, "MUST_FIX", "MUST_FIX"))
     lines.extend(_render_findings(verdict, "SHOULD_FIX", "SHOULD_FIX"))

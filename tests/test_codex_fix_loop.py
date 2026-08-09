@@ -22,6 +22,7 @@ from cw.codex_fix_loop import (
 )
 from cw.codex_review import (
     _MIN_ROLE_TIMEOUT_SECONDS,
+    _REVIEWER_ROLE_AGENT_FILES,
     CODEX_BUDGET_EXHAUSTED,
     CODEX_FIX_SCOPE_VIOLATION,
     CODEX_MUST_FIX_FINDINGS,
@@ -1605,7 +1606,7 @@ class TestCapabilityProbeIsCachedAcrossCycles:
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-probe-once")
         runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC], [_editor()])
-        out, _verdict = _run_loop(runner, worktree, session_id="s-probe-once")
+        out, verdict = _run_loop(runner, worktree, session_id="s-probe-once")
 
         assert out.status == "stage_complete"
         # Cycle 0's review pass plus _rereview's per-cycle pass both call
@@ -1613,3 +1614,11 @@ class TestCapabilityProbeIsCachedAcrossCycles:
         assert runner.fix_calls == 1
         probe_calls = [c for c in runner.calls if c["argv"] == list(_PROBE_ARGV)]
         assert len(probe_calls) == 1
+        # #1773: _rereview's own synthesis hop threads the prepared pass's
+        # agent-spec status through to the verdict it returns, exactly as
+        # run_review's does.
+        assert verdict is not None
+        assert verdict.agent_spec_status
+        assert {s.role for s in verdict.agent_spec_status} <= set(
+            _REVIEWER_ROLE_AGENT_FILES
+        )

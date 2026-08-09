@@ -544,6 +544,25 @@ def _mock_codex_capability_probe(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_global_agents_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Point the agent-spec global fallback at an empty directory (#1773).
+
+    Sibling of ``_mock_codex_capability_probe``: ``_resolve_agent_spec`` falls
+    back to ``~/.claude/agents/<role>.md`` when the worktree has no usable
+    repo-local copy, and a developer machine's real ``~/.claude/agents/`` is
+    populated. Without this, every test that reaches ``_prepare_review_pass``
+    on a tmp worktree with no ``.claude/agents/`` directory would silently read
+    the *host's* specs and become host-dependent — green here, different in CI.
+
+    Tests that need a populated global directory re-patch the same name
+    themselves; pytest's patch stacking lets the test-level patch win.
+    """
+    global_agents = tmp_path / "isolated-global-agents"
+    global_agents.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("cw.codex_review._context._GLOBAL_AGENTS_DIR", global_agents)
+
+
+@pytest.fixture(autouse=True)
 def _hide_optional_binaries(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> None:

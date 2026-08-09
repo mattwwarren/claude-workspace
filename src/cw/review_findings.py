@@ -20,7 +20,8 @@ Public surface:
   :class:`ReviewerFindingsDocument`, :class:`RejectedFinding`,
   :class:`AcceptedFinding`, :class:`ReviewerRunRecord`,
   :class:`ReviewerRunMetrics`, :class:`ReviewerRunFailure`,
-  :class:`StrippedEscalation`, :class:`ReviewVerdict`, :class:`CapturedDiff`.
+  :class:`AgentSpecStatus`, :class:`StrippedEscalation`,
+  :class:`ReviewVerdict`, :class:`CapturedDiff`.
 - Functions: :func:`validate_reviewer_document`, :func:`dedupe_findings`,
   :func:`derive_review_counts`, :func:`consolidate_verdict`,
   :func:`write_review_verdict`.
@@ -49,6 +50,10 @@ Confidence = Literal["HIGH", "MEDIUM", "LOW"]
 # The filesystem-capability mode reviewers actually ran under (#1709); see
 # ReviewVerdict.capability_mode.
 CapabilityMode = Literal["capable", "degraded"]
+# Where a reviewer role's agent specification was actually resolved from
+# (#1773): the repo-local ``.claude/agents/`` copy, the operator's global
+# ``~/.claude/agents/`` fallback, or nowhere at all. See AgentSpecStatus.
+AgentSpecSource = Literal["repo", "global", "none"]
 # The six reasons a finding can be rejected outright (used by
 # :attr:`RejectedFinding.reason` and :func:`_classify_finding`'s return type).
 # Split from the escalation-strip reason (R6): a stripped escalation is a
@@ -290,6 +295,23 @@ class ReviewerRunRecord(BaseModel):
     unexpected_tool_attempts: list[str] = Field(default_factory=list)
 
 
+class AgentSpecStatus(BaseModel):
+    """How one reviewer role's agent specification resolved (#1773).
+
+    ``empty`` is the single "this role ran unspecified" signal: it is True
+    whenever the finally-selected text was blank, whatever ``source`` says.
+    ``empty_repo_file`` is an independent fact about the repo-tracked copy —
+    True when ``.claude/agents/<role>.md`` existed but was blank, including
+    the case where the global fallback then recovered a usable spec
+    (``source="global", empty=False, empty_repo_file=True``).
+    """
+
+    role: str
+    source: AgentSpecSource
+    empty: bool
+    empty_repo_file: bool = False
+
+
 class ReviewerRunFailure(BaseModel):
     """A reviewer that failed to produce a document at all.
 
@@ -349,6 +371,12 @@ class ReviewVerdict(BaseModel):
     rejected_must_fix: list[RejectedFinding] = Field(default_factory=list)
     capability_mode: CapabilityMode | None = None
     capability_reason: str | None = None
+    # #1773: one record per selected reviewer role describing where its agent
+    # specification resolved from. Default-empty (not Optional) like
+    # ``agents_run``: "no records" is the honest shape for a verdict built by a
+    # path that never resolved specs, and the renderer treats it as "say
+    # nothing" rather than "everything was fine".
+    agent_spec_status: list[AgentSpecStatus] = Field(default_factory=list)
 
 
 class CapturedDiff(BaseModel):

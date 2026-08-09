@@ -728,6 +728,7 @@ def _rereview(
         fix_loop_enabled=True,
         metrics_by_role=metrics_by_role,
         capability=prepared.capability,
+        agent_spec_status=prepared.agent_spec_status,
     )
 
 
