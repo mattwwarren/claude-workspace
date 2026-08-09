@@ -1415,6 +1415,9 @@ cw event tail --client my-client
 # needs_attention, stage_timed_out_retried) for the same session
 cw event tail --dedup-terminal
 
+# Collapse consecutive same-type repeats into `TYPE xN over Mm` summary lines
+cw event tail --collapse-repeats
+
 # Return only the most recent N matching events (filter-then-limit)
 cw event tail --limit 20
 cw event tail -n 20
@@ -1433,6 +1436,16 @@ fields — e.g. `dispatch.tick`'s `lanes` and `lane_occupants` — are omitted,
 while scalar fields and scalar-lists are kept regardless of length (the
 filter is shape-based, not size-based). `--json` is unaffected and always
 emits the full event, nested fields included.
+
+`--collapse-repeats` merges consecutive events of the same type sharing an
+identical compact payload into a single `TYPE xN over Mm` summary line; a
+run interrupted by an unrelated event re-opens rather than merging across
+the gap. It is not supported with `--follow` (see below) — collapsing
+requires buffering a run until it closes, which would delay events past
+the immediate-flush contract. It composes with `--dedup-terminal` and
+`--limit`, applied last in the pipeline (filter → limit → dedup-terminal →
+collapse-repeats). `--json` is unaffected: passing `--collapse-repeats`
+with `--json` is a no-op, one JSON line per original event.
 
 ### Follow mode
 
