@@ -360,6 +360,114 @@ could hard-stop the fix loop before it reaches the worst case above,
 independent of `_MAX_FIX_CYCLES`. No such field exists today — this is
 flagged as a possible follow-up, not a commitment.
 
+### Codex Reviewer Profile (Lean Profile, #1711)
+
+A `codex exec` invocation launched by `cw` reads more than the prompt `cw`
+gives it. By default it also picks up the operator's `~/.codex/config.toml`,
+the repo's own `AGENTS.md`/project doc, whatever MCP servers the operator has
+configured, and an evolving set of optional feature surfaces. None of those
+are inputs `cw` chose, so two operators running the same review can get
+different reviewers. The lean profile closes those channels — unconditionally,
+on both the reviewer path (`_build_generic_codex_argv`) and the fix-cycle path
+(`_build_fix_codex_argv`), from one shared builder so the two cannot drift.
+
+**`reasoning_effort` (`StageExecutorConfig` field, default `"high"`)**
+
+Pins `-c model_reasoning_effort=<value>` on every codex invocation for the
+stage. It resolves through `resolve_executor_config()`'s **three-level** lane >
+client > default precedence — the same path `backend` and `endpoint` take (see
+that function's docstring). This is *not* the 4-level precedence documented
+under "4-Level Precedence" above: that chain is specific to the `model` field
+and its `client.worker_model` fallback, which `CodexExecutor` never reads.
+
+The field default `"high"` **is** the "default" tier — a bare
+`StageExecutorConfig()` already resolves to `"high"`. Setting it explicitly to
+`null` means "do not pin it", leaving codex's own default in force.
+
+`"high"` is a **starting position, not a benchmarked optimum.** No measurement
+justifies it yet; `cw.codex_review._benchmark.run_reasoning_effort_benchmark`
+exists to produce that measurement (it runs the same roles and prompts once per
+effort value and compares findings, degraded roles, wall clock, and token
+totals). Revisit the default once there are numbers.
+
+```yaml
+clients:
+  my-project:
+    workspace_path: /home/user/projects/my-project
+    pipeline:
+      executors:
+        review:
+          backend: codex
+          reasoning_effort: high
+    lanes:
+      - name: cheap-review
+        pipeline:
+          executors:
+            review:
+              backend: codex
+              reasoning_effort: medium   # lane wins over the client value
+```
+
+**What the profile disables**
+
+Eleven optional feature surfaces, via `--disable <feature>` (documented sugar
+for `-c features.<name>=false`): `hooks`, `memories`, `multi_agent`,
+`multi_agent_v2`, `plugins`, `plugin_sharing`, `browser_use`,
+`browser_use_external`, `browser_use_full_cdp_access`, `computer_use`,
+`personality`. These are exactly the identifiers `codex features list`
+enumerates.
+
+**MCP servers are disabled separately**, via `-c mcp_servers={}` — *not* via
+`--disable`. MCP servers are not a member of codex's `features` list, so
+`--disable`, being `features.<name>=false` sugar, structurally cannot reach
+them; a direct config override is the only mechanism that can. This is why the
+flag is listed apart from the eleven above rather than folded in with them.
+
+Plus two whole-channel closures:
+- `--ignore-user-config` — drops `~/.codex/config.toml`.
+- `-c project_doc_max_bytes=0` — stops codex inlining the repo's
+  `AGENTS.md`/project doc. `cw` already inlines every instruction the reviewer
+  should see; a second, unversioned instruction channel is the thing this
+  profile exists to close.
+
+**Why the `-c` overrides are trustworthy: `--strict-config`**
+
+Every invocation also carries `--strict-config`, which makes codex *reject* an
+unknown `-c` key rather than silently ignoring it. Verified against codex-cli
+0.147.0: `-c bogus_key_xyz=1` exits 1 with
+
+```
+Error loading config.toml: unknown configuration field `bogus_key_xyz` in -c/--config override
+```
+
+Without that flag, a typo'd or removed config key would leave the profile
+quietly not applied. With it, a stale override fails the run loudly instead.
+
+**Per-session diagnostics: `codex-review-profile.json`**
+
+Every review pass writes one profile artifact under the session's diagnostics
+dir (`~/.local/share/cw/sessions/<session_id>/diagnostics/`), answering "what
+profile did *this* review actually run under":
+
+- `profile_version` — bumped when the argv block changes shape.
+- `reasoning_effort` — the resolved value (`null` if unpinned).
+- `effective_model` — the model `cw` resolved and passed on the argv. No codex
+  event carries a model field, so this is `cw`'s answer, not codex's.
+- `cli_version` — parsed `codex --version` (`null` if unanswerable).
+- `enabled_tool_classes` — candidate tool classes the profile left enabled.
+  Empty today by construction: every candidate is in the disable list. That is
+  the honest reading, not a placeholder.
+- `instruction_sources` — which prompt-instruction channels actually
+  contributed content, unioned across every role in the pass, in a fixed
+  canonical order. Vocabulary: `role_spec`, `output_format_supplement`,
+  `ticket_context`, `approved_plan`, `project_rubrics`, `repo_policy`,
+  `lint_grounding`, `sensitive_files`. A channel appears only when its content
+  was non-empty — a zero-byte `.cw/plan.md` does not put `approved_plan` in the
+  list.
+
+Writing this artifact never blocks a review: a failed write is logged at
+WARNING and swallowed, matching the capability-probe diagnostics' contract.
+
 ## Orchestrator Configuration (`~/.claude-workspace/orchestrator.yaml`)
 
 Controls the autonomous dispatch loop. Created with defaults on first run.
