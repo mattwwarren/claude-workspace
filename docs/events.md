@@ -1415,12 +1415,23 @@ cw event tail --client my-client
 # needs_attention, stage_timed_out_retried) for the same session
 cw event tail --dedup-terminal
 
+# Return only the most recent N matching events (filter-then-limit)
+cw event tail --limit 20
+cw event tail -n 20
+
 # Machine-readable JSON output
 cw event tail --json
 ```
 
 One-shot `--since <consumer>` with an unknown consumer initializes the cursor
 at the end of the inbox (no history replay) instead of replaying everything.
+
+`--limit`/`-n` bounds the already-filtered set to the most recent N events; it
+is not supported with `--follow`, which streams unboundedly. The default
+(non-`--json`) output format is compact: nested dict/list-of-dict payload
+fields — e.g. `dispatch.tick`'s `lanes` and `lane_occupants` — are omitted,
+while scalar fields and short scalar-lists are kept. `--json` is unaffected
+and always emits the full event, nested fields included.
 
 ### Follow mode
 
