@@ -332,6 +332,13 @@ def _make_diff(*added_lines: str, **overrides: object) -> CapturedDiff:
     structured map). The last content repeats if the combined line count
     across all files exceeds ``len(added_lines)``, keeping ``files[f] ==
     sorted(file_line_text[f])`` an invariant.
+
+    ``file_window_text`` (#1738) is set equal to ``file_line_text`` — this
+    helper never generates context lines (every body line is ``+``-prefixed),
+    so it has no distinct content to contribute to the hunk-context superset;
+    tests that need genuine context-line content use the real
+    ``_parse_unified_diff`` parser against a real diff instead (see
+    ``tests/test_review_findings.py``'s ``_pr1729_captured_diff``).
     """
     lines = added_lines or ("def broken():",)
     files = overrides.get("files", {"src/cw/foo.py": [10]})
@@ -356,6 +363,7 @@ def _make_diff(*added_lines: str, **overrides: object) -> CapturedDiff:
         files=files,
         file_diffs=file_diffs,
         file_line_text=file_line_text,
+        file_window_text=dict(file_line_text),
     )
 
 

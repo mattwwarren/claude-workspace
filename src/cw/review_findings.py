@@ -364,12 +364,23 @@ class CapturedDiff(BaseModel):
     ``{line_number: content}`` map for exactly the added lines (same line-number
     domain as ``files[file]``) — the substrate for true line-position evidence
     validation of finding evidence.
+
+    ``file_window_text`` (#1738) is a second ``{line_number: content}`` map per
+    file, alongside ``file_line_text`` rather than replacing it: it ALSO
+    includes unchanged context-line content at its real new-file line number
+    (only a removed line, which has no new-file position, is excluded). It
+    exists solely as the widened substrate for ``_evidence_in_claimed_lines``'s
+    windowed branch (via ``_resolve_hunk_window``/``_nearest_hunk_line``) — it
+    must never feed ``_line_reference_valid``/``_nearest_added_line`` (the
+    anchor-*validity* gate) or ``files``, both of which stay added-line-only
+    on purpose.
     """
 
     text: str
     files: dict[str, list[int]] = Field(default_factory=dict)
     file_diffs: dict[str, str] = Field(default_factory=dict)
     file_line_text: dict[str, dict[int, str]] = Field(default_factory=dict)
+    file_window_text: dict[str, dict[int, str]] = Field(default_factory=dict)
 
 
 def _changed_files(diff: CapturedDiff) -> frozenset[str]:
@@ -446,6 +457,36 @@ def _nearest_added_line(
     best: int | None = None
     best_distance = tolerance + 1
     for candidate in diff.files.get(file, []):
+        distance = abs(candidate - line)
+        if distance > tolerance:
+            continue
+        if (
+            best is None
+            or distance < best_distance
+            or (distance == best_distance and candidate < best)
+        ):
+            best, best_distance = candidate, distance
+    return best
+
+
+def _nearest_hunk_line(
+    diff: CapturedDiff, file: str, line: int, tolerance: int = _LINE_ANCHOR_TOLERANCE
+) -> int | None:
+    """Return the hunk-covered line of *file* nearest *line*, within *tolerance*.
+
+    Sibling of :func:`_nearest_added_line`, deliberately kept separate rather
+    than repurposing it (#1738): candidates are drawn from
+    ``diff.file_window_text.get(file, {})`` — every context OR added line the
+    diff covers, not only added lines — so this must never be substituted for
+    :func:`_nearest_added_line` at :func:`_line_reference_valid`'s
+    anchor-validity call site. Same exact-hit short-circuit and tie-break
+    rules as :func:`_nearest_added_line`.
+    """
+    if line in diff.file_window_text.get(file, {}):
+        return line
+    best: int | None = None
+    best_distance = tolerance + 1
+    for candidate in diff.file_window_text.get(file, {}):
         distance = abs(candidate - line)
         if distance > tolerance:
             continue
@@ -577,6 +618,32 @@ def _resolve_line_window(
     return min(resolved_start, resolved_end), max(resolved_start, resolved_end)
 
 
+def _resolve_hunk_window(
+    diff: CapturedDiff, file: str, line_start: int | None, line_end: int | None
+) -> tuple[int, int] | None:
+    """Resolve a claimed (``line_start``, ``line_end``) pair to hunk-covered lines.
+
+    Mirror of :func:`_resolve_line_window`, calling :func:`_nearest_hunk_line`
+    (candidates: every context OR added line, via ``file_window_text``)
+    instead of :func:`_nearest_added_line` on both endpoints (#1738). Wired
+    into exactly one call site — :func:`_evidence_in_claimed_lines`'s windowed
+    branch — so the widened recall only affects evidence *matching*, never the
+    anchor-*validity* gate (:func:`_line_reference_valid`) or the persisted
+    anchor an accepted finding is snapped onto (:func:`_resolved_finding`,
+    which keeps calling this function's unchanged sibling).
+    """
+    raw_start = line_start if line_start is not None else line_end
+    raw_end = line_end if line_end is not None else line_start
+    if raw_start is None or raw_end is None:
+        msg = "_resolve_hunk_window requires at least one endpoint set"
+        raise ValueError(msg)
+    resolved_start = _nearest_hunk_line(diff, file, raw_start)
+    resolved_end = _nearest_hunk_line(diff, file, raw_end)
+    if resolved_start is None or resolved_end is None:
+        return None
+    return min(resolved_start, resolved_end), max(resolved_start, resolved_end)
+
+
 def _evidence_in_claimed_lines(
     diff: CapturedDiff,
     file: str,
@@ -591,29 +658,34 @@ def _evidence_in_claimed_lines(
     (``file_diffs``), the same fallback ``_line_reference_valid`` already grants
     file-level findings today.
 
-    When a line window is claimed, :func:`_resolve_line_window` snaps both
-    endpoints (the same near-line tolerance ``_line_reference_valid`` applies)
-    and orders them ascending before *text* is checked against the joined
-    content of exactly those added lines (``file_line_text``) — an endpoint
+    When a line window is claimed, :func:`_resolve_hunk_window` snaps both
+    endpoints (the same near-line tolerance ``_line_reference_valid`` applies,
+    but over the wider ``file_window_text`` candidate set — context lines
+    included) and orders them ascending before *text* is checked against the
+    joined content of exactly those lines (``file_window_text``) — an endpoint
     that fails to resolve makes the whole check fail. Both sides of every
     substring comparison are routed through :func:`_normalize_diff_text` so a
     stray ``+``/``-`` diff marker on either the evidence or the diff-derived
     text cannot break an otherwise-genuine match (#1715).
 
-    A quote whose true origin is a removed/context line — which has no
-    new-file line number — is correctly rejected here rather than accepted via
-    a whole-file or whole-diff fallback.
+    A quote whose true origin is a REMOVED line — which has no new-file line
+    number at all — is correctly rejected here (#1738: a context line, unlike
+    a removed line, does have a real new-file position and IS captured in
+    ``file_window_text``, so it is no longer excluded the way this docstring
+    used to claim).
     """
     if line_start is None and line_end is None:
         return _normalize_diff_text(text) in _normalize_diff_text(
             diff.file_diffs.get(file, "")
         )
-    resolved = _resolve_line_window(diff, file, line_start, line_end)
+    resolved = _resolve_hunk_window(diff, file, line_start, line_end)
     if resolved is None:
         return False
     start, end = resolved
-    line_text = diff.file_line_text.get(file, {})
-    window = "\n".join(line_text[n] for n in range(start, end + 1) if n in line_text)
+    window_text = diff.file_window_text.get(file, {})
+    window = "\n".join(
+        window_text[n] for n in range(start, end + 1) if n in window_text
+    )
     return _normalize_diff_text(text) in _normalize_diff_text(window)
 
 
