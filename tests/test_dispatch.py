@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
-import shutil
 import subprocess
 import threading
 from datetime import UTC, datetime, timedelta
@@ -6560,6 +6559,7 @@ class _BlockedCodexReview:
         return self._result, None
 
 
+@pytest.mark.binary_on_path("codex")
 class TestCodexSpawnDoesNotBlockDispatch:
     """#1727: a codex REVIEW in flight must not stall the shared dispatch tick."""
 
@@ -6575,18 +6575,14 @@ class TestCodexSpawnDoesNotBlockDispatch:
         )
         # CodexExecutor.spawn() (src/cw/executor.py) runs its OWN
         # shutil.which("codex") pre-flight, separate from the capability
-        # gate mocked above. CI runners have no codex binary on PATH, so
-        # without this patch spawn() takes the synchronous CODEX_NOT_FOUND
-        # branch and never reaches _background() — blocked_review.entered
-        # is never set and these tests only passed on a dev machine that
-        # happens to have codex installed.
-        real_which = shutil.which
-        monkeypatch.setattr(
-            "cw.executor.shutil.which",
-            lambda cmd, *args, **kwargs: (
-                "/usr/bin/codex" if cmd == "codex" else real_which(cmd, *args, **kwargs)
-            ),
-        )
+        # gate mocked above. The class-level @pytest.mark.binary_on_path
+        # marker (tests/conftest.py's _hide_optional_binaries guard, #1753)
+        # makes that pre-flight see codex as present without shelling out —
+        # CI runners have no real codex binary on PATH, and without this,
+        # spawn() takes the synchronous CODEX_NOT_FOUND branch and never
+        # reaches _background(): blocked_review.entered is never set and
+        # these tests only passed on a dev machine that happens to have
+        # codex installed.
 
     def test_other_client_spawns_while_codex_review_still_running(
         self,
