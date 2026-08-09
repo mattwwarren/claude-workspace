@@ -206,6 +206,33 @@ def _post_review_comment(
         )
 
 
+def _complete_session_as_unexpected_error(
+    sid: str, task: TicketTask, worktree: Path
+) -> None:
+    """Complete a session with a blocked/unexpected-error payload via the door.
+
+    Shared by ``CodexExecutor.spawn()``'s synchronous pre-flight-failure branch
+    (``cw.executor``) and this module's own background-thread except branch
+    below — both built the identical ``make_blocked(reason=UNEXPECTED_ERROR,
+    stage_reached=STAGE3_REVIEW)`` payload independently before this extraction
+    (#1727 round 5 DRY fix). ``guard_already_completed=True`` since either
+    caller may be racing the completion door's own success path.
+    """
+    from cw.executor import _complete_session_via_door
+
+    with sessions_lock():
+        _complete_session_via_door(
+            sid=sid,
+            payload=make_blocked(
+                ticket_id=task.ticket_id,
+                worktree=worktree,
+                reason=UNEXPECTED_ERROR,
+                stage_reached=STAGE3_REVIEW,
+            ).model_dump(mode="json"),
+            guard_already_completed=True,
+        )
+
+
 def _run_codex_review_and_complete(
     *,
     runner: CodexRunner,
@@ -292,17 +319,7 @@ def _run_codex_review_and_complete(
         _log.exception(
             "codex review thread failed session=%s ticket=%s", sid, task.ticket_id
         )
-        with sessions_lock():
-            _complete_session_via_door(
-                sid=sid,
-                payload=make_blocked(
-                    ticket_id=task.ticket_id,
-                    worktree=worktree,
-                    reason=UNEXPECTED_ERROR,
-                    stage_reached=STAGE3_REVIEW,
-                ).model_dump(mode="json"),
-                guard_already_completed=True,
-            )
+        _complete_session_as_unexpected_error(sid, task, worktree)
         # Deferred for the same cycle reason as the imports above: claim.py
         # imports cw.executor at module level, which imports this module.
         from cw.dispatch.claim import _revert_claimed_task_to_pending

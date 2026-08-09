@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 
 from cw.auto_dev_result import AutoDevResult
 from cw.codex_background import (
+    _complete_session_as_unexpected_error,
     _default_background,
     _run_codex_review_and_complete,
     _stamp_session_id_on_running_task,
@@ -910,17 +911,7 @@ class CodexExecutor:
                 # re-raise is correct *here* (unlike on the background path):
                 # dispatch is still on this stack and its own handler reverts
                 # the claimed task to PENDING.
-                with sessions_lock():
-                    _complete_session_via_door(
-                        sid=sid,
-                        payload=make_blocked(
-                            ticket_id=task.ticket_id,
-                            worktree=worktree,
-                            reason=UNEXPECTED_ERROR,
-                            stage_reached=STAGE3_REVIEW,
-                        ).model_dump(mode="json"),
-                        guard_already_completed=True,
-                    )
+                _complete_session_as_unexpected_error(sid, task, worktree)
                 raise
             return sid
 
