@@ -33,6 +33,10 @@ from cw.codex_review._const import (
     _is_spawn_error,
 )
 from cw.codex_review._context import _parse_reviewer_document
+from cw.codex_review._profile import (
+    _lean_profile_argv,
+    _persist_profile_diagnostics,
+)
 from cw.config import state_dir
 from cw.executor_diagnostics import build_executor_failure, persist_diagnostics_bundle
 from cw.openai_strict_schema import to_openai_strict_schema
@@ -88,7 +92,11 @@ def _codex_scratch_dir(session_id: str) -> Path:
 
 
 def _build_generic_codex_argv(
-    *, model: str | None, schema_path: Path, output_path: Path
+    *,
+    model: str | None,
+    schema_path: Path,
+    output_path: Path,
+    reasoning_effort: str | None = None,
 ) -> list[str]:
     """Return the generic ``codex exec`` argv (no ``review``/``--base``).
 
@@ -105,12 +113,21 @@ def _build_generic_codex_argv(
     unconditional and independent of the ``-o`` document, which is still
     written normally. They are inserted before ``--output-schema`` so the
     trailing ``-m <model>`` append contract stays intact.
+
+    The lean-profile block (#1711, :func:`_lean_profile_argv`) sits between the
+    sandbox pair and the audit flags, so it is equally outside
+    ``_AUDIT_ARGV_FLAGS`` — the degrade-and-retry strip in
+    :func:`_run_codex_role` removes only the audit flags and therefore never
+    weakens the profile. ``reasoning_effort=None`` (the builder default) means
+    "do not pin it"; the ``"high"`` default lives on ``StageExecutorConfig``,
+    where lane/client overrides can reach it.
     """
     argv = [
         "codex",
         "exec",
         "--sandbox",
         "read-only",
+        *_lean_profile_argv(reasoning_effort=reasoning_effort),
         *_AUDIT_ARGV_FLAGS,
         "--output-schema",
         str(schema_path),
@@ -247,6 +264,7 @@ def _run_codex_role(
     timeout_seconds: int | None,
     scratch_dir: Path,
     session_id: str,
+    reasoning_effort: str | None = None,
 ) -> tuple[
     ReviewerFindingsDocument | None, ReviewerRunFailure | None, ReviewerRunMetrics
 ]:
@@ -283,7 +301,10 @@ def _run_codex_role(
         encoding="utf-8",
     )
     argv = _build_generic_codex_argv(
-        model=model, schema_path=schema_path, output_path=output_path
+        model=model,
+        schema_path=schema_path,
+        output_path=output_path,
+        reasoning_effort=reasoning_effort,
     )
     start = time.monotonic()
     result = runner.run(worktree, argv, timeout_seconds, stdin=prompt)
@@ -301,6 +322,12 @@ def _run_codex_role(
     # by the _Clock-driven tests in tests/test_codex_review_roles.py.
     duration = time.monotonic() - start
     metrics = _parse_codex_audit_events(result.stdout, duration_seconds=duration)
+    # No codex-cli event carries a model field, so the audit parse always
+    # leaves this None (#1710). The model cw resolved and passed on the argv is
+    # the authoritative answer to "which model reviewed this" (#1711), so it is
+    # stamped here rather than left unanswerable. Set on both the success and
+    # failure branches below — a role that died mid-run still ran under a model.
+    metrics["effective_model"] = model
 
     if not result.timed_out and result.returncode == 0:
         doc = _parse_reviewer_document(result.output_file_content)
@@ -346,6 +373,8 @@ def run_codex_roles(
     model: str | None,
     wall_clock_budget_seconds: int | None,
     session_id: str,
+    reasoning_effort: str | None = None,
+    instruction_sources: list[str] | None = None,
 ) -> tuple[
     list[ReviewerFindingsDocument],
     list[ReviewerRunFailure],
@@ -369,7 +398,21 @@ def run_codex_roles(
     audit telemetry (#1710). A ``budget_exhausted`` skip never calls
     :func:`_run_codex_role`, so it correctly contributes no entry — "no
     telemetry" and "telemetry showing nothing happened" are different facts.
+
+    ``reasoning_effort``/``instruction_sources`` (#1711) describe the profile
+    this whole pass ran under, so the diagnostics artifact is written exactly
+    once per invocation — before the role loop, so a pass that dies partway
+    through still records what it was configured to be. ``reasoning_effort`` is
+    additionally threaded into every role's argv.
     """
+    _persist_profile_diagnostics(
+        session_id=session_id,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        instruction_sources=(
+            [] if instruction_sources is None else instruction_sources
+        ),
+    )
     scratch_dir = _codex_scratch_dir(uuid.uuid4().hex)
     try:
         documents: list[ReviewerFindingsDocument] = []
@@ -401,6 +444,7 @@ def run_codex_roles(
                 timeout_seconds=timeout,
                 scratch_dir=scratch_dir,
                 session_id=session_id,
+                reasoning_effort=reasoning_effort,
             )
             metrics_by_role[role] = metrics
             if doc is not None:

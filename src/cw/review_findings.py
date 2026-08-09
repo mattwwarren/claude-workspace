@@ -275,7 +275,9 @@ class ReviewerRunRecord(BaseModel):
     finding_count: int
     # Executor-native run identifier (codex ``thread.started.thread_id``).
     thread_id: str | None = None
-    # Always None today: no codex-cli 0.147.0 event carries a model field.
+    # No codex-cli event carries a model field, so this is NOT parsed from the
+    # audit stream — it is the model cw resolved and passed on the argv,
+    # stamped by _run_codex_role (#1711). None means no model was pinned.
     effective_model: str | None = None
     duration_seconds: float | None = None
     input_tokens: int | None = None

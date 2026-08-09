@@ -11,6 +11,8 @@ from pathlib import Path
 import pytest
 
 from cw.codex_review import (
+    _DISABLED_FEATURES,
+    _PROFILE_DIAGNOSTICS_FILENAME,
     CODEX_BUDGET_EXHAUSTED,
     CODEX_ERROR,
     CODEX_REVIEW_UNPARSEABLE,
@@ -23,7 +25,7 @@ from cw.codex_review import (
     run_codex_roles,
 )
 from cw.codex_runner import CodexRunResult
-from cw.config import state_dir
+from cw.config import diagnostics_dir, state_dir
 from cw.executor_diagnostics import ExecutorFailure, diagnostics_bundle_dir
 from cw.review_findings import (
     ReviewerFindingsDocument,
@@ -909,3 +911,202 @@ class TestRunCodexRoleFlagRejectionRetry:
         assert "--json" not in persisted.argv_sanitized
         assert "--ephemeral" not in persisted.argv_sanitized
         assert "still broken" in persisted.stderr_excerpt
+
+
+# ---------------------------------------------------------------------------
+# Lean reviewer profile threading (#1711)
+# ---------------------------------------------------------------------------
+
+
+def _overrides(argv: list[str]) -> list[str]:
+    """Return every ``-c <override>`` value in *argv*, in order."""
+    return [
+        argv[i + 1] for i, tok in enumerate(argv) if tok == "-c" and i + 1 < len(argv)
+    ]
+
+
+class TestBuildGenericCodexArgvLeanProfile:
+    @pytest.mark.parametrize("model", [None, "gpt-5"])
+    def test_lean_profile_flags_present(
+        self, tmp_path: Path, model: str | None
+    ) -> None:
+        argv = _build_generic_codex_argv(
+            model=model,
+            schema_path=tmp_path / "s.json",
+            output_path=tmp_path / "o.json",
+            reasoning_effort="high",
+        )
+        assert "--ignore-user-config" in argv
+        assert "--strict-config" in argv
+        overrides = _overrides(argv)
+        assert "project_doc_max_bytes=0" in overrides
+        assert "mcp_servers={}" in overrides
+        assert "model_reasoning_effort=high" in overrides
+        for feature in _DISABLED_FEATURES:
+            assert argv[argv.index(feature) - 1] == "--disable"
+        # The trailing "-m <model>" append contract is unchanged.
+        if model is not None:
+            assert argv[-2:] == ["-m", model]
+
+    def test_reasoning_effort_defaults_to_omitted(self, tmp_path: Path) -> None:
+        # Mirrors test_no_model: the builder-level default is "do not pin it";
+        # the "high" default lives on StageExecutorConfig, not here.
+        argv = _build_generic_codex_argv(
+            model=None,
+            schema_path=tmp_path / "s.json",
+            output_path=tmp_path / "o.json",
+        )
+        assert not any(
+            o.startswith("model_reasoning_effort=") for o in _overrides(argv)
+        )
+
+    def test_lean_block_sits_after_the_sandbox_pair(self, tmp_path: Path) -> None:
+        argv = _build_generic_codex_argv(
+            model=None,
+            schema_path=tmp_path / "s.json",
+            output_path=tmp_path / "o.json",
+            reasoning_effort="medium",
+        )
+        assert argv[:4] == ["codex", "exec", "--sandbox", "read-only"]
+        assert argv.index("--ignore-user-config") > argv.index("read-only")
+        assert argv.index("--ignore-user-config") < argv.index("--json")
+
+
+class TestRunCodexRoleEffectiveModel:
+    @pytest.mark.parametrize("model", ["gpt-5-codex", None])
+    def test_metrics_records_the_resolved_model(
+        self, tmp_path: Path, model: str | None
+    ) -> None:
+        runner = _SequencedRunner([_ok_result()])
+        _doc, failure, metrics = _run_codex_role(
+            runner=runner,
+            worktree=tmp_path,
+            role="Code Quality Reviewer",
+            prompt="p",
+            model=model,
+            timeout_seconds=None,
+            scratch_dir=tmp_path,
+            session_id="s-effective-model",
+        )
+        assert failure is None
+        assert metrics["effective_model"] == model
+
+    def test_effective_model_recorded_on_the_failure_branch(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _SequencedRunner(
+            [CodexRunResult(returncode=1, stdout="", stderr="boom")]
+        )
+        _doc, failure, metrics = _run_codex_role(
+            runner=runner,
+            worktree=tmp_path,
+            role="Code Quality Reviewer",
+            prompt="p",
+            model="gpt-5-codex",
+            timeout_seconds=None,
+            scratch_dir=tmp_path,
+            session_id="s-effective-model-fail",
+        )
+        assert failure is not None
+        assert metrics["effective_model"] == "gpt-5-codex"
+
+
+class TestRunCodexRolesProfileThreading:
+    def test_reasoning_effort_reaches_every_role_argv(self, tmp_path: Path) -> None:
+        runner = _SequencedRunner([_ok_result(), _ok_result()])
+        run_codex_roles(
+            runner=runner,
+            worktree=tmp_path,
+            roles=["Code Quality Reviewer", "SysAdmin Reviewer"],
+            prompts_by_role={"Code Quality Reviewer": "p1", "SysAdmin Reviewer": "p2"},
+            model=None,
+            wall_clock_budget_seconds=None,
+            session_id="s-effort",
+            reasoning_effort="medium",
+        )
+        assert len(runner.calls) == 2
+        for call in runner.calls:
+            argv = call["argv"]
+            assert isinstance(argv, list)
+            assert "model_reasoning_effort=medium" in _overrides(argv)
+
+    def test_profile_diagnostics_written_once_per_invocation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[dict[str, object]] = []
+
+        def _spy(
+            *,
+            session_id: str,
+            model: str | None,
+            reasoning_effort: str | None,
+            instruction_sources: list[str],
+        ) -> None:
+            seen.append(
+                {
+                    "session_id": session_id,
+                    "model": model,
+                    "reasoning_effort": reasoning_effort,
+                    "instruction_sources": instruction_sources,
+                }
+            )
+
+        monkeypatch.setattr("cw.codex_review._roles._persist_profile_diagnostics", _spy)
+        runner = _SequencedRunner([_ok_result(), _ok_result()])
+        run_codex_roles(
+            runner=runner,
+            worktree=tmp_path,
+            roles=["Code Quality Reviewer", "SysAdmin Reviewer"],
+            prompts_by_role={"Code Quality Reviewer": "p1", "SysAdmin Reviewer": "p2"},
+            model="gpt-5-codex",
+            wall_clock_budget_seconds=None,
+            session_id="s-profile-diag",
+            reasoning_effort="high",
+            instruction_sources=["role_spec", "approved_plan"],
+        )
+        # Once per invocation — not once per role.
+        assert seen == [
+            {
+                "session_id": "s-profile-diag",
+                "model": "gpt-5-codex",
+                "reasoning_effort": "high",
+                "instruction_sources": ["role_spec", "approved_plan"],
+            }
+        ]
+
+    def test_profile_diagnostics_artifact_lands_on_disk(self, tmp_path: Path) -> None:
+        runner = _SequencedRunner([_ok_result()])
+        run_codex_roles(
+            runner=runner,
+            worktree=tmp_path,
+            roles=["Code Quality Reviewer"],
+            prompts_by_role={"Code Quality Reviewer": "p1"},
+            model=None,
+            wall_clock_budget_seconds=None,
+            session_id="s-profile-artifact",
+            reasoning_effort="high",
+            instruction_sources=["ticket_context"],
+        )
+        path = diagnostics_dir("s-profile-artifact") / _PROFILE_DIAGNOSTICS_FILENAME
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["reasoning_effort"] == "high"
+        assert data["instruction_sources"] == ["ticket_context"]
+
+    def test_defaults_omit_effort_and_sources(self, tmp_path: Path) -> None:
+        runner = _SequencedRunner([_ok_result()])
+        run_codex_roles(
+            runner=runner,
+            worktree=tmp_path,
+            roles=["Code Quality Reviewer"],
+            prompts_by_role={"Code Quality Reviewer": "p1"},
+            model=None,
+            wall_clock_budget_seconds=None,
+            session_id="s-profile-defaults",
+        )
+        argv = runner.calls[0]["argv"]
+        assert isinstance(argv, list)
+        assert not any(
+            o.startswith("model_reasoning_effort=") for o in _overrides(argv)
+        )
+        path = diagnostics_dir("s-profile-defaults") / _PROFILE_DIAGNOSTICS_FILENAME
+        assert json.loads(path.read_text(encoding="utf-8"))["instruction_sources"] == []

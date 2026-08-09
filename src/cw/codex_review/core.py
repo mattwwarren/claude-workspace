@@ -34,6 +34,7 @@ def run_review(
     wall_clock_budget_seconds: int | None,
     session_id: str,
     fix_loop_enabled: bool,
+    reasoning_effort: str | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run the full per-role review pass; return ``(result, verdict)``.
 
@@ -44,6 +45,11 @@ def run_review(
     ``fix_loop_enabled`` (#1705) is forwarded to
     :func:`synthesize_codex_review_result`, which threads it into
     :func:`render_verdict_comment` on the blocking branch.
+
+    ``reasoning_effort`` (#1711) is the resolved ``StageExecutorConfig`` value
+    for this stage; it is pinned on every role's codex argv and, together with
+    the instruction channels ``_prepare_review_pass`` observed, recorded in the
+    per-session profile diagnostics.
     """
     prepared = _prepare_review_pass(
         task, worktree, default_branch, runner=runner, session_id=session_id
@@ -56,6 +62,8 @@ def run_review(
         model=model,
         wall_clock_budget_seconds=wall_clock_budget_seconds,
         session_id=session_id,
+        reasoning_effort=reasoning_effort,
+        instruction_sources=prepared.instruction_sources,
     )
     return synthesize_codex_review_result(
         task=task,
