@@ -2850,12 +2850,8 @@ def test_cli_event_tail_collapse_repeats_differing_payload_does_not_collapse(
     tmp_events_dir: Path,
 ) -> None:
     """Consecutive same-type events with differing scalar payloads do not merge."""
-    events_record_event(
-        OrchestratorEventType.DISPATCH_TICK, {"client": "acme", "n": 1}
-    )
-    events_record_event(
-        OrchestratorEventType.DISPATCH_TICK, {"client": "acme", "n": 2}
-    )
+    events_record_event(OrchestratorEventType.DISPATCH_TICK, {"client": "acme", "n": 1})
+    events_record_event(OrchestratorEventType.DISPATCH_TICK, {"client": "acme", "n": 2})
 
     runner = CliRunner()
     result = runner.invoke(main, ["event", "tail", "--collapse-repeats"])
@@ -2923,9 +2919,7 @@ def test_cli_event_tail_collapse_repeats_json_unaffected(tmp_events_dir: Path) -
     ]
 
     runner = CliRunner()
-    result = runner.invoke(
-        main, ["event", "tail", "--json", "--collapse-repeats"]
-    )
+    result = runner.invoke(main, ["event", "tail", "--json", "--collapse-repeats"])
     assert result.exit_code == 0, result.output
     lines = [ln for ln in result.output.splitlines() if ln.strip()]
     ids = [json.loads(ln)["id"] for ln in lines]
@@ -2937,15 +2931,10 @@ def test_cli_event_tail_collapse_repeats_rejects_with_follow(
 ) -> None:
     """--collapse-repeats with --follow exits non-zero via CwError."""
     runner = CliRunner()
-    result = runner.invoke(
-        main, ["event", "tail", "--collapse-repeats", "--follow"]
-    )
+    result = runner.invoke(main, ["event", "tail", "--collapse-repeats", "--follow"])
     assert result.exit_code != 0
     assert "follow" in result.output.lower()
-    assert (
-        "buffering" in result.output.lower()
-        or "flush" in result.output.lower()
-    )
+    assert "buffering" in result.output.lower() or "flush" in result.output.lower()
 
 
 def test_cli_event_tail_collapse_repeats_composes_with_dedup_terminal(
@@ -2975,9 +2964,7 @@ def test_cli_event_tail_collapse_repeats_composes_with_limit(
     tmp_events_dir: Path,
 ) -> None:
     """--limit applies server-side before --collapse-repeats groups the window."""
-    events_record_event(
-        OrchestratorEventType.DISPATCH_TICK, {"client": "acme", "n": 1}
-    )
+    events_record_event(OrchestratorEventType.DISPATCH_TICK, {"client": "acme", "n": 1})
     for _ in range(4):
         events_record_event(
             OrchestratorEventType.DISPATCH_TICK, {"client": "acme", "n": 2}
@@ -3000,9 +2987,7 @@ def test_cli_event_tail_collapse_repeats_composes_with_client_filter(
         events_record_event(
             OrchestratorEventType.DISPATCH_TICK, {"client": "alpha", "n": 1}
         )
-    events_record_event(
-        OrchestratorEventType.DISPATCH_TICK, {"client": "beta", "n": 1}
-    )
+    events_record_event(OrchestratorEventType.DISPATCH_TICK, {"client": "beta", "n": 1})
 
     runner = CliRunner()
     result = runner.invoke(
