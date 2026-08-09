@@ -227,11 +227,17 @@ _DISABLED_FEATURES: tuple[str, ...] = tuple(
     if feature.lean_profile_disposition is _LeanProfileDisposition.DISABLE
 )
 
-# Actual codex JSONL tool-call classes available to a reviewer under this
-# profile. ``command_execution`` is the observed audit-event class for the
-# read-only shell; browser, computer, MCP, plugin, and multi-agent tools are
-# closed by the profile. Feature flags are deliberately not reported here.
-_ENABLED_TOOL_CLASSES: tuple[str, ...] = (_COMMAND_EXECUTION_ITEM_TYPE,)
+# Actual codex JSONL tool-call classes available to a reviewer under each
+# captured CLI inventory. ``command_execution`` is the observed audit-event
+# class for the read-only shell; browser, computer, MCP, plugin, and multi-agent
+# tools are closed by the profile. Feature flags are deliberately not reported
+# here. Unknown CLI versions must not inherit a stale inventory.
+_CODEX_ENABLED_TOOL_CLASSES_BY_CLI_VERSION: dict[str, tuple[str, ...]] = {
+    "0.147.0": (_COMMAND_EXECUTION_ITEM_TYPE,)
+}
+_ENABLED_TOOL_CLASSES: tuple[str, ...] = _CODEX_ENABLED_TOOL_CLASSES_BY_CLI_VERSION[
+    "0.147.0"
+]
 
 
 def _lean_profile_argv(*, reasoning_effort: str | None) -> list[str]:
@@ -272,7 +278,7 @@ class _ProfileDiagnostics(BaseModel):
     # The matching captured feature inventory, if any. Feature flags are kept
     # separate from the actual tool-call classes reported below.
     feature_inventory_cli_version: str | None
-    enabled_tool_classes: list[str]
+    enabled_tool_classes: list[str] | None
     # Which prompt-instruction channels actually contributed content, unioned
     # across every role in the pass. None means the caller did not compute
     # provenance; [] means it computed that no channel fired. Vocabulary: role_spec,
@@ -310,13 +316,21 @@ def _persist_profile_diagnostics(
     profile is a property of the pass, not of any single reviewer. A non-None
     ``pass_discriminator`` preserves multiple passes in the same real session.
     """
+    inventory_version = _feature_inventory_version(cli_version)
+    enabled_tool_classes = (
+        None
+        if inventory_version is None
+        else _CODEX_ENABLED_TOOL_CLASSES_BY_CLI_VERSION.get(inventory_version)
+    )
     diagnostics = _ProfileDiagnostics(
         profile_version=_PROFILE_VERSION,
         reasoning_effort=reasoning_effort,
         effective_model=model,
         cli_version=cli_version,
-        feature_inventory_cli_version=_feature_inventory_version(cli_version),
-        enabled_tool_classes=list(_ENABLED_TOOL_CLASSES),
+        feature_inventory_cli_version=inventory_version,
+        enabled_tool_classes=(
+            None if enabled_tool_classes is None else list(enabled_tool_classes)
+        ),
         instruction_sources=(
             None if instruction_sources is None else list(instruction_sources)
         ),

@@ -464,9 +464,10 @@ profile did *this* review actually run under":
 - `feature_inventory_cli_version` — the CLI version whose captured feature
   inventory was used; `null` when no inventory matches the probed CLI.
 - `enabled_tool_classes` — actual codex JSONL tool-call classes available to
-  the read-only reviewer. The lean profile currently reports only
-  `command_execution`; feature-flag names are not tool classes and are kept in
-  the separately versioned feature inventory above.
+  the read-only reviewer for the matching CLI-versioned inventory. The
+  `0.147.0` inventory reports only `command_execution`; this field is `null`
+  when no inventory matches the probed CLI. Feature-flag names are not tool
+  classes and are kept in the separately versioned feature inventory above.
 - `instruction_sources` — which prompt-instruction channels actually
   contributed content, unioned across every role in the pass, in a fixed
   canonical order. Vocabulary: `role_spec`, `output_format_supplement`,

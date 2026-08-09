@@ -301,7 +301,7 @@ class TestPersistProfileDiagnostics:
         assert data["reasoning_effort"] is None
         assert data["cli_version"] is None
         assert data["feature_inventory_cli_version"] is None
-        assert data["enabled_tool_classes"] == ["command_execution"]
+        assert data["enabled_tool_classes"] is None
 
     def test_never_raises_on_oserror(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
@@ -362,7 +362,7 @@ class TestProbeRuntimeCliVersion:
         )
         data = json.loads(path.read_text(encoding="utf-8"))
         assert data["feature_inventory_cli_version"] is None
-        assert data["enabled_tool_classes"] == ["command_execution"]
+        assert data["enabled_tool_classes"] is None
 
 
 # ---------------------------------------------------------------------------
