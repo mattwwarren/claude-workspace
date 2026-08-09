@@ -23,7 +23,7 @@ from cw.codex_review._const import (
 )
 from cw.executor_diagnostics import append_diagnostics_pointer
 from cw.local_runner import _SCHEMA_VERSION, make_blocked, resolve_tier
-from cw.review_findings import consolidate_verdict
+from cw.review_findings import ReviewerHealthStatus, consolidate_verdict
 from cw.worktree import compute_branch_diff_scope
 
 if TYPE_CHECKING:
@@ -80,7 +80,7 @@ def _derive_health(documents: list[ReviewerFindingsDocument]) -> Health:
     that as full HIGH-confidence PROCEED would be exactly the "spuriously
     clean sentinel" risk the surrounding disposition logic exists to catch.
     """
-    if any(doc.status != "ok" for doc in documents):
+    if any(doc.status is not ReviewerHealthStatus.OK for doc in documents):
         return Health(
             lowest_agent_confidence="MEDIUM",
             any_incomplete_risk=True,
@@ -358,7 +358,11 @@ def _render_failed_roles_note(verdict: ReviewVerdict) -> list[str]:
     GitHub comment; previously only reached ``Blocker.details`` internally via
     ``_format_failures_detail`` on the zero-documents path.
     """
-    failed_roles = [r.reviewer_role for r in verdict.agents_run if r.status == "failed"]
+    failed_roles = [
+        r.reviewer_role
+        for r in verdict.agents_run
+        if r.status is ReviewerHealthStatus.FAILED
+    ]
     if not failed_roles:
         return []
     roles = ", ".join(failed_roles)
