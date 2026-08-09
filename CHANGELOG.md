@@ -23,6 +23,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   contract). Composes with `--dedup-terminal` and `--limit`, applied last in
   the pipeline. `--json` is unaffected — passing `--collapse-repeats` with
   `--json` is a no-op, one JSON line per original event.
+- **Reviewer agent specs now fall back to the operator's global copy when the
+  repo's own is missing or blank (#1773):** `.claude/agents/<role>.md` is still
+  read repo-first, but a worktree that carries no usable copy falls through to
+  `~/.claude/agents/<role>.md` instead of silently running the reviewer with an
+  empty `## Agent Specification` section. Gateable per-repo via
+  `[tool.cw.codex_review].agent_spec_global_fallback` in `pyproject.toml`
+  (default enabled). Every outcome — repo, global, or none — is recorded as an
+  `AgentSpecStatus` on the review verdict and rendered into the posted review
+  comment, so a silently-empty spec is now visible instead of swallowed.
 
 ### Fixed
 
