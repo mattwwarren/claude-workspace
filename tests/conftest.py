@@ -544,9 +544,7 @@ def _mock_codex_capability_probe(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_global_agents_dir(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def _isolate_global_agents_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Point the agent-spec global fallback at an empty directory (#1773).
 
     Sibling of ``_mock_codex_capability_probe``: ``_resolve_agent_spec`` falls
@@ -561,9 +559,7 @@ def _isolate_global_agents_dir(
     """
     global_agents = tmp_path / "isolated-global-agents"
     global_agents.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(
-        "cw.codex_review._context._GLOBAL_AGENTS_DIR", global_agents
-    )
+    monkeypatch.setattr("cw.codex_review._context._GLOBAL_AGENTS_DIR", global_agents)
 
 
 @pytest.fixture(autouse=True)

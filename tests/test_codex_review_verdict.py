@@ -932,7 +932,9 @@ def _body_with_specs(statuses: list[AgentSpecStatus]) -> str:
 
 class TestRenderAgentSpecNote:
     def test_repo_present_renders_fully_specified_headline(self) -> None:
-        body = _body_with_specs([_spec_status("repo", empty=False, empty_repo_file=False)])
+        body = _body_with_specs(
+            [_spec_status("repo", empty=False, empty_repo_file=False)]
+        )
         assert "_Agent specs loaded for all 1 reviewer role(s)._" in body
         assert "UNSPECIFIED" not in body
         assert "**NOTE:**" not in body
@@ -988,9 +990,7 @@ class TestRenderAgentSpecNote:
                 ),
             ]
         )
-        assert (
-            "Code Quality Reviewer (present but empty, no usable fallback)." in body
-        )
+        assert "Code Quality Reviewer (present but empty, no usable fallback)." in body
         assert "**NOTE:**" not in body
 
     def test_absent_label(self) -> None:
@@ -1014,9 +1014,7 @@ class TestRenderAgentSpecNote:
                 ),
             ]
         )
-        assert (
-            "Code Quality Reviewer (present but empty, no usable fallback)." in body
-        )
+        assert "Code Quality Reviewer (present but empty, no usable fallback)." in body
         assert "**NOTE:**" not in body
 
     def test_recovered_addendum_renders_alongside_a_degraded_headline(self) -> None:

@@ -879,9 +879,7 @@ def _write_repo_spec(worktree: Path, content: str) -> None:
     _write(worktree / ".claude" / "agents" / _ROLE_FILE, content)
 
 
-def _patch_global_agents(
-    monkeypatch: pytest.MonkeyPatch, path: Path
-) -> None:
+def _patch_global_agents(monkeypatch: pytest.MonkeyPatch, path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr("cw.codex_review._context._GLOBAL_AGENTS_DIR", path)
 
@@ -1038,14 +1036,19 @@ class TestResolveAgentSpec:
                 worktree, _ROLE, global_fallback_enabled=True
             )
         assert resolved.status.source == "none"
-        warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        warnings = [
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        ]
         assert warnings
         joined = "\n".join(warnings)
         assert _ROLE in joined
         assert str(worktree / ".claude" / "agents" / _ROLE_FILE) in joined
 
     def test_gate_disabled_absence_warning_names_only_the_repo_path(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         worktree = tmp_path / "wt"
         global_dir = tmp_path / "global"
@@ -1062,7 +1065,10 @@ class TestResolveAgentSpec:
         assert str(global_dir / _ROLE_FILE) not in joined
 
     def test_empty_but_resolved_source_does_not_warn(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         worktree = tmp_path / "wt"
         _patch_global_agents(monkeypatch, tmp_path / "global")
@@ -1076,7 +1082,10 @@ class TestResolveAgentSpec:
         assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
     def test_successful_global_fallback_does_not_warn(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         worktree = tmp_path / "wt"
         _write_repo_spec(worktree, "\n")
@@ -1299,6 +1308,4 @@ class TestPrepareReviewPass:
         assert [s.role for s in prepared.agent_spec_status] == prepared.roles
         assert all(s.source == "none" for s in prepared.agent_spec_status)
         assert all(s.empty is True for s in prepared.agent_spec_status)
-        assert all(
-            s.empty_repo_file is False for s in prepared.agent_spec_status
-        )
+        assert all(s.empty_repo_file is False for s in prepared.agent_spec_status)
