@@ -24,6 +24,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the pipeline. `--json` is unaffected — passing `--collapse-repeats` with
   `--json` is a no-op, one JSON line per original event.
 
+### Fixed
+
+- **`cw lane rm`/`ls`/`add`/`pause`/`resume` now accept `-c`/`--client` (#1607):**
+  every other client-scoped subcommand accepts `-c`/`--client` as an
+  alternative to a positional `CLIENT`, but the `lane` subcommands only
+  accepted `CLIENT` positionally, contradicting the documented `README.md`
+  usage. `lane ls` now takes `CLIENT` positionally (optional) or via
+  `-c`/`--client` (exactly one required); `add`/`rm`/`pause`/`resume` keep
+  the legacy `CLIENT NAME` two-positional form and additionally accept
+  `NAME -c CLIENT`.
+
 ## [1.30.0] - 2026-08-09
 
 ### Added

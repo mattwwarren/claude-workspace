@@ -9985,6 +9985,46 @@ class TestLaneLs:
         assert "default" in names
         assert "urgent" in names
 
+    def test_lane_ls_accepts_client_option(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """cw lane ls -c/--client acme works like the CLIENT positional (#1607)."""
+        _write_clients_yaml_with_lanes(
+            tmp_config_dir=tmp_config_dir,
+            tmp_path=tmp_path,
+            client_name="acme",
+            lanes=["default", "urgent"],
+        )
+        runner = CliRunner()
+        result = runner.invoke(cli=main, args=["lane", "ls", "-c", "acme"])
+        assert result.exit_code == 0, result.output
+        assert "default" in result.output
+        assert "urgent" in result.output
+
+    def test_lane_ls_rejects_positional_and_option_together(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _write_clients_yaml_with_lanes(
+            tmp_config_dir=tmp_config_dir,
+            tmp_path=tmp_path,
+            client_name="acme",
+            lanes=["default", "urgent"],
+        )
+        runner = CliRunner()
+        result = runner.invoke(cli=main, args=["lane", "ls", "acme", "-c", "acme"])
+        assert result.exit_code != 0
+        out = result.output.lower()
+        assert "positional" in out
+        assert "-c" in out or "--client" in out
+
+    def test_lane_ls_rejects_missing_client(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        runner = CliRunner()
+        result = runner.invoke(cli=main, args=["lane", "ls"])
+        assert result.exit_code != 0
+        assert "missing" in result.output.lower()
+
 
 class TestLaneAdd:
     def test_lane_add_writes_clients_yaml(
@@ -10030,6 +10070,26 @@ class TestLaneAdd:
         result = runner.invoke(main, ["lane", "add", "acme", "default"])
         assert result.exit_code != 0
         assert "already" in result.output.lower() or "exists" in result.output.lower()
+
+    def test_lane_add_accepts_client_option(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """cw lane add fast -c acme works like the CLIENT positional (#1607)."""
+        _write_clients_yaml_no_lanes(
+            tmp_config_dir=tmp_config_dir,
+            tmp_path=tmp_path,
+            client_name="acme",
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(cli=main, args=["lane", "add", "fast", "-c", "acme"])
+        assert result.exit_code == 0, result.output
+
+        from cw.config import load_clients
+
+        client = load_clients()["acme"]
+        lane_names = [ln.name for ln in client.effective_lanes]
+        assert "fast" in lane_names
 
 
 class TestLaneRm:
@@ -10090,6 +10150,49 @@ class TestLaneRm:
 
         runner = CliRunner()
         result = runner.invoke(main, ["lane", "rm", "acme", "urgent"])
+        assert result.exit_code != 0
+
+    def test_lane_rm_accepts_client_option(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """cw lane rm fast -c acme works like the CLIENT positional (#1607)."""
+        _write_clients_yaml_with_lanes(
+            tmp_config_dir=tmp_config_dir,
+            tmp_path=tmp_path,
+            client_name="acme",
+            lanes=["default", "fast"],
+        )
+        runner = CliRunner()
+        result = runner.invoke(cli=main, args=["lane", "rm", "fast", "-c", "acme"])
+        assert result.exit_code == 0, result.output
+
+        from cw.config import load_clients
+
+        client = load_clients()["acme"]
+        lane_names = [ln.name for ln in client.effective_lanes]
+        assert "fast" not in lane_names
+
+    def test_lane_rm_rejects_positional_and_option_together(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        _write_clients_yaml_with_lanes(
+            tmp_config_dir=tmp_config_dir,
+            tmp_path=tmp_path,
+            client_name="acme",
+            lanes=["default", "fast"],
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            cli=main,
+            args=["lane", "rm", "acme", "fast", "-c", "beta"],
+        )
+        assert result.exit_code != 0
+
+    def test_lane_rm_rejects_missing_client(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        runner = CliRunner()
+        result = runner.invoke(cli=main, args=["lane", "rm", "fast"])
         assert result.exit_code != 0
 
 
@@ -10169,6 +10272,57 @@ class TestLanePauseResume:
         override = _load_concurrency_overrides().lanes["acme/slow"]
         assert override.consecutive_spawn_errors == 0
         assert override.paused is False
+
+    def test_lane_pause_accepts_client_option(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """cw lane pause slow -c acme works like the CLIENT positional (#1607)."""
+        _write_clients_yaml_with_lanes(
+            tmp_config_dir=tmp_config_dir,
+            tmp_path=tmp_path,
+            client_name="acme",
+            lanes=["default", "slow"],
+        )
+        from cw.events import read_events
+        from cw.models import OrchestratorEventType
+
+        runner = CliRunner()
+        result = runner.invoke(cli=main, args=["lane", "pause", "slow", "-c", "acme"])
+        assert result.exit_code == 0, result.output
+
+        events = read_events()
+        paused_events = [
+            e for e in events if e.type == OrchestratorEventType.LANE_PAUSED
+        ]
+        assert len(paused_events) == 1
+        assert paused_events[0].payload["client"] == "acme"
+        assert paused_events[0].payload["lane"] == "slow"
+
+    def test_lane_resume_accepts_client_option(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """cw lane resume slow -c acme works like the CLIENT positional (#1607)."""
+        _write_clients_yaml_with_lanes(
+            tmp_config_dir=tmp_config_dir,
+            tmp_path=tmp_path,
+            client_name="acme",
+            lanes=["default", "slow"],
+        )
+        from cw.events import read_events
+        from cw.models import OrchestratorEventType
+
+        runner = CliRunner()
+        runner.invoke(cli=main, args=["lane", "pause", "slow", "-c", "acme"])
+        result = runner.invoke(cli=main, args=["lane", "resume", "slow", "-c", "acme"])
+        assert result.exit_code == 0, result.output
+
+        events = read_events()
+        resumed_events = [
+            e for e in events if e.type == OrchestratorEventType.LANE_RESUMED
+        ]
+        assert len(resumed_events) == 1
+        assert resumed_events[0].payload["client"] == "acme"
+        assert resumed_events[0].payload["lane"] == "slow"
 
 
 # ---------------------------------------------------------------------------
