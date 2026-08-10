@@ -49,9 +49,7 @@ def test_impl_completion_artifacts_defines_not_run_status() -> None:
     assert "pass" in content
 
 
-def test_impl_completion_artifacts_requires_every_configured_gate_reported() -> (
-    None
-):
+def test_impl_completion_artifacts_requires_every_configured_gate_reported() -> None:
     """Omitting a row for a configured gate must be a discipline failure, not
     a silently-accepted "done" claim — same `impl_failed` disposition as a
     contradicted artifact."""
