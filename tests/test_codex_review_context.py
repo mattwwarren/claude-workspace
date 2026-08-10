@@ -36,6 +36,8 @@ from cw.codex_review._context import (
     _OUTPUT_INSTRUCTIONS_CAPABLE,
     _OUTPUT_INSTRUCTIONS_INLINED_ONLY,
     _REVIEWER_ROLE_AGENT_FILES,
+    _load_operator_comments,
+    _load_pending_operator_comment_marker,
     _select_output_instructions,
 )
 from cw.codex_runner import FakeCodexRunner
@@ -292,6 +294,100 @@ class TestLoadTicketContext:
         _write(tmp_path / ".cw" / "context.json", json.dumps({"title": "", "body": ""}))
         _plan, ticket_text = _load_ticket_context(tmp_path)
         assert ticket_text is None
+
+
+class TestLoadOperatorComments:
+    """#1730: live comment fetch for the codex review path."""
+
+    def _github_repo(self, tmp_path: Path) -> Path:
+        _write(
+            tmp_path / ".claude" / "project-config.yaml",
+            "tracking:\n  primary:\n    system: github-issues\n",
+        )
+        return tmp_path
+
+    def test_returns_none_when_tracker_unresolvable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No project-config.yaml at all -- degrade, never guess a tracker."""
+
+        def _fail_if_called(*_a: object, **_kw: object) -> None:
+            msg = "must not fetch when the tracker is unknown"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments", _fail_if_called
+        )
+        assert _load_operator_comments(tmp_path, "T-1") is None
+
+    def test_returns_none_on_fetch_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """gh failure surfaces as None from fetch_issue_comments -- degrade."""
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments", lambda *_a, **_kw: None
+        )
+        assert _load_operator_comments(self._github_repo(tmp_path), "T-1") is None
+
+    def test_returns_none_on_empty_thread(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments", lambda *_a, **_kw: []
+        )
+        assert _load_operator_comments(self._github_repo(tmp_path), "T-1") is None
+
+    def test_skips_bodiless_comments_and_renders_the_rest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A whitespace-only or body-less entry contributes nothing; a comment
+        with no author/createdAt still renders under an 'unknown' header."""
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments",
+            lambda *_a, **_kw: [
+                {"body": "   "},
+                {"author": {"login": "op"}, "createdAt": "2026-08-10T00:00:00Z"},
+                {"body": "REAL BODY"},
+            ],
+        )
+        rendered = _load_operator_comments(self._github_repo(tmp_path), "T-1")
+        assert rendered == "### unknown\nREAL BODY"
+
+    def test_returns_none_when_every_comment_is_bodiless(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A thread of empty bodies is indistinguishable from no thread."""
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments",
+            lambda *_a, **_kw: [{"body": ""}],
+        )
+        assert _load_operator_comments(self._github_repo(tmp_path), "T-1") is None
+
+
+class TestLoadPendingOperatorCommentMarker:
+    """#1730: the queue_metadata marker read, fail-safe to False throughout."""
+
+    def test_absent_context_json(self, tmp_path: Path) -> None:
+        assert _load_pending_operator_comment_marker(tmp_path) is False
+
+    def test_malformed_json(self, tmp_path: Path) -> None:
+        _write(tmp_path / ".cw" / "context.json", "not json{{")
+        assert _load_pending_operator_comment_marker(tmp_path) is False
+
+    def test_non_dict_json(self, tmp_path: Path) -> None:
+        _write(tmp_path / ".cw" / "context.json", "[1, 2, 3]")
+        assert _load_pending_operator_comment_marker(tmp_path) is False
+
+    def test_missing_queue_metadata(self, tmp_path: Path) -> None:
+        _write(tmp_path / ".cw" / "context.json", json.dumps({"title": "t"}))
+        assert _load_pending_operator_comment_marker(tmp_path) is False
+
+    def test_marker_true(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path / ".cw" / "context.json",
+            json.dumps({"queue_metadata": {"pending_operator_comment": True}}),
+        )
+        assert _load_pending_operator_comment_marker(tmp_path) is True
 
 
 class TestParseReviewerDocument:
