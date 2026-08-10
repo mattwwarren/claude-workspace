@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Producer-side evidence/line-range window reconciliation (#1792):**
+  `_reconcile_evidence_window` repairs a codex-review finding's declared
+  line window when it is a few lines short/long of its own evidence's true
+  span — first via the exact pre-#1792 gap-tolerant join (byte-for-byte
+  compatible with existing #1236/#1715/#1738 behavior), then, only on
+  failure, by widening the window within `_LINE_ANCHOR_TOLERANCE` lines and
+  requiring an exact (not substring) match so widening can never absorb an
+  unrelated adjacent line. Applied both to evidence-quote matching (wide
+  `file_window_text` substrate) and to persisted-anchor repair (narrow
+  `file_line_text` substrate), reducing false `evidence_not_in_diff`
+  rejections without weakening the #1714 false-accept guard.
+
 ## [1.32.0] - 2026-08-10
 
 ### Added
