@@ -29,9 +29,10 @@ from cw.dev_queue.lifecycle import (
     transition_task_status,
 )
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
+from cw.events import record_event
 from cw.exceptions import RequeueStageError, RequeueStateError, UnblockStateError
 from cw.gh import fetch_approved_plan_comment
-from cw.models import QueueItemStatus, Stage
+from cw.models import OrchestratorEventType, QueueItemStatus, Stage
 from cw.worktree import _checked_out_branch, worktree_path_for
 
 if TYPE_CHECKING:
@@ -207,6 +208,66 @@ def _apply_requeue_stage(
     return False
 
 
+def _review_reentry_deliverable(
+    task: TicketTask, client_cfg: ClientConfig
+) -> tuple[bool, str, str, str | None]:
+    """True iff a REVIEW-stage re-entry can deliver operator tracker context.
+
+    Returns ``(deliverable, reason, backend, tracker)``. ``backend`` and
+    ``tracker`` are always returned (even when ``deliverable`` is True, or when
+    ``tracker`` was never consulted because ``backend`` alone already settled
+    the verdict) so the caller can fold them into the
+    ``REQUEUE_REVIEW_DELIVERY_DEGRADED`` payload for machine consumption
+    (GitHub #1730) without a second, possibly-drifting resolution call.
+    ``tracker`` is ``None`` when unresolvable (no ``tracking.primary.system``
+    in ``.claude/project-config.yaml`` -- see ``cw.tracker.resolve_tracker``'s
+    own contract) or not meaningful for the resolved backend (``claude-native``
+    never consults it). ``resolve_tracker`` is called unconditionally rather
+    than only on the codex branch: it is a local, read-only config-file read
+    with no network I/O, so a consistent payload key set is worth more than
+    skipping it.
+
+    Deferred import of ``resolve_executor_config`` to break the ``dev_queue ->
+    executor -> codex_background -> dev_queue`` cycle (same precedent as
+    ``unblock_ticket``'s deferred ``cw.config`` import, see module docstring).
+    NOTE for test authors: because these imports are function-local, tests must
+    monkeypatch ``cw.executor.resolve_executor_config`` /
+    ``cw.tracker.resolve_tracker`` at their origin modules, not this module --
+    there is no module-level attribute of either name here to patch.
+
+    Unlike an #1681-style guard, this NEVER blocks the transition (see
+    ``requeue.py``'s "review and finalize degrade and are deliberately not
+    guarded" comment in ``_apply_requeue_stage``, and #1730/#1717 comment 6):
+    the caller emits a loud event and proceeds regardless.
+    """
+    from cw.executor import resolve_executor_config
+    from cw.models.orchestrator_config import CLAUDE_NATIVE_BACKEND, CODEX_BACKEND
+    from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
+
+    backend = resolve_executor_config(Stage.REVIEW, task, client_cfg).backend
+    tracker = resolve_tracker(client_cfg.workspace_path)
+    if backend == CLAUDE_NATIVE_BACKEND:
+        return True, "", backend, tracker
+    if backend == CODEX_BACKEND:
+        if tracker == TRACKER_GITHUB_ISSUES:
+            return True, "", backend, tracker
+        return (
+            False,
+            (
+                f"REVIEW-stage backend 'codex' for client {client_cfg.name!r} can only"
+                " deliver operator tracker comments on a github-issues tracker"
+            ),
+            backend,
+            tracker,
+        )
+    return (
+        False,
+        f"REVIEW-stage backend {backend!r} has no operator-comment delivery path",
+        backend,
+        tracker,
+    )
+
+
 def _requeue_state_error_message(ticket_id: str, status: QueueItemStatus) -> str:
     """Build the RequeueStateError message for the forward/same-stage gate.
 
@@ -329,6 +390,36 @@ def requeue_ticket(
 
         to_stage = task.stage
         regress_attempts = task.regress_attempts if regressed else 0
+
+        # #1730: every successful requeue landing at REVIEW is, by construction,
+        # a review-stage re-entry of a previously-parked ticket -- i.e. the
+        # moment an operator send-back comment is supposed to reach the
+        # reviewer. If the resolved backend cannot deliver it, degrade LOUDLY
+        # and proceed: a hard-fail guard here would invert the asymmetry
+        # _apply_requeue_stage already codifies (impl hard-exits on a missing
+        # plan; review/finalize degrade). Emitted inline while dev_queue_lock is
+        # still held, mirroring _emit_stage_change's chokepoint convention --
+        # record_event takes _inbox_lock *inside* dev_queue_lock and the reverse
+        # nesting never occurs, so the ordering is deadlock-safe (RFC 0008 W1).
+        # Inline rather than per-caller because requeue_ticket's other
+        # production caller (dev_queue/drain.py) builds no events of its own.
+        if to_stage == Stage.REVIEW:
+            deliverable, reason, backend, tracker = _review_reentry_deliverable(
+                task, client_cfg
+            )
+            if not deliverable:
+                record_event(
+                    OrchestratorEventType.REQUEUE_REVIEW_DELIVERY_DEGRADED,
+                    {
+                        "ticket_id": ticket_id,
+                        "client": client_name,
+                        "reason": reason,
+                        "backend": backend,
+                        "tracker": tracker,
+                    },
+                    correlation_id=ticket_id,
+                )
+
         save_dev_queue(store)
 
     return {
