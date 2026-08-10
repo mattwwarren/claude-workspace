@@ -7347,6 +7347,198 @@ class TestApplyStagedDecision:
         assert task.regress_attempts == 1
         assert task.session_id is None
 
+    # -- #1717: FINALIZE self-heal regress round-trip repeat detection -----
+
+    def test_finalize_regress_round_trip_with_no_commit_emits_repeat_signal_not_silent_rearm(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """#1717: a FINALIZE self-heal regress (#770) round trip that lands
+        back at REVIEW with the branch head unchanged (IMPL produced no new
+        commit) re-parks with the same disposition it would have anyway --
+        but now also emits a companion SESSION_NEEDS_ATTENTION/
+        finalize_regress_repeat signal so the operator can tell this is a
+        *repeat*, not a fresh park. Mirrors #1710's review_pending_approval
+        shape (Rule 1, non-small/unresolved tier)."""
+        from cw.dev_queue import _stage_regress
+        from cw.dispatch import apply_staged_decision
+
+        attention = capture_events(
+            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+        repeat_signal = capture_events(
+            "cw.dispatch.regress_repeat",
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        )
+
+        task = self._make_running_task("FRR-1", stage=Stage.FINALIZE)
+        task.stage_base_ref = "sha-original"
+        task.regress_attempts = 1
+        _stage_regress(task, Stage.IMPL)
+        assert task.finalize_regress_branch_head == "sha-original"
+
+        # Round trip lands back at REVIEW with the branch head unchanged --
+        # IMPL produced no new commit (the incident shape of #1644/#1702/#1710).
+        task.stage = Stage.REVIEW
+        task.stage_base_ref = "sha-original"
+        task.status = QueueItemStatus.RUNNING
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        last_result: dict[str, object] = {"status": "review_pending_approval"}
+        apply_staged_decision(
+            task, "review_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "review_pending_approval"
+        assert task.finalize_regress_branch_head is None  # consumed
+
+        assert len(attention) == 1
+        assert attention[0][1]["paused_status"] == "approval_gate"
+
+        assert len(repeat_signal) == 1
+        _, payload, correlation_id = repeat_signal[0]
+        assert payload["paused_status"] == "finalize_regress_repeat"
+        assert correlation_id == "FRR-1"
+        assert payload["ticket_id"] == "FRR-1"
+        assert "attempts=1" in payload["breadcrumbs"]
+        assert "branch_head='sha-original'" in payload["breadcrumbs"]
+        assert "disposition='review_pending_approval'" in payload["breadcrumbs"]
+
+    def test_finalize_regress_round_trip_with_new_commit_emits_no_repeat_signal(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """#1717: same round trip, but IMPL genuinely committed (branch head
+        moved before REVIEW's claim) -- only the ordinary park fires, no
+        companion repeat signal. The marker is still consumed (cleared),
+        confirming no leak into a later cycle."""
+        from cw.dev_queue import _stage_regress
+        from cw.dispatch import apply_staged_decision
+
+        attention = capture_events(
+            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+        repeat_signal = capture_events(
+            "cw.dispatch.regress_repeat",
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        )
+
+        task = self._make_running_task("FRR-2", stage=Stage.FINALIZE)
+        task.stage_base_ref = "sha-original"
+        _stage_regress(task, Stage.IMPL)
+        assert task.finalize_regress_branch_head == "sha-original"
+
+        # IMPL actually committed this time -- REVIEW's claim stamps a fresh
+        # branch head.
+        task.stage = Stage.REVIEW
+        task.stage_base_ref = "sha-new-commit"
+        task.status = QueueItemStatus.RUNNING
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        last_result: dict[str, object] = {"status": "review_pending_approval"}
+        apply_staged_decision(
+            task, "review_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.finalize_regress_branch_head is None  # consumed either way
+
+        assert len(attention) == 1
+        assert attention[0][1]["paused_status"] == "approval_gate"
+        assert len(repeat_signal) == 0
+
+    def test_finalize_regress_round_trip_that_advances_cleanly_consumes_marker_without_signal(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """#1717: round trip where the branch head is unchanged, but this
+        pass's REVIEW-scoped gates let the task advance instead of re-parking
+        (e.g. the operator resolved the underlying gate in between) -- the
+        marker is consumed/cleared, but no companion signal fires, since
+        there is no repeat park to report."""
+        from cw.dev_queue import _stage_regress
+        from cw.dispatch import apply_staged_decision
+
+        repeat_signal = capture_events(
+            "cw.dispatch.regress_repeat",
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        )
+
+        task = self._make_running_task("FRR-3", stage=Stage.FINALIZE)
+        task.stage_base_ref = "sha-original"
+        _stage_regress(task, Stage.IMPL)
+        assert task.finalize_regress_branch_head == "sha-original"
+
+        task.stage = Stage.REVIEW
+        task.stage_base_ref = "sha-original"
+        task.status = QueueItemStatus.RUNNING
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        # Plain stage_complete, default client config (no scope_hint/hold/
+        # signoff configured) -- advances REVIEW -> FINALIZE unattended,
+        # mirroring test_stage_complete_recommendation_proceed_advances_unchanged.
+        last_result: dict[str, object] = {"status": "stage_complete"}
+        apply_staged_decision(
+            task, "stage_complete", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.FINALIZE
+        assert task.finalize_regress_branch_head is None  # still consumed
+        assert len(repeat_signal) == 0
+
+    def test_finalize_regress_repeat_signal_fires_identically_via_review_health_gate(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """#1717: gate-agnosticism -- the repeat signal fires the same way
+        regardless of which of the four REVIEW-scoped gates re-parked the
+        task. This exercises Rule 3's review_health_gate branch (#1702
+        shape), distinct from the Rule 1 approval_gate shape covered above."""
+        from cw.dev_queue import _stage_regress
+        from cw.dispatch import apply_staged_decision
+
+        repeat_signal = capture_events(
+            "cw.dispatch.regress_repeat",
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        )
+
+        task = self._make_running_task("FRR-4", stage=Stage.FINALIZE)
+        task.stage_base_ref = "sha-original"
+        _stage_regress(task, Stage.IMPL)
+
+        task.stage = Stage.REVIEW
+        task.stage_base_ref = "sha-original"
+        task.status = QueueItemStatus.RUNNING
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        last_result: dict[str, object] = {
+            "status": "stage_complete",
+            "health": {
+                "any_incomplete_risk": True,
+                "recommendation": "EXIT_FOR_HUMAN_REVIEW",
+            },
+        }
+        apply_staged_decision(
+            task, "stage_complete", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "review_health_gate"
+
+        assert len(repeat_signal) == 1
+        assert repeat_signal[0][1]["paused_status"] == "finalize_regress_repeat"
+        assert repeat_signal[0][1]["ticket_id"] == "FRR-4"
+
     def test_stage_failure_operator_unavailable_stamps_awaiting_operator_disposition(
         self, tmp_dispatch_dirs: Path, tmp_path: Path
     ) -> None:
