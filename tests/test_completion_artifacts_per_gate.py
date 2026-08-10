@@ -46,7 +46,7 @@ def test_impl_completion_artifacts_defines_not_run_status() -> None:
     distinct from `pass`."""
     content = _cmd("auto-dev-impl.md")
     assert "not_run" in content
-    assert "pass" in content
+    assert "`<command>` → `pass`" in content
 
 
 def test_impl_completion_artifacts_requires_every_configured_gate_reported() -> None:
