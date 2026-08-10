@@ -376,7 +376,7 @@ def check_gh_availability(*, timeout: int) -> bool:
     return result.returncode == 0
 
 
-def _fetch_issue_comments(
+def fetch_issue_comments(
     ticket_id: str, timeout: int, *, cwd: Path | None = None
 ) -> list[dict[str, Any]] | None:
     """Return the issue's comments list, or None on any fetch/parse error.
@@ -384,6 +384,10 @@ def _fetch_issue_comments(
     *cwd* scopes the ``gh`` call to a client's repo (defaults to None, i.e.
     ambient CWD); multi-client callers MUST pass it, mirroring
     ``post_issue_comment``'s cwd contract (GitHub #1269/#1279/#1419).
+
+    Public since #1730: the codex review backend inlines the live comment
+    thread into every reviewer prompt, so this is no longer a module-private
+    helper of ``fetch_approved_plan_comment``. Behavior is unchanged.
     """
     try:
         result = _sp.run(
@@ -435,7 +439,7 @@ def fetch_approved_plan_comment(
     - no marker-bearing comment is authored by the currently-authenticated
       ``gh`` identity, or that identity cannot be resolved (fail-closed)
     """
-    comments = _fetch_issue_comments(ticket_id, timeout)
+    comments = fetch_issue_comments(ticket_id, timeout)
     if comments is None:
         return None
 
