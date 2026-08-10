@@ -795,3 +795,94 @@ class TestHasTerminalResult:
         for shape in ({"status": "shipped"}, {"paused_status": "x"}, None):
             session = make_session(shape)
             assert _has_terminal_sentinel(session) == has_terminal_result(shape)
+
+
+# ---------------------------------------------------------------------------
+# opencode result-door collision tests (#1671 R8)
+# ---------------------------------------------------------------------------
+
+
+class TestOpencodeDoorCollision:
+    """opencode-specific collision scenarios for the result door.
+
+    opencode writes through the door from two sources:
+    - EXECUTOR_DIRECT: OpencodeExecutor's synchronous pre-flight failure path
+    - GIT_SYNTHESIS: harvest path via synthesize_opencode_result
+
+    These tests verify first-writer-wins holds for opencode's two sources
+    racing each other and racing external writers (stop-hook, salvage).
+    """
+
+    def test_executor_direct_wins_over_harvest_synthesis(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """EXECUTOR_DIRECT (opencode spawn failure) writes first → harvest refused."""
+        _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            session_id="oc-coll-1",
+            last_result={
+                "status": "blocked",
+                "blocker": {"reason": "opencode_not_found"},
+            },
+            last_result_source=LastResultSource.EXECUTOR_DIRECT,
+        )
+        with sessions_lock():
+            outcome = emit_result_locked(
+                _valid_payload(), "oc-coll-1", source=LastResultSource.GIT_SYNTHESIS
+            )
+        assert outcome.refused is True
+        assert outcome.existing_source == LastResultSource.EXECUTOR_DIRECT
+
+    def test_harvest_synthesis_wins_over_executor_direct(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """GIT_SYNTHESIS (opencode harvest) writes first → EXECUTOR_DIRECT refused."""
+        _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            session_id="oc-coll-2",
+            last_result={"status": "shipped"},
+            last_result_source=LastResultSource.GIT_SYNTHESIS,
+        )
+        with sessions_lock():
+            outcome = emit_result_locked(
+                _valid_payload(), "oc-coll-2", source=LastResultSource.EXECUTOR_DIRECT
+            )
+        assert outcome.refused is True
+        assert outcome.existing_source == LastResultSource.GIT_SYNTHESIS
+
+    def test_opencode_harvest_refusal_leaves_session_byte_identical(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Door refusal leaves session byte-identical (opencode harvest path)."""
+        foreign = {"status": "blocked", "blocker": {"reason": "opencode_no_output"}}
+        _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            session_id="oc-coll-3",
+            last_result=foreign,
+            last_result_source=LastResultSource.EXECUTOR_DIRECT,
+        )
+        before = json.dumps(
+            next(s for s in load_state().sessions if s.id == "oc-coll-3").model_dump(
+                mode="json"
+            ),
+            sort_keys=True,
+        )
+
+        with sessions_lock():
+            outcome = emit_result_locked(
+                _valid_payload(),
+                "oc-coll-3",
+                source=LastResultSource.SALVAGE_TRANSCRIPT,
+            )
+
+        assert outcome.refused is True
+        after = json.dumps(
+            next(s for s in load_state().sessions if s.id == "oc-coll-3").model_dump(
+                mode="json"
+            ),
+            sort_keys=True,
+        )
+        assert before == after
