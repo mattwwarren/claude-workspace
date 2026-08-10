@@ -103,3 +103,13 @@ def test_impl_step2_5_gate2_validates_json_verdict_before_trusting_exit_1() -> N
     assert "valid JSON verdict" in content
     assert '"triggered" key' in content or "a `triggered` key" in content
     assert "tooling failure, not drift" in content
+
+
+def test_gate_collapse_tables_mirror_the_tooling_failure_row() -> None:
+    """The exit-1-without-a-valid-verdict row must stay in lockstep across
+    auto-dev.md and docs/headless-contract.md, the same way the sibling
+    plan_scope_drift row already is (#1779 fix cycle 1)."""
+    for content in (_cmd("auto-dev.md"), _doc("docs/headless-contract.md")):
+        assert "without" in content
+        assert "valid JSON verdict" in content
+        assert "tooling failure, not drift" in content
