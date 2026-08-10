@@ -42,9 +42,11 @@ import yaml
 
 from cw.codex_review._capability import _probe_filesystem_capability
 from cw.codex_review._diff import _capture_diff
+from cw.gh import _FETCH_COMMENTS_TIMEOUT, fetch_issue_comments
 from cw.local_runner import resolve_tier
 from cw.models import CONTEXT_JSON_RELATIVE_PATH
 from cw.review_findings import AgentSpecStatus, ReviewerFindingsDocument
+from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -515,6 +517,67 @@ def _load_ticket_context(worktree: Path) -> tuple[str | None, str | None]:
     return plan_text, ticket_text
 
 
+def _load_operator_comments(worktree: Path, ticket_id: str) -> str | None:
+    """Live-fetch the ticket's comment thread as rendered text, or None (#1730).
+
+    The codex review backend previously saw only ``.cw/context.json``'s
+    title/body, so an operator send-back comment posted after Stage 0 never
+    reached a codex reviewer at all. This mirrors the "Comments are live, not
+    cached" convention ``auto-dev-plan.md``/``auto-dev-impl.md`` already
+    establish for the Claude-native path: fetched fresh on every review pass,
+    never read from the cached ``comments`` array.
+
+    Scoped to ``github-issues`` trackers because that is the only tracker with
+    a fetch op reachable from this process (``linear`` reads go through MCP
+    tools only a Claude session holds). Degrades to ``None`` — never raises —
+    on an unresolvable tracker, a gh failure, or an empty thread: a review
+    without comments is strictly better than no review, and the requeue-side
+    ``requeue.review_delivery_degraded`` event (#1730) is what makes an
+    undeliverable pairing operator-visible.
+    """
+    if resolve_tracker(worktree) != TRACKER_GITHUB_ISSUES:
+        return None
+    comments = fetch_issue_comments(
+        ticket_id, timeout=_FETCH_COMMENTS_TIMEOUT, cwd=worktree
+    )
+    if not comments:
+        return None
+    rendered: list[str] = []
+    for comment in comments:
+        body = comment.get("body")
+        if not isinstance(body, str) or not body.strip():
+            continue
+        author = comment.get("author")
+        login = author.get("login") if isinstance(author, dict) else None
+        created = comment.get("createdAt")
+        header = f"### {login or 'unknown'}"
+        if isinstance(created, str) and created:
+            header += f" ({created})"
+        rendered.append(f"{header}\n{body}")
+    return "\n\n".join(rendered) or None
+
+
+def _load_pending_operator_comment_marker(worktree: Path) -> bool:
+    """Read queue_metadata.pending_operator_comment from .cw/context.json (#1730).
+
+    Materialized at spawn time by ``spawn.py``'s ``_write_hook_context``,
+    cleared there (``dispatch/claim.py``) once a REVIEW-stage spawn has
+    consumed it. True means this REVIEW re-entry followed a regress that may
+    carry a pending operator send-back -- render an elevated-priority banner.
+    """
+    ctx_raw = _load_optional_text(worktree / CONTEXT_JSON_RELATIVE_PATH)
+    if ctx_raw is None:
+        return False
+    try:
+        data = json.loads(ctx_raw)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(data, dict):
+        return False
+    qm = data.get("queue_metadata")
+    return bool(isinstance(qm, dict) and qm.get("pending_operator_comment"))
+
+
 def _load_ruff_lint_config(worktree: Path) -> _RuffLintConfig | None:
     """Read ``[tool.ruff.lint]`` from *worktree*'s ``pyproject.toml`` (#1744).
 
@@ -713,6 +776,8 @@ def _build_reviewer_prompt(
     sensitive_hits: list[_SensitiveHit],
     capable: bool = False,
     lint_grounding: str | None = None,
+    operator_comments_text: str | None = None,
+    pending_operator_comment: bool = False,
 ) -> str:
     """Materialize one reviewer's full prompt, inlining every needed section.
 
@@ -728,6 +793,12 @@ def _build_reviewer_prompt(
     Same safe-default convention as *capable*: defaults to ``None`` for the
     variant-agnostic unit tests; :func:`_prepare_review_pass` always passes it
     explicitly.
+
+    *operator_comments_text* (#1730) is the live-fetched ticket comment thread,
+    and *pending_operator_comment* the per-arrival marker saying this REVIEW
+    re-entry followed a regress. When the marker is set, the comments section
+    is prefixed with a banner making them a binding adjudication input rather
+    than background context. Same safe-default convention again.
     """
     parts = [
         f"# Reviewer Role: {role}",
@@ -738,6 +809,20 @@ def _build_reviewer_prompt(
         parts.append(supplement)
     if ticket_text:
         parts.append(f"## Ticket Context\n{ticket_text}")
+    if operator_comments_text:
+        banner = (
+            "## Pending Operator Send-Back (#1730)\nThis REVIEW re-entry"
+            " follows a regress or requeue. Read the comments below before"
+            " finalizing findings -- a comment reflecting a prior operator"
+            " adjudication on a specific finding is binding, not advisory.\n\n"
+            if pending_operator_comment
+            else ""
+        )
+        parts.append(
+            "## Ticket Comments (live-fetched, chronological)\n"
+            + banner
+            + operator_comments_text
+        )
     if plan_text:
         parts.append(f"## Approved Plan\n{plan_text}")
     if project_rubrics:
@@ -833,6 +918,8 @@ def _prepare_review_pass(
     repo_policy = _load_review_policy(worktree, scope_tier)
     project_rubrics = _load_optional_text(worktree / ".claude" / "review-extras.md")
     plan_text, ticket_text = _load_ticket_context(worktree)
+    operator_comments_text = _load_operator_comments(worktree, task.ticket_id)
+    pending_operator_comment = _load_pending_operator_comment_marker(worktree)
     ruff_lint_config = _load_ruff_lint_config(worktree)
     quality_gates_text = _load_claude_md_quality_gates(worktree)
     lint_grounding = _render_lint_grounding_block(
@@ -868,6 +955,8 @@ def _prepare_review_pass(
             sensitive_hits=sensitive_hits,
             capable=capability.capable,
             lint_grounding=lint_grounding,
+            operator_comments_text=operator_comments_text,
+            pending_operator_comment=pending_operator_comment,
         )
         for role in roles
     }
