@@ -173,6 +173,46 @@ _print_agent_conflict() {
     } >&2
 }
 
+# _agent_prune_conflict_reason <baseline_file> <dst_file>
+# Mirrors _agent_conflict_reason for the prune path: echoes a reason and
+# returns 0 if deleting dst_file (whose source no longer exists in this run's
+# scan) would discard a change cw did not itself make. Returns 1 (safe to
+# prune) when dst_file is byte-identical to the recorded baseline (i.e.
+# nothing has touched it since cw last wrote it there).
+_agent_prune_conflict_reason() {
+    local baseline_file="$1"
+    local dst_file="$2"
+
+    if [ -f "$baseline_file" ] && cmp -s "$baseline_file" "$dst_file"; then
+        return 1
+    fi
+    if [ ! -f "$baseline_file" ]; then
+        echo "source removed and cw has no record of installing it (no baseline on file)"
+        return 0
+    fi
+    echo "source removed and destination diverges from cw's last-installed copy"
+    return 0
+}
+
+# _print_agent_prune_conflict <name> <dst_file> <reason>
+_print_agent_prune_conflict() {
+    local name="$1"
+    local dst_file="$2"
+    local reason="$3"
+
+    {
+        echo "ERROR: refusing to prune a modified agent spec."
+        echo ""
+        echo "  agent:               $name"
+        echo "  install destination: $dst_file"
+        echo "  reason:              $reason"
+        echo ""
+        echo "  To keep those changes:    re-add the source file to claude-workspace's"
+        echo "                            .claude/agents/, commit, and re-run."
+        echo "  To discard and prune it:  ./scripts/install-skills.sh --force"
+    } >&2
+}
+
 # ---------------------------------------------------------------------------
 # 2. Build the NEW manifest (what this run will install)
 # ---------------------------------------------------------------------------
@@ -288,6 +328,16 @@ fi
 prune_count=0
 pruned_names=()
 
+# Agents whose source disappeared AND whose destination diverges from the
+# recorded baseline (or has no baseline at all) — refused, not pruned (#1784
+# round 3). agent_prune_conflicts holds bare names for the summary print;
+# agent_prune_conflicts_entries holds the full "agents/<name>" manifest
+# paths so refused entries are carried forward into the manifest this run
+# writes, rather than becoming untracked orphans this same run's own prune
+# logic just deleted the safety net for.
+agent_prune_conflicts=()
+agent_prune_conflicts_entries=()
+
 if [ -f "$MANIFEST" ]; then
     while IFS= read -r old_entry || [ -n "$old_entry" ]; do
         [ -n "$old_entry" ] || continue
@@ -313,17 +363,39 @@ if [ -f "$MANIFEST" ]; then
             # INVARIANT header), or a broken symlink, so one branch covers
             # every shape a prior install could have left behind.
             if [ -e "$target" ] || [ -L "$target" ]; then
-                rm -rf "$target"
-                prune_count=$((prune_count + 1))
-                pruned_names+=("$old_entry")
-                # A pruned agent's baseline entry must go too, so a future
-                # re-add under the same filename doesn't inherit stale
-                # baseline state left over from before it was removed (#1784).
+                skip_prune=0
+                # Agents (unlike skills/commands, which are symlinks with no
+                # hand-edit risk in this ticket's scope) are plain files that
+                # can be hand-edited directly. Mirror the install-time
+                # overwrite-safety check: refuse to delete on divergence from
+                # the recorded baseline, unless --force is passed.
                 case "$old_entry" in
                     agents/*)
-                        rm -f "$AGENTS_BASELINE_DIR/${old_entry#agents/}"
+                        if [ "$FORCE" -eq 0 ]; then
+                            baseline_file="$AGENTS_BASELINE_DIR/${old_entry#agents/}"
+                            if reason="$(_agent_prune_conflict_reason "$baseline_file" "$target")"; then
+                                _print_agent_prune_conflict "${old_entry#agents/}" "$target" "$reason"
+                                agent_prune_conflicts+=("${old_entry#agents/}")
+                                agent_prune_conflicts_entries+=("$old_entry")
+                                skip_prune=1
+                            fi
+                        fi
                         ;;
                 esac
+
+                if [ "$skip_prune" -eq 0 ]; then
+                    rm -rf "$target"
+                    prune_count=$((prune_count + 1))
+                    pruned_names+=("$old_entry")
+                    # A pruned agent's baseline entry must go too, so a future
+                    # re-add under the same filename doesn't inherit stale
+                    # baseline state left over from before it was removed (#1784).
+                    case "$old_entry" in
+                        agents/*)
+                            rm -f "$AGENTS_BASELINE_DIR/${old_entry#agents/}"
+                            ;;
+                    esac
+                fi
             fi
         fi
     done < "$MANIFEST"
@@ -332,7 +404,21 @@ fi
 # ---------------------------------------------------------------------------
 # 4. Write the new manifest (overwrite)
 # ---------------------------------------------------------------------------
-printf '%s\n' "${new_entries[@]+"${new_entries[@]}"}" > "$MANIFEST"
+printf '%s\n' "${new_entries[@]+"${new_entries[@]}"}" "${agent_prune_conflicts_entries[@]+"${agent_prune_conflicts_entries[@]}"}" > "$MANIFEST"
+
+# Deferred abort, mirroring the agent_conflicts pattern above: the while
+# loop must run to completion first (so every legitimately-orphaned entry
+# elsewhere in $MANIFEST still prunes) and the manifest write above must
+# execute (so the carried-forward agent_prune_conflicts_entries persist)
+# before this exits non-zero.
+if [ "${#agent_prune_conflicts[@]}" -gt 0 ]; then
+    echo "" >&2
+    echo "ERROR: ${#agent_prune_conflicts[@]} orphaned agent(s) have hand-edited destinations and were not pruned:" >&2
+    for conflicted_name in "${agent_prune_conflicts[@]}"; do
+        echo "  - $conflicted_name" >&2
+    done
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # 5. Summary
