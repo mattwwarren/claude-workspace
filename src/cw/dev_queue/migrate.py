@@ -187,6 +187,13 @@ def _fill_salvage_no_sentinel_at_default(task_raw: dict[str, Any]) -> None:
         task_raw["salvage_no_sentinel_at"] = None
 
 
+def _fill_regressed_into_stage_default(task_raw: dict[str, Any]) -> None:
+    """Fill regressed_into_stage introduced in dev-queue schema v27
+    (GitHub #1794). Idempotent."""
+    if "regressed_into_stage" not in task_raw:
+        task_raw["regressed_into_stage"] = None
+
+
 def _fill_watched_prs_default(raw: dict[str, Any]) -> None:
     """Fill the top-level watched_prs list introduced in schema v15 (#1154).
 
@@ -228,6 +235,7 @@ def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
                 _fill_hold_finalize_default(task_raw)
                 _fill_attention_digest_buffered_default(task_raw)
                 _fill_salvage_no_sentinel_at_default(task_raw)
+                _fill_regressed_into_stage_default(task_raw)
     _fill_watched_prs_default(raw)
     raw["schema_version"] = DEV_QUEUE_SCHEMA_VERSION
     return raw

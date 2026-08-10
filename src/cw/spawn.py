@@ -47,7 +47,11 @@ _log = logging.getLogger(__name__)
 # Schema version for cw-context.json. Increment when the shape changes so
 # workers can detect whether they are reading a context written by an older cw.
 # v2: added `workspace_path` (#766 — forbidden main-checkout path for git guard).
-CW_CONTEXT_SCHEMA_VERSION = 2
+# v3: added `queue_metadata.regressed_into_stage` (#1794 — per-arrival signal to
+#     the impl-stage Pre-Stage Detector Guard that this IMPL entry was reached
+#     via a deliberate backward stage move, not a fresh dispatch or an ordinary
+#     forward advance).
+CW_CONTEXT_SCHEMA_VERSION = 3
 
 
 def build_disallowed_tools_arg(patterns: list[str]) -> list[str]:
@@ -401,6 +405,9 @@ def _write_hook_context(
                     "scope_hint": task.scope_hint,
                     "plan_source": task.plan_source,
                     "headless_timeout_override": task.headless_timeout_override,
+                    # #1794: Stage is a StrEnum, so json.dumps renders this as
+                    # the plain stage value (or null) with no .value call.
+                    "regressed_into_stage": task.regressed_into_stage,
                 },
                 "world_state_snapshot": {
                     "origin_main_sha_at_spawn": origin_sha,

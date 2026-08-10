@@ -322,6 +322,10 @@ def requeue_ticket(
             from_failed_applied = failed_ok
             _reset_for_same_stage_requeue(task)
             task.regress_attempts = 0
+            # #1794: a forward/same-stage bypass resolves any pending regress
+            # in the same lock, so the per-arrival marker must not survive to
+            # a later, unrelated stage entry.
+            task.regressed_into_stage = None
 
         to_stage = task.stage
         regress_attempts = task.regress_attempts if regressed else 0

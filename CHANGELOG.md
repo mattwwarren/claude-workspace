@@ -22,6 +22,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `INTEGRATION_OPENCODE_LIVE`) and nightly workflow (`nightly-opencode.yml`)
   pin the JSONL event shape against a real `opencode` CLI. Part of #1668.
 
+- **Per-arrival regress marker for the impl-guard staleness gate (#1794):**
+  `TicketTask.regressed_into_stage` records a fresh, per-arrival marker
+  whenever an operator sends a ticket back to Stage 2 with `requeue
+  --regress --stage impl`, so the Pre-Stage Detector Guard in
+  `auto-dev-impl.md` no longer short-circuits on HEAD's stale
+  impl-complete trailer and silently no-ops the send-back. The new
+  `check_impl_guard_staleness.py` deterministic gate script decides
+  whether the guard should honor newer tracker comments or an operator
+  regress, and a regress-marker verdict is now decoupled from a
+  comments-file load failure so a fetch error can no longer mask a real
+  regress.
+
 - **Producer-side evidence/line-range window reconciliation (#1792):**
   `_reconcile_evidence_window` repairs a codex-review finding's declared
   line window when it is a few lines short/long of its own evidence's true
