@@ -408,6 +408,10 @@ def _write_hook_context(
                     # #1794: Stage is a StrEnum, so json.dumps renders this as
                     # the plain stage value (or null) with no .value call.
                     "regressed_into_stage": task.regressed_into_stage,
+                    # #1730: sibling per-arrival marker -- true means this
+                    # re-entry may carry an operator send-back the review stage
+                    # must treat as a binding adjudication input.
+                    "pending_operator_comment": task.pending_operator_comment,
                 },
                 "world_state_snapshot": {
                     "origin_main_sha_at_spawn": origin_sha,

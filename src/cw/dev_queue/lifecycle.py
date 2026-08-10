@@ -577,6 +577,14 @@ def _stage_regress(task: TicketTask, target_stage: Stage) -> None:
     per-arrival marker distinct from the cumulative ``regress_attempts``,
     consumed and cleared by the next dispatch spawn (dispatch/claim.py) after
     it has been written into the worker's ``queue_metadata``.
+
+    Also stamps ``pending_operator_comment = True`` (GitHub #1730) -- the
+    sibling per-arrival marker saying this re-entry may carry an operator
+    send-back the reviewer must treat as binding. Stamped unconditionally here,
+    exactly like ``regressed_into_stage``; the stage gate lives at the
+    *consumption* site (``dispatch/claim.py`` clears it only at a REVIEW-stage
+    spawn), not at this shared stamp point, because Rule 5a's self-heal
+    regresses to IMPL and must not consume a marker meant for REVIEW.
     """
     old_stage = task.stage
     task.stage = target_stage
@@ -588,12 +596,18 @@ def _stage_regress(task: TicketTask, target_stage: Stage) -> None:
     # Each field is independently gated by its own precondition and consumed
     # exactly once by its own REVIEW-re-entry reader; neither write may
     # clobber the other's field. #1717 owns finalize_regress_branch_head
-    # (FINALIZE-origin only, gated below). #1730's pending-operator-comment
-    # marker, if/when it lands, must follow the identical shape: stamp here,
-    # consume-once elsewhere, no cross-clobber. The mandatory compose test
-    # (a re-entry that is simultaneously a same-branch-head repeat AND
-    # carries a pending operator send-back) is #1730's obligation to write,
-    # per the paired resolution comment on both tickets.
+    # (FINALIZE-origin only -- gated below, and it must be read BEFORE
+    # stage_base_ref is cleared). #1730 owns pending_operator_comment, which
+    # follows the identical shape with its gate at the *consumption* site
+    # instead: stamped on every regress origin here, cleared only at a
+    # REVIEW-stage spawn (dispatch/claim.py), because Rule 5a's self-heal
+    # regresses to IMPL and must not consume a marker meant for REVIEW.
+    # Both fields have now landed; the mandatory compose test -- a re-entry
+    # that is simultaneously a same-branch-head repeat AND carries a pending
+    # operator send-back -- is #1730's obligation as the ticket landing
+    # second, and lives in tests/test_dispatch.py's
+    # TestUnifiedReentryContractCompose per the paired resolution comment.
+    task.pending_operator_comment = True
     if old_stage == Stage.FINALIZE:
         task.finalize_regress_branch_head = task.stage_base_ref
     transition_task_status(task, QueueItemStatus.PENDING)

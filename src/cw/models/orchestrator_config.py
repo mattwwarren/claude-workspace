@@ -244,6 +244,15 @@ _DEFAULT_OPERATOR_EVENT_TYPES: frozenset[OrchestratorEventType] = frozenset(
         # already-live safety probe is attention-worthy, same rationale as
         # GATE_AUTO_APPROVED above.
         OrchestratorEventType.SSH_KEY_GATE_BYPASSED,
+        # GitHub #1730: a review-stage requeue proceeding with no operator-visible
+        # confirmation that the send-back comment actually reached the reviewer is
+        # a no-human-in-the-loop decision -- operator-attention-worthy, forwarded
+        # by default, same rationale as GATE_AUTO_APPROVED above (contrast
+        # CONCIERGE_RECOVERED, excluded as audit-only). No companion "delivery
+        # succeeded" event exists to pair this with (see #1730 Decisions item 4)
+        # -- this event is self-contained, not a correction to another forwarded
+        # signal.
+        OrchestratorEventType.REQUEUE_REVIEW_DELIVERY_DEGRADED,
     }
 )
 _DEFAULT_OPERATOR_TASK_TRANSITION_STATUSES: frozenset[QueueItemStatus] = frozenset(

@@ -209,6 +209,27 @@ class TicketTask(BaseModel):
     # stamped at the same _stage_regress seam under independent preconditions
     # (see the shared-seam comment there).
     finalize_regress_branch_head: str | None = None
+    # Per-arrival marker: raised to True by _stage_regress alongside
+    # regressed_into_stage above (same stamp point, same unconditional style),
+    # signalling that this re-entry followed a backward move and may therefore
+    # be carrying an operator send-back comment the reviewer must treat as a
+    # BINDING adjudication input rather than background context (GitHub #1730).
+    #
+    # Consumption timing deliberately DIVERGES from regressed_into_stage, which
+    # dispatch/claim.py clears at the very next spawn regardless of stage: this
+    # marker is cleared only at a spawn where task.stage == Stage.REVIEW. Rule
+    # 5a's FINALIZE self-heal (dispatch/routing.py) regresses to Stage.IMPL, not
+    # REVIEW, so an unconditional clear would consume-and-drop the marker at the
+    # IMPL spawn -- long before the task advances IMPL -> REVIEW, which is the
+    # only stage where it means anything.
+    #
+    # A plain bool suffices: unlike finalize_regress_branch_head directly above
+    # -- its sibling at the same _stage_regress seam, whose whole purpose is to
+    # carry a value forward for later comparison -- this marker carries no
+    # comparison data of its own. The comment *content* is delivered separately
+    # and unconditionally by the review stage's own live-fetch (both backends);
+    # this field only says "treat what you are about to read as elevated".
+    pending_operator_comment: bool = False
     # DEPRECATED — inert since the process-kill-timeout removal. Formerly the
     # per-ticket wall-clock budget override (#265); nothing consults it now.
     # Kept only so persisted dev-queue rows that carry the field keep loading.
