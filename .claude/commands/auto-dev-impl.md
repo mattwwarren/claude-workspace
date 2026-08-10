@@ -214,10 +214,9 @@ Stage 2 agent spawn:
   - **git diff --stat (vs fork point):** <paste verbatim — git diff --stat $FORK_POINT> (advisory — orchestrator re-runs live)
   - **git log --oneline (vs fork point):** <paste verbatim — git log --oneline $FORK_POINT..HEAD>
   - **git diff line count:** <total lines added + removed>
-  - **Mypy result (if Python touched):** <"pass" or paste errors>
-  - **Ruff result (if Python touched):** <"pass" or paste errors>
+  - **Quality gate results — one row per gate command** (report every command named in this session's quality-gate sentence as its own row — e.g. `ruff check` and `ruff format --check` are separate gates and MUST be separately reportable, never collapsed into a single "ruff" line): for each configured gate, report `<command>` → `pass` | `<exit code + error output>` | `not_run`. A gate you did not run MUST be reported `not_run` — never omitted, never folded into a sibling gate's result, and never reported `pass` on the strength of a different command.
   ```
-  Hallucinating or paraphrasing these is a discipline failure — the orchestrator parses them. Pasted output that contradicts the "done" claim (FAILED in test tail, non-empty mypy errors, empty diff) results in `impl_failed`.
+  Hallucinating or paraphrasing these is a discipline failure — the orchestrator parses them. Pasted output that contradicts the "done" claim (FAILED in test tail, non-empty mypy errors, empty diff) results in `impl_failed`. A completion report missing a row for any gate named in the session's quality-gate sentence is itself a discipline failure — same `impl_failed` disposition as a contradicted artifact.
 
 ### Step 2.5: Orchestrator Completion Gate
 
