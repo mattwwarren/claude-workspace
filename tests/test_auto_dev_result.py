@@ -281,7 +281,7 @@ def _no_op_payload() -> dict[str, Any]:
     }
 
 
-def _blocked_payload() -> dict[str, Any]:
+def _blocked_payload(blocker_reason: str = "impl_failed") -> dict[str, Any]:
     return {
         "schema_version": 1,
         "ticket_id": "GEN-7",
@@ -312,7 +312,7 @@ def _blocked_payload() -> dict[str, Any]:
         "friction_highlights": ["impl agent reported BLOCK"],
         "blocker": {
             "stage": "stage2_impl",
-            "reason": "impl_failed",
+            "reason": blocker_reason,
             "details": "tests failed twice",
         },
         "next_actions": [],
@@ -759,6 +759,32 @@ class TestInvariants:
         p["blocker"] = None
         with pytest.raises(ValidationError):
             AutoDevResult.model_validate(p)
+
+    def test_blocked_plan_scope_drift_round_trips_all_invariants(self) -> None:
+        """#1779: the Step 2.5 scope-conformance exit needs no schema change.
+
+        Characterization test — ``blocker.reason`` is an open enum (§4.2), so
+        ``plan_scope_drift`` must validate with zero parser/schema edits. Guards
+        against a future accidental tightening of ``reason`` into a Literal.
+        """
+        p = _blocked_payload(blocker_reason="plan_scope_drift")
+        p["blocker"]["details"] = (
+            "Step 2.5 gate 2: 17 files outside the plan's enumeration "
+            "(allowed 7). Extra: src/cw/a.py, src/cw/b.py, tests/test_c.py"
+        )
+
+        result = AutoDevResult.model_validate(p)
+
+        assert result.status == "blocked"
+        assert result.blocker is not None
+        assert result.blocker.reason == "plan_scope_drift"
+        assert result.blocker.stage == "stage2_impl"
+        assert "src/cw/a.py" in result.blocker.details
+        # Post-impl statuses must carry a real lines_actual (schema.py:718-734).
+        assert result.stage_reached == "stage2_impl"
+        assert result.scope.lines_actual is not None
+        # Not a FINALIZE-regress reason — the park is terminal for the operator.
+        assert "plan_scope_drift" not in FINALIZE_REGRESS_BLOCKER_REASONS
 
     def test_non_blocked_rejects_blocker(self) -> None:
         p = _shipped_payload()
