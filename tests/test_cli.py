@@ -8129,7 +8129,7 @@ class TestDevQueueApproveCli:
         ``_plan_is_reviewed`` reads) to ``None`` so ``approve_ticket``
         deterministically takes the "plan not yet quality-reviewed"
         re-queue branch, instead of shelling out to a real ``gh`` process.
-        Independently stubs ``_fetch_issue_comments`` at the ``crud``
+        Independently stubs ``fetch_issue_comments`` at the ``crud``
         import site -- the binding ``--post-marker``'s dedup check reads --
         to either an empty list (no marker yet) or a marker-bearing
         comment, per *marker_present*.
@@ -8177,7 +8177,7 @@ class TestDevQueueApproveCli:
             else []
         )
         monkeypatch.setattr(
-            "cw.cli.dev_queue.crud._fetch_issue_comments",
+            "cw.cli.dev_queue.crud.fetch_issue_comments",
             lambda *_args, **_kwargs: comments,
         )
 
@@ -8326,11 +8326,11 @@ class TestDevQueueApproveCli:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """_fetch_issue_comments returning None (gh fetch/parse error):
+        """fetch_issue_comments returning None (gh fetch/parse error):
         fail closed -- do not post a possible duplicate."""
         self._seed_plan_pending(tmp_config_dir, tmp_path, monkeypatch)
         monkeypatch.setattr(
-            "cw.cli.dev_queue.crud._fetch_issue_comments",
+            "cw.cli.dev_queue.crud.fetch_issue_comments",
             lambda *_args, **_kwargs: None,
         )
         with patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock:
@@ -8363,7 +8363,7 @@ class TestDevQueueApproveCli:
         #1269/#1279, now on the read side (GitHub #1419 review)."""
         self._seed_plan_pending(tmp_config_dir, tmp_path, monkeypatch)
         with (
-            patch("cw.cli.dev_queue.crud._fetch_issue_comments") as fetch_mock,
+            patch("cw.cli.dev_queue.crud.fetch_issue_comments") as fetch_mock,
             patch("cw.cli.dev_queue.crud.post_issue_comment") as post_mock,
         ):
             fetch_mock.return_value = []

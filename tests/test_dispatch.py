@@ -2003,6 +2003,63 @@ class TestDispatchTickSpawnErrors:
         assert task.regressed_into_stage is None
         assert task.regress_attempts == 1  # cumulative counter untouched
 
+    def test_successful_review_spawn_clears_pending_operator_comment(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """#1730: a REVIEW-stage spawn has materialized the marker into the
+        worker's queue_metadata, so the marker is consumed and cleared."""
+        from cw.models import Stage
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-1730R",
+                client="test-client",
+                stage=Stage.REVIEW,
+                pending_operator_comment=True,
+            )
+        )
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
+
+        assert spawned == 1
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.RUNNING
+        assert task.pending_operator_comment is False
+
+    def test_successful_impl_spawn_does_not_clear_pending_operator_comment(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """#1730: the clear is stage-gated — a non-REVIEW spawn (e.g. Rule 5a's
+        self-heal regress into IMPL) must NOT consume the marker, or it would be
+        gone long before the task advances IMPL -> REVIEW where it is useful."""
+        from cw.models import Stage
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-1730I",
+                client="test-client",
+                stage=Stage.IMPL,
+                pending_operator_comment=True,
+            )
+        )
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
+
+        assert spawned == 1
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.RUNNING
+        assert task.pending_operator_comment is True
+
     def test_unrelated_revert_preserves_existing_hook_context_conflict_stamp(
         self,
         tmp_dispatch_dirs: Path,

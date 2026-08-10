@@ -633,6 +633,40 @@ class TestBuildReviewerPrompt:
         assert "src/cw/foo.py (core) — why" in prompt
         assert "## Diff" in prompt
 
+    def test_build_reviewer_prompt_renders_comments_section(self) -> None:
+        """#1730: operator comments render as their own section, with the
+        elevated-priority banner gated on the pending marker."""
+        prompt = _build_reviewer_prompt(
+            "SysAdmin Reviewer",
+            agent_spec_text="SPEC",
+            diff=_make_diff(),
+            changed_files=["src/cw/foo.py"],
+            plan_text=None,
+            ticket_text=None,
+            project_rubrics=None,
+            repo_policy_section=None,
+            sensitive_hits=[],
+            operator_comments_text="FOO",
+        )
+        assert "## Ticket Comments (live-fetched, chronological)" in prompt
+        assert "FOO" in prompt
+        assert "Pending Operator Send-Back" not in prompt
+
+        banner_prompt = _build_reviewer_prompt(
+            "SysAdmin Reviewer",
+            agent_spec_text="SPEC",
+            diff=_make_diff(),
+            changed_files=["src/cw/foo.py"],
+            plan_text=None,
+            ticket_text=None,
+            project_rubrics=None,
+            repo_policy_section=None,
+            sensitive_hits=[],
+            operator_comments_text="FOO",
+            pending_operator_comment=True,
+        )
+        assert "Pending Operator Send-Back" in banner_prompt
+
     def test_optional_sections_absent(self) -> None:
         prompt = _build_reviewer_prompt(
             "SysAdmin Reviewer",
@@ -645,6 +679,7 @@ class TestBuildReviewerPrompt:
             repo_policy_section=None,
             sensitive_hits=[],
         )
+        assert "## Ticket Comments" not in prompt
         assert "## Approved Plan" not in prompt
         assert "## Ticket Context" not in prompt
         assert "## Project Rubrics" not in prompt
@@ -1210,6 +1245,134 @@ class TestPrepareReviewPass:
             ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
         ).strip()
         assert prepared.reviewed_sha == head
+
+    def _repo_with_change(
+        self, make_git_repo: Callable[[str], Path], name: str, tracker: str | None
+    ) -> Path:
+        """A feature-branch repo with one python change and a tracker config."""
+        repo = make_git_repo(name)
+        _git(repo, "checkout", "-b", "feature")
+        (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
+        _git(repo, "add", "mod.py")
+        _git(repo, "commit", "-m", "add mod.py")
+        if tracker is not None:
+            _write(
+                repo / ".claude" / "project-config.yaml",
+                f"tracking:\n  primary:\n    system: {tracker}\n",
+            )
+        return repo
+
+    def test_prepare_review_pass_includes_live_operator_comment_in_prompt(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#1730: the codex backend live-fetches ticket comments and inlines
+        them — before this, only .cw/context.json's title/body ever reached it."""
+        repo = self._repo_with_change(make_git_repo, "wt-1730-comments", "github-issues")
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments",
+            lambda *_a, **_kw: [
+                {
+                    "author": {"login": "mattwwarren"},
+                    "createdAt": "2026-08-10T00:00:00Z",
+                    "body": "SENDBACK-MARKER-1730",
+                }
+            ],
+        )
+
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-1730-comments",
+        )
+
+        assert prepared.roles
+        for role in prepared.roles:
+            assert "SENDBACK-MARKER-1730" in prepared.prompts_by_role[role]
+
+    def test_prepare_review_pass_omits_comments_when_tracker_not_github(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression guard: a non-github tracker has no fetch op here, so no
+        comment section is rendered and no gh call is attempted."""
+        repo = self._repo_with_change(make_git_repo, "wt-1730-linear", "linear")
+
+        def _fail_if_called(*_a: object, **_kw: object) -> None:
+            msg = "fetch_issue_comments must not run for a non-github tracker"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments", _fail_if_called
+        )
+
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-1730-linear",
+        )
+
+        for role in prepared.roles:
+            assert "## Ticket Comments" not in prepared.prompts_by_role[role]
+
+    def test_prepare_review_pass_renders_pending_operator_comment_banner(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#1730: queue_metadata.pending_operator_comment=true elevates the
+        comments to a binding-adjudication banner."""
+        repo = self._repo_with_change(make_git_repo, "wt-1730-banner", "github-issues")
+        _write(
+            repo / ".cw" / "context.json",
+            json.dumps({"queue_metadata": {"pending_operator_comment": True}}),
+        )
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments",
+            lambda *_a, **_kw: [{"body": "SENDBACK-MARKER-1730"}],
+        )
+
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-1730-banner",
+        )
+
+        assert prepared.roles
+        for role in prepared.roles:
+            assert "Pending Operator Send-Back" in prepared.prompts_by_role[role]
+
+    def test_prepare_review_pass_omits_banner_when_marker_absent_or_false(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression guard: comments still render, but without the banner."""
+        repo = self._repo_with_change(
+            make_git_repo, "wt-1730-no-banner", "github-issues"
+        )
+        _write(
+            repo / ".cw" / "context.json",
+            json.dumps({"queue_metadata": {"pending_operator_comment": False}}),
+        )
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments",
+            lambda *_a, **_kw: [{"body": "SENDBACK-MARKER-1730"}],
+        )
+
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-1730-no-banner",
+        )
+
+        assert prepared.roles
+        for role in prepared.roles:
+            prompt = prepared.prompts_by_role[role]
+            assert "SENDBACK-MARKER-1730" in prompt
+            assert "Pending Operator Send-Back" not in prompt
 
     def test_capable_probe_threads_into_every_role_prompt(
         self, make_git_repo: Callable[[str], Path]

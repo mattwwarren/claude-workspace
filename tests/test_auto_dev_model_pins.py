@@ -39,6 +39,27 @@ def test_plan_step1f4_revision_agent_pins_sonnet() -> None:
     assert 'Re-spawn the **Plan** agent (`model: "sonnet"`)' in content
 
 
+def test_review_orientation_states_comments_are_live_not_cached() -> None:
+    """#1730: Stage 3 must re-fetch comments, mirroring auto-dev-impl.md's own
+    "live, not cached" convention — a cached array can predate the send-back."""
+    content = _cmd("auto-dev-review.md")
+    assert "Comments are live, not cached (#1730)." in content
+
+
+def test_review_business_context_bullet_marks_comments_binding() -> None:
+    """#1730: the Business Context comments bullet must flag operator comments
+    as a binding adjudication input, not passive background."""
+    content = _cmd("auto-dev-review.md")
+    assert "binding adjudication input" in content
+
+
+def test_review_checkpoint3a_references_pending_operator_comment_marker() -> None:
+    """#1730: Checkpoint 3a must name the queue_metadata marker that elevates
+    the live-fetched comments."""
+    content = _cmd("auto-dev-review.md")
+    assert "queue_metadata.pending_operator_comment" in content
+
+
 def test_impl_spawn_heading_announces_scope_based_model() -> None:
     """Impl heading announces scope-resolved $IMPL_MODEL."""
     content = _cmd("auto-dev-impl.md")

@@ -6288,6 +6288,241 @@ class TestRequeueTicket:
 
 
 # ---------------------------------------------------------------------------
+# TestRequeueReviewDeliveryDegrade — #1730 degrade-loudly, never raise
+# ---------------------------------------------------------------------------
+
+_SYNTHETIC_BACKEND = "opencode"
+
+
+def _stub_review_backend(
+    monkeypatch: pytest.MonkeyPatch, backend: str, tracker: str | None
+) -> None:
+    """Pin the REVIEW-stage backend/tracker _review_reentry_deliverable resolves.
+
+    Patched at the ORIGIN modules (``cw.executor`` / ``cw.tracker``), not at
+    ``cw.dev_queue.requeue``: the helper imports both function-locally on every
+    call, so ``cw.dev_queue.requeue`` has no module attribute of either name to
+    patch and a patch there would silently no-op (#1730 plan, Phase 1 item 2).
+    """
+    from cw.models import StageExecutorConfig
+
+    monkeypatch.setattr(
+        "cw.executor.resolve_executor_config",
+        lambda *_a, **_kw: StageExecutorConfig(backend=backend),
+    )
+    monkeypatch.setattr("cw.tracker.resolve_tracker", lambda *_a, **_kw: tracker)
+
+
+class TestRequeueReviewDeliveryDegrade:
+    """A REVIEW-stage requeue that cannot deliver operator comments degrades
+    loudly (event) and proceeds — it never raises (#1730, comment 6 A2)."""
+
+    def test_requeue_into_review_with_undeliverable_backend_degrades_not_raises(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        _stub_review_backend(monkeypatch, _SYNTHETIC_BACKEND, "github-issues")
+        events = capture_events(
+            "cw.dev_queue.requeue",
+            OrchestratorEventType.REQUEUE_REVIEW_DELIVERY_DEGRADED,
+        )
+        task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess-degrade-1")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket("GEN-500", "genhealth")
+
+        assert result["to_stage"] == "review"
+        assert len(events) == 1
+        _etype, payload, corr = events[0]
+        assert corr == "GEN-500"
+        assert _SYNTHETIC_BACKEND in str(payload["reason"])
+        assert payload["backend"] == _SYNTHETIC_BACKEND
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.status == QueueItemStatus.PENDING
+
+    def test_requeue_into_review_with_codex_backend_and_non_github_tracker_degrades(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """codex + a non-github tracker cannot deliver comments — degrade, and
+        thread the resolved backend/tracker verbatim into the payload."""
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        _stub_review_backend(monkeypatch, "codex", "linear")
+        events = capture_events(
+            "cw.dev_queue.requeue",
+            OrchestratorEventType.REQUEUE_REVIEW_DELIVERY_DEGRADED,
+        )
+        task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess-degrade-2")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket("GEN-500", "genhealth")
+
+        assert result["to_stage"] == "review"
+        assert len(events) == 1
+        _etype, payload, _corr = events[0]
+        assert payload["backend"] == "codex"
+        assert payload["tracker"] == "linear"
+        assert "github-issues" in str(payload["reason"])
+
+    def test_requeue_into_review_with_codex_backend_and_github_tracker_no_degrade(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """Regression guard: codex + github-issues CAN deliver — no event."""
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        _stub_review_backend(monkeypatch, "codex", "github-issues")
+        events = capture_events(
+            "cw.dev_queue.requeue",
+            OrchestratorEventType.REQUEUE_REVIEW_DELIVERY_DEGRADED,
+        )
+        task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess-degrade-3")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket("GEN-500", "genhealth")
+
+        assert result["to_stage"] == "review"
+        assert events == []
+
+    def test_requeue_into_review_with_claude_native_backend_never_degrades(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """claude-native inlines comments into every reviewer prompt regardless
+        of tracker — it never consults the tracker to decide deliverability."""
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        _stub_review_backend(monkeypatch, "claude-native", None)
+        events = capture_events(
+            "cw.dev_queue.requeue",
+            OrchestratorEventType.REQUEUE_REVIEW_DELIVERY_DEGRADED,
+        )
+        task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess-degrade-4")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket("GEN-500", "genhealth")
+
+        assert result["to_stage"] == "review"
+        assert events == []
+
+    def test_requeue_forward_bypass_into_review_also_checked(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """The check keys off the RESOLVED to_stage, so a forward bypass
+        plan -> review is covered too, not only a same-stage requeue."""
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        _stub_review_backend(monkeypatch, "codex", "linear")
+        events = capture_events(
+            "cw.dev_queue.requeue",
+            OrchestratorEventType.REQUEUE_REVIEW_DELIVERY_DEGRADED,
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-degrade-5")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket("GEN-500", "genhealth", stage_override="review")
+
+        assert result["to_stage"] == "review"
+        assert len(events) == 1
+
+    def test_requeue_regress_into_review_from_finalize_also_checked(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """A backward --regress finalize -> review is covered too."""
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        _stub_review_backend(monkeypatch, "codex", "linear")
+        events = capture_events(
+            "cw.dev_queue.requeue",
+            OrchestratorEventType.REQUEUE_REVIEW_DELIVERY_DEGRADED,
+        )
+        task = _make_blocked_task(stage=Stage.FINALIZE, session_id="sess-degrade-6")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        result = requeue_ticket(
+            "GEN-500", "genhealth", stage_override="review", allow_regress=True
+        )
+
+        assert result["to_stage"] == "review"
+        assert result["regressed"] is True
+        assert len(events) == 1
+
+    def test_requeue_to_impl_or_finalize_unaffected(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """Non-REVIEW targets never run the delivery check, whatever the
+        backend resolves to — no event, no exception."""
+        from cw.dev_queue import requeue_ticket
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        _stub_review_backend(monkeypatch, _SYNTHETIC_BACKEND, "linear")
+        stub_fetch_plan(
+            monkeypatch,
+            plan_body(),
+            target="cw.dev_queue.requeue.fetch_approved_plan_comment",
+        )
+        events = capture_events(
+            "cw.dev_queue.requeue",
+            OrchestratorEventType.REQUEUE_REVIEW_DELIVERY_DEGRADED,
+        )
+        task_impl = _make_blocked_task(
+            ticket_id="GEN-510", stage=Stage.PLAN, session_id="sess-degrade-7a"
+        )
+        save_dev_queue(DevQueueStore(tasks=[task_impl]))
+        assert (
+            requeue_ticket("GEN-510", "genhealth", stage_override="impl")["to_stage"]
+            == "impl"
+        )
+
+        task_fin = _make_blocked_task(
+            ticket_id="GEN-511", stage=Stage.PLAN, session_id="sess-degrade-7b"
+        )
+        save_dev_queue(DevQueueStore(tasks=[task_fin]))
+        assert (
+            requeue_ticket("GEN-511", "genhealth", stage_override="finalize")[
+                "to_stage"
+            ]
+            == "finalize"
+        )
+
+        assert events == []
+
+
+# ---------------------------------------------------------------------------
 # TestSelectHeldTickets / TestDrainHeldTickets — RFC 0011 A4 (#1161)
 # ---------------------------------------------------------------------------
 
@@ -8257,6 +8492,24 @@ class TestStageRegress:
         assert task.regressed_into_stage is None
         _stage_regress(task, Stage.IMPL)
         assert task.regressed_into_stage == Stage.IMPL
+
+    def test_sets_pending_operator_comment(self) -> None:
+        """#1730: the shared stamp point also raises the pending-send-back marker."""
+        from cw.dev_queue import _stage_regress
+
+        task = _make_stage_task(stage=Stage.FINALIZE)
+        assert task.pending_operator_comment is False
+        _stage_regress(task, Stage.IMPL)
+        assert task.pending_operator_comment is True
+
+    def test_pending_operator_comment_stamped_regardless_of_target_stage(self) -> None:
+        """#1730: the stamp is unconditional (like regressed_into_stage) -- the
+        stage gate lives at the CONSUMPTION site (dispatch/claim.py), not here."""
+        from cw.dev_queue import _stage_regress
+
+        task = _make_stage_task(stage=Stage.REVIEW)
+        _stage_regress(task, Stage.PLAN)
+        assert task.pending_operator_comment is True
 
     def test_regress_attempts_sticky_but_regressed_into_stage_is_not(self) -> None:
         """#1794 R1: regress_attempts is cumulative/sticky across a ticket's life

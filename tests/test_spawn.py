@@ -2039,6 +2039,36 @@ class TestWriteHookContextTaskFields:
         # Stage is a StrEnum, so json.dumps renders the plain stage value.
         assert context["queue_metadata"]["regressed_into_stage"] == "impl"
 
+    def test_pending_operator_comment_threaded_into_queue_metadata(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """#1730: the pending-send-back marker must reach the worker's
+        queue_metadata, where auto-dev-review.md and codex_review read it."""
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-1730-marker")
+        task = _make_pending_task()
+        task.pending_operator_comment = True
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev-review GEN-1730 --headless",
+            label="auto-dev/GEN-1730",
+            native_daemon=daemon,
+            ticket_id="GEN-1730",
+            headless=True,
+            task=task,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        assert context["queue_metadata"]["pending_operator_comment"] is True
+
     def test_git_failure_sets_origin_sha_null(
         self,
         tmp_config_dir: Path,
