@@ -556,3 +556,246 @@ class TestReviewConsolidateWorktreeOption:
         verdict = json.loads(result.output)
         assert verdict["rejected"][0]["reason"] == "unknown_file"
         assert verdict["blocking"] is False
+
+
+def _verdict_payload(*accepted: dict[str, Any], **overrides: object) -> dict[str, Any]:
+    """A raw ``ReviewVerdict`` dict for the #1805 adjudicate/verify-fixes CLI."""
+    must_fix = [
+        af["finding"]
+        for af in accepted
+        if af["finding"]["severity"] == "MUST_FIX"
+        and af.get("disposition", "fixed") != "deferred"
+    ]
+    payload: dict[str, Any] = {
+        "blocking": bool(must_fix),
+        "must_fix": must_fix,
+        "reviewed_sha": "abc1234",
+        "accepted": list(accepted),
+        "review": {
+            "must_fix_initial": len(must_fix),
+            "should_fix": 0,
+            "fix_cycles_used": 0,
+            "deferred": 0,
+            "agents_run": 1,
+        },
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _accepted_payload(**overrides: object) -> dict[str, Any]:
+    """A raw ``AcceptedFinding`` dict wrapping ``_finding_kwargs``."""
+    finding_overrides = {
+        k: v
+        for k, v in overrides.items()
+        if k not in {"disposition", "disposition_detail", "reviewers"}
+    }
+    payload: dict[str, Any] = {
+        "finding": _finding_kwargs(**finding_overrides),
+        "reviewers": overrides.get("reviewers", ["Code Quality Reviewer"]),
+    }
+    for key in ("disposition", "disposition_detail"):
+        if key in overrides:
+            payload[key] = overrides[key]
+    return payload
+
+
+class TestReviewAdjudicateCommand:
+    """#1805: ``cw review adjudicate`` stamps real adjudication outcomes."""
+
+    def test_defer_outcome_stamps_disposition_and_recomputes_verdict(
+        self, runner: CliRunner
+    ) -> None:
+        accepted = _accepted_payload(line_start=2, line_end=2)
+        payload = {
+            "verdict": _verdict_payload(accepted),
+            "adjudications": [
+                {
+                    "severity": "MUST_FIX",
+                    "file": "src/cw/foo.py",
+                    "line_start": 2,
+                    "line_end": 2,
+                    "evidence": "def broken():",
+                    "summary": "Bug here",
+                    "outcome": "defer",
+                    "rationale": "out of scope for this ticket",
+                }
+            ],
+        }
+        result = runner.invoke(
+            main, ["review", "adjudicate", "-"], input=json.dumps(payload)
+        )
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert verdict["accepted"][0]["disposition"] == "deferred"
+        assert (
+            verdict["accepted"][0]["disposition_detail"]
+            == "out of scope for this ticket"
+        )
+        assert verdict["blocking"] is False
+        assert verdict["must_fix"] == []
+        assert verdict["review"]["deferred"] == 1
+        assert verdict["unmatched_adjudication_count"] == 0
+
+    def test_unmatched_entry_surfaces_count_in_printed_json(
+        self, runner: CliRunner
+    ) -> None:
+        accepted = _accepted_payload(line_start=2, line_end=2)
+        payload = {
+            "verdict": _verdict_payload(accepted),
+            "adjudications": [
+                {
+                    "severity": "MUST_FIX",
+                    "file": "src/cw/foo.py",
+                    "line_start": 99,
+                    "line_end": 99,
+                    "outcome": "reject",
+                    "rationale": "stale anchor",
+                }
+            ],
+        }
+        result = runner.invoke(
+            main, ["review", "adjudicate", "-"], input=json.dumps(payload)
+        )
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert verdict["unmatched_adjudication_count"] == 1
+        assert verdict["accepted"][0]["disposition"] == "dropped"
+        assert verdict["blocking"] is True
+
+    def test_deferred_findings_out_writes_documented_block(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        out = tmp_path / "nested" / "deferred-findings.md"
+        accepted = _accepted_payload(line_start=2, line_end=2)
+        payload = {
+            "verdict": _verdict_payload(accepted),
+            "adjudications": [
+                {
+                    "severity": "MUST_FIX",
+                    "file": "src/cw/foo.py",
+                    "line_start": 2,
+                    "line_end": 2,
+                    "evidence": "def broken():",
+                    "summary": "Bug here",
+                    "outcome": "defer",
+                    "rationale": "handle when scale demands",
+                }
+            ],
+        }
+        result = runner.invoke(
+            main,
+            ["review", "adjudicate", "-", "--deferred-findings-out", str(out)],
+            input=json.dumps(payload),
+        )
+        assert result.exit_code == 0, result.output
+        written = out.read_text()
+        assert written.startswith("# Deferred Review Findings\n")
+        assert "<!-- DEFERRED-REVIEW-FINDINGS" in written
+        assert '  rationale: "handle when scale demands"' in written
+
+    def test_deferred_findings_out_skips_write_when_all_fixed(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        out = tmp_path / "deferred-findings.md"
+        accepted = _accepted_payload(line_start=2, line_end=2)
+        payload = {
+            "verdict": _verdict_payload(accepted),
+            "adjudications": [
+                {
+                    "severity": "MUST_FIX",
+                    "file": "src/cw/foo.py",
+                    "line_start": 2,
+                    "line_end": 2,
+                    "evidence": "def broken():",
+                    "summary": "Bug here",
+                    "outcome": "fix",
+                }
+            ],
+        }
+        result = runner.invoke(
+            main,
+            ["review", "adjudicate", "-", "--deferred-findings-out", str(out)],
+            input=json.dumps(payload),
+        )
+        assert result.exit_code == 0, result.output
+        assert not out.exists()
+
+    def test_malformed_payload_prints_field_path_errors(
+        self, runner: CliRunner
+    ) -> None:
+        payload = {
+            "verdict": _verdict_payload(_accepted_payload()),
+            "adjudications": [
+                {
+                    "severity": "CRITICAL",
+                    "file": "src/cw/foo.py",
+                    "outcome": "reject",
+                    "rationale": "why",
+                }
+            ],
+        }
+        result = runner.invoke(
+            main, ["review", "adjudicate", "-"], input=json.dumps(payload)
+        )
+        assert result.exit_code == 1
+        assert "adjudications.0.severity" in result.output
+
+    def test_path_argument_reads_from_file(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        payload = {
+            "verdict": _verdict_payload(_accepted_payload(line_start=2, line_end=2)),
+            "adjudications": [],
+        }
+        payload_file = tmp_path / "req.json"
+        payload_file.write_text(json.dumps(payload))
+        result = runner.invoke(main, ["review", "adjudicate", str(payload_file)])
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert verdict["accepted"][0]["disposition"] == "dropped"
+
+
+class TestReviewVerifyFixesCommand:
+    """#1805: ``cw review verify-fixes`` downgrades unverified 'fixed' claims."""
+
+    def test_untouched_fixed_finding_is_downgraded(self, runner: CliRunner) -> None:
+        accepted = _accepted_payload(
+            file="src/cw/untouched.py", line_start=2, line_end=2
+        )
+        payload = {
+            "verdict": _verdict_payload(accepted),
+            "diff": _CONSOLIDATE_DIFF,
+        }
+        result = runner.invoke(
+            main, ["review", "verify-fixes", "-"], input=json.dumps(payload)
+        )
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert verdict["accepted"][0]["disposition"] == "dropped"
+        assert "src/cw/untouched.py" in verdict["accepted"][0]["disposition_detail"]
+
+    def test_touched_fixed_finding_is_retained(self, runner: CliRunner) -> None:
+        accepted = _accepted_payload(line_start=2, line_end=2)
+        payload = {
+            "verdict": _verdict_payload(accepted),
+            "diff": _CONSOLIDATE_DIFF,
+        }
+        result = runner.invoke(
+            main, ["review", "verify-fixes", "-"], input=json.dumps(payload)
+        )
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert verdict["accepted"][0]["disposition"] == "fixed"
+        assert verdict["accepted"][0]["disposition_detail"] == ""
+
+    def test_malformed_payload_prints_field_path_errors(
+        self, runner: CliRunner
+    ) -> None:
+        result = runner.invoke(
+            main,
+            ["review", "verify-fixes", "-"],
+            input=json.dumps({"diff": _CONSOLIDATE_DIFF}),
+        )
+        assert result.exit_code == 1
+        assert "verdict" in result.output
