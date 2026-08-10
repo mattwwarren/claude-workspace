@@ -225,22 +225,6 @@ if [ -d "$AGENTS_SRC" ]; then
     done
 fi
 
-# Deferred abort: must happen here, before the skills loop, the manifest
-# write, and (critically) the prune step below. A conflicting agent is
-# deliberately withheld from new_entries above so its destination is left
-# untouched — but the prune step treats any old-manifest entry absent from
-# new_entries as an orphan and deletes it. Continuing past this point with a
-# conflict pending would make this run's own prune logic delete the very
-# hand-edited file this feature exists to protect.
-if [ "${#agent_conflicts[@]}" -gt 0 ]; then
-    echo "" >&2
-    echo "ERROR: ${#agent_conflicts[@]} agent(s) have hand-edited destinations and were not installed:" >&2
-    for conflicted_name in "${agent_conflicts[@]}"; do
-        echo "  - $conflicted_name" >&2
-    done
-    exit 1
-fi
-
 skill_count=0
 if [ -d "$SKILLS_SRC" ]; then
     for src_dir in "$SKILLS_SRC"/*/; do
@@ -277,6 +261,25 @@ if [ -d "$SKILLS_SRC" ]; then
         new_entries+=("skills/$skill_name")
         skill_count=$((skill_count + 1))
     done
+fi
+
+# Deferred abort: must happen here, after the skills loop but before the
+# manifest write and (critically) the prune step below. A conflicting agent
+# is deliberately withheld from new_entries above so its destination is left
+# untouched — but the prune step treats any old-manifest entry absent from
+# new_entries as an orphan and deletes it. Continuing past this point with a
+# conflict pending would make this run's own prune logic delete the very
+# hand-edited file this feature exists to protect. Landing this check after
+# the skills loop (rather than before it, as originally shipped) means a
+# conflicting agent no longer prevents unrelated commands/skills from
+# installing on the same run.
+if [ "${#agent_conflicts[@]}" -gt 0 ]; then
+    echo "" >&2
+    echo "ERROR: ${#agent_conflicts[@]} agent(s) have hand-edited destinations and were not installed:" >&2
+    for conflicted_name in "${agent_conflicts[@]}"; do
+        echo "  - $conflicted_name" >&2
+    done
+    exit 1
 fi
 
 # ---------------------------------------------------------------------------
