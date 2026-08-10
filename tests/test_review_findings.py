@@ -180,6 +180,280 @@ def _pr1729_captured_diff() -> CapturedDiff:
     )
 
 
+# -- #1792 fixtures: real #1784 diff (scripts/install-skills.sh) -----------
+#
+# Real diff captured via `git diff 132e8fd6^ 132e8fd6 --
+# scripts/install-skills.sh` -- this repo's own commit implementing #1784.
+# No diagnostics artifact for the original mechanically-rejected reviewer
+# finding survived on this machine (unlike #1729's), so -- unlike
+# _PR1729_REJECTED_FINDING_KWARGS, which is quoted verbatim from one -- the
+# Finding objects the tests below build are test-authored, not captured.
+# The CapturedDiff substrate they're checked against is NOT invented,
+# though: it's parsed by the real, unmodified _parse_unified_diff from this
+# real merged diff, so the added-line vs hunk-context-line split the tests
+# rely on (verified below: lines 235-243 are diff-added, 244-245 are
+# unchanged hunk-context) is genuine, not constructed by hand the way
+# _make_diff's always-equal file_line_text/file_window_text would be.
+# Built via "\n".join([...]) of individual repr'd line literals, NOT a
+# triple-quoted block: several diff context lines are a bare " " (blank
+# source line, single-space context marker), which a triple-quoted literal
+# risks silently losing to editor/tool trailing-whitespace trimming --
+# byte-fidelity to the real diff matters here (the added-line/hunk-context
+# split several tests below depend on), so each line is its own quoted
+# string, immune to end-of-line trimming.
+_PR1784_INSTALL_SKILLS_DIFF = "\n".join(
+    [
+        'diff --git a/scripts/install-skills.sh b/scripts/install-skills.sh',
+        'index d7207ec0..a39dee95 100755',
+        '--- a/scripts/install-skills.sh',
+        '+++ b/scripts/install-skills.sh',
+        '@@ -18,12 +18,16 @@',
+        ' #   above still holds — an agent that exists only in global-claude never enters',
+        ' #   this manifest, so it is never removed by cw.',
+        ' #',
+        '-#   Overwrite hazard: `cp` here is unconditional, with no diff/staleness check',
+        '-#   against the destination.  If an agent is hand-edited directly in',
+        "-#   global-claude (the canonical source) after this repo's .claude/agents/",
+        '-#   copy was last refreshed, the next install run silently clobbers that edit',
+        "-#   back to the stale cw copy.  Re-import from global-claude into this repo's",
+        "-#   .claude/agents/ before running install if you've been editing there.",
+        '+#   Overwrite safety (#1784): a baseline shadow-copy store at',
+        '+#   ~/.claude/.cw-agents-baseline/ records the exact content cw itself last',
+        '+#   wrote for each installed agent.  On each run, before copying an agent',
+        "+#   file: if the destination doesn't exist yet, or matches the source, or",
+        '+#   matches the recorded baseline, the copy proceeds normally (this also',
+        '+#   covers the ordinary "cw\'s source legitimately changed" case with zero',
+        '+#   added friction).  Otherwise the destination has been hand-edited (or has',
+        '+#   unknown provenance, e.g. no baseline was ever recorded) and the script',
+        '+#   refuses to overwrite it, printing the source/destination paths and',
+        '+#   exiting non-zero.  Pass --force to overwrite anyway.',
+        ' #',
+        ' # PORTABILITY:',
+        ' #   Targets bash 3.2 (macOS /bin/bash) as well as modern bash on Linux.  Do not',
+        '@@ -32,6 +36,20 @@',
+        ' #   `set -u` errors on a bare "${arr[@]}" when the array is empty under 3.2.',
+        ' set -euo pipefail',
+        ' ',
+        '+# --force bypasses the agent overwrite-safety check below (#1784), matching',
+        '+# the repo-wide --force convention (cli/sessions.py, cli/spawn.py,',
+        '+# worktree_gc.py). No other flags are accepted.',
+        '+FORCE=0',
+        '+for arg in "$@"; do',
+        '+    case "$arg" in',
+        '+        --force) FORCE=1 ;;',
+        '+        *)',
+        '+            echo "Error: unknown argument: $arg" >&2',
+        '+            exit 1',
+        '+            ;;',
+        '+    esac',
+        '+done',
+        '+',
+        ' SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
+        ' PROJECT_DIR="$(dirname "$SCRIPT_DIR")"',
+        ' ',
+        '@@ -86,6 +104,15 @@ SKILLS_DST="$CLAUDE_HOME/skills"',
+        ' AGENTS_DST="$CLAUDE_HOME/agents"',
+        ' MANIFEST="$CLAUDE_HOME/.cw-skills-manifest"',
+        ' ',
+        '+# Baseline shadow-copy store for agent overwrite-safety (#1784): one copy per',
+        '+# installed agent file, holding the exact content cw itself last wrote there.',
+        '+# This is what lets the agent-copy loop below tell "cw\'s own source legitimately',
+        '+# changed" apart from "something else edited the destination directly" —',
+        "+# mtime doesn't work (plain cp resets mtime to now on every write), and git",
+        "+# status doesn't work either (a normal cw install intentionally leaves",
+        "+# global-claude's copy uncommitted, per the NOTE ON AGENTS above).",
+        '+AGENTS_BASELINE_DIR="$CLAUDE_HOME/.cw-agents-baseline"',
+        '+',
+        ' # ---------------------------------------------------------------------------',
+        ' # 1. Validate source directories',
+        ' # ---------------------------------------------------------------------------',
+        '@@ -96,7 +123,55 @@ fi',
+        ' ',
+        ' # -p is a no-op when the path is an existing dir OR a symlink to one, so this is',
+        ' # safe for the agents symlink-into-global-claude layout described above.',
+        '-mkdir -p "$COMMANDS_DST" "$SKILLS_DST" "$AGENTS_DST"',
+        '+mkdir -p "$COMMANDS_DST" "$SKILLS_DST" "$AGENTS_DST" "$AGENTS_BASELINE_DIR"',
+        '+',
+        '+# _agent_conflict_reason <src_file> <dst_file> <baseline_file>',
+        '+# Echoes a reason and returns 0 if installing src_file over dst_file would',
+        '+# clobber a change cw did not itself make. Returns 1 (safe to install) when',
+        "+# dst_file doesn't exist yet, is byte-identical to src_file, or is",
+        '+# byte-identical to the recorded baseline (i.e. nothing has touched it since',
+        '+# cw last wrote it there).',
+        '+_agent_conflict_reason() {',
+        '+    local src_file="$1"',
+        '+    local dst_file="$2"',
+        '+    local baseline_file="$3"',
+        '+',
+        '+    if [ ! -e "$dst_file" ]; then',
+        '+        return 1',
+        '+    fi',
+        '+    if cmp -s "$src_file" "$dst_file"; then',
+        '+        return 1',
+        '+    fi',
+        '+    if [ -f "$baseline_file" ] && cmp -s "$baseline_file" "$dst_file"; then',
+        '+        return 1',
+        '+    fi',
+        '+    if [ ! -f "$baseline_file" ]; then',
+        '+        echo "destination differs from cw\'s source and cw has no record of installing it (no baseline on file)"',
+        '+        return 0',
+        '+    fi',
+        '+    echo "destination differs from cw\'s source and from the last copy cw installed — something other than cw modified it"',
+        '+    return 0',
+        '+}',
+        '+',
+        '+# _print_agent_conflict <name> <src_file> <dst_file> <reason>',
+        '+_print_agent_conflict() {',
+        '+    local name="$1"',
+        '+    local src_file="$2"',
+        '+    local dst_file="$3"',
+        '+    local reason="$4"',
+        '+',
+        '+    {',
+        '+        echo "ERROR: refusing to overwrite a modified agent spec."',
+        '+        echo ""',
+        '+        echo "  agent:               $name"',
+        '+        echo "  cw source:           $src_file"',
+        '+        echo "  install destination: $dst_file"',
+        '+        echo "  reason:              $reason"',
+        '+        echo ""',
+        '+        echo "  To keep those changes:  re-import them into claude-workspace, commit, and re-run."',
+        '+        echo "  To discard and overwrite: ./scripts/install-skills.sh --force"',
+        '+    } >&2',
+        '+}',
+        ' ',
+        ' # ---------------------------------------------------------------------------',
+        ' # 2. Build the NEW manifest (what this run will install)',
+        '@@ -119,6 +194,7 @@ done',
+        ' ',
+        ' agent_count=0',
+        ' excluded_agent_count=0',
+        '+agent_conflicts=()',
+        ' if [ -d "$AGENTS_SRC" ]; then',
+        '     for src_file in "$AGENTS_SRC"/*.md; do',
+        '         [ -f "$src_file" ] || continue',
+        '@@ -127,12 +203,44 @@ if [ -d "$AGENTS_SRC" ]; then',
+        '             excluded_agent_count=$((excluded_agent_count + 1))',
+        '             continue',
+        '         fi',
+        '-        cp "$src_file" "$AGENTS_DST/$name"',
+        '+',
+        '+        dst_file="$AGENTS_DST/$name"',
+        '+        baseline_file="$AGENTS_BASELINE_DIR/$name"',
+        '+',
+        '+        # See _agent_conflict_reason above. Skipped entirely when --force is',
+        '+        # passed. The `if` condition (rather than a plain `reason=$(...)`',
+        '+        # assignment) is deliberate: under `set -e`, a bare assignment from a',
+        '+        # command substitution that returns non-zero (the "safe" case here)',
+        '+        # would abort the whole script.',
+        '+        if [ "$FORCE" -eq 0 ] && reason="$(_agent_conflict_reason "$src_file" "$dst_file" "$baseline_file")"; then',
+        '+            _print_agent_conflict "$name" "$src_file" "$dst_file" "$reason"',
+        '+            agent_conflicts+=("$name")',
+        '+            continue',
+        '+        fi',
+        '+',
+        '+        cp -p "$src_file" "$dst_file"',
+        '+        cp -p "$src_file" "$baseline_file"',
+        '         new_entries+=("agents/$name")',
+        '         agent_count=$((agent_count + 1))',
+        '     done',
+        ' fi',
+        ' ',
+        '+# Deferred abort: must happen here, before the skills loop, the manifest',
+        '+# write, and (critically) the prune step below. A conflicting agent is',
+        '+# deliberately withheld from new_entries above so its destination is left',
+        '+# untouched — but the prune step treats any old-manifest entry absent from',
+        '+# new_entries as an orphan and deletes it. Continuing past this point with a',
+        "+# conflict pending would make this run's own prune logic delete the very",
+        '+# hand-edited file this feature exists to protect.',
+        '+if [ "${#agent_conflicts[@]}" -gt 0 ]; then',
+        '+    echo "" >&2',
+        '+    echo "ERROR: ${#agent_conflicts[@]} agent(s) have hand-edited destinations and were not installed:" >&2',
+        '+    for conflicted_name in "${agent_conflicts[@]}"; do',
+        '+        echo "  - $conflicted_name" >&2',
+        '+    done',
+        '+    exit 1',
+        '+fi',
+        '+',
+        ' skill_count=0',
+        ' if [ -d "$SKILLS_SRC" ]; then',
+        '     for src_dir in "$SKILLS_SRC"/*/; do',
+        '@@ -205,6 +313,14 @@ if [ -f "$MANIFEST" ]; then',
+        '                 rm -rf "$target"',
+        '                 prune_count=$((prune_count + 1))',
+        '                 pruned_names+=("$old_entry")',
+        "+                # A pruned agent's baseline entry must go too, so a future",
+        "+                # re-add under the same filename doesn't inherit stale",
+        '+                # baseline state left over from before it was removed (#1784).',
+        '+                case "$old_entry" in',
+        '+                    agents/*)',
+        '+                        rm -f "$AGENTS_BASELINE_DIR/${old_entry#agents/}"',
+        '+                        ;;',
+        '+                esac',
+        '             fi',
+        '         fi',
+        '     done < "$MANIFEST"',
+    ]
+) + "\n"
+
+
+def _pr1784_captured_diff() -> CapturedDiff:
+    """Build the real #1784 ``scripts/install-skills.sh`` ``CapturedDiff`` via
+    the unmodified diff parser (mirrors :func:`_pr1729_captured_diff`).
+    """
+    file_diffs, file_line_text, file_window_text, _changed = _parse_unified_diff(
+        _PR1784_INSTALL_SKILLS_DIFF
+    )
+    files = {f: sorted(lines) for f, lines in file_line_text.items()}
+    return CapturedDiff(
+        text=_PR1784_INSTALL_SKILLS_DIFF,
+        files=files,
+        file_diffs=file_diffs,
+        file_line_text=file_line_text,
+        file_window_text=file_window_text,
+    )
+
+
+# Real content of scripts/install-skills.sh's post-#1784 new-file lines
+# 235-245 (verified: `git show 132e8fd6:scripts/install-skills.sh | sed -n
+# '235,245p'`, and cross-checked against _parse_unified_diff's own output).
+# Lines 235-243 are diff-added; 244-245 are unchanged hunk-context -- the
+# exact dual-substrate shape #1792 exists to reconcile. 11 lines total.
+_PR1784_EVIDENCE_11_LINES = (
+    'if [ "${#agent_conflicts[@]}" -gt 0 ]; then\n'
+    '    echo "" >&2\n'
+    '    echo "ERROR: ${#agent_conflicts[@]} agent(s) have hand-edited '
+    'destinations and were not installed:" >&2\n'
+    '    for conflicted_name in "${agent_conflicts[@]}"; do\n'
+    '        echo "  - $conflicted_name" >&2\n'
+    '    done\n'
+    '    exit 1\n'
+    'fi\n'
+    '\n'
+    'skill_count=0\n'
+    'if [ -d "$SKILLS_SRC" ]; then'
+)
+
+# Fabricated 11-line evidence guaranteed absent from the #1784 diff at any
+# offset -- the negative control for "evidence genuinely absent" (AC2/AC5),
+# distinct from _PR1784_EVIDENCE_11_LINES's genuinely-real-but-undersized-
+# window case. Line count matches (11) so detail-message assertions can pin
+# on the same number in both the positive and negative fixtures.
+_PR1784_ABSENT_EVIDENCE = (
+    "some fabricated line one\n"
+    "some fabricated line two\n"
+    "some fabricated line three\n"
+    "some fabricated line four\n"
+    "some fabricated line five\n"
+    "some fabricated line six\n"
+    "some fabricated line seven\n"
+    "some fabricated line eight\n"
+    "some fabricated line nine\n"
+    "some fabricated line ten\n"
+    "some fabricated line eleven"
+)
+
+
 class TestSeverityAndDispositionLiterals:
     def test_valid_severities_round_trip(self) -> None:
         for sev in ("MUST_FIX", "SHOULD_FIX", "NIT", "PRINCIPLE"):
@@ -757,6 +1031,206 @@ class TestValidateReviewerDocument:
         )
         assert not accepted
         assert rejected[0].reason == "evidence_not_in_diff"
+
+
+class TestEvidenceWindowReconciliation:
+    """#1792: a MUST_FIX finding whose evidence is diff-resident but whose
+    declared line_start/line_end undershoots (or, symmetrically, starts too
+    late) the evidence's true span by a small, within-tolerance amount is
+    reconciled by :func:`_reconcile_evidence_window`, not mechanically
+    rejected ``evidence_not_in_diff``. Real #1784 diff fixture (see module
+    fixtures above): an 11-line evidence quote at scripts/install-skills.sh
+    new-file lines 235-245, where lines 235-243 are genuinely diff-added and
+    244-245 are unchanged hunk-context -- the exact dual-substrate shape
+    #1792 exists to reconcile.
+    """
+
+    def test_1784_regression_line_end_short_by_one_is_accepted(self) -> None:
+        # Declared line_end=244 is one short of the evidence's true end
+        # (245). MUST fail red pre-fix: pre-#1792, _evidence_in_claimed_lines
+        # builds its window from _resolve_hunk_window(235, 244) = (235, 244)
+        # unchanged -- 10 lines of window content -- which cannot contain
+        # the 11-line evidence as a substring.
+        diff = _pr1784_captured_diff()
+        finding = _make_finding(
+            file="scripts/install-skills.sh",
+            line_start=235,
+            line_end=244,
+            evidence=_PR1784_EVIDENCE_11_LINES,
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        assert len(accepted) == 1
+        assert rejected == []
+
+    def test_1784_regression_persisted_anchor_is_repaired_to_true_end(self) -> None:
+        # Same fixture. The persisted anchor is corrected from the
+        # reviewer's stale line_end=244 -- but stays bounded at line 243,
+        # the last genuine ADDED line, never extending onto line 245's real
+        # content, which is unchanged hunk-context. _resolved_finding
+        # deliberately reconciles only against file_line_text (added-only),
+        # preserving the same #1738 invariant
+        # test_hunk_context_window_evidence_retained pins for the sibling
+        # #1729 fixture (persisted anchor 9521-9526, not extending to the
+        # reviewer's claimed 9527): a persisted anchor must always point at
+        # a real added line, never a context line, even though the
+        # (separately, more permissively matched) evidence-quote check spans
+        # further via file_window_text.
+        diff = _pr1784_captured_diff()
+        finding = _make_finding(
+            file="scripts/install-skills.sh",
+            line_start=235,
+            line_end=244,
+            evidence=_PR1784_EVIDENCE_11_LINES,
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        assert not rejected
+        assert accepted[0].line_start == 235
+        assert accepted[0].line_end == 243
+
+    def test_line_end_short_by_two_within_tolerance_is_accepted(self) -> None:
+        # Short by 2 lines (declared line_end=243, true end 245) -- proves
+        # the fix isn't a one-off special case for exactly 1 line short.
+        diff = _pr1784_captured_diff()
+        finding = _make_finding(
+            file="scripts/install-skills.sh",
+            line_start=235,
+            line_end=243,
+            evidence=_PR1784_EVIDENCE_11_LINES,
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        assert len(accepted) == 1
+        assert rejected == []
+
+    def test_line_start_late_is_also_reconciled(self) -> None:
+        # Symmetric case: line_start is declared 2 lines AFTER the
+        # evidence's true start (235) -- the evidence's leading two lines
+        # are dropped by the declared window. line_end=245 is itself a
+        # genuine hunk-context line (exact hit), so only the start side
+        # needs widening -- proves reconciliation isn't end-only.
+        diff = _pr1784_captured_diff()
+        finding = _make_finding(
+            file="scripts/install-skills.sh",
+            line_start=237,
+            line_end=245,
+            evidence=_PR1784_EVIDENCE_11_LINES,
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        assert len(accepted) == 1
+        assert rejected == []
+
+    def test_line_end_short_beyond_tolerance_still_rejected(self) -> None:
+        # Short by _LINE_ANCHOR_TOLERANCE + 1 (4 lines: declared line_end=
+        # 241, true end 245) -- outside the reconciliation's bound. Stays
+        # rejected -- proves the reconciliation is bounded, not an
+        # unbounded escape hatch.
+        diff = _pr1784_captured_diff()
+        finding = _make_finding(
+            file="scripts/install-skills.sh",
+            line_start=235,
+            line_end=241,
+            evidence=_PR1784_EVIDENCE_11_LINES,
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        assert not accepted
+        assert rejected[0].reason == "evidence_not_in_diff"
+
+    def test_evidence_genuinely_absent_still_rejected(self) -> None:
+        # AC2 (negative control): same declared window as the regression
+        # case, but the evidence text is not present anywhere in the file's
+        # diff at any offset -- the reconciliation must not turn into
+        # "accept anything nearby".
+        diff = _pr1784_captured_diff()
+        finding = _make_finding(
+            file="scripts/install-skills.sh",
+            line_start=235,
+            line_end=244,
+            evidence=_PR1784_ABSENT_EVIDENCE,
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        assert not accepted
+        assert rejected[0].reason == "evidence_not_in_diff"
+
+    def test_rejected_finding_detail_reports_discrepancy(self) -> None:
+        # AC4: the genuinely-absent-evidence rejection populates `detail`
+        # with both the evidence's own line count (11) and the declared
+        # line_start (235).
+        diff = _pr1784_captured_diff()
+        finding = _make_finding(
+            file="scripts/install-skills.sh",
+            line_start=235,
+            line_end=244,
+            evidence=_PR1784_ABSENT_EVIDENCE,
+        )
+        _, rejected, _ = validate_reviewer_document(_make_reviewer_doc(finding), diff)
+        assert rejected[0].reason == "evidence_not_in_diff"
+        assert "line_start=235" in rejected[0].detail
+        assert "11" in rejected[0].detail
+
+    def test_non_evidence_not_in_diff_rejection_keeps_detail_blank(self) -> None:
+        # A rejection for any other reason (here unknown_file) keeps detail
+        # at its "" default -- detail is populated for evidence_not_in_diff
+        # specifically, not for every rejection reason.
+        finding = _make_finding(file="src/cw/other.py")
+        _, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), _make_diff()
+        )
+        assert rejected[0].reason == "unknown_file"
+        assert rejected[0].detail == ""
+
+    def test_consolidate_verdict_1784_case_no_longer_blocks_via_rejected_must_fix(
+        self,
+    ) -> None:
+        # Integration, mirrors test_mechanically_rejected_must_fix_populates_
+        # rejected_must_fix_field: the #1784 fixture at severity="MUST_FIX"
+        # (the _make_finding default) run through consolidate_verdict.
+        # Post-fix: blocks via the ordinary must_fix path, not the #1714
+        # mechanical-rejection park.
+        diff = _pr1784_captured_diff()
+        finding = _make_finding(
+            severity="MUST_FIX",
+            file="scripts/install-skills.sh",
+            line_start=235,
+            line_end=244,
+            evidence=_PR1784_EVIDENCE_11_LINES,
+        )
+        doc = _make_reviewer_doc(finding)
+        verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        assert verdict.blocking is True
+        assert len(verdict.must_fix) == 1
+        assert verdict.rejected_must_fix == []
+
+    def test_consolidate_verdict_genuinely_unmatched_must_fix_still_blocks_via_park_signal(
+        self,
+    ) -> None:
+        # AC5, #1714 preservation (negative case): a MUST_FIX whose evidence
+        # is genuinely absent must still route through the #1714
+        # mechanical-rejection park -- #1792's reconciliation must never
+        # widen far enough to rescue a fabricated quote.
+        diff = _pr1784_captured_diff()
+        finding = _make_finding(
+            severity="MUST_FIX",
+            file="scripts/install-skills.sh",
+            line_start=235,
+            line_end=244,
+            evidence=_PR1784_ABSENT_EVIDENCE,
+        )
+        doc = _make_reviewer_doc(finding)
+        verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        assert verdict.blocking is False
+        assert len(verdict.rejected_must_fix) == 1
+        assert verdict.rejected_must_fix[0].reason == "evidence_not_in_diff"
 
 
 class TestUnanchoredFindings:
