@@ -7349,7 +7349,7 @@ class TestApplyStagedDecision:
 
     # -- #1717: FINALIZE self-heal regress round-trip repeat detection -----
 
-    def test_finalize_regress_round_trip_with_no_commit_emits_repeat_signal_not_silent_rearm(
+    def test_finalize_regress_round_trip_no_commit_emits_repeat_not_silent_rearm(
         self,
         tmp_dispatch_dirs: Path,
         tmp_path: Path,
@@ -7375,9 +7375,9 @@ class TestApplyStagedDecision:
 
         task = self._make_running_task("FRR-1", stage=Stage.FINALIZE)
         task.stage_base_ref = "sha-original"
-        task.regress_attempts = 1
         _stage_regress(task, Stage.IMPL)
         assert task.finalize_regress_branch_head == "sha-original"
+        assert task.regress_attempts == 1
 
         # Round trip lands back at REVIEW with the branch head unchanged --
         # IMPL produced no new commit (the incident shape of #1644/#1702/#1710).
@@ -7452,7 +7452,7 @@ class TestApplyStagedDecision:
         assert attention[0][1]["paused_status"] == "approval_gate"
         assert len(repeat_signal) == 0
 
-    def test_finalize_regress_round_trip_that_advances_cleanly_consumes_marker_without_signal(
+    def test_finalize_regress_round_trip_advances_cleanly_consumes_marker_no_signal(
         self,
         tmp_dispatch_dirs: Path,
         tmp_path: Path,
