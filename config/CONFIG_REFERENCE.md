@@ -871,6 +871,12 @@ default, the precedence order, or the resolution behavior (all settled by
 #1773 and covered by `tests/test_codex_review_context.py`'s
 `TestLoadAgentSpecFallbackGate`).
 
+**`cw doctor` visibility (#1776):** the `agent-spec-drift/<client>` check
+resolves every reviewer role for every configured client using this exact
+gate and reports the per-client, per-role result (repo-local / global
+fallback / absent) so a missing or blank spec surfaces at setup time instead
+of on the next review pass.
+
 ## Operator GitHub Login Override (RFC 0011 follow-up, #1171)
 
 `ClientConfig.operator_github_login` (see [Client Fields](#client-fields)
