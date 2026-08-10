@@ -52,6 +52,10 @@ OPENCODE_NO_OUTPUT = "opencode_no_output"
 UNEXPECTED_ERROR = "unexpected_error"
 LIVENESS_UNAVAILABLE = "liveness_unavailable"
 
+# The FINALIZE entry-point stage marker (mirrors STAGE3_REVIEW for codex).
+# Used as the stage_reached for the stage-block on non-FINALIZE stages (#1670 R5).
+STAGE4A_MERGE_GATE: StageReached = "stage4a_merge_gate"
+
 _blocked_scope = Scope(
     tier="small",
     files=0,
@@ -211,6 +215,31 @@ def build_env() -> dict[str, str]:
     ``build_env``).
     """
     return {k: v for k, v in os.environ.items() if k in _ENV_ALLOWLIST}
+
+
+def build_finalize_prompt(ticket_id: str) -> str:
+    """Build the opencode prompt for the FINALIZE stage (#1670).
+
+    opencode has no slash-command resolution (unlike ClaudeNativeExecutor's
+    ``/auto-dev-finalize <ticket> --headless`` invocation), so the prompt
+    inlines the instruction to read and follow the existing
+    ``auto-dev-finalize.md`` skill — backend-neutral at the producer level
+    (it runs ``gh`` commands, not executor-specific code, per R6). The
+    prompt instructs opencode to run the finalize flow (merge-gate → PR
+    create → auto-merge → read-back) and emit the ``<<<AUTO_DEV_RESULT>>>``
+    sentinel with the correct ``stage_reached`` marker (R1).
+    """
+    return (
+        f"Run the auto-dev FINALIZE stage for ticket {ticket_id}. "
+        "Read and follow the instructions in "
+        ".claude/commands/auto-dev-finalize.md "
+        f"(arguments: {ticket_id} --headless). "
+        "The finalize flow runs: merge-gate check, PR creation, "
+        "auto-merge enablement, read-back verification. "
+        "When complete, emit the <<<AUTO_DEV_RESULT>>> sentinel with "
+        "stage_reached set to stage4a_merge_gate, stage4b_pr_create, or "
+        "stage5_post_create as appropriate."
+    )
 
 
 def make_blocked(
