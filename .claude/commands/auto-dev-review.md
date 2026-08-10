@@ -262,7 +262,7 @@ The fix-loop agent's prompt must end with both the Friction Protocol block and t
    - **Recommendation**: PROCEED | EXIT_FOR_HUMAN_REVIEW
    ```
 
-   The fix-loop agent's prompt must ALSO include the same **Completion Artifacts** block as Stage 2 (Test command, test output tail, `git diff --stat`, `git log --oneline`, mypy/ruff results) — the orchestrator gates fix completion on facts the same way it gates impl completion (Subagent Reliability Mitigation 2). Incremental commits same as Stage 2 (Mitigation 3): one commit per MUST_FIX item resolved, not a single end-of-loop commit.
+   The fix-loop agent's prompt must ALSO include the same **Completion Artifacts** block as Stage 2 (Test command, test output tail, `git diff --stat`, `git log --oneline`, and the per-gate quality gate results table — one row per configured `quality_gate_commands` entry, `pass` | `<errors>` | `not_run`, per the Stage 2 contract in `auto-dev-impl.md`) — the orchestrator gates fix completion on facts the same way it gates impl completion (Subagent Reliability Mitigation 2). Incremental commits same as Stage 2 (Mitigation 3): one commit per MUST_FIX item resolved, not a single end-of-loop commit.
 
    The fix-loop agent's prompt must ALSO instruct: "If your fix touches any file outside the original Stage 1 approved plan's file list, OR if your changes push the diff into Large tier (>10 files OR >500 lines OR a forbidden area), report this in the friction report under a new bullet `**Scope growth**: [list affected files / explain tier change]`. The main session uses this to decide escalation."
 
