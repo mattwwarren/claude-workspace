@@ -31,17 +31,26 @@ package, and this gate must keep working as a standalone script. Sibling of
 JSON-verdict-to-stdout contract.
 
 Exit codes:
-    0  — verdict computed (whether or not it is stale)
-    2  — usage / parse error (unreadable or malformed `--comments-file`,
-         unparseable `--head-commit-at`). Does NOT block: the caller's prose
-         treats exit 2 as "cannot determine staleness — fail open to the
-         existing short-circuit behaviour", the same fail-open convention as
-         `check_not_main_checkout.py`'s and `check_plan_scope_conformance.py`'s
-         exit 2.
+    0  — verdict computed (whether or not it is stale). A malformed/unreadable
+         `--comments-file` no longer forces exit 2 (GitHub #1794 follow-up):
+         `--regressed-into-stage` is an independent, more reliable signal
+         (queue state, not a live network fetch) and must not be silently
+         discarded just because the comments fetch had a transient hiccup —
+         that would reintroduce the exact "regress is a no-op" defect this
+         script exists to close, under a narrower trigger. A bad comments file
+         only degrades the *comment*-staleness half of the verdict (recorded
+         via `comments_load_failed: true`); the regress-marker half is always
+         evaluated.
+    2  — usage / parse error: unparseable `--head-commit-at` only. Does NOT
+         block: the caller's prose treats exit 2 as "cannot determine
+         staleness — fail open to the existing short-circuit behaviour", the
+         same fail-open convention as `check_not_main_checkout.py`'s and
+         `check_plan_scope_conformance.py`'s exit 2.
 
 The JSON verdict is written to stdout on exit 0:
     {"stale": bool, "reasons": [...], "head_commit_at": "<iso>",
-     "newest_comment_at": "<iso>|null", "regressed_into_stage": "<stage>|\"\""}
+     "newest_comment_at": "<iso>|null", "regressed_into_stage": "<stage>|\"\"",
+     "comments_load_failed": bool}
 
 `reasons` is the operator-facing audit surface: the guard copies it into
 `friction_highlights` so a run that declined to short-circuit says why.
@@ -146,6 +155,8 @@ def compute_verdict(
     head_commit_at: datetime,
     comments: list[object],
     regressed_into_stage: str,
+    *,
+    comments_load_failed: bool = False,
 ) -> dict[str, object]:
     """Build the staleness/regress verdict.
 
@@ -155,6 +166,11 @@ def compute_verdict(
     value can only ever mean "this impl entry was reached via a backward move."
     Thresholding it — the way the cumulative ``regress_attempts`` counter would
     have to be — is exactly the false positive this field exists to avoid.
+
+    ``comments_load_failed`` degrades only the comment-staleness half of the
+    verdict (``comments`` is passed in as ``[]`` by the caller when the file
+    couldn't be read) -- it must never suppress ``_REASON_REGRESSED``, which
+    comes from queue state, not the comments fetch (GitHub #1794 follow-up).
     """
     newest = newest_comment_timestamp(comments)
     reasons: list[str] = []
@@ -168,6 +184,7 @@ def compute_verdict(
         "head_commit_at": head_commit_at_raw,
         "newest_comment_at": newest[0] if newest is not None else None,
         "regressed_into_stage": regressed_into_stage,
+        "comments_load_failed": comments_load_failed,
     }
 
 
@@ -210,15 +227,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    comments = _load_comments(Path(args.comments_file))
-    if comments is None:
-        return 2
+    loaded_comments = _load_comments(Path(args.comments_file))
+    comments_load_failed = loaded_comments is None
+    comments = [] if loaded_comments is None else loaded_comments
 
     verdict = compute_verdict(
         args.head_commit_at,
         head_commit_at,
         comments,
         args.regressed_into_stage,
+        comments_load_failed=comments_load_failed,
     )
     print(json.dumps(verdict, indent=2))
     return 0

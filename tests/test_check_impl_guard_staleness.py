@@ -140,38 +140,67 @@ def test_accepts_snake_case_created_at_too(tmp_path: Path) -> None:
     assert verdict["stale"] is True
 
 
-def test_malformed_comments_file_exits_2(tmp_path: Path) -> None:
+def test_malformed_comments_file_degrades_comment_evidence_only(tmp_path: Path) -> None:
+    """#1794 follow-up: a bad --comments-file no longer forces exit 2 -- it
+    degrades only the comment-staleness half of the verdict."""
     comments = tmp_path / "comments.json"
     comments.write_text("not json")
-    code, _verdict = _run(
+    code, verdict = _run(
         "--head-commit-at",
         "2026-08-10T22:53:27-04:00",
         "--comments-file",
         str(comments),
     )
-    assert code == 2
+    assert code == 0
+    assert verdict["stale"] is False
+    assert verdict["comments_load_failed"] is True
 
 
-def test_missing_comments_file_exits_2(tmp_path: Path) -> None:
-    code, _verdict = _run(
+def test_missing_comments_file_degrades_comment_evidence_only(tmp_path: Path) -> None:
+    code, verdict = _run(
         "--head-commit-at",
         "2026-08-10T22:53:27-04:00",
         "--comments-file",
         str(tmp_path / "does-not-exist.json"),
     )
-    assert code == 2
+    assert code == 0
+    assert verdict["stale"] is False
+    assert verdict["comments_load_failed"] is True
 
 
-def test_non_list_comments_file_exits_2(tmp_path: Path) -> None:
+def test_non_list_comments_file_degrades_comment_evidence_only(tmp_path: Path) -> None:
     comments = tmp_path / "comments.json"
     comments.write_text(json.dumps({"comments": []}))
-    code, _verdict = _run(
+    code, verdict = _run(
         "--head-commit-at",
         "2026-08-10T22:53:27-04:00",
         "--comments-file",
         str(comments),
     )
-    assert code == 2
+    assert code == 0
+    assert verdict["stale"] is False
+    assert verdict["comments_load_failed"] is True
+
+
+def test_malformed_comments_file_does_not_mask_regress_marker(tmp_path: Path) -> None:
+    """The money test: a broken comments fetch must not discard an
+    independently-sourced, valid --regressed-into-stage signal (GitHub #1794
+    follow-up -- this is the exact defect class the ticket exists to fix,
+    reintroduced under a narrower trigger by the original exit-2 design)."""
+    comments = tmp_path / "comments.json"
+    comments.write_text("not json")
+    code, verdict = _run(
+        "--head-commit-at",
+        "2026-08-10T22:53:27-04:00",
+        "--comments-file",
+        str(comments),
+        "--regressed-into-stage",
+        "impl",
+    )
+    assert code == 0
+    assert verdict["stale"] is True
+    assert verdict["reasons"] == ["regressed_to_impl"]
+    assert verdict["comments_load_failed"] is True
 
 
 def test_malformed_head_commit_at_exits_2(tmp_path: Path) -> None:
