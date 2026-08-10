@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.31.0] - 2026-08-09
+
 ### Added
 
 - **`clients.yaml` gains a per-client `quality_gate_commands` field (#1703):**
