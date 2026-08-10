@@ -114,7 +114,9 @@ def _parse_files_modified(plan_text: str) -> list[str]:
     lines = plan_text.splitlines()
     try:
         start = next(
-            i for i, line in enumerate(lines) if line.strip().startswith(_FILES_HEADING_PREFIX)
+            i
+            for i, line in enumerate(lines)
+            if line.strip().startswith(_FILES_HEADING_PREFIX)
         )
     except StopIteration:
         return []

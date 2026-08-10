@@ -87,9 +87,9 @@ _REAL_1784_FILES_TOUCHED_TABLE = """## Files touched, with estimated line deltas
 
 | File | Current | Est. delta | Est. new size |
 |---|---|---|---|
-| `scripts/install-skills.sh` | 234 | +100 to +115 | ~335–350 |
-| `tests/test_install_skills.py` | 563 | +180 to +230 | ~745–795 |
-| `docs/INSTALL.md` (optional) | — | +8 to +15 | — |
+| `scripts/install-skills.sh` | 234 | +100 to +115 | ~335-350 |
+| `tests/test_install_skills.py` | 563 | +180 to +230 | ~745-795 |
+| `docs/INSTALL.md` (optional) | - | +8 to +15 | - |
 """
 
 
