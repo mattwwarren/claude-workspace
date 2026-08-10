@@ -727,15 +727,15 @@ Add to the required friction report (after `## Friction Report` block):
 - **Test command used:** <exactly what was run>
 - **Test output (tail):** <paste last 50 lines of pytest/test output>
 - **git diff --stat:** <paste verbatim>
+- **git log --oneline (vs fork point):** <paste verbatim — git log --oneline $FORK_POINT..HEAD>
 - **git diff line count:** <total lines added/removed>
-- **Mypy result (if touched Python):** <pass or errors>
-- **Ruff result (if touched Python):** <pass or errors>
+- **Quality gate results — one row per gate command** (report every command named in this session's quality-gate sentence as its own row — e.g. `ruff check` and `ruff format --check` are separate gates and MUST be separately reportable): for each configured gate, report `<command>` → `pass` | `<exit code + error output>` | `not_run`. A gate not run MUST be reported `not_run` — never omitted, never folded into a sibling gate's result.
 ```
 
 **Orchestrator verification:**
 - Parse the pasted test tail; if it contains FAILED, ERROR, or non-zero exit, the claim is false
 - Parse git diff --stat; if it's empty or doesn't match the plan's file list, the claim is false
-- Mypy/ruff must show zero errors or it's false
+- Every gate named in the session's quality-gate sentence must have its own row showing `pass`; a `not_run` row, a non-zero result, or a missing row for any configured gate means the claim is false — same `impl_failed` disposition as a contradicted artifact
 
 **Interactive mode:** If any artifact contradicts the "done" claim, call AskUserQuestion: "Artifacts show tests failed / linter errors / no changes. Fix and retry, or abort?"
 
