@@ -64,25 +64,28 @@ def _make_session(
     last_result: dict[str, object] | None = None,
     cost_usd: float | None = None,
     started_at: datetime | None = None,
+    **overrides: object,
 ) -> Session:
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
-    return _make_daemon_session(
-        id=session_id,
-        name=name,
-        client=client,
-        purpose=purpose,
-        status=status,
-        origin=origin,
-        workspace_path=workspace,
-        worktree_path=worktree_path,
-        branch=branch,
-        surface_ref=surface_ref,
-        claude_session_id=claude_session_id,
-        last_result=last_result,
-        cost_usd=cost_usd,
-        started_at=started_at or datetime(2025, 6, 1, 12, 0, 0, tzinfo=UTC),
-    )
+    kwargs: dict[str, object] = {
+        "id": session_id,
+        "name": name,
+        "client": client,
+        "purpose": purpose,
+        "status": status,
+        "origin": origin,
+        "workspace_path": workspace,
+        "worktree_path": worktree_path,
+        "branch": branch,
+        "surface_ref": surface_ref,
+        "claude_session_id": claude_session_id,
+        "last_result": last_result,
+        "cost_usd": cost_usd,
+        "started_at": started_at or datetime(2025, 6, 1, 12, 0, 0, tzinfo=UTC),
+    }
+    kwargs.update(overrides)
+    return _make_daemon_session(**kwargs)
 
 
 def _seed(session: Session) -> None:
