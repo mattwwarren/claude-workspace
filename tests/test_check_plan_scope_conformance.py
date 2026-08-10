@@ -243,9 +243,7 @@ def test_pyproject_override_applied(tmp_path: Path) -> None:
 
     planned = _paths("planned", 14)
     delivered = [*planned, "src/cw/extra_a.py", "src/cw/extra_b.py"]
-    verdict = dict(
-        _mod.check_scope_conformance(planned, delivered, ratio, abs_floor)
-    )
+    verdict = dict(_mod.check_scope_conformance(planned, delivered, ratio, abs_floor))
     assert verdict["allowed_extra"] == 1
     assert verdict["triggered"] is True
 
