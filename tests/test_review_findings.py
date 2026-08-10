@@ -1609,6 +1609,53 @@ class TestConsolidateVerdict:
         assert verdict.rejected[0].reason == "evidence_not_in_diff"
 
 
+class TestConsolidateVerdictDetail:
+    """#1775: a reviewer document's `detail` copies onto its ReviewerRunRecord.
+
+    Before this fix, `consolidate_verdict` read every field of
+    `ReviewerFindingsDocument` except `detail` when building each
+    `ReviewerRunRecord` — the degraded-reviewer reason a prompt writes into
+    `detail` (per .claude/commands/auto-dev-review.md) parsed correctly but
+    was dropped before it ever reached the persisted verdict.
+    """
+
+    def test_degraded_document_detail_lands_on_matching_run_record(self) -> None:
+        doc = _make_reviewer_doc(
+            status="degraded",
+            detail="sandbox lacked filesystem access",
+            reviewer_role="Reviewer A",
+        )
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        assert verdict.agents_run[0].detail == "sandbox lacked filesystem access"
+
+    def test_ok_document_detail_also_lands_on_run_record(self) -> None:
+        # The copy is unconditional on status, not degraded-special-cased.
+        doc = _make_reviewer_doc(detail="reviewed; no issues found.")
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        assert verdict.agents_run[0].detail == "reviewed; no issues found."
+
+    def test_degraded_document_with_blank_detail_lands_as_blank(self) -> None:
+        # A degraded status with no stated reason is a real, non-erroring
+        # state (ReviewerFindingsDocument's ok-empty-findings-justification
+        # validator only fires for status="ok") -- pin that it survives as
+        # an empty string, not a sentinel or an error.
+        doc = _make_reviewer_doc(status="degraded", detail="")
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        assert verdict.agents_run[0].detail == ""
+
+    def test_failed_reviewer_run_failure_record_has_empty_detail(self) -> None:
+        # ReviewerRunFailure carries no detail concept -- a role recorded
+        # only via failed_reviewers (no matching document) stays at the
+        # ReviewerRunRecord default, by design (out of scope for #1775).
+        verdict = consolidate_verdict(
+            [],
+            _make_diff(),
+            reviewed_sha="sha",
+            failed_reviewers=[ReviewerRunFailure(role="Solo", reason="crash")],
+        )
+        assert verdict.agents_run[0].detail == ""
+
+
 class TestConsolidateVerdictFailedReviewers:
     def test_default_no_failed_reviewers(self) -> None:
         diff = _make_diff()
@@ -1729,6 +1776,22 @@ class TestWriteReviewVerdictArtifact:
         data = json.loads(path.read_text())
         assert "stale" not in data
 
+    def test_degraded_reviewer_detail_round_trips_through_persisted_artifact(
+        self, tmp_path: Path
+    ) -> None:
+        # #1775 acceptance criterion: the reason a degraded reviewer states in
+        # `detail` must survive synthesis into the persisted record on disk.
+        doc = _make_reviewer_doc(
+            status="degraded",
+            detail="sandbox lacked filesystem access",
+            reviewer_role="R1",
+        )
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="deadbeef")
+        path = tmp_path / "review-verdict.json"
+        write_review_verdict(verdict, path)
+        data = json.loads(path.read_text())
+        assert data["agents_run"][0]["detail"] == "sandbox lacked filesystem access"
+
 
 class TestExecutorNeutralContract:
     def test_claude_and_codex_shapes_validate_identically(self) -> None:
@@ -1778,6 +1841,20 @@ class TestReviewerRunRecord:
     def test_construct(self) -> None:
         r = ReviewerRunRecord(reviewer_role="R", status="ok", finding_count=3)
         assert r.finding_count == 3
+
+    def test_detail_defaults_to_empty_string(self) -> None:
+        # #1775: detail mirrors ReviewerFindingsDocument.detail's own default.
+        r = ReviewerRunRecord(reviewer_role="R", status="ok", finding_count=0)
+        assert r.detail == ""
+
+    def test_detail_field_accepts_explicit_value(self) -> None:
+        r = ReviewerRunRecord(
+            reviewer_role="R",
+            status="degraded",
+            finding_count=0,
+            detail="sandbox lacked filesystem access",
+        )
+        assert r.detail == "sandbox lacked filesystem access"
 
     def test_audit_metrics_fields_all_default_when_unset(self) -> None:
         # #1710: every new telemetry field is optional, so pre-#1710 bare

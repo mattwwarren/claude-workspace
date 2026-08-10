@@ -918,6 +918,16 @@ class TestLoadAgentSpecFallbackGate:
         assert _load_agent_spec_fallback_gate(tmp_path) is True
 
 
+def test_config_reference_documents_agent_spec_global_fallback() -> None:
+    """CONFIG_REFERENCE.md documents the #1773 fallback opt-out (#1782)."""
+    doc = (
+        Path(__file__).resolve().parent.parent / "config" / "CONFIG_REFERENCE.md"
+    ).read_text(encoding="utf-8")
+    assert "agent_spec_global_fallback" in doc
+    assert "[tool.cw.codex_review]" in doc
+    assert "#1773" in doc
+
+
 # ---------------------------------------------------------------------------
 # _resolve_agent_spec (#1773)
 # ---------------------------------------------------------------------------

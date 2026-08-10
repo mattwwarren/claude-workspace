@@ -38,6 +38,7 @@ if TYPE_CHECKING:
         ReviewerFindingsDocument,
         ReviewerRunFailure,
         ReviewerRunMetrics,
+        ReviewerRunRecord,
         ReviewVerdict,
         Severity,
     )
@@ -80,6 +81,11 @@ def _derive_health(documents: list[ReviewerFindingsDocument]) -> Health:
     though it produced neither a MUST_FIX finding nor a run failure. Reporting
     that as full HIGH-confidence PROCEED would be exactly the "spuriously
     clean sentinel" risk the surrounding disposition logic exists to catch.
+
+    See :func:`_render_degraded_roles_note` (#1775) for where a degraded
+    role's stated reason (``ReviewerRunRecord.detail``) surfaces on the
+    rendered comment — this function only derives the health signal, it does
+    not render anything.
     """
     if any(doc.status != "ok" for doc in documents):
         return Health(
@@ -398,6 +404,39 @@ def _render_failed_roles_note(verdict: ReviewVerdict) -> list[str]:
     ]
 
 
+def _degraded_role_label(record: ReviewerRunRecord) -> str:
+    """Name one degraded role, with its stated reason if it gave one (#1775).
+
+    ``record.detail`` is copied verbatim from the source
+    ``ReviewerFindingsDocument`` by :func:`consolidate_verdict`, so a blank
+    value here means the reviewer genuinely gave no reason -- not that the
+    plumbing dropped it.
+    """
+    if record.detail:
+        return f"{record.reviewer_role}: degraded — {record.detail}"
+    return f"{record.reviewer_role}: degraded (no reason given)"
+
+
+def _render_degraded_roles_note(verdict: ReviewVerdict) -> list[str]:
+    """Render a "DEGRADED COVERAGE" note naming any role that ran degraded.
+
+    Sibling of :func:`_render_failed_roles_note`: reads ``verdict.agents_run``
+    directly, same empty-list-returns-``[]`` shape. A "failed" role (never
+    produced a document) and a "degraded" role (produced a document but
+    could not complete a required check) are distinct facts, so this note is
+    additive to -- not a replacement for -- the partial-coverage note (#1775).
+    """
+    degraded = [r for r in verdict.agents_run if r.status == "degraded"]
+    if not degraded:
+        return []
+    labels = ", ".join(_degraded_role_label(r) for r in degraded)
+    plural = "" if len(degraded) == 1 else "s"
+    return [
+        f"**DEGRADED COVERAGE** — {len(degraded)} role{plural} ran degraded: {labels}.",
+        "",
+    ]
+
+
 def _render_capability_note(verdict: ReviewVerdict) -> list[str]:
     """Render the probed filesystem-capability mode the review ran under.
 
@@ -551,6 +590,7 @@ def render_verdict_comment(verdict: ReviewVerdict, *, fix_loop_enabled: bool) ->
         )
     lines.append("")
     lines.extend(_render_failed_roles_note(verdict))
+    lines.extend(_render_degraded_roles_note(verdict))
     lines.extend(_render_capability_note(verdict))
     lines.extend(_render_agent_spec_note(verdict))
     lines.extend(_render_rejected_must_fix(verdict))

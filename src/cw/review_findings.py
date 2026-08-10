@@ -268,6 +268,11 @@ class ReviewerRunMetrics(TypedDict, total=False):
 class ReviewerRunRecord(BaseModel):
     """Terminal-health record for one reviewer agent that ran (or failed).
 
+    ``detail`` mirrors :attr:`ReviewerFindingsDocument.detail` (#1775) --
+    it is copied verbatim from the source document by :func:`consolidate_verdict`
+    so a degraded reviewer's stated reason survives synthesis into the
+    persisted verdict instead of being silently dropped.
+
     Everything below ``finding_count`` is executor audit telemetry (#1710),
     populated from the codex ``--json`` event stream where one is available and
     left at its default everywhere else (the Claude-native review path, a role
@@ -277,6 +282,7 @@ class ReviewerRunRecord(BaseModel):
 
     reviewer_role: str
     status: ReviewerHealthStatus
+    detail: str = ""
     finding_count: int
     # Executor-native run identifier (codex ``thread.started.thread_id``).
     thread_id: str | None = None
@@ -1054,6 +1060,14 @@ def consolidate_verdict(
     field at its default. Defaulting to ``None`` is what lets the Claude-native
     caller (``cw.cli.review``), which never has codex metrics, stay unchanged —
     and it is purely additive: nothing here reads the values back (#1710).
+
+    Each parsed document's ``detail`` (#1775) is copied verbatim onto its
+    :class:`ReviewerRunRecord`, unconditionally of ``status`` — so a degraded
+    role's stated reason (or an ``ok`` role's justification) reaches
+    ``verdict.agents_run`` and, from there, the persisted artifact
+    (:func:`write_review_verdict`). A role recorded only via
+    ``failed_reviewers`` has no document and so no ``detail`` to copy; its
+    record keeps the ``""`` default.
     """
     failures = failed_reviewers if failed_reviewers is not None else []
     metrics = metrics_by_role if metrics_by_role is not None else {}
@@ -1074,11 +1088,14 @@ def consolidate_verdict(
                 reviewer_role=doc.reviewer_role,
                 status=doc.status,
                 finding_count=len(accepted),
+                detail=doc.detail,
                 **metrics.get(doc.reviewer_role, {}),
             )
         )
 
     run_records.extend(
+        # ReviewerRunFailure has no `detail` concept (it never parsed into a
+        # document), so this entry's `detail` stays at its "" default (#1775).
         ReviewerRunRecord(
             reviewer_role=failure.role,
             status="failed",
