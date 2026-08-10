@@ -428,7 +428,12 @@ class TestReviewConsolidateCommand:
             # superseded by a later one. This command runs no fix loop, so it
             # always emits the True default.
             "is_terminal_snapshot",
+            # #1805: adjudication entries that matched no accepted finding.
+            # Always emitted, 0 here — only `cw review adjudicate` ever sets
+            # it non-zero.
+            "unmatched_adjudication_count",
         }
+        assert verdict["unmatched_adjudication_count"] == 0
         assert verdict["capability_mode"] is None
         assert verdict["capability_reason"] is None
         assert verdict["is_terminal_snapshot"] is True
