@@ -201,6 +201,13 @@ def _fill_finalize_regress_branch_head_default(task_raw: dict[str, Any]) -> None
         task_raw["finalize_regress_branch_head"] = None
 
 
+def _fill_pending_operator_comment_default(task_raw: dict[str, Any]) -> None:
+    """Fill pending_operator_comment introduced in dev-queue schema v29
+    (GitHub #1730). Idempotent."""
+    if "pending_operator_comment" not in task_raw:
+        task_raw["pending_operator_comment"] = False
+
+
 def _fill_watched_prs_default(raw: dict[str, Any]) -> None:
     """Fill the top-level watched_prs list introduced in schema v15 (#1154).
 
@@ -244,6 +251,7 @@ def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
                 _fill_salvage_no_sentinel_at_default(task_raw)
                 _fill_regressed_into_stage_default(task_raw)
                 _fill_finalize_regress_branch_head_default(task_raw)
+                _fill_pending_operator_comment_default(task_raw)
     _fill_watched_prs_default(raw)
     raw["schema_version"] = DEV_QUEUE_SCHEMA_VERSION
     return raw

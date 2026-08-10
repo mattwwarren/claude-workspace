@@ -82,7 +82,13 @@ from cw.models.events import PrState, WatchedPr
 #      REVIEW-scoped gates to detect a finalize->impl->review round trip that
 #      landed back at REVIEW with no new commit — the #1644/#1702/#1710 silent
 #      repeat-park incident.
-DEV_QUEUE_SCHEMA_VERSION = 28
+# v29: added TicketTask.pending_operator_comment (GitHub #1730) — per-arrival
+#      marker telling the REVIEW stage that this entry followed a regress and
+#      may carry an operator send-back to treat as a binding adjudication
+#      input. Sibling of v27's regressed_into_stage, stamped at the same
+#      _stage_regress seam as v28's finalize_regress_branch_head but under an
+#      independent precondition, and cleared only at a REVIEW-stage spawn.
+DEV_QUEUE_SCHEMA_VERSION = 29
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 

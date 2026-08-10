@@ -51,7 +51,11 @@ _log = logging.getLogger(__name__)
 #     the impl-stage Pre-Stage Detector Guard that this IMPL entry was reached
 #     via a deliberate backward stage move, not a fresh dispatch or an ordinary
 #     forward advance).
-CW_CONTEXT_SCHEMA_VERSION = 3
+# v4: added `queue_metadata.pending_operator_comment` (#1730 — per-arrival
+#     signal to the REVIEW stage that this entry followed a regress and may
+#     carry an operator send-back comment to treat as a binding adjudication
+#     input rather than background context).
+CW_CONTEXT_SCHEMA_VERSION = 4
 
 
 def build_disallowed_tools_arg(patterns: list[str]) -> list[str]:

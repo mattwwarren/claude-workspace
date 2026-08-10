@@ -615,6 +615,7 @@ operator_channel_forward:
     - pr.action_taken           # RFC 0010 — a review recipe acted on a PR
     - pr.action_failed
     - gate.ssh_key_bypassed     # GitHub #1437 — operator bypassed the ssh-key gate probe
+    - requeue.review_delivery_degraded  # GitHub #1730 — a review requeue ran without the operator's send-back
   task_transition_statuses:
     - blocked_on_user
     - awaiting_operator_signoff
@@ -974,7 +975,7 @@ are `null` when not applicable.
 
 ### Always-present fields
 
-- `schema_version` — integer, currently `2`. Increment when the shape changes.
+- `schema_version` — integer, currently `4`. Increment when the shape changes.
 - `session_id` — cw session ID (8-char hex).
 - `session_name` — human-readable `<client>/<label>`.
 - `client` — client name from `clients.yaml`.
@@ -1011,6 +1012,11 @@ are `null` when not applicable.
     or a `cw dev-queue plan` run; `null` when none is set.
   - `headless_timeout_override` — always `null` (deprecated-inert; the
     per-ticket timeout was removed with the process-kill timeouts).
+  - `regressed_into_stage` — stage value | `null` (v3, #1794). Non-null means
+    this stage entry was reached via a deliberate backward move.
+  - `pending_operator_comment` — bool (v4, #1730). `true` means this entry
+    followed a regress and may carry an operator send-back the REVIEW stage
+    must treat as a binding adjudication input.
 - `world_state_snapshot` — git context captured at spawn:
   - `origin_main_sha_at_spawn` — SHA of `origin/<default_branch>` at spawn time, or `null` if the git call fails.
   - `origin_main_branch` — the client's `default_branch` (usually `"main"`).
@@ -1022,7 +1028,7 @@ are `null` when not applicable.
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 4,
   "session_id": "a1b2c3d4",
   "session_name": "my-project/auto-dev-GEN-314",
   "client": "my-project",
@@ -1042,7 +1048,9 @@ are `null` when not applicable.
   "queue_metadata": {
     "scope_hint": "large",
     "plan_source": null,
-    "headless_timeout_override": null
+    "headless_timeout_override": null,
+    "regressed_into_stage": null,
+    "pending_operator_comment": false
   },
   "world_state_snapshot": {
     "origin_main_sha_at_spawn": "c2e9096...",

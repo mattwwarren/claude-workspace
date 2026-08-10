@@ -952,7 +952,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 28
+        assert DEV_QUEUE_SCHEMA_VERSION == 29
 
     def test_pr_state_defaults(self) -> None:
         state = PrState()
@@ -1205,6 +1205,7 @@ class TestOperatorChannelForward:
                 OrchestratorEventType.PR_ACTION_TAKEN,
                 OrchestratorEventType.PR_ACTION_FAILED,
                 OrchestratorEventType.SSH_KEY_GATE_BYPASSED,
+                OrchestratorEventType.REQUEUE_REVIEW_DELIVERY_DEGRADED,
             }
         )
 

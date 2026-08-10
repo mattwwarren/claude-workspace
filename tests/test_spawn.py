@@ -2401,10 +2401,10 @@ class TestCwContextWorkspacePath:
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
     ) -> None:
-        """cw-context.json schema_version is current (3 after the #1794 addition)."""
+        """cw-context.json schema_version is current (4 after the #1730 addition)."""
         from cw.spawn import CW_CONTEXT_SCHEMA_VERSION, spawn_create_impl
 
-        assert CW_CONTEXT_SCHEMA_VERSION == 3
+        assert CW_CONTEXT_SCHEMA_VERSION == 4
 
         client = _make_client(tmp_path, name="schema-v2-client")
         daemon = FakeNativeDaemonClient()
@@ -2419,7 +2419,7 @@ class TestCwContextWorkspacePath:
         )
 
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
-        assert context["schema_version"] == 3
+        assert context["schema_version"] == 4
 
 
 class TestSpawnCreateImplCsidBackfill:

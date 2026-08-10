@@ -621,9 +621,7 @@ class TestFetchIssueComments:
     def test_fetch_issue_comments_returns_none_on_gh_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(
-            "cw.gh._sp.run", lambda *_a, **_kw: _make_run_result(1, "")
-        )
+        monkeypatch.setattr("cw.gh._sp.run", lambda *_a, **_kw: _make_run_result(1, ""))
         assert gh.fetch_issue_comments("1730", timeout=5) is None
 
     def test_fetch_issue_comments_returns_none_on_malformed_json(

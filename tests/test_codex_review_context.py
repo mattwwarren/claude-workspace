@@ -1267,7 +1267,9 @@ class TestPrepareReviewPass:
     ) -> None:
         """#1730: the codex backend live-fetches ticket comments and inlines
         them — before this, only .cw/context.json's title/body ever reached it."""
-        repo = self._repo_with_change(make_git_repo, "wt-1730-comments", "github-issues")
+        repo = self._repo_with_change(
+            make_git_repo, "wt-1730-comments", "github-issues"
+        )
         monkeypatch.setattr(
             "cw.codex_review._context.fetch_issue_comments",
             lambda *_a, **_kw: [
