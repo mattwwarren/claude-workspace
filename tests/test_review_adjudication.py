@@ -10,15 +10,15 @@ from __future__ import annotations
 import logging
 
 import pytest
+from pydantic import ValidationError
+
+from cw.auto_dev_result import Review
 from cw.review_adjudication import (
     Adjudication,
     apply_adjudication,
     render_deferred_findings_md,
     verify_fixed_dispositions,
 )
-from pydantic import ValidationError
-
-from cw.auto_dev_result import Review
 from cw.review_findings import AcceptedFinding, Finding, ReviewVerdict
 
 from .conftest import _make_diff, _make_finding
