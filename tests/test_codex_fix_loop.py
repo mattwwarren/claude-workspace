@@ -275,6 +275,12 @@ def _renamer(old: str, new: str) -> Callable[[Path, list[str]], CodexRunResult]:
     return _rename
 
 
+def _load_snapshot(session_id: str, cycle: int) -> ReviewVerdict:
+    """Read back a persisted per-cycle verdict snapshot from the bundle dir."""
+    path = diagnostics_bundle_dir(session_id) / _verdict_snapshot_filename(cycle)
+    return ReviewVerdict.model_validate_json(path.read_text())
+
+
 # ---------------------------------------------------------------------------
 # TestFixCycleFloor
 # ---------------------------------------------------------------------------
@@ -330,6 +336,10 @@ class TestFixCycleFloor:
         assert out.blocker.retry_eligible is True
         assert out_verdict is not None
         assert out_verdict.blocking is True
+        # #1763: the budget-exhausted park is this session's terminal
+        # disposition, so the last-persisted snapshot (cycle 0 — the floor
+        # parks before any fix invocation) is marked terminal.
+        assert _load_snapshot("s-floor", 0).is_terminal_snapshot is True
 
     def test_unlimited_budget_never_floors(
         self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
@@ -477,6 +487,10 @@ class TestFixInvocation:
         bundle = diagnostics_bundle_dir("s-fix-error-snapshot")
         assert (bundle / _verdict_snapshot_filename(0)).exists()
         assert any("[diagnostics:" in h for h in out.friction_highlights)
+        # #1763: the fix-failure park is terminal, so cycle 0's snapshot — the
+        # only one written — carries the terminal marker.
+        assert _load_snapshot("s-fix-error-snapshot", 0).is_terminal_snapshot is True
+        assert any(_verdict_snapshot_filename(0) in h for h in out.friction_highlights)
 
     def test_successful_fix_with_change_commits_with_conventional_message(
         self, make_git_repo: Callable[..., Path]
@@ -765,6 +779,17 @@ class TestFixLoopCapAndEscalation:
             f"cycle-{_MAX_FIX_CYCLES} MUST_FIX findings snapshot persisted" in h
             for h in out.friction_highlights
         )
+        # #1763: only the cap-exhausted terminal cycle's file is marked
+        # terminal; every superseded intermediate stays False.
+        assert (
+            _load_snapshot("s-cap-snapshot", _MAX_FIX_CYCLES).is_terminal_snapshot
+            is True
+        )
+        assert _load_snapshot("s-cap-snapshot", 0).is_terminal_snapshot is False
+        assert any(
+            _verdict_snapshot_filename(_MAX_FIX_CYCLES) in h
+            for h in out.friction_highlights
+        )
 
     def test_cycle0_snapshot_content_matches_original_findings_after_fix(
         self, make_git_repo: Callable[..., Path]
@@ -782,6 +807,10 @@ class TestFixLoopCapAndEscalation:
         snapshot = ReviewVerdict.model_validate_json(snapshot_path.read_text())
         assert any(f.summary == "MFA" for f in snapshot.must_fix)
         assert any(af.finding.summary == "MFA" for af in snapshot.accepted)
+        # #1763: cycle 0 was superseded by cycle 1's clean rereview, so it is
+        # explicitly NOT the terminal snapshot.
+        assert snapshot.is_terminal_snapshot is False
+        assert _load_snapshot("s-snapshot-content", 1).is_terminal_snapshot is True
 
     def test_unparseable_rereview_persists_cycle0_snapshot(
         self, make_git_repo: Callable[..., Path]
@@ -802,6 +831,13 @@ class TestFixLoopCapAndEscalation:
         assert (bundle / _verdict_snapshot_filename(0)).exists()
         assert not (bundle / _verdict_snapshot_filename(1)).exists()
         assert any("[diagnostics:" in h for h in out.friction_highlights)
+        # #1763: this park's `Blocker.details` comes from
+        # `_format_failures_detail`, NOT from any persisted verdict, so no
+        # snapshot is finalized — cycle 0's stays explicitly non-terminal
+        # rather than being falsely promoted.
+        assert (
+            _load_snapshot("s-rereview-fail-snapshot", 0).is_terminal_snapshot is False
+        )
 
     def test_cycle0_snapshot_write_failure_does_not_block_loop(
         self,
@@ -1309,6 +1345,11 @@ class TestScopeViolationGate:
         assert (bundle / _verdict_snapshot_filename(0)).exists()
         assert not (bundle / _verdict_snapshot_filename(1)).exists()
         assert any("[diagnostics:" in h for h in out.friction_highlights)
+        # #1763: the scope-violation park is terminal, and the file it is
+        # backed by is cycle 0's — the last one persisted.
+        assert (
+            _load_snapshot("s-scope-outsens-snapshot", 0).is_terminal_snapshot is True
+        )
 
     def test_untracked_sensitive_addition_parks_small_tier(
         self, make_git_repo: Callable[..., Path]
@@ -1622,3 +1663,106 @@ class TestCapabilityProbeIsCachedAcrossCycles:
         assert {s.role for s in verdict.agent_spec_status} <= set(
             _REVIEWER_ROLE_AGENT_FILES
         )
+
+
+# ---------------------------------------------------------------------------
+# TestTerminalSnapshotMarker — #1763
+# ---------------------------------------------------------------------------
+
+
+class TestTerminalSnapshotMarker:
+    """``ReviewVerdict.is_terminal_snapshot`` marks exactly the persisted
+    per-cycle file that actually backs the returned ``Blocker.details`` (#1763).
+
+    Before this marker, an operator opening ``cycle0-review-verdict.json`` "by
+    habit" could read a verdict whose ``rejected_must_fix`` is empty while the
+    reported blocker cited a mechanically-rejected MUST_FIX raised on a later
+    cycle (#1729) — nothing on disk said which file was authoritative.
+    """
+
+    def test_later_cycle_mechanical_rejection_matches_terminal_snapshot(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-term-mech")
+        # Cycle 0 blocks on a real MUST_FIX; a fix cycle actually runs; the
+        # cycle-1 rereview raises a mechanically-rejected MUST_FIX instead.
+        runner = _FixLoopRunner(
+            [_MF_DOC, _MF_MECH_REJECTED_DOC], fix_behaviors=[_editor()]
+        )
+        out, verdict = _run_loop(runner, worktree, session_id="s-term-mech")
+
+        assert out.status == "blocked"
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_MUST_FIX_MECHANICALLY_REJECTED
+        assert verdict is not None
+        assert verdict.rejected_must_fix
+        assert any(
+            rf.raw["summary"] == "MFX-mechanically-rejected"
+            for rf in verdict.rejected_must_fix
+        )
+
+        # Cycle 0's file legitimately has an EMPTY rejected_must_fix — the
+        # exact disagreement #1763 is about — and is now marked non-terminal.
+        cycle0 = _load_snapshot("s-term-mech", 0)
+        assert cycle0.rejected_must_fix == []
+        assert cycle0.is_terminal_snapshot is False
+
+        cycle1 = _load_snapshot("s-term-mech", 1)
+        assert any(
+            rf.raw["summary"] == "MFX-mechanically-rejected"
+            for rf in cycle1.rejected_must_fix
+        )
+        assert cycle1.is_terminal_snapshot is True
+
+        assert "### MUST_FIX — mechanically rejected" in out.blocker.details
+        # The pointer names the specific terminal file, not just the bundle dir.
+        assert any("cycle1-review-verdict.json" in h for h in out.friction_highlights)
+
+    def test_park_scope_violation_finalizes_before_review_rebind(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """``_park_scope_violation`` finalizes the persisted snapshot BEFORE it
+        rebinds ``verdict.review`` to the reconstructed cross-cycle ``Review``.
+
+        Mutation-proof by construction: the pre-rebind cycle-1 verdict carries
+        the rereview pass's own ``fix_cycles_used=0``/``had_real_commit=None``,
+        while the post-rebind value carries the loop's finalized
+        ``fix_cycles_used=2``/``had_real_commit=True``. Moving the finalize call
+        after the rebind rewrites the persisted file with the latter and fails
+        these assertions.
+        """
+        worktree = _worktree(
+            make_git_repo,
+            "wt-term-scope-order",
+            manifest={
+                ".claude/sensitive-files.yml": _MANIFEST,
+                "pyproject.toml": _PYPROJECT_CONTENT,
+            },
+        )
+        # Cycle 1's fix is benign (out of scope but non-sensitive) and commits,
+        # so cycle 1's rereview runs and persists cycle1-review-verdict.json.
+        # It still reports the original MUST_FIX open (_MF_DOC again), so the
+        # loop proceeds to cycle 2, whose fix trips the scope gate — making
+        # cycle 1, not cycle 0, the snapshot the park is backed by.
+        runner = _FixLoopRunner(
+            [_MF_DOC, _MF_DOC],
+            fix_behaviors=[
+                _editor(filename="extra.py", content="x = 1\n"),
+                _editor(filename="pyproject.toml", content='[project]\nname = "z"\n'),
+            ],
+        )
+        out, _ = _run_loop(runner, worktree, session_id="s-term-scope-order")
+
+        assert out.status == "blocked"
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_FIX_SCOPE_VIOLATION
+        assert out.review.fix_cycles_used == 2
+        assert out.review.had_real_commit is True
+
+        cycle1 = _load_snapshot("s-term-scope-order", 1)
+        assert cycle1.is_terminal_snapshot is True
+        # Pre-rebind values — the rereview pass's own review block.
+        assert cycle1.review.fix_cycles_used == 0
+        assert cycle1.review.had_real_commit is None
+        assert _load_snapshot("s-term-scope-order", 0).is_terminal_snapshot is False
+        assert any("cycle1-review-verdict.json" in h for h in out.friction_highlights)

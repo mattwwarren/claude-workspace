@@ -2390,6 +2390,33 @@ class TestWriteReviewVerdictArtifact:
         data = json.loads(path.read_text())
         assert data["agents_run"][0]["detail"] == "sandbox lacked filesystem access"
 
+    def test_is_terminal_snapshot_defaults_true(self) -> None:
+        # #1763: a verdict built by `consolidate_verdict` is a terminal
+        # disposition unless a caller (the fix loop) explicitly marks the
+        # snapshot it persists as a superseded intermediate.
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_make_finding(severity="NIT"))],
+            _make_diff(),
+            reviewed_sha="sha",
+        )
+        assert verdict.is_terminal_snapshot is True
+
+    def test_is_terminal_snapshot_round_trips_false(self, tmp_path: Path) -> None:
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_make_finding(severity="NIT"))],
+            _make_diff(),
+            reviewed_sha="sha",
+        )
+        intermediate = verdict.model_copy(update={"is_terminal_snapshot": False})
+        path = tmp_path / "review-verdict.json"
+        write_review_verdict(intermediate, path)
+        data = json.loads(path.read_text())
+        assert data["is_terminal_snapshot"] is False
+        assert (
+            ReviewVerdict.model_validate_json(path.read_text()).is_terminal_snapshot
+            is False
+        )
+
 
 class TestExecutorNeutralContract:
     def test_claude_and_codex_shapes_validate_identically(self) -> None:
