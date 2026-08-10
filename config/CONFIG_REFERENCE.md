@@ -817,6 +817,60 @@ and the recipe's act phase records a `PR_ACTION_FAILED` correction rather than
 requesting a bogus reviewer. For `claude-workspace` itself the key is set to
 `mode: ci`, so `request_reviewer` is a documented no-op here.
 
+## Reviewer Agent-Spec Global Fallback (`agent_spec_global_fallback`, #1773)
+
+Repo-level opt-out for one specific reviewer input: whether a reviewer role
+whose repo-tracked agent specification is missing or blank may fall back to
+the operator's own `~/.claude/agents/<role>.md`. Every other reviewer input
+(diff, plan/ticket context, project rubrics, sensitive-file hits) is always
+inlined from the worktree only — the agent spec is the one documented
+exception (see `src/cw/codex_review/_context.py`'s module docstring).
+
+```toml
+# pyproject.toml (repo root — this key is read from the worktree's own
+# pyproject.toml, same file as `[tool.ruff]`)
+[tool.cw.codex_review]
+agent_spec_global_fallback = false
+```
+
+- **Table**: `[tool.cw.codex_review]` in the repo's `pyproject.toml`.
+- **Key**: `agent_spec_global_fallback` — type `bool`.
+- **Default**: **enabled** (`true`). A missing `pyproject.toml`, a missing
+  `[tool.cw.codex_review]` table, a missing key, a non-boolean value, or
+  malformed TOML all leave the fallback ON — only an explicit `false` turns
+  it off (`_load_agent_spec_fallback_gate`, fail-safe by design: a repo that
+  cannot be parsed must not silently change reviewer behavior).
+
+**What enabling means (default):** for each reviewer role, the worktree's
+`.claude/agents/<role>.md` wins whenever it exists and is non-blank. A
+missing or blank repo copy falls through to
+`~/.claude/agents/<role>.md` on the machine running the review.
+
+**What disabling means:** the global fallback step is skipped entirely. A
+repo with no local spec for a role has that role run with an empty
+`## Agent Specification` section — reported as unspecified, never silently
+filled in from whatever happens to be on the executing host.
+
+**Why disable it:** a global fallback makes reviewer prompt content depend
+on the executing host's `~/.claude/agents/` — the same diff, reviewed on two
+different hosts, can be reviewed against two different specifications. A
+repo that needs its reviewer prompts to be strictly reproducible
+cross-host — notably one just adopting `cw` review and wanting every input
+grounded in tracked files from day one — sets this to `false`.
+
+**Provenance either way:** which source resolved for each role (`repo`,
+`global`, or `none`) is recorded per-role on the review verdict
+(`ReviewVerdict.agent_spec_status`) and always rendered into the posted
+verdict comment — either `_Agent specs loaded for all N reviewer role(s)._`
+or an `**AGENT SPEC(S) UNSPECIFIED**` / `**ALL AGENT SPECS UNSPECIFIED**`
+line naming the affected role(s), regardless of whether the gate is on or
+off.
+
+This gate is documentation-only in scope here — it does not change the
+default, the precedence order, or the resolution behavior (all settled by
+#1773 and covered by `tests/test_codex_review_context.py`'s
+`TestLoadAgentSpecFallbackGate`).
+
 ## Operator GitHub Login Override (RFC 0011 follow-up, #1171)
 
 `ClientConfig.operator_github_login` (see [Client Fields](#client-fields)
