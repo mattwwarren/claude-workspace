@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Degraded-reviewer reason no longer dropped before persistence (#1775):**
+  `ReviewerFindingsDocument.detail` is now copied onto `ReviewerRunRecord`,
+  and the verdict comment renders a `DEGRADED COVERAGE` note naming each
+  degraded role, instead of silently persisting an empty reason when a
+  reviewer's findings were downgraded.
+
 ## [1.31.0] - 2026-08-09
 
 ### Added
