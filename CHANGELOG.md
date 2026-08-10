@@ -8,6 +8,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **OpenCode executor tests, safety, and observability (#1671):**
+  `queue_peek` now detects opencode sessions and parses the `.cw/opencode.log`
+  JSONL log (backend-aware transcript reader) instead of searching for a
+  claude-jsonl transcript — the one rendering surface that is not cleanly
+  backend-neutral. New `test_reconcile_opencode.py` covers the live-process
+  / dead-process / recycled-PID / cancellation-retains-liveness harvest
+  scenarios (no process-tree kill tests — scope removed per #1669 R2).
+  Result-door collision tests cover opencode's two write sources
+  (EXECUTOR_DIRECT + GIT_SYNTHESIS) racing each other and external writers.
+  Lane serialization tests pin `max_parallel=1` for opencode-configured lanes.
+  A live smoke test (`test_opencode_contract_live.py`, gated behind
+  `INTEGRATION_OPENCODE_LIVE`) and nightly workflow (`nightly-opencode.yml`)
+  pin the JSONL event shape against a real `opencode` CLI. Part of #1668.
+
 - **Producer-side evidence/line-range window reconciliation (#1792):**
   `_reconcile_evidence_window` repairs a codex-review finding's declared
   line window when it is a few lines short/long of its own evidence's true

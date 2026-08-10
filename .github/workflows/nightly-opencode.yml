@@ -1,0 +1,63 @@
+# Nightly (opencode CLI contract integration) — #1671 R5
+#
+# Live contract suite that drives the real `opencode run --format json --pure`
+# CLI to pin cw's opencode JSONL harvest contract against actual CLI behavior.
+# Separate from nightly-codex.yml (which exercises the codex review backend)
+# and nightly-native.yml (which exercises the claude --bg daemon).
+#
+# Prerequisites:
+#   - `opencode` CLI installed
+#   - Model credentials available to the runner
+#
+# workflow_dispatch-only: no CI credentials are confirmed, so this never
+# runs on push/PR. The live suite self-skips unless INTEGRATION_OPENCODE_LIVE
+# is set, so a run without credentials degrades to skips rather than hard
+# errors.
+#
+# Local reproduction:
+#   INTEGRATION_OPENCODE_LIVE=1 \
+#     uv run pytest tests/test_opencode_contract_live.py -v -m integration
+
+name: Nightly (opencode CLI contract integration)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  opencode-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: CI
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+
+      - name: Set up Python 3.13
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --dev --extra mcp
+
+      - name: Install opencode CLI
+        run: npm install -g @anthropic-ai/opencode
+
+      - name: Diagnose opencode install
+        run: |
+          echo "## opencode version"
+          opencode --version 2>&1 || true
+          echo "## which opencode"
+          which opencode || true
+
+      - name: Record opencode capability probe (job summary)
+        run: |
+          echo "### OpenCode capability probe" >> "$GITHUB_STEP_SUMMARY"
+          echo "version: $(opencode --version 2>&1)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Test (opencode live contract)
+        id: opencode-contract-test
+        env:
+          INTEGRATION_OPENCODE_LIVE: "1"
+        run: uv run pytest tests/test_opencode_contract_live.py -v --tb=short -m integration

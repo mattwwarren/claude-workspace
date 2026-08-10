@@ -37,6 +37,10 @@ from cw.dev_queue import list_tickets
 from cw.exceptions import USAGE_LIMIT_RE
 from cw.gh import _fetch_pr_state
 from cw.models import QueueItemStatus, Stage, TicketTask
+from cw.opencode_runner import (
+    OPENCODE_LOG_RELATIVE_PATH,
+    extract_text_from_jsonl,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -293,6 +297,10 @@ def find_transcript_for_ticket(
 
     Falls back to the legacy heuristic (name-based project dir search) when
     no worktree path is available or its project dir is not found on disk.
+
+    opencode sessions: if the worktree contains ``.cw/opencode.log``, that
+    path is returned directly — opencode sessions have no claude-jsonl
+    transcript (#1671 R3).
     """
     refs = _load_session_refs(session_id)
 
@@ -304,6 +312,13 @@ def find_transcript_for_ticket(
         raw_wt = refs.get("worktree_path")
         if raw_wt is not None:
             effective_wt = Path(str(raw_wt))
+
+    # opencode sessions: check for .cw/opencode.log before searching claude
+    # project dirs — an opencode session has no claude-jsonl transcript.
+    if effective_wt is not None:
+        opencode_log = effective_wt / OPENCODE_LOG_RELATIVE_PATH
+        if opencode_log.exists():
+            return opencode_log
 
     if effective_wt is not None:
         project_dir = claude_project_dir(effective_wt)
@@ -400,6 +415,58 @@ def parse_transcript(path: Path) -> dict[str, Any]:
             last_sentinel.pr.number if last_sentinel and last_sentinel.pr else None
         ),
         "usage_limit_detected": usage_limit_detected,
+    }
+
+
+def parse_opencode_transcript(path: Path) -> dict[str, Any]:
+    """Parse an opencode JSONL log for queue_peek (#1671 R3).
+
+    opencode's ``--format json`` output has a different shape than claude-jsonl
+    (event types: ``step_start``/``step_finish``/``text``; no user/assistant
+    distinction; no timestamps in events). This reader reuses
+    ``extract_text_from_jsonl`` to concatenate text event payloads, then
+    ``parse_stdout`` for sentinel extraction.
+
+    Since opencode events carry no timestamps, the file's mtime serves as the
+    last-activity proxy (``last_asst_ts``). ``first_user_ts`` is None —
+    ``format_row`` falls through to ``claim_started_at`` for age computation.
+    """
+    last_sentinel: AutoDevResult | None = None
+    try:
+        log_content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {
+            "first_user_ts": None,
+            "last_asst_ts": None,
+            "last_sentinel_status": None,
+            "last_sentinel_stage": None,
+            "last_pr_number": None,
+            "usage_limit_detected": False,
+        }
+
+    if log_content:
+        text = extract_text_from_jsonl(log_content)
+        if text:
+            result = parse_stdout(text)
+            if isinstance(result, AutoDevResult) and not is_documented_example(result):
+                last_sentinel = result
+
+    last_asst_ts: str | None = None
+    try:
+        mtime = path.stat().st_mtime
+        last_asst_ts = dt.datetime.fromtimestamp(mtime, tz=dt.UTC).isoformat()
+    except OSError:
+        pass
+
+    return {
+        "first_user_ts": None,
+        "last_asst_ts": last_asst_ts,
+        "last_sentinel_status": last_sentinel.status if last_sentinel else None,
+        "last_sentinel_stage": last_sentinel.stage_reached if last_sentinel else None,
+        "last_pr_number": (
+            last_sentinel.pr.number if last_sentinel and last_sentinel.pr else None
+        ),
+        "usage_limit_detected": False,
     }
 
 
@@ -596,7 +663,10 @@ def build_peek_rows(client: str | None, now: dt.datetime) -> list[dict[str, Any]
             str(t.ticket_id), t.session_id, t.worktree_path
         )
         if transcript is not None:
-            info: dict[str, Any] = parse_transcript(transcript)
+            if transcript.name == OPENCODE_LOG_RELATIVE_PATH.name:
+                info: dict[str, Any] = parse_opencode_transcript(transcript)
+            else:
+                info = parse_transcript(transcript)
             info["signal_source"] = _SIGNAL_SOURCE_TRANSCRIPT
             info["jsonl_idle_min"] = None
             info["claim_started_at"] = _load_session_refs(t.session_id).get(
