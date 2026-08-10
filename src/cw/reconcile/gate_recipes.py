@@ -292,6 +292,14 @@ def _clean_review_snapshot(last_result: object) -> dict[str, object] | None:
         return None
     return {
         "must_fix_initial": review.get("must_fix_initial"),
+        # As of #1805, review.deferred on the Claude-native path is
+        # apply_adjudication's real deferral count, not the placeholder it was
+        # when every accepted finding carried an unearned disposition="fixed".
+        # auto_approve_clean_review's `deferred == 0` check (_predicate_holds
+        # below) therefore becomes semantically live once a lane enables the
+        # recipe: it will correctly stop auto-approving a review with genuinely
+        # deferred findings. That is the intended effect of making the field
+        # accurate, not a regression to guard against.
         "deferred": review.get("deferred", 0),
         "recommendation": health.get("recommendation"),
         "forbidden_touched": scope.get("forbidden_touched"),
@@ -315,6 +323,9 @@ def _predicate_holds(snapshot: dict[str, object]) -> bool:
     agents_run = snapshot["agents_run"]
     return (
         snapshot["must_fix_initial"] == 0
+        # See _clean_review_snapshot's note: this comparison is unchanged by
+        # #1805, but the value it reads became accurate on the Claude-native
+        # path there.
         and snapshot["deferred"] == 0
         and snapshot["recommendation"] == _RECOMMENDATION_PROCEED
         and snapshot["forbidden_touched"] is False
