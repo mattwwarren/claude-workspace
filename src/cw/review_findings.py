@@ -373,6 +373,17 @@ class ReviewVerdict(BaseModel):
     ``None`` for executors that have no such concept (LocalExecutor) rather than
     defaulting to a mode nobody probed. Purely recorded: nothing in
     ``consolidate_verdict`` or the health derivation reads them.
+
+    ``is_terminal_snapshot`` (#1763) means "this snapshot represents the
+    terminal disposition of its review pass, not one superseded by a later
+    fix-loop cycle over the same session". :func:`consolidate_verdict` never
+    sets it False — a freshly consolidated verdict IS its pass's outcome.
+    Only a caller persisting a known-non-final intermediate artifact (the
+    codex fix loop's per-cycle ``cycleN-review-verdict.json`` snapshots) stamps
+    it False, then re-stamps exactly one file True once the loop's true exit
+    disposition is known. It exists so an operator reading a snapshot off disk
+    can tell whether its ``rejected_must_fix`` is the one backing the reported
+    ``Blocker.details`` (#1729).
     """
 
     schema_version: Literal[1] = _REVIEW_VERDICT_SCHEMA_VERSION
@@ -398,6 +409,9 @@ class ReviewVerdict(BaseModel):
     # path that never resolved specs, and the renderer treats it as "say
     # nothing" rather than "everything was fine".
     agent_spec_status: list[AgentSpecStatus] = Field(default_factory=list)
+    # #1763: see the class docstring — True unless a fix-loop caller explicitly
+    # marks this persisted snapshot as a superseded intermediate cycle.
+    is_terminal_snapshot: bool = True
 
 
 class CapturedDiff(BaseModel):
