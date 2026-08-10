@@ -472,7 +472,7 @@ def test_step1f4_checkpoint_covers_both_revision_cycles() -> None:
 
 
 def test_step1f4_checkpoint_placed_before_exhausted_cycle_event() -> None:
-    """The Step 1f.4 checkpoint sits after format-only revision, before the exhausted-cycle event."""
+    """Checkpoint sits after format-only revision, before the exhausted-cycle event."""
     section = _step1f4_section()
     format_only_idx = section.index(FORMAT_ONLY_HEADING)
     checkpoint_idx = section.index(STEP1F4_CHECKPOINT_HEADING)
@@ -481,7 +481,7 @@ def test_step1f4_checkpoint_placed_before_exhausted_cycle_event() -> None:
 
 
 def test_step1f4_checkpoint_defers_authority_to_blocked_exit() -> None:
-    """The Step 1f.4 checkpoint is not treated as the fully-reviewed, authoritative plan."""
+    """The checkpoint is not treated as the fully-reviewed, authoritative plan."""
     section = _step1f4_section()
     window = _after(section, STEP1F4_CHECKPOINT_HEADING, span=600)
     assert "not the fully-re-reviewed, authoritative version" in window
@@ -496,7 +496,7 @@ def test_step1f4_checkpoint_is_best_effort() -> None:
 
 
 def test_step1a_confirms_checkpoint_origin_treated_as_unreviewed() -> None:
-    """Step 1a names both checkpoints and treats checkpoint-origin drafts as unreviewed."""
+    """Step 1a names both checkpoints and treats checkpoint-origin drafts unreviewed."""
     section = _step1a_section()
     assert CHECKPOINT_ORIGIN_HEADING in section
     window = _after(section, CHECKPOINT_ORIGIN_HEADING, span=600)
@@ -506,7 +506,7 @@ def test_step1a_confirms_checkpoint_origin_treated_as_unreviewed() -> None:
 
 
 def test_step1a_supersession_guard_covers_checkpoint_origin() -> None:
-    """The supersession guard is presence-based and needs no checkpoint-specific variant."""
+    """The guard is presence-based; no checkpoint-specific variant is needed."""
     section = _step1a_section()
     window = _after(
         section,
