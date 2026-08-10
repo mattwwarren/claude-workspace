@@ -136,9 +136,11 @@ def test_extra_files_equal_to_allowed_extra_does_not_trigger() -> None:
     delivered = [*planned, *_paths("unplanned", 7)]
 
     verdict = _check(planned, delivered)
+    extra_files = verdict["extra_files"]
+    assert isinstance(extra_files, list)
 
     assert verdict["allowed_extra"] == 7
-    assert len(verdict["extra_files"]) == 7
+    assert len(extra_files) == 7
     assert verdict["triggered"] is False
 
 
@@ -152,9 +154,11 @@ def test_extra_files_one_over_allowed_extra_triggers() -> None:
     delivered = [*planned, *_paths("unplanned", 8)]
 
     verdict = _check(planned, delivered)
+    extra_files = verdict["extra_files"]
+    assert isinstance(extra_files, list)
 
     assert verdict["allowed_extra"] == 7
-    assert len(verdict["extra_files"]) == 8
+    assert len(extra_files) == 8
     assert verdict["triggered"] is True
 
 
