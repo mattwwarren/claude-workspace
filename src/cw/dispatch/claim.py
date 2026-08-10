@@ -39,9 +39,6 @@ from cw.models import (
     OrchestratorEventType,
     QueueItemStatus,
 )
-from cw.reconcile import (
-    resolve_headless_budget,
-)
 from cw.worktree import (
     check_not_main_checkout,
     create_worktree,
@@ -470,7 +467,12 @@ def _revert_claimed_task_to_pending(
 
 
 def _park_running_task_blocked_on_user(
-    *, ticket_id: str, client_name: str, disposition: str, breadcrumbs: str
+    *,
+    ticket_id: str,
+    client_name: str,
+    disposition: str,
+    breadcrumbs: str,
+    expected_session_id: str | None = None,
 ) -> None:
     """Move a still-RUNNING claimed task to BLOCKED_ON_USER, clearing session_id.
 
@@ -481,6 +483,19 @@ def _park_running_task_blocked_on_user(
     session_id, save shape; this is the single copy. ``ticket_id``/``client_name``
     are keyword-only (both plain ``str``, no type-system distinction between
     them) so a future edit can't silently transpose them at a call site.
+
+    ``expected_session_id`` (optional) re-verifies ``stored_task.session_id ==
+    expected_session_id`` under the *same* ``dev_queue_lock()`` acquisition
+    that performs the transition — closing the check-then-use window a caller
+    would otherwise have if it read ``session_id`` from an earlier, unlocked
+    snapshot (``cw.reconcile.codex_boot``'s boot pass, #1727 round 5: the row
+    can be re-claimed by a fresh session between that snapshot read and this
+    call). A mismatch skips the park silently (the row no longer belongs to
+    the session the caller thinks it does) rather than misfiling a healthy,
+    unrelated session as parked. The two pre-spawn callers (dirty-worktree
+    guard, codex capability gate) omit it: they run synchronously, same-tick,
+    before any session_id has been stamped, so there is no snapshot to go
+    stale.
 
     Also emits SESSION_NEEDS_ATTENTION (#1257) using the canonical 9-field
     payload shape (see ``_route_scope_gated_approval`` in routing.py), reading
@@ -497,6 +512,10 @@ def _park_running_task_blocked_on_user(
                 stored_task.ticket_id == ticket_id
                 and stored_task.client == client_name
                 and stored_task.status == QueueItemStatus.RUNNING
+                and (
+                    expected_session_id is None
+                    or stored_task.session_id == expected_session_id
+                )
             ):
                 transition_task_status(
                     stored_task,
@@ -622,7 +641,6 @@ def _spawn_claimed_task(
     task: TicketTask,
     client: ClientConfig,
     *,
-    config: OrchestratorConfig,
     resolved_native_daemon: NativeDaemonClient,
     parent: str | None,
     emit: Callable[[str], None] | None,
@@ -713,13 +731,17 @@ def _spawn_claimed_task(
         _invalidate_stale_context_json(task, client, worktree_path)
 
         executor = resolve_executor(task, client, native_daemon=resolved_native_daemon)
+        # wall_clock_budget_seconds is always None since the process-kill-
+        # timeout removal: no executor is handed a kill deadline. The codex
+        # backend treats None as unlimited (no proc.kill on a timer), and the
+        # value written into cw-context.json is informational only.
         session_id = executor.spawn(
             stage=task.stage,
             task=task,
             worktree=worktree_path,
             client=client,
             parent=parent,
-            wall_clock_budget_seconds=resolve_headless_budget(task, None, config),
+            wall_clock_budget_seconds=None,
         )
 
         # Stamp session_id on the queued task so the completion

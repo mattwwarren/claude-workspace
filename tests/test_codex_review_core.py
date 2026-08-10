@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from cw.codex_review import _prepare_review_pass, run_review
+from cw.codex_runner import FakeCodexRunner
 from tests._codex_review_helpers import (
     _finding_payload,
     _git,
@@ -34,13 +35,16 @@ def test_run_review_threads_session_id_to_run_codex_role(
 
     monkeypatch.setattr("cw.codex_review._roles._run_codex_role", _spy_run_codex_role)
     run_review(
-        runner=_SequencedRunner([]),
+        # One queued result for the cold-cache filesystem-capability probe
+        # (#1709); _run_codex_role is monkeypatched, so no role consumes a slot.
+        runner=_SequencedRunner([_ok_result()]),
         task=_task(),
         worktree=worktree,
         default_branch="main",
         model=None,
         wall_clock_budget_seconds=None,
         session_id="sess-thread",
+        fix_loop_enabled=False,
     )
     assert captured["session_id"] == "sess-thread"
 
@@ -64,7 +68,11 @@ class TestPrepareReviewPass:
         _git(repo, "add", "mod.py")
         _git(repo, "commit", "-m", "add mod.py")
 
-        prepared = _prepare_review_pass(_task(), repo, "main")
+        # This throwaway pass also warms the #1709 capability cache, so the
+        # real run_review below gets a cache hit and spends no runner slot.
+        prepared = _prepare_review_pass(
+            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-prepare-run"
+        )
         results = [_ok_result() for _ in prepared.roles]
         results[0] = _ok_result(
             findings=[
@@ -82,12 +90,16 @@ class TestPrepareReviewPass:
             model=None,
             wall_clock_budget_seconds=None,
             session_id="sess-prepare-run",
+            fix_loop_enabled=False,
         )
         assert result.status == "stage_complete"
         assert verdict is not None
         assert verdict.blocking is False
         assert verdict.review.should_fix == 1
         assert len(runner.calls) == len(prepared.roles)
+        # #1773: the prepared pass's per-role agent-spec status reaches the
+        # verdict through run_review's synthesis hop.
+        assert {s.role for s in verdict.agent_spec_status} == set(prepared.roles)
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +124,14 @@ def test_run_review_threads_metrics_onto_verdict_agents_run(
     _git(repo, "add", "mod.py")
     _git(repo, "commit", "-m", "add mod.py")
 
-    prepared = _prepare_review_pass(_task(), repo, "main")
+    # Warms the #1709 capability cache; run_review below is then a cache hit.
+    prepared = _prepare_review_pass(
+        _task(),
+        repo,
+        "main",
+        runner=FakeCodexRunner(),
+        session_id="s-run-review-metrics",
+    )
     jsonl = _AUDIT_FIXTURE.read_text(encoding="utf-8")
     runner = _SequencedRunner([_ok_result(stdout=jsonl) for _ in prepared.roles])
     _result, verdict = run_review(
@@ -123,6 +142,7 @@ def test_run_review_threads_metrics_onto_verdict_agents_run(
         model=None,
         wall_clock_budget_seconds=None,
         session_id="sess-run-review-metrics",
+        fix_loop_enabled=False,
     )
     assert verdict is not None
     assert verdict.agents_run

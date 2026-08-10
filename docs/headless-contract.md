@@ -44,6 +44,10 @@ All interactive gates in the pipeline collapse to one of: AUTO-SKIP, AUTO-CONTIN
 | S1 forbidden-area hit | EXIT `forbidden_area` |
 | S2 impl checkpoint (any scope) | AUTO-CONTINUE — never gate |
 | S2 BLOCK or 2x failure | EXIT `blocked` with `blocker.reason: "impl_failed"` |
+| S2.5 files outside plan, within threshold | Append `"impl_scope_growth: <files>"` to `friction_highlights`; continue |
+| S2.5 files outside plan, threshold exceeded (`check_plan_scope_conformance.py` exit 1 **with a valid JSON verdict**) | EXIT `blocked` with `blocker.reason: "plan_scope_drift"`, `blocker.details` enumerating the unplanned paths (routes to BLOCKED_ON_USER; not finalize). Do NOT spawn reviewers |
+| S2.5 scope-conformance script exit 1 **without** a valid JSON verdict (tooling failure, not drift) | EXIT `blocked` with `blocker.reason: "impl_failed"`, `blocker.details` explains the script exited 1 without producing a valid verdict. Do NOT spawn reviewers |
+| S2.5 scope-conformance script exit 2 (plan has no parseable `## Files Modified`) | Append `"impl_scope_conformance_unparsed: <stderr>"` to `friction_highlights`; continue (fail-open) |
 | S3 review (any scope) | Always run reviewers |
 | S3 MUST_FIX (any scope) | Run fix loop; expected 2 cycles, hard-cap at 5 |
 | S3 review clean / SHOULD_FIX, small | AUTO-CONTINUE → S4 |
@@ -152,6 +156,7 @@ The skill emits **exactly one** sentinel block per invocation. If the parser fin
 | `review.fix_cycles_used` | int | 0 when first pass was clean. |
 | `review.deferred` | int | Count of findings deferred to .cw/deferred-findings.md; 0 or absent on pre-Stage-3 exits (default). |
 | `review.agents_run` | int | **v5** (#1237) — count of reviewer agents that actually produced a document. Reconciled against the executor-neutral review-verdict's `review.agents_run` (`len(documents)`) — this deliberately EXCLUDES every entry in the separate `verdict.agents_run` audit list that corresponds to a failed or skipped reviewer (timeout, error, unparseable output, budget-exhausted skip): a role that never produced usable findings must not inflate the count the clean-review gate treats as a required-non-zero signal (standing binding decision, #1236). Optional field; defaults to `0` on payloads from producers that predate v5. No longer purely advisory as of #1194: the opt-in `auto_approve_clean_review` gate recipe (RFC 0009, `cw.reconcile.gate_recipes`) requires `agents_run > 0` as part of its clean-review predicate — see Note (A9, §8). |
+| `review.had_real_commit` | bool \| null | **#1723** — when non-null, true iff at least one fix cycle in the run actually committed a change (OR'd across cycles); distinguishes a fix loop that converged (no MUST_FIX survivors) because a real fix landed from one that converged purely because every cycle's fix invocation was a tolerated no-op. Purely advisory — prose-only consumption in `render_verdict_comment`'s non-blocking headline. Optional field; defaults to `null` on payloads from producers that predate this field, representing an unknown commit outcome. No `schema_version` bump required — see Note (A11, §8). |
 | `health` | object | See §5. |
 | `friction_highlights` | string[] | Surfaced highlights from agent friction reports. |
 | `blocker` | object \| null | See §4.2. Required non-null when `status = "blocked"`. Exception (#777): `merge_gate_blocked` MAY also carry a non-null blocker to surface the gate reason (e.g. `prior_pipeline_pr_open`); `blocker` must be `null` for every other status. |
@@ -237,6 +242,7 @@ Full v3 shape with Phase B and Phase E fields (issue #174):
 | `impl_failed` | Implementation agent returned BLOCK or failed quality gates after 2 attempts. |
 | `review_blocked` | MUST_FIX findings persisted after 5 fix-loop cycles (the hard cap). |
 | `plan_deviation` | A non-deferrable Stage-3 finding (impl deviates from an explicit plan requirement/prohibition) survived the fix loop or was judged beyond fix-loop scope. The pipeline does not assign plan-vs-impl blame — it exits `blocked`; the operator uses `cw dev-queue requeue --regress` to send it back to impl, or revisits the plan. |
+| `plan_scope_drift` | Step 2.5 gate 2: the delivered diff touched more unplanned files than `.claude/scripts/check_plan_scope_conformance.py`'s allowance — `max(abs_floor, round(plan_file_count * (ratio - 1)))`, v1 defaults `ratio=1.5` / `abs_floor=5`, overridable per-repo via `[tool.cw.scope_conformance]` in `pyproject.toml` (#1779). Mechanical and pre-review: a file-set measurement taken *after impl, before review*, where `plan_deviation` is a reviewer's judgment about content raised during Stage 3. `blocker.stage` is `"stage2_impl"`, and `blocker.details` enumerates the specific unplanned paths — the operator's entire authorization surface. Distinct from the `scope_exceeded` **status**, which fires *before impl started* from the Stage-1 plan's own estimate and carries no blocker at all. |
 | `agent_block` | Any other agent returned friction level BLOCK that the pipeline could not auto-resolve. |
 | `automerge_not_armed` | `gh pr merge --auto` reported success but the read-back (`autoMergeRequest`) came back null — auto-merge was never actually armed. Fires from `auto-dev-finalize.md` Step 4c's re-verification or Step 4d's reuse-path arm+verify (#1140). |
 | `operator_unavailable` | Operator/dependency currently unreachable (e.g. locked push key, network/GitHub outage) — not a broken implementation leg. cw classifies this via `OPERATOR_UNAVAILABLE_BLOCKER_REASONS` and tags the park distinctly (RFC 0011 A1). |
@@ -474,6 +480,10 @@ Until then, cw must treat all non-terminal exits as fully manual recovery: the u
 
 **Note (A10, #1325):** Downgrading a `premises_pending_verification` sentinel whose every premise item is fully resolved (`verified: true` + a non-empty `resolution` string) to `stage_complete` at the parse boundary is a strictness **relaxation** — a previously-blocking/parked payload now proceeds — the opposite direction from A6/A7/A8's tightenings. **No version bump** is required: `stage_complete` is an existing enum value (not newly added), and no field is added, removed, renamed, or retyped. Same reasoning as the #899 `blocked` + non-null `pr` → `merge_pending` rewrite precedent.
 
+**Note (A12, #1779):** Adding the `plan_scope_drift` `blocker.reason` for the Step 2.5 post-impl scope-conformance gate requires **no version bump**. `blocker.reason` is an *open* enum (§4.2) — the "Bump required when… a new value is added to a closed enum" rule below is scoped to `status`, which is unchanged: the new exit reuses the existing `blocked` status. No field is added, removed, renamed, or retyped, and consumers that do not recognize the reason surface it verbatim exactly as the open-enum contract already requires. Deliberately *not* modelled as a new `status` value alongside `scope_exceeded`/`forbidden_area`: those are `_PRE_BRANCH_STATUSES` that structurally never carry a blocker, so they could carry neither the enumerated extra-file list nor the `stage2_impl` stage this gate's operator triage depends on.
+
+**Note (A11, #1723):** Adding the optional `review.had_real_commit` bool-or-null (§3.3) — same shape of change as A9/`agents_run`: a purely advisory field, prose-only consumption (it only changes wording inside `render_verdict_comment`'s non-blocking headline), defaulting `null` so the commit outcome of every pre-#1723 payload remains explicitly unknown while rendering exactly as it always did. **No version bump** required — same precedent as the v5 `agents_run` introduction (§8, version-history row 5).
+
 **Bump required when:**
 - Any field is removed or renamed.
 - Any existing field's type or semantics change.
@@ -632,19 +642,27 @@ Event string: `queue.session_reaped`
 
 **`reason` values (ReapReason enum):**
 
+Current producers (post-ADR-0014 — every one evidence-driven, never a timer):
+
 | Value | Trigger |
 |---|---|
 | `phantom_surface` | Daemon surface absent from roster (`_reconcile_locked` phantom sweep). |
-| `idle_stall` | Watchdog fired, no usage-limit message found; task reverted to PENDING for retry. |
-| `usage_limit_cutoff` | Watchdog fired; transcript contained a Claude usage-limit message; task reverted for retry. |
-| `retry_cap_parked` | Idle watchdog fired; retry cap reached; task set BLOCKED_ON_USER. |
-| `stalled_retry_cap_parked` | Stalled (wall-clock) sweep fired; `task.attempts` reached the per-tier stalled retry cap; task set BLOCKED_ON_USER instead of reverted. |
-| `wall_clock_budget` | Wall-clock budget exceeded (`revert_stalled_headless_sessions`); task reverted for retry. |
-| `finalize_blocked` | Stalled FINALIZE-stage session with commits beyond base but a confirmed absence of an open PR; parked (paused_status `finalize_blocked`) for salvage rather than reverted. |
+| `usage_limit_cutoff` | Transcript of a dead/phantom session contained a Claude usage-limit message; drives dispatch back-off. |
 | `terminal_sibling` | A PENDING row was parked/cancelled because the same (client, ticket) already has a COMPLETED or CANCELLED sibling row (#876). Queue-only disposition — surfaces via `session.reap_proposed` and the task's `disposition`, not via a session reap. |
-| `completed_backstop` | Backstop path (`revert_timed_out_tasks` / `revert_completed_silent_tasks`) found a TIMED_OUT or COMPLETED DAEMON session with a still-RUNNING queue task and no prior reap_reason. |
-| `salvage_completed` | Git-state HIGH path: committed branch, no open PR, post-review-clean; draft PR auto-created, task COMPLETED. |
-| `salvage_parked` | Git-state LOW path: committed branch, no open PR, not post-review-clean; task set BLOCKED_ON_USER for human salvage. |
+| `completed_backstop` | Backstop path (`revert_timed_out_tasks` / `revert_completed_silent_tasks`) found a TIMED_OUT (legacy) or COMPLETED DAEMON session with a still-RUNNING queue task and no prior reap_reason. |
+
+Historical-only values (no longer produced — removed with the process-kill
+timeouts, ADR-0014 — but still present in old event logs and persisted rows):
+
+| Value | Former trigger |
+|---|---|
+| `idle_stall` | Idle watchdog fired; task reverted to PENDING for retry. |
+| `retry_cap_parked` | Idle watchdog fired; retry cap reached; task set BLOCKED_ON_USER. |
+| `stalled_retry_cap_parked` | Wall-clock sweep fired at the per-tier stalled retry cap; task set BLOCKED_ON_USER. |
+| `wall_clock_budget` | Wall-clock budget exceeded; task reverted for retry. |
+| `finalize_blocked` | Stalled FINALIZE-stage session with commits but no PR; parked for rescue. |
+| `salvage_completed` | Git-state HIGH path: draft PR auto-created, task COMPLETED. |
+| `salvage_parked` | Git-state LOW path: task set BLOCKED_ON_USER for human salvage. |
 
 ---
 

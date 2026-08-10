@@ -308,6 +308,14 @@ class Review(BaseModel):
     # (`len(verdict.agents_run)`, including failed entries). Advisory optional
     # field; defaults to 0 on payloads from producers that predate v5.
     agents_run: int = 0
+    # #1723: true iff at least one fix cycle in the run produced a real
+    # commit (OR'd across cycles) — distinguishes a genuinely-fixed cycle-0
+    # blocker from a fix loop that converged (no MUST_FIX survivors) purely
+    # because every cycle's codex fix invocation was a no-op. Advisory
+    # optional field; defaults to None so payloads from producers that predate
+    # this field remain explicitly unknown. Finalized fix-loop results always
+    # populate a concrete bool.
+    had_real_commit: bool | None = None
 
 
 class AgentHealthEntry(BaseModel):

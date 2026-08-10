@@ -30,6 +30,7 @@ from cw.codex_review._const import (
     _CATEGORY_TO_REASON,
     _MIN_ROLE_TIMEOUT_SECONDS,
     CODEX_BUDGET_EXHAUSTED,
+    _is_spawn_error,
 )
 from cw.codex_review._context import _parse_reviewer_document
 from cw.config import state_dir
@@ -48,11 +49,6 @@ if TYPE_CHECKING:
     from cw.executor_diagnostics import ExecutorFailureCategory
 
 _log = logging.getLogger(__name__)
-
-# Exit code Popen/RealCodexRunner reports when the codex binary is not on PATH
-# (FileNotFoundError → CodexRunResult(returncode=127, ...)); paired with a
-# "command not found" stderr it classifies as a spawn_error (#1239).
-_COMMAND_NOT_FOUND_RETURNCODE = 127
 
 # The two audit flags #1710 adds to every generic reviewer invocation. Kept as
 # one tuple so the argv builder and the degrade-and-retry strip cannot drift.
@@ -167,10 +163,7 @@ def _classify_codex_failure(result: CodexRunResult) -> ExecutorFailureCategory:
     """
     if result.timed_out:
         return "timeout"
-    if (
-        result.returncode == _COMMAND_NOT_FOUND_RETURNCODE
-        and "command not found" in result.stderr
-    ):
+    if _is_spawn_error(result):
         return "spawn_error"
     if result.returncode != 0:
         return "nonzero_exit"

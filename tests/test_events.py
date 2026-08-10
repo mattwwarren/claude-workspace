@@ -201,6 +201,68 @@ def test_read_events_limit(tmp_events_dir: Path) -> None:
     assert len(result) == 3
 
 
+def test_read_events_limit_returns_most_recent(tmp_events_dir: Path) -> None:
+    """limit=N returns the N most recently recorded events, not the oldest N."""
+    recorded = [
+        events_record_event(OrchestratorEventType.TICKET_ENQUEUED, {"i": i})
+        for i in range(5)
+    ]
+    result = read_events(limit=3)
+    assert [ev.id for ev in result] == [ev.id for ev in recorded[-3:]]
+
+
+def test_read_events_limit_zero_returns_empty_list(tmp_events_dir: Path) -> None:
+    """limit=0 returns [] rather than the list[-0:] full-list trap."""
+    for _ in range(3):
+        events_record_event(OrchestratorEventType.TICKET_ENQUEUED, {})
+    result = read_events(limit=0)
+    assert result == []
+
+
+def test_read_events_limit_composes_with_type_and_since_ts_filters(
+    tmp_events_dir: Path,
+) -> None:
+    """limit bounds the already-filtered (type + since_ts) set, not the raw inbox."""
+    base = datetime(2025, 6, 1, 12, 0, 0, tzinfo=UTC)
+    matching: list[OrchestratorEvent] = []
+    with freeze_time(base):
+        events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": 0})
+    with freeze_time(base + timedelta(minutes=1)):
+        matching.append(
+            events_record_event(OrchestratorEventType.PR_CI_FAILED, {"n": 1})
+        )
+    with freeze_time(base + timedelta(minutes=2)):
+        events_record_event(OrchestratorEventType.PR_MERGED, {"n": 2})
+    with freeze_time(base + timedelta(minutes=3)):
+        matching.append(
+            events_record_event(OrchestratorEventType.PR_CI_FAILED, {"n": 3})
+        )
+    with freeze_time(base + timedelta(minutes=4)):
+        matching.append(
+            events_record_event(OrchestratorEventType.PR_CI_FAILED, {"n": 4})
+        )
+
+    cutoff = base + timedelta(seconds=30)
+    result = read_events(
+        since_ts=cutoff,
+        event_types=[OrchestratorEventType.PR_CI_FAILED],
+        limit=2,
+    )
+    assert [ev.id for ev in result] == [ev.id for ev in matching[-2:]]
+
+
+def test_read_events_limit_exceeds_available_count_returns_all(
+    tmp_events_dir: Path,
+) -> None:
+    """limit greater than the available count returns everything, in order."""
+    recorded = [
+        events_record_event(OrchestratorEventType.TICKET_ENQUEUED, {"i": i})
+        for i in range(3)
+    ]
+    result = read_events(limit=100)
+    assert [ev.id for ev in result] == [ev.id for ev in recorded]
+
+
 # ---------------------------------------------------------------------------
 # advance_cursor / consumer cursor tests
 # ---------------------------------------------------------------------------
@@ -2492,3 +2554,481 @@ def test_cli_event_prune_before_naive_timestamp(tmp_events_dir: Path) -> None:
     result = runner.invoke(main, ["event", "prune", "--before", "2000-01-01T00:00:00"])
     assert result.exit_code == 0, result.output
     assert "no timezone; assuming UTC" in result.output
+
+
+# ---------------------------------------------------------------------------
+# --limit/-n (issue #1694)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_event_tail_limit_flag_returns_at_most_n_most_recent(
+    tmp_events_dir: Path,
+) -> None:
+    """--limit N returns only the N most recently recorded matching events."""
+    recorded = [
+        events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i})
+        for i in range(5)
+    ]
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--limit", "2"])
+    assert result.exit_code == 0, result.output
+    for ev in recorded[-2:]:
+        assert ev.id in result.output
+    for ev in recorded[:3]:
+        assert ev.id not in result.output
+
+
+def test_cli_event_tail_limit_short_flag(tmp_events_dir: Path) -> None:
+    """-n is the short form of --limit."""
+    recorded = [
+        events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i})
+        for i in range(5)
+    ]
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "-n", "2"])
+    assert result.exit_code == 0, result.output
+    for ev in recorded[-2:]:
+        assert ev.id in result.output
+    for ev in recorded[:3]:
+        assert ev.id not in result.output
+
+
+def test_cli_event_tail_limit_composes_with_since_type_client_lane(
+    tmp_events_dir: Path,
+) -> None:
+    """--limit composes with --type/--client/--lane: filter-then-limit ordering."""
+    events_record_event(
+        OrchestratorEventType.SESSION_SPAWNED,
+        {"client": "alpha", "lane": "l1", "session_id": "s0"},
+    )
+    matching = [
+        events_record_event(
+            OrchestratorEventType.SESSION_SPAWNED,
+            {"client": "alpha", "lane": "l1", "session_id": f"s{i}"},
+        )
+        for i in range(1, 4)
+    ]
+    events_record_event(
+        OrchestratorEventType.SESSION_SPAWNED,
+        {"client": "beta", "lane": "l1", "session_id": "sX"},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "event",
+            "tail",
+            "--type",
+            "session.spawned",
+            "--client",
+            "alpha",
+            "--lane",
+            "l1",
+            "--limit",
+            "2",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    for ev in matching[-2:]:
+        assert ev.id in result.output
+    assert matching[0].id not in result.output
+
+
+def test_cli_event_tail_limit_rejects_non_positive(tmp_events_dir: Path) -> None:
+    """--limit 0 and --limit -1 both exit non-zero via CwError."""
+    runner = CliRunner()
+    result_zero = runner.invoke(main, ["event", "tail", "--limit", "0"])
+    assert result_zero.exit_code != 0
+    assert "--limit must be a positive integer" in result_zero.output
+
+    result_negative = runner.invoke(main, ["event", "tail", "--limit", "-1"])
+    assert result_negative.exit_code != 0
+    assert "--limit must be a positive integer" in result_negative.output
+
+
+def test_cli_event_tail_limit_incompatible_with_follow(tmp_events_dir: Path) -> None:
+    """--limit with --follow exits non-zero via CwError mentioning unbounded follow."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--limit", "5", "--follow"])
+    assert result.exit_code != 0
+    assert "follow" in result.output.lower()
+    assert "unbounded" in result.output.lower()
+
+
+def test_cli_event_tail_json_limit_compose(tmp_events_dir: Path) -> None:
+    """--json --limit returns exactly the N most recent events' ids, in order."""
+    recorded = [
+        events_record_event(OrchestratorEventType.PR_REGISTERED, {"n": i})
+        for i in range(5)
+    ]
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--json", "--limit", "2"])
+    assert result.exit_code == 0, result.output
+    lines = [ln for ln in result.output.splitlines() if ln.strip()]
+    ids = [json.loads(ln)["id"] for ln in lines]
+    assert ids == [ev.id for ev in recorded[-2:]]
+
+
+# ---------------------------------------------------------------------------
+# Compact default (non-json) output format (issue #1694)
+# ---------------------------------------------------------------------------
+
+
+def _dispatch_tick_payload_with_marker(marker: str) -> dict[str, object]:
+    """A dispatch.tick payload shaped like the real one (src/cw/dispatch/lanes.py).
+
+    The *marker* is planted only inside the nested ``lanes``/``lane_occupants``
+    structures (as a lane name), never in a scalar field, so a test can assert
+    it is absent from compact (non-json) output without also matching a scalar.
+    """
+    return {
+        "client": "acme",
+        "claimed": 2,
+        "pending": 1,
+        "running": 3,
+        "cap": 5,
+        "skip_reason": "none",
+        "lanes": {
+            marker: {
+                "claimed": 1,
+                "running": 1,
+                "blocked": 0,
+                "signoff": 0,
+                "pending": 0,
+            },
+        },
+        "lane_occupants": {
+            marker: [
+                {"session_id": "s1", "ticket_id": "T-1"},
+            ],
+        },
+        "occupied": 1,
+        "host_running": 4,
+        "host_budget": 10,
+    }
+
+
+def test_cli_event_tail_default_format_omits_nested_lane_maps(
+    tmp_events_dir: Path,
+) -> None:
+    """Default (non-json) output drops dispatch.tick's nested lanes/lane_occupants."""
+    marker = "lane-zebra-unique"
+    events_record_event(
+        OrchestratorEventType.DISPATCH_TICK,
+        _dispatch_tick_payload_with_marker(marker),
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail"])
+    assert result.exit_code == 0, result.output
+    assert marker not in result.output
+    assert "claimed=" in result.output
+    assert "pending=" in result.output
+    assert "running=" in result.output
+    assert "skip_reason=" in result.output
+
+
+def test_cli_event_tail_default_format_keeps_id_and_timestamp(
+    tmp_events_dir: Path,
+) -> None:
+    """Regression guard: id and an ISO-ish timestamp still appear in default output."""
+    ev = events_record_event(OrchestratorEventType.PR_REGISTERED, {"pr": 1})
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail"])
+    assert result.exit_code == 0, result.output
+    assert ev.id in result.output
+    assert ev.created_at.strftime("%Y-%m-%dT%H:%M:%S") in result.output
+
+
+def test_cli_event_tail_default_format_keeps_short_list_fields(
+    tmp_events_dir: Path,
+) -> None:
+    """A pr.ci_failed-shaped event's short scalar-list field survives compaction."""
+    events_record_event(
+        OrchestratorEventType.PR_CI_FAILED,
+        {
+            "pr": 42,
+            "repo": "owner/repo",
+            "failing_checks": ["lint", "type-check"],
+        },
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail"])
+    assert result.exit_code == 0, result.output
+    assert "lint" in result.output
+    assert "type-check" in result.output
+
+
+def test_cli_event_tail_json_still_full_fidelity(tmp_events_dir: Path) -> None:
+    """--json retains the full dispatch.tick payload verbatim, nested fields kept."""
+    marker = "lane-zebra-unique"
+    payload = _dispatch_tick_payload_with_marker(marker)
+    events_record_event(OrchestratorEventType.DISPATCH_TICK, payload)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--json"])
+    assert result.exit_code == 0, result.output
+    lines = [ln for ln in result.output.splitlines() if ln.strip()]
+    data = json.loads(lines[0])
+    assert data["payload"]["lanes"] == payload["lanes"]
+    assert data["payload"]["lane_occupants"] == payload["lane_occupants"]
+
+
+def test_cli_event_tail_follow_streams_compact_format_line_buffered(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--follow default output is also compact and still flushes per-event."""
+    marker = "lane-zebra-unique"
+    events_record_event(
+        OrchestratorEventType.DISPATCH_TICK,
+        _dispatch_tick_payload_with_marker(marker),
+    )
+
+    def raise_immediately(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("time.sleep", raise_immediately)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--follow"])
+    assert result.exit_code == 130
+    assert marker not in result.output
+    assert "claimed=" in result.output
+    assert "dispatch.tick" in result.output
+
+
+# ---------------------------------------------------------------------------
+# --collapse-repeats (issue #1754)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_event_tail_collapse_repeats_consecutive_run_collapses_to_one_line(
+    tmp_events_dir: Path,
+) -> None:
+    """3 consecutive same-type/same-payload events collapse to one `x3` line."""
+    for _ in range(3):
+        events_record_event(
+            OrchestratorEventType.DISPATCH_TICK, {"client": "acme", "n": 1}
+        )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--collapse-repeats"])
+    assert result.exit_code == 0, result.output
+    assert result.output.count("dispatch.tick") == 1
+    assert "x3" in result.output
+
+
+def test_cli_event_tail_collapse_repeats_run_interrupted_reopens(
+    tmp_events_dir: Path,
+) -> None:
+    """A run broken by an unrelated event re-opens instead of merging across it."""
+    for _ in range(2):
+        events_record_event(
+            OrchestratorEventType.DISPATCH_TICK, {"client": "acme", "n": 1}
+        )
+    events_record_event(OrchestratorEventType.PR_REGISTERED, {"pr": 1})
+    for _ in range(2):
+        events_record_event(
+            OrchestratorEventType.DISPATCH_TICK, {"client": "acme", "n": 1}
+        )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--collapse-repeats"])
+    assert result.exit_code == 0, result.output
+    assert result.output.count("dispatch.tick x2") == 2
+    assert "x4" not in result.output
+    assert "pr.registered" in result.output
+
+
+def test_cli_event_tail_collapse_repeats_differing_payload_does_not_collapse(
+    tmp_events_dir: Path,
+) -> None:
+    """Consecutive same-type events with differing scalar payloads do not merge."""
+    events_record_event(OrchestratorEventType.DISPATCH_TICK, {"client": "acme", "n": 1})
+    events_record_event(OrchestratorEventType.DISPATCH_TICK, {"client": "acme", "n": 2})
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--collapse-repeats"])
+    assert result.exit_code == 0, result.output
+    assert "x2" not in result.output
+    assert result.output.count("dispatch.tick") == 2
+
+
+def test_cli_event_tail_collapse_repeats_ignores_non_salient_nested_fields(
+    tmp_events_dir: Path,
+) -> None:
+    """Identical scalar fields but differing nested dict fields still collapse."""
+    events_record_event(
+        OrchestratorEventType.DISPATCH_TICK,
+        {"client": "acme", "n": 1, "lanes": {"l1": {"claimed": 1}}},
+    )
+    events_record_event(
+        OrchestratorEventType.DISPATCH_TICK,
+        {"client": "acme", "n": 1, "lanes": {"l2": {"claimed": 2}}},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--collapse-repeats"])
+    assert result.exit_code == 0, result.output
+    assert result.output.count("dispatch.tick") == 1
+    assert "x2" in result.output
+
+
+def test_cli_event_tail_collapse_repeats_singleton_run_prints_normally(
+    tmp_events_dir: Path,
+) -> None:
+    """A run of length 1 prints via the normal full per-event line, not `x1`."""
+    ev = events_record_event(OrchestratorEventType.PR_REGISTERED, {"pr": 1})
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--collapse-repeats"])
+    assert result.exit_code == 0, result.output
+    assert ev.id in result.output
+    assert ev.created_at.strftime("%Y-%m-%dT%H:%M:%S") in result.output
+    assert "x1" not in result.output
+
+
+def test_cli_event_tail_collapse_repeats_line_format_matches_ticket_example(
+    tmp_events_dir: Path,
+) -> None:
+    """Collapsed line matches `TYPE xN over Mm  k=v ...`, span computed in minutes."""
+    base = datetime(2025, 6, 1, 12, 0, 0, tzinfo=UTC)
+    for i in range(3):
+        with freeze_time(base + timedelta(minutes=i)):
+            events_record_event(
+                OrchestratorEventType.DISPATCH_TICK, {"client": "acme", "n": 1}
+            )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--collapse-repeats"])
+    assert result.exit_code == 0, result.output
+    assert "dispatch.tick x3 over 2m  client=acme n=1" in result.output
+
+
+def test_cli_event_tail_collapse_repeats_json_unaffected(tmp_events_dir: Path) -> None:
+    """--json --collapse-repeats is a no-op: one JSON line per original event."""
+    recorded = [
+        events_record_event(OrchestratorEventType.DISPATCH_TICK, {"client": "acme"})
+        for _ in range(3)
+    ]
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--json", "--collapse-repeats"])
+    assert result.exit_code == 0, result.output
+    lines = [ln for ln in result.output.splitlines() if ln.strip()]
+    ids = [json.loads(ln)["id"] for ln in lines]
+    assert ids == [ev.id for ev in recorded]
+
+
+def test_cli_event_tail_collapse_repeats_rejects_with_follow(
+    tmp_events_dir: Path,
+) -> None:
+    """--collapse-repeats with --follow exits non-zero via CwError."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--collapse-repeats", "--follow"])
+    assert result.exit_code != 0
+    assert "follow" in result.output.lower()
+    assert "buffering" in result.output.lower() or "flush" in result.output.lower()
+
+
+def test_cli_event_tail_collapse_repeats_composes_with_dedup_terminal(
+    tmp_events_dir: Path,
+) -> None:
+    """--dedup-terminal runs first; --collapse-repeats then summarizes the rest."""
+    for _ in range(3):
+        events_record_event(
+            OrchestratorEventType.SESSION_TIMED_OUT, {"session_id": "s1"}
+        )
+    for _ in range(3):
+        events_record_event(
+            OrchestratorEventType.DISPATCH_TICK, {"client": "acme", "n": 1}
+        )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["event", "tail", "--dedup-terminal", "--collapse-repeats"]
+    )
+    assert result.exit_code == 0, result.output
+    assert result.output.count("session.timed_out") == 1
+    assert result.output.count("dispatch.tick") == 1
+    assert "x3" in result.output
+
+
+def test_cli_event_tail_collapse_repeats_composes_with_limit(
+    tmp_events_dir: Path,
+) -> None:
+    """--limit applies server-side before --collapse-repeats groups the window."""
+    events_record_event(OrchestratorEventType.DISPATCH_TICK, {"client": "acme", "n": 1})
+    for _ in range(4):
+        events_record_event(
+            OrchestratorEventType.DISPATCH_TICK, {"client": "acme", "n": 2}
+        )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["event", "tail", "--limit", "4", "--collapse-repeats"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "x4" in result.output
+    assert "n=1" not in result.output
+
+
+def test_cli_event_tail_collapse_repeats_composes_with_client_filter(
+    tmp_events_dir: Path,
+) -> None:
+    """--client filters before --collapse-repeats groups the surviving events."""
+    for _ in range(3):
+        events_record_event(
+            OrchestratorEventType.DISPATCH_TICK, {"client": "alpha", "n": 1}
+        )
+    events_record_event(OrchestratorEventType.DISPATCH_TICK, {"client": "beta", "n": 1})
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["event", "tail", "--client", "alpha", "--collapse-repeats"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "x3" in result.output
+    assert "beta" not in result.output
+
+
+def test_cli_event_tail_collapse_repeats_empty_events_no_crash(
+    tmp_events_dir: Path,
+) -> None:
+    """No matching events + --collapse-repeats still prints the empty-path message."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--collapse-repeats"])
+    assert result.exit_code == 0, result.output
+    assert "No events." in result.output
+
+
+def test_cli_event_tail_collapse_repeats_mixed_types_no_cross_type_grouping(
+    tmp_events_dir: Path,
+) -> None:
+    """Type is part of the grouping key: never merges across types."""
+    events_record_event(OrchestratorEventType.DISPATCH_TICK, {})
+    events_record_event(OrchestratorEventType.PR_REGISTERED, {})
+    events_record_event(OrchestratorEventType.DISPATCH_TICK, {})
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--collapse-repeats"])
+    assert result.exit_code == 0, result.output
+    assert "x2" not in result.output
+    assert result.output.count("dispatch.tick") == 2
+    assert result.output.count("pr.registered") == 1
+
+
+def test_cli_event_tail_collapse_repeats_help_text_documents_flag(
+    tmp_events_dir: Path,
+) -> None:
+    """`cw event tail --help` mentions --collapse-repeats."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "--collapse-repeats" in result.output

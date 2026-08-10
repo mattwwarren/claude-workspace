@@ -9,8 +9,11 @@ telemetry is incomplete.
 Incidents covered:
   #419 — dispatch stall on stale main (loop-health WARN)
   #421 — phantom revert of a dirty worktree (session.phantom_reverted)
-  #418 — suppressed salvage of silently_idle session (session.salvage_skipped)
   #315 — TIMED_OUT session whose branch PR was merged (timed_out-merged WARN)
+
+(#418 — suppressed salvage of silently_idle session — was covered here until
+the process-kill-timeout removal deleted the stalled-budget sweep and its
+salvage-skip signal along with the incident's replay path.)
 """
 
 from __future__ import annotations
@@ -32,18 +35,13 @@ from cw.models import (
     CwState,
     DevQueueStore,
     DispatchSkipReason,
-    OrchestratorConfig,
     OrchestratorEventType,
     QueueItemStatus,
     Session,
     SessionStatus,
     TicketTask,
 )
-from cw.reconcile import (
-    _SILENTLY_IDLE_REASON,
-    reconcile,
-    revert_stalled_headless_sessions,
-)
+from cw.reconcile import reconcile
 from tests.conftest import _make_daemon_session as _cw_make_daemon_session
 
 
@@ -151,6 +149,13 @@ def test_incident_421_phantom_dirty_worktree(
         "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
+    # Keep the reconcile() gh pre-pass hermetic: a host without a working
+    # `gh` would route the ticket to gh_blocked instead of the dirty-worktree
+    # path under test.
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda *_args, **_kwargs: (False, True),
+    )
     # Incident #421: worktree was dirty at the time of phantom revert.
     # Drive dirtiness through worktree_path (not session.branch).
     monkeypatch.setattr(
@@ -188,79 +193,6 @@ def test_incident_421_phantom_dirty_worktree(
     assert task.status == QueueItemStatus.BLOCKED_ON_USER, (
         f"Expected BLOCKED_ON_USER, got {task.status} — "
         "dirty worktree was silently clobbered"
-    )
-
-
-# ---------------------------------------------------------------------------
-# #418 — Suppressed salvage of silently_idle session
-# ---------------------------------------------------------------------------
-
-_FROZEN_418 = "2026-06-05T12:00:00Z"
-_NOW_418 = datetime(2026, 6, 5, 12, 0, 0, tzinfo=UTC)
-_STARTED_LONG_AGO = datetime(2026, 6, 5, 0, 0, 0, tzinfo=UTC)  # 12 h before frozen now
-
-
-@freezegun.freeze_time(_FROZEN_418)
-def test_incident_418_silently_idle_emits_salvage_skipped(
-    tmp_config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Replay #418: silently_idle park-marker session emits session.salvage_skipped.
-
-    Incident: a headless DAEMON session that was parked by
-    flag_silently_idle_daemon_sessions (last_result has paused_status=silently_idle)
-    was being re-timed-out by revert_stalled_headless_sessions instead of being
-    left alone. The SESSION_SALVAGE_SKIPPED event (#459) makes this path visible.
-    """
-    sess = _make_daemon_session(
-        "silently-idle-418", "TICKET-418", started_at=_STARTED_LONG_AGO
-    )
-    sess.last_result = {"paused_status": _SILENTLY_IDLE_REASON}
-    state = CwState(sessions=[sess])
-    monkeypatch.setattr("cw.reconcile.stalled._detect._is_headless", lambda *_: True)
-
-    now = _NOW_418
-    revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
-
-    events = read_events(
-        consumer="test-incident-418-skip",
-        event_types=[OrchestratorEventType.SESSION_SALVAGE_SKIPPED],
-    )
-    assert len(events) == 1, f"Expected 1 salvage_skipped event, got {events}"
-    payload = events[0].payload
-    assert payload["session_id"] == "silently-idle-418"
-    assert payload.get("paused_status") == _SILENTLY_IDLE_REASON
-
-
-@freezegun.freeze_time(_FROZEN_418)
-def test_incident_418_terminal_sentinel_no_salvage_skip(
-    tmp_config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Contrast: terminal-sentinel last_result does NOT emit salvage_skipped.
-
-    The salvage_skipped path is gated on paused_status==silently_idle. A session
-    that genuinely shipped (last_result.status=shipped) must not emit the signal —
-    confusing a shipped session with a parked one is a correctness bug.
-    """
-    sess = _make_daemon_session(
-        "shipped-418", "TICKET-418B", started_at=_STARTED_LONG_AGO
-    )
-    # Real terminal sentinel — no paused_status key.
-    sess.last_result = {"status": "shipped", "schema_version": 4}
-    state = CwState(sessions=[sess])
-    monkeypatch.setattr("cw.reconcile.stalled._detect._is_headless", lambda *_: True)
-
-    now = _NOW_418
-    revert_stalled_headless_sessions(state, now=now, config=OrchestratorConfig())
-
-    events = read_events(
-        consumer="test-incident-418-no-skip",
-        event_types=[OrchestratorEventType.SESSION_SALVAGE_SKIPPED],
-    )
-    assert len(events) == 0, (
-        "Expected no salvage_skipped events for terminal-sentinel session, "
-        f"got {events}"
     )
 
 

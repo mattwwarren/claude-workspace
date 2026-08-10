@@ -12,6 +12,13 @@ orchestration sessions — supplies the reap *authority*).
 the revert path"). This ADR changes that default; see Reconciliation below.
 **Implemented by:** #552 (detect/act split), #554 (`reap_policy` gate),
 #555 (`SESSION_REAP_PROPOSED` + authorization), #556 (doc inversion).
+**Amended by:** [ADR-0014](0014-timers-never-destroy-work.md) (timers never
+destroy work) — narrows what may even be *proposed*: elapsed time and
+transcript quietness no longer produce reap candidates at all, so this ADR's
+gate now governs only evidence-driven dispositions (roster-absence phantoms).
+ADR-0014 also partially overturns the "Remove reaping entirely — rejected"
+alternative below: rejected-then was removal of *all* reaping; what ADR-0014
+removes is specifically the timer-driven class.
 
 ## Decision
 

@@ -11,24 +11,28 @@ from typing import TYPE_CHECKING
 import pytest
 
 from cw.codex_fix_loop import (
-    _CYCLE0_SNAPSHOT_FILENAME,
     _ESCALATE_AT_CYCLE,
     _FIX_CYCLE_FLOOR_SECONDS,
     _MAX_FIX_CYCLES,
     _build_fix_codex_argv,
     _build_fix_prompt,
     _track_open_findings,
+    _verdict_snapshot_filename,
     run_review_with_fix_loop,
 )
 from cw.codex_review import (
     _MIN_ROLE_TIMEOUT_SECONDS,
+    _REVIEWER_ROLE_AGENT_FILES,
     CODEX_BUDGET_EXHAUSTED,
     CODEX_FIX_SCOPE_VIOLATION,
     CODEX_MUST_FIX_FINDINGS,
+    CODEX_MUST_FIX_MECHANICALLY_REJECTED,
     CODEX_REVIEW_UNPARSEABLE,
+    render_verdict_comment,
     run_review,
     synthesize_codex_review_result,
 )
+from cw.codex_review._capability import _PROBE_ARGV
 from cw.codex_runner import CodexRunResult
 from cw.executor_diagnostics import diagnostics_bundle_dir
 from cw.local_runner import make_blocked
@@ -38,6 +42,7 @@ from cw.review_findings import (
     ReviewVerdict,
     _dedup_key,
     consolidate_verdict,
+    write_review_verdict,
 )
 from tests._codex_review_helpers import _Clock, _SequencedRunner, _write
 from tests.conftest import (
@@ -54,7 +59,7 @@ if TYPE_CHECKING:
     from cw.codex_runner import CodexRunner
     from cw.review_findings import ReviewerFindingsDocument
 
-    _FixBehavior = CodexRunResult | Callable[[Path, list[str]], CodexRunResult]
+    _FixBehavior = CodexRunResult | Callable[[Path, list[str]], CodexRunResult] | None
 
 # ---------------------------------------------------------------------------
 # Fixtures / doubles
@@ -141,11 +146,22 @@ def _doc(findings: list[dict[str, object]]) -> str:
     )
 
 
+# #1714: a MUST_FIX whose evidence is absent from the diff is rejected
+# `evidence_not_in_diff` — a MECHANICAL rejection, so it never reaches
+# `verdict.must_fix` and must never enter the fix loop.
+_MF_BAD_EVIDENCE = _finding_dict(
+    severity="MUST_FIX",
+    line=1,
+    evidence="this string appears nowhere in the captured diff",
+    summary="MFX-mechanically-rejected",
+)
+
 _MF_DOC = _doc([_MF_A])
 _MF_AB_DOC = _doc([_MF_A, _MF_B])
 _MF_SF_DOC = _doc([_MF_A, _SF])
 _SF_DOC = _doc([_SF])
 _CLEAN_DOC = _doc([])
+_MF_MECH_REJECTED_DOC = _doc([_MF_BAD_EVIDENCE])
 
 
 class _FixLoopRunner:
@@ -372,6 +388,7 @@ def _stage_complete(worktree: Path) -> tuple[AutoDevResult, ReviewVerdict]:
         reviewed_sha="sha-clean",
         session_id="s-stage-complete",
         default_branch="main",
+        fix_loop_enabled=True,
     )
     assert verdict is not None
     return result, verdict
@@ -458,7 +475,7 @@ class TestFixInvocation:
 
         assert out.status == "blocked"
         bundle = diagnostics_bundle_dir("s-fix-error-snapshot")
-        assert (bundle / _CYCLE0_SNAPSHOT_FILENAME).exists()
+        assert (bundle / _verdict_snapshot_filename(0)).exists()
         assert any("[diagnostics:" in h for h in out.friction_highlights)
 
     def test_successful_fix_with_change_commits_with_conventional_message(
@@ -672,13 +689,20 @@ class TestFixLoopCapAndEscalation:
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-clean2")
         runner = _FixLoopRunner([_MF_DOC, _MF_DOC, _CLEAN_DOC])
-        out, _verdict = _run_loop(runner, worktree, session_id="s-clean2")
+        out, verdict = _run_loop(runner, worktree, session_id="s-clean2")
 
         assert out.status == "stage_complete"
         assert out.blocker is None
         assert out.review.fix_cycles_used == 2
         assert out.health.fix_loop_escalated is False
         assert runner.fix_calls == 2
+        # #1705 bug #2: the returned *verdict* (not just out.review) must
+        # carry the finalized cross-cycle counts — _clean_exit previously
+        # stamped review onto the AutoDevResult but returned the stale
+        # cycle-terminal ReviewVerdict unchanged.
+        assert verdict is not None
+        assert verdict.review.must_fix_initial == 1
+        assert verdict.review.fix_cycles_used == 2
 
     def test_clean_exit_cycle_three_is_escalated(
         self, make_git_repo: Callable[..., Path]
@@ -702,7 +726,7 @@ class TestFixLoopCapAndEscalation:
         assert out.review.deferred == 1
         assert out.review.fix_cycles_used == 5
 
-    def test_clean_exit_persists_cycle0_snapshot(
+    def test_clean_exit_persists_snapshot_for_every_cycle(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-clean2-snapshot")
@@ -710,11 +734,21 @@ class TestFixLoopCapAndEscalation:
         out, _verdict = _run_loop(runner, worktree, session_id="s-clean2-snapshot")
 
         assert out.status == "stage_complete"
+        assert out.review.fix_cycles_used == 2
         bundle = diagnostics_bundle_dir("s-clean2-snapshot")
-        assert (bundle / _CYCLE0_SNAPSHOT_FILENAME).exists()
+        # Every cycle (0 through the terminal cycle) gets its own snapshot,
+        # not just cycle 0 — the pointer in friction_highlights now names the
+        # latest (terminal) cycle's file, cycle 2.
+        assert (bundle / _verdict_snapshot_filename(0)).exists()
+        assert (bundle / _verdict_snapshot_filename(1)).exists()
+        assert (bundle / _verdict_snapshot_filename(2)).exists()
         assert any("[diagnostics:" in h for h in out.friction_highlights)
+        assert any(
+            "cycle-2 MUST_FIX findings snapshot persisted" in h
+            for h in out.friction_highlights
+        )
 
-    def test_capped_run_persists_cycle0_snapshot(
+    def test_capped_run_persists_latest_cycle_snapshot(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-cap-snapshot")
@@ -723,8 +757,14 @@ class TestFixLoopCapAndEscalation:
 
         assert out.status == "blocked"
         bundle = diagnostics_bundle_dir("s-cap-snapshot")
-        assert (bundle / _CYCLE0_SNAPSHOT_FILENAME).exists()
+        # A capped run exhausts every cycle up to the cap, so the terminal
+        # pointer names the last (cycle _MAX_FIX_CYCLES) snapshot, not cycle 0.
+        assert (bundle / _verdict_snapshot_filename(_MAX_FIX_CYCLES)).exists()
         assert any("[diagnostics:" in h for h in out.friction_highlights)
+        assert any(
+            f"cycle-{_MAX_FIX_CYCLES} MUST_FIX findings snapshot persisted" in h
+            for h in out.friction_highlights
+        )
 
     def test_cycle0_snapshot_content_matches_original_findings_after_fix(
         self, make_git_repo: Callable[..., Path]
@@ -738,7 +778,7 @@ class TestFixLoopCapAndEscalation:
         assert not verdict.must_fix  # terminal state cleared the finding
 
         bundle = diagnostics_bundle_dir("s-snapshot-content")
-        snapshot_path = bundle / _CYCLE0_SNAPSHOT_FILENAME
+        snapshot_path = bundle / _verdict_snapshot_filename(0)
         snapshot = ReviewVerdict.model_validate_json(snapshot_path.read_text())
         assert any(f.summary == "MFA" for f in snapshot.must_fix)
         assert any(af.finding.summary == "MFA" for af in snapshot.accepted)
@@ -757,7 +797,10 @@ class TestFixLoopCapAndEscalation:
         assert out.blocker.reason == CODEX_REVIEW_UNPARSEABLE
         assert verdict is None
         bundle = diagnostics_bundle_dir("s-rereview-fail-snapshot")
-        assert (bundle / _CYCLE0_SNAPSHOT_FILENAME).exists()
+        # The failed rereview never reaches the per-cycle persist call, so the
+        # pointer still names cycle 0's snapshot — the only one written.
+        assert (bundle / _verdict_snapshot_filename(0)).exists()
+        assert not (bundle / _verdict_snapshot_filename(1)).exists()
         assert any("[diagnostics:" in h for h in out.friction_highlights)
 
     def test_cycle0_snapshot_write_failure_does_not_block_loop(
@@ -766,7 +809,7 @@ class TestFixLoopCapAndEscalation:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """``_persist_cycle0_snapshot`` never-raises: an ``OSError`` during the
+        """``_persist_cycle_snapshot`` never-raises: an ``OSError`` during the
         write is logged and swallowed, and the loop still returns its normal
         parked result with the pointer text in ``friction_highlights`` (the
         pointer is returned unconditionally per the plan's Adopted
@@ -794,6 +837,137 @@ class TestFixLoopCapAndEscalation:
             "cycle-0 findings snapshot write failed" in r.getMessage()
             for r in caplog.records
         )
+
+    def test_later_cycle_snapshot_write_failure_does_not_block_loop(
+        self,
+        make_git_repo: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A write failure on a fix-cycle snapshot (not just cycle 0) is
+        equally never-raising: cycle 0's write succeeds, cycle 1's is made to
+        fail, and the loop still completes with cycle 0's snapshot on disk,
+        no cycle-1 snapshot, and the failure logged for the correct cycle."""
+        worktree = _worktree(make_git_repo, "wt-snapshot-write-fail-later")
+        real_write = write_review_verdict
+
+        def _fail_after_cycle0(verdict: ReviewVerdict, path: Path) -> None:
+            if path.name == _verdict_snapshot_filename(0):
+                real_write(verdict, path)
+                return
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr(
+            "cw.codex_fix_loop.write_review_verdict", _fail_after_cycle0
+        )
+        runner = _FixLoopRunner([_MF_DOC])
+
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            out, _verdict = _run_loop(
+                runner, worktree, session_id="s-snapshot-write-fail-later"
+            )
+
+        assert out.status == "blocked"
+        bundle = diagnostics_bundle_dir("s-snapshot-write-fail-later")
+        assert (bundle / _verdict_snapshot_filename(0)).exists()
+        assert not (bundle / _verdict_snapshot_filename(1)).exists()
+        assert any(
+            "cycle-1 findings snapshot write failed" in r.getMessage()
+            for r in caplog.records
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestRealCommitTracking — #1723
+# ---------------------------------------------------------------------------
+
+
+class TestRealCommitTracking:
+    """``Review.had_real_commit`` — true iff at least one fix cycle produced a
+    real commit (OR'd across cycles), so a no-op/flaked fix-loop convergence
+    is positively distinguishable from a genuine fix (#1723)."""
+
+    def test_clean_exit_with_editor_fix_marks_had_real_commit_true(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(
+            make_git_repo=make_git_repo,
+            name="wt-had-commit-true",
+        )
+        runner = _FixLoopRunner(
+            review_docs=[_MF_DOC, _CLEAN_DOC],
+            fix_behaviors=[_editor()],
+        )
+        out, verdict = _run_loop(
+            runner=runner,
+            worktree=worktree,
+            session_id="s-had-commit-true",
+        )
+
+        assert out.status == "stage_complete"
+        assert out.review.had_real_commit is True
+        assert verdict is not None
+        assert verdict.review.had_real_commit is True
+
+    def test_clean_exit_with_default_noop_fix_marks_had_real_commit_false(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(
+            make_git_repo=make_git_repo,
+            name="wt-had-commit-false",
+        )
+        runner = _FixLoopRunner(
+            review_docs=[_MF_DOC, _CLEAN_DOC]
+        )  # no-op fix, then clean
+        out, _verdict = _run_loop(
+            runner=runner,
+            worktree=worktree,
+            session_id="s-had-commit-false",
+        )
+
+        assert out.review.had_real_commit is False
+        assert out.status == "stage_complete"
+        assert out.review.fix_cycles_used == 1
+
+    def test_multi_cycle_any_real_commit_marks_true_even_if_later_cycle_is_noop(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(
+            make_git_repo=make_git_repo,
+            name="wt-had-commit-or",
+        )
+        # cycle 1: real edit; cycle 2: no-op (default fix behavior).
+        runner = _FixLoopRunner(
+            review_docs=[_MF_DOC, _MF_DOC, _CLEAN_DOC],
+            fix_behaviors=[_editor(), None],
+        )
+        out, _verdict = _run_loop(
+            runner=runner,
+            worktree=worktree,
+            session_id="s-had-commit-or",
+        )
+
+        assert out.review.had_real_commit is True
+
+    def test_capped_park_reports_had_real_commit_false_when_every_cycle_is_noop(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(
+            make_git_repo=make_git_repo,
+            name="wt-had-commit-capped",
+        )
+        runner = _FixLoopRunner(review_docs=[_MF_DOC])
+        out, _verdict = _run_loop(
+            runner=runner,
+            worktree=worktree,
+            session_id="s-had-commit-capped",
+        )
+
+        assert out.status == "blocked"
+        assert out.review.had_real_commit is False
 
 
 # ---------------------------------------------------------------------------
@@ -864,6 +1038,7 @@ class TestFixLoopNonBlockingPassthrough:
             model=None,
             wall_clock_budget_seconds=None,
             session_id="s-pass-plain",
+            fix_loop_enabled=False,
         )
         assert loop_runner.fix_calls == 0
         assert loop_result.status == plain_result.status == "stage_complete"
@@ -884,6 +1059,35 @@ class TestFixLoopNonBlockingPassthrough:
         assert out.blocker is not None
         assert out.blocker.reason == CODEX_REVIEW_UNPARSEABLE
         assert verdict is None
+
+    def test_mechanically_rejected_must_fix_does_not_enter_fix_loop(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """#1714 R4: a mechanically-rejected MUST_FIX blocks but never autofixes.
+
+        The finding's line/evidence anchor is by definition unreliable (that is
+        *why* it was rejected), so handing it to a fix agent would ask codex to
+        patch code the finding may not even describe. The fix-loop gate reads
+        ``verdict.blocking``, which stays False — the park is carried by the
+        separate ``rejected_must_fix`` signal instead.
+        """
+        worktree = _worktree(make_git_repo, "wt-mech-reject")
+        runner = _FixLoopRunner([_MF_MECH_REJECTED_DOC])
+        out, verdict = _run_loop(runner, worktree, session_id="s-mech-reject")
+
+        assert runner.fix_calls == 0
+        assert out.status == "blocked"
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_MUST_FIX_MECHANICALLY_REJECTED
+        assert verdict is not None
+        assert verdict.blocking is False
+        # One entry per selected reviewer role (the runner double replays the
+        # same document for each); rejections are not deduped the way accepted
+        # findings are, so assert on the reason rather than a role count.
+        assert verdict.rejected_must_fix
+        assert {rf.reason for rf in verdict.rejected_must_fix} == {
+            "evidence_not_in_diff"
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -924,6 +1128,7 @@ class TestFixLoopDisabledGate:
             model=None,
             wall_clock_budget_seconds=None,
             session_id="s-gate",
+            fix_loop_enabled=False,
         )
 
         assert loop_result == plain_result
@@ -940,7 +1145,11 @@ class TestFixLoopDisabledGate:
         assert loop_runner.fix_calls == 0
         # One review pass worth of per-role calls (however many roles
         # run_review selects) — no re-review, since no fix cycle ran.
-        assert loop_runner.review_calls == plain_runner.review_calls
+        # +1 for the #1709 filesystem-capability probe: loop_runner runs first
+        # on a cold per-test cache and pays the probe; plain_runner's later call
+        # is a warm cache hit. The probe's argv has no "workspace-write", so
+        # _FixLoopRunner books it as a review call.
+        assert loop_runner.review_calls == plain_runner.review_calls + 1
         assert loop_result.review.fix_cycles_used == 0
         # No commits landed — the disabled gate never invoked the fix loop.
         assert _head(worktree) == head_before
@@ -1095,7 +1304,10 @@ class TestScopeViolationGate:
         assert out.blocker is not None
         assert out.blocker.reason == CODEX_FIX_SCOPE_VIOLATION
         bundle = diagnostics_bundle_dir("s-scope-outsens-snapshot")
-        assert (bundle / _CYCLE0_SNAPSHOT_FILENAME).exists()
+        # The scope violation parks before the cycle-1 rereview/persist call
+        # runs, so only cycle 0's snapshot exists.
+        assert (bundle / _verdict_snapshot_filename(0)).exists()
+        assert not (bundle / _verdict_snapshot_filename(1)).exists()
         assert any("[diagnostics:" in h for h in out.friction_highlights)
 
     def test_untracked_sensitive_addition_parks_small_tier(
@@ -1193,6 +1405,120 @@ class TestScopeViolationGate:
         assert out.review.must_fix_initial == 1
         assert out.blocker.retry_eligible is None
 
+    def test_out_of_scope_sensitive_modification_parks_verdict_stamped(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        # #1705 Decisions #2 regression pin: _park_scope_violation must stamp
+        # the finalized Review onto the returned *verdict* too, not just the
+        # returned AutoDevResult — mirrors _clean_exit's bug #2 fix, applied
+        # to the scope-violation park path.
+        worktree = _worktree(
+            make_git_repo,
+            "wt-scope-outsens-stamp",
+            manifest={
+                ".claude/sensitive-files.yml": _MANIFEST,
+                "pyproject.toml": _PYPROJECT_CONTENT,
+            },
+        )
+        runner = _FixLoopRunner(
+            [_MF_DOC],
+            fix_behaviors=[
+                _editor(filename="pyproject.toml", content='[project]\nname = "z"\n')
+            ],
+        )
+        out, verdict = _run_loop(runner, worktree, session_id="s-scope-outsens-stamp")
+
+        assert out.status == "blocked"
+        assert out.blocker is not None
+        assert out.blocker.reason == CODEX_FIX_SCOPE_VIOLATION
+        assert verdict is not None
+        assert verdict.review.must_fix_initial == out.review.must_fix_initial
+        assert verdict.review.fix_cycles_used == out.review.fix_cycles_used
+        assert verdict.review.must_fix_initial == 1
+        assert verdict.review.fix_cycles_used == 1
+
+
+# ---------------------------------------------------------------------------
+# TestVerdictCommentDistinguishesHistories — #1705 R3
+# ---------------------------------------------------------------------------
+
+
+def _render_fix_loop_history(
+    *,
+    make_git_repo: Callable[..., Path],
+    name: str,
+    review_docs: list[str],
+    fix_behaviors: list[_FixBehavior] | None,
+    fix_loop_enabled: bool,
+) -> str:
+    worktree = _worktree(
+        make_git_repo=make_git_repo,
+        name=f"wt-history-{name}",
+    )
+    runner = _FixLoopRunner(
+        review_docs=review_docs,
+        fix_behaviors=fix_behaviors,
+    )
+    _, verdict = _run_loop(
+        runner=runner,
+        worktree=worktree,
+        session_id=f"s-history-{name}",
+        fix_loop_enabled=fix_loop_enabled,
+    )
+    assert verdict is not None
+    return render_verdict_comment(
+        verdict,
+        fix_loop_enabled=fix_loop_enabled,
+    )
+
+
+class TestVerdictCommentDistinguishesHistories:
+    """render_verdict_comment must render four distinct comments for four
+    operationally different histories, even when the underlying Review can
+    look alike (e.g. fix_cycles_used == 0 for both a genuinely-clean cycle 0
+    and a fix-loop-disabled pass) — the fix_loop_enabled discriminator is
+    what tells them apart (#1705), and ``had_real_commit`` further
+    distinguishes a genuine fix from a no-op/flaked convergence (#1723)."""
+
+    def test_converged_clean_off_and_flaked_render_four_distinct_comments(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        histories: tuple[
+            tuple[str, list[str], list[_FixBehavior] | None, bool, tuple[str, ...]],
+            ...,
+        ] = (
+            (
+                "converged",
+                [_MF_DOC, _CLEAN_DOC],
+                [_editor()],
+                True,
+                ("resolved across 1 fix cycle",),
+            ),
+            ("clean", [_CLEAN_DOC], None, True, ("available",)),
+            ("off", [_CLEAN_DOC], None, False, ("disabled",)),
+            (
+                "flaked",
+                [_MF_DOC, _CLEAN_DOC],
+                None,
+                True,
+                ("UNVERIFIED", "without changing any file"),
+            ),
+        )
+        bodies = {
+            name: _render_fix_loop_history(
+                make_git_repo=make_git_repo,
+                name=name,
+                review_docs=review_docs,
+                fix_behaviors=fix_behaviors,
+                fix_loop_enabled=fix_loop_enabled,
+            )
+            for name, review_docs, fix_behaviors, fix_loop_enabled, _ in histories
+        }
+
+        assert len(set(bodies.values())) == len(histories)
+        for name, _, _, _, expected_markers in histories:
+            assert all(marker in bodies[name] for marker in expected_markers)
+
 
 # ---------------------------------------------------------------------------
 # _build_fix_prompt / _build_fix_codex_argv units
@@ -1264,3 +1590,35 @@ class TestFixLoopCarriesAuditMetrics:
         assert verdict is not None
         assert verdict.agents_run
         assert all(r.thread_id == "<THREAD_ID>" for r in verdict.agents_run)
+
+
+# ---------------------------------------------------------------------------
+# Filesystem-capability probe is spent once per invocation (#1709)
+# ---------------------------------------------------------------------------
+
+
+class TestCapabilityProbeIsCachedAcrossCycles:
+    """The probe is a real ``codex exec`` round-trip, so a fix loop that
+    re-prepares a review pass every cycle must not pay for it every cycle."""
+
+    def test_probe_runs_exactly_once_across_a_two_cycle_loop(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-probe-once")
+        runner = _FixLoopRunner([_MF_DOC, _CLEAN_DOC], [_editor()])
+        out, verdict = _run_loop(runner, worktree, session_id="s-probe-once")
+
+        assert out.status == "stage_complete"
+        # Cycle 0's review pass plus _rereview's per-cycle pass both call
+        # _prepare_review_pass; only the first misses the cache.
+        assert runner.fix_calls == 1
+        probe_calls = [c for c in runner.calls if c["argv"] == list(_PROBE_ARGV)]
+        assert len(probe_calls) == 1
+        # #1773: _rereview's own synthesis hop threads the prepared pass's
+        # agent-spec status through to the verdict it returns, exactly as
+        # run_review's does.
+        assert verdict is not None
+        assert verdict.agent_spec_status
+        assert {s.role for s in verdict.agent_spec_status} <= set(
+            _REVIEWER_ROLE_AGENT_FILES
+        )

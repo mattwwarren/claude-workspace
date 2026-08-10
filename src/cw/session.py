@@ -249,6 +249,7 @@ def start_session(
             client.purpose_prompts,
             client_name=client_name,
             workspace_path=str(client.workspace_path),
+            quality_gate_commands=client.quality_gate_commands,
         )
         or ""
     )

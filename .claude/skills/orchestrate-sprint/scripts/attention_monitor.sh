@@ -54,12 +54,13 @@ import sys, json
 
 # Only these paused_status values put blocker.reason verbatim into
 # breadcrumbs -- see BREADCRUMB_ELIGIBLE_PAUSED_STATUSES,
-# src/cw/dispatch/routing.py:131 (GitHub #1511, #1597); breadcrumbs
+# src/cw/dispatch/routing.py (GitHub #1511, #1597, #1729); breadcrumbs
 # is polymorphic for every other paused_status producer (worktree paths,
 # fixed reason-strings, full sentences), so this is a gated allowlist, not a
 # blanket breadcrumbs fallback.
 _BLOCKER_REASON_PAUSED_STATUSES = {
     "blocked", "awaiting_operator_availability", "merge_gate_blocked",
+    "codex_must_fix_mechanically_rejected",
 }
 
 for ln in sys.stdin:

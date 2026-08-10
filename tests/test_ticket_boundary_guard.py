@@ -33,10 +33,10 @@ _DIRECT_GH_CALLER_ALLOWLIST = frozenset(
         "cw/gh.py",
         # Pre-existing daemon-side direct callers, grandfathered.
         # Consolidation into gh.py is tracked as a follow-up in #1284,
-        # not this ticket's scope.
+        # not this ticket's scope. (cw/reconcile/salvage.py was on this
+        # list until the process-kill-timeout removal deleted the module.)
         "cw/doctor/loop_health.py",
         "cw/worktree_gc.py",
-        "cw/reconcile/salvage.py",
     }
 )
 
@@ -130,7 +130,7 @@ def _run_scan(finder: Callable[[ast.AST, Path], list[str]]) -> list[str]:
 
 class TestNoDirectGhCallOutsideAllowlist:
     """Deny-list scan: no raw `gh` subprocess construction outside gh.py
-    (and the three named, grandfathered daemon-side callers)."""
+    (and the named, grandfathered daemon-side callers)."""
 
     def test_no_direct_gh_call_outside_allowlist(self) -> None:
         violations = _run_scan(_find_direct_gh_subprocess_call)
@@ -168,7 +168,10 @@ class TestAllowlistStaysHonest:
     def test_gh_py_is_imported_by_its_known_callers(self) -> None:
         """Spot-check real call sites still import from cw.gh, not bypass it."""
         known_callers = (
-            "cw/executor.py",
+            # cw/codex_background.py, not cw/executor.py: _post_review_comment
+            # (executor.py's only cw.gh consumer) moved here with #1727's
+            # module-size split.
+            "cw/codex_background.py",
             "cw/pr_hydrate.py",
             "cw/reconcile/gate_recipes.py",
         )

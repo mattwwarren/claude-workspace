@@ -358,3 +358,157 @@ def test_blocked_exits_do_not_delete_draft() -> None:
 
     unsound_persists_window = _after(section, UNSOUND_PERSISTS_ANCHOR, span=500)
     assert "delete" not in unsound_persists_window.lower()
+
+
+# ---------------------------------------------------------------------------
+# 12. #1778: checkpoint writes during generation.
+# ---------------------------------------------------------------------------
+
+STEP1B_CHECKPOINT_HEADING = (
+    "**Headless only — checkpoint the draft before review runs (#1778).**"
+)
+STEP1B_TELEMETRY_HEADING = (
+    "**Headless only — after plan agent returns, emit `stage.entered`"
+)
+STEP1F4_CHECKPOINT_HEADING = "**Headless only — checkpoint the revised draft (#1778).**"
+FORMAT_ONLY_HEADING = "**Format-only revision (defense-in-depth).**"
+EXHAUSTED_CYCLE_HEADING = "**Headless only — if the 1 revision cycle is exhausted"
+CHECKPOINT_ORIGIN_HEADING = "**Checkpoint-origin note (#1778):**"
+
+
+def _step1b_section() -> str:
+    content = _cmd("auto-dev-plan.md")
+    start = content.index("### Step 1b: Generate Plan")
+    end = content.index("### Step 1c:")
+    return content[start:end]
+
+
+def _step1f4_section() -> str:
+    content = _cmd("auto-dev-plan.md")
+    start = content.index("**Step 1f.4 — Plan revision")
+    end = content.index("### Step 1g: Persist Plan")
+    return content[start:end]
+
+
+def test_step1b_checkpoints_after_plan_agent_returns() -> None:
+    """Step 1b writes the draft to disk right after the Plan agent returns."""
+    section = _step1b_section()
+    assert STEP1B_CHECKPOINT_HEADING in section
+    window = _after(section, STEP1B_CHECKPOINT_HEADING, span=400)
+    assert DRAFT_FILE in window
+    assert "write the plan's current text" in window
+
+
+def test_step1b_checkpoint_fires_before_telemetry_event() -> None:
+    """The Step 1b checkpoint write precedes the stage.entered telemetry emit."""
+    section = _step1b_section()
+    checkpoint_idx = section.index(STEP1B_CHECKPOINT_HEADING)
+    telemetry_idx = section.index(STEP1B_TELEMETRY_HEADING)
+    assert checkpoint_idx < telemetry_idx
+
+
+def test_step1b_checkpoint_is_unreviewed_at_capture_time() -> None:
+    """The Step 1b checkpoint paragraph notes the draft hasn't been reviewed yet."""
+    section = _step1b_section()
+    window = _after(section, STEP1B_CHECKPOINT_HEADING, span=700)
+    assert (
+        "neither Step 1c's ambiguity scan nor Step 1f's review stations have run yet"
+    ) in window
+
+
+def test_step1b_checkpoint_does_not_weaken_exit_time_rule() -> None:
+    """The Step 1b checkpoint does not replace/weaken/race the exit-time writes."""
+    section = _step1b_section()
+    window = _after(section, STEP1B_CHECKPOINT_HEADING, span=800)
+    assert (
+        "does not weaken, replace, or race the existing Step 1f.3 "
+        "blocked-exit draft writes"
+    ) in window
+
+
+def test_step1b_checkpoint_needs_no_new_resume_machinery() -> None:
+    """The Step 1b checkpoint paragraph confirms no new resume machinery is needed."""
+    section = _step1b_section()
+    window = _after(section, STEP1B_CHECKPOINT_HEADING, span=1000)
+    assert "Step 1a.0" in window
+    assert "supersession guard" in window
+    assert "Step 1e" in window
+    assert "Step 1g" in window
+
+
+def test_step1b_checkpoint_skipped_when_step1b_did_not_run() -> None:
+    """The Step 1b checkpoint is explicitly skipped when Step 1b did not run."""
+    section = _step1b_section()
+    window = _after(section, STEP1B_CHECKPOINT_HEADING, span=1200)
+    assert "Skip this checkpoint when Step 1b did not run this invocation" in window
+
+
+def test_step1b_checkpoint_is_best_effort() -> None:
+    """The Step 1b checkpoint write is explicitly best-effort/non-blocking."""
+    section = _step1b_section()
+    window = _after(section, STEP1B_CHECKPOINT_HEADING, span=500)
+    assert "best-effort" in window
+    assert "do not treat it as blocking" in window
+
+
+def test_step1f4_checkpoints_after_revision_returns() -> None:
+    """Step 1f.4 writes the revised draft to disk right after revision returns."""
+    section = _step1f4_section()
+    assert STEP1F4_CHECKPOINT_HEADING in section
+    window = _after(section, STEP1F4_CHECKPOINT_HEADING, span=400)
+    assert DRAFT_FILE in window
+    assert "write the plan's current text" in window
+
+
+def test_step1f4_checkpoint_covers_both_revision_cycles() -> None:
+    """The Step 1f.4 checkpoint paragraph covers both revision cycle types."""
+    section = _step1f4_section()
+    window = _after(section, STEP1F4_CHECKPOINT_HEADING, span=400)
+    assert "standard MUST_FIX revision cycle" in window
+    assert "format-only revision cycle" in window
+
+
+def test_step1f4_checkpoint_placed_before_exhausted_cycle_event() -> None:
+    """Checkpoint sits after format-only revision, before the exhausted-cycle event."""
+    section = _step1f4_section()
+    format_only_idx = section.index(FORMAT_ONLY_HEADING)
+    checkpoint_idx = section.index(STEP1F4_CHECKPOINT_HEADING)
+    exhausted_idx = section.index(EXHAUSTED_CYCLE_HEADING)
+    assert format_only_idx < checkpoint_idx < exhausted_idx
+
+
+def test_step1f4_checkpoint_defers_authority_to_blocked_exit() -> None:
+    """The checkpoint is not treated as the fully-reviewed, authoritative plan."""
+    section = _step1f4_section()
+    window = _after(section, STEP1F4_CHECKPOINT_HEADING, span=600)
+    assert "not the fully-re-reviewed, authoritative version" in window
+
+
+def test_step1f4_checkpoint_is_best_effort() -> None:
+    """The Step 1f.4 checkpoint write is explicitly best-effort/non-blocking."""
+    section = _step1f4_section()
+    window = _after(section, STEP1F4_CHECKPOINT_HEADING, span=500)
+    assert "best-effort" in window
+    assert "do not treat it as blocking" in window
+
+
+def test_step1a_confirms_checkpoint_origin_treated_as_unreviewed() -> None:
+    """Step 1a names both checkpoints and treats checkpoint-origin drafts unreviewed."""
+    section = _step1a_section()
+    assert CHECKPOINT_ORIGIN_HEADING in section
+    window = _after(section, CHECKPOINT_ORIGIN_HEADING, span=600)
+    assert "never treated as final or pre-approved" in window
+    assert "Step 1b post-generation checkpoint" in window
+    assert "Step 1f.4 post-revision checkpoint" in window
+
+
+def test_step1a_supersession_guard_covers_checkpoint_origin() -> None:
+    """The guard is presence-based; no checkpoint-specific variant is needed."""
+    section = _step1a_section()
+    window = _after(
+        section,
+        f"an approved `{PLAN_FILE}` always wins over a stale draft.",
+        span=700,
+    )
+    assert "presence-based" in window
+    assert "no separate checkpoint-specific guard is needed" in window

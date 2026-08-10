@@ -6,7 +6,351 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.32.0] - 2026-08-10
+
 ### Added
+
+- **Post-impl scope-conformance gate script (#1779):**
+  `.claude/scripts/check_plan_scope_conformance.py` compares the delivered
+  diff's file set against the approved plan's `## Files Modified` list and,
+  on exceeding a proportionality threshold, emits `status: "blocked"` with
+  `blocker.reason: "plan_scope_drift"` and the offending paths enumerated.
+  Thresholds are read from a `[tool.cw.scope_conformance]` table in the
+  repo's own `pyproject.toml`, fail-safe to module defaults. Deliberately
+  ships without any operator-authorized-additions mechanism — see #1786.
+  **Known limitation:** the file-list parser recognizes only bullet lists
+  under one exact heading, so it is inert on table-formatted plans and fails
+  open. Until #1796 lands, a passing result means "no file list could be
+  parsed," not "the diff matched the plan."
+- **Plan-draft checkpointing during Stage-1 plan generation (#1778):**
+  the plan draft is now persisted at checkpoints rather than only on exit,
+  so a crashed plan stage no longer loses the entire draft. #1649 persisted
+  on exit, and a crash is not an exit.
+
+### Fixed
+
+- **Degraded-reviewer reason no longer dropped before persistence (#1775):**
+  `ReviewerFindingsDocument.detail` is now copied onto `ReviewerRunRecord`,
+  and the verdict comment renders a `DEGRADED COVERAGE` note naming each
+  degraded role, instead of silently persisting an empty reason when a
+  reviewer's findings were downgraded.
+
+### Documentation
+
+- **`[tool.cw.codex_review].agent_spec_global_fallback` is now documented
+  (#1782):** the key that gates #1773's global agent-spec fallback was
+  undiscoverable for the adoption case it exists to serve. Adds a
+  `CONFIG_REFERENCE.md` drift-guard test so the documentation cannot silently
+  fall out of sync with the code again.
+
+## [1.31.0] - 2026-08-09
+
+### Added
+
+- **`clients.yaml` gains a per-client `quality_gate_commands` field (#1703):**
+  the impl/debt worker prompts previously hardcoded `ruff check, mypy, pytest`
+  for every client, which was wrong for non-Python clients. When set, the
+  configured commands are threaded into `start_session`'s generated prompt in
+  place of the hardcoded sentence; clients that don't set it keep the
+  existing default wording.
+- **`cw event tail` gains `--collapse-repeats` to merge consecutive same-type
+  repeats into a summary line (#1754):** consecutive events sharing the same
+  type and compact payload collapse into a single `TYPE xN over Mm` line; a
+  run broken by an unrelated event re-opens instead of merging across the
+  gap. Rejected together with `--follow` (collapsing requires buffering a run
+  until it closes, which conflicts with the immediate-flush follow
+  contract). Composes with `--dedup-terminal` and `--limit`, applied last in
+  the pipeline. `--json` is unaffected — passing `--collapse-repeats` with
+  `--json` is a no-op, one JSON line per original event.
+- **Reviewer agent specs now fall back to the operator's global copy when the
+  repo's own is missing or blank (#1773):** `.claude/agents/<role>.md` is still
+  read repo-first, but a worktree that carries no usable copy falls through to
+  `~/.claude/agents/<role>.md` instead of silently running the reviewer with an
+  empty `## Agent Specification` section. Gateable per-repo via
+  `[tool.cw.codex_review].agent_spec_global_fallback` in `pyproject.toml`
+  (default enabled). Every outcome — repo, global, or none — is recorded as an
+  `AgentSpecStatus` on the review verdict and rendered into the posted review
+  comment, so a silently-empty spec is now visible instead of swallowed.
+
+### Fixed
+
+- **`cw lane rm`/`ls`/`add`/`pause`/`resume` now accept `-c`/`--client` (#1607):**
+  every other client-scoped subcommand accepts `-c`/`--client` as an
+  alternative to a positional `CLIENT`, but the `lane` subcommands only
+  accepted `CLIENT` positionally, contradicting the documented `README.md`
+  usage. `lane ls` now takes `CLIENT` positionally (optional) or via
+  `-c`/`--client` (exactly one required); `add`/`rm`/`pause`/`resume` keep
+  the legacy `CLIENT NAME` two-positional form and additionally accept
+  `NAME -c CLIENT`.
+
+## [1.30.0] - 2026-08-09
+
+### Added
+
+- **`cw event tail` gains `--limit`/`-n` to bound output to the most recent N
+  matching events (#1694):** the flag composes with the existing `--type`/
+  `--client`/`--lane`/`--since` filters (filter-then-limit) and is rejected
+  together with `--follow`, which streams unboundedly. The default
+  (non-`--json`) output format also changed to compact: nested dict/
+  list-of-dict payload fields — e.g. `dispatch.tick`'s `lanes` and
+  `lane_occupants` — are now omitted, keeping only scalar fields and
+  scalar-lists (no length limit — the filter is shape-based, not size-based).
+  `--json` output is untouched and remains full-fidelity.
+
+### Fixed
+
+- **`read_events(limit=...)` returned the OLDEST N matching events instead of
+  the most recent N (#1694):** the function already accepted a `limit`
+  parameter but head-sliced (`events[:limit]`) a list that's in ascending
+  chronological order, so `limit=N` silently returned the N *earliest*
+  events. No production caller passed `limit=` yet, so this was latent —
+  surfaced while wiring up `cw event tail --limit`. Fixed to tail-slice
+  (`events[-limit:]`), with `limit=0` special-cased to `[]` (`list[-0:]` is
+  a Python trap that returns the whole list, not an empty one).
+- **A structural finding anchored on an enclosing def/class is no longer
+  dropped as unverifiable (#1743):** `_line_reference_valid`'s existing
+  tolerance check only accepts a finding whose cited line sits within a
+  small distance of a changed diff line — but a structural finding (e.g. a
+  missing type hint, a naming issue) is legitimately anchored on the
+  enclosing `def`/`class` line, which is itself rarely a changed line and so
+  was silently rejected. When a `worktree` is supplied, validation now falls
+  back to `_anchor_in_enclosing_def`, which parses the file's AST and accepts
+  the finding if its cited line falls anywhere inside the enclosing
+  def/class span (innermost span wins for nested defs). A missing/unreadable
+  file or a line with no enclosing definition still returns `False`, so the
+  fallback only rescues genuinely structural findings.
+
+- **A converged fix loop is distinguished from a no-op one (#1723):** the loop
+  reported convergence whenever no MUST_FIX findings survived, without regard
+  for whether any fix cycle had actually changed a file. A run in which every
+  cycle's codex fix invocation was a tolerated no-op was therefore
+  indistinguishable from one that genuinely resolved the cycle-0 blockers — the
+  two render identically while meaning opposite things. `Review` gains
+  `had_real_commit`, OR'd across cycles, and the verdict headline now reads
+  **UNVERIFIED** for a loop that converged without committing anything rather
+  than claiming the findings were resolved. The field defaults to `None` so
+  payloads from producers predating it stay explicitly unknown instead of being
+  coerced into a false negative; finalized fix-loop results always populate a
+  concrete bool.
+
+- **Codex reviewers are grounded in the repo's actual ruff opt-outs and
+  complexity thresholds (#1744):** reviewers were raising MUST_FIX findings
+  against ruff rules the repo has explicitly ignored, and misreading
+  `PLR0915` (too-many-statements) as a line-count metric rather than the
+  statement-count metric it actually gates — the exact #1729 failure mode.
+  The review prompt now injects a lint-grounding block built from the repo's
+  `[tool.ruff.lint]` ignores and pylint-threshold overrides, instructing
+  reviewers to downgrade or drop findings based solely on an opted-out rule
+  or a misread default, while still treating a concrete security or
+  correctness failure as MUST_FIX even when a related rule is ignored.
+
+### Fixed
+
+- **`test_worktree_path_finds_transcript_via_csid` and 5 sibling tests wrote
+  into the real `~/.claude/projects/` (#1736):** `claude_project_dir()`
+  resolves via `Path.home()` directly, bypassing the `patched_peek` fixture's
+  redirection of `CLAUDE_PROJECTS`/`CW_STATE`. `patched_peek` now also
+  redirects `HOME`; a new session-scoped `conftest.py` guard fails on any
+  leaked `tmp-pytest`/`pytest-of`-named directory under the real path and
+  warns (without failing) on any other unexpected new entry, so unrelated
+  concurrent Claude Code usage can't flake the suite.
+
+- **A codex review no longer freezes the shared dispatch tick (#1727):**
+  `CodexExecutor.spawn()` ran the whole review — per-role `codex exec`
+  subprocesses plus the bounded fix loop, up to the full REVIEW budget —
+  inside `dispatch_tick`'s own call stack, so one client's review stalled
+  spawns for every other client and lane. Pre-flight (session creation and
+  the REVIEW-stage/binary-presence checks) still runs on the caller's thread,
+  but once it passes the review is handed to a `cw.codex_background` daemon
+  thread and `spawn()` returns the session id immediately. The session's
+  `session_id` is stamped onto the still-RUNNING dev-queue row *before* the
+  handoff, so a crash in the window before dispatch's own post-spawn stamp
+  cannot leave a live codex session with no row attributing it. Backgrounding
+  costs the two recovery paths a synchronous caller, so both are replaced:
+  `run_dispatch_loop`'s shutdown path bounded-joins outstanding review threads
+  against one shared deadline and reports the still-running count on
+  `DISPATCH_LOOP_EXITED`, and a boot pass parks any codex session left ACTIVE
+  by a crash or SIGKILL, which no join can reach. The boot pass keys its
+  dev-queue lookup on `(ticket_id, client)`, matching
+  `_park_running_task_blocked_on_user`: ticket numbering is per-client, so a
+  ticket 21 in two clients would otherwise collide. It additionally requires
+  the matched row's recorded `session_id` to *be* the orphaned session, so a
+  zombie ACTIVE record from an earlier crashed boot cannot park the healthy
+  review that has since claimed the same ticket.
+
+- **Gate parks that do populate breadcrumbs are no longer filtered out of the
+  attention stream (#1729):** `BREADCRUMB_ELIGIBLE_PAUSED_STATUSES` omitted
+  `codex_must_fix_mechanically_rejected`, the park disposition #1714 introduced.
+  That park is the one gate-class park whose breadcrumbs are genuinely populated
+  from `blocker.reason` rather than a hardcoded `""` literal, so excluding it
+  meant an operator-review park emitted an empty breadcrumb — the single case
+  where the operator most needs to know *why* the branch stopped. The constant
+  now includes it, and the surrounding comment records the property that makes
+  the rest of the exclusions correct rather than accidental: membership here
+  does not by itself cause a breadcrumb to be emitted, since the producing
+  `_park_*` helper must independently stamp non-empty content at its own call
+  site. Every other gate-class park hardcodes `breadcrumbs=""`, so adding it
+  here would be cosmetic. The composition test is pinned against the imported
+  constants instead of hand-written string literals, closing the transcription
+  gap that produced this bug.
+
+- **A valid, fully-verbatim evidence quote spanning hunk context lines was
+  wrongly rejected as `evidence_not_in_diff` (#1738):** the real #1729
+  diagnostics artifact still on disk showed a `SysAdmin Reviewer` SHOULD_FIX
+  finding on `tests/test_dispatch.py` claiming lines 9522-9527 rejected, even
+  though its 6-line evidence quote is a genuine, byte-exact copy of the
+  post-change source at those exact lines — a fourth mechanical rejection
+  mode distinct from #1715's near-line-anchor/marker-normalization fixes and
+  from the ticket's own (unverifiable, likely fabricated) "no quotable
+  evidence span" hypothesis. Two compounding bugs: `_parse_unified_diff`
+  only ever recorded content for `+`-prefixed added lines, so the 5 of 6
+  claimed lines that were unchanged context had no entry at all in the
+  line-content map; and `_resolve_line_window` snapped *every* claimed
+  endpoint onto the nearest *added* line even when the endpoint was already
+  exactly correct, silently shrinking `(9522, 9527)` down to `(9521, 9526)`
+  and discarding the tail of the quote. `CapturedDiff` gains a second map,
+  `file_window_text`, alongside (not replacing) `file_line_text` — it also
+  captures context-line content at its real new-file line number (a removed
+  line still has no new-file position and stays excluded). A new sibling
+  resolver pair, `_nearest_hunk_line`/`_resolve_hunk_window`, mirrors the
+  existing `_nearest_added_line`/`_resolve_line_window` but draws candidates
+  from `file_window_text`; `_evidence_in_claimed_lines`'s windowed branch
+  routes through the new pair, while `_line_reference_valid`'s
+  anchor-*validity* gate and `_resolved_finding`'s persisted-anchor snap both
+  keep calling the original added-line-only functions, unchanged — an
+  accepted finding's `line_start`/`line_end` still snap onto the nearest
+  genuine added line (`9521`/`9526` for this fixture), not the reviewer's raw
+  claimed endpoints, so downstream consumers keep pointing at real changed
+  source. In a representative before/after aggregate check combining this
+  fixture, its negative control, and the two existing #1715 fixtures, 1 of 4
+  findings that was incorrectly rejected pre-fix is now correctly retained
+  post-fix (retained/raw: 2/4 → 3/4).
+
+  Mutation-proof seam check (#1628 convention): with the fix applied,
+  `test_hunk_context_window_evidence_retained` passes —
+
+  ```
+  tests/test_review_findings.py::TestValidateReviewerDocument::test_hunk_context_window_evidence_retained PASSED [100%]
+  1 passed in 0.12s
+  ```
+
+  Reverting the full production side of this fix — `CapturedDiff.file_window_text`,
+  `_nearest_hunk_line`/`_resolve_hunk_window`, `_evidence_in_claimed_lines`'s
+  rewiring onto them, and the `_parse_unified_diff` 3-tuple→4-tuple signature
+  change and its call sites (test file untouched) — reproduces the original
+  rejection —
+
+  ```
+  E       ValueError: not enough values to unpack (expected 4, got 3)
+  tests/test_review_findings.py::TestValidateReviewerDocument::test_hunk_context_window_evidence_retained FAILED [100%]
+  1 failed in 0.22s
+  ```
+
+  The failure surfaces at the `_parse_unified_diff` unpack (the test's own
+  fixture builder calls it directly and always unpacks 4 values) rather than
+  at the evidence-containment assertion the fix is actually about — expected,
+  since the signature change is part of the same seam being proven, not a
+  separate one.
+
+- **The fix loop only persisted cycle 0's review-verdict snapshot, not the
+  cycle that actually produced the park (#1739):** `_persist_cycle0_snapshot`
+  generalizes to `_persist_cycle_snapshot`, called once per fix cycle (0
+  through the terminal cycle) instead of only before the loop starts. Every
+  exit path now threads the latest cycle's pointer, so whichever cycle's
+  `ReviewVerdict` actually produced a park (e.g.
+  `codex_must_fix_mechanically_rejected` on a later cycle, as in #1729) is
+  the one an operator finds referenced in `friction_highlights`, instead of a
+  stale cycle-0 snapshot that may not even contain the offending finding.
+
+## [1.29.0] - 2026-08-08
+
+### Fixed
+
+- **A mechanically-rejected MUST_FIX no longer reads as a clean review
+  (#1714):** `consolidate_verdict` computed `blocking` from accepted findings
+  only, so a MUST_FIX rejected for a mechanical reason (bad line anchor,
+  evidence not found in the diff, unknown file) landed in `rejected`, never
+  reached `must_fix`, and the codex path fell through to `stage_complete`. The
+  posted comment then read "Non-blocking — no MUST_FIX findings", and
+  `_render_findings` iterates only `accepted`, so the discarded findings
+  appeared nowhere at all. In a 9-pass fleet sample, 4 of 4 MUST_FIX findings
+  were rejected this way and the review reported clean. `ReviewVerdict` gains
+  `rejected_must_fix` — the MUST_FIX-severity subset of `rejected`, selected
+  by severity rather than by rejection reason, so any future
+  `RejectedFindingReason` is covered by construction — and the codex path now
+  exits `blocked` with its own reason and its own park disposition rather than
+  reporting success. Deliberately a *second* signal rather than a widening of
+  `blocking`: the fix loop gates on `verdict.blocking`, and a finding whose
+  anchor could not be located is precisely what must never be handed to an
+  autofix loop. The Claude-native coordinator's instruction to discard
+  `.rejected` from adjudication is narrowed to non-MUST_FIX severities, since
+  the same `consolidate_verdict` serves both backends.
+
+- **The #1709 capability probe reported every host incapable, and cached it
+  (#1732):** the probe deliberately runs in its own scratch dir under
+  `state_dir()` rather than the review worktree — so it is never inside a git
+  repo, and `codex exec` refuses to start outside one ("Not inside a trusted
+  directory and `--skip-git-repo-check` was not specified", exit 1) before any
+  sandbox work happens. `_is_probe_error` classified that as neither a timeout
+  nor a spawn error, so it fell through to `_classify_capability_failure`,
+  matched no known marker, and returned a determinate `unknown` — which was
+  then written to a cache that has no TTL. Every codex review would have been
+  marked degraded, and #1702 hard-parks the REVIEW stage on degraded health:
+  the exact failure #1709 was filed to eliminate, reproduced through a new
+  mechanism. The probe now passes `--skip-git-repo-check`, and
+  `_is_probe_error` additionally treats "codex exited non-zero having written
+  nothing to stdout" as a probe error — degrading this one run, logged, and
+  never cached — per R7's requirement that a transient failure must not become
+  silently permanent. Keyed on empty stdout rather than on any particular
+  message, so a new refusal reason inherits the safe behavior; a genuinely
+  incapable sandbox still *replies*, so it is still classified and cached as a
+  real verdict. Operators who ran a codex review between #1709 and this fix
+  must clear the poisoned cache at
+  `~/.local/share/cw/codex-review/capability-cache.json`. Found by running the
+  shipped probe end-to-end against merged main while the unit suite was fully
+  green — every probe test used a fake runner, so nothing exercised a real
+  `codex exec` invocation.
+
+### Added
+
+- **Codex filesystem capability is now probed, not assumed (#1709):** the
+  codex-review path used to tell every reviewer "do not rely on filesystem
+  access" as a hardcoded constant. That was true of exactly one runtime. The
+  discriminator turns out to be the *install method*, not the OS: a
+  snap-confined codex gets its own PATH/mount namespace, cannot see the host's
+  `bwrap`, and fails closed — while a non-snap install on the same machine
+  reads the worktree fine. A host-side `which bwrap` check answers CAPABLE for
+  the snap install and is wrong, so `cw` now asks codex itself, via a real
+  `codex exec --sandbox read-only` read of a sentinel file whose value never
+  appears in the prompt.
+
+  The verdict is cached on disk at
+  `~/.local/share/cw/codex-review/capability-cache.json`, keyed by a runtime
+  fingerprint (cli version, platform, install type, sandbox mode) and with **no
+  TTL** — the fact only changes when the codex install does, so re-probing on a
+  timer would spend a model round-trip per dispatch tick to re-learn it. Delete
+  the file to force a re-probe. A probe that never *completed* (timeout, spawn
+  failure) degrades that one run and is deliberately not cached, so a transient
+  failure cannot become silently permanent.
+
+  Reviewers on a capable runtime now get a prompt variant that permits reading
+  beyond the inlined diff (consumer search, prior-art search, repo-wide
+  regression verification); write access is neither offered nor possible, and
+  the schema/degraded/escalation rules are shared verbatim between the two
+  variants so capability can never quietly alter the output contract. Failures
+  are classified — `sandbox_incapable`, `install_incomplete`, `unknown` — rather
+  than collapsed into one boolean, because a broken install and a confined
+  sandbox produce the same "cannot read" answer and want opposite remedies. The
+  selected mode is recorded on `ReviewVerdict.capability_mode` /
+  `capability_reason` and in a per-session `codex-capability.json` diagnostics
+  artifact. Rendering it in the verdict comment is deferred to #1725.
+
+- **The probed capability mode now renders in the verdict comment (#1725):**
+  closes the loop #1709 opened — `render_verdict_comment` gains
+  `_render_capability_note`, which prints a one-line `capable`/`degraded`
+  (with reason) annotation when `ReviewVerdict.capability_mode` is set, and
+  renders nothing for a verdict that never probed (`capability_mode is
+  None`), so an unprobed run is never mistaken for a probed-and-unknown one.
 
 - **OpenCode executor backend foundation (#1669):** `opencode` is now a
   first-class executor backend, selectable via `backend: opencode` in
@@ -86,6 +430,56 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   path hardcodes `EXIT_FOR_HUMAN_REVIEW` as a pessimistic default (#1580)
   rather than deriving it, so gating IMPL would have permanently stalled
   unattended `IMPL → REVIEW` auto-advance on LOCAL-backend clients.
+
+- **The posted review comment could not distinguish "found nothing" from
+  "found and fixed" (#1705):** `render_verdict_comment` only inspected
+  `verdict.blocking`/`must_fix`/`accepted`, never `verdict.review` — so a
+  fix-loop cycle that converged on a real MUST_FIX finding and a genuinely
+  clean first pass both rendered the same "Non-blocking — no MUST_FIX
+  findings" string. Root cause was two bugs: `_clean_exit` and
+  `_park_scope_violation` (`codex_fix_loop.py`) reconstructed the correct
+  cross-cycle `Review` and patched it onto the returned `AutoDevResult`, but
+  not onto the returned `ReviewVerdict` — the object `render_verdict_comment`
+  actually reads — so the posted comment kept reading the terminal
+  re-review's own `fix_cycles_used=0`. Both now stamp the finalized `Review`
+  onto the verdict they return, mirroring `_survivors_only_verdict`'s
+  existing pattern. Separately, `Review.fix_cycles_used == 0` is produced
+  identically by a fix-loop-disabled single pass and a fix-loop-enabled pass
+  whose cycle-0 review was already clean — no `Review`-only signal can tell
+  these apart, so `render_verdict_comment` (and
+  `synthesize_codex_review_result`/`run_review`, which now forward it) takes
+  a new required `fix_loop_enabled: bool` parameter to render each history as
+  its own state rather than lumping fix-loop-off in with the others. The
+  comment also now surfaces a "PARTIAL COVERAGE" note when a reviewer role
+  failed to run, reusing `verdict.agents_run` (#1710) — previously that
+  signal only reached `Blocker.details` on the zero-documents path, never the
+  posted GitHub comment.
+- **Reviewer findings with a near-line anchor or a stray diff-marker in
+  evidence were wrongly rejected (#1715):** two false-positive rejections on
+  top of #1632's diff-anchoring. First, `invalid_line_reference` used exact
+  line-number membership, so a finding whose anchor was off by even one line
+  from the real added line was rejected even with correct evidence text —
+  fleet evidence shows reviewer anchors commonly drift by one to three lines
+  (stale line numbers, off-by-one miscounts). Second, `evidence_not_in_diff`
+  compared evidence against raw per-file hunk text that still carries
+  `+`/`-`/context markers on every line, so a reviewer's genuine multiline
+  quote (no markers) couldn't match past the first line, and the windowed
+  path had the same exposure in reverse when the reviewer's own quote
+  carried diff-style markers (plausible if copied from a rendered diff
+  view). Line anchors now resolve via a fixed `±3` line tolerance
+  (`_nearest_added_line`: exact match first, else nearest candidate within
+  bound), and every evidence-vs-diff substring comparison is routed through
+  a marker/whitespace normalization (`_normalize_diff_text`) on both sides.
+  The bound is a fixed module constant, not derived from hunk/file size, and
+  stays enforced: an anchor farther than 3 lines away, a file not in the
+  diff, or evidence that still isn't a genuine substring after normalization
+  are all still rejected. In a representative before/after aggregate check,
+  2 of 3 findings that were incorrectly rejected pre-fix are now correctly
+  retained post-fix (retained/raw: 0/3 → 2/3). An accepted finding's
+  `line_start`/`line_end` are also snapped onto the resolved anchor before
+  the finding is returned, not left at the reviewer's raw off-by-up-to-3
+  claim — otherwise the verdict comment and fix-loop prompt would keep
+  pointing at the wrong line even after this fix retains the finding.
 
 ## [1.28.0] - 2026-08-07
 

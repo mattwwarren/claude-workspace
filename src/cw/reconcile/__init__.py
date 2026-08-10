@@ -5,21 +5,28 @@ returned by ``claude agents --json``.  ``reconcile()`` is split into two
 phases that run under ``sessions_lock`` (see ADR-0005):
 
 **Detect phase** — pure classification, no state writes.
-Three sweeps (stalled, idle/phantom, post-salvage) each call a
-``_detect_*`` helper that returns :class:`ReapCandidate` objects.  After
-each sweep ``_emit_reap_proposed`` fires
+Each sweep calls a ``_detect_*`` helper that returns candidate objects.
+``_emit_reap_proposed`` fires
 :attr:`OrchestratorEventType.SESSION_REAP_PROPOSED`
-for every candidate whose :attr:`Session.reap_proposed_at` is ``None``,
-stamping that field to deduplicate across ticks.
+for every proposal-worthy candidate whose :attr:`Session.reap_proposed_at`
+is ``None``, stamping that field to deduplicate across ticks.
 
-Emitting before the act phase keeps the event visible even when the act
-phase is suppressed by ``signal_only`` — consumers (the lane's ORCHESTRATE
-session or the operator) see the proposal and decide.
+**Act phase** — gated by ``reap_policy`` (ADR-0006) where destructive.
+Since the process-kill-timeout removal, no sweep dispositions a session off
+elapsed time or transcript quietness:
 
-**Act phase** — gated by ``reap_policy`` (ADR-0006).
-Under the default ``signal_only`` policy the act phase routes the owning
-:class:`TicketTask` to ``BLOCKED_ON_USER`` but performs no destructive
-mutation (no daemon stop, no worktree removal, no RUNNING→PENDING revert).
+- the **foreign-result** sweep (``stalled``) and **emitted-sentinel router**
+  (``idle``) act only on positive completion evidence (a recorded terminal
+  result / an emitted sentinel) — constructive, never a reap;
+- the **phantom** sweep acts only on roster absence (the process is
+  genuinely gone) and remains gated by ``reap_policy``
+  (default ``signal_only``);
+- the **liveness** sweep is signal-only: it latches transcript-staleness
+  buckets, emits ``session.liveness_changed``, and pages the operator
+  (``SESSION_NEEDS_ATTENTION``) when a live worker crosses the top bucket
+  with no sentinel and no pending subagent — it never stops a daemon,
+  reverts a task, or removes a worktree.
+
 Destructive acts require either ``reap_policy: auto`` on the session's lane
 *or* an explicit operator command (``cw doctor --reap``).
 
@@ -33,10 +40,6 @@ Transient-outage guard: ``reconcile`` skips the act phase entirely when
 ``claude agents --json`` fails or returns an empty roster while
 ACTIVE/IDLE sessions with surface refs exist — a hiccup must not mass-reap.
 
-``_reconcile_locked()`` runs the above sequence while ``sessions_lock``
-is held; helper functions called from within it (``revert_stalled_*``,
-``flag_silently_idle_*``) ``save_state`` directly without re-acquiring.
-
 See ADR-0005 (single state lock) and ADR-0006 (reaping is gated by an
 authority) for the invariants this module enforces.
 
@@ -45,12 +48,11 @@ import surface (``from cw.reconcile import X``) is preserved here via
 re-exports. Submodules:
 
 - ``_shared`` — constants, dataclasses/enums, and cross-cutting leaf helpers.
-- ``stalled`` — wall-clock-budget stalled-headless sweep.
-- ``idle`` — idle-watchdog (silently idle) sweep.
-- ``liveness`` — transcript-staleness bucket sweep (RFC 0008 W2, pure
-  observation, no disposition).
+- ``stalled`` — foreign-result completion sweep for headless sessions.
+- ``idle`` — emitted-sentinel router (#578).
+- ``liveness`` — transcript-staleness bucket sweep + operator distress
+  signal (RFC 0008 W2; signal-only, no disposition).
 - ``phantom`` — phantom (dead-surface) sweep.
-- ``salvage`` — git-state salvage post-pass (draft PR / flag).
 - ``tasks`` — dev-queue revert backstops and timed-out-merged completion.
 - ``core`` — ``reconcile`` / ``_reconcile_locked`` orchestration.
 """
@@ -71,15 +73,12 @@ from cw.reconcile._shared import (
     _SALVAGE_SKIP_ESCALATED_REASON,
     _SALVAGE_SKIP_REASON,
     _SALVAGE_TERMINAL_STATUSES,
+    _SESSION_UNRESPONSIVE_REASON,
     _SILENTLY_IDLE_REASON,
     _STAGE_REVIEW_COMPLETE,
     _STALLED_CAP_PARKED_REASON,
     _VALIDATION_FAILED_MAX_ATTEMPTS,
     AUTO_DEV_LABEL_PREFIX,
-    DEFAULT_IDLE_RETRY_CAP,
-    DEFAULT_STALLED_RETRY_CAP,
-    HEADLESS_TIMEOUT_SECONDS,
-    IDLE_WATCHDOG_SECONDS,
     SPAWN_GRACE_SECONDS,
     SUBAGENT_LIVENESS_WINDOW_SECONDS,
     TRANSCRIPT_LIVENESS_WINDOW_SECONDS,
@@ -110,11 +109,7 @@ from cw.reconcile._shared import (
     _worktree_dirty_by_path,
     compute_drift,
     feature_branch_key,
-    resolve_headless_budget,
-    resolve_idle_retry_cap,
-    resolve_idle_watchdog_budget,
     resolve_reap_policy,
-    resolve_stalled_retry_cap,
     ticket_id_for_session,
 )
 from cw.reconcile.concierge import (
@@ -138,7 +133,6 @@ from cw.reconcile.escalation import (
 from cw.reconcile.idle import (
     _act_on_idle_candidates,
     _detect_idle_candidates,
-    flag_silently_idle_daemon_sessions,
 )
 from cw.reconcile.liveness import (
     LivenessCandidate,
@@ -159,14 +153,9 @@ from cw.reconcile.phantom import (
     _act_on_phantom_candidates,
     _detect_phantom_candidates,
 )
-from cw.reconcile.salvage import (
-    rescue_finalize_blocked_sessions,
-    salvage_committed_no_pr_sessions,
-)
 from cw.reconcile.stalled import (
     _act_on_stalled_candidates,
     _detect_stalled_candidates,
-    revert_stalled_headless_sessions,
 )
 from cw.reconcile.tasks import (
     complete_timed_out_merged_tasks,
@@ -178,11 +167,7 @@ from cw.reconcile.tasks import (
 __all__ = [
     "AUTO_DEV_LABEL_PREFIX",
     "DEFAULT_CONCIERGE_RECOVERIES",
-    "DEFAULT_IDLE_RETRY_CAP",
-    "DEFAULT_STALLED_RETRY_CAP",
     "ESCALATION_PARK_MINUTES",
-    "HEADLESS_TIMEOUT_SECONDS",
-    "IDLE_WATCHDOG_SECONDS",
     "RECIPE_CANCELLED_ROW_RESTORE",
     "RECIPE_FALSE_PARK_REQUEUE",
     "RECIPE_PARK_MARKER_POISON_CLEAR",
@@ -202,6 +187,7 @@ __all__ = [
     "_SALVAGE_SKIP_ESCALATED_REASON",
     "_SALVAGE_SKIP_REASON",
     "_SALVAGE_TERMINAL_STATUSES",
+    "_SESSION_UNRESPONSIVE_REASON",
     "_SILENTLY_IDLE_REASON",
     "_STAGE_REVIEW_COMPLETE",
     "_STALLED_CAP_PARKED_REASON",
@@ -251,22 +237,14 @@ __all__ = [
     "complete_timed_out_merged_tasks",
     "compute_drift",
     "feature_branch_key",
-    "flag_silently_idle_daemon_sessions",
     "park_terminal_sibling_tasks",
     "reconcile",
     "record_session_liveness_changes",
-    "rescue_finalize_blocked_sessions",
     "resolve_concierge_recipe_enabled",
-    "resolve_headless_budget",
-    "resolve_idle_retry_cap",
-    "resolve_idle_watchdog_budget",
     "resolve_reap_policy",
-    "resolve_stalled_retry_cap",
     "revert_completed_silent_tasks",
-    "revert_stalled_headless_sessions",
     "revert_timed_out_tasks",
     "run_concierge_recoveries",
     "run_escalation_sweep",
-    "salvage_committed_no_pr_sessions",
     "ticket_id_for_session",
 ]

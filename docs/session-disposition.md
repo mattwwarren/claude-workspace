@@ -193,24 +193,30 @@ an unlocatable/unparseable transcript.
 bus (`cw event tail`) whenever it disposes of a session. The `reason` field
 uses the `ReapReason` taxonomy; see the "queue.session_reaped Bus Event"
 section of [`docs/headless-contract.md`](headless-contract.md) for the full
-`ReapReason` table. Two hardening measures make false reaps less likely:
+`ReapReason` table.
 
-- **Confirm-before-reap** (`OrchestratorConfig.idle_confirm_observations`,
-  default `2`): reconcile requires `session.idle_observation_count` to reach
-  this threshold across consecutive watchdog ticks before dispositing. A single
-  stale tick no longer triggers an immediate reap.
-- **Widened liveness windows** (#544/#548): the per-tier idle-watchdog budgets
-  are wider, reducing the window where a healthy-but-slow session looks idle.
+> **ADR-0014 note:** since the process-kill-timeout removal, only
+> evidence-driven dispositions exist — roster-absence phantoms, recorded
+> terminal results, dead local PIDs, and explicit operator commands. The
+> idle watchdog, wall-clock budgets, confirm-before-reap counter, and
+> liveness veto described in older revisions of this document are gone; a
+> quiet-but-live worker now surfaces via the liveness distress signal
+> (`session.needs_attention` with `paused_status=session_unresponsive`)
+> and is never dispositioned automatically.
 
-If a reap occurs and you need to force reconcile to re-examine state:
+If you need to force reconcile to re-examine state:
 
 ```bash
 cw doctor --reap
 ```
 
-### 5a. Branch-absence anomaly on `SESSION_TIMED_OUT` (#808)
+### 5a. Branch-absence anomaly on `SESSION_TIMED_OUT` (#808) — historical
 
-When a session times out with no sentinel and no merged PR, the reaper checks
+> **Historical (ADR-0014):** `SESSION_TIMED_OUT` is no longer produced —
+> nothing times sessions out. This section is kept for reading *old* event
+> logs and legacy `TIMED_OUT` rows in persisted state.
+
+When a session timed out with no sentinel and no merged PR, the reaper checked
 whether the feature branch still exists on origin and annotates the
 `SESSION_TIMED_OUT` event with a `branch_state` field:
 
@@ -250,21 +256,29 @@ where one already existed:
 
 | Park/reroute path | Disposition stamped |
 |---|---|
-| idle watchdog silently-idle park | `_SILENTLY_IDLE_REASON` ("silently_idle") |
-| stalled-sweep SIGNAL_ONLY reroute | `ReapReason.WALL_CLOCK_BUDGET` |
-| idle-sweep SIGNAL_ONLY reroute | `ReapReason.IDLE_STALL` |
+| idle watchdog silently-idle park *(historical, ADR-0014)* | `_SILENTLY_IDLE_REASON` ("silently_idle") |
+| stalled-sweep SIGNAL_ONLY reroute *(historical, ADR-0014)* | `ReapReason.WALL_CLOCK_BUDGET` |
+| idle-sweep SIGNAL_ONLY reroute *(historical, ADR-0014)* | `ReapReason.IDLE_STALL` |
 | phantom-sweep SIGNAL_ONLY reroute (clean crash) | `ReapReason.PHANTOM_SURFACE` |
-| stalled/phantom gh-check-blocked route | `_GH_CHECK_BLOCKED_REASON` |
-| salvage LOW-path flag | `_NEEDS_SALVAGE_REASON` |
+| phantom gh-check-blocked route | `_GH_CHECK_BLOCKED_REASON` |
+| salvage LOW-path flag *(historical, ADR-0014)* | `_NEEDS_SALVAGE_REASON` |
 | terminal-sibling park (`tasks.py`) | `ReapReason.TERMINAL_SIBLING` |
 | unknown client / invalid pipeline stage (`dispatch.py`) | `"unknown_client"` / `"invalid_stage_config"` (deliberately excluded from concierge/escalation eligibility — config errors, not recoverable states) |
+| mechanically-rejected MUST_FIX park (`dispatch/routing.py`, #1714) | `REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION` ("codex_must_fix_mechanically_rejected") — stamped directly by `_park_must_fix_mechanically_rejected`, Rule 5's only reason-keyed override, rather than derived via `_hold_aware_disposition`. Escalation-eligible and drain-eligible; deliberately excluded from `HOLD_DISPOSITIONS` and from concierge's false-park requeue |
 
 `cw.reconcile.escalation`'s `_ELIGIBLE_DISPOSITIONS` and
 `cw.reconcile.concierge`'s `_FALSE_PARK_ELIGIBLE_DISPOSITIONS` were updated
 to track these newly-non-null values so a ceiling-refused row in one of
 these classes still surfaces to the operator instead of silently sticking.
 
-### 6a. The liveness veto (#976, #1277, #1445)
+### 6a. The liveness veto (#976, #1277, #1445) — historical
+
+> **Historical (ADR-0014):** the stalled sweep's parks — and therefore the
+> veto that bounded them — were removed with the process-kill timeouts. Kept
+> for reading old `session.park_vetoed` events. The distress role the veto
+> played (surfacing a still-live worker to the operator instead of killing
+> it) is now the default behavior for every quiet worker, via the liveness
+> distress signal.
 
 The stalled sweep's pending park is additionally **vetoed** — suppressed
 entirely, no disposition stamped, no queue mutation — when the session's

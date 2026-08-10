@@ -12,6 +12,7 @@ from cw.codex_review import (
     CODEX_BUDGET_EXHAUSTED,
     CODEX_ERROR,
     CODEX_MUST_FIX_FINDINGS,
+    CODEX_MUST_FIX_MECHANICALLY_REJECTED,
     CODEX_REVIEW_PARTIAL,
     CODEX_REVIEW_UNPARSEABLE,
     CODEX_TIMEOUT,
@@ -19,8 +20,17 @@ from cw.codex_review import (
     render_verdict_comment,
     synthesize_codex_review_result,
 )
+from cw.codex_review._capability import (
+    _CodexFilesystemCapability,
+    _CodexFingerprint,
+)
 from cw.executor_diagnostics import diagnostics_bundle_dir
-from cw.review_findings import ReviewerRunFailure, consolidate_verdict
+from cw.review_findings import (
+    AgentSpecSource,
+    AgentSpecStatus,
+    ReviewerRunFailure,
+    consolidate_verdict,
+)
 from tests._codex_review_helpers import _task
 from tests._reconcile_helpers import (
     SCOPE_GUARD_BRANCH,
@@ -33,6 +43,8 @@ from tests.conftest import _make_diff, _make_finding, _make_reviewer_doc
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    from cw.review_findings import ReviewerFindingsDocument
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +66,7 @@ class TestSynthesizeCodexReviewResult:
             reviewed_sha="sha",
             session_id="s-synth",
             default_branch="main",
+            fix_loop_enabled=False,
         )
         assert result.status == "blocked"
         assert result.blocker is not None
@@ -88,6 +101,7 @@ class TestSynthesizeCodexReviewResult:
             reviewed_sha="sha",
             session_id="s-synth",
             default_branch="main",
+            fix_loop_enabled=False,
         )
         assert result.blocker is not None
         assert result.blocker.retry_eligible == expect_retry
@@ -106,6 +120,7 @@ class TestSynthesizeCodexReviewResult:
             reviewed_sha="sha",
             session_id="s-synth",
             default_branch="main",
+            fix_loop_enabled=False,
         )
         assert result.status == "blocked"
         assert result.blocker is not None
@@ -138,6 +153,7 @@ class TestSynthesizeCodexReviewResult:
             reviewed_sha="sha",
             session_id="s-synth",
             default_branch="main",
+            fix_loop_enabled=False,
         )
         assert result.status == "blocked"
         assert result.blocker is not None
@@ -170,6 +186,7 @@ class TestSynthesizeCodexReviewResult:
             reviewed_sha="sha",
             session_id="s-synth",
             default_branch="main",
+            fix_loop_enabled=False,
         )
         assert result.status == "blocked"
         assert result.blocker is not None
@@ -200,6 +217,7 @@ class TestSynthesizeCodexReviewResult:
             reviewed_sha="sha",
             session_id="s-synth-unanchored",
             default_branch="main",
+            fix_loop_enabled=False,
         )
         assert result.status == "blocked"
         assert result.blocker is not None
@@ -222,6 +240,7 @@ class TestSynthesizeCodexReviewResult:
             reviewed_sha="sha",
             session_id="s-synth",
             default_branch="main",
+            fix_loop_enabled=False,
         )
         assert result.status == "stage_complete"
         assert result.stage_reached == "stage3_review"
@@ -269,6 +288,7 @@ class TestSynthesizeCodexReviewResultHealth:
             reviewed_sha="sha",
             session_id="s-synth",
             default_branch="main",
+            fix_loop_enabled=False,
         )
         assert result.status == "stage_complete"
         assert result.health.lowest_agent_confidence == "MEDIUM"
@@ -299,6 +319,7 @@ class TestSynthesizeCodexReviewResultHealth:
             reviewed_sha="sha",
             session_id="s-synth",
             default_branch="main",
+            fix_loop_enabled=False,
         )
         assert result.status == "stage_complete"
         assert result.health.lowest_agent_confidence == "HIGH"
@@ -324,6 +345,7 @@ class TestSynthesizeCodexReviewResultHealth:
             reviewed_sha="sha",
             session_id="s-synth",
             default_branch="main",
+            fix_loop_enabled=False,
         )
         with_metrics, verdict = synthesize_codex_review_result(
             task=_task(),
@@ -334,6 +356,7 @@ class TestSynthesizeCodexReviewResultHealth:
             reviewed_sha="sha",
             session_id="s-synth",
             default_branch="main",
+            fix_loop_enabled=False,
             metrics_by_role={
                 doc.reviewer_role: {
                     "terminal_event": None,
@@ -346,6 +369,34 @@ class TestSynthesizeCodexReviewResultHealth:
         assert with_metrics.health.model_dump() == baseline.health.model_dump()
         assert verdict is not None
         assert verdict.agents_run[0].unexpected_tool_attempts == ["mcp_tool_call"]
+
+    def test_degraded_document_detail_survives_full_synthesis_pipeline(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        # #1775: proves the detail-copy fix reaches the real call path (not
+        # just consolidate_verdict in isolation), and that existing health
+        # behavior for a degraded document is unchanged by the addition.
+        worktree = make_git_repo("wt-synth-health-detail")
+        doc = _make_reviewer_doc(
+            status="degraded", detail="sandbox lacked filesystem access"
+        )
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-synth",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+        assert result.status == "stage_complete"
+        assert result.health.lowest_agent_confidence == "MEDIUM"
+        assert result.health.any_incomplete_risk is True
+        assert result.health.recommendation == "EXIT_FOR_HUMAN_REVIEW"
+        assert verdict is not None
+        assert verdict.agents_run[0].detail == "sandbox lacked filesystem access"
 
 
 class TestSynthesizeCodexReviewResultMetrics:
@@ -365,6 +416,7 @@ class TestSynthesizeCodexReviewResultMetrics:
             reviewed_sha="sha",
             session_id="s-synth",
             default_branch="main",
+            fix_loop_enabled=False,
             metrics_by_role={
                 "Role A": {
                     "thread_id": "thr-a",
@@ -400,6 +452,7 @@ class TestSynthesizeCodexReviewResultMetrics:
             reviewed_sha="sha",
             session_id="s-synth",
             default_branch="main",
+            fix_loop_enabled=False,
         )
         assert verdict is not None
         assert verdict.agents_run[0].thread_id is None
@@ -421,6 +474,7 @@ class TestSynthesizeCodexReviewResultMetrics:
             reviewed_sha="sha",
             session_id="s-synth",
             default_branch="main",
+            fix_loop_enabled=False,
             metrics_by_role={"R": {"thread_id": "thr-r"}},
         )
         assert verdict is None
@@ -430,18 +484,170 @@ class TestSynthesizeCodexReviewResultMetrics:
 
 
 # ---------------------------------------------------------------------------
+# synthesize_codex_review_result — mechanically-rejected MUST_FIX (#1714)
+# ---------------------------------------------------------------------------
+
+
+def _mechanically_rejected_must_fix_doc() -> ReviewerFindingsDocument:
+    """A doc whose single MUST_FIX finding cites a file absent from the diff.
+
+    ``_make_diff()`` only knows ``src/cw/foo.py``, so this finding is rejected
+    ``unknown_file`` before adjudication — a *mechanical* rejection, the exact
+    shape #1714 is about.
+    """
+    return _make_reviewer_doc(
+        _make_finding(
+            severity="MUST_FIX",
+            file="src/cw/never_in_the_diff.py",
+            line_start=None,
+            line_end=None,
+            summary="dropped before adjudication",
+        )
+    )
+
+
+class TestSynthesizeCodexReviewResultMechanicalRejection:
+    def test_mechanically_rejected_must_fix_blocks(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        # #1714 fleet regression: this used to fall through to stage_complete.
+        worktree = make_git_repo("wt-synth-mech-reject")
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[_mechanically_rejected_must_fix_doc()],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-synth-mech",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+        assert result.status != "stage_complete"
+        assert result.status == "blocked"
+        assert result.blocker is not None
+        assert result.blocker.reason == CODEX_MUST_FIX_MECHANICALLY_REJECTED
+        assert verdict is not None
+        # R4: the signal is carried by rejected_must_fix, NOT by flipping
+        # `blocking` — a mechanically-rejected finding's anchor is unreliable
+        # and must never enter the autofix loop.
+        assert verdict.blocking is False
+        assert len(verdict.rejected_must_fix) == 1
+        assert "dropped before adjudication" in result.blocker.details
+
+    def test_partial_vs_mechanical_rejection_precedence(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        # Pins the branch ordering: the mechanical-rejection branch sits
+        # between the `blocking` branch and the `failures` (partial) branch, so
+        # a run that would otherwise report CODEX_REVIEW_PARTIAL reports the
+        # dropped MUST_FIX instead — the stronger, more specific signal.
+        worktree = make_git_repo("wt-synth-mech-partial")
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[_mechanically_rejected_must_fix_doc()],
+            failures=[ReviewerRunFailure(role="Performance Reviewer", reason="crash")],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-synth-mech-partial",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+        assert result.blocker is not None
+        assert result.blocker.reason == CODEX_MUST_FIX_MECHANICALLY_REJECTED
+        assert result.blocker.reason != CODEX_REVIEW_PARTIAL
+        assert verdict is not None
+
+    def test_accepted_must_fix_still_reports_the_original_reason(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        # Regression guard: the new branch must not steal the blocking path.
+        worktree = make_git_repo("wt-synth-mech-mixed")
+        doc = _make_reviewer_doc(
+            _make_finding(severity="MUST_FIX"),
+            _make_finding(
+                severity="MUST_FIX",
+                file="src/cw/never_in_the_diff.py",
+                line_start=None,
+                line_end=None,
+                summary="dropped one",
+            ),
+        )
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-synth-mech-mixed",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+        assert result.blocker is not None
+        assert result.blocker.reason == CODEX_MUST_FIX_FINDINGS
+        assert verdict is not None
+        assert verdict.blocking is True
+        assert len(verdict.rejected_must_fix) == 1
+
+
+# ---------------------------------------------------------------------------
 # render_verdict_comment
 # ---------------------------------------------------------------------------
 
 
 class TestRenderVerdictComment:
+    def test_render_verdict_comment_shows_mechanically_rejected_must_fix(self) -> None:
+        # #1714's second silence: _render_findings iterates verdict.accepted
+        # only, so a mechanically-rejected MUST_FIX was invisible on the posted
+        # comment even once the sentinel blocked on it.
+        verdict = consolidate_verdict(
+            [_mechanically_rejected_must_fix_doc()], _make_diff(), reviewed_sha="sha"
+        )
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "Non-blocking" not in body
+        assert "MUST_FIX REJECTED" in body
+        assert "dropped before adjudication" in body
+        assert "src/cw/never_in_the_diff.py" in body
+        assert "unknown_file" in body
+
+    def test_rejected_must_fix_section_renders_alongside_blocking(self) -> None:
+        # The section is rendered unconditionally, so the (rarer) mixed case
+        # surfaces both the blocking findings and the dropped one.
+        doc = _make_reviewer_doc(
+            _make_finding(severity="MUST_FIX", summary="bad thing"),
+            _make_finding(
+                severity="MUST_FIX",
+                file="src/cw/never_in_the_diff.py",
+                line_start=None,
+                line_end=None,
+                summary="dropped one",
+            ),
+        )
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "BLOCKING" in body
+        assert "bad thing" in body
+        assert "dropped one" in body
+
+    def test_clean_verdict_has_no_rejected_must_fix_section(self) -> None:
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_make_finding(severity="NIT"))],
+            _make_diff(),
+            reviewed_sha="sha",
+        )
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "MUST_FIX REJECTED" not in body
+        assert "Non-blocking" in body
+
     def test_blocking_lists_must_fix(self) -> None:
         diff = _make_diff()
         doc = _make_reviewer_doc(
             _make_finding(severity="MUST_FIX", summary="bad thing")
         )
         verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
-        body = render_verdict_comment(verdict)
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
         assert "BLOCKING" in body
         assert "MUST_FIX" in body
         assert "bad thing" in body
@@ -451,7 +657,7 @@ class TestRenderVerdictComment:
         diff = _make_diff()
         doc = _make_reviewer_doc(_make_finding(severity="NIT"))
         verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
-        body = render_verdict_comment(verdict)
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
         assert "Non-blocking" in body
 
     def test_mixed_must_fix_and_should_fix_both_render(self) -> None:
@@ -473,7 +679,7 @@ class TestRenderVerdictComment:
         )
         doc = _make_reviewer_doc(must_fix, should_fix)
         verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
-        body = render_verdict_comment(verdict)
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
         assert "BLOCKING" in body
         assert "### MUST_FIX" in body
         assert "### SHOULD_FIX" in body
@@ -487,7 +693,7 @@ class TestRenderVerdictComment:
             _make_finding(severity="MUST_FIX", confidence="LOW", summary="bad thing")
         )
         verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
-        body = render_verdict_comment(verdict)
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
         assert "LOW confidence" in body
         assert "bad thing" in body
 
@@ -497,7 +703,7 @@ class TestRenderVerdictComment:
             _make_finding(severity="MUST_FIX", confidence="HIGH", summary="bad thing")
         )
         verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
-        body = render_verdict_comment(verdict)
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
         assert "confidence" not in body.lower()
 
     def test_medium_confidence_finding_renders_confidence_label(self) -> None:
@@ -506,7 +712,7 @@ class TestRenderVerdictComment:
             _make_finding(severity="MUST_FIX", confidence="MEDIUM", summary="bad thing")
         )
         verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
-        body = render_verdict_comment(verdict)
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
         assert "MEDIUM confidence" in body
 
     def test_confidence_does_not_affect_blocking_or_partition(self) -> None:
@@ -525,7 +731,475 @@ class TestRenderVerdictComment:
         assert verdict_high.blocking is True
         assert verdict_low.blocking is True
         assert len(verdict_high.must_fix) == len(verdict_low.must_fix) == 1
-        assert "### MUST_FIX" in render_verdict_comment(verdict_low)
+        assert "### MUST_FIX" in render_verdict_comment(
+            verdict_low, fix_loop_enabled=False
+        )
+
+    # -----------------------------------------------------------------
+    # #1705 — found-nothing vs found-and-fixed vs fix-loop-off histories
+    # -----------------------------------------------------------------
+
+    def test_clean_no_findings_fix_loop_off_states_single_pass(self) -> None:
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="NIT"))
+        verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "single-pass" in body.lower()
+        assert "disabled" in body.lower()
+        # R1: fix-loop-off must never be phrased as flaked/degraded.
+        assert "flak" not in body.lower()
+        assert "degrad" not in body.lower()
+
+    def test_clean_no_findings_fix_loop_on_states_available_but_unneeded(
+        self,
+    ) -> None:
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="NIT"))
+        verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        off_body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        on_body = render_verdict_comment(verdict, fix_loop_enabled=True)
+        assert "available" in on_body.lower()
+        assert on_body != off_body
+
+    def test_found_and_fixed_headline_differs_from_found_nothing(self) -> None:
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="NIT"))
+        clean_verdict = consolidate_verdict(
+            documents=[doc],
+            diff=diff,
+            reviewed_sha="sha",
+        )
+        fixed_verdict = clean_verdict.model_copy(
+            update={
+                "review": clean_verdict.review.model_copy(
+                    update={"must_fix_initial": 2, "fix_cycles_used": 2}
+                )
+            }
+        )
+        clean_body = render_verdict_comment(clean_verdict, fix_loop_enabled=True)
+        fixed_body = render_verdict_comment(fixed_verdict, fix_loop_enabled=True)
+        assert fixed_body != clean_body
+        assert "2" in fixed_body
+        assert "UNVERIFIED" not in fixed_body
+
+    def test_flaked_fix_loop_renders_unverified_not_resolved(self) -> None:
+        """#1723 — a fix loop that converged without any real commit renders
+        an UNVERIFIED headline instead of the resolved-N-of-M claim."""
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="NIT"))
+        clean_verdict = consolidate_verdict(
+            documents=[doc],
+            diff=diff,
+            reviewed_sha="sha",
+        )
+        flaked_verdict = clean_verdict.model_copy(
+            update={
+                "review": clean_verdict.review.model_copy(
+                    update={
+                        "must_fix_initial": 2,
+                        "fix_cycles_used": 2,
+                        "had_real_commit": False,
+                    }
+                )
+            }
+        )
+        body = render_verdict_comment(flaked_verdict, fix_loop_enabled=True)
+        assert "UNVERIFIED" in body
+        assert "commit outcomes not individually tracked" not in body
+        assert "2" in body
+
+    def test_had_real_commit_true_never_renders_unverified(self) -> None:
+        """#1723 — a genuine fix-cycle commit never renders the UNVERIFIED
+        headline, regardless of how many cycles it took."""
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="NIT"))
+        clean_verdict = consolidate_verdict(
+            documents=[doc],
+            diff=diff,
+            reviewed_sha="sha",
+        )
+        fixed_verdict = clean_verdict.model_copy(
+            update={
+                "review": clean_verdict.review.model_copy(
+                    update={
+                        "must_fix_initial": 2,
+                        "fix_cycles_used": 2,
+                        "had_real_commit": True,
+                    }
+                )
+            }
+        )
+        body = render_verdict_comment(fixed_verdict, fix_loop_enabled=True)
+        assert "UNVERIFIED" not in body
+
+    def test_unknown_real_commit_never_renders_unverified(self) -> None:
+        """Legacy payloads with an unknown commit outcome retain prior prose."""
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="NIT"))
+        clean_verdict = consolidate_verdict(
+            documents=[doc],
+            diff=diff,
+            reviewed_sha="sha",
+        )
+        legacy_verdict = clean_verdict.model_copy(
+            update={
+                "review": clean_verdict.review.model_copy(
+                    update={"must_fix_initial": 2, "fix_cycles_used": 2}
+                )
+            }
+        )
+        body = render_verdict_comment(legacy_verdict, fix_loop_enabled=True)
+        assert legacy_verdict.review.had_real_commit is None
+        assert "UNVERIFIED" not in body
+
+    def test_blocking_capped_exit_shows_resolved_vs_open_counts(self) -> None:
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="MUST_FIX"))
+        verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        verdict = verdict.model_copy(
+            update={
+                "review": verdict.review.model_copy(
+                    update={
+                        "must_fix_initial": 3,
+                        "deferred": 1,
+                        "fix_cycles_used": 5,
+                    }
+                )
+            }
+        )
+        body = render_verdict_comment(verdict, fix_loop_enabled=True)
+        assert "2 of 3" in body
+        assert "1" in body
+
+    def test_failed_role_note_rendered_for_partial_coverage(self) -> None:
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="NIT"))
+        verdict = consolidate_verdict(
+            [doc],
+            diff,
+            reviewed_sha="sha",
+            failed_reviewers=[
+                ReviewerRunFailure(role="Performance Reviewer", reason="codex_timeout")
+            ],
+        )
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "PARTIAL COVERAGE" in body
+        assert "Performance Reviewer" in body
+
+    def test_fix_loop_off_blocking_states_single_pass(self) -> None:
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="MUST_FIX"))
+        verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "BLOCKING" in body
+        assert "single-pass" in body.lower()
+        assert "disabled" in body.lower()
+
+    def test_capability_note_renders_when_degraded(self) -> None:
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="NIT"))
+        verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        verdict = verdict.model_copy(
+            update={"capability_mode": "degraded", "capability_reason": "unknown"}
+        )
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "degraded" in body.lower()
+        assert "unknown" in body
+
+    def test_capability_note_renders_when_capable(self) -> None:
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="NIT"))
+        verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        verdict = verdict.model_copy(
+            update={"capability_mode": "capable", "capability_reason": None}
+        )
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "capable" in body.lower()
+
+    def test_capability_note_absent_when_mode_unset(self) -> None:
+        # capability_mode defaults to None (nobody probed) -- must not render
+        # "unknown" or any placeholder, per the ticket's explicit instruction.
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="NIT"))
+        verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        assert verdict.capability_mode is None
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "capability" not in body.lower()
+        assert "degraded" not in body.lower()
+
+
+# ---------------------------------------------------------------------------
+# #1775 — a degraded reviewer's stated reason (`detail`), rendered
+# ---------------------------------------------------------------------------
+
+
+class TestRenderDegradedRolesNote:
+    def test_degraded_role_with_detail_renders_role_and_reason(self) -> None:
+        doc = _make_reviewer_doc(
+            status="degraded",
+            detail="sandbox lacked filesystem access",
+            reviewer_role="Reviewer A",
+        )
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "**DEGRADED COVERAGE**" in body
+        assert "Reviewer A" in body
+        assert "sandbox lacked filesystem access" in body
+
+    def test_degraded_role_with_no_detail_renders_distinct_no_reason_marker(
+        self,
+    ) -> None:
+        doc = _make_reviewer_doc(
+            status="degraded", detail="", reviewer_role="Reviewer A"
+        )
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "**DEGRADED COVERAGE**" in body
+        assert "Reviewer A: degraded (no reason given)" in body
+
+    def test_two_degraded_roles_with_and_without_detail_both_render_distinguishably(
+        self,
+    ) -> None:
+        # Mirrors the real #1754 repro: multiple degraded roles in one pass,
+        # only some of which stated a reason.
+        doc_a = _make_reviewer_doc(
+            status="degraded",
+            detail="sandbox lacked filesystem access",
+            reviewer_role="Reviewer A",
+        )
+        doc_b = _make_reviewer_doc(
+            status="degraded", detail="", reviewer_role="Reviewer B"
+        )
+        verdict = consolidate_verdict([doc_a, doc_b], _make_diff(), reviewed_sha="sha")
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "Reviewer A: degraded — sandbox lacked filesystem access" in body
+        assert "Reviewer B: degraded (no reason given)" in body
+
+    def test_clean_verdict_has_no_degraded_roles_section(self) -> None:
+        doc = _make_reviewer_doc(_make_finding(severity="NIT"))
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "DEGRADED COVERAGE" not in body
+
+    def test_degraded_note_renders_alongside_failed_roles_note(self) -> None:
+        doc = _make_reviewer_doc(
+            status="degraded",
+            detail="sandbox lacked filesystem access",
+            reviewer_role="Reviewer A",
+        )
+        verdict = consolidate_verdict(
+            [doc],
+            _make_diff(),
+            reviewed_sha="sha",
+            failed_reviewers=[
+                ReviewerRunFailure(role="Perf Reviewer", reason="timeout")
+            ],
+        )
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "**PARTIAL COVERAGE**" in body
+        assert "Perf Reviewer" in body
+        assert "**DEGRADED COVERAGE**" in body
+        assert "Reviewer A: degraded — sandbox lacked filesystem access" in body
+
+
+# ---------------------------------------------------------------------------
+# #1773 — agent-spec resolution status on the verdict and its rendered note
+# ---------------------------------------------------------------------------
+
+
+_RECOVERED_NOTE = (
+    "**NOTE:** Code Quality Reviewer's repo-tracked spec was present but "
+    "empty — recovered via the global fallback; the repo-tracked file may be "
+    "truncated or need attention."
+)
+
+
+def _spec_status(
+    source: AgentSpecSource,
+    empty: bool,
+    empty_repo_file: bool,
+    role: str = "Code Quality Reviewer",
+) -> AgentSpecStatus:
+    return AgentSpecStatus(
+        role=role,
+        source=source,
+        empty=empty,
+        empty_repo_file=empty_repo_file,
+    )
+
+
+def _body_with_specs(statuses: list[AgentSpecStatus]) -> str:
+    diff = _make_diff()
+    doc = _make_reviewer_doc(_make_finding(severity="NIT"))
+    verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+    verdict = verdict.model_copy(update={"agent_spec_status": statuses})
+    return render_verdict_comment(verdict, fix_loop_enabled=False)
+
+
+class TestRenderAgentSpecNote:
+    def test_repo_present_renders_fully_specified_headline(self) -> None:
+        body = _body_with_specs(
+            [_spec_status("repo", empty=False, empty_repo_file=False)]
+        )
+        assert "_Agent specs loaded for all 1 reviewer role(s)._" in body
+        assert "UNSPECIFIED" not in body
+        assert "**NOTE:**" not in body
+
+    def test_repo_empty_with_gate_disabled_names_the_role(self) -> None:
+        body = _body_with_specs(
+            [
+                _spec_status("repo", empty=True, empty_repo_file=True),
+                _spec_status(
+                    "repo", empty=False, empty_repo_file=False, role="SysAdmin Reviewer"
+                ),
+            ]
+        )
+        assert "**AGENT SPEC(S) UNSPECIFIED** — 1 of 2 role(s) ran without a " in body
+        assert "Code Quality Reviewer (present but empty, no usable fallback)." in body
+        assert "**NOTE:**" not in body
+
+    def test_global_present_renders_fully_specified_headline(self) -> None:
+        body = _body_with_specs(
+            [_spec_status("global", empty=False, empty_repo_file=False)]
+        )
+        assert "_Agent specs loaded for all 1 reviewer role(s)._" in body
+        assert "**NOTE:**" not in body
+
+    def test_recovered_empty_repo_file_appends_the_addendum(self) -> None:
+        body = _body_with_specs(
+            [_spec_status("global", empty=False, empty_repo_file=True)]
+        )
+        assert "_Agent specs loaded for all 1 reviewer role(s)._" in body
+        assert _RECOVERED_NOTE in body
+
+    def test_global_found_but_empty_label(self) -> None:
+        body = _body_with_specs(
+            [
+                _spec_status("global", empty=True, empty_repo_file=False),
+                _spec_status(
+                    "repo", empty=False, empty_repo_file=False, role="SysAdmin Reviewer"
+                ),
+            ]
+        )
+        assert "**AGENT SPEC(S) UNSPECIFIED** — 1 of 2 role(s) ran without a " in body
+        assert "Code Quality Reviewer (global spec found but empty)." in body
+        assert "**NOTE:**" not in body
+
+    def test_global_empty_with_empty_repo_file_uses_no_usable_fallback_label(
+        self,
+    ) -> None:
+        body = _body_with_specs(
+            [
+                _spec_status("global", empty=True, empty_repo_file=True),
+                _spec_status(
+                    "repo", empty=False, empty_repo_file=False, role="SysAdmin Reviewer"
+                ),
+            ]
+        )
+        assert "Code Quality Reviewer (present but empty, no usable fallback)." in body
+        assert "**NOTE:**" not in body
+
+    def test_absent_label(self) -> None:
+        body = _body_with_specs(
+            [
+                _spec_status("none", empty=True, empty_repo_file=False),
+                _spec_status(
+                    "repo", empty=False, empty_repo_file=False, role="SysAdmin Reviewer"
+                ),
+            ]
+        )
+        assert "Code Quality Reviewer (absent)." in body
+        assert "**NOTE:**" not in body
+
+    def test_none_with_empty_repo_file_uses_no_usable_fallback_label(self) -> None:
+        body = _body_with_specs(
+            [
+                _spec_status("none", empty=True, empty_repo_file=True),
+                _spec_status(
+                    "repo", empty=False, empty_repo_file=False, role="SysAdmin Reviewer"
+                ),
+            ]
+        )
+        assert "Code Quality Reviewer (present but empty, no usable fallback)." in body
+        assert "**NOTE:**" not in body
+
+    def test_recovered_addendum_renders_alongside_a_degraded_headline(self) -> None:
+        body = _body_with_specs(
+            [
+                _spec_status("global", empty=False, empty_repo_file=True),
+                _spec_status(
+                    "none", empty=True, empty_repo_file=False, role="SysAdmin Reviewer"
+                ),
+            ]
+        )
+        assert "**AGENT SPEC(S) UNSPECIFIED** — 1 of 2 role(s) ran without a " in body
+        assert "SysAdmin Reviewer (absent)." in body
+        assert _RECOVERED_NOTE in body
+
+    def test_all_roles_unspecified_renders_the_fail_open_headline(self) -> None:
+        body = _body_with_specs(
+            [
+                _spec_status("none", empty=True, empty_repo_file=False),
+                _spec_status(
+                    "none", empty=True, empty_repo_file=False, role="SysAdmin Reviewer"
+                ),
+            ]
+        )
+        assert (
+            "**ALL AGENT SPECS UNSPECIFIED** — no reviewer role in this pass "
+            "had a loaded agent specification (repo or global); every prompt's "
+            "`## Agent Specification` section was empty." in body
+        )
+        assert "**NOTE:**" not in body
+
+    def test_unset_renders_nothing(self) -> None:
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="NIT"))
+        verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        assert verdict.agent_spec_status == []
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "AGENT SPEC" not in body
+        assert "Agent specs loaded" not in body
+
+
+class TestVerdictRecordsAgentSpecStatus:
+    def test_agent_spec_status_recorded_verbatim(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-spec-status")
+        statuses = [_spec_status("global", empty=False, empty_repo_file=True)]
+        _result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[_make_reviewer_doc()],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-spec-status",
+            default_branch="main",
+            fix_loop_enabled=False,
+            agent_spec_status=statuses,
+        )
+        assert verdict is not None
+        assert verdict.agent_spec_status == statuses
+
+    def test_omitted_kwarg_leaves_the_field_empty(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-spec-status-absent")
+        _result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[_make_reviewer_doc()],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-spec-status-absent",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+        assert verdict is not None
+        assert verdict.agent_spec_status == []
 
 
 def test_format_failures_detail_includes_diagnostics_path() -> None:
@@ -561,6 +1235,7 @@ class TestCleanReviewScopeMeasurement:
             reviewed_sha="sha",
             session_id="s-scope",
             default_branch="main",
+            fix_loop_enabled=False,
         )
 
         assert result.status == "stage_complete"
@@ -588,6 +1263,7 @@ class TestCleanReviewScopeMeasurement:
             reviewed_sha="sha",
             session_id="s-scope-trunk",
             default_branch="trunk",
+            fix_loop_enabled=False,
         )
 
         assert result.scope.files == SCOPE_GUARD_FILES
@@ -609,6 +1285,7 @@ class TestCleanReviewScopeMeasurement:
             reviewed_sha="sha",
             session_id="s-scope-none",
             default_branch="main",
+            fix_loop_enabled=False,
         )
 
         assert result.scope.files == 0
@@ -633,6 +1310,7 @@ class TestCleanReviewScopeMeasurement:
                 reviewed_sha="sha",
                 session_id="s-scope-warns",
                 default_branch="main",
+                fix_loop_enabled=False,
             )
 
         assert result.scope.files == 0
@@ -655,9 +1333,95 @@ class TestCleanReviewScopeMeasurement:
             reviewed_sha="sha",
             session_id="s-scope-health",
             default_branch="main",
+            fix_loop_enabled=False,
         )
 
         assert result.branch == SCOPE_GUARD_BRANCH
         assert result.health.lowest_agent_confidence == "HIGH"
         assert result.health.any_incomplete_risk is False
         assert result.health.recommendation == "PROCEED"
+
+
+# ---------------------------------------------------------------------------
+# Filesystem-capability recording on the verdict (#1709)
+# ---------------------------------------------------------------------------
+
+
+def _capability(*, capable: bool, reason: str | None) -> _CodexFilesystemCapability:
+    return _CodexFilesystemCapability(
+        capable=capable,
+        reason=reason,
+        fingerprint=_CodexFingerprint(
+            cli_version="0.147.0",
+            platform="Linux",
+            install_type="other",
+            sandbox_mode="read-only",
+        ),
+    )
+
+
+class TestVerdictRecordsCapabilityMode:
+    """The selected capability mode must be recoverable from the artifact a
+    human reads, not just from a log line that scrolled away (#1709)."""
+
+    def test_degraded_capability_recorded_on_verdict(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-cap-degraded")
+        _result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[_make_reviewer_doc()],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-cap-degraded",
+            default_branch="main",
+            fix_loop_enabled=False,
+            capability=_capability(capable=False, reason="unknown"),
+        )
+        assert verdict is not None
+        assert verdict.capability_mode == "degraded"
+        assert verdict.capability_reason == "unknown"
+
+    def test_capable_capability_recorded_on_verdict(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-cap-capable")
+        _result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[_make_reviewer_doc()],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-cap-capable",
+            default_branch="main",
+            fix_loop_enabled=False,
+            capability=_capability(capable=True, reason=None),
+        )
+        assert verdict is not None
+        assert verdict.capability_mode == "capable"
+        assert verdict.capability_reason is None
+
+    def test_absent_capability_leaves_fields_unset(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """The kwarg is optional (additive): callers that do not probe — e.g.
+        the direct-synthesis tests above — record nothing rather than a
+        misleading default."""
+        worktree = make_git_repo("wt-cap-absent")
+        _result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[_make_reviewer_doc()],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-cap-absent",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+        assert verdict is not None
+        assert verdict.capability_mode is None
+        assert verdict.capability_reason is None

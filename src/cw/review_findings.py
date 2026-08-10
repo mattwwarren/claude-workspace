@@ -20,7 +20,8 @@ Public surface:
   :class:`ReviewerFindingsDocument`, :class:`RejectedFinding`,
   :class:`AcceptedFinding`, :class:`ReviewerRunRecord`,
   :class:`ReviewerRunMetrics`, :class:`ReviewerRunFailure`,
-  :class:`StrippedEscalation`, :class:`ReviewVerdict`, :class:`CapturedDiff`.
+  :class:`AgentSpecStatus`, :class:`StrippedEscalation`,
+  :class:`ReviewVerdict`, :class:`CapturedDiff`.
 - Functions: :func:`validate_reviewer_document`, :func:`dedupe_findings`,
   :func:`derive_review_counts`, :func:`consolidate_verdict`,
   :func:`write_review_verdict`.
@@ -28,6 +29,7 @@ Public surface:
 
 from __future__ import annotations
 
+import ast
 import logging
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, get_args
 
@@ -45,6 +47,13 @@ Severity = Literal["MUST_FIX", "SHOULD_FIX", "NIT", "PRINCIPLE"]
 Disposition = Literal["fixed", "rejected", "deferred"]
 ReviewerHealthStatus = Literal["ok", "degraded", "failed"]
 Confidence = Literal["HIGH", "MEDIUM", "LOW"]
+# The filesystem-capability mode reviewers actually ran under (#1709); see
+# ReviewVerdict.capability_mode.
+CapabilityMode = Literal["capable", "degraded"]
+# Where a reviewer role's agent specification was actually resolved from
+# (#1773): the repo-local ``.claude/agents/`` copy, the operator's global
+# ``~/.claude/agents/`` fallback, or nowhere at all. See AgentSpecStatus.
+AgentSpecSource = Literal["repo", "global", "none"]
 # The six reasons a finding can be rejected outright (used by
 # :attr:`RejectedFinding.reason` and :func:`_classify_finding`'s return type).
 # Split from the escalation-strip reason (R6): a stripped escalation is a
@@ -77,6 +86,13 @@ EscalationStripReason = Literal["escalation_evidence_not_in_diff"]
 _VALID_SEVERITIES: frozenset[str] = frozenset(get_args(Severity))
 
 _ESCALATION_STRIP_REASON: EscalationStripReason = "escalation_evidence_not_in_diff"
+
+# Reviewer-supplied line anchors observed drifting off the true added line by
+# one to three lines in fleet review runs (#1715) — usually a stale line
+# number from a prior diff revision or an off-by-one miscount, with otherwise
+# correct evidence text. Fixed module constant, not derived from hunk/file
+# size (see _nearest_added_line).
+_LINE_ANCHOR_TOLERANCE: int = 3  # lines
 
 # Schema version for the ReviewVerdict artifact (#1108/R6), following the
 # AutoDevResult.schema_version convention (auto_dev_result.py). Bump when the
@@ -252,6 +268,11 @@ class ReviewerRunMetrics(TypedDict, total=False):
 class ReviewerRunRecord(BaseModel):
     """Terminal-health record for one reviewer agent that ran (or failed).
 
+    ``detail`` mirrors :attr:`ReviewerFindingsDocument.detail` (#1775) --
+    it is copied verbatim from the source document by :func:`consolidate_verdict`
+    so a degraded reviewer's stated reason survives synthesis into the
+    persisted verdict instead of being silently dropped.
+
     Everything below ``finding_count`` is executor audit telemetry (#1710),
     populated from the codex ``--json`` event stream where one is available and
     left at its default everywhere else (the Claude-native review path, a role
@@ -261,6 +282,7 @@ class ReviewerRunRecord(BaseModel):
 
     reviewer_role: str
     status: ReviewerHealthStatus
+    detail: str = ""
     finding_count: int
     # Executor-native run identifier (codex ``thread.started.thread_id``).
     thread_id: str | None = None
@@ -277,6 +299,23 @@ class ReviewerRunRecord(BaseModel):
     tool_call_counts: dict[str, int] = Field(default_factory=dict)
     had_command_evidence: bool = False
     unexpected_tool_attempts: list[str] = Field(default_factory=list)
+
+
+class AgentSpecStatus(BaseModel):
+    """How one reviewer role's agent specification resolved (#1773).
+
+    ``empty`` is the single "this role ran unspecified" signal: it is True
+    whenever the finally-selected text was blank, whatever ``source`` says.
+    ``empty_repo_file`` is an independent fact about the repo-tracked copy —
+    True when ``.claude/agents/<role>.md`` existed but was blank, including
+    the case where the global fallback then recovered a usable spec
+    (``source="global", empty=False, empty_repo_file=True``).
+    """
+
+    role: str
+    source: AgentSpecSource
+    empty: bool
+    empty_repo_file: bool = False
 
 
 class ReviewerRunFailure(BaseModel):
@@ -312,6 +351,13 @@ class ReviewVerdict(BaseModel):
 
     ``blocking``/``must_fix``/``reviewed_sha`` are the exact 3 keys #1108
     requires; the rest is the executor-neutral superset.
+
+    ``capability_mode``/``capability_reason`` record which filesystem-capability
+    mode the reviewers actually ran under (#1709) — ``"capable"`` or
+    ``"degraded"``, with the classified reason on the degraded branch. Both stay
+    ``None`` for executors that have no such concept (LocalExecutor) rather than
+    defaulting to a mode nobody probed. Purely recorded: nothing in
+    ``consolidate_verdict`` or the health derivation reads them.
     """
 
     schema_version: Literal[1] = _REVIEW_VERDICT_SCHEMA_VERSION
@@ -323,6 +369,20 @@ class ReviewVerdict(BaseModel):
     agents_run: list[ReviewerRunRecord] = Field(default_factory=list)
     review: Review
     stripped_escalations: list[StrippedEscalation] = Field(default_factory=list)
+    # #1714: the subset of ``rejected`` whose raw payload claimed MUST_FIX
+    # severity. Deliberately independent of ``blocking``/``must_fix``, which
+    # are computed from ACCEPTED findings only -- see
+    # :func:`_select_rejected_must_fix` for why this is a second signal rather
+    # than a widening of the first.
+    rejected_must_fix: list[RejectedFinding] = Field(default_factory=list)
+    capability_mode: CapabilityMode | None = None
+    capability_reason: str | None = None
+    # #1773: one record per selected reviewer role describing where its agent
+    # specification resolved from. Default-empty (not Optional) like
+    # ``agents_run``: "no records" is the honest shape for a verdict built by a
+    # path that never resolved specs, and the renderer treats it as "say
+    # nothing" rather than "everything was fine".
+    agent_spec_status: list[AgentSpecStatus] = Field(default_factory=list)
 
 
 class CapturedDiff(BaseModel):
@@ -332,17 +392,29 @@ class CapturedDiff(BaseModel):
     for verbatim escalation-quote matching. ``files`` maps each changed file
     path to the list of changed (added) line numbers used for line-reference
     validation. ``file_diffs`` maps each file to its raw per-file hunk text
-    (``+``/``-``/context lines intact), used only for prompt inlining, never for
-    evidence validation. ``file_line_text`` maps each file to a
+    (``+``/``-``/context lines intact), used for prompt inlining AND as the
+    file-level evidence-validation fallback (``_evidence_in_claimed_lines``)
+    for findings with no line anchor. ``file_line_text`` maps each file to a
     ``{line_number: content}`` map for exactly the added lines (same line-number
     domain as ``files[file]``) — the substrate for true line-position evidence
     validation of finding evidence.
+
+    ``file_window_text`` (#1738) is a second ``{line_number: content}`` map per
+    file, alongside ``file_line_text`` rather than replacing it: it ALSO
+    includes unchanged context-line content at its real new-file line number
+    (only a removed line, which has no new-file position, is excluded). It
+    exists solely as the widened substrate for ``_evidence_in_claimed_lines``'s
+    windowed branch (via ``_resolve_hunk_window``/``_nearest_hunk_line``) — it
+    must never feed ``_line_reference_valid``/``_nearest_added_line`` (the
+    anchor-*validity* gate) or ``files``, both of which stay added-line-only
+    on purpose.
     """
 
     text: str
     files: dict[str, list[int]] = Field(default_factory=dict)
     file_diffs: dict[str, str] = Field(default_factory=dict)
     file_line_text: dict[str, dict[int, str]] = Field(default_factory=dict)
+    file_window_text: dict[str, dict[int, str]] = Field(default_factory=dict)
 
 
 def _changed_files(diff: CapturedDiff) -> frozenset[str]:
@@ -383,16 +455,227 @@ def _file_in_repo_tree(worktree: Path, file: str) -> bool:
     return candidate.is_relative_to(root) and candidate.is_file()
 
 
-def _line_reference_valid(diff: CapturedDiff, finding: Finding) -> bool:
-    """Return True iff *finding*'s line references are in the diff.
+def _normalize_diff_text(text: str) -> str:
+    """Strip one leading diff marker and surrounding whitespace per line.
+
+    Lets an evidence-vs-diff substring comparison match regardless of which
+    side (or neither) carries a stray ``+``/``-`` prefix: a reviewer's evidence
+    quote copied straight from a rendered diff view carries the marker even
+    though it isn't part of the real source line, while the file-level
+    fallback (``file_diffs``) always carries one because it stores raw
+    per-file hunk text. Only a single leading marker character is stripped per
+    line — line count and order are preserved (no blank-line collapsing), so
+    this cannot merge or reorder content (#1715).
+    """
+    normalized_lines = []
+    for raw_line in text.split("\n"):
+        stripped_marker = raw_line[1:] if raw_line[:1] in ("+", "-") else raw_line
+        normalized_lines.append(stripped_marker.strip())
+    return "\n".join(normalized_lines)
+
+
+def _nearest_added_line(
+    diff: CapturedDiff, file: str, line: int, tolerance: int = _LINE_ANCHOR_TOLERANCE
+) -> int | None:
+    """Return the added line of *file* nearest *line*, within *tolerance*.
+
+    An exact hit (*line* itself is a changed line) short-circuits via
+    :func:`_line_in_diff` without scanning candidates. Otherwise the nearest
+    candidate in ``diff.files.get(file, [])`` within *tolerance* lines wins;
+    ties break by lowest distance, then lowest line number. Returns ``None``
+    when no added line is within tolerance, including when *file* has none at
+    all (#1715).
+    """
+    if _line_in_diff(diff, file, line):
+        return line
+    best: int | None = None
+    best_distance = tolerance + 1
+    for candidate in diff.files.get(file, []):
+        distance = abs(candidate - line)
+        if distance > tolerance:
+            continue
+        if (
+            best is None
+            or distance < best_distance
+            or (distance == best_distance and candidate < best)
+        ):
+            best, best_distance = candidate, distance
+    return best
+
+
+def _nearest_hunk_line(
+    diff: CapturedDiff, file: str, line: int, tolerance: int = _LINE_ANCHOR_TOLERANCE
+) -> int | None:
+    """Return the hunk-covered line of *file* nearest *line*, within *tolerance*.
+
+    Sibling of :func:`_nearest_added_line`, deliberately kept separate rather
+    than repurposing it (#1738): candidates are drawn from
+    ``diff.file_window_text.get(file, {})`` — every context OR added line the
+    diff covers, not only added lines — so this must never be substituted for
+    :func:`_nearest_added_line` at :func:`_line_reference_valid`'s
+    anchor-validity call site. Same exact-hit short-circuit and tie-break
+    rules as :func:`_nearest_added_line`.
+    """
+    if line in diff.file_window_text.get(file, {}):
+        return line
+    best: int | None = None
+    best_distance = tolerance + 1
+    for candidate in diff.file_window_text.get(file, {}):
+        distance = abs(candidate - line)
+        if distance > tolerance:
+            continue
+        if (
+            best is None
+            or distance < best_distance
+            or (distance == best_distance and candidate < best)
+        ):
+            best, best_distance = candidate, distance
+    return best
+
+
+def _enclosing_def_span(source: str, line: int) -> tuple[int, int] | None:
+    """Return the ``(start, end)`` line span of the innermost function or
+    class in *source* enclosing *line*, or ``None`` if none does.
+
+    Walks every :class:`ast.FunctionDef`/:class:`ast.AsyncFunctionDef`/
+    :class:`ast.ClassDef` node and picks the smallest span containing *line*,
+    so a nested function's span wins over its enclosing function's. A
+    decorated function's span starts at the ``def``/``class`` line itself
+    (Python's ``lineno`` for such nodes, since 3.8, excludes the decorator
+    lines) — a line that only touches a decorator has no enclosing span.
+    *source* that fails to parse (a syntax error, or ``ast.parse``'s
+    ``ValueError`` on embedded null bytes) returns ``None`` rather than
+    raising — the caller (:func:`_anchor_in_enclosing_def`) treats "can't
+    determine a span" the same as "no span" (#1743).
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return None
+    best: tuple[int, int] | None = None
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        end = node.end_lineno
+        if end is None or not (node.lineno <= line <= end):
+            continue
+        if best is None or (end - node.lineno) < (best[1] - best[0]):
+            best = (node.lineno, end)
+    return best
+
+
+def _anchor_in_enclosing_def(
+    diff: CapturedDiff, worktree: Path, file: str, line: int
+) -> bool:
+    """True iff *line*'s enclosing def/class span in *file* contains a
+    changed line of *diff*.
+
+    Reads ``(worktree / file).read_text()`` and resolves *line*'s span via
+    :func:`_enclosing_def_span`; a missing/unreadable file or a line with no
+    enclosing definition both return ``False``. Gives a structural finding
+    (too-long function, too-many-params, does-two-things) anchored on the
+    enclosing ``def``/``class`` line — which is itself rarely a changed line —
+    a legitimate way to anchor: the span, not the single def line, is checked
+    against the diff's changed lines (#1743).
+    """
+    try:
+        source = (worktree / file).read_text()
+    except (OSError, UnicodeDecodeError):
+        return False
+    span = _enclosing_def_span(source, line)
+    if span is None:
+        return False
+    start, end = span
+    return any(start <= changed <= end for changed in diff.files.get(file, []))
+
+
+def _line_reference_valid(
+    diff: CapturedDiff, finding: Finding, worktree: Path | None = None
+) -> bool:
+    """Return True iff *finding*'s line references resolve to a changed line.
 
     A file-level finding (both endpoints ``None``) is exempt — it has no line
-    anchor to check.
+    anchor to check. A near-miss anchor within ``_LINE_ANCHOR_TOLERANCE`` lines
+    of a real changed line resolves via :func:`_nearest_added_line` rather than
+    requiring an exact match (#1715).
+
+    ``worktree`` (default ``None``) opts into the #1743 enclosing-def
+    fallback: when an endpoint is not itself near a changed line, and
+    ``worktree`` is given, :func:`_anchor_in_enclosing_def` is tried before
+    giving up on that endpoint — this is what lets a structural finding
+    anchored on a function/class's ``def`` line survive even though that line
+    is rarely itself changed, as long as some changed line falls inside the
+    definition's span. ``worktree=None`` (no caller opted in) disables the
+    fallback entirely, matching today's behavior byte-for-byte — the same
+    opt-in shape as #1632's ``_classify_unanchored_file``.
     """
     for line in (finding.line_start, finding.line_end):
-        if line is not None and not _line_in_diff(diff, finding.file, line):
-            return False
+        if line is None:
+            continue
+        if _nearest_added_line(diff, finding.file, line) is not None:
+            continue
+        if worktree is not None and _anchor_in_enclosing_def(
+            diff, worktree, finding.file, line
+        ):
+            _log.info(
+                "auto-dev: rescued finding anchored on enclosing def/class "
+                "span not itself a changed line (file=%s, line=%d)",
+                finding.file,
+                line,
+            )
+            continue
+        return False
     return True
+
+
+def _resolve_line_window(
+    diff: CapturedDiff, file: str, line_start: int | None, line_end: int | None
+) -> tuple[int, int] | None:
+    """Resolve a claimed (``line_start``, ``line_end``) pair to real added lines.
+
+    Callers must not pass both endpoints ``None`` (that's the file-level case,
+    handled separately). A set endpoint resolves via :func:`_nearest_added_line`;
+    an unset endpoint mirrors the other before resolving, matching the
+    single-line-claim behavior ``_evidence_in_claimed_lines`` has always had.
+    Returns the resolved ``(start, end)`` in ascending order, or ``None`` if
+    either endpoint fails to resolve within tolerance (#1715).
+    """
+    raw_start = line_start if line_start is not None else line_end
+    raw_end = line_end if line_end is not None else line_start
+    if raw_start is None or raw_end is None:
+        msg = "_resolve_line_window requires at least one endpoint set"
+        raise ValueError(msg)
+    resolved_start = _nearest_added_line(diff, file, raw_start)
+    resolved_end = _nearest_added_line(diff, file, raw_end)
+    if resolved_start is None or resolved_end is None:
+        return None
+    return min(resolved_start, resolved_end), max(resolved_start, resolved_end)
+
+
+def _resolve_hunk_window(
+    diff: CapturedDiff, file: str, line_start: int | None, line_end: int | None
+) -> tuple[int, int] | None:
+    """Resolve a claimed (``line_start``, ``line_end``) pair to hunk-covered lines.
+
+    Mirror of :func:`_resolve_line_window`, calling :func:`_nearest_hunk_line`
+    (candidates: every context OR added line, via ``file_window_text``)
+    instead of :func:`_nearest_added_line` on both endpoints (#1738). Wired
+    into exactly one call site — :func:`_evidence_in_claimed_lines`'s windowed
+    branch — so the widened recall only affects evidence *matching*, never the
+    anchor-*validity* gate (:func:`_line_reference_valid`) or the persisted
+    anchor an accepted finding is snapped onto (:func:`_resolved_finding`,
+    which keeps calling this function's unchanged sibling).
+    """
+    raw_start = line_start if line_start is not None else line_end
+    raw_end = line_end if line_end is not None else line_start
+    if raw_start is None or raw_end is None:
+        msg = "_resolve_hunk_window requires at least one endpoint set"
+        raise ValueError(msg)
+    resolved_start = _nearest_hunk_line(diff, file, raw_start)
+    resolved_end = _nearest_hunk_line(diff, file, raw_end)
+    if resolved_start is None or resolved_end is None:
+        return None
+    return min(resolved_start, resolved_end), max(resolved_start, resolved_end)
 
 
 def _evidence_in_claimed_lines(
@@ -409,22 +692,65 @@ def _evidence_in_claimed_lines(
     (``file_diffs``), the same fallback ``_line_reference_valid`` already grants
     file-level findings today.
 
-    When a line window is claimed, *text* must appear within the joined content
-    of exactly those added lines (``file_line_text``). A quote whose true origin
-    is a removed/context line — which has no new-file line number — is correctly
-    rejected here rather than accepted via a whole-file or whole-diff fallback.
+    When a line window is claimed, :func:`_resolve_hunk_window` snaps both
+    endpoints (the same near-line tolerance ``_line_reference_valid`` applies,
+    but over the wider ``file_window_text`` candidate set — context lines
+    included) and orders them ascending before *text* is checked against the
+    joined content of exactly those lines (``file_window_text``) — an endpoint
+    that fails to resolve makes the whole check fail. Both sides of every
+    substring comparison are routed through :func:`_normalize_diff_text` so a
+    stray ``+``/``-`` diff marker on either the evidence or the diff-derived
+    text cannot break an otherwise-genuine match (#1715).
+
+    A quote whose true origin is a REMOVED line — which has no new-file line
+    number at all — is correctly rejected here (#1738: a context line, unlike
+    a removed line, does have a real new-file position and IS captured in
+    ``file_window_text``, so it is no longer excluded the way this docstring
+    used to claim).
     """
-    if line_start is not None and line_end is not None:
-        start, end = line_start, line_end
-    elif line_start is not None:
-        start = end = line_start
-    elif line_end is not None:
-        start = end = line_end
-    else:
-        return text in diff.file_diffs.get(file, "")
-    line_text = diff.file_line_text.get(file, {})
-    window = "\n".join(line_text[n] for n in range(start, end + 1) if n in line_text)
-    return text in window
+    if line_start is None and line_end is None:
+        return _normalize_diff_text(text) in _normalize_diff_text(
+            diff.file_diffs.get(file, "")
+        )
+    resolved = _resolve_hunk_window(diff, file, line_start, line_end)
+    if resolved is None:
+        return False
+    start, end = resolved
+    window_text = diff.file_window_text.get(file, {})
+    window = "\n".join(
+        window_text[n] for n in range(start, end + 1) if n in window_text
+    )
+    return _normalize_diff_text(text) in _normalize_diff_text(window)
+
+
+def _resolved_finding(diff: CapturedDiff, finding: Finding) -> Finding:
+    """Return *finding* with its line anchors snapped onto the resolved window.
+
+    A file-level finding (both endpoints ``None``) passes through unchanged.
+    Any other finding reaching this point has already passed
+    ``_line_reference_valid``/``_evidence_in_claimed_lines``, so
+    :func:`_resolve_line_window` is expected to succeed — persisting the
+    resolved anchor (rather than the reviewer's raw, possibly
+    ``_LINE_ANCHOR_TOLERANCE``-lines-off claim) keeps downstream consumers of
+    an accepted finding (the verdict comment, the fix-loop prompt) pointed at
+    the real changed line. The unlikely resolution-failure case (e.g. an
+    unanchored finding whose file isn't in the diff at all) returns *finding*
+    unchanged rather than raising (#1715).
+    """
+    if finding.line_start is None and finding.line_end is None:
+        return finding
+    resolved = _resolve_line_window(
+        diff, finding.file, finding.line_start, finding.line_end
+    )
+    if resolved is None:
+        return finding
+    start, end = resolved
+    updates: dict[str, int | None] = {}
+    if finding.line_start is not None:
+        updates["line_start"] = start
+    if finding.line_end is not None:
+        updates["line_end"] = end
+    return finding.model_copy(update=updates)
 
 
 def _classify_unanchored_file(
@@ -454,7 +780,8 @@ def _classify_finding(
     file-known → line-in-range → evidence-in-claimed-lines. The
     ``invalid_line_reference`` check MUST run before the evidence check so that
     ``_evidence_in_claimed_lines`` only builds a window from confirmed-real
-    changed lines — a bogus line reference (e.g. ``line_start=999``) is reported
+    changed lines (possibly snapped within tolerance) — a bogus line reference
+    (e.g. ``line_start=999``) is reported
     as ``invalid_line_reference``, not misclassified as ``evidence_not_in_diff``
     via an empty window. The escalation-quote check is NOT here — it runs only
     after a finding passes all of these.
@@ -469,6 +796,15 @@ def _classify_finding(
     neither ``_line_reference_valid`` nor ``_evidence_in_claimed_lines`` ever
     runs for an unanchored finding — there is no diff-line window to check it
     against.
+
+    ``worktree`` also threads into :func:`_line_reference_valid` as the
+    #1743 enclosing-def fallback: a structural finding anchored on a
+    function/class's ``def`` line, which is itself rarely a changed line,
+    can now survive this check when a changed line falls inside that
+    definition's span. This can turn a previously ``invalid_line_reference``
+    case into ``evidence_not_in_diff`` at the very next check below —
+    intentional; #1743 owns the anchor-resolution axis, #1738 owns
+    evidence-quote matching.
     """
     if finding.severity not in _VALID_SEVERITIES:
         return "invalid_severity"
@@ -476,7 +812,7 @@ def _classify_finding(
         return "missing_evidence"
     if finding.file not in changed:
         return _classify_unanchored_file(finding.file, worktree)
-    if not _line_reference_valid(diff, finding):
+    if not _line_reference_valid(diff, finding, worktree):
         return "invalid_line_reference"
     if not _evidence_in_claimed_lines(
         diff, finding.file, finding.evidence, finding.line_start, finding.line_end
@@ -532,6 +868,7 @@ def validate_reviewer_document(
                 index,
                 finding.file,
             )
+        resolved_finding = _resolved_finding(diff, finding)
         escalation = finding.escalation
         if escalation is not None and not _substring_in_diff(
             diff, escalation.evidence_quote
@@ -554,9 +891,9 @@ def validate_reviewer_document(
                     reason=_ESCALATION_STRIP_REASON,
                 )
             )
-            accepted.append(finding.model_copy(update={"escalation": None}))
+            accepted.append(resolved_finding.model_copy(update={"escalation": None}))
         else:
-            accepted.append(finding)
+            accepted.append(resolved_finding)
 
     return accepted, rejected, stripped
 
@@ -645,6 +982,27 @@ def derive_review_counts(
     )
 
 
+def _select_rejected_must_fix(rejected: list[RejectedFinding]) -> list[RejectedFinding]:
+    """Select the MUST_FIX-severity members of *rejected* (#1714).
+
+    Keyed on the finding's own claimed SEVERITY, never on an enumerated set of
+    :data:`RejectedFindingReason` values — so a reason added later is covered by
+    construction rather than by remembering to extend a set here. ``raw`` is the
+    pre-validation ``Finding.model_dump()``, read defensively via ``.get()``
+    because a rejected payload is by definition one that failed validation.
+
+    Why this is a SECOND signal and not a widening of ``blocking``: a
+    mechanically-rejected finding was dropped precisely because its file/line/
+    evidence anchor could not be trusted, so it must never be handed to the
+    autofix loop (which gates on ``ReviewVerdict.blocking``; see
+    ``cw.codex_fix_loop``). It still must not vanish silently, though — a
+    MUST_FIX nobody ever evaluated on its merits is not a clean review. So the
+    two travel separately: ``blocking`` drives autofix, this drives an operator
+    park (``cw.codex_review._verdict``).
+    """
+    return [rf for rf in rejected if rf.raw.get("severity") == "MUST_FIX"]
+
+
 def consolidate_verdict(
     documents: list[ReviewerFindingsDocument],
     diff: CapturedDiff,
@@ -669,6 +1027,12 @@ def consolidate_verdict(
     ``stripped_escalations`` is the concatenation of every document's strip list
     in document order. ``blocking`` is True iff at least one accepted,
     non-deferred MUST_FIX finding exists.
+
+    ``rejected_must_fix`` (#1714) is the MUST_FIX-severity subset of
+    ``rejected`` — see :func:`_select_rejected_must_fix`. It is computed
+    independently of ``blocking``/``must_fix``, which continue to read accepted
+    findings only: a mechanically-rejected finding must block the pipeline for
+    an operator without ever entering the autofix loop.
 
     ``review.agents_run`` (the int count, distinct from the
     ``verdict.agents_run`` list above) counts only roles that actually
@@ -696,6 +1060,14 @@ def consolidate_verdict(
     field at its default. Defaulting to ``None`` is what lets the Claude-native
     caller (``cw.cli.review``), which never has codex metrics, stay unchanged —
     and it is purely additive: nothing here reads the values back (#1710).
+
+    Each parsed document's ``detail`` (#1775) is copied verbatim onto its
+    :class:`ReviewerRunRecord`, unconditionally of ``status`` — so a degraded
+    role's stated reason (or an ``ok`` role's justification) reaches
+    ``verdict.agents_run`` and, from there, the persisted artifact
+    (:func:`write_review_verdict`). A role recorded only via
+    ``failed_reviewers`` has no document and so no ``detail`` to copy; its
+    record keeps the ``""`` default.
     """
     failures = failed_reviewers if failed_reviewers is not None else []
     metrics = metrics_by_role if metrics_by_role is not None else {}
@@ -716,11 +1088,14 @@ def consolidate_verdict(
                 reviewer_role=doc.reviewer_role,
                 status=doc.status,
                 finding_count=len(accepted),
+                detail=doc.detail,
                 **metrics.get(doc.reviewer_role, {}),
             )
         )
 
     run_records.extend(
+        # ReviewerRunFailure has no `detail` concept (it never parsed into a
+        # document), so this entry's `detail` stays at its "" default (#1775).
         ReviewerRunRecord(
             reviewer_role=failure.role,
             status="failed",
@@ -748,6 +1123,7 @@ def consolidate_verdict(
         agents_run=run_records,
         review=review,
         stripped_escalations=all_stripped,
+        rejected_must_fix=_select_rejected_must_fix(all_rejected),
     )
 
 

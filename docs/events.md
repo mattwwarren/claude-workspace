@@ -352,9 +352,10 @@ Two caveats:
 
 ### `session.timed_out`
 
-**Emitter:** the idle watchdog (`cw.reconcile.idle`) and the stalled
-wall-clock sweep (`cw.reconcile.stalled`) when a REVERT_TASK disposition is
-acted on; also `cw spawn close` when an operator closes a RUNNING session.
+**Emitter:** `cw spawn close` when an operator closes a RUNNING session.
+(Historically also the idle watchdog and the stalled wall-clock sweep —
+those emitters were removed with the process-kill timeouts, ADR-0014; the
+`cause`/`branch_state` variants below appear only in old logs.)
 **Payload:**
 ```json
 {
@@ -374,9 +375,10 @@ add `branch_state: "absent_no_merged_pr"` when the feature branch is gone
 with no merged PR. This is a retry signal, not a park — parks emit
 `session.needs_attention` instead.
 
-### `session.stage_timed_out_retried`
+### `session.stage_timed_out_retried` — historical (ADR-0014)
 
-**Emitter:** the stalled sweep in `cw.reconcile.stalled`
+**Emitter:** none since the process-kill-timeout removal (was the stalled
+sweep in `cw.reconcile.stalled`); documented for reading old logs.
 **Payload:**
 ```json
 {
@@ -501,10 +503,12 @@ without task revert).
 
 ### `session.needs_attention`
 
-**Emitter:** `flag_silently_idle_daemon_sessions`, `revert_timed_out_tasks`,
-`revert_completed_silent_tasks`, `_salvage_low_path`,
-`_record_salvage_skip` in `cw.reconcile`; `apply_staged_decision`,
-`dispatch_tick` (via `_record_client_freshness_block`) in `cw.dispatch`
+**Emitter:** `revert_timed_out_tasks`, `revert_completed_silent_tasks`, and
+the liveness sweep's distress check (`record_session_liveness_changes`) in
+`cw.reconcile`; `apply_staged_decision`, `dispatch_tick` (via
+`_record_client_freshness_block`) in `cw.dispatch`. (The former idle-watchdog
+/ salvage / salvage-skip emitters were removed with the process-kill
+timeouts, ADR-0014.)
 **Payload:**
 ```json
 {
@@ -522,12 +526,16 @@ without task revert).
 orchestrator cannot automatically retry or complete it. `paused_status` is an
 open enum; consumers MUST tolerate unknown values. Known values:
 
-- `"silently_idle"` — DAEMON session is still alive but has been idle longer
-  than the watchdog budget without emitting a sentinel. Operator should inspect
-  and either resume or close the session.
-- `"needs_salvage"` — DAEMON session has commits beyond origin/main but no open
-  PR. The orchestrator cannot auto-salvage (e.g. low confidence or salvage
-  already attempted). Operator should review the branch and open a PR or discard.
+- `"session_unresponsive"` — signal-only distress from the liveness sweep
+  (ADR-0014): a roster-present DAEMON session crossed the top staleness
+  bucket with no sentinel emitted and no pending subagent at the transcript
+  tail. Edge-triggered per bucket crossing, fires a push notification, and
+  mutates nothing — the session keeps running; the operator decides.
+  `breadcrumbs` carries stale minutes, stage, and elapsed seconds.
+- `"silently_idle"` — *historical (ADR-0014)*: the idle watchdog's park.
+  No longer produced; may exist on old rows/logs.
+- `"needs_salvage"` — *historical (ADR-0014)*: the git-state salvage LOW
+  path's park. No longer produced; may exist on old rows/logs.
 - `"dirty_worktree"` — A phantom-reaped, TIMED_OUT, or COMPLETED session's
   worktree has uncommitted changes. The owning task has been routed to
   BLOCKED_ON_USER instead of being re-dispatched to avoid clobbering in-flight
@@ -546,13 +554,8 @@ open enum; consumers MUST tolerate unknown values. Known values:
   reason (e.g. `"main_behind_origin"`). Surfaces via `board.py`'s
   client-header badge only — invisible to the per-ticket row badge and to
   `cw orchestrate status` (no `ticket_id` to key off of).
-- `"salvage_skip_escalated"` — A session's consecutive salvage-skip latch
-  (`Session.consecutive_salvage_skips`, closes #974) reached
-  `salvage_skip_attention_threshold`. Session-scoped: standard
-  `session_id`/`session_name`/`ticket_id` populated. `breadcrumbs` carries
-  the streak count plus the last salvage-skip reason. Surfaces via
-  `board.py`'s existing per-ticket row badge — `_index_badge_events` already
-  keys on `ticket_id`, so no new board.py path is needed for this one.
+- `"salvage_skip_escalated"` — *historical (ADR-0014)*: the salvage-skip
+  latch escalation. No longer produced; may exist in old logs.
 - `"blocked"` — fires from two sources sharing the literal: Rule 5's
   `blocked` status (a hard stage-execution blocker; `breadcrumbs` carries
   `blocker.reason`, e.g. `"plan_unreviewable"` per the #1097 incident) and
@@ -594,6 +597,24 @@ open enum; consumers MUST tolerate unknown values. Known values:
   review — `cw dev-queue requeue` (or `cw dev-queue drain`, which selects this
   disposition); `cw dev-queue approve` deliberately fails closed here, because
   there is nothing shippable to authorize until review is re-run. See #1702.
+- `"codex_must_fix_mechanically_rejected"` — Rule 5: a `blocked` sentinel whose
+  `blocker.reason` is `codex_must_fix_mechanically_rejected`. Review produced a
+  MUST_FIX finding, but `review_findings`' validation dropped it before
+  adjudication (its file/line anchor was invalid, or its evidence quote was
+  absent from the diff), so it was never weighed on its merits — previously
+  this fell through to a silently clean `stage_complete`. The task is
+  BLOCKED_ON_USER with `disposition="codex_must_fix_mechanically_rejected"`,
+  at its unchanged stage. Unlike `"review_health_gate"` above, `breadcrumbs` is
+  **non-empty**: it carries the verbatim `blocker.reason`, since this park
+  genuinely originates from a populated `blocker` dict. Rule 5's only
+  reason-keyed disposition override — every other `blocker_reason` gets the
+  generic `_hold_aware_disposition` stamp. Deliberately **not** a
+  `HOLD_DISPOSITIONS` member and deliberately **not** fix-loop-eligible: a
+  finding rejected because its anchor could not be trusted must never be handed
+  to a fix agent. Operator recovery is to read the rejected finding on the
+  posted review comment (rendered under "MUST_FIX — mechanically rejected") and
+  re-run review — `cw dev-queue requeue`, or `cw dev-queue drain`, which selects
+  this disposition. See #1714.
 
 `correlation_id` is the `ticket_id` when resolvable, `null` otherwise.
 A push notification is fired for most emissions (via `fire_push_notification`)
@@ -616,9 +637,10 @@ namespace). Every other `paused_status` still forwards immediately,
 unbatched. See `docs/operator-channel.md`'s "Digest coalescing" section for
 the full buffer/window/flush contract.
 
-### `session.salvage_skipped`
+### `session.salvage_skipped` — historical (ADR-0014)
 
-**Emitter:** `revert_stalled_headless_sessions` in `cw.reconcile`
+**Emitter:** none since the process-kill-timeout removal (was the stalled
+sweep's park-marker skip path); documented for reading old logs.
 **Payload:**
 ```json
 {
@@ -1103,9 +1125,11 @@ when a gate fires) -- far higher volume than any currently-forwarded member.
 
 `correlation_id` is the `ticket_id`.
 
-### `session.park_vetoed`
+### `session.park_vetoed` — historical (ADR-0014)
 
-**Emitter:** `_act_on_stalled_candidates` in `cw.reconcile.stalled`
+**Emitter:** none since the process-kill-timeout removal (was
+`_act_on_stalled_candidates` in `cw.reconcile.stalled` — the parks this
+vetoed no longer exist); documented for reading old logs.
 **Payload:**
 ```json
 {
@@ -1391,12 +1415,37 @@ cw event tail --client my-client
 # needs_attention, stage_timed_out_retried) for the same session
 cw event tail --dedup-terminal
 
+# Collapse consecutive same-type repeats into `TYPE xN over Mm` summary lines
+cw event tail --collapse-repeats
+
+# Return only the most recent N matching events (filter-then-limit)
+cw event tail --limit 20
+cw event tail -n 20
+
 # Machine-readable JSON output
 cw event tail --json
 ```
 
 One-shot `--since <consumer>` with an unknown consumer initializes the cursor
 at the end of the inbox (no history replay) instead of replaying everything.
+
+`--limit`/`-n` bounds the already-filtered set to the most recent N events; it
+is not supported with `--follow`, which streams unboundedly. The default
+(non-`--json`) output format is compact: nested dict/list-of-dict payload
+fields — e.g. `dispatch.tick`'s `lanes` and `lane_occupants` — are omitted,
+while scalar fields and scalar-lists are kept regardless of length (the
+filter is shape-based, not size-based). `--json` is unaffected and always
+emits the full event, nested fields included.
+
+`--collapse-repeats` merges consecutive events of the same type sharing an
+identical compact payload into a single `TYPE xN over Mm` summary line; a
+run interrupted by an unrelated event re-opens rather than merging across
+the gap. It is not supported with `--follow` (see below) — collapsing
+requires buffering a run until it closes, which would delay events past
+the immediate-flush contract. It composes with `--dedup-terminal` and
+`--limit`, applied last in the pipeline (filter → limit → dedup-terminal →
+collapse-repeats). `--json` is unaffected: passing `--collapse-repeats`
+with `--json` is a no-op, one JSON line per original event.
 
 ### Follow mode
 

@@ -33,14 +33,21 @@ def run_review(
     model: str | None,
     wall_clock_budget_seconds: int | None,
     session_id: str,
+    fix_loop_enabled: bool,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Run the full per-role review pass; return ``(result, verdict)``.
 
     This is ``CodexExecutor.spawn()``'s Step 3 delegation target: capture the
     diff, select reviewers, materialize prompts, run the shared-deadline loop,
     and synthesize the typed result.
+
+    ``fix_loop_enabled`` (#1705) is forwarded to
+    :func:`synthesize_codex_review_result`, which threads it into
+    :func:`render_verdict_comment` on the blocking branch.
     """
-    prepared = _prepare_review_pass(task, worktree, default_branch)
+    prepared = _prepare_review_pass(
+        task, worktree, default_branch, runner=runner, session_id=session_id
+    )
     documents, failures, metrics_by_role = run_codex_roles(
         runner=runner,
         worktree=worktree,
@@ -59,5 +66,8 @@ def run_review(
         reviewed_sha=prepared.reviewed_sha,
         session_id=session_id,
         default_branch=default_branch,
+        fix_loop_enabled=fix_loop_enabled,
         metrics_by_role=metrics_by_role,
+        capability=prepared.capability,
+        agent_spec_status=prepared.agent_spec_status,
     )

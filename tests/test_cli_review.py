@@ -390,13 +390,34 @@ class TestReviewConsolidateCommand:
             "agents_run",
             "review",
             "stripped_escalations",
+            # #1714: the MUST_FIX-severity subset of `rejected`. Reaches the
+            # Claude-native coordinator through this passthrough with no
+            # Python-side change beyond the field itself.
+            "rejected_must_fix",
+            # #1709: which filesystem-capability mode the reviewers ran under.
+            # Always emitted (null for executors that never probe) so a
+            # consumer can tell "not probed" from "probed and degraded".
+            "capability_mode",
+            "capability_reason",
+            # #1773: per-role record of where each reviewer's agent
+            # specification resolved from. Always emitted (empty list for
+            # paths that never resolve specs, e.g. this consolidate command)
+            # so a consumer can tell "not resolved here" from "resolved and
+            # unspecified".
+            "agent_spec_status",
         }
+        assert verdict["capability_mode"] is None
+        assert verdict["capability_reason"] is None
         assert set(verdict["review"]) == {
             "must_fix_initial",
             "should_fix",
             "fix_cycles_used",
             "deferred",
             "agents_run",
+            # #1723: OR-across-cycles marker for whether the fix loop
+            # actually committed a change, vs. converging on an all-no-op
+            # run.
+            "had_real_commit",
         }
 
     def test_empty_documents_all_failed_yields_zero_agents_run(
@@ -419,10 +440,13 @@ class TestReviewConsolidateCommand:
         assert len(verdict["agents_run"]) == 2
 
     def test_build_captured_diff_matches_parse_unified_diff(self) -> None:
-        file_diffs, file_line_text, _changed = _parse_unified_diff(_CONSOLIDATE_DIFF)
+        file_diffs, file_line_text, file_window_text, _changed = _parse_unified_diff(
+            _CONSOLIDATE_DIFF
+        )
         diff = _build_captured_diff(_CONSOLIDATE_DIFF)
         assert diff.file_diffs == file_diffs
         assert diff.file_line_text == file_line_text
+        assert diff.file_window_text == file_window_text
         assert diff.files == {f: sorted(lines) for f, lines in file_line_text.items()}
 
 

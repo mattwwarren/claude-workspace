@@ -60,13 +60,16 @@ def _build_captured_diff(diff_text: str) -> CapturedDiff:
     """
     from cw.codex_review import _parse_unified_diff
 
-    file_diffs, file_line_text, _changed_files = _parse_unified_diff(diff_text)
+    file_diffs, file_line_text, file_window_text, _changed_files = _parse_unified_diff(
+        diff_text
+    )
     files = {f: sorted(lines) for f, lines in file_line_text.items()}
     return CapturedDiff(
         text=diff_text,
         files=files,
         file_diffs=file_diffs,
         file_line_text=file_line_text,
+        file_window_text=file_window_text,
     )
 
 

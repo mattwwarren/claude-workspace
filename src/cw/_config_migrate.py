@@ -236,12 +236,10 @@ def _clear_stale_local_liveness(session_raw: dict[str, Any]) -> None:
     epoch-relative value for the same still-live process -- so leaving it in
     place would cause reconcile to misclassify a live aider session as dead
     on the first pass after upgrade. Clearing it drops the fast process-exit
-    harvest path for that session; recovery falls back to stalled.py's
-    headless wall-clock sweep (gated on _is_headless, not surface_ref/
-    local_liveness -- LOCAL sessions never carry a surface_ref, so idle.py
-    and the phantom detector in _shared.py both skip them) once
-    resolve_headless_budget() elapses, or a fresh LocalExecutor spawn
-    re-establishes an epoch-relative handle.
+    harvest path for that session; a fresh LocalExecutor spawn re-establishes
+    an epoch-relative handle. (There is no wall-clock fallback sweep anymore —
+    the process-kill timeouts were removed — so until a re-spawn, such a
+    session surfaces only through the signal-only liveness sweep.)
     """
     if session_raw.get("local_liveness") is not None:
         logger.info(

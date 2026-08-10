@@ -1,11 +1,32 @@
 """Reviewer role selection and prompt-context assembly for the codex-review package.
 
-Codex has no filesystem access to ``.claude/*`` (snap sandbox), so every
-reviewer input — the authoritative agent spec, plan/ticket context, project
-rubrics, per-reviewer policy, and sensitive-file hits — is read here by ``cw``
-and inlined into each role's materialized prompt. Also owns file categorization,
-the small-/large-scope reviewer-selection tables, and codex output-document
-parsing. Consumed by ``core`` (prompt assembly) and ``_roles`` (doc parsing).
+Every reviewer input — the authoritative agent spec, plan/ticket context,
+project rubrics, per-reviewer policy, and sensitive-file hits — is read here by
+``cw`` and inlined into each role's materialized prompt. For most inputs the
+source is the worktree and nothing else: inlining from the repo is what makes a
+review pass reproducible and independent of where ``.claude/*`` happens to live.
+
+The agent specification is the one documented exception (#1773). It is still
+repo-local by default and read from the worktree first, but a repo whose
+``.claude/agents/<role>.md`` is missing or blank falls back to the operator's
+own ``~/.claude/agents/<role>.md`` rather than silently running the reviewer
+with an empty ``## Agent Specification`` section. That fallback is gateable
+per-repo via ``[tool.cw.codex_review].agent_spec_global_fallback`` in
+``pyproject.toml`` (default enabled), and every outcome is diagnosed rather
+than swallowed: :func:`_resolve_agent_spec` logs a warning when a spec is
+absent everywhere, and the per-role :class:`AgentSpecStatus` it returns is
+carried onto the verdict and rendered into the posted review comment.
+
+What is **not** unconditional is whether codex can read anything *else*. That
+varies by runtime — a snap-confined install cannot reach ``bwrap`` and fails
+closed, while a non-snap install on the same machine reads the worktree fine
+(#1709). ``_capability`` probes which one this is, and
+:func:`_select_output_instructions` picks the matching ``_OUTPUT_INSTRUCTIONS``
+variant, so a capable runtime is no longer told it cannot read.
+
+Also owns file categorization, the small-/large-scope reviewer-selection
+tables, and codex output-document parsing. Consumed by ``core`` (prompt
+assembly) and ``_roles`` (doc parsing).
 """
 
 from __future__ import annotations
@@ -13,21 +34,25 @@ from __future__ import annotations
 import fnmatch
 import json
 import logging
+import tomllib
+from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
 import yaml
 
+from cw.codex_review._capability import _probe_filesystem_capability
 from cw.codex_review._diff import _capture_diff
 from cw.local_runner import resolve_tier
 from cw.models import CONTEXT_JSON_RELATIVE_PATH
-from cw.review_findings import ReviewerFindingsDocument
+from cw.review_findings import AgentSpecStatus, ReviewerFindingsDocument
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
-    from pathlib import Path
 
+    from cw.codex_review._capability import _CodexFilesystemCapability
+    from cw.codex_runner import CodexRunner
     from cw.models import TicketTask
-    from cw.review_findings import CapturedDiff
+    from cw.review_findings import AgentSpecSource, CapturedDiff
 
 _log = logging.getLogger(__name__)
 
@@ -45,6 +70,13 @@ _REVIEWER_ROLE_AGENT_FILES: dict[str, str] = {
     "Deployment Reviewer": "deployment-reviewer.md",
 }
 
+# The operator's own agent-spec directory, used as the fallback source when a
+# worktree carries no usable ``.claude/agents/<role>.md`` (#1773). Bound at
+# import time so tests can redirect it away from the real home (conftest's
+# autouse ``_isolate_global_agents_dir``) — the fallback must never make a
+# review pass depend on what happens to be installed on the host.
+_GLOBAL_AGENTS_DIR: Path = Path.home() / ".claude" / "agents"
+
 _SENSITIVE_HEADER = (
     "SENSITIVE FILES TOUCHED — APPLY ELEVATED SCRUTINY\n\n"
     "These files are high blast-radius. Apply maximum scrutiny for: unintended "
@@ -52,10 +84,64 @@ _SENSITIVE_HEADER = (
     "handling gaps, cross-org data leakage, and regression risk."
 )
 
-_OUTPUT_INSTRUCTIONS = (
+# #1744: grounds reviewers in the repo's actual ruff opt-outs and complexity
+# thresholds so they stop raising MUST_FIX findings against rules the repo
+# has explicitly ignored, or against a complexity metric they've misread
+# (PLR0915 gates statements, not lines — the exact #1729 failure mode).
+_LINT_GROUNDING_INSTRUCTION = (
+    "REPO LINT CONFIGURATION — GROUND FINDINGS IN THE REPO'S ACTUAL RUFF SETUP\n\n"
+    "A finding based solely on enforcing a ruff rule this repo has explicitly "
+    "opted out of below, or on treating an unmodified ruff default as if it "
+    "were a repo-configured threshold, is not a MUST_FIX — downgrade it or "
+    "drop it. An ignored ruff rule does not shield a concrete security or "
+    "correctness failure: report such a failure as MUST_FIX when warranted, "
+    "even when a related rule such as S603 is ignored. "
+    "In particular, PLR0915 (too-many-statements) gates on the number of "
+    "STATEMENTS in a function body, not the number of lines — a long "
+    "function built from short, simple statements can sit well under the "
+    "statement threshold while spanning many lines; do not flag line count "
+    "as if it were the gated metric."
+)
+
+# Ruff's pylint-refactor setting names and corresponding rule codes. Numeric
+# policy comes only from pyproject.toml overrides or the injected CLAUDE.md
+# Quality Gates section; do not duplicate it here.
+_PYLINT_THRESHOLD_CODES: dict[str, str] = {
+    "max-branches": "PLR0912",
+    "max-statements": "PLR0915",
+    "max-returns": "PLR0911",
+}
+
+# The one sentence that differs between the two `_OUTPUT_INSTRUCTIONS`
+# variants, named so the prompt text and its regression tests cannot drift
+# apart (R8: each variant must carry its own marker and NOT the other's).
+_INLINED_ONLY_MARKER = "do not rely on filesystem access"
+_CAPABLE_ONLY_MARKER = (
+    "read-only filesystem access to the repository worktree is available"
+)
+
+_INLINED_ONLY_PREAMBLE = (
     "## Output\n"
-    "Evaluate the diff strictly from the material inlined above — do not rely "
-    "on filesystem access. Emit a single JSON object conforming to the provided "
+    "Evaluate the diff strictly from the material inlined above — "
+    f"{_INLINED_ONLY_MARKER}. "
+)
+
+_CAPABLE_PREAMBLE = (
+    "## Output\n"
+    f"This runtime was probed and confirmed capable: {_CAPABLE_ONLY_MARKER} to "
+    "you, and you MAY use it when it makes a finding stronger — searching for "
+    "a changed symbol's other consumers, checking prior art before calling "
+    "something a new abstraction, or verifying a regression repo-wide. Write "
+    "access is neither offered nor possible. The material inlined above "
+    "remains the authoritative context; reading is a supplement to it, never a "
+    "replacement for evaluating the diff. "
+)
+
+# Schema/degraded/escalation rules — identical in both variants by
+# construction, so a capability change can never quietly alter the contract
+# codex's output is validated against.
+_OUTPUT_SCHEMA_RULES = (
+    "Emit a single JSON object conforming to the provided "
     "ReviewerFindingsDocument schema to the output file (`-o`): `reviewer_role`, "
     "`status` (ok/degraded/failed), `detail`, and a `findings` array. When "
     'returning `status="ok"` with an empty `findings` array, `detail` MUST '
@@ -66,7 +152,10 @@ _OUTPUT_INSTRUCTIONS = (
     'environment, use `status="degraded"` (naming the unperformed check in '
     '`detail`) rather than silently reporting `"ok"`. Every '
     "finding's `evidence` MUST be a verbatim substring of the claimed file's "
-    "changed lines. Report no prose outside the JSON object.\n\n"
+    "changed lines. Report no prose outside the JSON object."
+)
+
+_OUTPUT_SPEC_PRECEDENCE = (
     "The inlined Agent Specification section above was authored for a "
     "different execution environment (a tool-using Claude subagent). Any "
     "tool-invocation syntax or search/verification precondition it names is "
@@ -83,6 +172,26 @@ _OUTPUT_INSTRUCTIONS = (
     "result — are void for this invocation; this instruction block's JSON "
     "ReviewerFindingsDocument contract governs exclusively."
 )
+
+_OUTPUT_INSTRUCTIONS_INLINED_ONLY = (
+    f"{_INLINED_ONLY_PREAMBLE}{_OUTPUT_SCHEMA_RULES}\n\n{_OUTPUT_SPEC_PRECEDENCE}"
+)
+
+_OUTPUT_INSTRUCTIONS_CAPABLE = (
+    f"{_CAPABLE_PREAMBLE}{_OUTPUT_SCHEMA_RULES}\n\n{_OUTPUT_SPEC_PRECEDENCE}"
+)
+
+# Back-compat alias: byte-identical to the single pre-#1709 variant, so the
+# #1548 regression-lock test keeps asserting against the same string.
+_OUTPUT_INSTRUCTIONS = _OUTPUT_INSTRUCTIONS_INLINED_ONLY
+
+
+def _select_output_instructions(capable: bool) -> str:
+    """Pick the output-instruction variant matching this runtime's capability."""
+    return (
+        _OUTPUT_INSTRUCTIONS_CAPABLE if capable else _OUTPUT_INSTRUCTIONS_INLINED_ONLY
+    )
+
 
 _CODEX_OUTPUT_FORMAT_ROLES: frozenset[str] = frozenset(
     {
@@ -164,6 +273,13 @@ class _SensitiveHit(NamedTuple):
     path: str
     category: str
     reason: str
+
+
+class _RuffLintConfig(NamedTuple):
+    """The repo's ``[tool.ruff.lint]`` opt-outs and pylint-threshold overrides."""
+
+    ignore: tuple[str, ...]
+    pylint_overrides: dict[str, int]
 
 
 def _categorize_changed_files(files: Iterable[str]) -> _FileCategories:
@@ -317,26 +433,16 @@ def _load_sensitive_hits(
     return []
 
 
-def _parse_review_policy(text: str) -> dict[str, str]:
-    """Parse ``review-policy.md`` H2 sections into a role-keyed map.
-
-    Warn-and-skip: an H2 heading that is not a known reviewer name is logged
-    and dropped; the parse never raises.
-    """
-    policy: dict[str, str] = {}
+def _parse_markdown_h2_sections(text: str) -> list[tuple[str, str]]:
+    """Parse Markdown H2 sections into ``(heading, body)`` pairs."""
+    sections: list[tuple[str, str]] = []
     heading: str | None = None
     body: list[str] = []
 
     def _commit() -> None:
         if heading is None:
             return
-        if heading in _REVIEWER_ROLE_AGENT_FILES:
-            policy[heading] = "\n".join(body).strip()
-        else:
-            _log.warning(
-                'review-policy.md: unmatched section "%s" — skipped (typo?)',
-                heading,
-            )
+        sections.append((heading, "\n".join(body).strip()))
 
     for line in text.splitlines():
         if line.startswith("## "):
@@ -346,6 +452,24 @@ def _parse_review_policy(text: str) -> dict[str, str]:
         elif heading is not None:
             body.append(line)
     _commit()
+    return sections
+
+
+def _parse_review_policy(text: str) -> dict[str, str]:
+    """Parse ``review-policy.md`` H2 sections into a role-keyed map.
+
+    Warn-and-skip: an H2 heading that is not a known reviewer name is logged
+    and dropped; the parse never raises.
+    """
+    policy: dict[str, str] = {}
+    for heading, body in _parse_markdown_h2_sections(text):
+        if heading not in _REVIEWER_ROLE_AGENT_FILES:
+            _log.warning(
+                'review-policy.md: unmatched section "%s" — skipped (typo?)',
+                heading,
+            )
+            continue
+        policy[heading] = body
     return policy
 
 
@@ -387,11 +511,137 @@ def _load_ticket_context(worktree: Path) -> tuple[str | None, str | None]:
     return plan_text, ticket_text
 
 
-def _load_agent_spec(worktree: Path, role: str) -> str:
-    """Return the authoritative agent spec for *role*, inlined verbatim."""
+def _load_ruff_lint_config(worktree: Path) -> _RuffLintConfig | None:
+    """Read ``[tool.ruff.lint]`` from *worktree*'s ``pyproject.toml`` (#1744).
+
+    Fails safe to ``None`` on a missing file or malformed TOML — same
+    ``tomllib.load`` + fail-safe idiom as ``cw.doctor.versions``' source-version
+    read. A valid TOML file with no ``[tool.ruff.lint]`` section at all still
+    returns a ``_RuffLintConfig`` with empty ``ignore``/``pylint_overrides``:
+    absence of ruff-lint config is a fact about the repo, not a read failure.
+    """
+    try:
+        with (worktree / "pyproject.toml").open("rb") as fh:
+            data = tomllib.load(fh)
+    except (FileNotFoundError, KeyError, tomllib.TOMLDecodeError, OSError):
+        return None
+    lint = data.get("tool", {}).get("ruff", {}).get("lint", {})
+    ignore = lint.get("ignore", [])
+    pylint = lint.get("pylint", {})
+    return _RuffLintConfig(ignore=tuple(ignore), pylint_overrides=dict(pylint))
+
+
+def _load_agent_spec_fallback_gate(worktree: Path) -> bool:
+    """Read ``[tool.cw.codex_review].agent_spec_global_fallback`` (#1773).
+
+    Same ``tomllib.load`` + fail-safe idiom as :func:`_load_ruff_lint_config`,
+    and the same reason for it: a repo that cannot be parsed must not silently
+    change reviewer behavior. Defaults to ``True`` — a missing file, a missing
+    table, a missing key, a non-boolean value, or malformed TOML all leave the
+    fallback ENABLED. Only an explicit ``false`` turns it off, which is the
+    opt-out for a repo that wants its reviewers grounded exclusively in its own
+    tracked specs.
+    """
+    try:
+        with (worktree / "pyproject.toml").open("rb") as fh:
+            data = tomllib.load(fh)
+    except (FileNotFoundError, KeyError, tomllib.TOMLDecodeError, OSError):
+        return True
+    section = data.get("tool", {}).get("cw", {}).get("codex_review", {})
+    value = section.get("agent_spec_global_fallback", True)
+    return value if isinstance(value, bool) else True
+
+
+def _extract_markdown_section(text: str, heading: str) -> str | None:
+    """Extract the body of *text*'s ``## {heading}`` H2 section, or ``None``.
+
+    Uses the same H2 parser as ``review-policy.md`` so section boundaries have
+    one implementation.
+    """
+    return next(
+        (
+            body
+            for section_heading, body in _parse_markdown_h2_sections(text)
+            if section_heading == heading
+        ),
+        None,
+    )
+
+
+def _load_claude_md_quality_gates(worktree: Path) -> str | None:
+    """Return *worktree*'s ``CLAUDE.md`` ``## Quality Gates`` section, verbatim."""
+    text = _load_optional_text(worktree / "CLAUDE.md")
+    if text is None:
+        return None
+    return _extract_markdown_section(text=text, heading="Quality Gates")
+
+
+class _AgentSpecResolution(NamedTuple):
+    """One role's resolved agent-spec text plus the status describing it."""
+
+    text: str
+    status: AgentSpecStatus
+
+
+def _resolve_agent_spec(
+    worktree: Path, role: str, *, global_fallback_enabled: bool
+) -> _AgentSpecResolution:
+    """Resolve *role*'s agent spec repo-local-first, then global (#1773).
+
+    Order: the worktree's ``.claude/agents/<role>.md`` wins whenever it exists
+    and is non-blank. A missing OR blank repo copy falls through to
+    ``_GLOBAL_AGENTS_DIR/<role>.md`` when *global_fallback_enabled*; with the
+    gate off, the repo copy's state stands as the answer.
+
+    Never raises and never returns ``None``: an unresolvable spec yields ``""``
+    (the pre-#1773 fail-open behavior — a review pass still runs) but is now
+    reported rather than silent. ``_log.warning`` fires only when the spec is
+    genuinely absent everywhere consulted (``source == "none"``); a file that
+    was found but blank is carried on the returned status for the verdict
+    comment instead, because "present but empty" and "not there at all" are
+    different facts about the repo.
+    """
     filename = _REVIEWER_ROLE_AGENT_FILES[role]
-    text = _load_optional_text(worktree / ".claude" / "agents" / filename)
-    return text if text is not None else ""
+    repo_path = worktree / ".claude" / "agents" / filename
+    repo_text = _load_optional_text(repo_path)
+    empty_repo_file = repo_text is not None and not repo_text.strip()
+
+    def _resolution(text: str, source: AgentSpecSource) -> _AgentSpecResolution:
+        usable = text if text.strip() else ""
+        return _AgentSpecResolution(
+            text=usable,
+            status=AgentSpecStatus(
+                role=role,
+                source=source,
+                empty=not usable,
+                empty_repo_file=empty_repo_file,
+            ),
+        )
+
+    if repo_text is not None and repo_text.strip():
+        return _resolution(repo_text, "repo")
+    if not global_fallback_enabled:
+        if repo_text is None:
+            _warn_agent_spec_absent(role, [repo_path])
+            return _resolution("", "none")
+        return _resolution("", "repo")
+    global_path = _GLOBAL_AGENTS_DIR / filename
+    global_text = _load_optional_text(global_path)
+    if global_text is None:
+        _warn_agent_spec_absent(role, [repo_path, global_path])
+        return _resolution("", "none")
+    return _resolution(global_text, "global")
+
+
+def _warn_agent_spec_absent(role: str, paths: list[Path]) -> None:
+    """Log the genuinely-absent-spec warning naming *role* and every path tried."""
+    _log.warning(
+        "agent_spec_absent: reviewer role %r has no agent specification — "
+        "tried %s; this role's prompt will run with an empty "
+        "`## Agent Specification` section",
+        role,
+        ", ".join(str(p) for p in paths),
+    )
 
 
 def _render_sensitive_block(hits: list[_SensitiveHit]) -> str:
@@ -399,6 +649,51 @@ def _render_sensitive_block(hits: list[_SensitiveHit]) -> str:
     lines = [_SENSITIVE_HEADER, "", "Touched sensitive files:"]
     lines.extend(f"- {h.path} ({h.category}) — {h.reason}" for h in hits)
     return "\n".join(lines)
+
+
+def _render_ruff_ignore_section(ignore: tuple[str, ...]) -> str:
+    lines = [
+        "## Globally Ignored Ruff Rules (pyproject.toml `[tool.ruff.lint].ignore`)"
+    ]
+    lines.extend(f"- {code}" for code in ignore)
+    return "\n".join(lines)
+
+
+def _render_pylint_thresholds_section(overrides: dict[str, int]) -> str:
+    lines = ["## Complexity Thresholds (PLR0912 / PLR0915 / PLR0911)"]
+    for key, code in _PYLINT_THRESHOLD_CODES.items():
+        if key in overrides:
+            lines.append(
+                f"- {code} ({key}): {overrides[key]} (configured in pyproject.toml)"
+            )
+    return "\n".join(lines)
+
+
+def _render_lint_grounding_block(
+    ruff_config: _RuffLintConfig | None, quality_gates_text: str | None
+) -> str | None:
+    """Render the ``## Repo Lint Configuration`` grounding block (#1744).
+
+    Returns ``None`` when there is nothing to ground against: no
+    ``[tool.ruff.lint].ignore`` entries, no pylint-threshold overrides, and no
+    ``CLAUDE.md`` Quality Gates text. Otherwise assembles the not-a-MUST_FIX
+    instruction, the ignore list (when non-empty), repo-configured
+    PLR0912/PLR0915/PLR0911 threshold overrides (when present), and the
+    verbatim Quality Gates text. When no overrides exist, Quality Gates is the
+    sole authoritative source for numeric thresholds.
+    """
+    ignore = ruff_config.ignore if ruff_config is not None else ()
+    overrides = ruff_config.pylint_overrides if ruff_config is not None else {}
+    if not ignore and not overrides and not quality_gates_text:
+        return None
+    parts = [_LINT_GROUNDING_INSTRUCTION]
+    if ignore:
+        parts.append(_render_ruff_ignore_section(ignore))
+    if overrides:
+        parts.append(_render_pylint_thresholds_section(overrides))
+    if quality_gates_text:
+        parts.append(f"## CLAUDE.md Quality Gates (verbatim)\n{quality_gates_text}")
+    return "\n\n".join(parts)
 
 
 def _build_reviewer_prompt(
@@ -412,8 +707,24 @@ def _build_reviewer_prompt(
     project_rubrics: str | None,
     repo_policy_section: str | None,
     sensitive_hits: list[_SensitiveHit],
+    capable: bool = False,
+    lint_grounding: str | None = None,
 ) -> str:
-    """Materialize one reviewer's full prompt, inlining every needed section."""
+    """Materialize one reviewer's full prompt, inlining every needed section.
+
+    *capable* selects which ``_OUTPUT_INSTRUCTIONS`` variant closes the prompt
+    (#1709). It defaults to ``False`` — the pre-#1709 text — purely so this
+    function's variant-agnostic unit tests stay byte-identical; the sole
+    production caller (:func:`_prepare_review_pass`) always passes the probed
+    value explicitly, so the default never fires in production.
+
+    *lint_grounding* (#1744) is the rendered repo-lint-configuration block —
+    the repo's ruff opt-outs and complexity thresholds — so reviewers stop
+    raising MUST_FIX findings against rules the repo has explicitly ignored.
+    Same safe-default convention as *capable*: defaults to ``None`` for the
+    variant-agnostic unit tests; :func:`_prepare_review_pass` always passes it
+    explicitly.
+    """
     parts = [
         f"# Reviewer Role: {role}",
         f"## Agent Specification\n{agent_spec_text}",
@@ -429,11 +740,13 @@ def _build_reviewer_prompt(
         parts.append(f"## Project Rubrics\n{project_rubrics}")
     if repo_policy_section:
         parts.append(f"## Repo Policy for {role}\n{repo_policy_section}")
+    if lint_grounding:
+        parts.append(f"## Repo Lint Configuration\n{lint_grounding}")
     if sensitive_hits:
         parts.append(_render_sensitive_block(sensitive_hits))
     parts.append("## Changed Files\n" + "\n".join(changed_files))
     parts.append(f"## Diff\n{diff.text}")
-    parts.append(_OUTPUT_INSTRUCTIONS)
+    parts.append(_select_output_instructions(capable))
     return "\n\n".join(parts)
 
 
@@ -454,7 +767,7 @@ def _parse_reviewer_document(
 
 
 class _ReviewPassInputs(NamedTuple):
-    """Assembled, side-effect-free inputs for one per-role review pass (#1392).
+    """Assembled inputs for one per-role review pass (#1392).
 
     The output of :func:`_prepare_review_pass` — everything ``run_codex_roles``
     needs (selected ``roles`` and their materialized ``prompts_by_role``) plus
@@ -462,21 +775,37 @@ class _ReviewPassInputs(NamedTuple):
     ``synthesize_codex_review_result`` consumes. Extracted so the fix loop can
     re-run a fresh review pass each cycle without re-inlining ``run_review``'s
     input-assembly body.
+
+    ``capability`` (#1709) is the probed filesystem-capability verdict the
+    prompts were built against — returned so the caller can record it on the
+    verdict rather than re-deriving (or, worse, re-probing) it.
+
+    ``agent_spec_status`` (#1773) is the per-role agent-spec resolution record,
+    in ``roles`` order — same shape and same reason as ``capability``: the
+    prompts were built from it, so the caller records it on the verdict rather
+    than re-reading the filesystem to reconstruct where each spec came from.
     """
 
     roles: list[str]
     prompts_by_role: dict[str, str]
     diff: CapturedDiff
     reviewed_sha: str
+    capability: _CodexFilesystemCapability
+    agent_spec_status: list[AgentSpecStatus]
 
 
 def _prepare_review_pass(
-    task: TicketTask, worktree: Path, default_branch: str
+    task: TicketTask,
+    worktree: Path,
+    default_branch: str,
+    *,
+    runner: CodexRunner,
+    session_id: str,
 ) -> _ReviewPassInputs:
     """Assemble one review pass's inputs: capture diff, select roles, build prompts.
 
-    Pure extraction of ``run_review``'s former input-assembly body (everything
-    before ``run_codex_roles`` was called) — no logic change, no side effects
+    Extracted from ``run_review``'s former input-assembly body (everything
+    before ``run_codex_roles`` was called). Before #1709 it had no side effects
     beyond the read-only git/\u200bfilesystem reads it already performed. Shared by
     ``run_review`` and ``cw.codex_fix_loop``'s per-cycle re-review (#1392).
 
@@ -484,7 +813,15 @@ def _prepare_review_pass(
     :func:`_load_optional_text` alongside its other bare-name callers — a test
     patches ``_load_optional_text`` via module-object ``setattr`` on this
     module, which only intercepts same-module bare-name calls.
+
+    ``runner``/``session_id`` (#1709) drive the filesystem-capability probe,
+    which is what changed that: on a cold fingerprint cache it spends one real
+    ``codex exec`` round-trip and writes the verdict to disk. Every subsequent
+    call — notably the fix loop's per-cycle re-review — is a cache hit that
+    runs nothing, which is why the probe lives here rather than at each call
+    site.
     """
+    capability = _probe_filesystem_capability(runner=runner, session_id=session_id)
     diff, reviewed_sha, changed_files = _capture_diff(worktree, default_branch)
     scope_tier = resolve_tier(task.scope_hint)
     categories = _categorize_changed_files(changed_files)
@@ -492,6 +829,12 @@ def _prepare_review_pass(
     repo_policy = _load_review_policy(worktree, scope_tier)
     project_rubrics = _load_optional_text(worktree / ".claude" / "review-extras.md")
     plan_text, ticket_text = _load_ticket_context(worktree)
+    ruff_lint_config = _load_ruff_lint_config(worktree)
+    quality_gates_text = _load_claude_md_quality_gates(worktree)
+    lint_grounding = _render_lint_grounding_block(
+        ruff_config=ruff_lint_config,
+        quality_gates_text=quality_gates_text,
+    )
     mutates_persisted_state = (
         bool(sensitive_hits) or categories.python or categories.frontend
     )
@@ -501,10 +844,17 @@ def _prepare_review_pass(
         mutates_persisted_state=mutates_persisted_state,
         has_ticket_context=ticket_text is not None,
     )
+    fallback_enabled = _load_agent_spec_fallback_gate(worktree)
+    resolutions = {
+        role: _resolve_agent_spec(
+            worktree, role, global_fallback_enabled=fallback_enabled
+        )
+        for role in roles
+    }
     prompts_by_role = {
         role: _build_reviewer_prompt(
             role,
-            agent_spec_text=_load_agent_spec(worktree, role),
+            agent_spec_text=resolutions[role].text,
             diff=diff,
             changed_files=changed_files,
             plan_text=plan_text,
@@ -512,6 +862,8 @@ def _prepare_review_pass(
             project_rubrics=project_rubrics,
             repo_policy_section=repo_policy.get(role),
             sensitive_hits=sensitive_hits,
+            capable=capability.capable,
+            lint_grounding=lint_grounding,
         )
         for role in roles
     }
@@ -520,4 +872,6 @@ def _prepare_review_pass(
         prompts_by_role=prompts_by_role,
         diff=diff,
         reviewed_sha=reviewed_sha,
+        capability=capability,
+        agent_spec_status=[resolutions[role].status for role in roles],
     )

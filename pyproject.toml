@@ -1,6 +1,6 @@
 [project]
 name = "claude-workspace"
-version = "1.28.0"
+version = "1.32.0"
 description = "Multi-session workspace orchestrator for Claude Code"
 readme = "README.md"
 authors = [
@@ -69,6 +69,7 @@ addopts = ["-m", "not integration"]
 markers = [
     "integration: end-to-end tests that shell out to external tools (tmux, cmux, claude --bg)",
     "cmux: requires a live cmux daemon (macOS only); run nightly via .github/workflows/nightly.yml",
+    "binary_on_path(*names): exempt from the optional-binary absence guard (#1753) for the given binary name(s), e.g. @pytest.mark.binary_on_path('codex')",
 ]
 
 [tool.ruff]
@@ -206,6 +207,19 @@ ignore = [
 # break the reconcile ↔ dispatch circular dependency (#698). Inline import
 # at function level is the sanctioned mechanism, not a workaround.
 "src/cw/reconcile/_shared.py" = ["PLC0415"]
+# codex_background defers cw.executor's _complete_session_via_door /
+# _post_review_comment / _resolve_codex_fix_loop_enabled and cw.dispatch.claim's
+# _revert_claimed_task_to_pending inside _run_codex_review_and_complete (#1727):
+# executor.py imports this module at module top, and all four names are defined
+# below executor.py's own import block, so a module-level import here would hit
+# a partially initialized module. Inline import is the sanctioned mechanism.
+"src/cw/codex_background.py" = ["PLC0415"]
+# codex_boot defers cw.dispatch.claim._park_running_task_blocked_on_user and
+# cw.executor.resolve_executor_config inside reap_orphaned_codex_sessions_at_boot
+# (#1727): cw.executor imports cw.reconcile at module top, so this module (inside
+# the cw.reconcile package) must not reach back at import time. Mirrors
+# _shared.py's own deferred cw.dispatch import (#698).
+"src/cw/reconcile/codex_boot.py" = ["PLC0415"]
 # claim defers the cw.dispatch.gating import inside _spawn_claimed_task to break
 # the gating ↔ claim circular dependency (#1310): gating imports claim at module
 # top, so claim's own reach back into gating must be function-level. Inline

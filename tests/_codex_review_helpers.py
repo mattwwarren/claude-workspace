@@ -22,6 +22,22 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def _mk_codex_proc(
+    stdout: str = "", returncode: int = 0
+) -> subprocess.CompletedProcess[str]:
+    """A ``codex --version`` :class:`subprocess.CompletedProcess` double.
+
+    Shared by ``test_codex_executor.py``'s ``TestCodexCapabilityDiagnosis``
+    (binary presence/version probe) and ``test_codex_capability.py``'s
+    fingerprint tests (#1709) — the two probes are different subsystems but
+    build the identical ``CompletedProcess`` shape, so the builder lives here
+    rather than being copied a third time.
+    """
+    return subprocess.CompletedProcess(
+        args=[], returncode=returncode, stdout=stdout, stderr=""
+    )
+
+
 def _finding_payload(
     *,
     severity: str = "MUST_FIX",
@@ -142,6 +158,20 @@ def _git(repo: Path, *args: str) -> None:
 def _write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+def _populate_global_agents_dir(path: Path, **role_to_content: str) -> None:
+    """Write fake global agent-spec files into *path* (#1773).
+
+    Keyword names are the agent-spec FILE stems under
+    ``_REVIEWER_ROLE_AGENT_FILES`` with ``-`` written as ``_`` (a Python
+    keyword cannot carry a dash), e.g. ``code_reviewer="SPEC"`` writes
+    ``<path>/code-reviewer.md``. Lets ``_resolve_agent_spec``'s
+    global-fallback cases populate a controlled directory without repeating
+    the mkdir/write boilerplate.
+    """
+    for stem, content in role_to_content.items():
+        _write(path / f"{stem.replace('_', '-')}.md", content)
 
 
 def _task() -> TicketTask:

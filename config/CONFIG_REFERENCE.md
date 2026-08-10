@@ -53,6 +53,7 @@ State is stored at `~/.local/share/cw/` (or `$XDG_DATA_HOME/cw/`).
 | `notifications` | bool | `false` | Desktop notifications on session events. A top-level `notifications: true` key in `clients.yaml` (sibling of `clients:`) turns it on for every client that doesn't set it explicitly |
 | `auto_background_threshold` | int \| null | `null` | Auto-background the session after N conversation turns |
 | `worker_model` | string \| null | `null` | Pin the model for DAEMON-origin worker spawns (auto-dev). Forwarded as `--model <id>` to `claude --bg` from both initial spawn and DAEMON-origin resume. USER-origin sessions (interactive `cw start` / `cw resume`) always inherit the operator's logged-in default model. Opaque string — no validation. |
+| `quality_gate_commands` | string \| null | `null` | Per-client override for the gate list named in the `impl`/`debt` session prompts (default: `ruff check, mypy, pytest`). Set it for a client whose stack is not Python, e.g. `"npm run lint && npm test"`. Empty string omits the gate sentence entirely. Opaque string — no validation. Distinct from the `quality_gates:` key removed from `project-config.yaml` by #1616 (that key was unread; this one is read by `get_purpose_prompt`), and from the CLAUDE.md "## Quality Gates" section (#1744). |
 | `operator_github_login` | string \| null | `null` | Override the runtime-resolved GitHub login used for counterparty/self-identity resolution (RFC 0011 S1). Rare multi-account case; the runtime `gh api user` login is authoritative when unset. |
 | `repo_path` | path | *none** | Shared repo path (worktree mode) |
 | `branch` | string | *none** | Branch name (worktree mode) |
@@ -403,72 +404,27 @@ operator_github_login_by_repo: {}
 # client-less entry points (RFC 0011 follow-up, #1171) — see "Operator
 # GitHub Login Override" below.
 
-# Per-tier headless timeout budgets (seconds). Sessions whose scope.tier is
-# known (from the auto-dev sentinel scope field) are budgeted by this map.
-# Sessions without a known tier fall back to the global HEADLESS_TIMEOUT_SECONDS.
-# Explicit per-ticket overrides (cw dev-queue add --timeout <s>) still win over
-# both this and the per-stage map below. Per-stage budgets
-# (`headless_timeout_by_stage`, see below) are consulted before this per-tier
-# map; a stage present in that map fully overrides the per-tier lookup below
-# for sessions at that stage.
-headless_timeout_by_tier:
-  small: 1800   # 30 min — tight cap for small-scope tickets
-  large: 5400   # 90 min — room for 11-file, 600-line implementations
+# REMOVED — process-kill timeouts (ADR-0014). The wall-clock budget and
+# idle-watchdog machinery no longer exists: sessions are never dispositioned
+# (TIMED_OUT, reverted, parked, daemon-stopped, worktree-removed) on elapsed
+# time or transcript quietness. The following keys are ignored if present in
+# an existing config (a one-time warning is logged at load): 
+#   headless_timeout_by_tier, headless_timeout_by_stage,
+#   idle_watchdog_by_tier, idle_watchdog_by_stage, idle_watchdog_seconds,
+#   idle_retry_cap_by_tier, stalled_retry_cap_by_tier,
+#   idle_confirm_observations, park_veto_cap,
+#   salvage_skip_attention_threshold
+# (`cw dev-queue add --timeout` was removed with them.)
+# What replaces the signal those timers provided: the liveness-bucket ladder
+# (`liveness_buckets_minutes` below) emits session.liveness_changed on
+# transcript-staleness crossings, and a crossing into the top bucket by a
+# roster-present session with no sentinel and no pending subagent emits a
+# signal-only session.needs_attention (paused_status=session_unresponsive)
+# plus a push notification — the operator decides what happens next.
 
-# Per-stage wall-clock timeout budgets (seconds), consulted BEFORE the
-# per-tier default above. Keyed by Stage (plan/impl/review/finalize);
-# HARDEN is a dormant stage and intentionally has no entry. A stage absent
-# from this map falls through to headless_timeout_by_tier / the global
-# HEADLESS_TIMEOUT_SECONDS fallback unchanged. Seeded from empirical stage
-# timing baselines (wiki cw-stage-timing-baselines-2026-07-05, n=739 legs).
-# Explicit per-ticket overrides (cw dev-queue add --timeout <s>) still win
-# over both this and the per-tier default.
-headless_timeout_by_stage:
-  plan: 3600      # 60 min — wall-clock p99 38.5m, max 47.8m
-  impl: 4200      # 70 min — wall-clock p99 38.6m, max 50.5m
-  review: 7200    # 120 min — wall-clock p99 72.0m (matches prior -t 7200 workaround)
-  finalize: 5400  # 90 min — matches existing large-tier ceiling (CI-wait tail)
-
-# Per-tier idle-watchdog budgets (seconds). After this window of silence
-# (no terminal sentinel emitted), a DAEMON session is flagged as
-# BLOCKED_ON_USER and a push notification fires. Large-tier sessions can
-# legitimately stall on slow test runs or mypy before emitting any
-# sentinel. Sessions whose scope_hint is unknown fall back to the global
-# IDLE_WATCHDOG_SECONDS (900s). Per-stage budgets (`idle_watchdog_by_stage`,
-# see below) are consulted before this per-tier map; a stage present in
-# that map fully overrides the per-tier lookup below for sessions at that
-# stage. See GitHub issues #326, #340, #1061.
-idle_watchdog_by_tier:
-  large: 3600   # 60 min — above worst-case FINALIZE gate-run (pytest+mypy); #918
-
-# Per-stage idle-watchdog budgets (seconds), consulted BEFORE the per-tier
-# default above. Keyed by Stage (plan/impl/review/finalize); FINALIZE
-# deliberately has no entry -- that stage's idle disposition is owned by
-# stalled.py (#1054), not this map. Empty by default: no per-stage IDLE
-# baseline exists yet (contrast headless_timeout_by_stage's #1020 baseline).
-# A review-stage fan-out to several worktree-isolated reviewer subagents
-# can legitimately leave the parent session quiet well past the flat 900s
-# default; set review: 3600 (or similar) once you've observed your own
-# fan-out idle profile. See GitHub issue #1061.
-idle_watchdog_by_stage: {}
-
-# Global idle-watchdog budget (seconds) when a session has no per-tier
-# budget (e.g. it stalled before Stage 1 set a scope_hint).
-# null falls back to the built-in 900s constant.
-idle_watchdog_seconds: null
-
-# Number of consecutive failed idle-watchdog observations before a session
-# is dispositioned (confirm-before-reap, #545). 1 reproduces the old
-# single-observation behavior.
-idle_confirm_observations: 2
-
-# Retry caps. idle_retry_cap_by_tier / stalled_retry_cap_by_tier cap
-# idle-stall (#384) and wall-clock-budget (#756) auto-retries per scope
-# tier before a ticket is parked BLOCKED_ON_USER (built-in default: 2 for
-# unknown tiers). global_attempt_ceiling is the absolute ceiling on
-# task.attempts across ALL kill causes (#786).
-idle_retry_cap_by_tier: {}
-stalled_retry_cap_by_tier: {}
+# Absolute ceiling on task.attempts across ALL causes (#786) — a spawn-time
+# admission gate (parks BLOCKED_ON_USER instead of spawning again), not a
+# process-kill timer.
 global_attempt_ceiling: 10
 
 # Consecutive spawn errors at which a lane's circuit breaker trips and
@@ -490,25 +446,14 @@ liveness_buckets_minutes: [15, 30, 45]
 liveness_first_bucket_by_stage:
   impl: 35
 
-# session.needs_attention escalation latches: consecutive per-client
-# freshness-gate blocks (RFC 0007 W2) / consecutive per-session salvage
-# skips (#974) at which a needs_attention event fires exactly once.
+# session.needs_attention escalation latch: consecutive per-client
+# freshness-gate blocks (RFC 0007 W2) at which a needs_attention event fires
+# exactly once.
 freshness_block_attention_threshold: 5
-salvage_skip_attention_threshold: 5
-
-# Maximum consecutive POST-BUDGET liveness vetoes the stalled sweep grants a
-# single session before letting the pending wall-clock-budget / retry-cap park
-# proceed (#1445). Deliberately small: it counts only vetoes that fire after
-# the session has already blown its wall-clock budget, so 2 already reproduces
-# the "would have parked two sweeps after budget exhaustion" arithmetic behind
-# the veto-runaway this bound fixes. On cap-fire an immediate
-# session.needs_attention is emitted at both park sites. Resets for free per
-# pipeline episode (fresh Session object).
-park_veto_cap: 2
 
 # Maximum consecutive sentinel-stage-mismatch vetoes the phantom sweep grants a
 # single already_refused session before letting the pending CRASH_COMPLETE
-# proceed (#1449). Mirrors park_veto_cap: counts only vetoes that fire while the
+# proceed (#1449). Counts only vetoes that fire while the
 # transcript is still LIVE on a session whose most recent tick refused a
 # stage-mismatched sentinel, so 2 already reproduces the #1281 "would have
 # crashed two sweeps after the refusal" window this bound fixes. On cap-fire an
@@ -711,12 +656,10 @@ attention_digest_idle_floor_seconds: 60
 disallowed_mcp_tools: []
 ```
 
-Override a single ticket's budget or tier at enqueue time (there is no
-per-ticket idle-watchdog flag — the idle budget resolves from
-`idle_watchdog_by_tier` / `idle_watchdog_seconds` above):
+Override a single ticket's scope tier at enqueue time (the former
+`--timeout` flag was removed with the process-kill timeouts — see ADR-0014):
 
 ```bash
-cw dev-queue add GEN-123 --client my-project --timeout 7200
 cw dev-queue add GEN-456 --client my-project --scope large
 ```
 
@@ -874,6 +817,60 @@ and the recipe's act phase records a `PR_ACTION_FAILED` correction rather than
 requesting a bogus reviewer. For `claude-workspace` itself the key is set to
 `mode: ci`, so `request_reviewer` is a documented no-op here.
 
+## Reviewer Agent-Spec Global Fallback (`agent_spec_global_fallback`, #1773)
+
+Repo-level opt-out for one specific reviewer input: whether a reviewer role
+whose repo-tracked agent specification is missing or blank may fall back to
+the operator's own `~/.claude/agents/<role>.md`. Every other reviewer input
+(diff, plan/ticket context, project rubrics, sensitive-file hits) is always
+inlined from the worktree only — the agent spec is the one documented
+exception (see `src/cw/codex_review/_context.py`'s module docstring).
+
+```toml
+# pyproject.toml (repo root — this key is read from the worktree's own
+# pyproject.toml, same file as `[tool.ruff]`)
+[tool.cw.codex_review]
+agent_spec_global_fallback = false
+```
+
+- **Table**: `[tool.cw.codex_review]` in the repo's `pyproject.toml`.
+- **Key**: `agent_spec_global_fallback` — type `bool`.
+- **Default**: **enabled** (`true`). A missing `pyproject.toml`, a missing
+  `[tool.cw.codex_review]` table, a missing key, a non-boolean value, or
+  malformed TOML all leave the fallback ON — only an explicit `false` turns
+  it off (`_load_agent_spec_fallback_gate`, fail-safe by design: a repo that
+  cannot be parsed must not silently change reviewer behavior).
+
+**What enabling means (default):** for each reviewer role, the worktree's
+`.claude/agents/<role>.md` wins whenever it exists and is non-blank. A
+missing or blank repo copy falls through to
+`~/.claude/agents/<role>.md` on the machine running the review.
+
+**What disabling means:** the global fallback step is skipped entirely. A
+repo with no local spec for a role has that role run with an empty
+`## Agent Specification` section — reported as unspecified, never silently
+filled in from whatever happens to be on the executing host.
+
+**Why disable it:** a global fallback makes reviewer prompt content depend
+on the executing host's `~/.claude/agents/` — the same diff, reviewed on two
+different hosts, can be reviewed against two different specifications. A
+repo that needs its reviewer prompts to be strictly reproducible
+cross-host — notably one just adopting `cw` review and wanting every input
+grounded in tracked files from day one — sets this to `false`.
+
+**Provenance either way:** which source resolved for each role (`repo`,
+`global`, or `none`) is recorded per-role on the review verdict
+(`ReviewVerdict.agent_spec_status`) and always rendered into the posted
+verdict comment — either `_Agent specs loaded for all N reviewer role(s)._`
+or an `**AGENT SPEC(S) UNSPECIFIED**` / `**ALL AGENT SPECS UNSPECIFIED**`
+line naming the affected role(s), regardless of whether the gate is on or
+off.
+
+This gate is documentation-only in scope here — it does not change the
+default, the precedence order, or the resolution behavior (all settled by
+#1773 and covered by `tests/test_codex_review_context.py`'s
+`TestLoadAgentSpecFallbackGate`).
+
 ## Operator GitHub Login Override (RFC 0011 follow-up, #1171)
 
 `ClientConfig.operator_github_login` (see [Client Fields](#client-fields)
@@ -989,11 +986,10 @@ are `null` when not applicable.
 - `attempt` — 1-indexed current attempt number at the moment of spawn. `1` on
   the first spawn (`_claim_next_pending` increments `TicketTask.attempts` before
   calling `spawn_create_impl`); `2` on the first retry, etc.
-- `wall_clock_budget_seconds` — seconds this session is allowed to run before
-  the orchestrator reaps it. Computed by `resolve_headless_budget` (#314):
-  priority is (1) per-ticket override, (1.5) `headless_timeout_by_stage`
-  (#1020), (2) last sentinel's `scope.tier`, (2.5) `task.scope_hint`,
-  (3) global default.
+- `wall_clock_budget_seconds` — always `null` since the process-kill-timeout
+  removal (ADR-0014): no session is handed a kill deadline and the
+  orchestrator never reaps on elapsed time. The key is retained for
+  schema-shape compatibility only.
 - `stage_started_at` — ISO 8601 UTC timestamp (`datetime.now(UTC).isoformat()`)
   written at spawn. Workers can use it to compute elapsed time without relying
   on wall-clock calls.
@@ -1007,7 +1003,8 @@ are `null` when not applicable.
   - `plan_source` — the task's plan provenance (e.g. `"generated"`,
     `"github_issue_existing"`), carried through from a prior stage's sentinel
     or a `cw dev-queue plan` run; `null` when none is set.
-  - `headless_timeout_override` — per-ticket timeout in seconds, or `null`.
+  - `headless_timeout_override` — always `null` (deprecated-inert; the
+    per-ticket timeout was removed with the process-kill timeouts).
 - `world_state_snapshot` — git context captured at spawn:
   - `origin_main_sha_at_spawn` — SHA of `origin/<default_branch>` at spawn time, or `null` if the git call fails.
   - `origin_main_branch` — the client's `default_branch` (usually `"main"`).
@@ -1029,7 +1026,7 @@ are `null` when not applicable.
   "worktree_path": "/path/to/.claude/worktrees/my-worktree",
   "workspace_path": "/home/user/projects/my-project",
   "attempt": 1,
-  "wall_clock_budget_seconds": 5400,
+  "wall_clock_budget_seconds": null,
   "stage_started_at": "2026-06-10T14:32:00.123456+00:00",
   "expected_sentinel_schema_ref": {
     "command": "cw schema show auto-dev-result --format=tldr",

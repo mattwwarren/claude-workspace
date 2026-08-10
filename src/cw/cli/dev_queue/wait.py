@@ -27,7 +27,6 @@ from cw.dev_queue import (
 )
 from cw.exceptions import CwError
 from cw.models import (
-    OrchestratorConfig,
     QueueItemStatus,
     Session,
     TicketTask,
@@ -36,7 +35,6 @@ from cw.native_daemon import get_native_daemon_client
 from cw.reconcile import (
     _csid_from_transcript,
     _transcript_age_seconds,
-    resolve_idle_watchdog_budget,
 )
 from cw.session import _is_native_surface_ref
 
@@ -53,6 +51,13 @@ _WAIT_DEFAULT_TIMEOUT: int = 300
 
 # Poll interval for the sentinel-aware wait loop (seconds).
 _WAIT_SENTINEL_POLL_INTERVAL: float = 5.0
+
+# Transcript-staleness threshold for the roster-absence ATTENTION check
+# (_check_stale_attention). Purely a reporting threshold for this CLI's exit
+# code — it never dispositions the session. Local since the idle-watchdog
+# budget resolver was removed with the process-kill timeouts; the check's
+# real evidence is roster absence, staleness just debounces it.
+_WAIT_STALE_ATTENTION_SECONDS: int = 900
 
 # Exit-code mapping from AutoDevResult.status to wait exit codes. Keys must
 # cover every schema.Status value except INTERMEDIATE_ADVANCE_STATUSES (those
@@ -247,7 +252,6 @@ def _check_stale_attention(
     ticket_id: str,
     resolved: str,
     output_json: bool,
-    config: OrchestratorConfig,
 ) -> None:
     """Fire ATTENTION when the session is stale and absent from the daemon roster.
 
@@ -256,9 +260,10 @@ def _check_stale_attention(
     ``Exit(_WAIT_EXIT_ATTENTION)`` when the attention predicate holds.
     """
     now = datetime.now(UTC)
-    budget = resolve_idle_watchdog_budget(task, config)
     transcript_age = _transcript_age_seconds(session, now)
-    is_stale = transcript_age is not None and transcript_age > budget
+    is_stale = (
+        transcript_age is not None and transcript_age > _WAIT_STALE_ATTENTION_SECONDS
+    )
     in_roster = False
     surface_ref = session.surface_ref
     if surface_ref is not None and _is_native_surface_ref(surface_ref):
@@ -509,7 +514,7 @@ def dev_queue_wait(
         # non-daemon surface refs (e.g. tmux window names).
         # BlockedResult → keep polling (partial write guard), so exclude from ATTENTION.
         _check_stale_attention(
-            task, session, sentinel, ticket_id, resolved, output_json, config
+            task, session, sentinel, ticket_id, resolved, output_json
         )
 
         # HEARTBEAT: no terminal sentinel but transcript advancing (or session

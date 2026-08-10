@@ -141,15 +141,10 @@ class TestNoReviewApprovalCallPath:
         """Positive control: known-legitimate gh pr call sites never trip.
 
         Guards specifically against the scanner over-matching on `gh pr
-        edit --add-reviewer` (gh.py) and `gh pr merge --auto` (salvage.py),
-        per the ticket's test-plan hint to verify these two neighbors
-        explicitly stay green.
+        edit --add-reviewer` (gh.py), per the ticket's test-plan hint to
+        verify legitimate neighbors explicitly stay green. (The second
+        original neighbor, `gh pr merge --auto` in reconcile/salvage.py,
+        was deleted along with the process-kill timeouts.)
         """
         gh_py = (_SRC_ROOT / "cw" / "gh.py").read_text(encoding="utf-8")
-        salvage_py = (_SRC_ROOT / "cw" / "reconcile" / "salvage.py").read_text(
-            encoding="utf-8"
-        )
         assert not _find_gh_pr_review_approve(gh_py, _SRC_ROOT / "cw" / "gh.py")
-        assert not _find_gh_pr_review_approve(
-            salvage_py, _SRC_ROOT / "cw" / "reconcile" / "salvage.py"
-        )

@@ -7,14 +7,17 @@ escalation strip-on-invalid-evidence rule, and the #1108 artifact writer.
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
+from cw.codex_review import _parse_unified_diff
 from cw.review_findings import (
+    _LINE_ANCHOR_TOLERANCE,
     AcceptedFinding,
     CapturedDiff,
     Finding,
@@ -24,6 +27,11 @@ from cw.review_findings import (
     ReviewerRunRecord,
     ReviewVerdict,
     StrippedEscalation,
+    _anchor_in_enclosing_def,
+    _classify_finding,
+    _enclosing_def_span,
+    _line_reference_valid,
+    _select_rejected_must_fix,
     consolidate_verdict,
     dedupe_findings,
     derive_review_counts,
@@ -38,8 +46,138 @@ from tests.conftest import (
     _make_reviewer_doc,
 )
 
-if TYPE_CHECKING:
-    from pathlib import Path
+# -- #1738 fixtures: real #1729 diagnostics artifact -----------------------
+#
+# Redacted from the unrotated session diagnostics located at
+# /home/matthew/.local/share/cw/sessions/dc7cf73e/diagnostics/
+# cycle0-review-verdict.json (reviewed_sha b5c8119e... matches the real
+# commit b5c8119e "chore(#1729): mark Stage 2 implementation complete"),
+# per the fixtures-for-external-systems rule (real capture, not invented).
+# The diff text below is verbatim `git diff 494414f8^ 494414f8 --
+# tests/test_dispatch.py` output from this repo.
+
+_PR1729_TEST_DISPATCH_DIFF = '''\
+diff --git a/tests/test_dispatch.py b/tests/test_dispatch.py
+index 21cc6981..043f6a49 100644
+--- a/tests/test_dispatch.py
++++ b/tests/test_dispatch.py
+@@ -9491,7 +9491,22 @@ class TestApplyStagedDecision:
+         that can carry a non-null blocker (schema.py's #777 exception --
+         'blocked'/'merge_gate_blocked' only) plus the _AWAITING_OPERATOR_REASON
+         substitute Rule 5 writes when blocker_reason is in
+-        OPERATOR_UNAVAILABLE_BLOCKER_REASONS.
++        OPERATOR_UNAVAILABLE_BLOCKER_REASONS, plus (#1729) the
++        "codex_must_fix_mechanically_rejected" substitute -- the one gate-class
++        park (#1714's _park_must_fix_mechanically_rejected) whose breadcrumbs
++        genuinely originate from a populated blocker dict rather than a
++        hardcoded breadcrumbs="" literal.
++
++        Membership in BREADCRUMB_ELIGIBLE_PAUSED_STATUSES does not by itself
++        cause a breadcrumb to be emitted: every producing _park_* helper must
++        independently stamp non-empty breadcrumbs content (the constant has no
++        runtime reader in src/ -- see the block comment above its definition
++        in routing.py). The exclusion assertions below prove the other
++        gate-class parks (review_health_gate, finalize_hold, signoff_gate,
++        approval_gate -- the last also covering scope_hint_gate, which reuses
++        approval_gate's paused_status literal) stay out of this set: they
++        hardcode breadcrumbs="", so adding their paused_status here would be
++        cosmetic, not a fix.
+         """
+         from cw.auto_dev_result import (
+             OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
+@@ -9502,14 +9517,18 @@ class TestApplyStagedDecision:
+             BREADCRUMB_ELIGIBLE_PAUSED_STATUSES,
+         )
+
++        must_fix_mechanically_rejected = "codex_must_fix_mechanically_rejected"
++
+         assert {
+             "blocked",
+             "merge_gate_blocked",
+             "awaiting_operator_availability",
++            must_fix_mechanically_rejected,
+         } == BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+         # every non-substitute member is drawn from STAGE_FAILURE_STATUSES
+         assert (
+-            BREADCRUMB_ELIGIBLE_PAUSED_STATUSES - {_AWAITING_OPERATOR_REASON}
++            BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
++            - {_AWAITING_OPERATOR_REASON, must_fix_mechanically_rejected}
+         ) <= STAGE_FAILURE_STATUSES
+         # scope_exceeded/forbidden_area excluded by design (#777: never carry a
+         # blocker), not oversight
+@@ -9520,6 +9539,18 @@ class TestApplyStagedDecision:
+         # set is non-empty
+         assert OPERATOR_UNAVAILABLE_BLOCKER_REASONS
+         assert _AWAITING_OPERATOR_REASON in BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
++        assert must_fix_mechanically_rejected in BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
++
++        # gate-class exclusion (#1729): each of these hardcodes breadcrumbs=""
++        # at its _park_* call site (routing.py), so membership here would not
++        # change what gets emitted -- their paused_status must stay excluded.
++        for gate_paused_status in (
++            "review_health_gate",
++            "finalize_hold",
++            "signoff_gate",
++            "approval_gate",
++        ):
++            assert gate_paused_status not in BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+
+     # -- review-health gate (#1702) --------------------------------------
+
+'''
+
+# The real Finding field values from the rejected #1729 SysAdmin Reviewer
+# finding, quoted verbatim from the diagnostics artifact above.
+_PR1729_REJECTED_FINDING_KWARGS: dict[str, object] = {
+    "severity": "SHOULD_FIX",
+    "file": "tests/test_dispatch.py",
+    "line_start": 9522,
+    "line_end": 9527,
+    "summary": "The pinning test does not pin the duplicated monitor allowlist",
+    "consequence": (
+        "This assertion validates only the Python constant. A future edit can "
+        "update `routing.py` without updating `_BLOCKER_REASON_PAUSED_STATUSES` "
+        "in `attention_monitor.sh`, and the test will remain green while the "
+        "attention stream silently omits blocker reasons—the same drift this "
+        "change repairs."
+    ),
+    "suggested_fix": (
+        "Add a synchronization assertion that reads and parses "
+        "`_BLOCKER_REASON_PAUSED_STATUSES` from `attention_monitor.sh` and "
+        "compares it with `BREADCRUMB_ELIGIBLE_PAUSED_STATUSES`, or generate "
+        "both representations from one source."
+    ),
+    "evidence": (
+        "assert {\n"
+        '            "blocked",\n'
+        '            "merge_gate_blocked",\n'
+        '            "awaiting_operator_availability",\n'
+        "            must_fix_mechanically_rejected,\n"
+        "        } == BREADCRUMB_ELIGIBLE_PAUSED_STATUSES"
+    ),
+    "confidence": "HIGH",
+    "escalation": None,
+}
+
+
+def _pr1729_captured_diff() -> CapturedDiff:
+    """Build the real #1729 ``CapturedDiff`` via the unmodified diff parser.
+
+    Uses :func:`cw.codex_review._parse_unified_diff` against the verbatim
+    diff fixture (NOT ``_make_diff``, which never generates context lines) —
+    the #1738 hunk-context-window tests need real context-line content.
+    """
+    file_diffs, file_line_text, file_window_text, _changed = _parse_unified_diff(
+        _PR1729_TEST_DISPATCH_DIFF
+    )
+    files = {f: sorted(lines) for f, lines in file_line_text.items()}
+    return CapturedDiff(
+        text=_PR1729_TEST_DISPATCH_DIFF,
+        files=files,
+        file_diffs=file_diffs,
+        file_line_text=file_line_text,
+        file_window_text=file_window_text,
+    )
 
 
 class TestSeverityAndDispositionLiterals:
@@ -430,6 +568,196 @@ class TestValidateReviewerDocument:
         assert len(accepted) == 1
         assert not rejected
 
+    # -- #1715: near-line anchor tolerance -----------------------------
+
+    def test_near_line_anchor_within_tolerance_retained(self) -> None:
+        # Anchor is 2 lines off the real added line (10) — within the
+        # +/-3 tolerance bound. Evidence text is correct, so the finding
+        # should be retained rather than rejected invalid_line_reference.
+        diff = _make_diff("def broken():", files={"src/cw/foo.py": [10]})
+        f = _make_finding(line_start=12, line_end=12, evidence="def broken():")
+        accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
+        assert len(accepted) == 1
+        assert not rejected
+        # The accepted finding's anchor is snapped to the real added line
+        # (10), not left at the reviewer's raw off-by-2 claim (12) — a
+        # downstream renderer showing this location must point at real
+        # source, not the reviewer's drift (#1715).
+        assert accepted[0].line_start == 10
+        assert accepted[0].line_end == 10
+
+    def test_near_line_range_anchor_retained(self) -> None:
+        # line_start=8 is 2 lines off added line 10; line_end=13 is 2 lines
+        # off added line 11 — each endpoint independently within tolerance.
+        diff = _make_diff("line one", "line two", files={"src/cw/foo.py": [10, 11]})
+        f = _make_finding(line_start=8, line_end=13, evidence="line one\nline two")
+        accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
+        assert len(accepted) == 1
+        assert not rejected
+        assert accepted[0].line_start == 10
+        assert accepted[0].line_end == 11
+
+    # -- #1715: multiline evidence prefix normalization -----------------
+
+    def test_file_level_multiline_evidence_matches_after_prefix_normalization(
+        self,
+    ) -> None:
+        # File-level finding (no line anchor) falls back to file_diffs, which
+        # stores raw hunk text with a "+" marker on every line. A reviewer's
+        # genuine multiline quote carries no such markers at all (that's the
+        # real-world shape of Bug B: a plain source-code quote, not a
+        # diff-rendered one) — the *second* line's missing "+" breaks
+        # contiguous substring matching against "+line one\n+line two" even
+        # though the content is identical. MUST fail red pre-fix (verified:
+        # "line one\nline two" is NOT a substring of the raw
+        # "+++ b/...\n+line one\n+line two\n" hunk text).
+        diff = _make_diff("line one", "line two", files={"src/cw/foo.py": [10, 11]})
+        f = _make_finding(line_start=None, line_end=None, evidence="line one\nline two")
+        accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
+        assert len(accepted) == 1
+        assert not rejected
+
+    def test_windowed_multiline_evidence_with_prefix_still_matches(self) -> None:
+        # Windowed finding (explicit line_start/line_end) builds its window
+        # from file_line_text, which is already prefix-free. Here the
+        # REVIEWER's evidence itself carries diff-style "+" markers (plausible
+        # if copied from a rendered diff view) — the latent exposure noted in
+        # Bug B's second half. MUST fail red pre-fix: "+line one\n+line two"
+        # is not a substring of the prefix-free window "line one\nline two".
+        diff = _make_diff("line one", "line two", files={"src/cw/foo.py": [10, 11]})
+        f = _make_finding(line_start=10, line_end=11, evidence="+line one\n+line two")
+        accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
+        assert len(accepted) == 1
+        assert not rejected
+
+    # -- #1715: regression guards (mutation-proof) -----------------------
+
+    def test_anchor_outside_tolerance_still_rejected(self) -> None:
+        # Distance 4 from the only added line (10) — outside the +/-3 bound.
+        diff = _make_diff("def broken():", files={"src/cw/foo.py": [10]})
+        f = _make_finding(line_start=14, line_end=14, evidence="def broken():")
+        accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
+        assert not accepted
+        assert rejected[0].reason == "invalid_line_reference"
+
+    def test_near_line_content_mismatch_still_rejected(self) -> None:
+        # line_start=12 resolves to added line 10 (distance 2, within
+        # tolerance), but the evidence text is not that line's real content —
+        # the loosened anchor bound must not loosen the evidence check.
+        diff = _make_diff("def broken():", files={"src/cw/foo.py": [10]})
+        f = _make_finding(line_start=12, line_end=12, evidence="totally unrelated text")
+        accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
+        assert not accepted
+        assert rejected[0].reason == "evidence_not_in_diff"
+
+    def test_widened_range_window_does_not_admit_third_unrelated_line(self) -> None:
+        # line_start=8 snaps to 10 (distance 2); line_end=15 snaps to 16
+        # (distance 1) -> resolved window is 10-16 inclusive, wider than a
+        # single +/-3 span (the deliberate, tested compounding effect from
+        # independently-snapped endpoints). Evidence genuinely inside that
+        # window (line 13's real content) is accepted.
+        diff = _make_diff(
+            "first line content",
+            "second line content",
+            "third line content",
+            "fourth line content",
+            files={"src/cw/foo.py": [10, 13, 16, 20]},
+        )
+        f = _make_finding(line_start=8, line_end=15, evidence="second line content")
+        accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
+        assert len(accepted) == 1
+        assert not rejected
+        assert accepted[0].line_start == 10
+        assert accepted[0].line_end == 16
+
+    def test_widened_range_window_rejects_evidence_outside_resolved_window(
+        self,
+    ) -> None:
+        # Same widened window (10-16) as above, but the evidence is the real
+        # content of line 20 — a genuine added line, just outside the
+        # resolved window. Proves the widened window is still bounded, not an
+        # unbounded escape hatch.
+        diff = _make_diff(
+            "first line content",
+            "second line content",
+            "third line content",
+            "fourth line content",
+            files={"src/cw/foo.py": [10, 13, 16, 20]},
+        )
+        f = _make_finding(line_start=8, line_end=15, evidence="fourth line content")
+        accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
+        assert not accepted
+        assert rejected[0].reason == "evidence_not_in_diff"
+
+    # -- #1738: hunk-context evidence window (mode 4) --------------------
+
+    def test_hunk_context_window_evidence_retained(self) -> None:
+        # Real #1729 diagnostics artifact (see module fixtures above): a
+        # SHOULD_FIX finding whose evidence is a verbatim 6-line quote of the
+        # post-change source (lines 9522-9527), but only line 9526 of that
+        # span is a diff-added line -- the other five are unchanged context
+        # that _resolve_line_window's added-line-only window used to drop,
+        # rejecting a genuine, fully-verbatim quote as evidence_not_in_diff.
+        # MUST fail red pre-fix: CapturedDiff has no file_window_text field
+        # yet, and _evidence_in_claimed_lines still routes through
+        # _resolve_line_window/file_line_text (added-only), which snaps this
+        # claim's window down to (9521, 9526) and drops the tail of the quote.
+        diff = _pr1729_captured_diff()
+        finding = Finding(**_PR1729_REJECTED_FINDING_KWARGS)
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        assert not rejected
+        assert len(accepted) == 1
+        # The persisted anchor stays snapped to the genuine added line (9526),
+        # not the reviewer's raw claimed endpoints (9522/9527) -- both of
+        # which are context lines. _resolved_finding deliberately keeps
+        # calling the unchanged _resolve_line_window (added-only), not the
+        # new _resolve_hunk_window.
+        assert accepted[0].line_start == 9521
+        assert accepted[0].line_end == 9526
+
+    def test_hunk_context_window_unrelated_line_still_rejected(self) -> None:
+        # Negative control: widening the window to include context-line
+        # content must not turn it into "match anything nearby". Real diff,
+        # real content -- but neither variant's evidence is the true content
+        # of the claimed 9522-9527 window.
+        diff = _pr1729_captured_diff()
+
+        # (a) genuine CONTEXT-line content from elsewhere in the same file
+        # (line 9511, "from cw.auto_dev_result import ("), claimed at the
+        # #1729 finding's line range. Only visible in file_window_text at
+        # all post-fix -- proves the widened map is still bounded to the
+        # claimed window, not a whole-file search.
+        unrelated_context = _make_finding(
+            file="tests/test_dispatch.py",
+            line_start=9522,
+            line_end=9527,
+            evidence="from cw.auto_dev_result import (",
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(unrelated_context), diff
+        )
+        assert not accepted
+        assert rejected[0].reason == "evidence_not_in_diff"
+
+        # (b) evidence that only ever existed on a REMOVED line -- no
+        # new-file line number at all, so it can never be in file_window_text
+        # regardless of window width. line_start/line_end=9494 is itself a
+        # genuine added line (exact hit, no snapping), so this fails on the
+        # evidence check, not invalid_line_reference.
+        removed_line_evidence = _make_finding(
+            file="tests/test_dispatch.py",
+            line_start=9494,
+            line_end=9494,
+            evidence="OPERATOR_UNAVAILABLE_BLOCKER_REASONS.",
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(removed_line_evidence), diff
+        )
+        assert not accepted
+        assert rejected[0].reason == "evidence_not_in_diff"
+
 
 class TestUnanchoredFindings:
     """#1632: a finding whose file is not in the diff but does resolve to a
@@ -523,6 +851,343 @@ class TestUnanchoredFindings:
         assert not rejected2
         assert accepted2[0].escalation is None
         assert len(stripped2) == 1
+
+
+# Shared fixture source for TestEnclosingDefSpan and TestAnchorInEnclosingDef.
+_ENCLOSING_DEF_SHORT_SOURCE = (
+    "def helper():\n"
+    "    return 1\n"
+    "\n"
+    "def target_function(a, b, c, d, e):\n"
+    "    x = a + b\n"
+    "    y = c + d\n"
+    "    return x + y + e\n"
+)
+
+# Shared fixture source for TestEnclosingDefAnchor and
+# TestLineReferenceValidWorktreeParam. Deliberately spaced so the anchor
+# (target_function's def line, 6) sits MORE than _LINE_ANCHOR_TOLERANCE (3)
+# lines from every changed line used in those tests — otherwise
+# _nearest_added_line's own near-miss tolerance (#1715) would already resolve
+# the endpoint and the new enclosing-def fallback would never actually be
+# exercised.
+_ENCLOSING_DEF_SOURCE = (
+    "def helper():\n"  # 1
+    "    return 1\n"  # 2
+    "\n"  # 3
+    "\n"  # 4
+    "\n"  # 5
+    "def target_function(a, b, c, d, e):\n"  # 6
+    "    x = a + b\n"  # 7
+    "    y = c + d\n"  # 8
+    "    z = x + y\n"  # 9
+    "    w = z + e\n"  # 10
+    "    v = w * 2\n"  # 11
+    "    return v\n"  # 12
+)
+
+
+def _write_enclosing_def_source(tmp_path: Path, source: str) -> None:
+    (tmp_path / "src" / "pkg").mkdir(parents=True)
+    (tmp_path / "src" / "pkg" / "mod.py").write_text(source)
+
+
+class TestEnclosingDefSpan:
+    """Pure unit tests of ``_enclosing_def_span`` (#1743): resolve a source
+    line to the ``(start, end)`` line span of its innermost enclosing
+    function/class, or ``None`` if no such enclosing definition exists.
+    """
+
+    def test_line_at_def_itself_returns_span(self) -> None:
+        assert _enclosing_def_span(_ENCLOSING_DEF_SHORT_SOURCE, 4) == (4, 7)
+
+    def test_line_inside_body_returns_same_span(self) -> None:
+        assert _enclosing_def_span(_ENCLOSING_DEF_SHORT_SOURCE, 6) == (4, 7)
+
+    def test_module_scope_line_returns_none(self) -> None:
+        # Line 3 is the blank line between the two top-level defs — module
+        # scope, no enclosing function/class.
+        assert _enclosing_def_span(_ENCLOSING_DEF_SHORT_SOURCE, 3) is None
+
+    def test_nested_function_innermost_span_wins(self) -> None:
+        source = (
+            "def outer():\n    def inner():\n        return 1\n    return inner()\n"
+        )
+        # Line 3 is inside both outer (1-4) and inner (2-3) — inner must win.
+        assert _enclosing_def_span(source, 3) == (2, 3)
+
+    def test_class_definition_span_covers_whole_body(self) -> None:
+        source = "class Foo:\n    def bar(self):\n        return 1\n"
+        assert _enclosing_def_span(source, 1) == (1, 3)
+
+    def test_decorator_line_has_no_enclosing_span(self) -> None:
+        source = "@staticmethod\ndef foo():\n    return 1\n"
+        assert _enclosing_def_span(source, 1) is None
+        assert _enclosing_def_span(source, 2) == (2, 3)
+
+    def test_syntax_error_source_returns_none(self) -> None:
+        assert _enclosing_def_span("def foo(:\n    pass\n", 1) is None
+
+    def test_line_past_eof_returns_none(self) -> None:
+        assert _enclosing_def_span(_ENCLOSING_DEF_SHORT_SOURCE, 999) is None
+
+
+class TestAnchorInEnclosingDef:
+    """Unit tests of ``_anchor_in_enclosing_def`` (#1743): the I/O-touching
+    wrapper that reads *file* under *worktree*, resolves *line*'s enclosing
+    def/class span, and checks whether any of *diff*'s changed lines for
+    *file* fall inside that span.
+    """
+
+    def test_missing_file_returns_false(self, tmp_path: Path) -> None:
+        diff = _make_diff("    y = c + d", files={"src/pkg/mod.py": [6]})
+        assert _anchor_in_enclosing_def(diff, tmp_path, "src/pkg/mod.py", 4) is False
+
+    def test_changed_line_inside_span_returns_true(self, tmp_path: Path) -> None:
+        _write_enclosing_def_source(tmp_path, _ENCLOSING_DEF_SHORT_SOURCE)
+        diff = _make_diff("    y = c + d", files={"src/pkg/mod.py": [6]})
+        assert _anchor_in_enclosing_def(diff, tmp_path, "src/pkg/mod.py", 4) is True
+
+    def test_no_changed_line_inside_span_returns_false(self, tmp_path: Path) -> None:
+        _write_enclosing_def_source(tmp_path, _ENCLOSING_DEF_SHORT_SOURCE)
+        # Line 2 (inside helper(), span 1-2) is changed, but the anchor is
+        # target_function's def line (span 4-7) — no overlap.
+        diff = _make_diff("    return 1", files={"src/pkg/mod.py": [2]})
+        assert _anchor_in_enclosing_def(diff, tmp_path, "src/pkg/mod.py", 4) is False
+
+
+class TestEnclosingDefAnchor:
+    """Integration tests through ``validate_reviewer_document`` (#1743): a
+    finding anchored on an enclosing ``def``/``class`` line that is not
+    itself changed is no longer mechanically rejected ``invalid_line_reference``
+    when a changed line falls inside that definition's span AND a worktree is
+    supplied — it instead proceeds to the evidence check, which (since these
+    findings don't quote the changed line's real content) currently lands on
+    ``evidence_not_in_diff``. That reclassification is an intentional
+    side-effect of this ticket; #1738 owns evidence-quote matching itself.
+    """
+
+    _CLASS_SOURCE = (
+        "class Foo:\n"
+        "    def bar(self):\n"
+        "        return 1\n"
+        "\n"
+        "    def baz(self):\n"
+        "        return 2\n"
+    )
+
+    def test_def_line_anchor_accepted_with_worktree(self, tmp_path: Path) -> None:
+        _write_enclosing_def_source(tmp_path, _ENCLOSING_DEF_SOURCE)
+        diff = _make_diff("    v = w * 2", files={"src/pkg/mod.py": [11]})
+        finding = _make_finding(
+            file="src/pkg/mod.py",
+            line_start=6,
+            line_end=6,
+            evidence="target_function does too many things",
+        )
+        _, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff, worktree=tmp_path
+        )
+        assert rejected[0].reason == "evidence_not_in_diff"
+
+    def test_def_line_anchor_rejected_without_worktree(self, tmp_path: Path) -> None:
+        _write_enclosing_def_source(tmp_path, _ENCLOSING_DEF_SOURCE)
+        diff = _make_diff("    v = w * 2", files={"src/pkg/mod.py": [11]})
+        finding = _make_finding(
+            file="src/pkg/mod.py",
+            line_start=6,
+            line_end=6,
+            evidence="target_function does too many things",
+        )
+        _, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff, worktree=None
+        )
+        assert rejected[0].reason == "invalid_line_reference"
+
+    def test_def_span_with_no_changed_line_inside_still_rejected(
+        self, tmp_path: Path
+    ) -> None:
+        _write_enclosing_def_source(tmp_path, _ENCLOSING_DEF_SOURCE)
+        # Changed line 1 sits inside helper()'s span (1-2), not
+        # target_function's (6-12) — the anchor's own span has no changed
+        # line, so the fallback correctly declines to rescue it.
+        diff = _make_diff("def helper():", files={"src/pkg/mod.py": [1]})
+        finding = _make_finding(
+            file="src/pkg/mod.py",
+            line_start=6,
+            line_end=6,
+            evidence="target_function does too many things",
+        )
+        _, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff, worktree=tmp_path
+        )
+        assert rejected[0].reason == "invalid_line_reference"
+
+    def test_anchor_with_no_enclosing_def_still_rejected(self, tmp_path: Path) -> None:
+        _write_enclosing_def_source(tmp_path, _ENCLOSING_DEF_SOURCE)
+        # Line 4 (one of the blank lines between the two top-level defs) has
+        # no enclosing function/class at all, regardless of where the changed
+        # lines are.
+        diff = _make_diff("    v = w * 2", files={"src/pkg/mod.py": [11]})
+        finding = _make_finding(
+            file="src/pkg/mod.py",
+            line_start=4,
+            line_end=4,
+            evidence="module scope finding",
+        )
+        _, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff, worktree=tmp_path
+        )
+        assert rejected[0].reason == "invalid_line_reference"
+
+    def test_class_def_anchor_accepted(self, tmp_path: Path) -> None:
+        _write_enclosing_def_source(tmp_path, self._CLASS_SOURCE)
+        diff = _make_diff("        return 2", files={"src/pkg/mod.py": [6]})
+        finding = _make_finding(
+            file="src/pkg/mod.py",
+            line_start=1,
+            line_end=1,
+            evidence="Foo does too many things",
+        )
+        _, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff, worktree=tmp_path
+        )
+        assert rejected[0].reason == "evidence_not_in_diff"
+
+    def test_syntax_error_source_falls_back_to_invalid_line_reference(
+        self, tmp_path: Path
+    ) -> None:
+        _write_enclosing_def_source(tmp_path, "def foo(:\n    pass\n")
+        # Changed line (100) is far outside tolerance of the anchor (1), so
+        # the fallback is actually exercised (and hits the parse failure).
+        diff = _make_diff("    pass", files={"src/pkg/mod.py": [100]})
+        finding = _make_finding(
+            file="src/pkg/mod.py",
+            line_start=1,
+            line_end=1,
+            evidence="foo does too many things",
+        )
+        _, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff, worktree=tmp_path
+        )
+        assert rejected[0].reason == "invalid_line_reference"
+
+
+class TestEnclosingDefAnchorRealFileRegression:
+    """Reproduces the ticket's exact evidence: a structural finding anchored
+    on ``_run_fix_and_commit``'s real ``def`` line in
+    ``src/cw/codex_fix_loop.py``, which is not itself a changed line. The
+    function's real span is discovered dynamically via ``ast.parse`` in this
+    test's own setup (not the helper under test) so the assertion stays
+    correct if the function is refactored — #1743 explicitly rejects
+    hardcoding the line numbers observed at plan time.
+    """
+
+    def _discover_span(self, repo_root: Path) -> tuple[int, int]:
+        source_path = repo_root / "src" / "cw" / "codex_fix_loop.py"
+        tree = ast.parse(source_path.read_text())
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == "_run_fix_and_commit"
+            ):
+                assert node.end_lineno is not None
+                return node.lineno, node.end_lineno
+        msg = "_run_fix_and_commit not found in codex_fix_loop.py"
+        raise AssertionError(msg)
+
+    def _changed_line_beyond_tolerance(self, def_line: int, end_line: int) -> int:
+        # Must sit more than _LINE_ANCHOR_TOLERANCE (3) lines from def_line so
+        # _nearest_added_line's own near-miss tolerance (#1715) doesn't
+        # already resolve the anchor before the new fallback is exercised.
+        changed_line = def_line + _LINE_ANCHOR_TOLERANCE + 1
+        assert changed_line <= end_line, (
+            "_run_fix_and_commit is too short for this regression test's "
+            "assumption — pick a line closer to end_line"
+        )
+        return changed_line
+
+    def test_def_line_anchor_accepted_with_worktree(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        def_line, end_line = self._discover_span(repo_root)
+        changed_line = self._changed_line_beyond_tolerance(def_line, end_line)
+        diff = _make_diff(
+            "some changed line inside the function",
+            files={"src/cw/codex_fix_loop.py": [changed_line]},
+        )
+        finding = _make_finding(
+            file="src/cw/codex_fix_loop.py",
+            line_start=def_line,
+            line_end=def_line,
+            evidence="_run_fix_and_commit does too many things",
+        )
+        _, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff, worktree=repo_root
+        )
+        assert rejected[0].reason == "evidence_not_in_diff"
+
+    def test_def_line_anchor_rejected_without_worktree(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        def_line, end_line = self._discover_span(repo_root)
+        changed_line = self._changed_line_beyond_tolerance(def_line, end_line)
+        diff = _make_diff(
+            "some changed line inside the function",
+            files={"src/cw/codex_fix_loop.py": [changed_line]},
+        )
+        finding = _make_finding(
+            file="src/cw/codex_fix_loop.py",
+            line_start=def_line,
+            line_end=def_line,
+            evidence="_run_fix_and_commit does too many things",
+        )
+        _, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff, worktree=None
+        )
+        assert rejected[0].reason == "invalid_line_reference"
+
+
+class TestLineReferenceValidWorktreeParam:
+    """Direct unit tests of ``_line_reference_valid``'s new ``worktree``
+    parameter and ``_classify_finding``'s pass-through of it (#1743).
+    """
+
+    def test_line_reference_valid_defaults_to_no_worktree(self, tmp_path: Path) -> None:
+        _write_enclosing_def_source(tmp_path, _ENCLOSING_DEF_SOURCE)
+        diff = _make_diff("    v = w * 2", files={"src/pkg/mod.py": [11]})
+        finding = _make_finding(
+            file="src/pkg/mod.py", line_start=6, line_end=6, evidence="x"
+        )
+        assert _line_reference_valid(diff, finding) is False
+
+    def test_line_reference_valid_with_worktree_rescues_def_anchor(
+        self, tmp_path: Path
+    ) -> None:
+        _write_enclosing_def_source(tmp_path, _ENCLOSING_DEF_SOURCE)
+        diff = _make_diff("    v = w * 2", files={"src/pkg/mod.py": [11]})
+        finding = _make_finding(
+            file="src/pkg/mod.py", line_start=6, line_end=6, evidence="x"
+        )
+        assert _line_reference_valid(diff, finding, tmp_path) is True
+
+    def test_classify_finding_passes_worktree_through(self, tmp_path: Path) -> None:
+        _write_enclosing_def_source(tmp_path, _ENCLOSING_DEF_SOURCE)
+        diff = _make_diff("    v = w * 2", files={"src/pkg/mod.py": [11]})
+        finding = _make_finding(
+            file="src/pkg/mod.py",
+            line_start=6,
+            line_end=6,
+            evidence="target_function does too many things",
+        )
+        changed = frozenset(diff.files)
+        # evidence doesn't match the changed line's real text, so the def-line
+        # anchor is rescued and classification proceeds to the evidence check.
+        assert (
+            _classify_finding(finding, diff, changed, tmp_path)
+            == "evidence_not_in_diff"
+        )
+        assert _classify_finding(finding, diff, changed, None) == (
+            "invalid_line_reference"
+        )
 
 
 class TestEscalationStripOnInvalidEvidence:
@@ -772,6 +1437,224 @@ class TestConsolidateVerdict:
         assert verdict.blocking is False
         assert verdict.rejected[0].reason == "unknown_file"
 
+    def test_mechanically_rejected_must_fix_populates_rejected_must_fix_field(
+        self, tmp_path: Path
+    ) -> None:
+        # #1714: the fleet reproduction. A MUST_FIX rejected for a MECHANICAL
+        # reason (here unknown_file) is dropped before adjudication, so
+        # `blocking` stays False by design (R4 -- an unreliable anchor must
+        # never enter the autofix loop). `rejected_must_fix` is the separate
+        # signal that says "something MUST_FIX-shaped was silently dropped".
+        (tmp_path / "docs.md").write_text("x")
+        finding = _make_finding(
+            severity="MUST_FIX", file="docs.md", line_start=None, line_end=None
+        )
+        doc = _make_reviewer_doc(finding)
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        assert verdict.blocking is False
+        assert verdict.must_fix == []
+        assert len(verdict.rejected_must_fix) == 1
+        assert verdict.rejected_must_fix[0].reason == "unknown_file"
+        assert verdict.rejected_must_fix[0].raw["severity"] == "MUST_FIX"
+
+    def test_should_fix_mechanical_rejection_does_not_populate_rejected_must_fix(
+        self,
+    ) -> None:
+        # #1714 AC#4: only MUST_FIX-severity rejections raise the new signal;
+        # a mechanically-rejected SHOULD_FIX stays purely informational.
+        finding = _make_finding(
+            severity="SHOULD_FIX", file="docs.md", line_start=None, line_end=None
+        )
+        doc = _make_reviewer_doc(finding)
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        assert verdict.rejected[0].reason == "unknown_file"
+        assert verdict.rejected_must_fix == []
+
+    def test_rejected_must_fix_keyed_on_category_not_enumerated_reason(self) -> None:
+        # #1714 AC#3: the selection is keyed on the finding's SEVERITY, never on
+        # an enumerated set of RejectedFindingReason values -- so a reason value
+        # that does not exist today is covered by construction. model_construct
+        # bypasses the Literal so a synthetic reason can be exercised at all.
+        synthetic = RejectedFinding.model_construct(
+            raw=_finding_kwargs(severity="MUST_FIX"),
+            reviewer_role="Test Reviewer",
+            reason="a_synthetic_reason_never_seen_before",
+            detail="",
+        )
+        benign = RejectedFinding.model_construct(
+            raw=_finding_kwargs(severity="NIT"),
+            reviewer_role="Test Reviewer",
+            reason="a_synthetic_reason_never_seen_before",
+            detail="",
+        )
+        assert _select_rejected_must_fix([synthetic, benign]) == [synthetic]
+
+    def test_mixed_blocking_and_rejected_must_fix(self) -> None:
+        # #1714: the two signals are independent and can coexist -- an accepted
+        # MUST_FIX still blocks while a mechanically-rejected one is reported.
+        doc = _make_reviewer_doc(
+            _make_finding(severity="MUST_FIX"),
+            _make_finding(
+                severity="MUST_FIX",
+                file="not/in/diff.py",
+                line_start=None,
+                line_end=None,
+                summary="dropped one",
+            ),
+        )
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        assert verdict.blocking is True
+        assert len(verdict.must_fix) == 1
+        assert len(verdict.rejected_must_fix) == 1
+
+    def test_aggregate_near_line_and_multiline_via_consolidate_verdict(self) -> None:
+        # #1715 integration: three findings through the full
+        # consolidate_verdict pipeline. (1) file not in diff, no worktree ->
+        # still unknown_file (#1632 mechanism untouched). (2) near-line
+        # anchor (distance 2, within tolerance) with matching evidence ->
+        # accepted. (3) file-level multiline evidence with no diff markers,
+        # matched against raw "+"-prefixed file_diffs text via normalization
+        # -> accepted. MUST fail red pre-fix (findings 2 and 3 both rejected
+        # under exact-match/raw-substring behavior).
+        diff = _make_diff(
+            "def broken():",
+            "line one",
+            "line two",
+            files={"src/cw/foo.py": [10], "src/cw/bar.py": [20, 21]},
+        )
+        findings = [
+            _make_finding(
+                file="src/cw/other.py",
+                line_start=None,
+                line_end=None,
+                evidence="whatever",
+            ),
+            _make_finding(
+                file="src/cw/foo.py",
+                line_start=12,
+                line_end=12,
+                evidence="def broken():",
+            ),
+            _make_finding(
+                file="src/cw/bar.py",
+                line_start=None,
+                line_end=None,
+                evidence="line one\nline two",
+            ),
+        ]
+        doc = _make_reviewer_doc(*findings, reviewer_role="Reviewer A")
+        verdict = consolidate_verdict([doc], diff, "deadbeef")
+        assert len(verdict.rejected) == 1
+        assert verdict.rejected[0].reason == "unknown_file"
+        assert len(verdict.accepted) == 2
+
+    def test_aggregate_hunk_context_and_negative_control_via_consolidate_verdict(
+        self,
+    ) -> None:
+        # #1738 integration, mirroring
+        # test_aggregate_near_line_and_multiline_via_consolidate_verdict's
+        # shape: four findings through the full consolidate_verdict pipeline
+        # combining (1) the real #1729 hunk-context finding (mode 4, this
+        # ticket's fix), (2) its negative control (must stay rejected even
+        # with the widened window), and (3) the two existing #1715 fixtures
+        # (near-line anchor, multiline-prefix normalization) -- unaffected by
+        # this fix, re-run here to prove the two widenings compose cleanly.
+        # MUST fail red pre-fix: (1) is rejected (evidence_not_in_diff)
+        # before the fix. Retained/raw: 2/4 pre-fix -> 3/4 post-fix.
+        pr1729_diff = _pr1729_captured_diff()
+        legacy_diff = _make_diff(
+            "def broken():",
+            "line one",
+            "line two",
+            files={"src/cw/foo.py": [10], "src/cw/bar.py": [20, 21]},
+        )
+        diff = CapturedDiff(
+            text=pr1729_diff.text + "\n" + legacy_diff.text,
+            files={**pr1729_diff.files, **legacy_diff.files},
+            file_diffs={**pr1729_diff.file_diffs, **legacy_diff.file_diffs},
+            file_line_text={
+                **pr1729_diff.file_line_text,
+                **legacy_diff.file_line_text,
+            },
+            file_window_text={
+                **pr1729_diff.file_window_text,
+                **legacy_diff.file_window_text,
+            },
+        )
+        findings = [
+            Finding(**_PR1729_REJECTED_FINDING_KWARGS),
+            _make_finding(
+                file="tests/test_dispatch.py",
+                line_start=9522,
+                line_end=9527,
+                evidence="from cw.auto_dev_result import (",
+            ),
+            _make_finding(
+                file="src/cw/foo.py",
+                line_start=12,
+                line_end=12,
+                evidence="def broken():",
+            ),
+            _make_finding(
+                file="src/cw/bar.py",
+                line_start=None,
+                line_end=None,
+                evidence="line one\nline two",
+            ),
+        ]
+        doc = _make_reviewer_doc(*findings, reviewer_role="Reviewer A")
+        verdict = consolidate_verdict([doc], diff, "deadbeef")
+        assert len(verdict.accepted) == 3
+        assert len(verdict.rejected) == 1
+        assert verdict.rejected[0].reason == "evidence_not_in_diff"
+
+
+class TestConsolidateVerdictDetail:
+    """#1775: a reviewer document's `detail` copies onto its ReviewerRunRecord.
+
+    Before this fix, `consolidate_verdict` read every field of
+    `ReviewerFindingsDocument` except `detail` when building each
+    `ReviewerRunRecord` — the degraded-reviewer reason a prompt writes into
+    `detail` (per .claude/commands/auto-dev-review.md) parsed correctly but
+    was dropped before it ever reached the persisted verdict.
+    """
+
+    def test_degraded_document_detail_lands_on_matching_run_record(self) -> None:
+        doc = _make_reviewer_doc(
+            status="degraded",
+            detail="sandbox lacked filesystem access",
+            reviewer_role="Reviewer A",
+        )
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        assert verdict.agents_run[0].detail == "sandbox lacked filesystem access"
+
+    def test_ok_document_detail_also_lands_on_run_record(self) -> None:
+        # The copy is unconditional on status, not degraded-special-cased.
+        doc = _make_reviewer_doc(detail="reviewed; no issues found.")
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        assert verdict.agents_run[0].detail == "reviewed; no issues found."
+
+    def test_degraded_document_with_blank_detail_lands_as_blank(self) -> None:
+        # A degraded status with no stated reason is a real, non-erroring
+        # state (ReviewerFindingsDocument's ok-empty-findings-justification
+        # validator only fires for status="ok") -- pin that it survives as
+        # an empty string, not a sentinel or an error.
+        doc = _make_reviewer_doc(status="degraded", detail="")
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        assert verdict.agents_run[0].detail == ""
+
+    def test_failed_reviewer_run_failure_record_has_empty_detail(self) -> None:
+        # ReviewerRunFailure carries no detail concept -- a role recorded
+        # only via failed_reviewers (no matching document) stays at the
+        # ReviewerRunRecord default, by design (out of scope for #1775).
+        verdict = consolidate_verdict(
+            [],
+            _make_diff(),
+            reviewed_sha="sha",
+            failed_reviewers=[ReviewerRunFailure(role="Solo", reason="crash")],
+        )
+        assert verdict.agents_run[0].detail == ""
+
 
 class TestConsolidateVerdictFailedReviewers:
     def test_default_no_failed_reviewers(self) -> None:
@@ -893,6 +1776,22 @@ class TestWriteReviewVerdictArtifact:
         data = json.loads(path.read_text())
         assert "stale" not in data
 
+    def test_degraded_reviewer_detail_round_trips_through_persisted_artifact(
+        self, tmp_path: Path
+    ) -> None:
+        # #1775 acceptance criterion: the reason a degraded reviewer states in
+        # `detail` must survive synthesis into the persisted record on disk.
+        doc = _make_reviewer_doc(
+            status="degraded",
+            detail="sandbox lacked filesystem access",
+            reviewer_role="R1",
+        )
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="deadbeef")
+        path = tmp_path / "review-verdict.json"
+        write_review_verdict(verdict, path)
+        data = json.loads(path.read_text())
+        assert data["agents_run"][0]["detail"] == "sandbox lacked filesystem access"
+
 
 class TestExecutorNeutralContract:
     def test_claude_and_codex_shapes_validate_identically(self) -> None:
@@ -942,6 +1841,20 @@ class TestReviewerRunRecord:
     def test_construct(self) -> None:
         r = ReviewerRunRecord(reviewer_role="R", status="ok", finding_count=3)
         assert r.finding_count == 3
+
+    def test_detail_defaults_to_empty_string(self) -> None:
+        # #1775: detail mirrors ReviewerFindingsDocument.detail's own default.
+        r = ReviewerRunRecord(reviewer_role="R", status="ok", finding_count=0)
+        assert r.detail == ""
+
+    def test_detail_field_accepts_explicit_value(self) -> None:
+        r = ReviewerRunRecord(
+            reviewer_role="R",
+            status="degraded",
+            finding_count=0,
+            detail="sandbox lacked filesystem access",
+        )
+        assert r.detail == "sandbox lacked filesystem access"
 
     def test_audit_metrics_fields_all_default_when_unset(self) -> None:
         # #1710: every new telemetry field is optional, so pre-#1710 bare
@@ -1107,6 +2020,9 @@ class TestCapturedDiffStructure:
         reloaded = CapturedDiff.model_validate_json(diff.model_dump_json())
         assert reloaded.file_line_text == diff.file_line_text
         assert reloaded.file_diffs == diff.file_diffs
+        # #1738: file_window_text (the hunk-context superset of
+        # file_line_text) round-trips the same way.
+        assert reloaded.file_window_text == diff.file_window_text
 
     def test_files_matches_file_line_text_keys(self) -> None:
         # The _make_diff invariant the production _capture_diff also upholds:

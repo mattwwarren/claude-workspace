@@ -100,6 +100,28 @@ FINALIZE_GATE_HELD_DISPOSITION = "finalize_gate_held"
 # SIGNOFF_GATE_DISPOSITION already gets.
 REVIEW_HEALTH_GATE_DISPOSITION = "review_health_gate"
 
+# Disposition stamped when dispatch's Rule 5 routes a blocked sentinel whose
+# blocker.reason is codex_review's CODEX_MUST_FIX_MECHANICALLY_REJECTED -- the
+# review produced a MUST_FIX finding, but validation dropped it (bad anchor,
+# evidence absent from the diff) before adjudication could weigh it (#1714).
+#
+# Unlike every other disposition in this module, this one is NOT derived from a
+# (status, blocker_reason) pair by _derive_disposition/_hold_aware_disposition.
+# It is stamped directly by dispatch.routing._park_must_fix_mechanically_
+# rejected, Rule 5's sole reason-keyed override -- deliberately, so it can
+# never resolve to AWAITING_OPERATOR_DISPOSITION (a HOLD_DISPOSITIONS member)
+# by riding the OPERATOR_UNAVAILABLE_BLOCKER_REASONS path.
+#
+# Same set-membership treatment as REVIEW_HEALTH_GATE_DISPOSITION above, for
+# the same reason: it is a *quality* signal, not an authorization slot. A
+# dropped MUST_FIX is pending a fix (re-run review with the finding
+# adjudicated), not pending an operator saying "proceed anyway" -- so it is
+# deliberately NOT a HOLD_DISPOSITIONS member, which would also silently make
+# it eligible for concierge's false-park auto-requeue and defeat the gate.
+REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION = (
+    "codex_must_fix_mechanically_rejected"
+)
+
 # Textually identical to cw.reconcile._shared._NEEDS_SALVAGE_REASON
 # ("needs_salvage") but a SEPARATE constant, not an import of it: _shared
 # imports FROM cw.dev_queue (dev_queue -> reconcile is the only cycle-safe

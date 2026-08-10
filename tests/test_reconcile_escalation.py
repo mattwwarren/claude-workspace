@@ -50,6 +50,10 @@ _ELIGIBLE_COMBOS: list[tuple[QueueItemStatus, str | None]] = [
     # quality signal — same class as plan/review_pending_approval above, not a
     # deliberately-armed operator stop (which are excluded from escalation).
     (QueueItemStatus.BLOCKED_ON_USER, "review_health_gate"),
+    # #1714: a mechanically-rejected MUST_FIX park is the same class as the
+    # review-health gate above — an unresolved, non-operator-initiated quality
+    # signal, not a deliberately-armed operator stop.
+    (QueueItemStatus.BLOCKED_ON_USER, "codex_must_fix_mechanically_rejected"),
     (QueueItemStatus.AWAITING_OPERATOR_SIGNOFF, None),
     (QueueItemStatus.AWAITING_OPERATOR_SIGNOFF, "signoff_gate"),
     (QueueItemStatus.FAILED, None),

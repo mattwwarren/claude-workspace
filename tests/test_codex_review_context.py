@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -13,19 +14,36 @@ import pytest
 from cw.codex_review import (
     _build_reviewer_prompt,
     _categorize_changed_files,
+    _load_agent_spec_fallback_gate,
+    _load_claude_md_quality_gates,
     _load_optional_text,
     _load_review_policy,
+    _load_ruff_lint_config,
     _load_sensitive_hits,
     _load_ticket_context,
     _parse_reviewer_document,
     _prepare_review_pass,
     _read_sensitive_manifest,
+    _render_lint_grounding_block,
+    _resolve_agent_spec,
+    _RuffLintConfig,
     _select_reviewer_roles,
 )
+from cw.codex_review._capability import _PROBE_SENTINEL
+from cw.codex_review._context import (
+    _CAPABLE_ONLY_MARKER,
+    _INLINED_ONLY_MARKER,
+    _OUTPUT_INSTRUCTIONS_CAPABLE,
+    _OUTPUT_INSTRUCTIONS_INLINED_ONLY,
+    _REVIEWER_ROLE_AGENT_FILES,
+    _select_output_instructions,
+)
+from cw.codex_runner import FakeCodexRunner
 from tests._codex_review_helpers import (
     _doc_json,
     _finding_payload,
     _git,
+    _populate_global_agents_dir,
     _task,
     _write,
 )
@@ -33,7 +51,6 @@ from tests.conftest import _make_diff
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +372,238 @@ class TestLoadReviewPolicy:
 
 
 # ---------------------------------------------------------------------------
+# _load_ruff_lint_config (#1744)
+# ---------------------------------------------------------------------------
+
+
+class TestLoadRuffLintConfig:
+    def test_reads_ignore_list_and_pylint_overrides_when_present(
+        self, tmp_path: Path
+    ) -> None:
+        _write(
+            tmp_path / "pyproject.toml",
+            '[tool.ruff.lint]\nignore = ["PLR0913", "T201"]\n\n'
+            "[tool.ruff.lint.pylint]\nmax-branches = 15\n",
+        )
+        result = _load_ruff_lint_config(tmp_path)
+        assert result is not None
+        assert result.ignore == ("PLR0913", "T201")
+        assert result.pylint_overrides.get("max-branches") == 15
+
+    def test_missing_pylint_subtable_yields_no_overrides(self, tmp_path: Path) -> None:
+        # Mirrors this repo's actual real state: ignore-only, no pylint subtable.
+        _write(tmp_path / "pyproject.toml", '[tool.ruff.lint]\nignore = ["PLR0913"]\n')
+        result = _load_ruff_lint_config(tmp_path)
+        assert result is not None
+        assert result.ignore == ("PLR0913",)
+        assert result.pylint_overrides == {}
+
+    def test_missing_pyproject_returns_none(self, tmp_path: Path) -> None:
+        assert _load_ruff_lint_config(tmp_path) is None
+
+    def test_malformed_toml_returns_none(self, tmp_path: Path) -> None:
+        _write(tmp_path / "pyproject.toml", "not [ valid toml{{{\n")
+        assert _load_ruff_lint_config(tmp_path) is None
+
+    def test_missing_tool_ruff_lint_section_returns_empty_not_none(
+        self, tmp_path: Path
+    ) -> None:
+        _write(tmp_path / "pyproject.toml", '[project]\nname = "x"\n')
+        result = _load_ruff_lint_config(tmp_path)
+        assert result is not None
+        assert result.ignore == ()
+        assert result.pylint_overrides == {}
+
+
+# ---------------------------------------------------------------------------
+# _load_claude_md_quality_gates (#1744)
+# ---------------------------------------------------------------------------
+
+
+class TestLoadClaudeMdQualityGates:
+    def test_extracts_quality_gates_section_verbatim(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path / "CLAUDE.md",
+            "## Quality Gates\nbody line 1\nbody line 2\n## Module Size\nother\n",
+        )
+        result = _load_claude_md_quality_gates(tmp_path)
+        assert result is not None
+        assert "body line 1" in result
+        assert "body line 2" in result
+        assert "Module Size" not in result
+        assert "other" not in result
+
+    def test_missing_claude_md_returns_none(self, tmp_path: Path) -> None:
+        assert _load_claude_md_quality_gates(tmp_path) is None
+
+    def test_missing_heading_returns_none(self, tmp_path: Path) -> None:
+        _write(tmp_path / "CLAUDE.md", "## Some Other Heading\nbody\n")
+        assert _load_claude_md_quality_gates(tmp_path) is None
+
+    def test_against_real_repo_claude_md(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        result = _load_claude_md_quality_gates(repo_root)
+        assert result is not None
+        assert "PLR0912" in result
+        assert "PLR0915" in result
+        assert "PLR0911" in result
+        assert "PLR0913" in result
+
+
+# ---------------------------------------------------------------------------
+# _render_lint_grounding_block (#1744)
+# ---------------------------------------------------------------------------
+
+
+class TestRenderLintGroundingBlock:
+    def test_both_present_includes_ignore_list_and_quality_gates_text(self) -> None:
+        config = _RuffLintConfig(ignore=("PLR0913",), pylint_overrides={})
+        result = _render_lint_grounding_block(
+            ruff_config=config,
+            quality_gates_text="QUALITY GATES BODY",
+        )
+        assert result is not None
+        assert "PLR0913" in result
+        assert "QUALITY GATES BODY" in result
+
+    def test_ruff_config_only_omits_quality_gates_subsection(self) -> None:
+        config = _RuffLintConfig(ignore=("PLR0913",), pylint_overrides={})
+        result = _render_lint_grounding_block(
+            ruff_config=config,
+            quality_gates_text=None,
+        )
+        assert result is not None
+        assert "PLR0913" in result
+        assert "Quality Gates" not in result
+
+    def test_quality_gates_only_omits_ruff_subsection(self) -> None:
+        result = _render_lint_grounding_block(
+            ruff_config=None,
+            quality_gates_text="QUALITY GATES BODY",
+        )
+        assert result is not None
+        assert "QUALITY GATES BODY" in result
+        assert "Globally Ignored Ruff Rules" not in result
+
+    def test_both_absent_returns_none(self) -> None:
+        assert (
+            _render_lint_grounding_block(
+                ruff_config=None,
+                quality_gates_text=None,
+            )
+            is None
+        )
+        empty_config = _RuffLintConfig(ignore=(), pylint_overrides={})
+        assert (
+            _render_lint_grounding_block(
+                ruff_config=empty_config,
+                quality_gates_text=None,
+            )
+            is None
+        )
+        assert (
+            _render_lint_grounding_block(
+                ruff_config=empty_config,
+                quality_gates_text="",
+            )
+            is None
+        )
+
+    def test_always_states_not_a_must_fix_instruction_when_rendered(self) -> None:
+        result = _render_lint_grounding_block(
+            ruff_config=_RuffLintConfig(ignore=("X",), pylint_overrides={}),
+            quality_gates_text=None,
+        )
+        assert result is not None
+        assert "is not a MUST_FIX" in result
+
+    def test_ignored_security_rule_does_not_suppress_concrete_failure(self) -> None:
+        result = _render_lint_grounding_block(
+            ruff_config=_RuffLintConfig(ignore=("S603",), pylint_overrides={}),
+            quality_gates_text=None,
+        )
+        assert result is not None
+        assert "based solely on enforcing a ruff rule" in result
+        assert "concrete security or correctness failure" in result
+        assert "report such a failure as MUST_FIX" in result
+        assert "S603" in result
+
+    def test_distinguishes_statements_from_lines(self) -> None:
+        result = _render_lint_grounding_block(
+            ruff_config=_RuffLintConfig(ignore=("X",), pylint_overrides={}),
+            quality_gates_text=None,
+        )
+        assert result is not None
+        assert "PLR0915" in result
+        lowered = result.lower()
+        assert "statement" in lowered
+        assert "not the number of lines" in lowered or "not lines" in lowered
+
+    def test_no_parallel_thresholds_when_pylint_subtable_absent(self) -> None:
+        result = _render_lint_grounding_block(
+            ruff_config=_RuffLintConfig(ignore=("PLR0913",), pylint_overrides={}),
+            quality_gates_text=None,
+        )
+        assert result is not None
+        assert "Complexity Thresholds" not in result
+        assert "max-branches" not in result
+        assert "max-statements" not in result
+        assert "max-returns" not in result
+
+
+# ---------------------------------------------------------------------------
+# code-reviewer.md "Concrete Numeric Thresholds" table (#1774)
+# ---------------------------------------------------------------------------
+
+
+class TestCodeReviewerAgentSpecFunctionLengthGate:
+    """Regression guard for #1774: a row in the Concrete Numeric Thresholds
+    table may assert MUST_FIX only if it cites a gate this repo actually
+    configures; Function length, Nesting depth, Parameter count, and the
+    positional-args row must not assert a bare/unbacked MUST_FIX threshold.
+    See the inline #1774 note in the table's prose for the full rationale.
+    """
+
+    def _spec_text(self) -> str:
+        repo_root = Path(__file__).resolve().parents[1]
+        return (repo_root / ".claude" / "agents" / "code-reviewer.md").read_text()
+
+    def test_function_length_row_does_not_assert_bare_line_count(self) -> None:
+        text = self._spec_text()
+        assert "| Function length | 50 lines | MUST_FIX" not in text
+
+    def test_function_length_row_cites_configured_gate(self) -> None:
+        text = self._spec_text()
+        assert "PLR0915" in text
+
+    def test_parameter_count_row_cites_configured_gate(self) -> None:
+        text = self._spec_text()
+        assert "PLR0913" in text
+
+    def test_nesting_depth_row_no_longer_bare_must_fix(self) -> None:
+        text = self._spec_text()
+        assert "Nesting depth (if/for/with) | 4 levels | MUST_FIX" not in text
+
+    def test_nesting_depth_row_is_non_blocking(self) -> None:
+        text = self._spec_text()
+        assert "Nesting depth (if/for/with) | 4 levels" in text
+        assert "SHOULD_FIX only, as a readability suggestion" in text
+
+    def test_positional_args_row_no_longer_bare_must_fix(self) -> None:
+        text = self._spec_text()
+        assert "Function calls with 2+ positional args | any | MUST_FIX" not in text
+
+    def test_positional_args_row_is_non_blocking(self) -> None:
+        text = self._spec_text()
+        assert "Function calls with 2+ positional args | any" in text
+        assert "SHOULD_FIX missing-named-args" in text
+
+    def test_table_carries_1774_regression_note(self) -> None:
+        text = self._spec_text()
+        assert "#1774" in text
+
+
+# ---------------------------------------------------------------------------
 # _build_reviewer_prompt
 # ---------------------------------------------------------------------------
 
@@ -400,6 +649,26 @@ class TestBuildReviewerPrompt:
         assert "## Ticket Context" not in prompt
         assert "## Project Rubrics" not in prompt
         assert "ELEVATED SCRUTINY" not in prompt
+        assert "## Repo Lint Configuration" not in prompt
+
+    def test_lint_grounding_section_included_when_provided(self) -> None:
+        prompt = _build_reviewer_prompt(
+            "SysAdmin Reviewer",
+            agent_spec_text="SPEC",
+            diff=_make_diff(),
+            changed_files=["src/cw/foo.py"],
+            plan_text=None,
+            ticket_text=None,
+            project_rubrics=None,
+            repo_policy_section=None,
+            sensitive_hits=[],
+            lint_grounding="GROUNDING BODY",
+        )
+        assert "## Repo Lint Configuration" in prompt
+        assert "GROUNDING BODY" in prompt
+        assert prompt.index("## Repo Lint Configuration") < prompt.index(
+            "advisory here, not blocking"
+        )
 
     def test_output_instructions_override_agent_spec_preconditions(self) -> None:
         """_OUTPUT_INSTRUCTIONS must countermand the inlined agent spec's own
@@ -540,6 +809,362 @@ class TestBuildReviewerPrompt:
 
 
 # ---------------------------------------------------------------------------
+# Capability-driven output-instruction selection (#1709)
+# ---------------------------------------------------------------------------
+
+
+class TestSelectOutputInstructions:
+    def test_capable_selects_the_capable_variant(self) -> None:
+        assert _select_output_instructions(True) is _OUTPUT_INSTRUCTIONS_CAPABLE
+
+    def test_incapable_selects_the_inlined_only_variant(self) -> None:
+        assert _select_output_instructions(False) is _OUTPUT_INSTRUCTIONS_INLINED_ONLY
+
+    def test_inlined_only_variant_is_the_back_compat_alias(self) -> None:
+        """``_OUTPUT_INSTRUCTIONS`` must stay byte-identical to the pre-#1709
+        single-variant text so the #1548 regression-lock above keeps meaning
+        what it meant."""
+        from cw.codex_review._context import _OUTPUT_INSTRUCTIONS
+
+        assert _OUTPUT_INSTRUCTIONS == _OUTPUT_INSTRUCTIONS_INLINED_ONLY
+
+    def test_both_variants_keep_the_shared_schema_and_precedence_rules(self) -> None:
+        for variant in (
+            _OUTPUT_INSTRUCTIONS_CAPABLE,
+            _OUTPUT_INSTRUCTIONS_INLINED_ONLY,
+        ):
+            assert 'status="degraded"' in variant
+            assert 'confidence: "LOW"' in variant
+            assert "advisory here, not blocking" in variant
+            assert "Report no prose outside the JSON object." in variant
+
+
+class TestBuildReviewerPromptCapability:
+    """R8 anti-vacuous seam: each capability value must produce a prompt that
+    carries its own marker and NOT the other's. Either direction of regression
+    (always-capable, always-inlined) fails one of these two tests."""
+
+    def _prompt(self, *, capable: bool) -> str:
+        return _build_reviewer_prompt(
+            "SysAdmin Reviewer",
+            agent_spec_text="SPEC",
+            diff=_make_diff(),
+            changed_files=["src/cw/foo.py"],
+            plan_text=None,
+            ticket_text=None,
+            project_rubrics=None,
+            repo_policy_section=None,
+            sensitive_hits=[],
+            capable=capable,
+        )
+
+    def test_capable_prompt_grants_read_only_repo_access(self) -> None:
+        prompt = self._prompt(capable=True)
+        assert _CAPABLE_ONLY_MARKER in prompt
+        assert _INLINED_ONLY_MARKER not in prompt
+
+    def test_incapable_prompt_keeps_the_inlined_only_premise(self) -> None:
+        prompt = self._prompt(capable=False)
+        assert _INLINED_ONLY_MARKER in prompt
+        assert _CAPABLE_ONLY_MARKER not in prompt
+
+    def test_capable_defaults_to_false(self) -> None:
+        """The parameter is additive-with-default so ``TestBuildReviewerPrompt``'s
+        variant-agnostic call sites stay byte-identical; production always
+        passes it explicitly."""
+        prompt = _build_reviewer_prompt(
+            "SysAdmin Reviewer",
+            agent_spec_text="SPEC",
+            diff=_make_diff(),
+            changed_files=["src/cw/foo.py"],
+            plan_text=None,
+            ticket_text=None,
+            project_rubrics=None,
+            repo_policy_section=None,
+            sensitive_hits=[],
+        )
+        assert _INLINED_ONLY_MARKER in prompt
+
+
+# ---------------------------------------------------------------------------
+# _load_agent_spec_fallback_gate (#1773)
+# ---------------------------------------------------------------------------
+
+
+class TestLoadAgentSpecFallbackGate:
+    def test_missing_pyproject_defaults_to_enabled(self, tmp_path: Path) -> None:
+        assert _load_agent_spec_fallback_gate(tmp_path) is True
+
+    def test_missing_table_defaults_to_enabled(self, tmp_path: Path) -> None:
+        _write(tmp_path / "pyproject.toml", '[project]\nname = "x"\n')
+        assert _load_agent_spec_fallback_gate(tmp_path) is True
+
+    def test_explicit_false_disables_the_fallback(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path / "pyproject.toml",
+            "[tool.cw.codex_review]\nagent_spec_global_fallback = false\n",
+        )
+        assert _load_agent_spec_fallback_gate(tmp_path) is False
+
+    def test_explicit_true_keeps_the_fallback_enabled(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path / "pyproject.toml",
+            "[tool.cw.codex_review]\nagent_spec_global_fallback = true\n",
+        )
+        assert _load_agent_spec_fallback_gate(tmp_path) is True
+
+    def test_malformed_toml_fails_safe_to_enabled(self, tmp_path: Path) -> None:
+        _write(tmp_path / "pyproject.toml", "not [ valid toml{{{\n")
+        assert _load_agent_spec_fallback_gate(tmp_path) is True
+
+
+def test_config_reference_documents_agent_spec_global_fallback() -> None:
+    """CONFIG_REFERENCE.md documents the #1773 fallback opt-out (#1782)."""
+    doc = (
+        Path(__file__).resolve().parent.parent / "config" / "CONFIG_REFERENCE.md"
+    ).read_text(encoding="utf-8")
+    assert "agent_spec_global_fallback" in doc
+    assert "[tool.cw.codex_review]" in doc
+    assert "#1773" in doc
+
+
+# ---------------------------------------------------------------------------
+# _resolve_agent_spec (#1773)
+# ---------------------------------------------------------------------------
+
+
+_ROLE = "Code Quality Reviewer"
+_ROLE_FILE = "code-reviewer.md"
+
+
+def _write_repo_spec(worktree: Path, content: str) -> None:
+    _write(worktree / ".claude" / "agents" / _ROLE_FILE, content)
+
+
+def _patch_global_agents(monkeypatch: pytest.MonkeyPatch, path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("cw.codex_review._context._GLOBAL_AGENTS_DIR", path)
+
+
+class TestResolveAgentSpec:
+    """Repo-local -> global fallback resolution, its gate, and its diagnostics.
+
+    Relies on conftest's autouse ``_isolate_global_agents_dir`` for the
+    global-absent cases; the fallback-succeeds cases re-patch the same name
+    with a populated directory.
+    """
+
+    def test_repo_local_present_wins_and_never_reads_global(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = tmp_path / "wt"
+        _write_repo_spec(worktree, "REPO SPEC BODY\n")
+        _patch_global_agents(monkeypatch, tmp_path / "global")
+        _populate_global_agents_dir(
+            tmp_path / "global", code_reviewer="GLOBAL SPEC BODY\n"
+        )
+
+        resolved = _resolve_agent_spec(worktree, _ROLE, global_fallback_enabled=True)
+
+        assert resolved.text == "REPO SPEC BODY\n"
+        assert resolved.status.source == "repo"
+        assert resolved.status.empty is False
+        assert resolved.status.empty_repo_file is False
+
+    def test_repo_absent_falls_back_to_global(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = tmp_path / "wt"
+        _patch_global_agents(monkeypatch, tmp_path / "global")
+        _populate_global_agents_dir(
+            tmp_path / "global", code_reviewer="GLOBAL SPEC BODY\n"
+        )
+
+        resolved = _resolve_agent_spec(worktree, _ROLE, global_fallback_enabled=True)
+
+        assert resolved.text == "GLOBAL SPEC BODY\n"
+        assert resolved.status.source == "global"
+        assert resolved.status.empty is False
+        assert resolved.status.empty_repo_file is False
+
+    def test_repo_absent_with_gate_disabled_ignores_a_usable_global(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = tmp_path / "wt"
+        _patch_global_agents(monkeypatch, tmp_path / "global")
+        _populate_global_agents_dir(
+            tmp_path / "global", code_reviewer="GLOBAL SPEC BODY\n"
+        )
+
+        resolved = _resolve_agent_spec(worktree, _ROLE, global_fallback_enabled=False)
+
+        assert resolved.text == ""
+        assert resolved.status.source == "none"
+        assert resolved.status.empty is True
+        assert resolved.status.empty_repo_file is False
+
+    def test_repo_and_global_both_absent(self, tmp_path: Path) -> None:
+        resolved = _resolve_agent_spec(
+            tmp_path / "wt", _ROLE, global_fallback_enabled=True
+        )
+
+        assert resolved.text == ""
+        assert resolved.status.source == "none"
+        assert resolved.status.empty is True
+        assert resolved.status.empty_repo_file is False
+
+    def test_empty_repo_file_recovers_via_global(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = tmp_path / "wt"
+        _write_repo_spec(worktree, "   \n")
+        _patch_global_agents(monkeypatch, tmp_path / "global")
+        _populate_global_agents_dir(
+            tmp_path / "global", code_reviewer="GLOBAL SPEC BODY\n"
+        )
+
+        resolved = _resolve_agent_spec(worktree, _ROLE, global_fallback_enabled=True)
+
+        assert resolved.text == "GLOBAL SPEC BODY\n"
+        assert resolved.status.source == "global"
+        assert resolved.status.empty is False
+        assert resolved.status.empty_repo_file is True
+
+    def test_empty_repo_file_with_global_absent_stays_unspecified(
+        self, tmp_path: Path
+    ) -> None:
+        worktree = tmp_path / "wt"
+        _write_repo_spec(worktree, "")
+
+        resolved = _resolve_agent_spec(worktree, _ROLE, global_fallback_enabled=True)
+
+        assert resolved.text == ""
+        assert resolved.status.source == "none"
+        assert resolved.status.empty is True
+        assert resolved.status.empty_repo_file is True
+
+    def test_empty_repo_file_with_empty_global_reports_global_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = tmp_path / "wt"
+        _write_repo_spec(worktree, "\n")
+        _patch_global_agents(monkeypatch, tmp_path / "global")
+        _populate_global_agents_dir(tmp_path / "global", code_reviewer="  \n")
+
+        resolved = _resolve_agent_spec(worktree, _ROLE, global_fallback_enabled=True)
+
+        assert resolved.text == ""
+        assert resolved.status.source == "global"
+        assert resolved.status.empty is True
+        assert resolved.status.empty_repo_file is True
+
+    def test_empty_repo_file_with_gate_disabled_stays_repo_sourced(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = tmp_path / "wt"
+        _write_repo_spec(worktree, "\n")
+        _patch_global_agents(monkeypatch, tmp_path / "global")
+        _populate_global_agents_dir(
+            tmp_path / "global", code_reviewer="GLOBAL SPEC BODY\n"
+        )
+
+        resolved = _resolve_agent_spec(worktree, _ROLE, global_fallback_enabled=False)
+
+        assert resolved.text == ""
+        assert resolved.status.source == "repo"
+        assert resolved.status.empty is True
+        assert resolved.status.empty_repo_file is True
+
+    def test_global_present_but_empty_with_repo_absent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = tmp_path / "wt"
+        _patch_global_agents(monkeypatch, tmp_path / "global")
+        _populate_global_agents_dir(tmp_path / "global", code_reviewer="")
+
+        resolved = _resolve_agent_spec(worktree, _ROLE, global_fallback_enabled=True)
+
+        assert resolved.text == ""
+        assert resolved.status.source == "global"
+        assert resolved.status.empty is True
+        assert resolved.status.empty_repo_file is False
+
+    def test_genuine_absence_logs_a_warning_naming_role_and_paths(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        worktree = tmp_path / "wt"
+        with caplog.at_level(logging.WARNING):
+            resolved = _resolve_agent_spec(
+                worktree, _ROLE, global_fallback_enabled=True
+            )
+        assert resolved.status.source == "none"
+        warnings = [
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        ]
+        assert warnings
+        joined = "\n".join(warnings)
+        assert _ROLE in joined
+        assert str(worktree / ".claude" / "agents" / _ROLE_FILE) in joined
+
+    def test_gate_disabled_absence_warning_names_only_the_repo_path(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        worktree = tmp_path / "wt"
+        global_dir = tmp_path / "global"
+        _patch_global_agents(monkeypatch, global_dir)
+        with caplog.at_level(logging.WARNING):
+            resolved = _resolve_agent_spec(
+                worktree, _ROLE, global_fallback_enabled=False
+            )
+        assert resolved.status.source == "none"
+        joined = "\n".join(
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        )
+        assert str(worktree / ".claude" / "agents" / _ROLE_FILE) in joined
+        assert str(global_dir / _ROLE_FILE) not in joined
+
+    def test_empty_but_resolved_source_does_not_warn(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        worktree = tmp_path / "wt"
+        _patch_global_agents(monkeypatch, tmp_path / "global")
+        _populate_global_agents_dir(tmp_path / "global", code_reviewer="")
+        with caplog.at_level(logging.WARNING):
+            resolved = _resolve_agent_spec(
+                worktree, _ROLE, global_fallback_enabled=True
+            )
+        assert resolved.status.empty is True
+        assert resolved.status.source == "global"
+        assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+    def test_successful_global_fallback_does_not_warn(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        worktree = tmp_path / "wt"
+        _write_repo_spec(worktree, "\n")
+        _patch_global_agents(monkeypatch, tmp_path / "global")
+        _populate_global_agents_dir(
+            tmp_path / "global", code_reviewer="GLOBAL SPEC BODY\n"
+        )
+        with caplog.at_level(logging.WARNING):
+            resolved = _resolve_agent_spec(
+                worktree, _ROLE, global_fallback_enabled=True
+            )
+        assert resolved.status.source == "global"
+        assert resolved.status.empty_repo_file is True
+        assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+# ---------------------------------------------------------------------------
 # _prepare_review_pass extraction (#1392)
 # ---------------------------------------------------------------------------
 
@@ -554,7 +1179,13 @@ class TestPrepareReviewPass:
         _git(repo, "add", "mod.py")
         _git(repo, "commit", "-m", "add mod.py")
 
-        prepared = _prepare_review_pass(_task(), repo, "main")
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-prepare",
+        )
 
         # A python-only small-scope change selects code/sysadmin + data-safety
         # (python mutates persisted state) and no product-manager (no ticket ctx).
@@ -573,3 +1204,170 @@ class TestPrepareReviewPass:
             ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
         ).strip()
         assert prepared.reviewed_sha == head
+
+    def test_capable_probe_threads_into_every_role_prompt(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """A runtime whose probe returns the sentinel gets the capable prompt
+        variant on EVERY selected role, and the verdict-bound capability on the
+        prepared inputs (#1709)."""
+        repo = make_git_repo("wt-prepare-capable")
+        _git(repo, "checkout", "-b", "feature")
+        (repo / "mod.py").write_text("def broken():\n", encoding="utf-8")
+        _git(repo, "add", "mod.py")
+        _git(repo, "commit", "-m", "add mod.py")
+
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(stdout=f"codex\n{_PROBE_SENTINEL}\n"),
+            session_id="s-prepare-capable",
+        )
+
+        assert prepared.capability.capable is True
+        assert prepared.roles
+        for role in prepared.roles:
+            assert _CAPABLE_ONLY_MARKER in prepared.prompts_by_role[role]
+            assert _INLINED_ONLY_MARKER not in prepared.prompts_by_role[role]
+
+    def test_incapable_probe_threads_the_inlined_only_variant(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = make_git_repo("wt-prepare-incapable")
+        _git(repo, "checkout", "-b", "feature")
+        (repo / "mod.py").write_text("def broken():\n", encoding="utf-8")
+        _git(repo, "add", "mod.py")
+        _git(repo, "commit", "-m", "add mod.py")
+
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(stdout="NO_FILESYSTEM_ACCESS\n"),
+            session_id="s-prepare-incapable",
+        )
+
+        assert prepared.capability.capable is False
+        for role in prepared.roles:
+            assert _INLINED_ONLY_MARKER in prepared.prompts_by_role[role]
+
+    def test_lint_grounding_included_when_pyproject_and_claude_md_present(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = make_git_repo("wt-prepare-lint-grounding")
+        _write(
+            repo / "pyproject.toml",
+            '[tool.ruff.lint]\nignore = ["ZZZ9999_DISTINCTIVE_IGNORE"]\n',
+        )
+        _write(
+            repo / "CLAUDE.md",
+            "## Quality Gates\nDISTINCTIVE_QUALITY_GATE_MARKER_TEXT\n"
+            "## Module Size\nother\n",
+        )
+        _git(repo, "add", "pyproject.toml", "CLAUDE.md")
+        _git(repo, "commit", "-m", "add lint config")
+        _git(repo, "checkout", "-b", "feature")
+        (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
+        _git(repo, "add", "mod.py")
+        _git(repo, "commit", "-m", "add mod.py")
+
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-prepare-lint-grounding",
+        )
+
+        assert prepared.roles
+        for role in prepared.roles:
+            prompt = prepared.prompts_by_role[role]
+            assert "ZZZ9999_DISTINCTIVE_IGNORE" in prompt
+            assert "DISTINCTIVE_QUALITY_GATE_MARKER_TEXT" in prompt
+
+    def test_lint_grounding_absent_when_repo_files_missing(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = make_git_repo("wt-prepare-no-lint-grounding")
+        _git(repo, "checkout", "-b", "feature")
+        (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
+        _git(repo, "add", "mod.py")
+        _git(repo, "commit", "-m", "add mod.py")
+
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-prepare-no-lint-grounding",
+        )
+
+        assert prepared.roles
+        for role in prepared.roles:
+            assert "## Repo Lint Configuration" not in prepared.prompts_by_role[role]
+
+    def test_agent_spec_status_threaded_for_every_selected_role(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#1773: every selected role carries a resolved spec status, and a
+        repo whose ``.claude/agents/`` copy exists reports ``source="repo"``."""
+        repo = make_git_repo("wt-prepare-agent-spec")
+        _git(repo, "checkout", "-b", "feature")
+        (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
+        _git(repo, "add", "mod.py")
+        _git(repo, "commit", "-m", "add mod.py")
+
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-prepare-agent-spec-repo",
+        )
+        for role in prepared.roles:
+            _write(
+                repo / ".claude" / "agents" / _REVIEWER_ROLE_AGENT_FILES[role],
+                f"SPEC FOR {role}\n",
+            )
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-prepare-agent-spec-repo",
+        )
+
+        assert prepared.roles
+        assert [s.role for s in prepared.agent_spec_status] == prepared.roles
+        assert all(s.source == "repo" for s in prepared.agent_spec_status)
+        assert all(s.empty is False for s in prepared.agent_spec_status)
+        for role in prepared.roles:
+            assert f"SPEC FOR {role}" in prepared.prompts_by_role[role]
+
+    def test_no_agents_dir_at_all_fails_open_and_marks_every_role_unspecified(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """#1773 fail-open: an absent ``.claude/agents/`` (with the global
+        fallback isolated to an empty dir) still produces prompts — it is
+        diagnosed, not fatal."""
+        repo = make_git_repo("wt-prepare-agent-spec-none")
+        _git(repo, "checkout", "-b", "feature")
+        (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
+        _git(repo, "add", "mod.py")
+        _git(repo, "commit", "-m", "add mod.py")
+
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-prepare-agent-spec-none",
+        )
+
+        assert prepared.roles
+        assert set(prepared.prompts_by_role) == set(prepared.roles)
+        assert [s.role for s in prepared.agent_spec_status] == prepared.roles
+        assert all(s.source == "none" for s in prepared.agent_spec_status)
+        assert all(s.empty is True for s in prepared.agent_spec_status)
+        assert all(s.empty_repo_file is False for s in prepared.agent_spec_status)

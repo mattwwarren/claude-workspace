@@ -356,22 +356,6 @@ class TestGateTimeoutSeconds:
     def test_unknown_gate_falls_back_to_default(self) -> None:
         assert _mod.gate_timeout_seconds("ruff") == _mod.GATE_TIMEOUT_FALLBACK_SECONDS
 
-    def test_poll_ceiling_stays_comfortably_inside_finalize_stage_budget(
-        self,
-    ) -> None:
-        """GATE_POLL_CEILING_SECONDS must sit well inside the FINALIZE stage's
-        headless budget (src/cw/models/orchestrator_config.py) so a gate_timeout
-        block fires with stage budget to spare (#1432) -- a read-only import,
-        not a new src/cw mechanism, so it stays within this ticket's R2 scope.
-        """
-        from cw.models.enums import Stage
-        from cw.models.orchestrator_config import OrchestratorConfig
-
-        finalize_budget_s = OrchestratorConfig().headless_timeout_by_stage[
-            Stage.FINALIZE
-        ]
-        assert finalize_budget_s > _mod.GATE_POLL_CEILING_SECONDS
-
     def test_gate_timeout_cli_subcommand_json_shape(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:

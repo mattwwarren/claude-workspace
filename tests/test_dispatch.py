@@ -6,6 +6,7 @@ import contextlib
 import json
 import logging
 import subprocess
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING
 import pytest
 import yaml
 
+from cw.codex_background import join_outstanding_codex_threads
 from cw.config import (
     _load_concurrency_overrides,
     _save_concurrency_overrides,
@@ -42,6 +44,7 @@ from cw.dispatch import (
     _accumulate_task_cost,
     _cached_codex_capability_diagnosis,
     _codex_capability_gate,
+    _park_running_task_blocked_on_user,
     _reset_codex_capability_cache,
     _resolve_dispatch_skip_reason,
     consume_completed_sessions,
@@ -63,6 +66,7 @@ from cw.exceptions import (
     VersionDriftError,
     WorktreeError,
 )
+from cw.local_runner import make_blocked
 from cw.models import (
     CODEX_BACKEND,
     DEFAULT_GLOBAL_ATTEMPT_CEILING,
@@ -182,26 +186,38 @@ def breaker_config() -> OrchestratorConfig:
     )
 
 
-def _make_clients_yaml(tmp_path: Path, client: ClientConfig) -> None:
-    """Write a minimal clients.yaml for the given client."""
+def _make_clients_yaml(
+    tmp_path: Path, *clients: ClientConfig, codex_review_client: str | None = None
+) -> None:
+    """Write a minimal clients.yaml for the given clients.
+
+    Variadic to match ``tests/test_dispatch_host_capacity.py:67``'s same-named
+    helper (#1727 R4), so multi-client dispatch tests don't need a second
+    writer. ``codex_review_client`` pins that one client's REVIEW stage to the
+    codex backend — the only per-client pipeline block these tests need.
+    """
     config_dir = tmp_path / ".config" / "cw"
     config_dir.mkdir(parents=True, exist_ok=True)
     clients_file = config_dir / "clients.yaml"
-    lines = [
-        "clients:\n",
-        f"  {client.name}:\n",
-        f"    workspace_path: {client.workspace_path}\n",
-        f"    default_branch: {client.default_branch}\n",
-    ]
-    if client.worktree_base is not None:
-        lines.append(f"    worktree_base: {client.worktree_base}\n")
-    if client.lanes:
-        lines.append("    lanes:\n")
-        for lane in client.lanes:
-            lines.append(f"      - name: {lane.name}\n")
-            lines.append(f"        max_parallel: {lane.max_parallel}\n")
-            if lane.priority != 0:
-                lines.append(f"        priority: {lane.priority}\n")
+    lines = ["clients:\n"]
+    for client in clients:
+        lines.append(f"  {client.name}:\n")
+        lines.append(f"    workspace_path: {client.workspace_path}\n")
+        lines.append(f"    default_branch: {client.default_branch}\n")
+        if client.worktree_base is not None:
+            lines.append(f"    worktree_base: {client.worktree_base}\n")
+        if client.lanes:
+            lines.append("    lanes:\n")
+            for lane in client.lanes:
+                lines.append(f"      - name: {lane.name}\n")
+                lines.append(f"        max_parallel: {lane.max_parallel}\n")
+                if lane.priority != 0:
+                    lines.append(f"        priority: {lane.priority}\n")
+        if codex_review_client == client.name:
+            lines.append("    pipeline:\n")
+            lines.append("      executors:\n")
+            lines.append("        review:\n")
+            lines.append("          backend: codex\n")
     clients_file.write_text("".join(lines))
 
 
@@ -1359,6 +1375,13 @@ def test_dispatch_tick_reconciles_phantoms_before_counting(
         "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
     )
+    # Keep the reconcile() gh pre-pass hermetic: a host without a working
+    # `gh` would route TKT-OLD to gh_blocked (BLOCKED_ON_USER holds the lane
+    # slot) instead of the phantom-revert path under test.
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda *_args, **_kwargs: (False, True),
+    )
     from cw.models import OrchestratorConfig, ReapPolicy
 
     monkeypatch.setattr(
@@ -1436,6 +1459,13 @@ def test_crash_revert_respawn_rejects_old_event_completes_new(
     monkeypatch.setattr(
         "cw.reconcile.core._claude_agents_json",
         lambda: [{"sessionId": "decoy000"}],
+    )
+    # Keep the reconcile() gh pre-pass hermetic: a host without a working
+    # `gh` would route TKT-RACE to gh_blocked instead of the crash-revert
+    # path under test.
+    monkeypatch.setattr(
+        "cw.reconcile._deps.pr_is_merged_for_ticket",
+        lambda *_args, **_kwargs: (False, True),
     )
     from cw.models import OrchestratorConfig, ReapPolicy
 
@@ -6500,6 +6530,328 @@ class TestClientFilter:
 
 
 # ---------------------------------------------------------------------------
+# TestCodexSpawnDoesNotBlockDispatch — #1727
+# ---------------------------------------------------------------------------
+
+
+class _BlockedCodexReview:
+    """A ``run_review_with_fix_loop`` stand-in that parks until released.
+
+    Stands in for the real blocking unit of work (``codex exec`` subprocesses,
+    up to the full REVIEW budget). Blocking here — rather than inside a
+    ``CodexRunner`` fake — puts the block at exactly the seam #1727 moved off
+    the ``dispatch_tick`` call stack, without needing a real git diff.
+    """
+
+    def __init__(self, worktree: Path, ticket_id: str) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self._result = make_blocked(
+            ticket_id=ticket_id,
+            worktree=worktree,
+            reason="codex_review_unparseable",
+            stage_reached="stage3_review",
+        )
+
+    def __call__(self, **_kwargs: object) -> tuple[object, None]:
+        self.entered.set()
+        self.release.wait(timeout=30.0)
+        return self._result, None
+
+
+@pytest.mark.binary_on_path("codex")
+class TestCodexSpawnDoesNotBlockDispatch:
+    """#1727: a codex REVIEW in flight must not stall the shared dispatch tick."""
+
+    @pytest.fixture(autouse=True)
+    def _codex_capable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Make the pre-spawn codex capability gate pass without shelling out."""
+        from cw.executor import CodexCapabilityDiagnosis
+
+        _reset_codex_capability_cache()
+        monkeypatch.setattr(
+            "cw.dispatch.claim.codex_capability_diagnosis",
+            lambda **_kwargs: CodexCapabilityDiagnosis(None, "codex-cli 1.0.0"),
+        )
+        # CodexExecutor.spawn() (src/cw/executor.py) runs its OWN
+        # shutil.which("codex") pre-flight, separate from the capability
+        # gate mocked above. The class-level @pytest.mark.binary_on_path
+        # marker (tests/conftest.py's _hide_optional_binaries guard, #1753)
+        # makes that pre-flight see codex as present without shelling out —
+        # CI runners have no real codex binary on PATH, and without this,
+        # spawn() takes the synchronous CODEX_NOT_FOUND branch and never
+        # reaches _background(): blocked_review.entered is never set and
+        # these tests only passed on a dev machine that happens to have
+        # codex installed.
+
+    def test_other_client_spawns_while_codex_review_still_running(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        """Acceptance item 1: both clients spawn in one tick, codex still ACTIVE."""
+        ws_a = make_git_repo("workspace/codex-block-a")
+        ws_b = make_git_repo("workspace/codex-block-b")
+        client_a = ClientConfig(
+            name="client-a",
+            workspace_path=ws_a,
+            default_branch="main",
+            worktree_base=tmp_path / "worktrees-a",
+        )
+        client_b = ClientConfig(
+            name="client-b",
+            workspace_path=ws_b,
+            default_branch="main",
+            worktree_base=tmp_path / "worktrees-b",
+        )
+        _make_clients_yaml(
+            tmp_dispatch_dirs, client_a, client_b, codex_review_client="client-a"
+        )
+        add_ticket(TicketTask(ticket_id="A-1", client="client-a", stage=Stage.REVIEW))
+        add_ticket(TicketTask(ticket_id="B-1", client="client-b"))
+
+        blocked_review = _BlockedCodexReview(ws_a, "A-1")
+        monkeypatch.setattr(
+            "cw.codex_background.run_review_with_fix_loop", blocked_review
+        )
+        config = OrchestratorConfig(
+            tick_interval_seconds=30,
+            per_client_max_parallel={"client-a": 1, "client-b": 1},
+        )
+        try:
+            result = dispatch_tick(config, native_daemon=mock_native_daemon)
+
+            # The codex review is genuinely in flight, not already finished.
+            assert blocked_review.entered.wait(timeout=10.0)
+
+            # Both clients got a spawn out of the same tick.
+            assert result.spawned == 2
+            # client-b's task went to the daemon, i.e. the tick was never
+            # parked behind client-a's codex subprocess.
+            assert len(mock_native_daemon.spawn_calls) == 1
+
+            state = load_state()
+            codex_session = next(s for s in state.sessions if s.client == "client-a")
+            assert codex_session.status is SessionStatus.ACTIVE
+            # R1: session_id is on the RUNNING row before the review finishes.
+            tasks = {t.ticket_id: t for t in load_dev_queue().tasks}
+            assert tasks["A-1"].status is QueueItemStatus.RUNNING
+            assert tasks["A-1"].session_id == codex_session.id
+        finally:
+            blocked_review.release.set()
+            join_outstanding_codex_threads(timeout_seconds=10.0)
+
+    def test_shutdown_join_reports_still_running_codex_threads(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+        monkeypatch: pytest.MonkeyPatch,
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        """R7(b): the loop's shutdown path bounds the join and reports the count."""
+        ws_a = make_git_repo("workspace/codex-join-a")
+        client_a = ClientConfig(
+            name="client-a",
+            workspace_path=ws_a,
+            default_branch="main",
+            worktree_base=tmp_path / "worktrees-join",
+        )
+        _make_clients_yaml(tmp_dispatch_dirs, client_a, codex_review_client="client-a")
+        add_ticket(TicketTask(ticket_id="A-2", client="client-a", stage=Stage.REVIEW))
+
+        blocked_review = _BlockedCodexReview(ws_a, "A-2")
+        monkeypatch.setattr(
+            "cw.codex_background.run_review_with_fix_loop", blocked_review
+        )
+        # Keep the bounded join bounded *and fast* — the point is that it does
+        # not wait the review out, not how many seconds it waits.
+        monkeypatch.setattr(
+            "cw.codex_background._CODEX_BACKGROUND_JOIN_TIMEOUT_SECONDS", 0.05
+        )
+
+        captured: list[dict[str, object]] = []
+
+        def capture_event(
+            event_type: object,
+            payload: dict[str, object] | None = None,
+            **_kwargs: object,
+        ) -> object:
+            if event_type == OrchestratorEventType.DISPATCH_LOOP_EXITED:
+                captured.append(payload or {})
+            return None
+
+        monkeypatch.setattr("cw.dispatch.loop.record_event", capture_event)
+
+        try:
+            run_dispatch_loop(once=True, native_daemon=mock_native_daemon)
+
+            assert blocked_review.entered.wait(timeout=10.0)
+            assert len(captured) == 1
+            assert captured[0]["codex_threads_still_running"] == 1
+        finally:
+            blocked_review.release.set()
+            join_outstanding_codex_threads(timeout_seconds=10.0)
+
+    def test_boot_pass_flags_codex_session_orphaned_by_a_crash(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+        mock_native_daemon: FakeNativeDaemonClient,
+    ) -> None:
+        """R7(c): an ACTIVE codex session at boot is parked before the first tick.
+
+        No live thread exists — that is the point: a SIGKILL leaves nothing to
+        join, so only a boot pass can notice the orphan.
+        """
+        from cw.reconcile.codex_boot import CODEX_ORPHANED_AT_BOOT_DISPOSITION
+
+        ws_a = make_git_repo("workspace/codex-boot-a")
+        client_a = ClientConfig(
+            name="client-a",
+            workspace_path=ws_a,
+            default_branch="main",
+            worktree_base=tmp_path / "worktrees-boot",
+        )
+        _make_clients_yaml(tmp_dispatch_dirs, client_a, codex_review_client="client-a")
+
+        worktree = tmp_path / "orphan-wt"
+        (worktree / ".claude").mkdir(parents=True)
+        (worktree / ".claude" / "cw-context.json").write_text('{"headless": true}')
+        orphan = _make_daemon_session(
+            id="orphan-sid",
+            name="client-a/auto-dev/A-3",
+            client="client-a",
+            status=SessionStatus.ACTIVE,
+            worktree_path=worktree,
+        )
+        save_state(CwState(sessions=[orphan]))
+        add_ticket(
+            TicketTask(
+                ticket_id="A-3",
+                client="client-a",
+                stage=Stage.REVIEW,
+                status=QueueItemStatus.RUNNING,
+                session_id="orphan-sid",
+            )
+        )
+
+        run_dispatch_loop(once=True, native_daemon=mock_native_daemon)
+
+        task = next(t for t in load_dev_queue().tasks if t.ticket_id == "A-3")
+        assert task.status is QueueItemStatus.BLOCKED_ON_USER
+        events = read_events(
+            consumer="test-codex-boot-e2e",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert any(
+            e.payload["paused_status"] == CODEX_ORPHANED_AT_BOOT_DISPOSITION
+            for e in events
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestParkRunningTaskExpectedSessionId
+# ---------------------------------------------------------------------------
+
+
+class TestParkRunningTaskExpectedSessionId:
+    """#1727 round 5: ``expected_session_id`` closes the boot-reconcile TOCTOU.
+
+    ``cw.reconcile.codex_boot`` checks ``task.session_id == session.id`` on a
+    snapshot read taken before the lock is acquired. Without a matching check
+    at write time, a row re-claimed by a fresh session between that snapshot
+    and this call could still be parked as a false-positive crash orphan.
+    ``expected_session_id`` re-verifies identity atomically under the same
+    ``dev_queue_lock()`` the transition itself runs under.
+    """
+
+    def test_matching_expected_session_id_parks_as_before(
+        self, tmp_dispatch_dirs: Path
+    ) -> None:
+        add_ticket(
+            TicketTask(
+                ticket_id="PARK-1",
+                client="test-client",
+                status=QueueItemStatus.RUNNING,
+                session_id="sess-current",
+            )
+        )
+
+        _park_running_task_blocked_on_user(
+            ticket_id="PARK-1",
+            client_name="test-client",
+            disposition="codex_review_orphaned_at_boot",
+            breadcrumbs="orphan",
+            expected_session_id="sess-current",
+        )
+
+        task = load_dev_queue().tasks[0]
+        assert task.status is QueueItemStatus.BLOCKED_ON_USER
+        assert task.session_id is None
+
+    def test_mismatched_expected_session_id_skips_the_park(
+        self, tmp_dispatch_dirs: Path
+    ) -> None:
+        """The row was re-claimed by a newer session; the stale caller must not
+        touch it, even though (ticket_id, client, RUNNING) still match."""
+        add_ticket(
+            TicketTask(
+                ticket_id="PARK-2",
+                client="test-client",
+                status=QueueItemStatus.RUNNING,
+                session_id="sess-new-successor",
+            )
+        )
+
+        _park_running_task_blocked_on_user(
+            ticket_id="PARK-2",
+            client_name="test-client",
+            disposition="codex_review_orphaned_at_boot",
+            breadcrumbs="orphan",
+            expected_session_id="sess-stale-snapshot",
+        )
+
+        task = load_dev_queue().tasks[0]
+        assert task.status is QueueItemStatus.RUNNING
+        assert task.session_id == "sess-new-successor"
+        events = read_events(
+            consumer="test-park-mismatch-no-attention",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert events == []
+
+    def test_expected_session_id_omitted_preserves_pre_spawn_behavior(
+        self, tmp_dispatch_dirs: Path
+    ) -> None:
+        """The two pre-spawn callers (dirty-worktree guard, codex capability
+        gate) pass no ``expected_session_id`` — park must proceed exactly as
+        it did before this parameter existed."""
+        add_ticket(
+            TicketTask(
+                ticket_id="PARK-3",
+                client="test-client",
+                status=QueueItemStatus.RUNNING,
+                session_id=None,
+            )
+        )
+
+        _park_running_task_blocked_on_user(
+            ticket_id="PARK-3",
+            client_name="test-client",
+            disposition="dirty_worktree",
+            breadcrumbs="/some/path",
+        )
+
+        task = load_dev_queue().tasks[0]
+        assert task.status is QueueItemStatus.BLOCKED_ON_USER
+
+
+# ---------------------------------------------------------------------------
 # TestDispatchLoopExitedEvent
 # ---------------------------------------------------------------------------
 
@@ -9478,6 +9830,29 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.stage == Stage.FINALIZE
 
+    def test_blocked_plan_scope_drift_at_impl_parks_without_regress(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """blocked/plan_scope_drift fires during Stage 2 (IMPL), so
+        task.stage == Stage.IMPL at apply time -- Rule 5a's regress branch
+        requires task.stage == Stage.FINALIZE (routing.py:1343-1349) and is
+        therefore structurally unreachable here, independent of
+        FINALIZE_REGRESS_BLOCKER_REASONS membership (#1779, R3).
+        """
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("PSD-IMPL-1", stage=Stage.IMPL)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "stage2_impl", "reason": "plan_scope_drift"},
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.stage == Stage.IMPL
+        assert task.regress_attempts == 0
+        assert task.blocked_reason == "plan_scope_drift"
+
     def test_awaiting_operator_reason_constant_value(self) -> None:
         from cw.dispatch import _AWAITING_OPERATOR_REASON
 
@@ -9491,25 +9866,48 @@ class TestApplyStagedDecision:
         that can carry a non-null blocker (schema.py's #777 exception --
         'blocked'/'merge_gate_blocked' only) plus the _AWAITING_OPERATOR_REASON
         substitute Rule 5 writes when blocker_reason is in
-        OPERATOR_UNAVAILABLE_BLOCKER_REASONS.
+        OPERATOR_UNAVAILABLE_BLOCKER_REASONS, plus (#1729) the
+        "codex_must_fix_mechanically_rejected" substitute -- the one gate-class
+        park (#1714's _park_must_fix_mechanically_rejected) whose breadcrumbs
+        genuinely originate from a populated blocker dict rather than a
+        hardcoded breadcrumbs="" literal.
+
+        Membership in BREADCRUMB_ELIGIBLE_PAUSED_STATUSES does not by itself
+        cause a breadcrumb to be emitted: every producing _park_* helper must
+        independently stamp non-empty breadcrumbs content (the constant has no
+        runtime reader in src/ -- see the block comment above its definition
+        in routing.py). The exclusion assertions below prove the other
+        gate-class parks (review_health_gate, finalize_hold, signoff_gate,
+        approval_gate -- the last also covering scope_hint_gate, which reuses
+        approval_gate's paused_status literal) stay out of this set: they
+        hardcode breadcrumbs="", so adding their paused_status here would be
+        cosmetic, not a fix.
         """
         from cw.auto_dev_result import (
             OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
             STAGE_FAILURE_STATUSES,
         )
         from cw.dispatch import (
+            _APPROVAL_GATE_REASON,
             _AWAITING_OPERATOR_REASON,
+            _FINALIZE_HOLD_REASON,
+            _REVIEW_HEALTH_GATE_REASON,
+            _SIGNOFF_GATE_REASON,
             BREADCRUMB_ELIGIBLE_PAUSED_STATUSES,
         )
+
+        must_fix_mechanically_rejected = "codex_must_fix_mechanically_rejected"
 
         assert {
             "blocked",
             "merge_gate_blocked",
             "awaiting_operator_availability",
+            must_fix_mechanically_rejected,
         } == BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
         # every non-substitute member is drawn from STAGE_FAILURE_STATUSES
         assert (
-            BREADCRUMB_ELIGIBLE_PAUSED_STATUSES - {_AWAITING_OPERATOR_REASON}
+            BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+            - {_AWAITING_OPERATOR_REASON, must_fix_mechanically_rejected}
         ) <= STAGE_FAILURE_STATUSES
         # scope_exceeded/forbidden_area excluded by design (#777: never carry a
         # blocker), not oversight
@@ -9520,6 +9918,20 @@ class TestApplyStagedDecision:
         # set is non-empty
         assert OPERATOR_UNAVAILABLE_BLOCKER_REASONS
         assert _AWAITING_OPERATOR_REASON in BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+        assert must_fix_mechanically_rejected in BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+
+        # gate-class exclusion (#1729): each of these hardcodes breadcrumbs=""
+        # at its _park_* call site (routing.py), so membership here would not
+        # change what gets emitted -- their paused_status must stay excluded.
+        assert not (
+            {
+                _REVIEW_HEALTH_GATE_REASON,
+                _FINALIZE_HOLD_REASON,
+                _SIGNOFF_GATE_REASON,
+                _APPROVAL_GATE_REASON,
+            }
+            & BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+        )
 
     # -- review-health gate (#1702) --------------------------------------
 
@@ -9661,6 +10073,130 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.PENDING
         assert task.stage == Stage.FINALIZE
 
+    # -- mechanically-rejected MUST_FIX gate (#1714) -----------------------
+
+    @staticmethod
+    def _mech_rejected_result(stage: str = "stage3_review") -> dict[str, object]:
+        from cw.codex_review import CODEX_MUST_FIX_MECHANICALLY_REJECTED
+
+        return {
+            "status": "blocked",
+            "blocker": {
+                "stage": stage,
+                "reason": CODEX_MUST_FIX_MECHANICALLY_REJECTED,
+            },
+        }
+
+    def test_blocked_must_fix_mechanically_rejected_parks_with_dedicated_disposition(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """#1714: Rule 5's sole reason-keyed override stamps its own disposition.
+
+        Mirrors ``test_stage_complete_review_health_gate_parks_without_signoff``
+        (task-state + SESSION_NEEDS_ATTENTION payload assertions), adapted to
+        Rule 5's blocked-status entry point.
+        """
+        from cw.codex_review import CODEX_MUST_FIX_MECHANICALLY_REJECTED
+        from cw.dev_queue import REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION
+        from cw.dispatch import apply_staged_decision
+
+        attention = capture_events(
+            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+
+        task = self._make_running_task("MFR-1", stage=Stage.REVIEW)
+        apply_staged_decision(
+            task, "blocked", self._mech_rejected_result(), self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION
+        assert task.disposition == "codex_must_fix_mechanically_rejected"
+        assert task.blocked_reason == CODEX_MUST_FIX_MECHANICALLY_REJECTED
+        assert task.stage == Stage.REVIEW
+
+        assert len(attention) == 1
+        event_type, payload, correlation_id = attention[0]
+        assert event_type == OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        assert payload["paused_status"] == "codex_must_fix_mechanically_rejected"
+        # Unlike the review-health gate, this park genuinely originates from a
+        # populated blocker dict, so breadcrumbs carries the real reason.
+        assert payload["breadcrumbs"] == CODEX_MUST_FIX_MECHANICALLY_REJECTED
+        assert payload["ticket_id"] == "MFR-1"
+        assert correlation_id == "MFR-1"
+
+    def test_blocked_must_fix_mechanically_rejected_disposition_is_not_verbatim_blocked(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """#1714: proves the override bypasses the generic verbatim-status stamp.
+
+        ``_hold_aware_disposition("blocked", <this reason>)`` returns the literal
+        ``"blocked"`` (asserted directly in test_dev_queue.py) — so if the
+        routing call site ever regressed to the generic path, this would be
+        ``"blocked"`` and the park would be indistinguishable from any other.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("MFR-2", stage=Stage.REVIEW)
+        apply_staged_decision(
+            task, "blocked", self._mech_rejected_result(), self._clients(tmp_path)
+        )
+
+        assert task.disposition != "blocked"
+
+    def test_blocked_other_reason_still_uses_generic_disposition(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """#1714 regression guard: every other blocker_reason is untouched."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("MFR-3", stage=Stage.REVIEW)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "stage3_review", "reason": "agent_block"},
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "blocked"
+        assert task.blocked_reason == "agent_block"
+
+    def test_blocked_must_fix_mechanically_rejected_never_finalize_regresses(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """#1714: the new branch returns before Rule 5a's self-heal regress.
+
+        The reason is not a member of ``FINALIZE_REGRESS_BLOCKER_REASONS``
+        (``{"agent_block"}``) so no collision is possible today, but the branch
+        is placed first and returns immediately so that fact need not hold
+        forever. Driven at FINALIZE because 5a is the only FINALIZE-gated path.
+        """
+        from cw.dev_queue import REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION
+        from cw.dispatch import apply_staged_decision
+
+        requeued = capture_events(
+            "cw.dispatch.routing", OrchestratorEventType.TICKET_REQUEUED
+        )
+
+        task = self._make_running_task("MFR-4", stage=Stage.FINALIZE)
+        apply_staged_decision(
+            task,
+            "blocked",
+            self._mech_rejected_result(stage="stage4_finalize"),
+            self._clients(tmp_path),
+        )
+
+        assert requeued == []
+        assert task.stage == Stage.FINALIZE
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION
+
     def test_review_pending_approval_small_tier_review_health_gate_parks(
         self, tmp_dispatch_dirs: Path, tmp_path: Path
     ) -> None:
@@ -9740,6 +10276,7 @@ class TestApplyStagedDecision:
             reviewed_sha="sha",
             session_id="s-1702",
             default_branch="main",
+            fix_loop_enabled=False,
         )
         # The producer is untouched by this ticket: assert its real output shape
         # before feeding it through routing.
