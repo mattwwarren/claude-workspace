@@ -534,6 +534,13 @@ def _render_rejected_must_fix(verdict: ReviewVerdict) -> list[str]:
     ``RejectedFinding.raw`` is the pre-validation ``Finding.model_dump()``, so
     it carries ``Finding``'s field names — but read via ``.get()`` because a
     rejected payload is by definition one that failed validation.
+
+    ``rf.detail`` (#1792), when non-blank (populated for the
+    ``evidence_not_in_diff`` reason specifically — see
+    ``_evidence_window_discrepancy_detail``), renders as an indented
+    follow-up line so the diagnosable discrepancy (declared vs. evidence
+    line counts) reaches the operator reading the posted comment, not just
+    the persisted verdict artifact.
     """
     if not verdict.rejected_must_fix:
         return []
@@ -545,6 +552,8 @@ def _render_rejected_must_fix(verdict: ReviewVerdict) -> list[str]:
             loc = f"{loc}:{line_start}"
         summary = str(rf.raw.get("summary", "<no summary>"))
         lines.append(f"- **{loc}** — {summary} (rejected: {rf.reason})")
+        if rf.detail:
+            lines.append(f"  - {rf.detail}")
     lines.append("")
     return lines
 

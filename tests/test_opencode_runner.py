@@ -12,10 +12,12 @@ from cw.opencode_runner import (
     OPENCODE_LOG_RELATIVE_PATH,
     OPENCODE_NO_OUTPUT,
     OPENCODE_NOT_FOUND,
+    STAGE4A_MERGE_GATE,
     FakeOpencodeRunner,
     RealOpencodeRunner,
     build_argv,
     build_env,
+    build_finalize_prompt,
     extract_text_from_jsonl,
     make_blocked,
     opencode_available,
@@ -273,3 +275,25 @@ def test_synthesize_opencode_result_empty_log(
     assert isinstance(result, AutoDevResult)
     assert result.blocker is not None
     assert result.blocker.reason == OPENCODE_NO_OUTPUT
+
+
+# ---------------------------------------------------------------------------
+# build_finalize_prompt + STAGE4A_MERGE_GATE (#1670)
+# ---------------------------------------------------------------------------
+
+
+def test_stage4a_merge_gate_constant() -> None:
+    """STAGE4A_MERGE_GATE is the canonical FINALIZE entry-point marker."""
+    assert STAGE4A_MERGE_GATE == "stage4a_merge_gate"
+
+
+def test_build_finalize_prompt_references_skill_and_ticket() -> None:
+    """build_finalize_prompt references skill, ticket_id, and stage markers."""
+    prompt = build_finalize_prompt("PROJ-42")
+    assert "auto-dev-finalize.md" in prompt
+    assert "PROJ-42" in prompt
+    assert "--headless" in prompt
+    assert "stage4a_merge_gate" in prompt
+    assert "stage4b_pr_create" in prompt
+    assert "stage5_post_create" in prompt
+    assert "<<<AUTO_DEV_RESULT>>>" in prompt

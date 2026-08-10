@@ -71,6 +71,7 @@ from cw.models import (
     CODEX_BACKEND,
     DEFAULT_GLOBAL_ATTEMPT_CEILING,
     DEFAULT_LANE,
+    OPENCODE_BACKEND,
     ClientConcurrencyOverride,
     ClientConfig,
     ConcurrencyOverrides,
@@ -6172,6 +6173,148 @@ class TestLaneCapCountingWithAwaitingSignoff:
         ]
         assert {"ticket_id": "T2", "status": "running"} in occupants["impl"]
         assert len(occupants["impl"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# opencode lane serialization (#1671 R7)
+# ---------------------------------------------------------------------------
+
+
+def test_opencode_lane_max1_running_holds_slot(
+    tmp_dispatch_dirs: Path,
+    sample_client_config: ClientConfig,
+) -> None:
+    """A RUNNING opencode task in a max_parallel=1 lane blocks a second spawn.
+
+    Lane serialization is backend-agnostic (OCCUPIED_LANE_STATUSES counts by
+    status, not by executor), but this test pins the property for an
+    opencode-configured lane specifically (#1671 R7).
+    """
+    from cw.models import StagePipelineConfig
+
+    lanes = [
+        LaneConfig(
+            name="impl",
+            max_parallel=1,
+            pipeline=StagePipelineConfig(
+                executors={
+                    Stage.FINALIZE: StageExecutorConfig(backend=OPENCODE_BACKEND)
+                }
+            ),
+        )
+    ]
+    client = ClientConfig(
+        name="test-client",
+        workspace_path=sample_client_config.workspace_path,
+        default_branch="main",
+        lanes=lanes,
+    )
+    _make_clients_yaml(tmp_dispatch_dirs, client)
+
+    running_task = TicketTask(
+        ticket_id="OC-RUNNING",
+        client="test-client",
+        lane="impl",
+        stage=Stage.FINALIZE,
+    )
+    running_task.status = QueueItemStatus.RUNNING
+    running_task.session_id = "sess-oc-running"
+    with dev_queue_lock():
+        store = load_dev_queue()
+        store.tasks.append(running_task)
+        save_dev_queue(store)
+
+    sess = Session(
+        id="sess-oc-running",
+        name="test-client/auto-dev/OC-RUNNING",
+        client="test-client",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=sample_client_config.workspace_path,
+    )
+    save_state(CwState(sessions=[sess]))
+
+    add_ticket(
+        TicketTask(
+            ticket_id="OC-PENDING",
+            client="test-client",
+            lane="impl",
+            stage=Stage.FINALIZE,
+        )
+    )
+
+    config = OrchestratorConfig(default_ceiling=1)
+    daemon = FakeNativeDaemonClient()
+    result = dispatch_tick(config, native_daemon=daemon)
+
+    assert result.spawned == 0
+
+
+def test_opencode_lane_max1_blocked_holds_slot(
+    tmp_dispatch_dirs: Path,
+    sample_client_config: ClientConfig,
+) -> None:
+    """A BLOCKED_ON_USER opencode task in a max_parallel=1 lane blocks spawn."""
+    from cw.models import StagePipelineConfig
+
+    lanes = [
+        LaneConfig(
+            name="impl",
+            max_parallel=1,
+            pipeline=StagePipelineConfig(
+                executors={
+                    Stage.FINALIZE: StageExecutorConfig(backend=OPENCODE_BACKEND)
+                }
+            ),
+        )
+    ]
+    client = ClientConfig(
+        name="test-client",
+        workspace_path=sample_client_config.workspace_path,
+        default_branch="main",
+        lanes=lanes,
+    )
+    _make_clients_yaml(tmp_dispatch_dirs, client)
+
+    blocked_task = TicketTask(
+        ticket_id="OC-BLOCKED",
+        client="test-client",
+        lane="impl",
+        stage=Stage.FINALIZE,
+    )
+    blocked_task.status = QueueItemStatus.BLOCKED_ON_USER
+    blocked_task.session_id = "sess-oc-blocked"
+    with dev_queue_lock():
+        store = load_dev_queue()
+        store.tasks.append(blocked_task)
+        save_dev_queue(store)
+
+    sess = Session(
+        id="sess-oc-blocked",
+        name="test-client/auto-dev/OC-BLOCKED",
+        client="test-client",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=sample_client_config.workspace_path,
+    )
+    save_state(CwState(sessions=[sess]))
+
+    add_ticket(
+        TicketTask(
+            ticket_id="OC-PENDING-2",
+            client="test-client",
+            lane="impl",
+            stage=Stage.FINALIZE,
+        )
+    )
+
+    config = OrchestratorConfig(default_ceiling=1)
+    daemon = FakeNativeDaemonClient()
+    result = dispatch_tick(config, native_daemon=daemon)
+
+    assert result.spawned == 0
 
 
 # ---------------------------------------------------------------------------

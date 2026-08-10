@@ -506,6 +506,27 @@ def _mechanically_rejected_must_fix_doc() -> ReviewerFindingsDocument:
     )
 
 
+def _evidence_not_in_diff_must_fix_doc() -> ReviewerFindingsDocument:
+    """A doc whose MUST_FIX finding resolves to a real diff line window but
+    whose evidence text is absent from it (#1792).
+
+    Sibling of :func:`_mechanically_rejected_must_fix_doc`: that fixture is
+    rejected ``unknown_file`` (a reason ``RejectedFinding.detail`` is never
+    populated for); this one is rejected ``evidence_not_in_diff``, the one
+    reason #1792 populates ``detail`` for.
+    """
+    return _make_reviewer_doc(
+        _make_finding(
+            severity="MUST_FIX",
+            file="src/cw/foo.py",
+            line_start=10,
+            line_end=10,
+            evidence="not present anywhere",
+            summary="evidence mismatch",
+        )
+    )
+
+
 class TestSynthesizeCodexReviewResultMechanicalRejection:
     def test_mechanically_rejected_must_fix_blocks(
         self, make_git_repo: Callable[[str], Path]
@@ -630,6 +651,17 @@ class TestRenderVerdictComment:
         assert "BLOCKING" in body
         assert "bad thing" in body
         assert "dropped one" in body
+
+    def test_render_verdict_comment_includes_discrepancy_detail(self) -> None:
+        # #1792: an evidence_not_in_diff rejection's populated `detail`
+        # (unlike a mechanically-rejected unknown_file's blank one, covered
+        # above) surfaces on the rendered comment.
+        verdict = consolidate_verdict(
+            [_evidence_not_in_diff_must_fix_doc()], _make_diff(), reviewed_sha="sha"
+        )
+        assert verdict.rejected_must_fix[0].detail != ""
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert verdict.rejected_must_fix[0].detail in body
 
     def test_clean_verdict_has_no_rejected_must_fix_section(self) -> None:
         verdict = consolidate_verdict(
