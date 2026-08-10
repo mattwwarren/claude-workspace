@@ -507,12 +507,7 @@ class TestInstallSkillsAgentOverwriteSafety:
 
         dest = fake_home / ".claude" / "agents" / "code-quality-reviewer.md"
         dest.write_text("# hand-edited content B\n")
-        src = (
-            fake_repo_with_agents
-            / ".claude"
-            / "agents"
-            / "code-quality-reviewer.md"
-        )
+        src = fake_repo_with_agents / ".claude" / "agents" / "code-quality-reviewer.md"
 
         r2 = _run(script, fake_home)
         assert r2.returncode != 0
@@ -529,12 +524,7 @@ class TestInstallSkillsAgentOverwriteSafety:
         assert r1.returncode == 0, r1.stderr
 
         # cw's own source is updated; destination untouched by anyone else.
-        src = (
-            fake_repo_with_agents
-            / ".claude"
-            / "agents"
-            / "code-quality-reviewer.md"
-        )
+        src = fake_repo_with_agents / ".claude" / "agents" / "code-quality-reviewer.md"
         src.write_text("# code quality reviewer v2\n")
 
         r2 = _run(script, fake_home)
@@ -591,8 +581,7 @@ class TestInstallSkillsAgentOverwriteSafety:
         assert r2.returncode != 0
 
         assert manifest.read_text() == manifest_before, (
-            "manifest must not be rewritten on a run that aborts due to a "
-            "conflict"
+            "manifest must not be rewritten on a run that aborts due to a conflict"
         )
         assert dest.exists(), (
             "the manifest-scoped prune step must not delete the hand-edited "
@@ -631,10 +620,7 @@ class TestInstallSkillsAgentOverwriteSafety:
         assert r1.returncode == 0, r1.stderr
 
         baseline = (
-            fake_home
-            / ".claude"
-            / ".cw-agents-baseline"
-            / "code-quality-reviewer.md"
+            fake_home / ".claude" / ".cw-agents-baseline" / "code-quality-reviewer.md"
         )
         assert baseline.exists(), "baseline shadow-copy must be written on install"
 

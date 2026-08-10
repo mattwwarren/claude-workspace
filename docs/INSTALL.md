@@ -91,6 +91,8 @@ Re-running `scripts/install-skills.sh` (directly, or via `./scripts/install.sh`)
 
 Agents (`~/.claude/agents`) are unaffected by this — they are still copied (not symlinked), and on a typical setup the destination itself is a symlink into the `global-claude` repo. That layout is unchanged and out of scope for this doc.
 
+Because agents are copied rather than symlinked, `install-skills.sh` guards against silently clobbering a hand-edit: it keeps a baseline shadow copy of each agent file at `~/.claude/.cw-agents-baseline/`, and refuses (non-zero exit, naming the file and both paths) to overwrite a destination that diverges from both the source and that baseline. Pass `--force` to overwrite anyway.
+
 ### For Development
 
 ```bash
