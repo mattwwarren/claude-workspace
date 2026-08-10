@@ -241,6 +241,223 @@ def _pr1729_captured_diff() -> CapturedDiff:
     )
 
 
+# -- #1764 fixture: real #1703 diff (src/cw/prompts.py), corroboration -----
+#
+# Corroborating evidence for the same rejection mode (#1764) on an
+# independent function: the ticket's own live #1703 reproduction rejected a
+# structural finding on ``get_purpose_prompt`` (session bf5d88b3). Real diff
+# captured via `git show 535fbd23713825eac75c22210c1b5d833c83a7cd --
+# src/cw/prompts.py` (PR #1769, "feat(#1703): parameterize the quality-gate
+# sentence in impl/debt prompts"), stripped of the commit-message preamble
+# down to the first `diff --git` line. Built as a list of individually
+# quoted line literals rather than one triple-quoted block -- several diff
+# context lines are a bare " " (blank source line, single-space context
+# marker), which a triple-quoted literal risks silently losing to
+# editor/tool trailing-whitespace trimming (mirrors the
+# _PR1784_INSTALL_SKILLS_DIFF_LINES rationale below).
+_PR1703_PROMPTS_DIFF_LINES: list[str] = [
+    "diff --git a/src/cw/prompts.py b/src/cw/prompts.py",
+    "index e8e640b5..08ec002b 100644",
+    "--- a/src/cw/prompts.py",
+    "+++ b/src/cw/prompts.py",
+    "@@ -2,6 +2,10 @@",
+    " ",
+    " from __future__ import annotations",
+    " ",
+    "+from dataclasses import dataclass",
+    "+",
+    "+from cw.models.enums import SessionPurpose",
+    "+",
+    ' CW_COMMAND_REFERENCE = """\\',
+    " [cw commands]",
+    " - cw dev-queue add <ticket> — enqueue a ticket for the auto-dev pipeline",
+    "@@ -21,35 +25,73 @@ _AGENT_TEAM_GUIDANCE = (",
+    '     "- Feed review findings back as follow-up work items."',
+    " )",
+    " ",
+    "-PURPOSE_PROMPTS: dict[str, str] = {",
+    '-    "impl": (',
+    '-        "You are in the IMPLEMENTATION session. "',
+    '-        "Write code, implement features, and fix bugs. "',
+    '-        "If you notice quality issues (linting, types, duplication, docs), "',
+    '-        "note them for later cleanup but stay focused on implementation. "',
+    '+_DEFAULT_QUALITY_GATES = "ruff check, mypy, pytest"',
+    "+",
+    "+",
+    "+def _quality_gate_sentence(commands: str) -> str:",
+    '+    """Render the gate sentence naming *commands* as the gate list."""',
+    "+    return (",
+    '         "Before finishing any unit of work, run quality gates "',
+    '-        "(ruff check, mypy, pytest) and fix all issues." + _AGENT_TEAM_GUIDANCE',
+    '+        f"({commands}) and fix all issues."',
+    "+    )",
+    "+",
+    "+",
+    "+@dataclass(frozen=True)",
+    "+class _PromptSpec:",
+    "+    base: str",
+    "+    gated: bool = False",
+    "+",
+    "+",
+    "+def _render_prompt(spec: _PromptSpec, quality_gate_commands: str) -> str:",
+    '+    """Render a prompt spec with the configured quality gate commands."""',
+    "+    gate_sentence = (",
+    "+        _quality_gate_sentence(quality_gate_commands)",
+    "+        if spec.gated and quality_gate_commands",
+    '+        else ""',
+    "+    )",
+    "+    return spec.base + gate_sentence + _AGENT_TEAM_GUIDANCE",
+    "+",
+    "+",
+    "+_PROMPT_SPECS: dict[SessionPurpose, _PromptSpec] = {",
+    "+    SessionPurpose.IMPL: _PromptSpec(",
+    "+        base=(",
+    '+            "You are in the IMPLEMENTATION session. "',
+    '+            "Write code, implement features, and fix bugs. "',
+    '+            "If you notice quality issues (linting, types, duplication, docs), "',
+    '+            "note them for later cleanup but stay focused on implementation. "',
+    "+        ),",
+    "+        gated=True,",
+    "     ),",
+    '-    "idea": (',
+    '-        "You are in the IDEA session. "',
+    (
+        '-        "Brainstorm approaches, '
+        'explore design options, and prototype solutions. "'
+    ),
+    '-        "Think creatively about architecture and features. "',
+    (
+        '-        "Document ideas clearly for the '
+        'implementation session to pick up.\\n\\n"'
+    ),
+    '-        "CRITICAL: Never clear context when exiting plan mode. "',
+    '-        "Clearing context drops all delegation work on the floor. "',
+    '-        "Always continue in the same context after plan approval."',
+    "-        + _AGENT_TEAM_GUIDANCE",
+    "+    SessionPurpose.IDEA: _PromptSpec(",
+    "+        base=(",
+    '+            "You are in the IDEA session. "',
+    (
+        '+            "Brainstorm approaches, '
+        'explore design options, and prototype solutions. "'
+    ),
+    '+            "Think creatively about architecture and features. "',
+    (
+        '+            "Document ideas clearly for the '
+        'implementation session to pick up.\\n\\n"'
+    ),
+    '+            "CRITICAL: Never clear context when exiting plan mode. "',
+    '+            "Clearing context drops all delegation work on the floor. "',
+    '+            "Always continue in the same context after plan approval."',
+    "+        )",
+    "     ),",
+    '-    "debt": (',
+    '-        "You are in the TECH DEBT session. "',
+    (
+        '-        "Fix linting violations, type errors, duplication, and '
+        'documentation gaps. "'
+    ),
+    '-        "Do not implement new features or change behavior. "',
+    '-        "Keep changes minimal and focused on quality. "',
+    '-        "Before finishing any unit of work, run quality gates "',
+    '-        "(ruff check, mypy, pytest) and fix all issues." + _AGENT_TEAM_GUIDANCE',
+    "+    SessionPurpose.DEBT: _PromptSpec(",
+    "+        base=(",
+    '+            "You are in the TECH DEBT session. "',
+    (
+        '+            "Fix linting violations, type errors, duplication, and '
+        'documentation gaps. "'
+    ),
+    '+            "Do not implement new features or change behavior. "',
+    '+            "Keep changes minimal and focused on quality. "',
+    "+        ),",
+    "+        gated=True,",
+    "     ),",
+    " }",
+    " ",
+    "+PURPOSE_PROMPTS: dict[str, str] = {",
+    "+    purpose.value: _render_prompt(",
+    "+        spec=spec,",
+    "+        quality_gate_commands=_DEFAULT_QUALITY_GATES,",
+    "+    )",
+    "+    for purpose, spec in _PROMPT_SPECS.items()",
+    "+}",
+    "+",
+    " ",
+    " def build_session_context(",
+    "     client_name: str,",
+    "@@ -77,6 +119,7 @@ def get_purpose_prompt(",
+    "     *,",
+    "     client_name: str | None = None,",
+    "     workspace_path: str | None = None,",
+    "+    quality_gate_commands: str | None = None,",
+    " ) -> str | None:",
+    '     """Resolve the system prompt for a given purpose.',
+    " ",
+    "@@ -87,6 +130,16 @@ def get_purpose_prompt(",
+    "     prompt is prefixed with a ``[cw identity]`` block so the LLM knows",
+    "     which client/purpose it belongs to.",
+    " ",
+    "+    *quality_gate_commands* replaces the gate list named in the ``impl`` and",
+    "+    ``debt`` prompts, for clients whose stack is not the Python default:",
+    "+",
+    "+    - ``None`` (default): keep the default ``ruff check, mypy, pytest`` triad.",
+    '+    - ``""``: omit the gate sentence entirely.',
+    "+    - any other string: substitute it verbatim into the gate sentence.",
+    "+",
+    "+    It has no effect on ``idea`` (no gate sentence) and is superseded by a",
+    "+    whole-prompt entry in *client_overrides*.",
+    "+",
+    "     Raises ValueError if only one of *client_name* / *workspace_path*",
+    "     is provided.",
+    '     """',
+    "@@ -94,8 +147,18 @@ def get_purpose_prompt(",
+    (
+        '         msg = "client_name and workspace_path must both '
+        'be provided or both omitted"'
+    ),
+    "         raise ValueError(msg)",
+    " ",
+    "+    try:",
+    "+        prompt_spec = _PROMPT_SPECS.get(SessionPurpose(purpose))",
+    "+    except ValueError:",
+    "+        prompt_spec = None",
+    "+",
+    "     if client_overrides and purpose in client_overrides:",
+    "         prompt: str | None = client_overrides[purpose]",
+    (
+        "+    elif prompt_spec and prompt_spec.gated and "
+        "quality_gate_commands is not None:"
+    ),
+    "+        prompt = _render_prompt(",
+    "+            spec=prompt_spec,",
+    "+            quality_gate_commands=quality_gate_commands,",
+    "+        )",
+    "     else:",
+    "         prompt = PURPOSE_PROMPTS.get(purpose)",
+    " ",
+]
+_PR1703_PROMPTS_DIFF = "\n".join(_PR1703_PROMPTS_DIFF_LINES) + "\n"
+
+
+def _pr1703_captured_diff() -> CapturedDiff:
+    """Build the real #1703 ``CapturedDiff`` via the unmodified diff parser.
+
+    Mirrors :func:`_pr1729_captured_diff`'s construction.
+    """
+    file_diffs, file_line_text, file_window_text, _changed = _parse_unified_diff(
+        _PR1703_PROMPTS_DIFF
+    )
+    files = {f: sorted(lines) for f, lines in file_line_text.items()}
+    return CapturedDiff(
+        text=_PR1703_PROMPTS_DIFF,
+        files=files,
+        file_diffs=file_diffs,
+        file_line_text=file_line_text,
+        file_window_text=file_window_text,
+    )
+
+
 # -- #1792 fixtures: real #1784 diff (scripts/install-skills.sh) -----------
 #
 # Real diff captured via `git diff 132e8fd6^ 132e8fd6 --
@@ -1855,6 +2072,98 @@ class TestEnclosingDefAnchorRealFileRegression:
             _make_reviewer_doc(finding), diff, worktree=None
         )
         assert rejected[0].reason == "invalid_line_reference"
+
+
+class TestPromptsGetPurposePromptStructuralFinding:
+    """#1764 corroboration: reproduces the ticket's own live #1703 evidence
+    (session bf5d88b3) — a structural MUST_FIX anchored on
+    ``get_purpose_prompt``'s real ``def`` line in ``src/cw/prompts.py``,
+    which is not itself a changed line in the captured #1703 diff. Same
+    rejection mode as ``Test9491MustFixCaseReconstruction`` above, on an
+    independent function and via the OTHER anchor-resolution sub-path: 9491
+    resolves via #1715's plain near-line tolerance, this one only via
+    #1743's enclosing-def fallback (the claimed line sits 6 lines from the
+    nearest added line, beyond the tolerance of 3).
+    """
+
+    _SUMMARY = (
+        "get_purpose_prompt now spans 54 lines, exceeding the 50-line function limit."
+    )
+
+    def _discover_def_line(self, repo_root: Path) -> int:
+        # Discovered dynamically via ast.parse against the real
+        # src/cw/prompts.py, not hardcoded — mirrors
+        # TestEnclosingDefAnchorRealFileRegression's discipline.
+        source_path = repo_root / "src" / "cw" / "prompts.py"
+        tree = ast.parse(source_path.read_text())
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == "get_purpose_prompt"
+            ):
+                return node.lineno
+        msg = "get_purpose_prompt not found in src/cw/prompts.py"
+        raise AssertionError(msg)
+
+    def _finding(self, def_line: int) -> Finding:
+        return Finding(
+            severity="MUST_FIX",
+            file="src/cw/prompts.py",
+            line_start=def_line,
+            line_end=None,
+            summary=self._SUMMARY,
+            consequence="x",
+            suggested_fix="x",
+            evidence=self._SUMMARY,
+            confidence="HIGH",
+        )
+
+    def test_1703_line_reference_invalid_without_worktree(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        def_line = self._discover_def_line(repo_root)
+        diff = _pr1703_captured_diff()
+        finding = self._finding(def_line)
+        # Nearest added line (122) is 6 away from the claimed def line,
+        # beyond _LINE_ANCHOR_TOLERANCE (3).
+        assert _line_reference_valid(diff, finding, worktree=None) is False
+
+    def test_1703_line_reference_valid_via_enclosing_def_with_worktree(
+        self,
+    ) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        def_line = self._discover_def_line(repo_root)
+        diff = _pr1703_captured_diff()
+        assert _anchor_in_enclosing_def(diff, repo_root, "src/cw/prompts.py", def_line)
+        finding = self._finding(def_line)
+        assert _line_reference_valid(diff, finding, worktree=repo_root) is True
+
+    def test_1703_classified_evidence_not_in_diff_matching_production(
+        self,
+    ) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        def_line = self._discover_def_line(repo_root)
+        diff = _pr1703_captured_diff()
+        finding = self._finding(def_line)
+        changed = frozenset(diff.files)
+        assert (
+            _classify_finding(finding, diff, changed, worktree=repo_root)
+            == "evidence_not_in_diff"
+        )
+
+    def test_1703_rejected_via_consolidate_verdict(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        def_line = self._discover_def_line(repo_root)
+        diff = _pr1703_captured_diff()
+        finding = self._finding(def_line)
+        doc = _make_reviewer_doc(finding)
+        verdict = consolidate_verdict(
+            [doc], diff, reviewed_sha="535fbd23", worktree=repo_root
+        )
+        assert verdict.blocking is False
+        assert verdict.must_fix == []
+        assert len(verdict.rejected_must_fix) == 1
+        assert verdict.rejected_must_fix[0].reason == "evidence_not_in_diff"
+        assert verdict.rejected_must_fix[0].raw["severity"] == "MUST_FIX"
 
 
 class TestLineReferenceValidWorktreeParam:
