@@ -560,6 +560,20 @@ def _stage_regress(task: TicketTask, target_stage: Stage) -> None:
     task.stage = target_stage
     task.regress_attempts += 1
     task.regressed_into_stage = target_stage
+    # Shared seam (#1717/#1730 unified re-entry contract, GitHub issue
+    # comments posted 2026-08-10): both tickets stamp per-regress-arrival
+    # markers here, immediately before stage_base_ref is cleared below.
+    # Each field is independently gated by its own precondition and consumed
+    # exactly once by its own REVIEW-re-entry reader; neither write may
+    # clobber the other's field. #1717 owns finalize_regress_branch_head
+    # (FINALIZE-origin only, gated below). #1730's pending-operator-comment
+    # marker, if/when it lands, must follow the identical shape: stamp here,
+    # consume-once elsewhere, no cross-clobber. The mandatory compose test
+    # (a re-entry that is simultaneously a same-branch-head repeat AND
+    # carries a pending operator send-back) is #1730's obligation to write,
+    # per the paired resolution comment on both tickets.
+    if old_stage == Stage.FINALIZE:
+        task.finalize_regress_branch_head = task.stage_base_ref
     transition_task_status(task, QueueItemStatus.PENDING)
     task.session_id = None
     task.stage_base_ref = None

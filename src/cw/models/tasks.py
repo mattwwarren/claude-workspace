@@ -76,7 +76,13 @@ from cw.models.events import PrState, WatchedPr
 #      marker telling the impl-stage Pre-Stage Detector Guard that this stage
 #      entry was reached via a deliberate backward move, distinct from the
 #      cumulative, never-reset-on-advance regress_attempts.
-DEV_QUEUE_SCHEMA_VERSION = 27
+# v28: added TicketTask.finalize_regress_branch_head (GitHub #1717) —
+#      branch-head oracle stamped by _stage_regress only when regressing FROM
+#      Stage.FINALIZE, consumed (read-and-cleared) once by dispatch/routing.py's
+#      REVIEW-scoped gates to detect a finalize->impl->review round trip that
+#      landed back at REVIEW with no new commit — the #1644/#1702/#1710 silent
+#      repeat-park incident.
+DEV_QUEUE_SCHEMA_VERSION = 28
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -190,6 +196,19 @@ class TicketTask(BaseModel):
     # reset on ordinary advance without defeating the FINALIZE self-heal cap
     # (GitHub #770, FINALIZE_REGRESS_CAP in auto_dev_result/schema.py).
     regressed_into_stage: Stage | None = None
+    # Branch-head oracle for the #1717 FINALIZE-regress repeat detector: set
+    # by _stage_regress to the pre-regress stage_base_ref, but ONLY when
+    # regressing FROM Stage.FINALIZE (the #770 self-heal round trip this field
+    # exists to close the loop on). Consumed (read-and-cleared) exactly once,
+    # by dispatch/routing.py's REVIEW-scoped gates on the round trip's first
+    # REVIEW re-entry — compared against the freshly-restamped stage_base_ref
+    # to detect "no commit landed anywhere in the round trip," which would
+    # otherwise silently re-fire an identical park with no operator-visible
+    # signal that this is a repeat (GitHub #1644, #1702, #1710). Unrelated to
+    # regressed_into_stage above: distinct field, distinct owner ticket, both
+    # stamped at the same _stage_regress seam under independent preconditions
+    # (see the shared-seam comment there).
+    finalize_regress_branch_head: str | None = None
     # DEPRECATED — inert since the process-kill-timeout removal. Formerly the
     # per-ticket wall-clock budget override (#265); nothing consults it now.
     # Kept only so persisted dev-queue rows that carry the field keep loading.
