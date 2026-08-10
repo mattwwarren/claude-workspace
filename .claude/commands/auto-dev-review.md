@@ -168,11 +168,29 @@ The **action list** (bucket 1) — not "MUST_FIX only" — is what drives Step 3
 
 **Adjudication is judgment** → it stays on the coordinating session. A stateless executor must never decide whether a finding is correct — that is exactly how the "we did X for a reason" pushback gets lost. An executor may only *mechanically apply* an action-list fix the session has already decided ("change X to Y in file Z").
 
-**Recording adjudication:**
-- **Rejections (bucket 2):** record each REJECTED finding + one-line rationale; these are written to the PR body by Stage 4 (Step 4d). Append the same to `friction_highlights`. For a rejection rooted in non-obvious design intent, add an inline `# Why:` comment at the code site (per the global review-culture rule).
-- **Deferrals (bucket 3):** record each deferred finding now; Stage 4 (Step 4d) writes them into the machine-readable `DEFERRED-REVIEW-FINDINGS` block in the PR body for Step H3 to harvest. Append a one-line note to `friction_highlights`.
+**Recording adjudication:** every bucket assignment — FIX included — becomes one entry in the `ADJUDICATIONS` array described below, which is the single source both the verdict and `.cw/deferred-findings.md` are generated from. Do not record a decision in only one of the two places.
+- **Rejections (bucket 2):** one entry with `outcome: "reject"` + a one-line `rationale`; these reach the PR body via Stage 4 (Step 4d). Append the same to `friction_highlights`. For a rejection rooted in non-obvious design intent, add an inline `# Why:` comment at the code site (per the global review-culture rule).
+- **Deferrals (bucket 3):** one entry with `outcome: "defer"` + `rationale`; Stage 4 (Step 4d) writes them into the machine-readable `DEFERRED-REVIEW-FINDINGS` block in the PR body for Step H3 to harvest. Append a one-line note to `friction_highlights`.
+- **Fixes (bucket 1):** one entry with `outcome: "fix"` and no rationale. Omitting it does not fail the run, but it leaves the finding recorded as `"dropped"` (nobody decided) — and for a MUST_FIX that keeps the verdict blocking.
 
-**Stash adjudication outcomes for Stage 4.** Since PR creation happens in Stage 4 (FINALIZE), not here, write the adjudication outcomes to `.cw/deferred-findings.md` so Stage 4's Step 4d can consume them. Since Checkpoint 3a's adjudication now operates on structured `Finding` objects from `.accepted` (not freeform reviewer prose), the block's four keys below are projected mechanically: `severity` ← `finding.severity`, `summary` ← `finding.summary`, `file` ← `finding.file`, `rationale` ← the adjudication rationale recorded for the deferral. The block's shape itself is unchanged (R6):
+**Stamp the adjudication mechanically — `cw review adjudicate` (#1805).** The judgment above is unchanged; only its *serialization* is now mechanical. Before this step existed, the outcome was typed twice — once as prose into `.cw/deferred-findings.md`, once implicitly as the `disposition="fixed"` every accepted finding still carried from `cw review consolidate` — and only the first was accurate.
+
+1. As each finding is bucket-sorted, append one `Adjudication` object to an `ADJUDICATIONS` array, copying the identity fields straight off the finding:
+   ```json
+   {"severity": "<finding.severity>", "file": "<finding.file>", "line_start": <finding.line_start>, "line_end": <finding.line_end>, "evidence": "<finding.evidence>", "summary": "<finding.summary>", "outcome": "<fix|reject|defer>", "rationale": "<one-line rationale>"}
+   ```
+   `rationale` is REQUIRED (non-blank) for `reject`/`defer` and unused for `fix`. `evidence` is a same-location tiebreak, not part of the identity match — copy it, but a stale one does not break the match.
+2. After the full sort, assemble `{"verdict": <the frozen Checkpoint-3a verdict>, "adjudications": ADJUDICATIONS}` and run:
+   ```bash
+   printf '%s' "$ADJUDICATE_INPUT" | cw review adjudicate --deferred-findings-out .cw/deferred-findings.md -
+   ```
+   This writes `.cw/deferred-findings.md` for you in the documented shape below (creating `.cw/` if absent, and writing nothing at all when every finding was fixed) — do NOT also hand-author it.
+3. **Use the printed `ReviewVerdict` as this round's saved record from here on**, not the raw `cw review consolidate` output. It carries the real `disposition` per finding plus recomputed `blocking`/`must_fix`/`review.deferred`.
+4. **If the printed verdict's `unmatched_adjudication_count` is > 0, append `"adjudication_unmatched_count: <N>"` to `friction_highlights`.** A non-zero count means an adjudication entry matched no accepted finding (stale anchor, ambiguous same-location collision, duplicate entry) — the command does not fail on it, so this is the only thing that makes it visible at the approval gate.
+
+Findings the pass never covers are stamped `disposition: "dropped"`. A dropped **MUST_FIX** deliberately still counts toward `blocking`/`must_fix`: nobody decided its fate, and erring toward a gate failure beats silent pass-through. If the printed verdict blocks and you believe every MUST_FIX *was* adjudicated, the missing entry — not the finding — is the bug.
+
+The generated file's shape (unchanged, reproduced byte-for-byte by `cw review adjudicate`; Stage 4's Step 4d copies it into the PR body and the Step H3 sweep greps the sentinels literally):
 
 ```
 # Deferred Review Findings
@@ -191,7 +209,7 @@ Rejected (intentional / documented tradeoff):
 DEFERRED-REVIEW-FINDINGS -->
 ```
 
-Omit the `Rejected` section when there are no rejections. Omit the `DEFERRED-REVIEW-FINDINGS` block when there are no deferrals. Omit the file entirely when every finding was fixed (nothing to record). If `.cw/` does not exist, create it.
+The `Rejected` section is omitted when there are no rejections, the `DEFERRED-REVIEW-FINDINGS` block when there are no deferrals, and the file is not written at all when every finding was fixed — all three handled by the command, not by you.
 
 **Headless:** adjudication is autonomous — **no AskUserQuestion.** The session adjudicates deterministically, records rationale for every REJECT/DEFER in `.cw/deferred-findings.md`, and proceeds. Interactive mode MAY surface the adjudication for confirmation but defaults to the same dispositions.
 
@@ -350,6 +368,23 @@ If the output is non-empty (staged or unstaged changes exist), you MUST either:
 
 Never exit with a dirty tree and no sentinel. A session exit with no sentinel looks identical to "never ran" to the dispatcher — it resets the task to the plan stage and discards origin commits, causing an infinite plan→impl→review→silent-exit loop.
 
+### Step 3c: Verify the `fixed` claims against the diff (#1805)
+
+Run this once the round's final verdict is settled — after the fix loop converged, or after the sparse-feedback skip decided there would be no fix cycle — and **before** emitting the Stage 3 Completion sentinel. It applies whether or not a fix loop ran: a finding adjudicated FIX that nothing was ever committed for is exactly the case this catches.
+
+```bash
+git fetch origin <branch-name>
+FIX_DIFF="$(git diff <the sha the Checkpoint-3a verdict was frozen at>...origin/<branch-name>)"
+# envelope: {"verdict": <the adjudicated verdict from Checkpoint 3a / Step 3b>, "diff": "$FIX_DIFF"}
+printf '%s' "$VERIFY_INPUT" | cw review verify-fixes -
+```
+
+The diff boundary is cumulative — every commit since the verdict was frozen, not just the last fix cycle — so a fix landed in cycle 1 still counts in cycle 3.
+
+Any `disposition: "fixed"` whose cited file/line that diff never touched is downgraded to `"dropped"`, with the reason in `disposition_detail`. **Use this command's output as the round's authoritative record**, and for each downgrade append a `friction_highlights` entry, e.g. `"fixed_disposition_downgraded_to_dropped: <file>:<line>"`.
+
+This is **record-only**: a downgrade never triggers a new fix cycle and never re-opens the gate. It corrects what the record *claims* was done, which is the whole point — "we fixed it" with no diff behind it is the failure this ticket exists to make visible.
+
 ---
 
 ## Stage 3 Completion (headless only)
@@ -376,6 +411,8 @@ To resolve the tier:
 `scope.tier` must always be a concrete value (`"small"` or `"large"`) in the emitted sentinel — the schema validator requires it for any stage beyond pre-impl. Use the resolved tier when available; fall back to `"small"` when emitting the `scope_tier_unresolvable` blocked sentinel above.
 
 **`review.agents_run` must be set to the `agents_run` int from the frozen (Step 3a) `cw review consolidate` `.review` block** (see Checkpoint 3a), not left at the template's placeholder `0` and not a manually tracked dispatch count (R3). Likewise, `review.must_fix_initial` and `review.should_fix` must be sourced from that same frozen block, not recomputed at sentinel-emission time.
+
+**`review.deferred` is NOT one of the frozen three (#1805).** It is a different kind of field: `must_fix_initial`/`should_fix`/`agents_run` are a cycle-0 baseline that must not move, whereas `deferred` is *by definition* zero until adjudication happens and non-zero afterwards. Source it from the `cw review adjudicate` output (Checkpoint 3a), which recomputes it while preserving the frozen three verbatim — freezing it too would pin it at the meaningless pre-adjudication `0`.
 
 **Only emit this sentinel when invoked as a standalone `/auto-dev-review <ticket-id> --headless` command. Do NOT emit when running as part of the interactive monolith chain (`auto-dev.md` owns the sentinel in that context).**
 
