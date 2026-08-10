@@ -221,24 +221,32 @@ _PR1729_9491_MUST_FIX_FINDING_KWARGS: dict[str, object] = {
 }
 
 
-def _pr1729_captured_diff() -> CapturedDiff:
-    """Build the real #1729 ``CapturedDiff`` via the unmodified diff parser.
+def _captured_diff_from_text(diff_text: str) -> CapturedDiff:
+    """Build a real ``CapturedDiff`` from a captured unified-diff text via the
+    unmodified diff parser.
 
     Uses :func:`cw.codex_review._parse_unified_diff` against the verbatim
     diff fixture (NOT ``_make_diff``, which never generates context lines) —
     the #1738 hunk-context-window tests need real context-line content.
+    Shared by :func:`_pr1729_captured_diff`, :func:`_pr1703_captured_diff`,
+    and :func:`_pr1784_captured_diff` (#1764).
     """
     file_diffs, file_line_text, file_window_text, _changed = _parse_unified_diff(
-        _PR1729_TEST_DISPATCH_DIFF
+        diff_text
     )
     files = {f: sorted(lines) for f, lines in file_line_text.items()}
     return CapturedDiff(
-        text=_PR1729_TEST_DISPATCH_DIFF,
+        text=diff_text,
         files=files,
         file_diffs=file_diffs,
         file_line_text=file_line_text,
         file_window_text=file_window_text,
     )
+
+
+def _pr1729_captured_diff() -> CapturedDiff:
+    """Build the real #1729 ``CapturedDiff`` via the unmodified diff parser."""
+    return _captured_diff_from_text(_PR1729_TEST_DISPATCH_DIFF)
 
 
 # -- #1764 fixture: real #1703 diff (src/cw/prompts.py), corroboration -----
@@ -441,21 +449,8 @@ _PR1703_PROMPTS_DIFF = "\n".join(_PR1703_PROMPTS_DIFF_LINES) + "\n"
 
 
 def _pr1703_captured_diff() -> CapturedDiff:
-    """Build the real #1703 ``CapturedDiff`` via the unmodified diff parser.
-
-    Mirrors :func:`_pr1729_captured_diff`'s construction.
-    """
-    file_diffs, file_line_text, file_window_text, _changed = _parse_unified_diff(
-        _PR1703_PROMPTS_DIFF
-    )
-    files = {f: sorted(lines) for f, lines in file_line_text.items()}
-    return CapturedDiff(
-        text=_PR1703_PROMPTS_DIFF,
-        files=files,
-        file_diffs=file_diffs,
-        file_line_text=file_line_text,
-        file_window_text=file_window_text,
-    )
+    """Build the real #1703 ``CapturedDiff`` via the unmodified diff parser."""
+    return _captured_diff_from_text(_PR1703_PROMPTS_DIFF)
 
 
 # -- #1792 fixtures: real #1784 diff (scripts/install-skills.sh) -----------
@@ -682,19 +677,9 @@ _PR1784_INSTALL_SKILLS_DIFF = "\n".join(_PR1784_INSTALL_SKILLS_DIFF_LINES) + "\n
 
 def _pr1784_captured_diff() -> CapturedDiff:
     """Build the real #1784 ``scripts/install-skills.sh`` ``CapturedDiff`` via
-    the unmodified diff parser (mirrors :func:`_pr1729_captured_diff`).
+    the unmodified diff parser.
     """
-    file_diffs, file_line_text, file_window_text, _changed = _parse_unified_diff(
-        _PR1784_INSTALL_SKILLS_DIFF
-    )
-    files = {f: sorted(lines) for f, lines in file_line_text.items()}
-    return CapturedDiff(
-        text=_PR1784_INSTALL_SKILLS_DIFF,
-        files=files,
-        file_diffs=file_diffs,
-        file_line_text=file_line_text,
-        file_window_text=file_window_text,
-    )
+    return _captured_diff_from_text(_PR1784_INSTALL_SKILLS_DIFF)
 
 
 # Real content of scripts/install-skills.sh's post-#1784 new-file lines
@@ -2001,6 +1986,26 @@ class TestEnclosingDefAnchor:
         assert rejected[0].reason == "invalid_line_reference"
 
 
+def _find_function_node(
+    tree: ast.AST, name: str
+) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    """Find the first ``def``/``async def`` node named *name* in *tree*.
+
+    Shared by ``TestEnclosingDefAnchorRealFileRegression._discover_span`` and
+    ``TestPromptsGetPurposePromptStructuralFinding._discover_def_line`` (#1764)
+    — both discover a real function's span dynamically via ``ast.parse``
+    rather than hardcoding line numbers (#1743's discipline).
+    """
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == name
+        ):
+            return node
+    msg = f"{name} not found"
+    raise AssertionError(msg)
+
+
 class TestEnclosingDefAnchorRealFileRegression:
     """Reproduces the ticket's exact evidence: a structural finding anchored
     on ``_run_fix_and_commit``'s real ``def`` line in
@@ -2014,15 +2019,9 @@ class TestEnclosingDefAnchorRealFileRegression:
     def _discover_span(self, repo_root: Path) -> tuple[int, int]:
         source_path = repo_root / "src" / "cw" / "codex_fix_loop.py"
         tree = ast.parse(source_path.read_text())
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and node.name == "_run_fix_and_commit"
-            ):
-                assert node.end_lineno is not None
-                return node.lineno, node.end_lineno
-        msg = "_run_fix_and_commit not found in codex_fix_loop.py"
-        raise AssertionError(msg)
+        node = _find_function_node(tree, "_run_fix_and_commit")
+        assert node.end_lineno is not None
+        return node.lineno, node.end_lineno
 
     def _changed_line_beyond_tolerance(self, def_line: int, end_line: int) -> int:
         # Must sit more than _LINE_ANCHOR_TOLERANCE (3) lines from def_line so
@@ -2096,14 +2095,7 @@ class TestPromptsGetPurposePromptStructuralFinding:
         # TestEnclosingDefAnchorRealFileRegression's discipline.
         source_path = repo_root / "src" / "cw" / "prompts.py"
         tree = ast.parse(source_path.read_text())
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and node.name == "get_purpose_prompt"
-            ):
-                return node.lineno
-        msg = "get_purpose_prompt not found in src/cw/prompts.py"
-        raise AssertionError(msg)
+        return _find_function_node(tree, "get_purpose_prompt").lineno
 
     def _finding(self, def_line: int) -> Finding:
         return Finding(
