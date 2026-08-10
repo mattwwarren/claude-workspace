@@ -24,6 +24,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`cw doctor` preflight check for missing reviewer agent specs (#1776):**
+  new `agent-spec-drift` check runs per configured client, resolving every
+  reviewer role in `_REVIEWER_ROLE_AGENT_FILES` the same way #1773's review
+  pipeline does (repo-local `.claude/agents/<role>.md` first, then
+  `~/.claude/agents/<role>.md` when the repo's `agent_spec_global_fallback`
+  gate allows it) and warning when a role has no usable spec — distinguishing
+  a blank tracked file from a missing one. Detection only, advisory
+  (`ok=True`/`warn=True`, never a hard failure) — surfaces drift before a
+  reviewer silently runs unspecified mid-review.
+
 - **OpenCode executor tests, safety, and observability (#1671):**
   `queue_peek` now detects opencode sessions and parses the `.cw/opencode.log`
   JSONL log (backend-aware transcript reader) instead of searching for a
