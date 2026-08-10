@@ -246,12 +246,24 @@ All gates below run inside `$TMPWT`. Do NOT run gates from the cw session worktr
    ```
    Empty diff → `impl_failed`. The agent claimed work; no work exists.
 
-2. **File set is within the plan's enumeration:**
+2. **File set is within the plan's enumeration** (mechanical, not prose — #1779):
    ```bash
-   git -C "$TMPWT" diff --name-only "$FORK_POINT" | sort > /tmp/touched_files-$$
-   # Compare against the plan's file list (from Step 1)
+   git -C "$TMPWT" diff --name-only "$FORK_POINT" | sort > /tmp/touched_files-$CW_SESSION
+   uv run python .claude/scripts/check_plan_scope_conformance.py \
+     --plan .cw/plan.md --touched-files /tmp/touched_files-$CW_SESSION
+   SCOPE_CONFORMANCE_EXIT=$?
    ```
-   Files outside the plan's enumeration → flag as scope growth (does NOT block on its own; routes to the existing Stage 3b scope-growth handling). Missing planned files → flag as missing work.
+   Note the script itself runs from the **cw session worktree**, not `$TMPWT`: `.cw/plan.md` is session state that was never committed to the branch, so it does not exist inside the detached gate worktree. Only the file-set extraction is `-C "$TMPWT"`.
+
+   The script compares the delivered file set against the plan's `## Files Modified` enumeration and allows `max(SCOPE_DRIFT_ABS_FLOOR, round(plan_files * (SCOPE_DRIFT_RATIO - 1)))` unplanned files (v1: floor 5, ratio 1.5; per-repo override via `[tool.cw.scope_conformance]` in `pyproject.toml`). It prints a JSON verdict — `triggered`, `extra_files`, `allowed_extra`, `plan_file_count`, `delivered_file_count` — to stdout.
+
+   Disposition by exit code:
+
+   - **Exit 1 (drift):** EXIT `blocked` with `blocker.reason: "plan_scope_drift"`, `blocker.stage: "stage2_impl"`, and `blocker.details` carrying the verdict's `extra_files` list **verbatim** (e.g. `"Step 2.5 gate 2: <N> files outside the plan's enumeration (allowed <allowed_extra>). Extra: <comma-joined extra_files>"`). Do NOT spawn reviewers — a diff that outgrew its approved file set is a diff no reviewer can converge a fix loop against, which is the failure this gate exists to stop. The enumerated paths are the operator's **entire** authorization surface: if the growth was legitimate, the operator requeues the parked task directly (there is no separate in-band "this was requested" signal, by design — see #1786). The emitted sentinel MUST populate `scope.lines_actual` from the already-computed `git diff --stat` (`stage_reached: "stage2_impl"` is post-impl, and the schema rejects a null `lines_actual` there).
+   - **Exit 0 (conforming):** unchanged behavior — if the verdict's `extra_files` is non-empty, append `"impl_scope_growth: <files>"` to `friction_highlights` and continue (non-blocking; routes through the existing Stage 3b scope-growth handling).
+   - **Exit 2 (parse error, e.g. the plan has no parseable `## Files Modified` section):** do NOT block. Append `"impl_scope_conformance_unparsed: <stderr>"` to `friction_highlights` and continue — a plan the gate cannot read is a plan-format problem, not an implementation failure, and failing closed here would park every run against a legacy plan document.
+
+   Missing planned files (a planned path absent from the diff) is a separate signal the script deliberately does not fold in → flag as missing work, unchanged.
 
 3. **Test command exit code is 0:** Re-run the agent's claimed test command in `$TMPWT`:
    ```bash
