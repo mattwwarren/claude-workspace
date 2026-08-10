@@ -366,6 +366,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   task; the orchestrator session kills strays. Stage-specific adapters
   (finalize/plan/impl) are follow-on tickets (#1670, #1671). Part of #1668.
 
+- **OpenCode executor finalize adapter (#1670):** `OpencodeExecutor` is now
+  FINALIZE-only: `spawn()` returns a typed `BLOCKED`
+  (`reason=opencode_<stage>_not_implemented`) for any non-FINALIZE stage,
+  mirroring `CodexExecutor`'s REVIEW-only pattern. For FINALIZE, the adapter
+  materializes a prompt that instructs opencode to read and follow the
+  existing `auto-dev-finalize.md` skill (no new skill file) and emit the
+  `<<<AUTO_DEV_RESULT>>>` sentinel with the correct `stage_reached` marker
+  (`stage4a_merge_gate`, `stage4b_pr_create`, or `stage5_post_create`). The
+  plan-fetch pre-flight is removed for FINALIZE (the finalize flow reads
+  `.cw/context.json`, not `.cw/plan.md`). Part of #1668.
+
 - **Per-role codex reviewer metrics, and one-shot reviewer runs are now
   ephemeral (#1710):** reviewer invocations pass `--json` and `--ephemeral`,
   and the JSONL audit stream is consumed into per-role metrics on the existing

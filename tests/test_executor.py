@@ -53,6 +53,7 @@ from cw.models import (
 )
 from cw.opencode_runner import (
     OPENCODE_NOT_FOUND,
+    STAGE4A_MERGE_GATE,
     FakeOpencodeRunner,
     OpencodeRunner,
 )
@@ -1206,6 +1207,31 @@ def test_resolve_executor_opencode(tmp_config_dir: Path) -> None:
     assert isinstance(executor, OpencodeExecutor)
 
 
+def test_opencode_executor_wrong_stage_blocked(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """spawn() on a non-FINALIZE stage → blocked/opencode_<stage>_not_implemented."""
+    worktree = make_git_repo("wt-opencode-wrong-stage")
+    fake_runner = FakeOpencodeRunner()
+    config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
+    executor = OpencodeExecutor(config=config, runner=fake_runner)
+    client = ClientConfig(name="test", workspace_path=worktree)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
+
+    executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+
+    assert len(fake_runner.calls) == 0
+    state = load_state()
+    session = find_completed_session(state)
+    assert session.last_result_source == LastResultSource.EXECUTOR_DIRECT
+    result = AutoDevResult.model_validate(session.last_result)
+    assert result.status == "blocked"
+    assert result.stage_reached == STAGE4A_MERGE_GATE
+    assert result.blocker is not None
+    assert result.blocker.reason == "opencode_impl_not_implemented"
+
+
 def test_opencode_executor_blocked_binary_missing(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
@@ -1216,10 +1242,12 @@ def test_opencode_executor_blocked_binary_missing(
     config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
     executor = OpencodeExecutor(config=config, runner=fake_runner)
     client = ClientConfig(name="test", workspace_path=worktree)
-    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.FINALIZE)
 
     with patch("cw.executor.opencode_available", return_value=False):
-        executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+        executor.spawn(
+            stage=Stage.FINALIZE, task=task, worktree=worktree, client=client
+        )
 
     assert len(fake_runner.calls) == 0
     state = load_state()
@@ -1232,53 +1260,27 @@ def test_opencode_executor_blocked_binary_missing(
     assert result.blocker.retry_eligible is True
 
 
-def test_opencode_executor_blocked_plan_missing(
-    tmp_config_dir: Path,
-    make_git_repo: Callable[[str], Path],
-) -> None:
-    """Absent .cw/plan.md → blocked/plan_missing."""
-    worktree = make_git_repo("wt-opencode-plan-missing")
-    fake_runner = FakeOpencodeRunner()
-    config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
-    executor = OpencodeExecutor(config=config, runner=fake_runner)
-    client = ClientConfig(name="test", workspace_path=worktree)
-    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
-
-    with patch("cw.executor.opencode_available", return_value=True):
-        executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
-
-    assert len(fake_runner.calls) == 0
-    state = load_state()
-    session = find_completed_session(state)
-    result = AutoDevResult.model_validate(session.last_result)
-    assert result.status == "blocked"
-    assert result.blocker is not None
-    assert result.blocker.reason == PLAN_MISSING
-
-
 def test_opencode_executor_spawn_runner_path(
     tmp_config_dir: Path,
     make_git_repo: Callable[[str], Path],
 ) -> None:
-    """Happy path: pre-flight passes → launch() called, session left ACTIVE.
+    """Happy path: FINALIZE pre-flight passes → launch() called, session left ACTIVE.
 
     Fire-and-forget: liveness handle stored, no result written, session ACTIVE.
+    The argv's trailing positional is the finalize prompt (not the plan message).
     """
     worktree = make_git_repo("wt-opencode-runner-path")
-    cw_dir = worktree / ".cw"
-    cw_dir.mkdir(exist_ok=True)
-    (cw_dir / "plan.md").write_text("do the thing", encoding="utf-8")
 
     fake_runner = FakeOpencodeRunner()
     config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="genhealth/glm-5.2")
     executor = OpencodeExecutor(config=config, runner=fake_runner)
     client = ClientConfig(name="test", workspace_path=worktree)
-    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.FINALIZE)
 
     try:
         with patch("cw.executor.opencode_available", return_value=True):
             sid = executor.spawn(
-                stage=Stage.IMPL, task=task, worktree=worktree, client=client
+                stage=Stage.FINALIZE, task=task, worktree=worktree, client=client
             )
 
         assert len(fake_runner.calls) == 1
@@ -1287,6 +1289,9 @@ def test_opencode_executor_spawn_runner_path(
         assert "--format" in call["argv"]
         assert "--pure" in call["argv"]
         assert "--model" in call["argv"]
+        prompt = call["argv"][-1]
+        assert "auto-dev-finalize.md" in prompt
+        assert "T-1" in prompt
 
         state = load_state()
         session = next(s for s in state.sessions if s.id == sid)
@@ -1306,15 +1311,12 @@ def test_opencode_executor_spawn_liveness_unavailable(
 ) -> None:
     """start_time None → blocked/liveness_unavailable, session COMPLETED."""
     worktree = make_git_repo("wt-opencode-liveness-unavailable")
-    cw_dir = worktree / ".cw"
-    cw_dir.mkdir(exist_ok=True)
-    (cw_dir / "plan.md").write_text("do the thing", encoding="utf-8")
 
     fake_runner = FakeOpencodeRunner()
     config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
     executor = OpencodeExecutor(config=config, runner=fake_runner)
     client = ClientConfig(name="test", workspace_path=worktree)
-    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.FINALIZE)
 
     try:
         with (
@@ -1322,7 +1324,7 @@ def test_opencode_executor_spawn_liveness_unavailable(
             patch("cw.executor.read_process_start_time_ns", return_value=None),
         ):
             executor.spawn(
-                stage=Stage.IMPL, task=task, worktree=worktree, client=client
+                stage=Stage.FINALIZE, task=task, worktree=worktree, client=client
             )
 
         state = load_state()
@@ -1350,22 +1352,21 @@ def test_opencode_executor_exception_handler(
             raise RuntimeError(_boom_msg)
 
     worktree = make_git_repo("wt-opencode-explode")
-    cw_dir = worktree / ".cw"
-    cw_dir.mkdir(exist_ok=True)
-    (cw_dir / "plan.md").write_text("do the thing", encoding="utf-8")
 
     config = StageExecutorConfig(backend=OPENCODE_BACKEND, model="m")
     executor = OpencodeExecutor(
         config=config, runner=cast("OpencodeRunner", _ExplodingRunner())
     )
     client = ClientConfig(name="test", workspace_path=worktree)
-    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.IMPL)
+    task = TicketTask(ticket_id="T-1", client="test", stage=Stage.FINALIZE)
 
     with (
         patch("cw.executor.opencode_available", return_value=True),
         pytest.raises(RuntimeError, match=_boom_msg),
     ):
-        executor.spawn(stage=Stage.IMPL, task=task, worktree=worktree, client=client)
+        executor.spawn(
+            stage=Stage.FINALIZE, task=task, worktree=worktree, client=client
+        )
 
     state = load_state()
     session = find_completed_session(state)
