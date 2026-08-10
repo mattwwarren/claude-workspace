@@ -6,6 +6,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.32.0] - 2026-08-10
+
+### Added
+
+- **Post-impl scope-conformance gate script (#1779):**
+  `.claude/scripts/check_plan_scope_conformance.py` compares the delivered
+  diff's file set against the approved plan's `## Files Modified` list and,
+  on exceeding a proportionality threshold, emits `status: "blocked"` with
+  `blocker.reason: "plan_scope_drift"` and the offending paths enumerated.
+  Thresholds are read from a `[tool.cw.scope_conformance]` table in the
+  repo's own `pyproject.toml`, fail-safe to module defaults. Deliberately
+  ships without any operator-authorized-additions mechanism — see #1786.
+  **Known limitation:** the file-list parser recognizes only bullet lists
+  under one exact heading, so it is inert on table-formatted plans and fails
+  open. Until #1796 lands, a passing result means "no file list could be
+  parsed," not "the diff matched the plan."
+- **Plan-draft checkpointing during Stage-1 plan generation (#1778):**
+  the plan draft is now persisted at checkpoints rather than only on exit,
+  so a crashed plan stage no longer loses the entire draft. #1649 persisted
+  on exit, and a crash is not an exit.
+
 ### Fixed
 
 - **Degraded-reviewer reason no longer dropped before persistence (#1775):**
@@ -13,6 +34,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and the verdict comment renders a `DEGRADED COVERAGE` note naming each
   degraded role, instead of silently persisting an empty reason when a
   reviewer's findings were downgraded.
+
+### Documentation
+
+- **`[tool.cw.codex_review].agent_spec_global_fallback` is now documented
+  (#1782):** the key that gates #1773's global agent-spec fallback was
+  undiscoverable for the adoption case it exists to serve. Adds a
+  `CONFIG_REFERENCE.md` drift-guard test so the documentation cannot silently
+  fall out of sync with the code again.
 
 ## [1.31.0] - 2026-08-09
 
