@@ -92,3 +92,14 @@ def test_review_md_cross_references_scope_conformance_gate() -> None:
     content = _cmd("auto-dev-review.md")
     assert "check_plan_scope_conformance" in content
     assert "plan_scope_drift" in content
+
+
+def test_impl_step2_5_gate2_validates_json_verdict_before_trusting_exit_1() -> None:
+    """Exit 1 alone (e.g. a transient `uv run` failure) must not be trusted as
+    genuine drift — the prose must require a JSON-verdict check with a
+    `triggered` key before building `plan_scope_drift` blocker.details (#1779
+    fix cycle 1)."""
+    content = _cmd("auto-dev-impl.md")
+    assert "valid JSON verdict" in content
+    assert '"triggered" key' in content or "a `triggered` key" in content
+    assert "tooling failure, not drift" in content

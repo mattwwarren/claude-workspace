@@ -126,6 +126,38 @@ def test_small_plan_abs_floor_applies() -> None:
     assert verdict["triggered"] is False
 
 
+def test_extra_files_equal_to_allowed_extra_does_not_trigger() -> None:
+    """Boundary: len(extra_files) == allowed_extra must NOT trigger.
+
+    The trigger condition is a strict ``>``; landing exactly on the allowance
+    must read as conforming, not drift.
+    """
+    planned = _paths("planned", 14)
+    delivered = [*planned, *_paths("unplanned", 7)]
+
+    verdict = _check(planned, delivered)
+
+    assert verdict["allowed_extra"] == 7
+    assert len(verdict["extra_files"]) == 7
+    assert verdict["triggered"] is False
+
+
+def test_extra_files_one_over_allowed_extra_triggers() -> None:
+    """Boundary: len(extra_files) == allowed_extra + 1 must trigger.
+
+    Guards against an off-by-one (e.g. ``>`` accidentally becoming ``>=``)
+    silently flipping pipeline behavior right at the threshold.
+    """
+    planned = _paths("planned", 14)
+    delivered = [*planned, *_paths("unplanned", 8)]
+
+    verdict = _check(planned, delivered)
+
+    assert verdict["allowed_extra"] == 7
+    assert len(verdict["extra_files"]) == 8
+    assert verdict["triggered"] is True
+
+
 def test_blocker_details_enumerates_extra_file_paths() -> None:
     """extra_files is the operator's only authorization surface (R1).
 

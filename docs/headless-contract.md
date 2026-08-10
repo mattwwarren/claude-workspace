@@ -45,7 +45,8 @@ All interactive gates in the pipeline collapse to one of: AUTO-SKIP, AUTO-CONTIN
 | S2 impl checkpoint (any scope) | AUTO-CONTINUE — never gate |
 | S2 BLOCK or 2x failure | EXIT `blocked` with `blocker.reason: "impl_failed"` |
 | S2.5 files outside plan, within threshold | Append `"impl_scope_growth: <files>"` to `friction_highlights`; continue |
-| S2.5 files outside plan, threshold exceeded (`check_plan_scope_conformance.py` exit 1) | EXIT `blocked` with `blocker.reason: "plan_scope_drift"`, `blocker.details` enumerating the unplanned paths (routes to BLOCKED_ON_USER; not finalize). Do NOT spawn reviewers |
+| S2.5 files outside plan, threshold exceeded (`check_plan_scope_conformance.py` exit 1 **with a valid JSON verdict**) | EXIT `blocked` with `blocker.reason: "plan_scope_drift"`, `blocker.details` enumerating the unplanned paths (routes to BLOCKED_ON_USER; not finalize). Do NOT spawn reviewers |
+| S2.5 scope-conformance script exit 1 **without** a valid JSON verdict (tooling failure, not drift) | EXIT `blocked` with `blocker.reason: "impl_failed"`, `blocker.details` explains the script exited 1 without producing a valid verdict. Do NOT spawn reviewers |
 | S2.5 scope-conformance script exit 2 (plan has no parseable `## Files Modified`) | Append `"impl_scope_conformance_unparsed: <stderr>"` to `friction_highlights`; continue (fail-open) |
 | S3 review (any scope) | Always run reviewers |
 | S3 MUST_FIX (any scope) | Run fix loop; expected 2 cycles, hard-cap at 5 |
