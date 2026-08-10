@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Degraded/failed reviewer verdict without a stated reason is now a
+  contract violation (#1806):** `ReviewerFindingsDocument` rejects
+  `status="degraded"`/`status="failed"` with an empty or missing
+  `detail` at parse time — closing the gap #1775 could not reach (it can
+  only persist a reason that exists). A reviewer that self-reports
+  degraded with no reason is now treated the same as any other
+  malformed output: rejected at the parse boundary and surfaced as a
+  blocked review (`CODEX_REVIEW_PARTIAL`/`CODEX_REVIEW_UNPARSEABLE` on
+  the codex path, a hard `cw review consolidate` failure on the
+  Claude-native path) rather than a spuriously clean `status="ok"`-
+  looking pass. The reviewer output contract in
+  `.claude/commands/auto-dev-review.md` and the codex adapter's
+  `_OUTPUT_SCHEMA_RULES` now state the reason requirement explicitly.
+
 ### Added
 
 - **OpenCode executor tests, safety, and observability (#1671):**

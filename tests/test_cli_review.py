@@ -360,6 +360,24 @@ class TestReviewConsolidateCommand:
             for line in result.output.splitlines()
         )
 
+    def test_degraded_status_with_blank_detail_prints_field_path_and_exits_1(
+        self, runner: CliRunner
+    ) -> None:
+        # #1806: a reviewer self-reporting status="degraded" with no stated
+        # reason is a contract violation, same shape as an invalid severity --
+        # the Claude-native path (this CLI) must reject it, not silently
+        # accept it as a clean-looking degraded document.
+        payload = _consolidate_payload(
+            documents=[_doc_payload(status="degraded", detail="")]
+        )
+        result = runner.invoke(
+            main, ["review", "consolidate", "-"], input=json.dumps(payload)
+        )
+        assert result.exit_code == 1
+        assert any(
+            line.startswith("documents.0:") for line in result.output.splitlines()
+        )
+
     def test_path_argument_reads_from_file(
         self, runner: CliRunner, tmp_path: Path
     ) -> None:

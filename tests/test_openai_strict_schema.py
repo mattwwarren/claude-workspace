@@ -14,6 +14,9 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+import pytest
+from pydantic import ValidationError
+
 from cw.openai_strict_schema import to_openai_strict_schema
 from cw.review_findings import ReviewerFindingsDocument
 
@@ -118,14 +121,16 @@ class TestTransformProperties:
 
 class TestRoundTripValidation:
     def test_round_trip_model_validate_null_detail(self) -> None:
-        # status="degraded" (#1544): these fixtures exist to verify null->""
-        # detail coercion, orthogonal to the ok/empty-findings justification
-        # rule, which would otherwise reject the resulting blank detail.
+        # status="ok" with a non-empty findings list (#1806: status="degraded"
+        # now requires a stated reason, so it no longer tolerates the blank
+        # detail this null->"" coercion produces): these fixtures exist to
+        # verify field-level null->"" coercion, orthogonal to either
+        # cross-field justification rule.
         payload = {
             "reviewer_role": "R",
-            "status": "degraded",
+            "status": "ok",
             "detail": None,
-            "findings": [],
+            "findings": [_VALID_FINDING],
         }
         doc = ReviewerFindingsDocument.model_validate(payload)
         assert doc.detail == ""
@@ -134,22 +139,26 @@ class TestRoundTripValidation:
         payload = {
             "reviewer_role": "R",
             "status": "degraded",
-            "detail": "",
+            "detail": "sandbox lacked filesystem access",
             "findings": None,
         }
         doc = ReviewerFindingsDocument.model_validate(payload)
         assert doc.findings == []
 
     def test_round_trip_model_validate_both_null(self) -> None:
+        # #1806: both field-level null->"" (detail) and null->[] (findings)
+        # coercions still run first, but the resulting blank detail on a
+        # degraded status is then rejected by the new model-level
+        # degraded/failed-reason validator -- this used to assert a
+        # successful round-trip, which was exactly the gap #1806 closes.
         payload = {
             "reviewer_role": "R",
             "status": "degraded",
             "detail": None,
             "findings": None,
         }
-        doc = ReviewerFindingsDocument.model_validate(payload)
-        assert doc.detail == ""
-        assert doc.findings == []
+        with pytest.raises(ValidationError):
+            ReviewerFindingsDocument.model_validate(payload)
 
     def test_round_trip_model_validate_null_optional_finding_fields(self) -> None:
         payload = {

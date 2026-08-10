@@ -837,6 +837,12 @@ class TestSelectOutputInstructions:
             assert 'confidence: "LOW"' in variant
             assert "advisory here, not blocking" in variant
             assert "Report no prose outside the JSON object." in variant
+            # #1806: `detail` is required and non-empty whenever status is
+            # "degraded" or "failed" -- must appear in both variants.
+            assert (
+                "`detail` is REQUIRED and MUST be non-empty whenever `status` "
+                'is "degraded" or "failed"' in variant
+            )
 
 
 class TestBuildReviewerPromptCapability:

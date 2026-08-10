@@ -174,6 +174,9 @@ class ReviewerFindingsDocument(BaseModel):
 
     A ``failed`` reviewer produced no usable findings, so a non-empty
     ``findings`` list under ``status="failed"`` is a contradiction and rejected.
+    A ``degraded`` or ``failed`` reviewer must also state its reason in
+    ``detail`` — a blank reason on either status is a contract violation
+    (#1806), not a silently-accepted value.
     """
 
     reviewer_role: str
@@ -210,6 +213,18 @@ class ReviewerFindingsDocument(BaseModel):
                 "a reviewer with status='ok' and no findings must state what "
                 "it checked in `detail` (or use status='degraded' if a "
                 "required check could not be performed)"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _check_degraded_or_failed_has_reason(self) -> ReviewerFindingsDocument:
+        if self.status in ("degraded", "failed") and _is_blank(self.detail):
+            msg = (
+                f"a reviewer with status={self.status!r} must state its "
+                "reason in `detail` — an empty or missing reason on a "
+                "degraded or failed verdict is a contract violation, not a "
+                "silently-accepted value (#1806)"
             )
             raise ValueError(msg)
         return self
