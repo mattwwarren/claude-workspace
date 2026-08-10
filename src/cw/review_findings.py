@@ -880,13 +880,16 @@ def _evidence_window_discrepancy_detail(finding: Finding) -> str:
     """Build a diagnosable ``RejectedFinding.detail`` for an
     ``evidence_not_in_diff`` rejection (#1792 AC4).
 
-    Only called once the finding has already passed
+    For a line-anchored finding, only called once it has already passed
     ``_line_reference_valid`` (its endpoints DO resolve to real diff lines) —
     the rejection is about the *span*, not the anchor, so this reports the
     evidence's own line count against the declared window rather than
-    re-deriving anchor validity. Takes only *finding* (no ``diff`` — the
-    message is derived entirely from the finding's own declared/evidence
-    shape, not from diff content).
+    re-deriving anchor validity. The no-anchor branch below instead covers a
+    file-level finding (``line_start``/``line_end`` both ``None``), which has
+    no endpoints for ``_line_reference_valid`` to have validated in the first
+    place. Takes only *finding* (no ``diff`` — the message is derived
+    entirely from the finding's own declared/evidence shape, not from diff
+    content).
     """
     evidence_lines = finding.evidence.count("\n") + 1
     if finding.line_start is None and finding.line_end is None:
