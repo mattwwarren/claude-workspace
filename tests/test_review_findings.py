@@ -160,6 +160,66 @@ _PR1729_REJECTED_FINDING_KWARGS: dict[str, object] = {
     "escalation": None,
 }
 
+# -- #1764 fixture: reconstructed 9491 MUST_FIX finding ---------------------
+#
+# #1764 asks whether the whole-function structural-claim rejection mode
+# (a MUST_FIX whose evidence describes an aggregate property of a function
+# rather than quoting diff-resident text) survives the #1738/#1743 matcher
+# changes. The genuine finding it investigates -- a MUST_FIX on
+# tests/test_dispatch.py:9491 -- was mechanically rejected and reported via
+# GitHub comment id 5226090232 (fetched live via
+# `gh api repos/mattwwarren/claude-workspace/issues/comments/5226090232`,
+# html_url
+# https://github.com/mattwwarren/claude-workspace/issues/1729#issuecomment-5226090232),
+# but (per #1763) no diagnostics artifact for it survived on this machine the
+# way #1729's did (_PR1729_REJECTED_FINDING_KWARGS above) -- so only what the
+# rendered comment itself carries is genuine.
+#
+# GENUINE (verbatim from the comment): severity, file, line_start, summary.
+# The comment's rendered line is:
+#   - **tests/test_dispatch.py:9491** — Split the expanded breadcrumb
+#     composition test; it now exceeds the 50-line function threshold and
+#     covers two independent contracts. (rejected: evidence_not_in_diff)
+#
+# RECONSTRUCTED, NOT RECOVERABLE (no surviving artifact has them; authored to
+# faithfully reproduce the finding's shape -- a whole-function structural
+# claim whose ``evidence`` is reviewer prose describing an aggregate property
+# of the function (its line count, its number of contracts), never a verbatim
+# quote of diff-resident text -- the exact defect class #1764 investigates):
+# line_end, consequence, suggested_fix, evidence, confidence. The reused diff
+# (``_pr1729_captured_diff`` below) is byte-identical to the diff the
+# original #1729 reviewer pass saw for this file (`git diff
+# 494414f8..b5c8119ec9e09b34756ff6f6b9f1b62c3fb23e64 -- tests/test_dispatch.py`
+# is empty), and the real post-change function this finding targets is named
+# ``test_breadcrumb_eligible_paused_statuses_composition`` (confirmed via
+# `git show 494414f8:tests/test_dispatch.py`).
+_PR1729_9491_MUST_FIX_FINDING_KWARGS: dict[str, object] = {
+    "severity": "MUST_FIX",
+    "file": "tests/test_dispatch.py",
+    "line_start": 9491,
+    "line_end": None,
+    "summary": (
+        "Split the expanded breadcrumb composition test; it now exceeds the "
+        "50-line function threshold and covers two independent contracts."
+    ),
+    "consequence": (
+        "A single test asserting two independent contracts (breadcrumb "
+        "membership and gate-class exclusion) fails ambiguously — a future "
+        "reader can't tell which contract broke without re-reading the "
+        "whole body."
+    ),
+    "suggested_fix": (
+        "Split into two tests, one per contract, each under the 50-line threshold."
+    ),
+    "evidence": (
+        "test_breadcrumb_eligible_paused_statuses_composition now exceeds "
+        "the 50-line function threshold and covers two independent "
+        "contracts."
+    ),
+    "confidence": "HIGH",
+    "escalation": None,
+}
+
 
 def _pr1729_captured_diff() -> CapturedDiff:
     """Build the real #1729 ``CapturedDiff`` via the unmodified diff parser.
@@ -1110,6 +1170,61 @@ class TestValidateReviewerDocument:
         )
         assert not accepted
         assert rejected[0].reason == "evidence_not_in_diff"
+
+
+class Test9491MustFixCaseReconstruction:
+    """#1764: reconstructs the genuine tests/test_dispatch.py:9491 MUST_FIX
+    (reported via GitHub comment id 5226090232 — see
+    ``_PR1729_9491_MUST_FIX_FINDING_KWARGS`` above for the provenance
+    disclosure) and proves the whole-function structural-claim rejection
+    mode it exhibits is still active against the current matcher: the anchor
+    resolves fine (both #1715's near-line tolerance and #1743's enclosing-def
+    fallback are proven working elsewhere in this file), but the evidence is
+    reviewer prose describing an aggregate property of the function rather
+    than a verbatim quote of diff-resident text, so it is rejected
+    ``evidence_not_in_diff`` — a third axis, distinct from both #1743
+    (anchor validity) and #1738 (window construction).
+    """
+
+    def test_9491_line_reference_valid_via_near_line_tolerance(self) -> None:
+        # Resolves via ordinary #1715 near-line tolerance (claimed 9491 is
+        # distance 3 from the nearest genuine added line, 9494) -- NOT
+        # #1743's enclosing-def fallback (no worktree is even passed here).
+        diff = _pr1729_captured_diff()
+        finding = Finding(**_PR1729_9491_MUST_FIX_FINDING_KWARGS)
+        assert _line_reference_valid(diff, finding) is True
+
+    def test_9491_classified_evidence_not_in_diff(self) -> None:
+        diff = _pr1729_captured_diff()
+        finding = Finding(**_PR1729_9491_MUST_FIX_FINDING_KWARGS)
+        changed = frozenset(diff.files)
+        assert _classify_finding(finding, diff, changed) == "evidence_not_in_diff"
+
+    def test_9491_rejected_via_validate_reviewer_document(self) -> None:
+        diff = _pr1729_captured_diff()
+        finding = Finding(**_PR1729_9491_MUST_FIX_FINDING_KWARGS)
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), diff
+        )
+        assert accepted == []
+        assert rejected[0].reason == "evidence_not_in_diff"
+        assert rejected[0].detail != ""
+
+    def test_9491_parks_as_rejected_must_fix_via_consolidate_verdict(self) -> None:
+        # Mirrors
+        # test_mechanically_rejected_must_fix_populates_rejected_must_fix_field's
+        # shape: blocking stays False (R4 -- an unreliable/unadjudicated
+        # MUST_FIX must never enter the autofix loop), but rejected_must_fix
+        # is the independent signal that surfaces it to the operator.
+        diff = _pr1729_captured_diff()
+        finding = Finding(**_PR1729_9491_MUST_FIX_FINDING_KWARGS)
+        doc = _make_reviewer_doc(finding)
+        verdict = consolidate_verdict([doc], diff, reviewed_sha="b5c8119e")
+        assert verdict.blocking is False
+        assert verdict.must_fix == []
+        assert len(verdict.rejected_must_fix) == 1
+        assert verdict.rejected_must_fix[0].reason == "evidence_not_in_diff"
+        assert verdict.rejected_must_fix[0].raw["severity"] == "MUST_FIX"
 
 
 class TestEvidenceWindowReconciliation:
