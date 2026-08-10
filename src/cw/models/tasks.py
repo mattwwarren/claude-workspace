@@ -72,7 +72,11 @@ from cw.models.events import PrState, WatchedPr
 #      session whose still-live cw-context.json made the last spawn attempt
 #      raise HookContextConflictError. Stamped by the dispatch claim path,
 #      read by concierge recipe 1 to refuse a requeue that cannot succeed.
-DEV_QUEUE_SCHEMA_VERSION = 26
+# v27: added TicketTask.regressed_into_stage (GitHub #1794) — per-arrival
+#      marker telling the impl-stage Pre-Stage Detector Guard that this stage
+#      entry was reached via a deliberate backward move, distinct from the
+#      cumulative, never-reset-on-advance regress_attempts.
+DEV_QUEUE_SCHEMA_VERSION = 27
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -174,6 +178,18 @@ class TicketTask(BaseModel):
     # IMPL for self-heal (e.g. diff-cover gate failures). Bounded by
     # FINALIZE_REGRESS_CAP in auto_dev_result.py. See GitHub #770.
     regress_attempts: int = 0
+    # Per-arrival marker: set to the target stage by _stage_regress whenever a
+    # regress (operator `--regress`, or FINALIZE self-heal) lands the task
+    # there; cleared by the next real dispatch spawn for this task
+    # (dispatch/claim.py), or by an intervening forward requeue bypass
+    # (requeue.py). Distinct from the cumulative regress_attempts above: this
+    # field answers "was THIS stage entry reached via a backward move," not
+    # "how many regresses has this ticket ever had." Reusing regress_attempts
+    # for this purpose produces a false positive once any later, unrelated
+    # forward advance crosses the same stage (GitHub #1794); it also cannot be
+    # reset on ordinary advance without defeating the FINALIZE self-heal cap
+    # (GitHub #770, FINALIZE_REGRESS_CAP in auto_dev_result/schema.py).
+    regressed_into_stage: Stage | None = None
     # DEPRECATED — inert since the process-kill-timeout removal. Formerly the
     # per-ticket wall-clock budget override (#265); nothing consults it now.
     # Kept only so persisted dev-queue rows that carry the field keep loading.
