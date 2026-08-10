@@ -9830,6 +9830,29 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.stage == Stage.FINALIZE
 
+    def test_blocked_plan_scope_drift_at_impl_parks_without_regress(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """blocked/plan_scope_drift fires during Stage 2 (IMPL), so
+        task.stage == Stage.IMPL at apply time -- Rule 5a's regress branch
+        requires task.stage == Stage.FINALIZE (routing.py:1343-1349) and is
+        therefore structurally unreachable here, independent of
+        FINALIZE_REGRESS_BLOCKER_REASONS membership (#1779, R3).
+        """
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("PSD-IMPL-1", stage=Stage.IMPL)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "stage2_impl", "reason": "plan_scope_drift"},
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.stage == Stage.IMPL
+        assert task.regress_attempts == 0
+        assert task.blocked_reason == "plan_scope_drift"
+
     def test_awaiting_operator_reason_constant_value(self) -> None:
         from cw.dispatch import _AWAITING_OPERATOR_REASON
 
