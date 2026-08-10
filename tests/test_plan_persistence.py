@@ -370,9 +370,7 @@ STEP1B_CHECKPOINT_HEADING = (
 STEP1B_TELEMETRY_HEADING = (
     "**Headless only — after plan agent returns, emit `stage.entered`"
 )
-STEP1F4_CHECKPOINT_HEADING = (
-    "**Headless only — checkpoint the revised draft (#1778).**"
-)
+STEP1F4_CHECKPOINT_HEADING = "**Headless only — checkpoint the revised draft (#1778).**"
 FORMAT_ONLY_HEADING = "**Format-only revision (defense-in-depth).**"
 EXHAUSTED_CYCLE_HEADING = "**Headless only — if the 1 revision cycle is exhausted"
 CHECKPOINT_ORIGIN_HEADING = "**Checkpoint-origin note (#1778):**"
@@ -414,8 +412,7 @@ def test_step1b_checkpoint_is_unreviewed_at_capture_time() -> None:
     section = _step1b_section()
     window = _after(section, STEP1B_CHECKPOINT_HEADING, span=700)
     assert (
-        "neither Step 1c's ambiguity scan nor Step 1f's review stations "
-        "have run yet"
+        "neither Step 1c's ambiguity scan nor Step 1f's review stations have run yet"
     ) in window
 
 
