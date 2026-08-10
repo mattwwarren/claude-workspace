@@ -174,6 +174,9 @@ class ReviewerFindingsDocument(BaseModel):
 
     A ``failed`` reviewer produced no usable findings, so a non-empty
     ``findings`` list under ``status="failed"`` is a contradiction and rejected.
+    A ``degraded`` or ``failed`` reviewer must also state its reason in
+    ``detail`` — a blank reason on either status is a contract violation
+    (#1806), not a silently-accepted value.
     """
 
     reviewer_role: str
@@ -210,6 +213,18 @@ class ReviewerFindingsDocument(BaseModel):
                 "a reviewer with status='ok' and no findings must state what "
                 "it checked in `detail` (or use status='degraded' if a "
                 "required check could not be performed)"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _check_degraded_or_failed_has_reason(self) -> ReviewerFindingsDocument:
+        if self.status in ("degraded", "failed") and _is_blank(self.detail):
+            msg = (
+                f"a reviewer with status={self.status!r} must state its "
+                "reason in `detail` — an empty or missing reason on a "
+                "degraded or failed verdict is a contract violation, not a "
+                "silently-accepted value (#1806)"
             )
             raise ValueError(msg)
         return self
@@ -268,6 +283,11 @@ class ReviewerRunMetrics(TypedDict, total=False):
 class ReviewerRunRecord(BaseModel):
     """Terminal-health record for one reviewer agent that ran (or failed).
 
+    ``detail`` mirrors :attr:`ReviewerFindingsDocument.detail` (#1775) --
+    it is copied verbatim from the source document by :func:`consolidate_verdict`
+    so a degraded reviewer's stated reason survives synthesis into the
+    persisted verdict instead of being silently dropped.
+
     Everything below ``finding_count`` is executor audit telemetry (#1710),
     populated from the codex ``--json`` event stream where one is available and
     left at its default everywhere else (the Claude-native review path, a role
@@ -277,6 +297,7 @@ class ReviewerRunRecord(BaseModel):
 
     reviewer_role: str
     status: ReviewerHealthStatus
+    detail: str = ""
     finding_count: int
     # Executor-native run identifier (codex ``thread.started.thread_id``).
     thread_id: str | None = None
@@ -672,6 +693,88 @@ def _resolve_hunk_window(
     return min(resolved_start, resolved_end), max(resolved_start, resolved_end)
 
 
+def _reconcile_evidence_window(
+    candidates: dict[int, str],
+    text: str,
+    start: int,
+    end: int,
+    tolerance: int = _LINE_ANCHOR_TOLERANCE,
+) -> tuple[int, int] | None:
+    """Reconcile a declared (start, end) window against *text*'s own content
+    when the window itself is too short/long by a few lines (#1792,
+    producer-side variant of #1715/#1738/#1743).
+
+    Two-phase, deliberately asymmetric in strictness:
+
+    1. The declared ``(start, end)`` window unchanged (widen=0,0) is tried
+       first, using the exact pre-#1792 rule: a gap-tolerant join of
+       whichever of ``range(start, end + 1)`` are present in *candidates*
+       (a missing line is silently skipped, never synthesized), then a
+       plain substring check against *text*. This reproduces pre-#1792
+       behavior byte-for-byte — required so every already-passing
+       #1236/#1715/#1738 case is untouched, including ones where the
+       evidence is a short fragment inside a wider, near-line-tolerance-
+       widened window that itself has gaps.
+    2. Only when that fails does this grow the start backward and/or the
+       end forward by up to *tolerance* lines each. A widened candidate
+       counts ONLY when every line in its range is present in *candidates*
+       (no gaps — never synthesizes a line the diff doesn't contain) AND
+       its joined content EXACTLY equals *text* (both normalized) — not
+       merely contains it. Exact equality (stricter than phase 1's
+       substring check) is load-bearing: a substring check here would let
+       widening accidentally absorb a different, genuinely-real-but-
+       unrelated adjacent line into the window purely because it happens
+       to contain the evidence text as a substring once joined (regression
+       guard: a 1-line quote actually anchored on the line right after a
+       claimed single-line window, with the declared line prepended as
+       unrelated "noise", must stay rejected — #1236 R6's claimed-window
+       boundary). Phase 2 is what actually *widens* the window; phase 1
+       never does, so it can never be fooled by an adjacent real line the
+       way an unconstrained substring-under-widening search would be.
+
+    ``candidates`` is a ``{line: content}`` map — callers pass either the
+    narrow added-lines-only substrate for anchor persistence or the wider
+    hunk-context substrate for evidence matching, never both. Returns the
+    smallest matching widened window (by span, then lowest start) so a
+    repaired anchor is the tightest defensible span. ``None`` when neither
+    phase finds a match — a genuinely-absent evidence string is unaffected
+    by this function at any offset (#1714's false-accept guard is
+    preserved: this only ever repairs a length mismatch on real, fully and
+    exactly present content, never accepts fabricated or unrelated
+    content).
+    """
+    target = _normalize_diff_text(text)
+    base_joined = "\n".join(
+        candidates[n] for n in range(start, end + 1) if n in candidates
+    )
+    if target in _normalize_diff_text(base_joined):
+        return (start, end)
+
+    best: tuple[int, int] | None = None
+    for widen_start in range(tolerance + 1):
+        for widen_end in range(tolerance + 1):
+            if widen_start == 0 and widen_end == 0:
+                continue  # already tried above (phase 1)
+            candidate_start = start - widen_start
+            candidate_end = end + widen_end
+            if candidate_start > candidate_end:
+                continue
+            line_range = range(candidate_start, candidate_end + 1)
+            if not all(n in candidates for n in line_range):
+                continue
+            joined = "\n".join(candidates[n] for n in line_range)
+            if _normalize_diff_text(joined) != target:
+                continue
+            span = candidate_end - candidate_start
+            if (
+                best is None
+                or span < (best[1] - best[0])
+                or (span == (best[1] - best[0]) and candidate_start < best[0])
+            ):
+                best = (candidate_start, candidate_end)
+    return best
+
+
 def _evidence_in_claimed_lines(
     diff: CapturedDiff,
     file: str,
@@ -689,9 +792,12 @@ def _evidence_in_claimed_lines(
     When a line window is claimed, :func:`_resolve_hunk_window` snaps both
     endpoints (the same near-line tolerance ``_line_reference_valid`` applies,
     but over the wider ``file_window_text`` candidate set — context lines
-    included) and orders them ascending before *text* is checked against the
-    joined content of exactly those lines (``file_window_text``) — an endpoint
-    that fails to resolve makes the whole check fail. Both sides of every
+    included) and orders them ascending; :func:`_reconcile_evidence_window`
+    then checks *text* against that window's content and, if the window
+    itself is a few lines short/long of *text*'s own true span, against a
+    widened window within ``_LINE_ANCHOR_TOLERANCE`` lines (#1792) — an
+    endpoint that fails to resolve, or a widened search that finds no
+    matching window, makes the whole check fail. Both sides of every
     substring comparison are routed through :func:`_normalize_diff_text` so a
     stray ``+``/``-`` diff marker on either the evidence or the diff-derived
     text cannot break an otherwise-genuine match (#1715).
@@ -711,10 +817,7 @@ def _evidence_in_claimed_lines(
         return False
     start, end = resolved
     window_text = diff.file_window_text.get(file, {})
-    window = "\n".join(
-        window_text[n] for n in range(start, end + 1) if n in window_text
-    )
-    return _normalize_diff_text(text) in _normalize_diff_text(window)
+    return _reconcile_evidence_window(window_text, text, start, end) is not None
 
 
 def _resolved_finding(diff: CapturedDiff, finding: Finding) -> Finding:
@@ -730,6 +833,19 @@ def _resolved_finding(diff: CapturedDiff, finding: Finding) -> Finding:
     the real changed line. The unlikely resolution-failure case (e.g. an
     unanchored finding whose file isn't in the diff at all) returns *finding*
     unchanged rather than raising (#1715).
+
+    After resolution, :func:`_reconcile_evidence_window` is tried against the
+    narrow ``file_line_text`` (added-lines-only) substrate — deliberately NOT
+    ``file_window_text`` — so a persisted anchor can be repaired to better
+    match its own evidence's true span (#1792) without ever snapping onto a
+    context line: this preserves the same #1738 invariant that keeps a
+    persisted anchor pointed at real added-line content even when the
+    (separately, more permissively matched) evidence-quote check in
+    :func:`_evidence_in_claimed_lines` spans further via the wider
+    ``file_window_text`` substrate. A reconciliation that finds no better
+    match (or whose added-only substrate simply cannot reach the evidence's
+    true span) leaves the anchor at its #1715 near-line-tolerance resolution,
+    unchanged.
     """
     if finding.line_start is None and finding.line_end is None:
         return finding
@@ -739,6 +855,19 @@ def _resolved_finding(diff: CapturedDiff, finding: Finding) -> Finding:
     if resolved is None:
         return finding
     start, end = resolved
+    candidates = diff.file_line_text.get(finding.file, {})
+    reconciled = _reconcile_evidence_window(candidates, finding.evidence, start, end)
+    if reconciled is not None and reconciled != (start, end):
+        _log.info(
+            "auto-dev: repaired finding's declared line window to match its "
+            "own evidence span (file=%s, declared=%d-%d, repaired=%d-%d)",
+            finding.file,
+            start,
+            end,
+            reconciled[0],
+            reconciled[1],
+        )
+        start, end = reconciled
     updates: dict[str, int | None] = {}
     if finding.line_start is not None:
         updates["line_start"] = start
@@ -760,6 +889,41 @@ def _classify_unanchored_file(
     if worktree is not None and _file_in_repo_tree(worktree, file):
         return "unanchored"
     return "unknown_file"
+
+
+def _evidence_window_discrepancy_detail(finding: Finding) -> str:
+    """Build a diagnosable ``RejectedFinding.detail`` for an
+    ``evidence_not_in_diff`` rejection (#1792 AC4).
+
+    For a line-anchored finding, only called once it has already passed
+    ``_line_reference_valid`` (its endpoints DO resolve to real diff lines) —
+    the rejection is about the *span*, not the anchor, so this reports the
+    evidence's own line count against the declared window rather than
+    re-deriving anchor validity. The no-anchor branch below instead covers a
+    file-level finding (``line_start``/``line_end`` both ``None``), which has
+    no endpoints for ``_line_reference_valid`` to have validated in the first
+    place. Takes only *finding* (no ``diff`` — the message is derived
+    entirely from the finding's own declared/evidence shape, not from diff
+    content).
+    """
+    evidence_lines = finding.evidence.count("\n") + 1
+    if finding.line_start is None and finding.line_end is None:
+        return (
+            f"evidence is {evidence_lines} line(s); finding has no line "
+            "anchor (file-level fallback) and the evidence text was not "
+            "found anywhere in the file's diff"
+        )
+    declared_lines = (
+        (finding.line_end or finding.line_start or 0)
+        - (finding.line_start or finding.line_end or 0)
+        + 1
+    )
+    return (
+        f"evidence is {evidence_lines} line(s) long but the declared range "
+        f"line_start={finding.line_start}, line_end={finding.line_end} spans "
+        f"{declared_lines} line(s); no window within ±{_LINE_ANCHOR_TOLERANCE} "
+        "lines of the declared range contains the evidence text verbatim"
+    )
 
 
 def _classify_finding(
@@ -850,6 +1014,11 @@ def validate_reviewer_document(
                     raw=finding.model_dump(),
                     reviewer_role=doc.reviewer_role,
                     reason=reason,
+                    detail=(
+                        _evidence_window_discrepancy_detail(finding)
+                        if reason == "evidence_not_in_diff"
+                        else ""
+                    ),
                 )
             )
             continue
@@ -1054,6 +1223,14 @@ def consolidate_verdict(
     field at its default. Defaulting to ``None`` is what lets the Claude-native
     caller (``cw.cli.review``), which never has codex metrics, stay unchanged —
     and it is purely additive: nothing here reads the values back (#1710).
+
+    Each parsed document's ``detail`` (#1775) is copied verbatim onto its
+    :class:`ReviewerRunRecord`, unconditionally of ``status`` — so a degraded
+    role's stated reason (or an ``ok`` role's justification) reaches
+    ``verdict.agents_run`` and, from there, the persisted artifact
+    (:func:`write_review_verdict`). A role recorded only via
+    ``failed_reviewers`` has no document and so no ``detail`` to copy; its
+    record keeps the ``""`` default.
     """
     failures = failed_reviewers if failed_reviewers is not None else []
     metrics = metrics_by_role if metrics_by_role is not None else {}
@@ -1074,11 +1251,14 @@ def consolidate_verdict(
                 reviewer_role=doc.reviewer_role,
                 status=doc.status,
                 finding_count=len(accepted),
+                detail=doc.detail,
                 **metrics.get(doc.reviewer_role, {}),
             )
         )
 
     run_records.extend(
+        # ReviewerRunFailure has no `detail` concept (it never parsed into a
+        # document), so this entry's `detail` stays at its "" default (#1775).
         ReviewerRunRecord(
             reviewer_role=failure.role,
             status="failed",

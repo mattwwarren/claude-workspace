@@ -6,6 +6,99 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Degraded/failed reviewer verdict without a stated reason is now a
+  contract violation (#1806):** `ReviewerFindingsDocument` rejects
+  `status="degraded"`/`status="failed"` with an empty or missing
+  `detail` at parse time — closing the gap #1775 could not reach (it can
+  only persist a reason that exists). A reviewer that self-reports
+  degraded with no reason is now treated the same as any other
+  malformed output: rejected at the parse boundary and surfaced as a
+  blocked review (`CODEX_REVIEW_PARTIAL`/`CODEX_REVIEW_UNPARSEABLE` on
+  the codex path, a hard `cw review consolidate` failure on the
+  Claude-native path) rather than a spuriously clean `status="ok"`-
+  looking pass. The reviewer output contract in
+  `.claude/commands/auto-dev-review.md` and the codex adapter's
+  `_OUTPUT_SCHEMA_RULES` now state the reason requirement explicitly.
+
+### Added
+
+- **OpenCode executor tests, safety, and observability (#1671):**
+  `queue_peek` now detects opencode sessions and parses the `.cw/opencode.log`
+  JSONL log (backend-aware transcript reader) instead of searching for a
+  claude-jsonl transcript — the one rendering surface that is not cleanly
+  backend-neutral. New `test_reconcile_opencode.py` covers the live-process
+  / dead-process / recycled-PID / cancellation-retains-liveness harvest
+  scenarios (no process-tree kill tests — scope removed per #1669 R2).
+  Result-door collision tests cover opencode's two write sources
+  (EXECUTOR_DIRECT + GIT_SYNTHESIS) racing each other and external writers.
+  Lane serialization tests pin `max_parallel=1` for opencode-configured lanes.
+  A live smoke test (`test_opencode_contract_live.py`, gated behind
+  `INTEGRATION_OPENCODE_LIVE`) and nightly workflow (`nightly-opencode.yml`)
+  pin the JSONL event shape against a real `opencode` CLI. Part of #1668.
+
+- **Per-arrival regress marker for the impl-guard staleness gate (#1794):**
+  `TicketTask.regressed_into_stage` records a fresh, per-arrival marker
+  whenever an operator sends a ticket back to Stage 2 with `requeue
+  --regress --stage impl`, so the Pre-Stage Detector Guard in
+  `auto-dev-impl.md` no longer short-circuits on HEAD's stale
+  impl-complete trailer and silently no-ops the send-back. The new
+  `check_impl_guard_staleness.py` deterministic gate script decides
+  whether the guard should honor newer tracker comments or an operator
+  regress, and a regress-marker verdict is now decoupled from a
+  comments-file load failure so a fetch error can no longer mask a real
+  regress.
+
+- **Producer-side evidence/line-range window reconciliation (#1792):**
+  `_reconcile_evidence_window` repairs a codex-review finding's declared
+  line window when it is a few lines short/long of its own evidence's true
+  span — first via the exact pre-#1792 gap-tolerant join (byte-for-byte
+  compatible with existing #1236/#1715/#1738 behavior), then, only on
+  failure, by widening the window within `_LINE_ANCHOR_TOLERANCE` lines and
+  requiring an exact (not substring) match so widening can never absorb an
+  unrelated adjacent line. Applied both to evidence-quote matching (wide
+  `file_window_text` substrate) and to persisted-anchor repair (narrow
+  `file_line_text` substrate), reducing false `evidence_not_in_diff`
+  rejections without weakening the #1714 false-accept guard.
+
+## [1.32.0] - 2026-08-10
+
+### Added
+
+- **Post-impl scope-conformance gate script (#1779):**
+  `.claude/scripts/check_plan_scope_conformance.py` compares the delivered
+  diff's file set against the approved plan's `## Files Modified` list and,
+  on exceeding a proportionality threshold, emits `status: "blocked"` with
+  `blocker.reason: "plan_scope_drift"` and the offending paths enumerated.
+  Thresholds are read from a `[tool.cw.scope_conformance]` table in the
+  repo's own `pyproject.toml`, fail-safe to module defaults. Deliberately
+  ships without any operator-authorized-additions mechanism — see #1786.
+  **Known limitation:** the file-list parser recognizes only bullet lists
+  under one exact heading, so it is inert on table-formatted plans and fails
+  open. Until #1796 lands, a passing result means "no file list could be
+  parsed," not "the diff matched the plan."
+- **Plan-draft checkpointing during Stage-1 plan generation (#1778):**
+  the plan draft is now persisted at checkpoints rather than only on exit,
+  so a crashed plan stage no longer loses the entire draft. #1649 persisted
+  on exit, and a crash is not an exit.
+
+### Fixed
+
+- **Degraded-reviewer reason no longer dropped before persistence (#1775):**
+  `ReviewerFindingsDocument.detail` is now copied onto `ReviewerRunRecord`,
+  and the verdict comment renders a `DEGRADED COVERAGE` note naming each
+  degraded role, instead of silently persisting an empty reason when a
+  reviewer's findings were downgraded.
+
+### Documentation
+
+- **`[tool.cw.codex_review].agent_spec_global_fallback` is now documented
+  (#1782):** the key that gates #1773's global agent-spec fallback was
+  undiscoverable for the adoption case it exists to serve. Adds a
+  `CONFIG_REFERENCE.md` drift-guard test so the documentation cannot silently
+  fall out of sync with the code again.
+
 ## [1.31.0] - 2026-08-09
 
 ### Added
@@ -328,6 +421,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Cancellation does NOT kill the process tree — cw stops tracking + parks the
   task; the orchestrator session kills strays. Stage-specific adapters
   (finalize/plan/impl) are follow-on tickets (#1670, #1671). Part of #1668.
+
+- **OpenCode executor finalize adapter (#1670):** `OpencodeExecutor` is now
+  FINALIZE-only: `spawn()` returns a typed `BLOCKED`
+  (`reason=opencode_<stage>_not_implemented`) for any non-FINALIZE stage,
+  mirroring `CodexExecutor`'s REVIEW-only pattern. For FINALIZE, the adapter
+  materializes a prompt that instructs opencode to read and follow the
+  existing `auto-dev-finalize.md` skill (no new skill file) and emit the
+  `<<<AUTO_DEV_RESULT>>>` sentinel with the correct `stage_reached` marker
+  (`stage4a_merge_gate`, `stage4b_pr_create`, or `stage5_post_create`). The
+  plan-fetch pre-flight is removed for FINALIZE (the finalize flow reads
+  `.cw/context.json`, not `.cw/plan.md`). Part of #1668.
 
 - **Per-role codex reviewer metrics, and one-shot reviewer runs are now
   ephemeral (#1710):** reviewer invocations pass `--json` and `--ephemeral`,

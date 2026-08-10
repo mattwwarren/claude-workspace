@@ -2076,3 +2076,140 @@ class TestBlindRow:
         task = _make_ticket_task("902", worktree_path=None)
         result = queue_peek._compute_jsonl_idle_min(task, _NOW)
         assert result == 5.0
+
+
+# ---------------------------------------------------------------------------
+# opencode transcript reader (#1671 R3)
+# ---------------------------------------------------------------------------
+
+
+def _write_opencode_log(worktree: Path, events: list[dict[str, Any]]) -> Path:
+    """Write a minimal opencode JSONL log at worktree/.cw/opencode.log."""
+    log_path = worktree / ".cw" / "opencode.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w") as f:
+        for event in events:
+            f.write(json.dumps(event) + "\n")
+    return log_path
+
+
+def test_parse_opencode_transcript_sentinel_found(tmp_path: Path) -> None:
+    """Sentinel in opencode text events → parsed status/stage returned."""
+    from cw.opencode_runner import make_blocked
+
+    blocked = make_blocked(ticket_id="T-1", worktree=tmp_path, reason="test")
+    sentinel_json = blocked.model_dump_json()
+    sentinel_text = f"<<<AUTO_DEV_RESULT\n{sentinel_json}\nAUTO_DEV_RESULT>>>"
+    log_path = _write_opencode_log(
+        tmp_path,
+        [
+            {"type": "step_start", "part": {"type": "step-start"}},
+            {"type": "text", "part": {"text": sentinel_text}},
+            {"type": "step_finish", "part": {"reason": "stop"}},
+        ],
+    )
+
+    result = queue_peek.parse_opencode_transcript(log_path)
+    assert result["last_sentinel_status"] == "blocked"
+    assert result["last_sentinel_stage"] == "stage2_impl"
+    assert result["first_user_ts"] is None
+    assert result["last_asst_ts"] is not None
+    assert result["usage_limit_detected"] is False
+
+
+def test_parse_opencode_transcript_no_sentinel(tmp_path: Path) -> None:
+    """No sentinel in text events → None status."""
+    log_path = _write_opencode_log(
+        tmp_path,
+        [
+            {"type": "text", "part": {"text": "working on it"}},
+            {"type": "step_finish", "part": {"reason": "stop"}},
+        ],
+    )
+
+    result = queue_peek.parse_opencode_transcript(log_path)
+    assert result["last_sentinel_status"] is None
+    assert result["last_sentinel_stage"] is None
+    assert result["last_asst_ts"] is not None
+
+
+def test_parse_opencode_transcript_missing_file(tmp_path: Path) -> None:
+    """Missing log file → all fields None/False."""
+    result = queue_peek.parse_opencode_transcript(tmp_path / "nonexistent.log")
+    assert result["last_sentinel_status"] is None
+    assert result["last_asst_ts"] is None
+    assert result["usage_limit_detected"] is False
+
+
+def test_parse_opencode_transcript_stat_oserror(tmp_path: Path) -> None:
+    """stat() OSError → last_asst_ts is None, sentinel still parsed."""
+    from unittest.mock import patch
+
+    log_path = _write_opencode_log(
+        tmp_path, [{"type": "text", "part": {"text": "no sentinel"}}]
+    )
+    with patch.object(Path, "stat", side_effect=OSError("denied")):
+        result = queue_peek.parse_opencode_transcript(log_path)
+    assert result["last_sentinel_status"] is None
+    assert result["last_asst_ts"] is None
+
+
+def test_find_transcript_finds_opencode_log(patched_peek: None, tmp_path: Path) -> None:
+    """find_transcript_for_ticket returns .cw/opencode.log when it exists."""
+    worktree = tmp_path / "wt-opencode-peek"
+    worktree.mkdir()
+    _write_opencode_log(worktree, [{"type": "text", "part": {"text": "hello"}}])
+
+    result = queue_peek.find_transcript_for_ticket(
+        "T-1", session_id=None, worktree_path=worktree
+    )
+    assert result is not None
+    assert result.name == "opencode.log"
+    assert result.parent.name == ".cw"
+
+
+def test_find_transcript_prefers_opencode_over_claude(
+    patched_peek: None, tmp_path: Path
+) -> None:
+    """When both opencode.log and a claude transcript exist, opencode.log wins."""
+    from cw._util import claude_project_dir
+
+    worktree = tmp_path / "wt-both"
+    worktree.mkdir()
+    _write_opencode_log(worktree, [{"type": "text", "part": {"text": "opencode"}}])
+
+    # Also create a claude transcript
+    proj = claude_project_dir(worktree)
+    proj.mkdir(parents=True, exist_ok=True)
+    (proj / "session.jsonl").write_text('{"type":"init"}\n')
+
+    result = queue_peek.find_transcript_for_ticket(
+        "T-1", session_id=None, worktree_path=worktree
+    )
+    assert result is not None
+    assert result.name == "opencode.log"
+
+
+def test_build_peek_rows_uses_opencode_parser(
+    patched_peek: None, tmp_path: Path
+) -> None:
+    """build_peek_rows calls parse_opencode_transcript for opencode sessions."""
+    from cw.opencode_runner import make_blocked
+
+    worktree = tmp_path / "wt-peek-opencode"
+    worktree.mkdir()
+    blocked = make_blocked(ticket_id="T-1", worktree=worktree, reason="test")
+    sentinel_json = blocked.model_dump_json()
+    sentinel_text = f"<<<AUTO_DEV_RESULT\n{sentinel_json}\nAUTO_DEV_RESULT>>>"
+    _write_opencode_log(
+        worktree,
+        [{"type": "text", "part": {"text": sentinel_text}}],
+    )
+
+    task = _make_ticket_task("T-1", worktree_path=worktree)
+    with patch("cw.queue_peek.load_running_tasks", return_value=[task]):
+        rows = queue_peek.build_peek_rows(None, _NOW)
+
+    assert len(rows) == 1
+    assert rows[0]["signal_source"] == "transcript"
+    assert rows[0]["status"] == "blocked"

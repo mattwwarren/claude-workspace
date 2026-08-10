@@ -764,6 +764,13 @@ def _spawn_claimed_task(
                     # hook-context conflict is stale evidence — cleared here
                     # atomically with the other spawn-failure counters.
                     stored_task.hook_context_conflict_session_id = None
+                    # #1794: executor.spawn above already wrote the in-memory
+                    # task's regressed_into_stage into the new session's
+                    # queue_metadata, so the per-arrival marker is consumed.
+                    # Clear it so it never leaks into a later, unrelated stage
+                    # entry (the false positive the cumulative regress_attempts
+                    # counter would have produced).
+                    stored_task.regressed_into_stage = None
                     # R5: stamp stage_base_ref -- non-fatal on failure
                     try:
                         head_sha = subprocess.check_output(

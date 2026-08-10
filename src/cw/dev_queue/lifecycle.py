@@ -501,6 +501,10 @@ def _stamp_salvage_stage(task: TicketTask) -> None:
     :func:`_advance_task_pointer` (R2): that helper also transitions status
     to PENDING, clears ``session_id``/``stage_base_ref``, and expects to move
     exactly one pipeline position -- all wrong for a terminal write.
+    Deliberately does NOT clear ``regressed_into_stage`` either (R3, GitHub
+    #1794): the row is headed to a terminal disposition and will not be
+    re-dispatched off this stage without a fresh regress or forward requeue,
+    both of which already own that reset.
 
     Honest limit: a task salvaged after it had already reached FINALIZE has
     ``stage == stage_high_water == finalize`` already, so this call is a
@@ -520,6 +524,12 @@ def _advance_task_pointer(task: TicketTask, stages: list[Stage]) -> None:
     Mutates task in-place. The caller is responsible for any precondition checks.
     Does NOT check current status — approve path calls this directly;
     _stage_advance retains its RUNNING assert and calls this after.
+
+    Does NOT touch ``regressed_into_stage`` (GitHub #1794) — by the time any
+    forward advance fires, the task's current stage was already entered via a
+    dispatch spawn or a forward requeue, both of which already clear that
+    marker. Clearing it here would be a no-op; *reading* it here would
+    resurrect the sticky-counter false positive the field exists to avoid.
     """
     old_stage = task.stage
     idx = stages.index(task.stage)
@@ -540,10 +550,16 @@ def _stage_regress(task: TicketTask, target_stage: Stage) -> None:
     Caller is responsible for stage selection and regress-cap enforcement.
     See GitHub #770. stage_high_water is deliberately NOT touched here --
     it is monotonic and must never be lowered by a regress (GitHub #1361).
+
+    Also stamps ``regressed_into_stage = target_stage`` (GitHub #1794) -- a
+    per-arrival marker distinct from the cumulative ``regress_attempts``,
+    consumed and cleared by the next dispatch spawn (dispatch/claim.py) after
+    it has been written into the worker's ``queue_metadata``.
     """
     old_stage = task.stage
     task.stage = target_stage
     task.regress_attempts += 1
+    task.regressed_into_stage = target_stage
     transition_task_status(task, QueueItemStatus.PENDING)
     task.session_id = None
     task.stage_base_ref = None

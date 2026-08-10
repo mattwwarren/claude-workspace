@@ -837,6 +837,12 @@ class TestSelectOutputInstructions:
             assert 'confidence: "LOW"' in variant
             assert "advisory here, not blocking" in variant
             assert "Report no prose outside the JSON object." in variant
+            # #1806: `detail` is required and non-empty whenever status is
+            # "degraded" or "failed" -- must appear in both variants.
+            assert (
+                "`detail` is REQUIRED and MUST be non-empty whenever `status` "
+                'is "degraded" or "failed"' in variant
+            )
 
 
 class TestBuildReviewerPromptCapability:
@@ -916,6 +922,16 @@ class TestLoadAgentSpecFallbackGate:
     def test_malformed_toml_fails_safe_to_enabled(self, tmp_path: Path) -> None:
         _write(tmp_path / "pyproject.toml", "not [ valid toml{{{\n")
         assert _load_agent_spec_fallback_gate(tmp_path) is True
+
+
+def test_config_reference_documents_agent_spec_global_fallback() -> None:
+    """CONFIG_REFERENCE.md documents the #1773 fallback opt-out (#1782)."""
+    doc = (
+        Path(__file__).resolve().parent.parent / "config" / "CONFIG_REFERENCE.md"
+    ).read_text(encoding="utf-8")
+    assert "agent_spec_global_fallback" in doc
+    assert "[tool.cw.codex_review]" in doc
+    assert "#1773" in doc
 
 
 # ---------------------------------------------------------------------------

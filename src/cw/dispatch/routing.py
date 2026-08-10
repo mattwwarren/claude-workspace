@@ -199,6 +199,21 @@ _DEGRADED_HEALTH_RECOMMENDATION = "EXIT_FOR_HUMAN_REVIEW"
 # _stage_advance_unchecked config-error paths) hardcodes breadcrumbs="" and is
 # deliberately excluded from this set -- membership for one of those would be
 # cosmetic, not a fix (#1729).
+#
+# #1775 reaffirms this for _park_review_health_gate specifically: a degraded
+# reviewer's stated reason (ReviewerRunRecord.detail, threaded through
+# cw.review_findings.consolidate_verdict and rendered by
+# cw.codex_review._verdict._render_degraded_roles_note) lives entirely inside
+# the review-executor process and is never written onto the
+# session.last_result sentinel this dispatch-loop process reads -- there is no
+# existing data path from that detail into _park_review_health_gate's
+# breadcrumbs/needs_attention payload. Threading one in was considered and
+# declined this round: render_verdict_comment already posts the degraded-role
+# note to the ticket on every completed review pass, including the
+# stage_complete path that reaches this park (codex_background.py posts it
+# whenever verdict is not None), so the reason is already a durable,
+# operator-visible artifact before the park happens. Adding a second copy via
+# breadcrumbs would duplicate that, not fix a silence. See #1607/#1754.
 BREADCRUMB_ELIGIBLE_PAUSED_STATUSES: frozenset[str] = (
     STAGE_FAILURE_STATUSES - {"scope_exceeded", "forbidden_area"}
 ) | {_AWAITING_OPERATOR_REASON, _MUST_FIX_MECHANICALLY_REJECTED_REASON}
@@ -571,6 +586,15 @@ def _park_review_health_gate(task: TicketTask) -> None:
     this way (``approval.py``'s gate-release condition matches neither the
     scope-gated statuses nor the approval-gate disposition); the intended
     recovery is ``cw dev-queue requeue``/``drain``.
+
+    ``breadcrumbs`` is hardcoded ``""`` here, deliberately (#1729) -- see the
+    module-level comment above ``BREADCRUMB_ELIGIBLE_PAUSED_STATUSES``. #1775
+    reaffirms that choice specifically for a degraded reviewer's stated
+    reason: it has no data path into this function's scope (``task`` only,
+    no ``ReviewVerdict`` in hand) and does not need one, because
+    ``render_verdict_comment`` has already posted it to the ticket by the
+    time this park runs -- mirroring how ``_park_must_fix_mechanically_rejected``
+    below documents its own deliberate divergence from this same convention.
     """
     record_event(
         OrchestratorEventType.SESSION_NEEDS_ATTENTION,

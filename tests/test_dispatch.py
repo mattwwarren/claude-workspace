@@ -71,6 +71,7 @@ from cw.models import (
     CODEX_BACKEND,
     DEFAULT_GLOBAL_ATTEMPT_CEILING,
     DEFAULT_LANE,
+    OPENCODE_BACKEND,
     ClientConcurrencyOverride,
     ClientConfig,
     ConcurrencyOverrides,
@@ -1959,6 +1960,36 @@ class TestDispatchTickSpawnErrors:
         assert task.spawn_error_count == 0
         assert task.next_eligible_at is None
         assert task.hook_context_conflict_session_id is None
+
+    def test_successful_spawn_clears_regressed_into_stage(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """#1794: a successful spawn consumes and clears the per-arrival regress
+        marker, while the cumulative regress_attempts counter is left untouched."""
+        from cw.models import Stage
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-1794",
+                client="test-client",
+                stage=Stage.IMPL,
+                regress_attempts=1,
+                regressed_into_stage=Stage.IMPL,
+            )
+        )
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
+
+        assert spawned == 1
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.RUNNING
+        assert task.regressed_into_stage is None
+        assert task.regress_attempts == 1  # cumulative counter untouched
 
     def test_unrelated_revert_preserves_existing_hook_context_conflict_stamp(
         self,
@@ -6145,6 +6176,148 @@ class TestLaneCapCountingWithAwaitingSignoff:
 
 
 # ---------------------------------------------------------------------------
+# opencode lane serialization (#1671 R7)
+# ---------------------------------------------------------------------------
+
+
+def test_opencode_lane_max1_running_holds_slot(
+    tmp_dispatch_dirs: Path,
+    sample_client_config: ClientConfig,
+) -> None:
+    """A RUNNING opencode task in a max_parallel=1 lane blocks a second spawn.
+
+    Lane serialization is backend-agnostic (OCCUPIED_LANE_STATUSES counts by
+    status, not by executor), but this test pins the property for an
+    opencode-configured lane specifically (#1671 R7).
+    """
+    from cw.models import StagePipelineConfig
+
+    lanes = [
+        LaneConfig(
+            name="impl",
+            max_parallel=1,
+            pipeline=StagePipelineConfig(
+                executors={
+                    Stage.FINALIZE: StageExecutorConfig(backend=OPENCODE_BACKEND)
+                }
+            ),
+        )
+    ]
+    client = ClientConfig(
+        name="test-client",
+        workspace_path=sample_client_config.workspace_path,
+        default_branch="main",
+        lanes=lanes,
+    )
+    _make_clients_yaml(tmp_dispatch_dirs, client)
+
+    running_task = TicketTask(
+        ticket_id="OC-RUNNING",
+        client="test-client",
+        lane="impl",
+        stage=Stage.FINALIZE,
+    )
+    running_task.status = QueueItemStatus.RUNNING
+    running_task.session_id = "sess-oc-running"
+    with dev_queue_lock():
+        store = load_dev_queue()
+        store.tasks.append(running_task)
+        save_dev_queue(store)
+
+    sess = Session(
+        id="sess-oc-running",
+        name="test-client/auto-dev/OC-RUNNING",
+        client="test-client",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=sample_client_config.workspace_path,
+    )
+    save_state(CwState(sessions=[sess]))
+
+    add_ticket(
+        TicketTask(
+            ticket_id="OC-PENDING",
+            client="test-client",
+            lane="impl",
+            stage=Stage.FINALIZE,
+        )
+    )
+
+    config = OrchestratorConfig(default_ceiling=1)
+    daemon = FakeNativeDaemonClient()
+    result = dispatch_tick(config, native_daemon=daemon)
+
+    assert result.spawned == 0
+
+
+def test_opencode_lane_max1_blocked_holds_slot(
+    tmp_dispatch_dirs: Path,
+    sample_client_config: ClientConfig,
+) -> None:
+    """A BLOCKED_ON_USER opencode task in a max_parallel=1 lane blocks spawn."""
+    from cw.models import StagePipelineConfig
+
+    lanes = [
+        LaneConfig(
+            name="impl",
+            max_parallel=1,
+            pipeline=StagePipelineConfig(
+                executors={
+                    Stage.FINALIZE: StageExecutorConfig(backend=OPENCODE_BACKEND)
+                }
+            ),
+        )
+    ]
+    client = ClientConfig(
+        name="test-client",
+        workspace_path=sample_client_config.workspace_path,
+        default_branch="main",
+        lanes=lanes,
+    )
+    _make_clients_yaml(tmp_dispatch_dirs, client)
+
+    blocked_task = TicketTask(
+        ticket_id="OC-BLOCKED",
+        client="test-client",
+        lane="impl",
+        stage=Stage.FINALIZE,
+    )
+    blocked_task.status = QueueItemStatus.BLOCKED_ON_USER
+    blocked_task.session_id = "sess-oc-blocked"
+    with dev_queue_lock():
+        store = load_dev_queue()
+        store.tasks.append(blocked_task)
+        save_dev_queue(store)
+
+    sess = Session(
+        id="sess-oc-blocked",
+        name="test-client/auto-dev/OC-BLOCKED",
+        client="test-client",
+        purpose=SessionPurpose.IMPL,
+        origin=SessionOrigin.DAEMON,
+        status=SessionStatus.ACTIVE,
+        workspace_path=sample_client_config.workspace_path,
+    )
+    save_state(CwState(sessions=[sess]))
+
+    add_ticket(
+        TicketTask(
+            ticket_id="OC-PENDING-2",
+            client="test-client",
+            lane="impl",
+            stage=Stage.FINALIZE,
+        )
+    )
+
+    config = OrchestratorConfig(default_ceiling=1)
+    daemon = FakeNativeDaemonClient()
+    result = dispatch_tick(config, native_daemon=daemon)
+
+    assert result.spawned == 0
+
+
+# ---------------------------------------------------------------------------
 # TestLaneOccupantsPayload (#1243) — lane_occupants/occupied on every skip path
 # ---------------------------------------------------------------------------
 
@@ -9829,6 +10002,29 @@ class TestApplyStagedDecision:
 
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.stage == Stage.FINALIZE
+
+    def test_blocked_plan_scope_drift_at_impl_parks_without_regress(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """blocked/plan_scope_drift fires during Stage 2 (IMPL), so
+        task.stage == Stage.IMPL at apply time -- Rule 5a's regress branch
+        requires task.stage == Stage.FINALIZE (routing.py:1343-1349) and is
+        therefore structurally unreachable here, independent of
+        FINALIZE_REGRESS_BLOCKER_REASONS membership (#1779, R3).
+        """
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("PSD-IMPL-1", stage=Stage.IMPL)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "stage2_impl", "reason": "plan_scope_drift"},
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.stage == Stage.IMPL
+        assert task.regress_attempts == 0
+        assert task.blocked_reason == "plan_scope_drift"
 
     def test_awaiting_operator_reason_constant_value(self) -> None:
         from cw.dispatch import _AWAITING_OPERATOR_REASON

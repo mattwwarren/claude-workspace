@@ -29,6 +29,7 @@ from cw.review_findings import (
     AgentSpecSource,
     AgentSpecStatus,
     ReviewerRunFailure,
+    ReviewerRunRecord,
     consolidate_verdict,
 )
 from tests._codex_review_helpers import _task
@@ -370,6 +371,34 @@ class TestSynthesizeCodexReviewResultHealth:
         assert verdict is not None
         assert verdict.agents_run[0].unexpected_tool_attempts == ["mcp_tool_call"]
 
+    def test_degraded_document_detail_survives_full_synthesis_pipeline(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        # #1775: proves the detail-copy fix reaches the real call path (not
+        # just consolidate_verdict in isolation), and that existing health
+        # behavior for a degraded document is unchanged by the addition.
+        worktree = make_git_repo("wt-synth-health-detail")
+        doc = _make_reviewer_doc(
+            status="degraded", detail="sandbox lacked filesystem access"
+        )
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-synth",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+        assert result.status == "stage_complete"
+        assert result.health.lowest_agent_confidence == "MEDIUM"
+        assert result.health.any_incomplete_risk is True
+        assert result.health.recommendation == "EXIT_FOR_HUMAN_REVIEW"
+        assert verdict is not None
+        assert verdict.agents_run[0].detail == "sandbox lacked filesystem access"
+
 
 class TestSynthesizeCodexReviewResultMetrics:
     """#1710: metrics_by_role threads onto verdict.agents_run."""
@@ -474,6 +503,27 @@ def _mechanically_rejected_must_fix_doc() -> ReviewerFindingsDocument:
             line_start=None,
             line_end=None,
             summary="dropped before adjudication",
+        )
+    )
+
+
+def _evidence_not_in_diff_must_fix_doc() -> ReviewerFindingsDocument:
+    """A doc whose MUST_FIX finding resolves to a real diff line window but
+    whose evidence text is absent from it (#1792).
+
+    Sibling of :func:`_mechanically_rejected_must_fix_doc`: that fixture is
+    rejected ``unknown_file`` (a reason ``RejectedFinding.detail`` is never
+    populated for); this one is rejected ``evidence_not_in_diff``, the one
+    reason #1792 populates ``detail`` for.
+    """
+    return _make_reviewer_doc(
+        _make_finding(
+            severity="MUST_FIX",
+            file="src/cw/foo.py",
+            line_start=10,
+            line_end=10,
+            evidence="not present anywhere",
+            summary="evidence mismatch",
         )
     )
 
@@ -602,6 +652,17 @@ class TestRenderVerdictComment:
         assert "BLOCKING" in body
         assert "bad thing" in body
         assert "dropped one" in body
+
+    def test_render_verdict_comment_includes_discrepancy_detail(self) -> None:
+        # #1792: an evidence_not_in_diff rejection's populated `detail`
+        # (unlike a mechanically-rejected unknown_file's blank one, covered
+        # above) surfaces on the rendered comment.
+        verdict = consolidate_verdict(
+            [_evidence_not_in_diff_must_fix_doc()], _make_diff(), reviewed_sha="sha"
+        )
+        assert verdict.rejected_must_fix[0].detail != ""
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert verdict.rejected_must_fix[0].detail in body
 
     def test_clean_verdict_has_no_rejected_must_fix_section(self) -> None:
         verdict = consolidate_verdict(
@@ -898,6 +959,112 @@ class TestRenderVerdictComment:
         body = render_verdict_comment(verdict, fix_loop_enabled=False)
         assert "capability" not in body.lower()
         assert "degraded" not in body.lower()
+
+
+# ---------------------------------------------------------------------------
+# #1775 — a degraded reviewer's stated reason (`detail`), rendered
+# ---------------------------------------------------------------------------
+
+
+class TestRenderDegradedRolesNote:
+    # #1806: ReviewerFindingsDocument now rejects status="degraded" with a
+    # blank `detail` at construction, so the two blank-detail cases below can
+    # no longer go through _make_reviewer_doc()/consolidate_verdict() -- they
+    # build a valid verdict first, then substitute a directly-constructed
+    # ReviewerRunRecord (rendering stays reachable as defense-in-depth for
+    # any run record not routed through the document contract).
+
+    def test_degraded_role_with_detail_renders_role_and_reason(self) -> None:
+        doc = _make_reviewer_doc(
+            status="degraded",
+            detail="sandbox lacked filesystem access",
+            reviewer_role="Reviewer A",
+        )
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "**DEGRADED COVERAGE**" in body
+        assert "Reviewer A" in body
+        assert "sandbox lacked filesystem access" in body
+
+    def test_degraded_role_with_no_detail_renders_distinct_no_reason_marker(
+        self,
+    ) -> None:
+        doc = _make_reviewer_doc(reviewer_role="Reviewer A")
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        verdict = verdict.model_copy(
+            update={
+                "agents_run": [
+                    ReviewerRunRecord(
+                        reviewer_role="Reviewer A",
+                        status="degraded",
+                        detail="",
+                        finding_count=0,
+                    )
+                ]
+            }
+        )
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "**DEGRADED COVERAGE**" in body
+        assert "Reviewer A: degraded (no reason given)" in body
+
+    def test_two_degraded_roles_with_and_without_detail_both_render_distinguishably(
+        self,
+    ) -> None:
+        # Mirrors the real #1754 repro: multiple degraded roles in one pass,
+        # only some of which stated a reason.
+        doc_a = _make_reviewer_doc(
+            status="degraded",
+            detail="sandbox lacked filesystem access",
+            reviewer_role="Reviewer A",
+        )
+        verdict = consolidate_verdict([doc_a], _make_diff(), reviewed_sha="sha")
+        verdict = verdict.model_copy(
+            update={
+                "agents_run": [
+                    ReviewerRunRecord(
+                        reviewer_role="Reviewer A",
+                        status="degraded",
+                        detail="sandbox lacked filesystem access",
+                        finding_count=0,
+                    ),
+                    ReviewerRunRecord(
+                        reviewer_role="Reviewer B",
+                        status="degraded",
+                        detail="",
+                        finding_count=0,
+                    ),
+                ]
+            }
+        )
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "Reviewer A: degraded — sandbox lacked filesystem access" in body
+        assert "Reviewer B: degraded (no reason given)" in body
+
+    def test_clean_verdict_has_no_degraded_roles_section(self) -> None:
+        doc = _make_reviewer_doc(_make_finding(severity="NIT"))
+        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "DEGRADED COVERAGE" not in body
+
+    def test_degraded_note_renders_alongside_failed_roles_note(self) -> None:
+        doc = _make_reviewer_doc(
+            status="degraded",
+            detail="sandbox lacked filesystem access",
+            reviewer_role="Reviewer A",
+        )
+        verdict = consolidate_verdict(
+            [doc],
+            _make_diff(),
+            reviewed_sha="sha",
+            failed_reviewers=[
+                ReviewerRunFailure(role="Perf Reviewer", reason="timeout")
+            ],
+        )
+        body = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert "**PARTIAL COVERAGE**" in body
+        assert "Perf Reviewer" in body
+        assert "**DEGRADED COVERAGE**" in body
+        assert "Reviewer A: degraded — sandbox lacked filesystem access" in body
 
 
 # ---------------------------------------------------------------------------

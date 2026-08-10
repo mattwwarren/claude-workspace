@@ -2001,9 +2001,43 @@ class TestWriteHookContextTaskFields:
         assert qm["scope_hint"] == "large"
         assert qm["plan_source"] is None
         assert qm["headless_timeout_override"] is None
+        assert qm["regressed_into_stage"] is None
         ws = context["world_state_snapshot"]
         assert ws["origin_main_branch"] == "main"
         assert ws["prior_attempts_summary"] == []
+
+    def test_regressed_into_stage_threaded_into_queue_metadata(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """#1794: a task regressed into IMPL must carry that per-arrival signal
+        into the worker's queue_metadata, where auto-dev-impl.md's Pre-Stage
+        Detector Guard reads it."""
+        from cw.models import Stage
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path)
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-1794-regress")
+        task = _make_pending_task()
+        task.regressed_into_stage = Stage.IMPL
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev-impl GEN-1794 --headless",
+            label="auto-dev/GEN-1794",
+            native_daemon=daemon,
+            ticket_id="GEN-1794",
+            headless=True,
+            task=task,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        # Stage is a StrEnum, so json.dumps renders the plain stage value.
+        assert context["queue_metadata"]["regressed_into_stage"] == "impl"
 
     def test_git_failure_sets_origin_sha_null(
         self,
@@ -2337,10 +2371,10 @@ class TestCwContextWorkspacePath:
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
     ) -> None:
-        """cw-context.json schema_version is 2 after the #766 addition."""
+        """cw-context.json schema_version is current (3 after the #1794 addition)."""
         from cw.spawn import CW_CONTEXT_SCHEMA_VERSION, spawn_create_impl
 
-        assert CW_CONTEXT_SCHEMA_VERSION == 2
+        assert CW_CONTEXT_SCHEMA_VERSION == 3
 
         client = _make_client(tmp_path, name="schema-v2-client")
         daemon = FakeNativeDaemonClient()
@@ -2355,7 +2389,7 @@ class TestCwContextWorkspacePath:
         )
 
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
-        assert context["schema_version"] == 2
+        assert context["schema_version"] == 3
 
 
 class TestSpawnCreateImplCsidBackfill:

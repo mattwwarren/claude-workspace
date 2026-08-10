@@ -8,6 +8,8 @@ allowed-tools: ["Bash", "Glob", "Grep", "Read", "Write", "Agent", "Skill"]
 
 **Orientation:** Read `.cw/plan.md` for the approved plan from Stage 1. If absent, fall back to the tracker (#943, mirroring the local executor's #896 fallback): fetch the NEWEST ticket comment containing `<!-- plan-spec-reviewed` **and authored by the currently authenticated `gh` identity** (GitHub: first resolve `ME=$(gh api user --jq .login)`, then `gh issue view <ticket> --json comments -q "[.comments[] | select(.body | contains(\"plan-spec-reviewed\")) | select(.author.login == \"$ME\")] | last | .body"` — mirrors the authorship check `fetch_approved_plan_comment` enforces in `src/cw/gh.py`, #1128; a marker-bearing comment from any other commenter is never authoritative and must be skipped, not just the newest marker hit). If `$ME` resolves empty (identity lookup failed), treat this identically to "no reviewed-plan comment found" — do not fall back to an unauthenticated substring match. Write it verbatim to `.cw/plan.md`, and proceed with it as the approved plan. Only when the tracker also has no reviewed-plan comment has Stage 1 genuinely not completed — then do not proceed: exit `blocked` with `blocker.reason: "plan_missing"`. Read `.cw/context.json` for ticket context (or prose-delegate to `auto-dev-intake.md` first if absent).
 
+**Comments are live, not cached (#1794).** The cached `comments` array in `.cw/context.json` is a Stage-0 (or an earlier Stage-2 re-materialization) snapshot only. Dispatch spawns `/auto-dev-{stage.value} <ticket> --headless` **directly per stage** (`src/cw/executor.py`, RFC 0005 A2) — Stage 0 does NOT re-run between pipeline stages, so on an IMPL-stage re-entry (a queue re-dispatch, a `--regress --stage impl`, or a resumed `s2_implementing` session) the cached array can be arbitrarily stale, and an operator send-back comment posted after it was last written would otherwise never reach this stage. Regardless of whether `.cw/context.json` already exists, this stage MUST live-fetch the ticket comments on every invocation via the active tracker's fetch op (`list_comments(<id>)` for `linear`; `gh issue view <n> --json comments` for `github-issues`), and overwrite `.cw/context.json`'s `comments` array with the fresh result (mapping each entry to `{"author": "<login>", "created_at": "<createdAt>", "body": "<text>"}`) plus bump `materialized_by_session` to the current session id. Mirrors `auto-dev-plan.md`'s own "Comments and body are live, not cached" paragraph. Also write the fresh array verbatim to `/tmp/impl-comments-$CW_SESSION.json` — the Pre-Stage Detector Guard below consumes it. **WARN on comments-fetch failure** (mirrors `auto-dev-intake.md`'s Step 0d handling of the same fetch): if the live fetch exits non-zero or returns malformed JSON, emit an attention signal, log `"impl_comments_fetch_failed"` in `friction_highlights`, and leave `.cw/context.json`'s existing `comments` array untouched rather than overwriting it with an empty/failed result — a stale-but-real cached array is strictly better evidence than discarding what's there. Still write whatever was successfully fetched (possibly `[]`) to `/tmp/impl-comments-$CW_SESSION.json`; the staleness script degrades gracefully on a bad or empty comments file (see below) without masking an independently-sourced `regressed_into_stage` signal.
+
 In standalone headless invocation: emit `AUTO_DEV_RESULT` after this stage completes. In the interactive monolith chain: do NOT emit the sentinel here; the monolith owns it.
 
 **Arguments:** "$ARGUMENTS"
@@ -113,10 +115,27 @@ session's checkout is the work tree) **does not apply in headless mode**:
 
 ### Pre-Stage Detector Guard
 
-Before starting S2 work, run `detect_current_stage()` (see [Resume Detection](#resume-detection)):
+Before starting S2 work, run `detect_current_stage()` (see [Resume Detection](#resume-detection)).
+
+**Staleness/regress check (#1794) — run before applying either bullet below, whenever the detector reports a stage past S2.** The guard's premise for the "past S2, do not re-implement" bullet — that HEAD's `Auto-Dev-Stage: impl-complete` trailer means there is nothing left to do — is only sound when nothing has asked for more work since HEAD was written. Compute:
+
+```bash
+HEAD_COMMIT_AT=$(git log -1 --format=%cI HEAD)
+REGRESSED_INTO_STAGE=$(jq -r '.queue_metadata.regressed_into_stage // empty' .claude/cw-context.json 2>/dev/null)
+VERDICT=$(uv run python .claude/scripts/check_impl_guard_staleness.py \
+  --head-commit-at "$HEAD_COMMIT_AT" \
+  --comments-file /tmp/impl-comments-$CW_SESSION.json \
+  --regressed-into-stage "$REGRESSED_INTO_STAGE")
+```
+(`/tmp/impl-comments-$CW_SESSION.json` is the freshly live-fetched comments array from the Orientation step above, written to a temp file before this call.)
+
+`REGRESSED_INTO_STAGE` reads `.claude/cw-context.json` → `queue_metadata.regressed_into_stage` (written by `spawn_create_impl` from `TicketTask.regressed_into_stage` — see `src/cw/spawn.py`). A non-empty value means THIS impl-stage entry was reached via `_stage_regress` — either the operator's `cw dev-queue requeue <T> --regress --stage impl`, or the FINALIZE self-heal regress — both an explicit, external assertion that the stage is NOT actually complete. This is a **per-arrival** signal (cleared by dispatch the moment this session was spawned — `src/cw/dispatch/claim.py`), deliberately distinct from `TicketTask.regress_attempts` (a cumulative, never-reset-on-advance counter that bounds the FINALIZE self-heal cap and would otherwise misfire on every later IMPL entry after a single regress anywhere in the ticket's history, #1794). A missing/unreadable `queue_metadata` (interactive mode, or a context predating this field) reads as empty, not an error. **Known limitation:** because this marker is consumed and cleared at spawn time, a spawned session that dies before acting on it loses the regress signal for good; the comment-staleness check above is the backstop, but a bare `--regress` with no accompanying comment would not be caught in that case.
+
+On script exit 2 (`--head-commit-at` unparseable — fail open): treat as `stale: false` and proceed exactly as the unchanged behavior below; log `"impl_guard_staleness_check_failed"` in `friction_highlights`. A malformed or unreadable `--comments-file` does NOT trigger exit 2 (GitHub #1794 follow-up) — the script still exits 0 with a computed verdict and `comments_load_failed: true`, because `REGRESSED_INTO_STAGE` is an independent, queue-state-derived signal that must not be discarded just because the comments fetch had a transient hiccup. If the verdict's `comments_load_failed` is `true`, log `"impl_guard_comments_load_failed"` in `friction_highlights` alongside the verdict's `reasons`.
 
 - If `stage == "s2_implementing"`: branch exists but `Auto-Dev-Stage: impl-complete` trailer is absent. **Resume from current branch HEAD; do not reset.** Log the resumed-from SHA so the user can audit. Skip the worktree-create + branch-init steps below and have the new impl agent continue on top of existing commits.
-- If `stage` is past S2 (`s3_*`, `s4_*`, `s5_*`, `merged`): advance to that stage's entry point; do not re-implement.
+- If `stage` is past S2 (`s3_*`, `s4_*`, `s5_*`, `merged`) **AND the verdict's `stale` is `false`**: advance to that stage's entry point; do not re-implement. This is the unchanged fast path for the common case — a completed impl with no new operator activity and no operator regress.
+- If `stage` is past S2 **AND the verdict's `stale` is `true`**: the trailer's premise ("impl is done, nothing to do") is stale — do NOT advance to the next stage's entry point and do NOT treat the ticket as already complete. **Resume from current branch HEAD; do not reset** (same discipline as the `s2_implementing` bullet above). Log the verdict's `reasons` (`regressed_to_impl` and/or `stale_comment_after_head`) in `friction_highlights`, and pass the live-fetched comments (verbatim, chronological, especially any postdating `HEAD_COMMIT_AT`) to the Stage 2 agent as new, binding instructions to read and act on before re-declaring completion. The agent still must append a fresh `Auto-Dev-Stage: impl-complete` trailer to its new final commit per the S2 Completion Marker section below — the old trailer's commit is not this run's answer.
 - Otherwise (`pre_flight`, any `s1_*`, or no detector signal): proceed with fresh implementation as specified below.
 
 **Headless only — before spawning Stage 2 agent, emit `stage.entered` (`s2_impl_started`):**
@@ -246,12 +265,26 @@ All gates below run inside `$TMPWT`. Do NOT run gates from the cw session worktr
    ```
    Empty diff → `impl_failed`. The agent claimed work; no work exists.
 
-2. **File set is within the plan's enumeration:**
+2. **File set is within the plan's enumeration** (mechanical, not prose — #1779):
    ```bash
-   git -C "$TMPWT" diff --name-only "$FORK_POINT" | sort > /tmp/touched_files-$$
-   # Compare against the plan's file list (from Step 1)
+   git -C "$TMPWT" diff --name-only "$FORK_POINT" | sort > /tmp/touched_files-$CW_SESSION
+   SCOPE_CONFORMANCE_OUTPUT=$(uv run python .claude/scripts/check_plan_scope_conformance.py \
+     --plan .cw/plan.md --touched-files /tmp/touched_files-$CW_SESSION)
+   SCOPE_CONFORMANCE_EXIT=$?
    ```
-   Files outside the plan's enumeration → flag as scope growth (does NOT block on its own; routes to the existing Stage 3b scope-growth handling). Missing planned files → flag as missing work.
+   Note the script itself runs from the **cw session worktree**, not `$TMPWT`: `.cw/plan.md` is session state that was never committed to the branch, so it does not exist inside the detached gate worktree. Only the file-set extraction is `-C "$TMPWT"`.
+
+   The script compares the delivered file set against the plan's `## Files Modified` enumeration and allows `max(SCOPE_DRIFT_ABS_FLOOR, round(plan_files * (SCOPE_DRIFT_RATIO - 1)))` unplanned files (v1: floor 5, ratio 1.5; per-repo override via `[tool.cw.scope_conformance]` in `pyproject.toml`). It prints a JSON verdict — `triggered`, `extra_files`, `allowed_extra`, `plan_file_count`, `delivered_file_count` — to stdout, captured above in `$SCOPE_CONFORMANCE_OUTPUT`.
+
+   Disposition by exit code:
+
+   - **Exit 1 (drift) — only after validating the verdict:** exit 1 is not by itself proof of drift. A transient `uv run` / script failure (sync error, uncaught exception, environment issue) also commonly exits 1, and is indistinguishable from genuine drift by exit code alone. Before building `blocker.details` from the verdict, confirm `$SCOPE_CONFORMANCE_OUTPUT` parses as JSON and contains a `triggered` key (ideally also `extra_files`, `allowed_extra`, `plan_file_count`, `delivered_file_count`) — e.g. `echo "$SCOPE_CONFORMANCE_OUTPUT" | uv run python -c 'import json,sys; d=json.load(sys.stdin); assert "triggered" in d'`.
+     - **Valid JSON verdict with a `triggered` key present:** EXIT `blocked` with `blocker.reason: "plan_scope_drift"`, `blocker.stage: "stage2_impl"`, and `blocker.details` carrying the verdict's `extra_files` list **verbatim** (e.g. `"Step 2.5 gate 2: <N> files outside the plan's enumeration (allowed <allowed_extra>). Extra: <comma-joined extra_files>"`). Do NOT spawn reviewers — a diff that outgrew its approved file set is a diff no reviewer can converge a fix loop against, which is the failure this gate exists to stop. The enumerated paths are the operator's **entire** authorization surface: if the growth was legitimate, the operator requeues the parked task directly (there is no separate in-band "this was requested" signal, by design — see #1786). The emitted sentinel MUST populate `scope.lines_actual` from the already-computed `git diff --stat` (`stage_reached: "stage2_impl"` is post-impl, and the schema rejects a null `lines_actual` there).
+     - **No valid JSON verdict (tooling failure, not drift):** do NOT treat as `plan_scope_drift`. Route through the existing `impl_failed` disposition instead — EXIT `blocked` with `blocker.reason: "impl_failed"`, `blocker.details: "Step 2.5 gate 2: scope-conformance script exited 1 without producing a valid verdict — treating as tooling failure, not drift: <stderr/stdout excerpt>"`. Do NOT spawn reviewers.
+   - **Exit 0 (conforming):** unchanged behavior — if the verdict's `extra_files` is non-empty, append `"impl_scope_growth: <files>"` to `friction_highlights` and continue (non-blocking; routes through the existing Stage 3b scope-growth handling).
+   - **Exit 2 (parse error, e.g. the plan has no parseable `## Files Modified` section):** do NOT block. Append `"impl_scope_conformance_unparsed: <stderr>"` to `friction_highlights` and continue — a plan the gate cannot read is a plan-format problem, not an implementation failure, and failing closed here would park every run against a legacy plan document.
+
+   Missing planned files (a planned path absent from the diff) is a separate signal the script deliberately does not fold in → flag as missing work, unchanged.
 
 3. **Test command exit code is 0:** Re-run the agent's claimed test command in `$TMPWT`:
    ```bash

@@ -124,7 +124,10 @@ The rows below define the deterministic headless action for every interactive ga
 | S2.5 branch not pushed (`origin/<branch>` absent after fetch) | EXIT `blocked` with `blocker.reason: "impl_not_pushed"`. Do NOT spawn reviewers |
 | S2.5 completion gate fails (diff empty, test fail) | EXIT `blocked` with `blocker.reason: "impl_failed"`, `blocker.details: "Step 2.5 gate <N>: <output>"`. Do NOT spawn reviewers |
 | S2.5 missing planned files | Treat as missing work; route to impl retry (counts against 2x failure budget) |
-| S2.5 files outside plan | Append `"impl_scope_growth: <files>"` to `friction_highlights`; continue (routes through existing scope-growth handling) |
+| S2.5 files outside plan, within threshold | Append `"impl_scope_growth: <files>"` to `friction_highlights`; continue (routes through existing scope-growth handling) |
+| S2.5 files outside plan, threshold exceeded (`check_plan_scope_conformance.py` exit 1 **with a valid JSON verdict**) | EXIT `blocked` with `blocker.reason: "plan_scope_drift"`, `blocker.details` enumerating the unplanned paths (routes to BLOCKED_ON_USER; not finalize). Do NOT spawn reviewers |
+| S2.5 scope-conformance script exit 1 **without** a valid JSON verdict (tooling failure, not drift) | EXIT `blocked` with `blocker.reason: "impl_failed"`, `blocker.details: "Step 2.5 gate 2: scope-conformance script exited 1 without producing a valid verdict — treating as tooling failure, not drift: <stderr/stdout excerpt>"`. Do NOT spawn reviewers |
+| S2.5 scope-conformance script exit 2 (plan has no parseable `## Files Modified`) | Append `"impl_scope_conformance_unparsed: <stderr>"` to `friction_highlights`; continue (fail-open — a plan the gate cannot read is not an implementation failure) |
 | S2 / S3b agent timeout (Mitigation 4) | EXIT `blocked` with `blocker.reason: "agent_block"`, `blocker.details: "agent timed out after <N>m"` |
 | S2 / S3b single-commit on non-trivial change | Append `"impl_no_incremental_commits"` to `friction_highlights`; continue (advisory only) |
 | S3 review (any scope) | Always run reviewers, then adjudicate every finding into FIX NOW / REJECT / DEFER (Checkpoint 3a) |
@@ -587,6 +590,43 @@ These thresholds determine guard levels, not rejection. Tune as trust grows:
 
 ---
 
+## Post-Impl Scope Conformance Threshold
+
+Distinct from the tiers above: those bound what a plan may *propose*, this bounds
+how far an implementation may *drift from the plan it was given*. Enforced at
+Step 2.5 gate 2 by `.claude/scripts/check_plan_scope_conformance.py` against the
+plan's `## Files Modified` enumeration (#1779).
+
+```
+allowed_extra = max(SCOPE_DRIFT_ABS_FLOOR, round(plan_file_count * (SCOPE_DRIFT_RATIO - 1)))
+triggered     = len(delivered_files - planned_files) > allowed_extra
+```
+
+| Version | `SCOPE_DRIFT_RATIO` | `SCOPE_DRIFT_ABS_FLOOR` | Effect |
+|---------|--------------------|------------------------|--------|
+| v1 (current) | 1.5 | 5 | Up to 50% more files than planned, never fewer than 5 extra |
+
+The floor exists so tiny plans are not tripped by one missed call site; the ratio
+exists so a large plan's allowance scales with it. Only *delivered-but-unplanned*
+files count — a planned file missing from the diff is the separate "missing work"
+signal, and folding it in would let an under-delivering run look like drift.
+
+**Per-repo override** — add to the repo's `pyproject.toml` rather than editing the
+shared script:
+
+```toml
+[tool.cw.scope_conformance]
+ratio = 1.25      # optional; defaults to SCOPE_DRIFT_RATIO
+abs_floor = 3     # optional; defaults to SCOPE_DRIFT_ABS_FLOOR
+```
+
+The read fails **open**: a missing file, missing table, missing key, wrong-typed
+value, or malformed TOML each fall back to the shipped default for that value. A
+repo whose `pyproject.toml` cannot be parsed must not silently change gate
+behavior.
+
+---
+
 ## Subagent Reliability Mitigations
 
 The auto-dev pipeline delegates implementation, review, and prep work to spawned agents. Agent self-report (Friction/Health checks) was historically the only ground truth for stage advancement. Session-in-practice revealed three failure modes that self-report does not catch:
@@ -928,6 +968,7 @@ When `status: "blocked"`, the `blocker.reason` field carries one of:
 | `impl_failed` | Implementation agent returned BLOCK or failed quality gates after 2 attempts |
 | `review_blocked` | MUST_FIX findings persisted after 5 fix-loop cycles (the hard cap) |
 | `plan_deviation` | A non-deferrable Stage-3 finding (impl deviates from an explicit plan requirement/prohibition) survived the fix loop or was judged beyond fix-loop scope. The pipeline does not assign plan-vs-impl blame — it always exits `blocked`; the operator uses `cw dev-queue requeue --regress` to send it back to impl, or revisits the plan |
+| `plan_scope_drift` | Step 2.5 gate 2: the delivered diff touched more unplanned files than `check_plan_scope_conformance.py`'s allowance (#1779). **Mechanical and pre-review** — it is a file-set measurement taken *after impl, before review*, where `plan_deviation` above is a reviewer's *judgment* about content, raised during Stage 3. `blocker.stage` is `"stage2_impl"` (vs `plan_deviation`'s `"stage3_review"`), and `blocker.details` enumerates the specific unplanned paths — that list is the operator's entire authorization surface: requeue the parked task if the growth was legitimate, or `cw dev-queue requeue --regress` to send it back for a tighter diff. Distinct from `scope_exceeded`, which is a Status (not a blocker reason) fired *before impl started*, from the Stage-1 plan's own estimate |
 | `plan_unreviewable` | Plan Reviewer (spec station) returned MUST_FIX both before and after a single Step 1f.4 revision cycle — the plan needs human triage, not another auto-revision. No branch created |
 | `plan_unsound` | Plan Soundness Reviewer returned a MUST_FIX (direction contradicts a codified `ARCHITECTURE.md` §7/§8 rule) in a headless run, or it persisted after a Step 1f.4 revision cycle — the chosen direction needs human judgment. No branch created |
 | `agent_block` | Any other agent returned friction level BLOCK that the pipeline could not auto-resolve |

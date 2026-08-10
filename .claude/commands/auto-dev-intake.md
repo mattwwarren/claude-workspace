@@ -284,7 +284,7 @@ cat > .cw/context.json << 'CWCTXEOF'
   "ticket_id": "<TICKET>",
   "ticket_title": "<title from ticket fetch>",
   "ticket_body": "<body from ticket fetch>",
-  "comments": ["<comment 1>", "<comment 2>", "..."],
+  "comments": [{"author": "<login>", "created_at": "<ISO8601 createdAt>", "body": "<comment text>"}, "..."],
   "scope_hint": null,
   "prior_decisions": [],
   "materialized_by_session": "<session_id from .claude/cw-context.json>"
@@ -292,8 +292,8 @@ cat > .cw/context.json << 'CWCTXEOF'
 CWCTXEOF
 ```
 
-**Populating `comments` (from a real fetch, never model initiative):** the `comments` array MUST be filled from an actual tracker fetch — never guessed, never left `[]` by default:
-- **`github-issues` mode:** use the `comments` returned by the Step 3 fetch (`gh issue view <n> --json title,body,state,url,comments`). The single Step 3 call already carries them; do not re-fetch.
+**Populating `comments` (from a real fetch, never model initiative):** the `comments` array MUST be filled from an actual tracker fetch — never guessed, never left `[]` by default. **Each entry is an object, not a bare body string (#1794):** map the tracker's own fields onto `{"author": ..., "created_at": ..., "body": ...}` **on write** — `github-issues` gives `author.login` → `author` and `createdAt` → `created_at`; `linear` gives the comment's user identity → `author` and its creation timestamp → `created_at`. The timestamp is load-bearing, not decoration: Stage 2's Pre-Stage Detector Guard compares the newest comment's `created_at` against branch HEAD's commit date to decide whether an `Auto-Dev-Stage: impl-complete` trailer is still authoritative (`.claude/scripts/check_impl_guard_staleness.py`), and a timestamp-less comment is invisible to that check.
+- **`github-issues` mode:** use the `comments` returned by the Step 3 fetch (`gh issue view <n> --json title,body,state,url,comments`). The single Step 3 call already carries them, including `createdAt` and `author.login`; do not re-fetch.
 - **`linear` mode:** `list_comments(<id>)` is a **mandatory op that MUST run before Step 0d** — run it explicitly and populate `comments` from its result. Do NOT rely on model initiative to decide whether comments are worth fetching.
 
 **WARN on comments-fetch failure:** if the comments fetch exits non-zero or returns malformed JSON, emit an attention signal and continue with `comments: []`:
