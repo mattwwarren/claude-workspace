@@ -1960,6 +1960,36 @@ class TestDispatchTickSpawnErrors:
         assert task.next_eligible_at is None
         assert task.hook_context_conflict_session_id is None
 
+    def test_successful_spawn_clears_regressed_into_stage(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """#1794: a successful spawn consumes and clears the per-arrival regress
+        marker, while the cumulative regress_attempts counter is left untouched."""
+        from cw.models import Stage
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-1794",
+                client="test-client",
+                stage=Stage.IMPL,
+                regress_attempts=1,
+                regressed_into_stage=Stage.IMPL,
+            )
+        )
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
+
+        assert spawned == 1
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.RUNNING
+        assert task.regressed_into_stage is None
+        assert task.regress_attempts == 1  # cumulative counter untouched
+
     def test_unrelated_revert_preserves_existing_hook_context_conflict_stamp(
         self,
         tmp_dispatch_dirs: Path,
