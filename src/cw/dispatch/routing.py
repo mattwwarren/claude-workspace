@@ -972,17 +972,22 @@ def _walk_stage_pointer_forward(
     single-hop behavior. See GitHub #1149 (plan-review MUST_FIX #1).
     """
     original_session_id = task.session_id
+    # #1717: captured once, before any hop -- mirrors original_session_id
+    # above. _advance_task_pointer clears task.stage_base_ref on every hop
+    # (same R6-style side effect as session_id), so the live value is already
+    # gone by the time the walk reaches the REVIEW rung on the very same hop
+    # that carried it there. No real dispatch claim happens mid-walk, so this
+    # pre-walk snapshot is the correct "current head" proxy throughout.
+    original_stage_base_ref = task.stage_base_ref
     while stages.index(task.stage) < target_idx:
-        # #1717: computed once, before any REVIEW-rung gate check below, and
-        # consumed (cleared) here regardless of which gate -- if any -- fires
-        # below. REVIEW is visited at most once per walk (the while condition
-        # only moves forward), so this is the walk's single consumption point
-        # for the FINALIZE-regress repeat marker.
-        is_repeat = (
-            _consume_finalize_regress_repeat(task)
-            if task.stage == Stage.REVIEW
-            else False
-        )
+        # Computed once per iteration, before any REVIEW-rung gate check
+        # below, and consumed (cleared) here regardless of which gate -- if
+        # any -- fires below. REVIEW is visited at most once per walk (the
+        # while condition only moves forward), so this is the walk's single
+        # consumption point for the FINALIZE-regress repeat marker.
+        # _consume_finalize_regress_repeat itself no-ops at any non-REVIEW
+        # stage.
+        is_repeat = _consume_finalize_regress_repeat(task, original_stage_base_ref)
         if task.stage == Stage.REVIEW and _should_gate_for_scope_hint(
             task, last_result
         ):
@@ -1117,12 +1122,11 @@ def _route_scope_gated_approval(
     outranks-signoff precedent below.
     """
     # #1717: computed once, before any REVIEW-scoped gate check below (mirrors
-    # _walk_stage_pointer_forward's identical placement), and consumed
-    # (cleared) here unconditionally -- False (no consumption) at any other
-    # stage, since the marker is only ever meaningful on REVIEW's re-entry.
-    is_repeat = (
-        _consume_finalize_regress_repeat(task) if task.stage == Stage.REVIEW else False
-    )
+    # _walk_stage_pointer_forward's identical placement). No-ops at any
+    # non-REVIEW stage internally -- see _consume_finalize_regress_repeat.
+    # No hop has run yet in this function, so task.stage_base_ref is still
+    # the live, un-cleared claim-time value here.
+    is_repeat = _consume_finalize_regress_repeat(task, task.stage_base_ref)
     if task.stage == Stage.REVIEW and _should_gate_for_review_health(last_result):
         _park_review_health_gate(task)
         _record_scope_routing_decision(task, last_result, _RULE_SCOPE_GATED_APPROVAL)
@@ -1217,10 +1221,9 @@ def _route_stage_success(
     (``_record_scope_routing_decision``) after the decision is made.
     """
     # #1717: computed once, before any REVIEW-scoped gate check below (mirrors
-    # _route_scope_gated_approval's identical placement).
-    is_repeat = (
-        _consume_finalize_regress_repeat(task) if task.stage == Stage.REVIEW else False
-    )
+    # _route_scope_gated_approval's identical placement). No hop has run yet
+    # in this function, so task.stage_base_ref is still the live value.
+    is_repeat = _consume_finalize_regress_repeat(task, task.stage_base_ref)
     if task.stage == Stage.REVIEW and _should_gate_for_review_health(last_result):
         # Why first: every gate below is an authorization or scope-workflow
         # question ("may this ship?"); this one is a quality question ("is

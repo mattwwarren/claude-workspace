@@ -7539,6 +7539,55 @@ class TestApplyStagedDecision:
         assert repeat_signal[0][1]["paused_status"] == "finalize_regress_repeat"
         assert repeat_signal[0][1]["ticket_id"] == "FRR-4"
 
+    def test_finalize_regress_repeat_signal_fires_via_stage_walk_finalize_hold_gate(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """#1717: gate-agnosticism, walk variant -- the repeat signal also
+        fires when the REVIEW-rung gate that re-parks the task is reached via
+        the multi-hop stage walk (_walk_stage_pointer_forward), not just via
+        _route_scope_gated_approval/_route_stage_success directly. Mirrors
+        'Site 3' of test_force_hold_park_emits_session_needs_attention: a task
+        at Stage.IMPL with a later-stage sentinel walks IMPL->REVIEW, where
+        hold_finalize='manual' parks it at the finalize_hold gate mid-walk."""
+        from cw.dev_queue import _stage_regress
+        from cw.dispatch import apply_staged_decision
+
+        repeat_signal = capture_events(
+            "cw.dispatch.regress_repeat",
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        )
+
+        task = self._make_running_task("FRR-5", stage=Stage.FINALIZE)
+        task.stage_base_ref = "sha-original"
+        _stage_regress(task, Stage.IMPL)
+        assert task.finalize_regress_branch_head == "sha-original"
+
+        # Round trip lands back with the branch head unchanged, but this time
+        # the sentinel reports a later stage than IMPL -- driving the walk
+        # rather than a direct Rule 1/Rule 3 call -- and hold_finalize is set
+        # so the walk's REVIEW rung parks at the finalize_hold gate.
+        task.stage_base_ref = "sha-original"
+        task.status = QueueItemStatus.RUNNING
+        task.hold_finalize = "manual"
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        apply_staged_decision(
+            task,
+            "blocked",
+            {"status": "blocked", "stage_reached": "stage4b_pr_create"},
+            self._clients(tmp_path),
+        )
+
+        assert task.stage == Stage.REVIEW
+        assert task.finalize_regress_branch_head is None  # consumed
+
+        assert len(repeat_signal) == 1
+        assert repeat_signal[0][1]["paused_status"] == "finalize_regress_repeat"
+        assert repeat_signal[0][1]["ticket_id"] == "FRR-5"
+
     def test_stage_failure_operator_unavailable_stamps_awaiting_operator_disposition(
         self, tmp_dispatch_dirs: Path, tmp_path: Path
     ) -> None:

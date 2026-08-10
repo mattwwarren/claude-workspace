@@ -12,11 +12,13 @@ operator-visible signal that this is a *repeat*, not a fresh park.
 the pre-regress ``stage_base_ref`` (the branch-head oracle) whenever it
 regresses FROM ``Stage.FINALIZE``. This module owns the REVIEW-side
 consumption of that marker: :func:`_consume_finalize_regress_repeat` reads
-and clears it, comparing the stored SHA to the freshly-restamped
-``stage_base_ref`` at REVIEW's next claim; :func:`_maybe_emit_finalize_
-regress_repeat_signal` fires a companion ``SESSION_NEEDS_ATTENTION`` event
-when that comparison found a repeat AND this pass re-parked the task (never
-when it advanced past REVIEW instead).
+and clears it, comparing the stored SHA against a caller-supplied current
+branch head (normally ``task.stage_base_ref`` at REVIEW's claim, but a
+pre-hop snapshot when reached via the multi-hop walk -- see that function's
+docstring); :func:`_maybe_emit_finalize_regress_repeat_signal` fires a
+companion ``SESSION_NEEDS_ATTENTION`` event when that comparison found a
+repeat AND this pass re-parked the task (never when it advanced past REVIEW
+instead).
 
 Kept as a sibling module to ``dispatch.routing`` rather than folded into it
 (#1728: routing.py is already 1445 lines) -- imported by routing.py and
@@ -29,7 +31,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cw.events import record_event
-from cw.models import OrchestratorEventType, QueueItemStatus
+from cw.models import OrchestratorEventType, QueueItemStatus, Stage
 
 if TYPE_CHECKING:
     from cw.models import TicketTask
@@ -43,26 +45,43 @@ if TYPE_CHECKING:
 _FINALIZE_REGRESS_REPEAT_REASON = "finalize_regress_repeat"
 
 
-def _consume_finalize_regress_repeat(task: TicketTask) -> bool:
+def _consume_finalize_regress_repeat(
+    task: TicketTask, current_branch_head: str | None
+) -> bool:
     """Read-and-clear ``task.finalize_regress_branch_head``; True iff a repeat.
 
-    Callers MUST scope this to ``task.stage == Stage.REVIEW`` -- mirroring the
-    existing convention on ``dispatch.routing._should_gate_for_review_health``
-    -- and must call it at most once per REVIEW-stage routing pass, since the
-    marker is cleared as a side effect regardless of the outcome.
+    No-ops (returns ``False`` without touching the marker) when
+    ``task.stage != Stage.REVIEW`` -- the marker is only ever meaningful on
+    REVIEW's re-entry, mirroring the existing convention on
+    ``dispatch.routing._should_gate_for_review_health``. Callers must still
+    call this at most once per REVIEW-stage routing pass, since the marker is
+    cleared as a side effect regardless of the outcome.
+
+    ``current_branch_head`` is the branch head to compare the marker against.
+    Direct callers (``_route_scope_gated_approval``, ``_route_stage_success``)
+    pass ``task.stage_base_ref`` as-is. ``_walk_stage_pointer_forward`` MUST
+    instead pass the value captured *before* the walk began: its own
+    ``_advance_task_pointer`` hop into REVIEW unconditionally clears
+    ``task.stage_base_ref`` (mirroring its identical, pre-existing handling of
+    ``task.session_id``) before this check ever runs on that same visit to
+    REVIEW, since no real dispatch claim happens mid-walk -- reading the live
+    (post-hop) value here would always compare the marker against ``None``
+    and never detect a genuine repeat.
 
     Returns ``False`` when no marker is set (no FINALIZE-origin regress is in
     play). Otherwise clears the marker and returns whether the stored
-    pre-regress branch head equals ``task.stage_base_ref`` as freshly
-    restamped by REVIEW's claim -- ``True`` means zero commits landed
-    anywhere in the finalize->impl->review round trip, the exact condition
-    that produced the #1644/#1702/#1710 silent-repeat incidents.
+    pre-regress branch head equals ``current_branch_head`` -- ``True`` means
+    zero commits landed anywhere in the finalize->impl->review round trip,
+    the exact condition that produced the #1644/#1702/#1710 silent-repeat
+    incidents.
     """
+    if task.stage != Stage.REVIEW:
+        return False
     marker = task.finalize_regress_branch_head
     task.finalize_regress_branch_head = None
     if marker is None:
         return False
-    return marker == task.stage_base_ref
+    return marker == current_branch_head
 
 
 def _maybe_emit_finalize_regress_repeat_signal(
