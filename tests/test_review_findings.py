@@ -31,6 +31,7 @@ from cw.review_findings import (
     _classify_finding,
     _enclosing_def_span,
     _line_reference_valid,
+    _reconcile_evidence_window,
     _select_rejected_must_fix,
     consolidate_verdict,
     dedupe_findings,
@@ -1236,6 +1237,49 @@ class TestEvidenceWindowReconciliation:
         assert verdict.blocking is False
         assert len(verdict.rejected_must_fix) == 1
         assert verdict.rejected_must_fix[0].reason == "evidence_not_in_diff"
+
+    def test_persisted_anchor_repaired_when_undershoot_stays_within_added_lines(
+        self,
+    ) -> None:
+        # Sibling of the #1784 fixture's persisted-anchor test, but for the
+        # case that fixture deliberately can't exercise: here the evidence's
+        # undershot tail (line 12) is itself a genuine ADDED line (not
+        # hunk-context), so _resolved_finding's file_line_text-only
+        # reconciliation (unlike the #1784 case, where the tail is
+        # context-only) DOES find a match and repairs the persisted anchor.
+        diff = _make_diff(
+            "line one",
+            "line two",
+            "line three",
+            files={"src/cw/foo.py": [10, 11, 12]},
+        )
+        f = _make_finding(
+            line_start=10, line_end=11, evidence="line one\nline two\nline three"
+        )
+        accepted, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), diff)
+        assert not rejected
+        assert len(accepted) == 1
+        assert accepted[0].line_start == 10
+        assert accepted[0].line_end == 12
+
+    def test_reconcile_evidence_window_direct_start_after_end_no_match(self) -> None:
+        # Direct unit test of the defensive candidate_start > candidate_end
+        # guard: unreachable through validate_reviewer_document (every
+        # caller passes an already-ordered start <= end), but exercised
+        # directly here so the guard itself is covered rather than dead.
+        assert _reconcile_evidence_window({}, "x", start=5, end=3, tolerance=3) is None
+
+    def test_file_level_rejection_detail_reports_no_line_anchor(self) -> None:
+        # AC4, file-level branch: a rejected file-level finding (no line
+        # anchor at all) gets a detail message naming the no-anchor case
+        # rather than a declared-range mismatch.
+        f = _make_finding(
+            line_start=None, line_end=None, evidence="not present anywhere"
+        )
+        _, rejected, _ = validate_reviewer_document(_make_reviewer_doc(f), _make_diff())
+        assert rejected[0].reason == "evidence_not_in_diff"
+        assert "no line" in rejected[0].detail
+        assert "file-level fallback" in rejected[0].detail
 
 
 class TestUnanchoredFindings:
