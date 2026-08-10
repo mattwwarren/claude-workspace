@@ -63,6 +63,15 @@ _BLOCKER_REASON_PAUSED_STATUSES = {
     "codex_must_fix_mechanically_rejected",
 }
 
+# finalize_regress_repeat (GitHub #1717, src/cw/dispatch/regress_repeat.py) is
+# a companion signal, not a blocker.reason-carrying park -- its breadcrumbs is
+# a composite diagnostic string ("attempts=... branch_head=... pr_url=...
+# disposition=..."), not a verbatim blocker.reason. Surfaced the same way
+# (always shown when present) via a separate check below rather than folding
+# it into _BLOCKER_REASON_PAUSED_STATUSES, to keep the docstring above
+# ("blocker.reason verbatim") accurate.
+_FINALIZE_REGRESS_REPEAT_PAUSED_STATUS = "finalize_regress_repeat"
+
 for ln in sys.stdin:
     ln = ln.strip()
     if not ln:
@@ -80,7 +89,10 @@ for ln in sys.stdin:
         bits.append("stage=" + str(p.get("stage")))
     if p.get("attempts") is not None:
         bits.append("att=" + str(p.get("attempts")))
-    if p.get("paused_status") in _BLOCKER_REASON_PAUSED_STATUSES and p.get("breadcrumbs"):
+    if (
+        p.get("paused_status") in _BLOCKER_REASON_PAUSED_STATUSES
+        or p.get("paused_status") == _FINALIZE_REGRESS_REPEAT_PAUSED_STATUS
+    ) and p.get("breadcrumbs"):
         bits.append("reason=" + str(p.get("breadcrumbs")))
     joined = " ".join(bits)
     sess = str(p.get("session_id") or "")[:8]

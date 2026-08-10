@@ -79,6 +79,11 @@ from cw.dispatch.loop import (
     consume_completed_sessions,
     run_dispatch_loop,
 )
+from cw.dispatch.regress_repeat import (
+    _FINALIZE_REGRESS_REPEAT_REASON,
+    _consume_finalize_regress_repeat,
+    _maybe_emit_finalize_regress_repeat_signal,
+)
 from cw.dispatch.routing import (
     _APPROVAL_GATE_REASON,
     _AWAITING_OPERATOR_REASON,
@@ -146,6 +151,7 @@ __all__ = [
     "_DISPATCH_CONSUMER",
     "_EARLIER_STAGE_REPORT_REASON",
     "_FINALIZE_HOLD_REASON",
+    "_FINALIZE_REGRESS_REPEAT_REASON",
     "_INVALID_STAGE_REASON",
     "_LANE_PAUSE_SOURCE_CIRCUIT_BREAKER",
     "_LOADED_VERSION",
@@ -174,6 +180,7 @@ __all__ = [
     "_codex_capability_cache",
     "_codex_capability_gate",
     "_codex_capability_park_count",
+    "_consume_finalize_regress_repeat",
     "_dispatch_client_lanes",
     "_emit_attempt_cap_blocked_event",
     "_emit_availability_skip",
@@ -184,6 +191,7 @@ __all__ = [
     "_invalidate_stale_context_json",
     "_lane_occupants_for_client",
     "_lane_stats_for_client",
+    "_maybe_emit_finalize_regress_repeat_signal",
     "_maybe_notify_lane_starved",
     "_park_review_health_gate",
     "_park_running_task_blocked_on_user",
