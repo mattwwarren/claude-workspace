@@ -108,6 +108,15 @@ Two paths deliberately leave every snapshot `false`, and both are correct:
 
 In both cases the sentinel — not a snapshot — remains the source of truth (§1).
 
+**Caveat — the field defaults `true`.** `is_terminal_snapshot` defaults to
+`true` on `ReviewVerdict` (fail-toward-trust), so any snapshot written before
+#1763 shipped, or by any future caller that doesn't know to stamp it `false`,
+will read as terminal/authoritative regardless of whether it actually is. Only
+the codex fix loop's per-cycle persist explicitly stamps `false` at write time.
+A `cycleN-review-verdict.json` from a session that predates this field carries
+no reliable signal either way — cross-check the sentinel (§1) rather than
+trusting `is_terminal_snapshot=true` on an old file at face value.
+
 ---
 
 ## 3. Sentinel status → operator action

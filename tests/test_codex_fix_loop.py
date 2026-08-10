@@ -1715,6 +1715,12 @@ class TestTerminalSnapshotMarker:
         assert cycle1.is_terminal_snapshot is True
 
         assert "### MUST_FIX — mechanically rejected" in out.blocker.details
+        # #1763 review: the header alone doesn't prove *which* finding backs
+        # the blocker — assert the specific rejected finding's own identity
+        # (rendered via `_render_rejected_must_fix`'s `summary` field) appears
+        # verbatim, so a regression that renders a different/stale rejected
+        # MUST_FIX than the one actually persisted in cycle1 would fail here.
+        assert "MFX-mechanically-rejected" in out.blocker.details
         # The pointer names the specific terminal file, not just the bundle dir.
         assert any("cycle1-review-verdict.json" in h for h in out.friction_highlights)
 
