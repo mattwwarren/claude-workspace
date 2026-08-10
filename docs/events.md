@@ -615,6 +615,22 @@ open enum; consumers MUST tolerate unknown values. Known values:
   posted review comment (rendered under "MUST_FIX — mechanically rejected") and
   re-run review — `cw dev-queue requeue`, or `cw dev-queue drain`, which selects
   this disposition. See #1714.
+- `"finalize_regress_repeat"` — a companion signal (`src/cw/dispatch/
+  regress_repeat.py`), fired ALONGSIDE whichever of the paused_status values
+  above the ordinary park already emitted this pass -- never a replacement for
+  it. A FINALIZE self-heal regress (#770) reverts a ticket to `Stage.IMPL`;
+  if that IMPL leg produces no new commit, the round trip lands back at
+  REVIEW with an unchanged branch head, and REVIEW's scope-gated gates
+  re-evaluate from a blank slate, re-parking the ticket with an identical
+  disposition -- burning an attempt each cycle with no operator-visible
+  signal that this is a *repeat*, not a fresh park (the #1644/#1702/#1710
+  incidents). This event is that signal. `breadcrumbs` is a composite
+  diagnostic string, not a verbatim `blocker.reason`:
+  `"attempts=<int> branch_head=<repr> pr_url=<repr> disposition=<repr>"`.
+  Fires only when this pass genuinely re-parked the task (`task.status` is
+  `BLOCKED_ON_USER` or `AWAITING_OPERATOR_SIGNOFF`) with the branch head
+  unchanged since the regress -- never when the round trip resolved (the
+  task advanced past REVIEW) or when a real commit landed. See #1717.
 
 `correlation_id` is the `ticket_id` when resolvable, `null` otherwise.
 A push notification is fired for most emissions (via `fire_push_notification`)
