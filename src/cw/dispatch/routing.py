@@ -43,6 +43,10 @@ from cw.dev_queue import (
     _stage_regress,
     transition_task_status,
 )
+from cw.dispatch.regress_repeat import (
+    _consume_finalize_regress_repeat,
+    _maybe_emit_finalize_regress_repeat_signal,
+)
 from cw.events import record_event
 from cw.models import (
     ClientConfig,
@@ -969,11 +973,22 @@ def _walk_stage_pointer_forward(
     """
     original_session_id = task.session_id
     while stages.index(task.stage) < target_idx:
+        # #1717: computed once, before any REVIEW-rung gate check below, and
+        # consumed (cleared) here regardless of which gate -- if any -- fires
+        # below. REVIEW is visited at most once per walk (the while condition
+        # only moves forward), so this is the walk's single consumption point
+        # for the FINALIZE-regress repeat marker.
+        is_repeat = (
+            _consume_finalize_regress_repeat(task)
+            if task.stage == Stage.REVIEW
+            else False
+        )
         if task.stage == Stage.REVIEW and _should_gate_for_scope_hint(
             task, last_result
         ):
             _park_scope_hint_gate(task)
             _record_scope_routing_decision(task, last_result, _RULE_STAGE_WALK)
+            _maybe_emit_finalize_regress_repeat_signal(task, is_repeat)
             return "parked"
         # Not `elif` (ruff RET505: an elif after a `return` is redundant) --
         # the `return` above already makes this exclusive with the branches
@@ -982,13 +997,16 @@ def _walk_stage_pointer_forward(
         if task.stage == Stage.REVIEW and _should_force_hold_finalize(task, clients):
             _park_finalize_hold(task)
             _record_scope_routing_decision(task, last_result, _RULE_STAGE_WALK)
+            _maybe_emit_finalize_regress_repeat_signal(task, is_repeat)
             return "parked"
         if task.stage == Stage.REVIEW and _should_gate_for_signoff(task, clients):
             _park_signoff_gate(task)
             _record_scope_routing_decision(task, last_result, _RULE_STAGE_WALK)
+            _maybe_emit_finalize_regress_repeat_signal(task, is_repeat)
             return "parked"
         if task.stage == Stage.REVIEW:
             _record_scope_routing_decision(task, last_result, _RULE_STAGE_WALK)
+            _maybe_emit_finalize_regress_repeat_signal(task, is_repeat)
         _advance_task_pointer(task, stages)
         task.session_id = original_session_id
     return "proceed"
@@ -1098,9 +1116,17 @@ def _route_scope_gated_approval(
     authorization-workflow signal, mirroring the existing finalize_hold-
     outranks-signoff precedent below.
     """
+    # #1717: computed once, before any REVIEW-scoped gate check below (mirrors
+    # _walk_stage_pointer_forward's identical placement), and consumed
+    # (cleared) here unconditionally -- False (no consumption) at any other
+    # stage, since the marker is only ever meaningful on REVIEW's re-entry.
+    is_repeat = (
+        _consume_finalize_regress_repeat(task) if task.stage == Stage.REVIEW else False
+    )
     if task.stage == Stage.REVIEW and _should_gate_for_review_health(last_result):
         _park_review_health_gate(task)
         _record_scope_routing_decision(task, last_result, _RULE_SCOPE_GATED_APPROVAL)
+        _maybe_emit_finalize_regress_repeat_signal(task, is_repeat)
         return
     tier = _resolve_scope_tier(last_result, task)
     earlier_stage_report = _is_earlier_stage_report(task, last_result, clients)
@@ -1128,6 +1154,7 @@ def _route_scope_gated_approval(
             task, QueueItemStatus.BLOCKED_ON_USER, disposition=disposition
         )
         _record_scope_routing_decision(task, last_result, _RULE_SCOPE_GATED_APPROVAL)
+        _maybe_emit_finalize_regress_repeat_signal(task, is_repeat)
         return
     if task.stage == Stage.REVIEW and _should_force_hold_finalize(task, clients):
         # Why first: the A3 force hold is an operator's explicit "do not ship
@@ -1147,6 +1174,7 @@ def _route_scope_gated_approval(
     else:
         _stage_advance_unchecked(task, clients, disposition=disposition, pr_url=pr_url)
     _record_scope_routing_decision(task, last_result, _RULE_SCOPE_GATED_APPROVAL)
+    _maybe_emit_finalize_regress_repeat_signal(task, is_repeat)
 
 
 def _route_stage_success(
@@ -1188,6 +1216,11 @@ def _route_stage_success(
     Every call emits the #1617 scope-routing audit event
     (``_record_scope_routing_decision``) after the decision is made.
     """
+    # #1717: computed once, before any REVIEW-scoped gate check below (mirrors
+    # _route_scope_gated_approval's identical placement).
+    is_repeat = (
+        _consume_finalize_regress_repeat(task) if task.stage == Stage.REVIEW else False
+    )
     if task.stage == Stage.REVIEW and _should_gate_for_review_health(last_result):
         # Why first: every gate below is an authorization or scope-workflow
         # question ("may this ship?"); this one is a quality question ("is
@@ -1206,6 +1239,7 @@ def _route_stage_success(
     else:
         _stage_advance_unchecked(task, clients, disposition=disposition, pr_url=pr_url)
     _record_scope_routing_decision(task, last_result, _RULE_STAGE_SUCCESS)
+    _maybe_emit_finalize_regress_repeat_signal(task, is_repeat)
 
 
 def _route_staged_decision(
