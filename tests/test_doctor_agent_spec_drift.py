@@ -12,30 +12,19 @@ from pathlib import Path
 
 import pytest
 
+from cw.codex_review import _REVIEWER_ROLE_AGENT_FILES
 from cw.doctor.agent_spec_drift import _check_agent_spec_drift
 from cw.models import ClientConfig
 from tests._codex_review_helpers import _populate_global_agents_dir, _write
 
-_ALL_ROLES: dict[str, str] = {
-    "code_reviewer": "Code Quality Reviewer",
-    "sysadmin_reviewer": "SysAdmin Reviewer",
-    "data_safety_reviewer": "Data Safety Reviewer",
-    "product_manager_reviewer": "Product Manager Reviewer",
-    "architecture_reviewer": "Architecture Reviewer",
-    "test_reviewer": "Test Reviewer",
-    "performance_reviewer": "Performance Reviewer",
-    "api_contract_validator": "API Contract Validator",
-    "deployment_reviewer": "Deployment Reviewer",
-}
-
 
 def _write_repo_specs(root: Path, *, skip: set[str] | None = None) -> None:
-    """Write a non-blank repo-local spec for every role except *skip* stems."""
+    """Write a non-blank repo-local spec for every role except *skip* role names."""
     skip = skip or set()
-    for stem in _ALL_ROLES:
-        if stem in skip:
+    for role, filename in _REVIEWER_ROLE_AGENT_FILES.items():
+        if role in skip:
             continue
-        _write(root / ".claude" / "agents" / f"{stem.replace('_', '-')}.md", "SPEC\n")
+        _write(root / ".claude" / "agents" / filename, "SPEC\n")
 
 
 def test_empty_clients_yields_no_results() -> None:
@@ -74,7 +63,7 @@ def test_no_agents_dir_at_all_produces_actionable_warning(
 def test_role_falls_back_to_global_when_repo_missing(
     sample_client: ClientConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    _write_repo_specs(sample_client.workspace_path, skip={"deployment_reviewer"})
+    _write_repo_specs(sample_client.workspace_path, skip={"Deployment Reviewer"})
     global_dir = tmp_path / "global-agents"
     monkeypatch.setattr("cw.codex_review._context._GLOBAL_AGENTS_DIR", global_dir)
     _populate_global_agents_dir(global_dir, deployment_reviewer="GLOBAL SPEC\n")
@@ -90,7 +79,7 @@ def test_role_falls_back_to_global_when_repo_missing(
 def test_fallback_disabled_reports_global_only_role_as_absent(
     sample_client: ClientConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    _write_repo_specs(sample_client.workspace_path, skip={"deployment_reviewer"})
+    _write_repo_specs(sample_client.workspace_path, skip={"Deployment Reviewer"})
     _write(
         sample_client.workspace_path / "pyproject.toml",
         "[tool.cw.codex_review]\nagent_spec_global_fallback = false\n",
@@ -113,7 +102,7 @@ def test_blank_repo_file_reported_distinctly_from_missing_file(
 ) -> None:
     _write_repo_specs(
         sample_client.workspace_path,
-        skip={"deployment_reviewer", "api_contract_validator"},
+        skip={"Deployment Reviewer", "API Contract Validator"},
     )
     # deployment_reviewer: blank tracked file. api_contract_validator: absent
     # entirely. Global fallback dir stays empty (autouse isolation), so both
@@ -138,7 +127,7 @@ def test_blank_repo_file_reported_distinctly_from_missing_file(
 def test_blank_repo_file_recovered_by_global_fallback_reports_resolved(
     sample_client: ClientConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    _write_repo_specs(sample_client.workspace_path, skip={"deployment_reviewer"})
+    _write_repo_specs(sample_client.workspace_path, skip={"Deployment Reviewer"})
     _write(
         sample_client.workspace_path / ".claude" / "agents" / "deployment-reviewer.md",
         "   \n",
