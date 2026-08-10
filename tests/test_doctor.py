@@ -4204,6 +4204,23 @@ class TestCheckProjectConfigs:
         assert "project-config/client-a" in names
         assert report.ok
 
+    def test_run_doctor_includes_agent_spec_drift_checks(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_config_dir: Path,
+    ) -> None:
+        from cw.models import ClientConfig
+
+        _stub_claude_version_ok(monkeypatch)
+        client = ClientConfig(name="client-a", workspace_path=tmp_path)
+        monkeypatch.setattr(
+            "cw.doctor._deps.load_clients", lambda: {"client-a": client}
+        )
+        report = run_doctor()
+        names = [c.name for c in report.checks]
+        assert "agent-spec-drift/client-a" in names
+
     def test_gh_on_path_true_when_which_resolves(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
