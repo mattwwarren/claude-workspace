@@ -150,7 +150,11 @@ _OUTPUT_SCHEMA_RULES = (
     "saying what you verified. If a rubric-mandated check from the inlined "
     "agent specification could not actually be performed in this "
     'environment, use `status="degraded"` (naming the unperformed check in '
-    '`detail`) rather than silently reporting `"ok"`. Every '
+    '`detail`) rather than silently reporting `"ok"`. `detail` is REQUIRED '
+    'and MUST be non-empty whenever `status` is "degraded" or "failed" — a '
+    "degraded or failed reviewer with a blank `detail` is rejected as a "
+    "schema violation, exactly like a blank `detail` on the empty-findings "
+    '`status="ok"` case above. Every '
     "finding's `evidence` MUST be a verbatim substring of the claimed file's "
     "changed lines. Report no prose outside the JSON object."
 )
