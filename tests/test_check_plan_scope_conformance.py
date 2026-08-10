@@ -61,6 +61,38 @@ def _paths(prefix: str, count: int) -> list[str]:
     return [f"src/cw/{prefix}_{i}.py" for i in range(count)]
 
 
+# Real plan fixtures recovered verbatim via `gh issue view 1779 --json comments`
+# and `gh issue view 1784 --json comments` (#1796) — these are the two real
+# plans that motivated the table/heading-prefix parsing gap: #1779's own plan
+# used a markdown table under the canonical heading, and #1784's plan used a
+# variant heading wording entirely.
+_REAL_1779_FILES_MODIFIED_TABLE = """## Files Modified
+
+| File | Est. lines | Type |
+|---|---|---|
+| `.claude/scripts/check_plan_scope_conformance.py` | ~180 (new) | new script |
+| `.claude/scripts/check_imports.py` | +1 | edit |
+| `.claude/commands/auto-dev-plan.md` | +15/-3 | edit |
+| `.claude/commands/auto-dev-impl.md` | +55/-10 | edit |
+| `.claude/commands/auto-dev.md` | +20/-2 | edit |
+| `.claude/commands/auto-dev-review.md` | +5 | edit |
+| `docs/headless-contract.md` | +15/-2 | edit |
+| `tests/test_check_plan_scope_conformance.py` | ~220 (new) | new test |
+| `tests/test_scope_conformance_gate_docs.py` | ~110 (new) | new test |
+| `tests/test_auto_dev_result.py` | +25 | edit |
+| `tests/test_dispatch.py` | +30 | edit |
+"""
+
+_REAL_1784_FILES_TOUCHED_TABLE = """## Files touched, with estimated line deltas
+
+| File | Current | Est. delta | Est. new size |
+|---|---|---|---|
+| `scripts/install-skills.sh` | 234 | +100 to +115 | ~335-350 |
+| `tests/test_install_skills.py` | 563 | +180 to +230 | ~745-795 |
+| `docs/INSTALL.md` (optional) | - | +8 to +15 | - |
+"""
+
+
 _DEFAULTS = (_mod.SCOPE_DRIFT_RATIO, _mod.SCOPE_DRIFT_ABS_FLOOR)
 
 
@@ -228,7 +260,8 @@ def test_parses_backticked_and_bolded_bullet_paths() -> None:
 
 
 def test_ignores_malformed_or_non_bullet_lines_in_files_modified() -> None:
-    """Stray prose, tables, and non-path bullets under the heading are ignored."""
+    """Stray prose, an incomplete table (header + separator only, no data
+    rows), and non-path bullets under the heading are ignored."""
     text = (
         "## Files Modified\n\n"
         "This section enumerates every file the plan will touch.\n"
@@ -248,6 +281,95 @@ def test_ignores_malformed_or_non_bullet_lines_in_files_modified() -> None:
 def test_missing_heading_yields_empty_file_list() -> None:
     """A plan with no ``## Files Modified`` heading parses to nothing."""
     assert _mod._parse_files_modified("# Plan\n\n## Patterns Found\n\n- a\n") == []
+
+
+def test_parses_table_rows_under_files_modified_heading() -> None:
+    """A markdown table under the heading yields its first-column paths."""
+    text = (
+        "## Files Modified\n\n"
+        "| File | Est. lines |\n"
+        "|---|---|\n"
+        "| `src/cw/one.py` | ~10 |\n"
+        "| `tests/test_one.py` | ~20 |\n"
+        "| `docs/thing.md` | ~5 |\n"
+    )
+
+    assert _mod._parse_files_modified(text) == [
+        "src/cw/one.py",
+        "tests/test_one.py",
+        "docs/thing.md",
+    ]
+
+
+def test_parses_real_1779_files_modified_table() -> None:
+    """The real #1779 plan table (verbatim) parses to its 11 files, in order."""
+    assert _mod._parse_files_modified(_REAL_1779_FILES_MODIFIED_TABLE) == [
+        ".claude/scripts/check_plan_scope_conformance.py",
+        ".claude/scripts/check_imports.py",
+        ".claude/commands/auto-dev-plan.md",
+        ".claude/commands/auto-dev-impl.md",
+        ".claude/commands/auto-dev.md",
+        ".claude/commands/auto-dev-review.md",
+        "docs/headless-contract.md",
+        "tests/test_check_plan_scope_conformance.py",
+        "tests/test_scope_conformance_gate_docs.py",
+        "tests/test_auto_dev_result.py",
+        "tests/test_dispatch.py",
+    ]
+
+
+def test_parses_real_1784_variant_heading_table() -> None:
+    """The real #1784 plan uses a variant heading; prefix match still finds it,
+    and the trailing ``(optional)`` annotation is stripped to the bare path."""
+    assert _mod._parse_files_modified(_REAL_1784_FILES_TOUCHED_TABLE) == [
+        "scripts/install-skills.sh",
+        "tests/test_install_skills.py",
+        "docs/INSTALL.md",
+    ]
+
+
+def test_heading_prefix_match_ignores_exact_wording() -> None:
+    """A third heading variant, seen in neither real fixture, still matches —
+    proving the matcher is genuinely prefix-based, not an alias list."""
+    text = "## Files Changed\n\n- src/cw/one.py\n- tests/test_one.py\n"
+
+    assert _mod._parse_files_modified(text) == [
+        "src/cw/one.py",
+        "tests/test_one.py",
+    ]
+
+
+def test_table_cell_backticks_and_bold_stripped() -> None:
+    """Bold- and backtick-wrapped table cells unwrap to the bare path."""
+    text = (
+        "## Files Modified\n\n"
+        "| File | Est. lines |\n"
+        "|---|---|\n"
+        "| **src/cw/one.py** | ~10 |\n"
+        "| `src/cw/two.py` | ~5 |\n"
+    )
+
+    assert _mod._parse_files_modified(text) == [
+        "src/cw/one.py",
+        "src/cw/two.py",
+    ]
+
+
+def test_mixed_bullets_and_table_rows_both_parsed() -> None:
+    """Bullets and a table row in the same section both contribute, de-duplicated."""
+    text = (
+        "## Files Modified\n\n"
+        "- src/cw/bullet.py\n\n"
+        "| File | Est. lines |\n"
+        "|---|---|\n"
+        "| `src/cw/table.py` | ~10 |\n"
+        "| `src/cw/bullet.py` | ~5 |\n"
+    )
+
+    assert _mod._parse_files_modified(text) == [
+        "src/cw/bullet.py",
+        "src/cw/table.py",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -414,3 +536,88 @@ def test_cli_ignores_blank_lines_in_touched_files(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     assert json.loads(result.stdout)["delivered_file_count"] == 3
+
+
+def test_cli_real_1779_and_1784_shapes_produce_nonempty_verdict(
+    tmp_path: Path,
+) -> None:
+    """Both real plan fixtures parse to a nonempty file list end-to-end via
+    the CLI, with zero-drift touched-files sets — proving exit 0, not 2."""
+    plan_1779 = tmp_path / "plan-1779.md"
+    plan_1779.write_text(_REAL_1779_FILES_MODIFIED_TABLE, encoding="utf-8")
+    touched_1779 = tmp_path / "touched-1779.txt"
+    touched_1779.write_text(
+        "\n".join(
+            [
+                ".claude/scripts/check_plan_scope_conformance.py",
+                ".claude/scripts/check_imports.py",
+                ".claude/commands/auto-dev-plan.md",
+                ".claude/commands/auto-dev-impl.md",
+                ".claude/commands/auto-dev.md",
+                ".claude/commands/auto-dev-review.md",
+                "docs/headless-contract.md",
+                "tests/test_check_plan_scope_conformance.py",
+                "tests/test_scope_conformance_gate_docs.py",
+                "tests/test_auto_dev_result.py",
+                "tests/test_dispatch.py",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    result_1779 = _run_cli(plan_1779, touched_1779)
+    assert result_1779.returncode == 0, result_1779.stderr
+    verdict_1779 = json.loads(result_1779.stdout)
+    assert verdict_1779["plan_file_count"] == 11
+
+    plan_1784 = tmp_path / "plan-1784.md"
+    plan_1784.write_text(_REAL_1784_FILES_TOUCHED_TABLE, encoding="utf-8")
+    touched_1784 = tmp_path / "touched-1784.txt"
+    touched_1784.write_text(
+        "\n".join(
+            [
+                "scripts/install-skills.sh",
+                "tests/test_install_skills.py",
+                "docs/INSTALL.md",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    result_1784 = _run_cli(plan_1784, touched_1784)
+    assert result_1784.returncode == 0, result_1784.stderr
+    verdict_1784 = json.loads(result_1784.stdout)
+    assert verdict_1784["plan_file_count"] == 3
+
+
+def test_no_file_list_found_and_matched_are_distinct_outcomes(
+    tmp_path: Path,
+) -> None:
+    """No-heading (exit 2), matched+conforming (exit 0), and drift (exit 1)
+    are pairwise distinct return codes."""
+    touched = tmp_path / "touched.txt"
+    touched.write_text("src/cw/one.py\n", encoding="utf-8")
+
+    no_heading = tmp_path / "no-heading.md"
+    no_heading.write_text("# Plan\n\n## Patterns Found\n\n- a\n", encoding="utf-8")
+    result_a = _run_cli(no_heading, touched)
+    assert result_a.returncode == 2
+    assert "Files Modified" in result_a.stderr
+
+    matched = tmp_path / "matched.md"
+    matched.write_text(
+        "## Files Modified\n\n| File |\n|---|\n| `src/cw/one.py` |\n",
+        encoding="utf-8",
+    )
+    result_b = _run_cli(matched, touched)
+    assert result_b.returncode == 0
+
+    drift_touched = tmp_path / "drift-touched.txt"
+    drift_touched.write_text(
+        "\n".join(["src/cw/one.py", *_paths("unplanned", 8)]) + "\n",
+        encoding="utf-8",
+    )
+    result_c = _run_cli(matched, drift_touched)
+    assert result_c.returncode == 1
+
+    assert len({result_a.returncode, result_b.returncode, result_c.returncode}) == 3

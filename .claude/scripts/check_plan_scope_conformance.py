@@ -28,9 +28,11 @@ Exit codes:
     0  — conforming (no extra files, or extras within the allowance)
     1  — DRIFT: extra files exceed the allowance; Step 2.5 exits ``blocked``
          with ``blocker.reason: "plan_scope_drift"``
-    2  — usage / parse error (unreadable input, or no parseable
-         ``## Files Modified`` section). Does NOT block — same fail-open
-         convention as ``check_not_main_checkout.py``'s exit 2.
+    2  — usage / parse error (unreadable input, or no parseable files-modified
+         section — heading matched by prefix, e.g. ``## Files Modified``;
+         paths carried as either bullets or markdown-table rows). Does NOT
+         block — same fail-open convention as ``check_not_main_checkout.py``'s
+         exit 2.
 
 The JSON verdict is written to stdout on exits 0 and 1:
     {"triggered": bool, "extra_files": [...], "allowed_extra": int,
@@ -59,12 +61,29 @@ SCOPE_DRIFT_ABS_FLOOR = 5  # v1: always allow at least 5 extra files (covers a
 # would produce false positives at almost any growth)
 
 _FILES_MODIFIED_HEADING = "## Files Modified"
+# The canonical/example heading, used verbatim in messages and quoted in
+# auto-dev-plan.md's Step 1b producer instruction. The matcher below is
+# deliberately more tolerant than this literal — real plans have used
+# variant wording (e.g. "## Files touched, with estimated line deltas",
+# #1784) — so parsing tests against the prefix, not this exact string.
+_FILES_HEADING_PREFIX = "## Files"
 
-# A bullet's first token is treated as a path only if it looks like one. This
-# is what lets prose bullets ("- Note that nothing else is touched") sit under
-# the heading without being counted as files.
+# A bullet's or table cell's first token is treated as a path only if it
+# looks like one. This is what lets prose bullets ("- Note that nothing else
+# is touched") and table header/separator rows ("| File |", "|---|---|") sit
+# under the heading without being counted as files.
 _PATH_MARKERS = ("/", ".")
 _STRIP_CHARS = "`*_'\",;:()[]"
+
+
+def _extract_path_token(text: str) -> str | None:
+    """Return the first whitespace-delimited token in *text* if it looks
+    like a file path, after stripping list/emphasis/table decoration."""
+    token = text.strip().lstrip("*_ ").split(maxsplit=1)[0:1]
+    if not token:
+        return None
+    candidate = token[0].strip(_STRIP_CHARS)
+    return candidate if _looks_like_path(candidate) else None
 
 
 def _looks_like_path(token: str) -> bool:
@@ -77,17 +96,27 @@ def _looks_like_path(token: str) -> bool:
 
 
 def _parse_files_modified(plan_text: str) -> list[str]:
-    """Extract the file paths bulleted under the plan's ``## Files Modified``.
+    """Extract the file paths listed under the plan's files-modified section.
 
-    Returns them in document order, de-duplicated. Returns an empty list when
-    the heading is absent — the caller treats that as a parse error (exit 2)
-    rather than as "the plan named zero files", because an empty baseline would
-    make every delivered file look unplanned.
+    The section heading is matched by prefix (``_FILES_HEADING_PREFIX``, e.g.
+    ``"## Files Modified"`` or the real-world variant ``"## Files touched,
+    with estimated line deltas"``), not by exact wording. Within the section
+    body, paths may be carried either as bullets (``- path`` / ``* path``) or
+    as the first cell of a markdown table row (``| path | ... |``) — both
+    real plans observed in the wild (#1779, #1784) have used one or the
+    other. Returns them in document order, de-duplicated.
+
+    Returns an empty list when no matching heading is found — the caller
+    treats that as a parse error (exit 2) rather than as "the plan named zero
+    files", because an empty baseline would make every delivered file look
+    unplanned.
     """
     lines = plan_text.splitlines()
     try:
         start = next(
-            i for i, line in enumerate(lines) if line.strip() == _FILES_MODIFIED_HEADING
+            i
+            for i, line in enumerate(lines)
+            if line.strip().startswith(_FILES_HEADING_PREFIX)
         )
     except StopIteration:
         return []
@@ -97,13 +126,15 @@ def _parse_files_modified(plan_text: str) -> list[str]:
         stripped = line.strip()
         if stripped.startswith("#") and not stripped.startswith("####"):
             break  # next section — the Files Modified body has ended
-        if not stripped.startswith(("- ", "* ")):
+        candidate: str | None
+        if stripped.startswith(("- ", "* ")):
+            candidate = _extract_path_token(stripped[2:])
+        elif stripped.startswith("|") and stripped.count("|") >= 2:
+            cells = stripped.split("|")
+            candidate = _extract_path_token(cells[1]) if len(cells) > 1 else None
+        else:
             continue
-        token = stripped[2:].lstrip("*_ ").split(maxsplit=1)[0:1]
-        if not token:
-            continue
-        candidate = token[0].strip(_STRIP_CHARS)
-        if _looks_like_path(candidate) and candidate not in paths:
+        if candidate and candidate not in paths:
             paths.append(candidate)
     return paths
 
@@ -223,10 +254,12 @@ def main(argv: list[str] | None = None) -> int:
     plan_files = _parse_files_modified(plan_text)
     if not plan_files:
         print(
-            f"check_plan_scope_conformance: no parseable '{_FILES_MODIFIED_HEADING}'"
-            f" section in {plan_path} — cannot measure scope conformance."
-            " Treating as a parse error (non-blocking); see auto-dev-plan.md"
-            " Step 1b for the required plan section format.",
+            "check_plan_scope_conformance: no parseable file-list section"
+            f" (heading must begin with '{_FILES_HEADING_PREFIX}', e.g."
+            f" '{_FILES_MODIFIED_HEADING}') in {plan_path} — cannot measure"
+            " scope conformance. Treating as a parse error (non-blocking);"
+            " see auto-dev-plan.md Step 1b for the required plan section"
+            " format.",
             file=sys.stderr,
         )
         return 2
