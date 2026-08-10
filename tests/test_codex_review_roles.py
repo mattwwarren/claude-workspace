@@ -416,6 +416,27 @@ class TestClassifyCodexFailure:
         )
         assert _classify_codex_failure(result) == "schema_mismatch"
 
+    def test_schema_mismatch_degraded_status_with_blank_detail(self) -> None:
+        # #1794/#1806 repro shape: a reviewer self-reports status="degraded"
+        # with findings attached but no stated reason -- the #1806 validator
+        # now rejects this at parse time, so it classifies as a schema
+        # mismatch instead of silently surviving as a "valid" degraded doc.
+        payload = json.dumps(
+            {
+                "reviewer_role": "R",
+                "status": "degraded",
+                "detail": "",
+                "findings": [
+                    _finding_payload(summary="Bug one", evidence="def one():"),
+                    _finding_payload(summary="Bug two", evidence="def two():"),
+                ],
+            }
+        )
+        result = CodexRunResult(
+            returncode=0, stdout="", stderr="", output_file_content=payload
+        )
+        assert _classify_codex_failure(result) == "schema_mismatch"
+
 
 def _bundle_file(session_id: str, role_slug: str, category: str) -> Path:
     """Return the single bundle JSON matching *role_slug*/*category* (#1330).

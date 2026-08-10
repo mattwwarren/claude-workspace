@@ -658,22 +658,91 @@ class TestReviewerFindingsDocumentOkJustification:
         )
         assert doc.detail == ""
 
-    def test_degraded_empty_findings_blank_detail_passes(self) -> None:
-        # Regression lock for R2: degraded is exempt from the justification
-        # requirement entirely, even with empty findings and blank detail.
-        doc = ReviewerFindingsDocument(
-            reviewer_role="R", status="degraded", detail="", findings=[]
-        )
-        assert doc.detail == ""
+    def test_degraded_empty_findings_blank_detail_now_rejected(self) -> None:
+        # Was a regression lock for R2 ("degraded is exempt from the
+        # justification requirement entirely, even with empty findings and
+        # blank detail"). #1806 explicitly revokes that exemption: a
+        # self-reported degraded verdict with no stated reason is now a
+        # contract violation, same as "ok" with no findings and no detail.
+        with pytest.raises(ValidationError):
+            ReviewerFindingsDocument(
+                reviewer_role="R", status="degraded", detail="", findings=[]
+            )
 
     def test_failed_status_unaffected_by_justification_check(self) -> None:
         # The new validator doesn't newly constrain "failed" — existing
         # _check_failed_has_no_findings behavior (failed + findings rejected)
         # is covered separately by test_failed_status_with_findings_rejected.
+        # detail is non-blank here so the #1806 degraded/failed-reason
+        # validator (covered separately below) doesn't fire either.
         doc = ReviewerFindingsDocument(
-            reviewer_role="R", status="failed", detail="", findings=[]
+            reviewer_role="R", status="failed", detail="stated reason", findings=[]
         )
-        assert doc.detail == ""
+        assert doc.detail == "stated reason"
+
+
+class TestReviewerFindingsDocumentDegradedFailedJustification:
+    """#1806: status='degraded'/'failed' requires a non-blank `detail` stating
+    the reason — closes the gap #1775 could not reach (it can only persist a
+    reason that exists; it can't require one to exist in the first place).
+    """
+
+    def test_degraded_blank_detail_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            ReviewerFindingsDocument(
+                reviewer_role="R", status="degraded", detail="", findings=[]
+            )
+
+    def test_degraded_whitespace_detail_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            ReviewerFindingsDocument(
+                reviewer_role="R", status="degraded", detail="   ", findings=[]
+            )
+
+    def test_degraded_with_findings_and_blank_detail_still_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            ReviewerFindingsDocument(
+                reviewer_role="R",
+                status="degraded",
+                detail="",
+                findings=[_make_finding()],
+            )
+
+    def test_degraded_nonblank_detail_passes(self) -> None:
+        doc = ReviewerFindingsDocument(
+            reviewer_role="R",
+            status="degraded",
+            detail="sandbox lacked filesystem access",
+            findings=[],
+        )
+        assert doc.detail == "sandbox lacked filesystem access"
+
+    def test_failed_blank_detail_rejected(self) -> None:
+        # findings=[] so _check_failed_has_no_findings doesn't short-circuit
+        # first -- chained mode="after" validators stop at the first raise.
+        with pytest.raises(ValidationError):
+            ReviewerFindingsDocument(
+                reviewer_role="R", status="failed", detail="", findings=[]
+            )
+
+    def test_failed_nonblank_detail_passes(self) -> None:
+        doc = ReviewerFindingsDocument(
+            reviewer_role="R", status="failed", detail="crashed on startup", findings=[]
+        )
+        assert doc.detail == "crashed on startup"
+
+    def test_degraded_null_detail_coerces_to_blank_then_rejected(self) -> None:
+        # Proves field-level None->"" coercion runs before the new
+        # model-level check sees it.
+        with pytest.raises(ValidationError):
+            ReviewerFindingsDocument.model_validate(
+                {
+                    "reviewer_role": "R",
+                    "status": "degraded",
+                    "detail": None,
+                    "findings": [],
+                }
+            )
 
 
 class TestReviewerFindingsDocumentNullNormalization:
@@ -683,13 +752,14 @@ class TestReviewerFindingsDocumentNullNormalization:
     """
 
     def test_null_detail_normalizes_to_empty_string(self) -> None:
-        # Decoupled from status="ok" (#1544): the new ok/empty-findings
-        # justification validator rejects a blank detail on that combination,
-        # but the null->"" coercion this test verifies is a field-level
-        # concern orthogonal to that cross-field rule, so it moves off
-        # status="ok" to status="degraded" (exempt from the justification
-        # rule) to keep testing exactly what it intends.
-        doc = _make_reviewer_doc(detail=None, status="degraded")
+        # Decoupled from status="ok" with empty findings (#1544) and from
+        # status="degraded" (#1806, which now requires a stated reason on
+        # degraded/failed): the only remaining combination that tolerates a
+        # blank/null detail is status="ok" with non-empty findings, so this
+        # moves there to keep testing exactly what it intends -- the
+        # field-level null->"" coercion, orthogonal to either cross-field
+        # justification rule.
+        doc = _make_reviewer_doc(_make_finding(), detail=None, status="ok")
         assert doc.detail == ""
 
     def test_null_findings_normalizes_to_empty_list(self) -> None:
@@ -699,6 +769,9 @@ class TestReviewerFindingsDocumentNullNormalization:
     def test_status_failed_with_null_findings_still_passes_no_findings_check(
         self,
     ) -> None:
+        # detail uses the conftest _make_reviewer_doc default
+        # ("reviewed; no issues found."), non-blank, so this stays clear of
+        # the #1806 degraded/failed-reason validator too.
         doc = _make_reviewer_doc(status="failed", findings=None)
         assert doc.findings == []
 
@@ -2157,14 +2230,16 @@ class TestConsolidateVerdictDetail:
         verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
         assert verdict.agents_run[0].detail == "reviewed; no issues found."
 
-    def test_degraded_document_with_blank_detail_lands_as_blank(self) -> None:
-        # A degraded status with no stated reason is a real, non-erroring
-        # state (ReviewerFindingsDocument's ok-empty-findings-justification
-        # validator only fires for status="ok") -- pin that it survives as
-        # an empty string, not a sentinel or an error.
-        doc = _make_reviewer_doc(status="degraded", detail="")
-        verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
-        assert verdict.agents_run[0].detail == ""
+    def test_degraded_document_with_blank_detail_rejected_at_construction(
+        self,
+    ) -> None:
+        # #1806: a degraded status with no stated reason used to be treated
+        # as a real, non-erroring state that survived consolidate_verdict as
+        # an empty string -- that was exactly the bug #1806 closes. It is now
+        # rejected by ReviewerFindingsDocument's own validator before
+        # consolidate_verdict ever sees it.
+        with pytest.raises(ValidationError):
+            _make_reviewer_doc(status="degraded", detail="")
 
     def test_failed_reviewer_run_failure_record_has_empty_detail(self) -> None:
         # ReviewerRunFailure carries no detail concept -- a role recorded

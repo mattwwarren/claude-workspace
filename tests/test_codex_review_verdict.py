@@ -29,6 +29,7 @@ from cw.review_findings import (
     AgentSpecSource,
     AgentSpecStatus,
     ReviewerRunFailure,
+    ReviewerRunRecord,
     consolidate_verdict,
 )
 from tests._codex_review_helpers import _task
@@ -966,6 +967,13 @@ class TestRenderVerdictComment:
 
 
 class TestRenderDegradedRolesNote:
+    # #1806: ReviewerFindingsDocument now rejects status="degraded" with a
+    # blank `detail` at construction, so the two blank-detail cases below can
+    # no longer go through _make_reviewer_doc()/consolidate_verdict() -- they
+    # build a valid verdict first, then substitute a directly-constructed
+    # ReviewerRunRecord (rendering stays reachable as defense-in-depth for
+    # any run record not routed through the document contract).
+
     def test_degraded_role_with_detail_renders_role_and_reason(self) -> None:
         doc = _make_reviewer_doc(
             status="degraded",
@@ -981,10 +989,20 @@ class TestRenderDegradedRolesNote:
     def test_degraded_role_with_no_detail_renders_distinct_no_reason_marker(
         self,
     ) -> None:
-        doc = _make_reviewer_doc(
-            status="degraded", detail="", reviewer_role="Reviewer A"
-        )
+        doc = _make_reviewer_doc(reviewer_role="Reviewer A")
         verdict = consolidate_verdict([doc], _make_diff(), reviewed_sha="sha")
+        verdict = verdict.model_copy(
+            update={
+                "agents_run": [
+                    ReviewerRunRecord(
+                        reviewer_role="Reviewer A",
+                        status="degraded",
+                        detail="",
+                        finding_count=0,
+                    )
+                ]
+            }
+        )
         body = render_verdict_comment(verdict, fix_loop_enabled=False)
         assert "**DEGRADED COVERAGE**" in body
         assert "Reviewer A: degraded (no reason given)" in body
@@ -999,10 +1017,25 @@ class TestRenderDegradedRolesNote:
             detail="sandbox lacked filesystem access",
             reviewer_role="Reviewer A",
         )
-        doc_b = _make_reviewer_doc(
-            status="degraded", detail="", reviewer_role="Reviewer B"
+        verdict = consolidate_verdict([doc_a], _make_diff(), reviewed_sha="sha")
+        verdict = verdict.model_copy(
+            update={
+                "agents_run": [
+                    ReviewerRunRecord(
+                        reviewer_role="Reviewer A",
+                        status="degraded",
+                        detail="sandbox lacked filesystem access",
+                        finding_count=0,
+                    ),
+                    ReviewerRunRecord(
+                        reviewer_role="Reviewer B",
+                        status="degraded",
+                        detail="",
+                        finding_count=0,
+                    ),
+                ]
+            }
         )
-        verdict = consolidate_verdict([doc_a, doc_b], _make_diff(), reviewed_sha="sha")
         body = render_verdict_comment(verdict, fix_loop_enabled=False)
         assert "Reviewer A: degraded — sandbox lacked filesystem access" in body
         assert "Reviewer B: degraded (no reason given)" in body
