@@ -423,9 +423,15 @@ class TestReviewConsolidateCommand:
             # so a consumer can tell "not resolved here" from "resolved and
             # unspecified".
             "agent_spec_status",
+            # #1763: whether this persisted verdict is the terminal
+            # disposition of its review pass or an intermediate fix-loop cycle
+            # superseded by a later one. This command runs no fix loop, so it
+            # always emits the True default.
+            "is_terminal_snapshot",
         }
         assert verdict["capability_mode"] is None
         assert verdict["capability_reason"] is None
+        assert verdict["is_terminal_snapshot"] is True
         assert set(verdict["review"]) == {
             "must_fix_initial",
             "should_fix",

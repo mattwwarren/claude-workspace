@@ -1,7 +1,8 @@
 # Session Disposition Contract
 
-How to read a `cw` session's outcome correctly. The three gotchas in this
-document each caused a wrong disposition during the 2026-06-10/11 sprint.
+How to read a `cw` session's outcome correctly. The four gotchas in this
+document each caused a wrong disposition: the first three during the
+2026-06-10/11 sprint, the fourth while triaging a fix-loop park (#1729).
 
 ---
 
@@ -32,7 +33,7 @@ different session's transcript in a reused worktree.
 
 ---
 
-## 2. The three gotchas
+## 2. The four gotchas
 
 ### Gotcha 1 — Fixture/example blocks ≠ the terminal emit
 
@@ -77,6 +78,35 @@ surface_ref-prefix glob (§1). Note that `_parse_sentinel_from_transcript`
 takes `(cwd, claude_session_id)` and returns None when the csid is None — so
 for a csid-less session, resolve the path first (or derive the csid from the
 transcript filename via `_csid_from_transcript`), then parse.
+
+### Gotcha 4 — A `cycleN-review-verdict.json` diagnostics snapshot is not automatically the session's final disposition
+
+A codex fix loop persists one full `ReviewVerdict` snapshot **per cycle** under
+the session's diagnostics bundle dir (`cycle0-review-verdict.json`,
+`cycle1-...`, …, #1739). Only one of them is the verdict the returned
+`Blocker.details` was actually rendered from. Opening `cycle0-...json` "by
+habit" reads a file whose `rejected_must_fix` may legitimately be empty while
+the reported blocker cites a MUST_FIX that a *later* cycle's re-review
+mechanically rejected (#1729) — the two disagree, and neither the filename nor
+the numbering says which one is authoritative. The highest-numbered file is not
+a safe substitute either: a fix-invocation failure or scope violation parks
+before that cycle's re-review ever persists a snapshot.
+
+**Rule:** read `is_terminal_snapshot` (#1763). Exactly one snapshot per session
+carries `true`; every superseded intermediate carries `false`. Cross-check
+against the `friction_highlights` pointer, which now names the specific file
+(`cycle-1 MUST_FIX findings snapshot persisted (cycle1-review-verdict.json)
+[diagnostics: …]`) rather than just the bundle directory.
+
+Two paths deliberately leave every snapshot `false`, and both are correct:
+
+- **Unparseable re-review** (`codex_review_unparseable`): the park's details
+  come from the reviewer-failure formatter, not from any persisted verdict.
+- **Cycle-0 mechanical rejection** (`codex_must_fix_mechanically_rejected`
+  before any fix cycle): the fix loop never engages, so no snapshot is written
+  at all.
+
+In both cases the sentinel — not a snapshot — remains the source of truth (§1).
 
 ---
 
