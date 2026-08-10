@@ -56,6 +56,7 @@ Expected output for a healthy setup:
 - `[OK] claude-version` — `claude` binary found and responsive.
 - `[WARN] daemon-reachable` — the Claude native daemon has not been started yet; this resolves automatically when `cw` first spawns a worker session.
 - `[OK/WARN] skills-commands-drift` — repo-tracked `.claude/skills`/`.claude/commands` files compared against `~/.claude`; `[WARN]` means at least one tracked file is missing, content differs, or its `~/.claude` counterpart is a symlink pointing somewhere other than this checkout.
+- `[OK/WARN] agent-spec-drift/<client>` — per-client reviewer agent-spec resolution (repo-local / global fallback / absent); `[WARN]` names any reviewer role with no usable spec.
 
 ## Installation
 

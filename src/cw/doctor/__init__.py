@@ -25,6 +25,8 @@ re-exports. Submodules:
   daemon reachability.
 - ``skills_drift`` — repo-tracked ``.claude/skills``/``.claude/commands`` vs
   ``~/.claude`` drift detection.
+- ``agent_spec_drift`` — per-client reviewer agent-spec resolution (repo /
+  global fallback / absent) drift detection.
 - ``core`` — the ``run_doctor`` orchestrator that assembles the full report.
 - ``report`` — human-readable and JSON rendering.
 """
@@ -32,6 +34,7 @@ re-exports. Submodules:
 from __future__ import annotations
 
 from cw.doctor._shared import CheckResult, DoctorReport, WedgeFinding
+from cw.doctor.agent_spec_drift import _check_agent_spec_drift
 from cw.doctor.config_checks import (
     _check_attention_state_census,
     _check_config_file,
@@ -87,6 +90,7 @@ __all__ = [
     "CheckResult",
     "DoctorReport",
     "WedgeFinding",
+    "_check_agent_spec_drift",
     "_check_attention_state_census",
     "_check_claude_version",
     "_check_codex_capability",
