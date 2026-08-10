@@ -27,27 +27,6 @@ from cw.models import (
 )
 from tests.conftest import _make_daemon_session, _make_diff
 
-_EXPECTED_SESSION_FIELDS = {
-    "id",
-    "name",
-    "client",
-    "purpose",
-    "status",
-    "origin",
-    "started_at",
-    "completed_at",
-    "completed_reason",
-    "idle_at",
-    "worktree_path",
-    "branch",
-    "surface_ref",
-    "claude_session_id",
-    "lane",
-    "last_result",
-    "cost_usd",
-}
-
-
 def _make_session(
     tmp_path: Path,
     *,
@@ -102,7 +81,7 @@ class TestSessionShow:
         result = runner.invoke(main, ["session", "show", "abcd", "--json"])
         assert result.exit_code == 0
         data = json.loads(result.output)
-        assert set(data.keys()) == _EXPECTED_SESSION_FIELDS
+        assert set(data.keys()) == set(Session.model_fields.keys())
         assert data["id"] == "abcd1234"
         assert data["client"] == "test-client"
 
@@ -293,7 +272,7 @@ class TestSessionList:
         data = json.loads(result.output)
         assert isinstance(data, list)
         assert len(data) == 1
-        assert set(data[0].keys()) == _EXPECTED_SESSION_FIELDS
+        assert set(data[0].keys()) == set(Session.model_fields.keys())
 
     def test_list_human_output_shows_headers(
         self, tmp_config_dir: Path, tmp_path: Path
