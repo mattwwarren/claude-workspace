@@ -18,12 +18,16 @@
 #   above still holds — an agent that exists only in global-claude never enters
 #   this manifest, so it is never removed by cw.
 #
-#   Overwrite hazard: `cp` here is unconditional, with no diff/staleness check
-#   against the destination.  If an agent is hand-edited directly in
-#   global-claude (the canonical source) after this repo's .claude/agents/
-#   copy was last refreshed, the next install run silently clobbers that edit
-#   back to the stale cw copy.  Re-import from global-claude into this repo's
-#   .claude/agents/ before running install if you've been editing there.
+#   Overwrite safety (#1784): a baseline shadow-copy store at
+#   ~/.claude/.cw-agents-baseline/ records the exact content cw itself last
+#   wrote for each installed agent.  On each run, before copying an agent
+#   file: if the destination doesn't exist yet, or matches the source, or
+#   matches the recorded baseline, the copy proceeds normally (this also
+#   covers the ordinary "cw's source legitimately changed" case with zero
+#   added friction).  Otherwise the destination has been hand-edited (or has
+#   unknown provenance, e.g. no baseline was ever recorded) and the script
+#   refuses to overwrite it, printing the source/destination paths and
+#   exiting non-zero.  Pass --force to overwrite anyway.
 #
 # PORTABILITY:
 #   Targets bash 3.2 (macOS /bin/bash) as well as modern bash on Linux.  Do not
@@ -31,6 +35,20 @@
 #   Empty arrays are expanded via the "${arr[@]+"${arr[@]}"}" idiom because
 #   `set -u` errors on a bare "${arr[@]}" when the array is empty under 3.2.
 set -euo pipefail
+
+# --force bypasses the agent overwrite-safety check below (#1784), matching
+# the repo-wide --force convention (cli/sessions.py, cli/spawn.py,
+# worktree_gc.py). No other flags are accepted.
+FORCE=0
+for arg in "$@"; do
+    case "$arg" in
+        --force) FORCE=1 ;;
+        *)
+            echo "Error: unknown argument: $arg" >&2
+            exit 1
+            ;;
+    esac
+done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -86,6 +104,15 @@ SKILLS_DST="$CLAUDE_HOME/skills"
 AGENTS_DST="$CLAUDE_HOME/agents"
 MANIFEST="$CLAUDE_HOME/.cw-skills-manifest"
 
+# Baseline shadow-copy store for agent overwrite-safety (#1784): one copy per
+# installed agent file, holding the exact content cw itself last wrote there.
+# This is what lets the agent-copy loop below tell "cw's own source legitimately
+# changed" apart from "something else edited the destination directly" —
+# mtime doesn't work (plain cp resets mtime to now on every write), and git
+# status doesn't work either (a normal cw install intentionally leaves
+# global-claude's copy uncommitted, per the NOTE ON AGENTS above).
+AGENTS_BASELINE_DIR="$CLAUDE_HOME/.cw-agents-baseline"
+
 # ---------------------------------------------------------------------------
 # 1. Validate source directories
 # ---------------------------------------------------------------------------
@@ -96,7 +123,95 @@ fi
 
 # -p is a no-op when the path is an existing dir OR a symlink to one, so this is
 # safe for the agents symlink-into-global-claude layout described above.
-mkdir -p "$COMMANDS_DST" "$SKILLS_DST" "$AGENTS_DST"
+mkdir -p "$COMMANDS_DST" "$SKILLS_DST" "$AGENTS_DST" "$AGENTS_BASELINE_DIR"
+
+# _agent_conflict_reason <src_file> <dst_file> <baseline_file>
+# Echoes a reason and returns 0 if installing src_file over dst_file would
+# clobber a change cw did not itself make. Returns 1 (safe to install) when
+# dst_file doesn't exist yet, is byte-identical to src_file, or is
+# byte-identical to the recorded baseline (i.e. nothing has touched it since
+# cw last wrote it there).
+_agent_conflict_reason() {
+    local src_file="$1"
+    local dst_file="$2"
+    local baseline_file="$3"
+
+    if [ ! -e "$dst_file" ]; then
+        return 1
+    fi
+    if cmp -s "$src_file" "$dst_file"; then
+        return 1
+    fi
+    if [ -f "$baseline_file" ] && cmp -s "$baseline_file" "$dst_file"; then
+        return 1
+    fi
+    if [ ! -f "$baseline_file" ]; then
+        echo "destination differs from cw's source and cw has no record of installing it (no baseline on file)"
+        return 0
+    fi
+    echo "destination differs from cw's source and from the last copy cw installed — something other than cw modified it"
+    return 0
+}
+
+# _print_agent_conflict <name> <src_file> <dst_file> <reason>
+_print_agent_conflict() {
+    local name="$1"
+    local src_file="$2"
+    local dst_file="$3"
+    local reason="$4"
+
+    {
+        echo "ERROR: refusing to overwrite a modified agent spec."
+        echo ""
+        echo "  agent:               $name"
+        echo "  cw source:           $src_file"
+        echo "  install destination: $dst_file"
+        echo "  reason:              $reason"
+        echo ""
+        echo "  To keep those changes:  re-import them into claude-workspace, commit, and re-run."
+        echo "  To discard and overwrite: ./scripts/install-skills.sh --force"
+    } >&2
+}
+
+# _agent_prune_conflict_reason <baseline_file> <dst_file>
+# Mirrors _agent_conflict_reason for the prune path: echoes a reason and
+# returns 0 if deleting dst_file (whose source no longer exists in this run's
+# scan) would discard a change cw did not itself make. Returns 1 (safe to
+# prune) when dst_file is byte-identical to the recorded baseline (i.e.
+# nothing has touched it since cw last wrote it there).
+_agent_prune_conflict_reason() {
+    local baseline_file="$1"
+    local dst_file="$2"
+
+    if [ -f "$baseline_file" ] && cmp -s "$baseline_file" "$dst_file"; then
+        return 1
+    fi
+    if [ ! -f "$baseline_file" ]; then
+        echo "source removed and cw has no record of installing it (no baseline on file)"
+        return 0
+    fi
+    echo "source removed and destination diverges from cw's last-installed copy"
+    return 0
+}
+
+# _print_agent_prune_conflict <name> <dst_file> <reason>
+_print_agent_prune_conflict() {
+    local name="$1"
+    local dst_file="$2"
+    local reason="$3"
+
+    {
+        echo "ERROR: refusing to prune a modified agent spec."
+        echo ""
+        echo "  agent:               $name"
+        echo "  install destination: $dst_file"
+        echo "  reason:              $reason"
+        echo ""
+        echo "  To keep those changes:    re-add the source file to claude-workspace's"
+        echo "                            .claude/agents/, commit, and re-run."
+        echo "  To discard and prune it:  ./scripts/install-skills.sh --force"
+    } >&2
+}
 
 # ---------------------------------------------------------------------------
 # 2. Build the NEW manifest (what this run will install)
@@ -119,6 +234,7 @@ done
 
 agent_count=0
 excluded_agent_count=0
+agent_conflicts=()
 if [ -d "$AGENTS_SRC" ]; then
     for src_file in "$AGENTS_SRC"/*.md; do
         [ -f "$src_file" ] || continue
@@ -127,7 +243,23 @@ if [ -d "$AGENTS_SRC" ]; then
             excluded_agent_count=$((excluded_agent_count + 1))
             continue
         fi
-        cp "$src_file" "$AGENTS_DST/$name"
+
+        dst_file="$AGENTS_DST/$name"
+        baseline_file="$AGENTS_BASELINE_DIR/$name"
+
+        # See _agent_conflict_reason above. Skipped entirely when --force is
+        # passed. The `if` condition (rather than a plain `reason=$(...)`
+        # assignment) is deliberate: under `set -e`, a bare assignment from a
+        # command substitution that returns non-zero (the "safe" case here)
+        # would abort the whole script.
+        if [ "$FORCE" -eq 0 ] && reason="$(_agent_conflict_reason "$src_file" "$dst_file" "$baseline_file")"; then
+            _print_agent_conflict "$name" "$src_file" "$dst_file" "$reason"
+            agent_conflicts+=("$name")
+            continue
+        fi
+
+        cp -p "$src_file" "$dst_file"
+        cp -p "$src_file" "$baseline_file"
         new_entries+=("agents/$name")
         agent_count=$((agent_count + 1))
     done
@@ -171,11 +303,40 @@ if [ -d "$SKILLS_SRC" ]; then
     done
 fi
 
+# Deferred abort: must happen here, after the skills loop but before the
+# manifest write and (critically) the prune step below. A conflicting agent
+# is deliberately withheld from new_entries above so its destination is left
+# untouched — but the prune step treats any old-manifest entry absent from
+# new_entries as an orphan and deletes it. Continuing past this point with a
+# conflict pending would make this run's own prune logic delete the very
+# hand-edited file this feature exists to protect. Landing this check after
+# the skills loop (rather than before it, as originally shipped) means a
+# conflicting agent no longer prevents unrelated commands/skills from
+# installing on the same run.
+if [ "${#agent_conflicts[@]}" -gt 0 ]; then
+    echo "" >&2
+    echo "ERROR: ${#agent_conflicts[@]} agent(s) have hand-edited destinations and were not installed:" >&2
+    for conflicted_name in "${agent_conflicts[@]}"; do
+        echo "  - $conflicted_name" >&2
+    done
+    exit 1
+fi
+
 # ---------------------------------------------------------------------------
 # 3. Manifest-scoped prune: remove OLD entries absent from NEW set
 # ---------------------------------------------------------------------------
 prune_count=0
 pruned_names=()
+
+# Agents whose source disappeared AND whose destination diverges from the
+# recorded baseline (or has no baseline at all) — refused, not pruned (#1784
+# round 3). agent_prune_conflicts holds bare names for the summary print;
+# agent_prune_conflicts_entries holds the full "agents/<name>" manifest
+# paths so refused entries are carried forward into the manifest this run
+# writes, rather than becoming untracked orphans this same run's own prune
+# logic just deleted the safety net for.
+agent_prune_conflicts=()
+agent_prune_conflicts_entries=()
 
 if [ -f "$MANIFEST" ]; then
     while IFS= read -r old_entry || [ -n "$old_entry" ]; do
@@ -202,9 +363,39 @@ if [ -f "$MANIFEST" ]; then
             # INVARIANT header), or a broken symlink, so one branch covers
             # every shape a prior install could have left behind.
             if [ -e "$target" ] || [ -L "$target" ]; then
-                rm -rf "$target"
-                prune_count=$((prune_count + 1))
-                pruned_names+=("$old_entry")
+                skip_prune=0
+                # Agents (unlike skills/commands, which are symlinks with no
+                # hand-edit risk in this ticket's scope) are plain files that
+                # can be hand-edited directly. Mirror the install-time
+                # overwrite-safety check: refuse to delete on divergence from
+                # the recorded baseline, unless --force is passed.
+                case "$old_entry" in
+                    agents/*)
+                        if [ "$FORCE" -eq 0 ]; then
+                            baseline_file="$AGENTS_BASELINE_DIR/${old_entry#agents/}"
+                            if reason="$(_agent_prune_conflict_reason "$baseline_file" "$target")"; then
+                                _print_agent_prune_conflict "${old_entry#agents/}" "$target" "$reason"
+                                agent_prune_conflicts+=("${old_entry#agents/}")
+                                agent_prune_conflicts_entries+=("$old_entry")
+                                skip_prune=1
+                            fi
+                        fi
+                        ;;
+                esac
+
+                if [ "$skip_prune" -eq 0 ]; then
+                    rm -rf "$target"
+                    prune_count=$((prune_count + 1))
+                    pruned_names+=("$old_entry")
+                    # A pruned agent's baseline entry must go too, so a future
+                    # re-add under the same filename doesn't inherit stale
+                    # baseline state left over from before it was removed (#1784).
+                    case "$old_entry" in
+                        agents/*)
+                            rm -f "$AGENTS_BASELINE_DIR/${old_entry#agents/}"
+                            ;;
+                    esac
+                fi
             fi
         fi
     done < "$MANIFEST"
@@ -213,7 +404,21 @@ fi
 # ---------------------------------------------------------------------------
 # 4. Write the new manifest (overwrite)
 # ---------------------------------------------------------------------------
-printf '%s\n' "${new_entries[@]+"${new_entries[@]}"}" > "$MANIFEST"
+printf '%s\n' "${new_entries[@]+"${new_entries[@]}"}" "${agent_prune_conflicts_entries[@]+"${agent_prune_conflicts_entries[@]}"}" > "$MANIFEST"
+
+# Deferred abort, mirroring the agent_conflicts pattern above: the while
+# loop must run to completion first (so every legitimately-orphaned entry
+# elsewhere in $MANIFEST still prunes) and the manifest write above must
+# execute (so the carried-forward agent_prune_conflicts_entries persist)
+# before this exits non-zero.
+if [ "${#agent_prune_conflicts[@]}" -gt 0 ]; then
+    echo "" >&2
+    echo "ERROR: ${#agent_prune_conflicts[@]} orphaned agent(s) have hand-edited destinations and were not pruned:" >&2
+    for conflicted_name in "${agent_prune_conflicts[@]}"; do
+        echo "  - $conflicted_name" >&2
+    done
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # 5. Summary

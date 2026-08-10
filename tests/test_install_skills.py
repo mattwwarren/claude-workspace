@@ -51,9 +51,11 @@ def _scaffold_fake_install(tmp_path: Path, fake_repo: Path) -> Path:
     return script_copy
 
 
-def _run(script: Path, fake_home: Path) -> subprocess.CompletedProcess[str]:
+def _run(
+    script: Path, fake_home: Path, *extra_args: str
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["bash", str(script)],
+        ["bash", str(script), *extra_args],
         capture_output=True,
         text=True,
         env={**os.environ, "HOME": str(fake_home)},
@@ -463,6 +465,277 @@ class TestInstallSkillsAgents:
         result = _run(script, fake_home)
         assert result.returncode == 0, result.stderr
         assert "agents synced   : 0" in result.stdout
+
+
+class TestInstallSkillsAgentOverwriteSafety:
+    """Agent copies must refuse to clobber a hand-edited destination (#1784).
+
+    A baseline shadow-copy store at ~/.claude/.cw-agents-baseline/ records the
+    exact content cw itself last wrote for each agent. On divergence between
+    the destination and BOTH the source and the baseline, install must refuse
+    (non-zero exit) instead of silently overwriting — unless --force is
+    passed.
+    """
+
+    def test_agent_hand_edit_is_not_clobbered(
+        self, script: Path, fake_repo_with_agents: Path, fake_home: Path
+    ) -> None:
+        r1 = _run(script, fake_home)
+        assert r1.returncode == 0, r1.stderr
+
+        dest = fake_home / ".claude" / "agents" / "code-quality-reviewer.md"
+        assert dest.read_text() == "# code quality reviewer\n"
+
+        # Simulate a hand-edit directly on the destination; source untouched.
+        dest.write_text("# hand-edited content B\n")
+
+        r2 = _run(script, fake_home)
+        assert r2.returncode != 0, (
+            "install must refuse when destination diverges from both source "
+            "and baseline"
+        )
+        assert dest.read_text() == "# hand-edited content B\n", (
+            "hand-edited destination must survive untouched on refusal, not "
+            "be silently reverted to the source content"
+        )
+
+    def test_conflict_message_names_file_and_both_paths_and_remediation(
+        self, script: Path, fake_repo_with_agents: Path, fake_home: Path
+    ) -> None:
+        r1 = _run(script, fake_home)
+        assert r1.returncode == 0, r1.stderr
+
+        dest = fake_home / ".claude" / "agents" / "code-quality-reviewer.md"
+        dest.write_text("# hand-edited content B\n")
+        src = fake_repo_with_agents / ".claude" / "agents" / "code-quality-reviewer.md"
+
+        r2 = _run(script, fake_home)
+        assert r2.returncode != 0
+
+        assert "code-quality-reviewer.md" in r2.stderr
+        assert str(src.resolve()) in r2.stderr
+        assert str(dest.resolve()) in r2.stderr
+        assert "--force" in r2.stderr
+
+    def test_cw_copy_legitimately_newer_installs_without_friction(
+        self, script: Path, fake_repo_with_agents: Path, fake_home: Path
+    ) -> None:
+        r1 = _run(script, fake_home)
+        assert r1.returncode == 0, r1.stderr
+
+        # cw's own source is updated; destination untouched by anyone else.
+        src = fake_repo_with_agents / ".claude" / "agents" / "code-quality-reviewer.md"
+        src.write_text("# code quality reviewer v2\n")
+
+        r2 = _run(script, fake_home)
+        assert r2.returncode == 0, r2.stderr
+        assert "ERROR" not in r2.stderr
+
+        dest = fake_home / ".claude" / "agents" / "code-quality-reviewer.md"
+        assert dest.read_text() == "# code quality reviewer v2\n"
+
+    def test_preexisting_identical_destination_installs_cleanly(
+        self, script: Path, fake_repo_with_agents: Path, fake_home: Path
+    ) -> None:
+        # Destination pre-populated byte-identical to source, with no prior
+        # baseline on disk at all (simulates the #1774-mirror case).
+        agents_dst = fake_home / ".claude" / "agents"
+        agents_dst.mkdir(parents=True, exist_ok=True)
+        (agents_dst / "code-quality-reviewer.md").write_text(
+            "# code quality reviewer\n"
+        )
+
+        result = _run(script, fake_home)
+        assert result.returncode == 0, result.stderr
+        assert "ERROR" not in result.stderr
+        assert (
+            agents_dst / "code-quality-reviewer.md"
+        ).read_text() == "# code quality reviewer\n"
+
+    def test_force_flag_overwrites_hand_edit(
+        self, script: Path, fake_repo_with_agents: Path, fake_home: Path
+    ) -> None:
+        r1 = _run(script, fake_home)
+        assert r1.returncode == 0, r1.stderr
+
+        dest = fake_home / ".claude" / "agents" / "code-quality-reviewer.md"
+        dest.write_text("# hand-edited content B\n")
+
+        r2 = _run(script, fake_home, "--force")
+        assert r2.returncode == 0, r2.stderr
+        assert dest.read_text() == "# code quality reviewer\n"
+
+    def test_conflict_does_not_write_manifest_or_prune(
+        self, script: Path, fake_repo_with_agents: Path, fake_home: Path
+    ) -> None:
+        r1 = _run(script, fake_home)
+        assert r1.returncode == 0, r1.stderr
+
+        dest = fake_home / ".claude" / "agents" / "code-quality-reviewer.md"
+        dest.write_text("# hand-edited content B\n")
+
+        manifest = fake_home / ".claude" / ".cw-skills-manifest"
+        manifest_before = manifest.read_text()
+
+        r2 = _run(script, fake_home)
+        assert r2.returncode != 0
+
+        assert manifest.read_text() == manifest_before, (
+            "manifest must not be rewritten on a run that aborts due to a conflict"
+        )
+        assert dest.exists(), (
+            "the manifest-scoped prune step must not delete the hand-edited "
+            "file as a false orphan"
+        )
+        assert dest.read_text() == "# hand-edited content B\n"
+
+    def test_other_agents_still_install_when_one_conflicts(
+        self, script: Path, fake_repo_with_agents: Path, fake_home: Path
+    ) -> None:
+        agents_src = fake_repo_with_agents / ".claude" / "agents"
+        (agents_src / "test-generator.md").write_text("# test generator\n")
+
+        r1 = _run(script, fake_home)
+        assert r1.returncode == 0, r1.stderr
+
+        dest = fake_home / ".claude" / "agents" / "code-quality-reviewer.md"
+        dest.write_text("# hand-edited content B\n")
+
+        # Update the *other* agent's source so its install is observable.
+        (agents_src / "test-generator.md").write_text("# test generator v2\n")
+
+        r2 = _run(script, fake_home)
+        assert r2.returncode != 0, "run must still exit non-zero overall"
+
+        other_dest = fake_home / ".claude" / "agents" / "test-generator.md"
+        assert other_dest.read_text() == "# test generator v2\n", (
+            "an uninvolved sibling agent must still install normally even "
+            "though the run overall fails"
+        )
+
+    def test_agent_baseline_removed_when_agent_pruned(
+        self, script: Path, fake_repo_with_agents: Path, fake_home: Path
+    ) -> None:
+        r1 = _run(script, fake_home)
+        assert r1.returncode == 0, r1.stderr
+
+        baseline = (
+            fake_home / ".claude" / ".cw-agents-baseline" / "code-quality-reviewer.md"
+        )
+        assert baseline.exists(), "baseline shadow-copy must be written on install"
+
+        agents_src = fake_repo_with_agents / ".claude" / "agents"
+        (agents_src / "code-quality-reviewer.md").unlink()
+
+        r2 = _run(script, fake_home)
+        assert r2.returncode == 0, r2.stderr
+
+        dest = fake_home / ".claude" / "agents" / "code-quality-reviewer.md"
+        assert not dest.exists()
+        assert not baseline.exists(), (
+            "a pruned agent's baseline entry must be removed too, so a "
+            "future re-add under the same filename doesn't inherit stale "
+            "baseline state"
+        )
+
+    def test_conflicting_agent_run_still_installs_skills(
+        self, script: Path, fake_repo_with_agents: Path, fake_home: Path
+    ) -> None:
+        """Regression test for the abort-placement bug (#1784 round 3): the
+        agent_conflicts deferred-abort block used to sit BEFORE the skills
+        loop, so a conflicting run exited before a single skill installed.
+        """
+        r1 = _run(script, fake_home)
+        assert r1.returncode == 0, r1.stderr
+
+        dest = fake_home / ".claude" / "agents" / "code-quality-reviewer.md"
+        dest.write_text("# hand-edited content B\n")
+
+        # Remove the skill symlink so its presence after run 2 can only be
+        # explained by the skills loop having actually run during run 2 —
+        # not by leftover state from run 1.
+        skill_dst = fake_home / ".claude" / "skills" / "cw-fanout"
+        skill_dst.unlink()
+
+        r2 = _run(script, fake_home)
+        assert r2.returncode != 0, "agent conflict must still abort the run"
+
+        skill_src = fake_repo_with_agents / ".claude" / "skills" / "cw-fanout"
+        assert skill_dst.is_symlink(), (
+            "the skills loop must still run (and reinstall the skill) even "
+            "though the agent conflict aborts the overall script — proves "
+            "the abort now happens after the skills loop, not before it"
+        )
+        assert skill_dst.readlink() == skill_src.resolve()
+
+    def test_prune_refuses_to_delete_hand_edited_orphaned_agent(
+        self, script: Path, fake_repo_with_agents: Path, fake_home: Path
+    ) -> None:
+        r1 = _run(script, fake_home)
+        assert r1.returncode == 0, r1.stderr
+
+        dest = fake_home / ".claude" / "agents" / "code-quality-reviewer.md"
+        baseline = (
+            fake_home / ".claude" / ".cw-agents-baseline" / "code-quality-reviewer.md"
+        )
+        assert baseline.exists()
+
+        # Hand-edit the destination directly — diverges from both source and
+        # the recorded baseline.
+        dest.write_text("# hand-edited content B\n")
+
+        # Drop the agent from repo source entirely so this run's source scan
+        # no longer sees it, firing the manifest-scoped prune's "old entry
+        # absent from new set" condition.
+        agents_src = fake_repo_with_agents / ".claude" / "agents"
+        (agents_src / "code-quality-reviewer.md").unlink()
+
+        r2 = _run(script, fake_home)
+        assert r2.returncode != 0, (
+            "prune must refuse to delete an agent whose destination "
+            "diverges from its baseline"
+        )
+
+        assert dest.exists(), "hand-edited destination must not be deleted"
+        assert dest.read_text() == "# hand-edited content B\n"
+        assert baseline.exists(), "baseline entry must not be removed on refusal"
+
+        manifest = fake_home / ".claude" / ".cw-skills-manifest"
+        entries = manifest.read_text().splitlines()
+        assert "agents/code-quality-reviewer.md" in entries, (
+            "a refused prune entry must be carried forward into the new "
+            "manifest so it is reconsidered next run"
+        )
+
+    def test_prune_force_deletes_hand_edited_orphaned_agent(
+        self, script: Path, fake_repo_with_agents: Path, fake_home: Path
+    ) -> None:
+        r1 = _run(script, fake_home)
+        assert r1.returncode == 0, r1.stderr
+
+        dest = fake_home / ".claude" / "agents" / "code-quality-reviewer.md"
+        baseline = (
+            fake_home / ".claude" / ".cw-agents-baseline" / "code-quality-reviewer.md"
+        )
+
+        dest.write_text("# hand-edited content B\n")
+
+        agents_src = fake_repo_with_agents / ".claude" / "agents"
+        (agents_src / "code-quality-reviewer.md").unlink()
+
+        r2 = _run(script, fake_home, "--force")
+        assert r2.returncode == 0, r2.stderr
+
+        assert not dest.exists(), (
+            "--force must bypass the prune-time divergence check too"
+        )
+        assert not baseline.exists(), "baseline entry must be cleaned up too"
+
+        manifest = fake_home / ".claude" / ".cw-skills-manifest"
+        entries = manifest.read_text().splitlines()
+        assert "agents/code-quality-reviewer.md" not in entries, (
+            "a force-pruned entry must not be carried forward"
+        )
 
 
 class TestProjectScopedCommandsExcluded:
