@@ -10,6 +10,7 @@ GROUPS: list[tuple[str, list[str]]] = [
     (
         ".claude/scripts",
         [
+            "check_impl_guard_staleness",
             "check_plan_scope_conformance",
             "post_review",
             "prep_pr_finalize",
