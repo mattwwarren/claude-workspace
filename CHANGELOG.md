@@ -56,6 +56,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **REVIEW-stage requeues deliver live operator comments to codex-backend
+  reviewers (#1730):** when a fresh operator comment triggers a REVIEW-stage
+  requeue, the codex backend now receives that comment's content directly
+  instead of re-reviewing a stale snapshot. If delivery to the backend can't
+  be completed, `TicketTask.pending_operator_comment` marks the task so the
+  gap degrades loudly (a `requeue.review_delivery_degraded` event) rather than
+  silently reviewing without the operator's input. `gh.fetch_issue_comments`
+  is now public to support the fetch path.
+
 - **`branch_freshness` ticket-branch staleness probe closes both REVIEW approve
   paths against a stale branch (#1823):** REVIEW-scoped approvals no longer
   advance a task whose ticket branch has drifted behind its tracked base

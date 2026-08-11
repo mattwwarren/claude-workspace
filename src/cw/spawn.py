@@ -26,6 +26,7 @@ from cw.exceptions import (
     WorktreeError,
 )
 from cw.models import (
+    HOOK_CONTEXT_RELATIVE_PATH,
     TERMINAL_SESSION_STATUSES,
     OrchestratorEventType,
     Session,
@@ -51,7 +52,11 @@ _log = logging.getLogger(__name__)
 #     the impl-stage Pre-Stage Detector Guard that this IMPL entry was reached
 #     via a deliberate backward stage move, not a fresh dispatch or an ordinary
 #     forward advance).
-CW_CONTEXT_SCHEMA_VERSION = 3
+# v4: added `queue_metadata.pending_operator_comment` (#1730 — per-arrival
+#     signal to the REVIEW stage that this entry followed a regress and may
+#     carry an operator send-back comment to treat as a binding adjudication
+#     input rather than background context).
+CW_CONTEXT_SCHEMA_VERSION = 4
 
 
 def build_disallowed_tools_arg(patterns: list[str]) -> list[str]:
@@ -315,10 +320,10 @@ def _write_hook_context(
     clobbering — the prior session has not finished and we must not steal
     its hook context (issue #427 fix 2).
     """
-    claude_dir = worktree / ".claude"
+    context_path = worktree / HOOK_CONTEXT_RELATIVE_PATH
+    claude_dir = context_path.parent
     claude_dir.mkdir(parents=True, exist_ok=True)
     settings_path = claude_dir / "settings.local.json"
-    context_path = claude_dir / "cw-context.json"
 
     if origin is SessionOrigin.USER and settings_path.exists():
         msg = (
@@ -408,6 +413,10 @@ def _write_hook_context(
                     # #1794: Stage is a StrEnum, so json.dumps renders this as
                     # the plain stage value (or null) with no .value call.
                     "regressed_into_stage": task.regressed_into_stage,
+                    # #1730: sibling per-arrival marker -- true means this
+                    # re-entry may carry an operator send-back the review stage
+                    # must treat as a binding adjudication input.
+                    "pending_operator_comment": task.pending_operator_comment,
                 },
                 "world_state_snapshot": {
                     "origin_main_sha_at_spawn": origin_sha,

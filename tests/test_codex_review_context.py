@@ -36,9 +36,13 @@ from cw.codex_review._context import (
     _OUTPUT_INSTRUCTIONS_CAPABLE,
     _OUTPUT_INSTRUCTIONS_INLINED_ONLY,
     _REVIEWER_ROLE_AGENT_FILES,
+    _load_operator_comments,
+    _load_pending_operator_comment_marker,
     _select_output_instructions,
 )
 from cw.codex_runner import FakeCodexRunner
+from cw.models import HOOK_CONTEXT_RELATIVE_PATH, SessionOrigin
+from cw.spawn import _write_hook_context
 from tests._codex_review_helpers import (
     _doc_json,
     _finding_payload,
@@ -47,10 +51,30 @@ from tests._codex_review_helpers import (
     _task,
     _write,
 )
-from tests.conftest import _make_diff
+from tests.conftest import _make_diff, _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+
+def _write_real_hook_context(worktree: Path, *, pending: bool) -> None:
+    """Materialize the hook context via spawn's REAL writer (#1730).
+
+    Deliberately not a hand-placed fixture: driving ``_write_hook_context`` is
+    what binds the reviewer-side read path to the spawn-side write path, so a
+    future edit that moves either end fails the assertion instead of shipping a
+    silently dead feature (#1628 — make the seam survive the fix).
+    """
+    _write_hook_context(
+        worktree,
+        session_id="s-1730",
+        session_name="test-client/auto-dev/1730",
+        client="test-client",
+        purpose="review",
+        ticket_id="1730",
+        origin=SessionOrigin.DAEMON,
+        task=_make_ticket_task(pending_operator_comment=pending),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +316,152 @@ class TestLoadTicketContext:
         _write(tmp_path / ".cw" / "context.json", json.dumps({"title": "", "body": ""}))
         _plan, ticket_text = _load_ticket_context(tmp_path)
         assert ticket_text is None
+
+
+class TestLoadOperatorComments:
+    """#1730: live comment fetch for the codex review path."""
+
+    def _github_repo(self, tmp_path: Path) -> Path:
+        _write(
+            tmp_path / ".claude" / "project-config.yaml",
+            "tracking:\n  primary:\n    system: github-issues\n",
+        )
+        return tmp_path
+
+    def test_returns_none_when_tracker_unresolvable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No project-config.yaml at all -- degrade, never guess a tracker."""
+
+        def _fail_if_called(*_a: object, **_kw: object) -> None:
+            msg = "must not fetch when the tracker is unknown"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments", _fail_if_called
+        )
+        assert _load_operator_comments(tmp_path, "T-1") is None
+
+    def test_returns_none_on_fetch_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """gh failure surfaces as None from fetch_issue_comments -- degrade."""
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments", lambda *_a, **_kw: None
+        )
+        assert _load_operator_comments(self._github_repo(tmp_path), "T-1") is None
+
+    def test_returns_none_on_empty_thread(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments", lambda *_a, **_kw: []
+        )
+        assert _load_operator_comments(self._github_repo(tmp_path), "T-1") is None
+
+    def test_skips_bodiless_comments_and_renders_the_rest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A whitespace-only or body-less entry contributes nothing; a comment
+        with no author/createdAt still renders under an 'unknown' header."""
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments",
+            lambda *_a, **_kw: [
+                {"body": "   "},
+                {"author": {"login": "op"}, "createdAt": "2026-08-10T00:00:00Z"},
+                {"body": "REAL BODY"},
+            ],
+        )
+        rendered = _load_operator_comments(self._github_repo(tmp_path), "T-1")
+        assert rendered == "### unknown\nREAL BODY"
+
+    def test_returns_none_when_every_comment_is_bodiless(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A thread of empty bodies is indistinguishable from no thread."""
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments",
+            lambda *_a, **_kw: [{"body": ""}],
+        )
+        assert _load_operator_comments(self._github_repo(tmp_path), "T-1") is None
+
+    def test_joins_multiple_comments_with_blank_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#1730: this ticket delivers the full operator thread, not just a
+        single comment -- the multi-comment join path must be covered."""
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments",
+            lambda *_a, **_kw: [
+                {
+                    "author": {"login": "a"},
+                    "createdAt": "2026-08-10T00:00:00Z",
+                    "body": "BODY1",
+                },
+                {
+                    "author": {"login": "b"},
+                    "createdAt": "2026-08-10T01:00:00Z",
+                    "body": "BODY2",
+                },
+            ],
+        )
+        rendered = _load_operator_comments(self._github_repo(tmp_path), "T-1")
+        assert rendered == (
+            "### a (2026-08-10T00:00:00Z)\nBODY1\n\n### b (2026-08-10T01:00:00Z)\nBODY2"
+        )
+
+
+class TestLoadPendingOperatorCommentMarker:
+    """#1730: the queue_metadata marker read, fail-safe to False throughout.
+
+    Every populated case goes through the REAL spawn-side writer or through
+    ``HOOK_CONTEXT_RELATIVE_PATH``, the single constant both ends resolve —
+    never a hand-placed file at a path this test picked. The first cut of this
+    suite authored ``.cw/context.json`` itself and so agreed with a reader that
+    pointed at the wrong file: it proved the parser worked while the production
+    read missed every time and the banner never rendered. A reader/writer path
+    disagreement now fails ``test_marker_true_from_real_writer``, and a
+    regression back to the Stage 0 ticket-context file fails
+    ``test_marker_not_read_from_stage0_ticket_context``.
+    """
+
+    def test_absent_context_json(self, tmp_path: Path) -> None:
+        assert _load_pending_operator_comment_marker(tmp_path) is False
+
+    def test_malformed_json(self, tmp_path: Path) -> None:
+        _write(tmp_path / HOOK_CONTEXT_RELATIVE_PATH, "not json{{")
+        assert _load_pending_operator_comment_marker(tmp_path) is False
+
+    def test_non_dict_json(self, tmp_path: Path) -> None:
+        _write(tmp_path / HOOK_CONTEXT_RELATIVE_PATH, "[1, 2, 3]")
+        assert _load_pending_operator_comment_marker(tmp_path) is False
+
+    def test_missing_queue_metadata(self, tmp_path: Path) -> None:
+        _write(tmp_path / HOOK_CONTEXT_RELATIVE_PATH, json.dumps({"title": "t"}))
+        assert _load_pending_operator_comment_marker(tmp_path) is False
+
+    def test_marker_true_from_real_writer(self, tmp_path: Path) -> None:
+        """Pipeline test: spawn writes, the reviewer reads, no fixture between."""
+        _write_real_hook_context(tmp_path, pending=True)
+        assert _load_pending_operator_comment_marker(tmp_path) is True
+
+    def test_marker_false_from_real_writer(self, tmp_path: Path) -> None:
+        _write_real_hook_context(tmp_path, pending=False)
+        assert _load_pending_operator_comment_marker(tmp_path) is False
+
+    def test_marker_not_read_from_stage0_ticket_context(self, tmp_path: Path) -> None:
+        """The marker must NOT be honored out of ``.cw/context.json`` (#1730).
+
+        Different layer: that file is Stage 0 *ticket* context and is deleted
+        outright by ``_invalidate_stale_context_json`` (#1046) on a rescued
+        respawn, so dispatch state read from there would vanish. Fails if the
+        reader ever drifts back onto it.
+        """
+        _write(
+            tmp_path / ".cw" / "context.json",
+            json.dumps({"queue_metadata": {"pending_operator_comment": True}}),
+        )
+        assert _load_pending_operator_comment_marker(tmp_path) is False
 
 
 class TestParseReviewerDocument:
@@ -633,6 +803,40 @@ class TestBuildReviewerPrompt:
         assert "src/cw/foo.py (core) — why" in prompt
         assert "## Diff" in prompt
 
+    def test_build_reviewer_prompt_renders_comments_section(self) -> None:
+        """#1730: operator comments render as their own section, with the
+        elevated-priority banner gated on the pending marker."""
+        prompt = _build_reviewer_prompt(
+            "SysAdmin Reviewer",
+            agent_spec_text="SPEC",
+            diff=_make_diff(),
+            changed_files=["src/cw/foo.py"],
+            plan_text=None,
+            ticket_text=None,
+            project_rubrics=None,
+            repo_policy_section=None,
+            sensitive_hits=[],
+            operator_comments_text="FOO",
+        )
+        assert "## Ticket Comments (live-fetched, chronological)" in prompt
+        assert "FOO" in prompt
+        assert "Pending Operator Send-Back" not in prompt
+
+        banner_prompt = _build_reviewer_prompt(
+            "SysAdmin Reviewer",
+            agent_spec_text="SPEC",
+            diff=_make_diff(),
+            changed_files=["src/cw/foo.py"],
+            plan_text=None,
+            ticket_text=None,
+            project_rubrics=None,
+            repo_policy_section=None,
+            sensitive_hits=[],
+            operator_comments_text="FOO",
+            pending_operator_comment=True,
+        )
+        assert "Pending Operator Send-Back" in banner_prompt
+
     def test_optional_sections_absent(self) -> None:
         prompt = _build_reviewer_prompt(
             "SysAdmin Reviewer",
@@ -645,6 +849,7 @@ class TestBuildReviewerPrompt:
             repo_policy_section=None,
             sensitive_hits=[],
         )
+        assert "## Ticket Comments" not in prompt
         assert "## Approved Plan" not in prompt
         assert "## Ticket Context" not in prompt
         assert "## Project Rubrics" not in prompt
@@ -1210,6 +1415,130 @@ class TestPrepareReviewPass:
             ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
         ).strip()
         assert prepared.reviewed_sha == head
+
+    def _repo_with_change(
+        self, make_git_repo: Callable[[str], Path], name: str, tracker: str | None
+    ) -> Path:
+        """A feature-branch repo with one python change and a tracker config."""
+        repo = make_git_repo(name)
+        _git(repo, "checkout", "-b", "feature")
+        (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
+        _git(repo, "add", "mod.py")
+        _git(repo, "commit", "-m", "add mod.py")
+        if tracker is not None:
+            _write(
+                repo / ".claude" / "project-config.yaml",
+                f"tracking:\n  primary:\n    system: {tracker}\n",
+            )
+        return repo
+
+    def test_prepare_review_pass_includes_live_operator_comment_in_prompt(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#1730: the codex backend live-fetches ticket comments and inlines
+        them — before this, only .cw/context.json's title/body ever reached it."""
+        repo = self._repo_with_change(
+            make_git_repo, "wt-1730-comments", "github-issues"
+        )
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments",
+            lambda *_a, **_kw: [
+                {
+                    "author": {"login": "mattwwarren"},
+                    "createdAt": "2026-08-10T00:00:00Z",
+                    "body": "SENDBACK-MARKER-1730",
+                }
+            ],
+        )
+
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-1730-comments",
+        )
+
+        assert prepared.roles
+        for role in prepared.roles:
+            assert "SENDBACK-MARKER-1730" in prepared.prompts_by_role[role]
+
+    def test_prepare_review_pass_omits_comments_when_tracker_not_github(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression guard: a non-github tracker has no fetch op here, so no
+        comment section is rendered and no gh call is attempted."""
+        repo = self._repo_with_change(make_git_repo, "wt-1730-linear", "linear")
+
+        def _fail_if_called(*_a: object, **_kw: object) -> None:
+            msg = "fetch_issue_comments must not run for a non-github tracker"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments", _fail_if_called
+        )
+
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-1730-linear",
+        )
+
+        for role in prepared.roles:
+            assert "## Ticket Comments" not in prepared.prompts_by_role[role]
+
+    def test_prepare_review_pass_renders_pending_operator_comment_banner(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#1730: queue_metadata.pending_operator_comment=true elevates the
+        comments to a binding-adjudication banner."""
+        repo = self._repo_with_change(make_git_repo, "wt-1730-banner", "github-issues")
+        _write_real_hook_context(repo, pending=True)
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments",
+            lambda *_a, **_kw: [{"body": "SENDBACK-MARKER-1730"}],
+        )
+
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-1730-banner",
+        )
+
+        assert prepared.roles
+        for role in prepared.roles:
+            assert "Pending Operator Send-Back" in prepared.prompts_by_role[role]
+
+    def test_prepare_review_pass_omits_banner_when_marker_absent_or_false(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression guard: comments still render, but without the banner."""
+        repo = self._repo_with_change(
+            make_git_repo, "wt-1730-no-banner", "github-issues"
+        )
+        _write_real_hook_context(repo, pending=False)
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments",
+            lambda *_a, **_kw: [{"body": "SENDBACK-MARKER-1730"}],
+        )
+
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-1730-no-banner",
+        )
+
+        assert prepared.roles
+        for role in prepared.roles:
+            prompt = prepared.prompts_by_role[role]
+            assert "SENDBACK-MARKER-1730" in prompt
+            assert "Pending Operator Send-Back" not in prompt
 
     def test_capable_probe_threads_into_every_role_prompt(
         self, make_git_repo: Callable[[str], Path]

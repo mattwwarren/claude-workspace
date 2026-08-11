@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+from cw.models import CONTEXT_JSON_RELATIVE_PATH, HOOK_CONTEXT_RELATIVE_PATH
+
 COMMANDS = Path(__file__).parent.parent / ".claude" / "commands"
 
 
@@ -37,6 +39,57 @@ def test_plan_step1f4_revision_agent_pins_sonnet() -> None:
     """Step 1f.4 plan-revision agent must pin sonnet (not opus like Step 1b)."""
     content = _cmd("auto-dev-plan.md")
     assert 'Re-spawn the **Plan** agent (`model: "sonnet"`)' in content
+
+
+def test_review_orientation_states_comments_are_live_not_cached() -> None:
+    """#1730: Stage 3 must re-fetch comments, mirroring auto-dev-impl.md's own
+    "live, not cached" convention — a cached array can predate the send-back."""
+    content = _cmd("auto-dev-review.md")
+    assert "Comments are live, not cached (#1730)." in content
+
+
+def test_review_business_context_bullet_marks_comments_binding() -> None:
+    """#1730: the Business Context comments bullet must flag operator comments
+    as a binding adjudication input, not passive background."""
+    content = _cmd("auto-dev-review.md")
+    assert "binding adjudication input" in content
+
+
+def test_review_checkpoint3a_references_pending_operator_comment_marker() -> None:
+    """#1730: Checkpoint 3a must name the queue_metadata marker that elevates
+    the live-fetched comments, and must point at the file it is actually
+    written to. A bare substring check on the marker name alone previously
+    passed unchanged whether the doc named the wrong file (.cw/context.json,
+    which never carries queue_metadata) or the right one -- the same
+    reader/writer path-drift bug already caught, and given a mutation-proof
+    test, on the codex-backend code path (test_codex_review_context.py's
+    test_marker_not_read_from_stage0_ticket_context). This test pins both
+    occurrences (the Orientation banner and Checkpoint 3a's (4c)) to the
+    shared HOOK_CONTEXT_RELATIVE_PATH constant instead."""
+    content = _cmd("auto-dev-review.md")
+    hook_path = HOOK_CONTEXT_RELATIVE_PATH.as_posix()
+    marker = "`queue_metadata.pending_operator_comment`"
+    correct = f"`{hook_path}`'s {marker}"
+    wrong = f"`{CONTEXT_JSON_RELATIVE_PATH.as_posix()}`'s {marker}"
+    assert content.count(correct) == 2
+    assert wrong not in content
+
+
+def test_review_operator_settled_finding_lands_in_adjudications_array() -> None:
+    """#1730 x #1805: a finding an operator comment settles must still be
+    recorded as an ADJUDICATIONS entry with a rationale naming that comment.
+
+    #1805 made the ADJUDICATIONS array the single source `cw review
+    adjudicate` serializes both the verdict and .cw/deferred-findings.md
+    from. If (4c)'s binding-comment rule left the operator's own decision
+    implicit, it would be the one adjudication recorded in prose only --
+    re-opening, from a new direction, the "recorded in only one of the two
+    places" defect #1805 exists to close."""
+    content = _cmd("auto-dev-review.md")
+    assert "An operator-settled finding is adjudicated exactly like any other" in (
+        content
+    )
+    assert "`ADJUDICATIONS` array below" in content
 
 
 def test_impl_spawn_heading_announces_scope_based_model() -> None:

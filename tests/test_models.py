@@ -952,7 +952,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 28
+        assert DEV_QUEUE_SCHEMA_VERSION == 29
 
     def test_pr_state_defaults(self) -> None:
         state = PrState()
@@ -1205,6 +1205,7 @@ class TestOperatorChannelForward:
                 OrchestratorEventType.PR_ACTION_TAKEN,
                 OrchestratorEventType.PR_ACTION_FAILED,
                 OrchestratorEventType.SSH_KEY_GATE_BYPASSED,
+                OrchestratorEventType.REQUEUE_REVIEW_DELIVERY_DEGRADED,
             }
         )
 
@@ -1626,9 +1627,11 @@ class TestPackageExportCompleteness:
 
     The models.py -> cw/models/ package split (#1320) must preserve every
     ``from cw.models import X`` call site unchanged. This asserts ``__all__``
-    equals the exhaustive historical top-level surface (49 names) — hardcoded
-    here, NOT re-derived from the package, so a dropped or renamed export is a
-    falsifiable failure rather than a tautology.
+    equals the exhaustive top-level surface (the historical 49 names, plus
+    #1730's ``HOOK_CONTEXT_RELATIVE_PATH`` = 50) — hardcoded here, NOT
+    re-derived from the package, so a dropped or renamed export is a
+    falsifiable failure rather than a tautology. A deliberate addition updates
+    this set in the same commit.
     """
 
     def test_all_matches_full_surface(self) -> None:
@@ -1654,6 +1657,7 @@ class TestPackageExportCompleteness:
             "DispatchSkipReason",
             "EventHookRegistry",
             "FocusEntry",
+            "HOOK_CONTEXT_RELATIVE_PATH",
             "HookRule",
             "LOCAL_BACKEND",
             "LaneConcurrencyOverride",

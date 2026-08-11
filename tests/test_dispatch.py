@@ -2003,6 +2003,63 @@ class TestDispatchTickSpawnErrors:
         assert task.regressed_into_stage is None
         assert task.regress_attempts == 1  # cumulative counter untouched
 
+    def test_successful_review_spawn_clears_pending_operator_comment(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """#1730: a REVIEW-stage spawn has materialized the marker into the
+        worker's queue_metadata, so the marker is consumed and cleared."""
+        from cw.models import Stage
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-1730R",
+                client="test-client",
+                stage=Stage.REVIEW,
+                pending_operator_comment=True,
+            )
+        )
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
+
+        assert spawned == 1
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.RUNNING
+        assert task.pending_operator_comment is False
+
+    def test_successful_impl_spawn_does_not_clear_pending_operator_comment(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """#1730: the clear is stage-gated — a non-REVIEW spawn (e.g. Rule 5a's
+        self-heal regress into IMPL) must NOT consume the marker, or it would be
+        gone long before the task advances IMPL -> REVIEW where it is useful."""
+        from cw.models import Stage
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-1730I",
+                client="test-client",
+                stage=Stage.IMPL,
+                pending_operator_comment=True,
+            )
+        )
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
+
+        assert spawned == 1
+        task = load_dev_queue().tasks[0]
+        assert task.status == QueueItemStatus.RUNNING
+        assert task.pending_operator_comment is True
+
     def test_unrelated_revert_preserves_existing_hook_context_conflict_stamp(
         self,
         tmp_dispatch_dirs: Path,
@@ -10987,6 +11044,290 @@ class TestBranchStalenessGate:
 
         task = self._make_running_task("BSG-7", stage=Stage.REVIEW)
         assert _should_gate_for_branch_staleness(task, {}) is False
+
+
+# ---------------------------------------------------------------------------
+# TestUnifiedReentryContractCompose
+# ---------------------------------------------------------------------------
+
+
+class TestUnifiedReentryContractCompose:
+    """#1717 + #1730: the mandatory compose test for the Unified Re-entry Contract.
+
+    Both tickets stamp a per-regress-arrival marker at the SAME seam
+    (``dev_queue.lifecycle._stage_regress``) and consume it at a REVIEW
+    re-entry, but they were implemented on branches that never saw each other:
+    #1717 merged first, #1730 rebased on top. The field names differ, so a
+    merge of the two is silent — git raises no conflict on a semantic collision
+    at a shared stamp point. The paired resolution comment on both tickets
+    therefore assigns a compose test to whichever ticket lands second (#1730),
+    driving a re-entry that is SIMULTANEOUSLY a same-branch-head repeat and a
+    carrier of a pending operator send-back, in one pass.
+
+    Every assertion below is chosen to fail under a specific mutation:
+
+    - both markers stamped by one ``_stage_regress`` call → fails if either
+      write is dropped or moved so it clobbers the other's field;
+    - ``finalize_regress_branch_head`` is ``None`` after a non-FINALIZE-origin
+      regress → fails if #1717's write is stamped ungated by regress origin;
+    - ``pending_operator_comment`` survives the routing pass that consumes
+      #1717's marker → fails if either consumer clears the other's field;
+    - ``pending_operator_comment`` survives a non-REVIEW spawn but is consumed
+      by a REVIEW spawn → fails if #1730's clear is stamped ungated by stage.
+
+    #1823 extension: that ticket inserted a FIFTH REVIEW-scoped gate
+    (``_should_gate_for_branch_staleness``) directly into this seam — between
+    ``_consume_finalize_regress_repeat`` and the #1702 health gate, on an
+    early-return park path. ``lifecycle.py`` auto-merged with no conflict, so
+    nothing forced the composition to be re-proved. The tests above do NOT
+    reach that path: ``_make_ticket_task`` leaves ``worktree_path`` at ``None``
+    and ``has_overlapping_branch_staleness`` short-circuits to ``False`` there,
+    making the new gate silently inert. The three-way case is therefore pinned
+    explicitly below.
+    """
+
+    def _make_running_task(
+        self,
+        ticket_id: str,
+        stage: Stage = Stage.FINALIZE,
+    ) -> TicketTask:
+        task = _make_ticket_task(
+            ticket_id=ticket_id,
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            stage=stage,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        return task
+
+    def _clients(self, tmp_path: Path) -> dict[str, ClientConfig]:
+        return {
+            "test-client": ClientConfig(name="test-client", workspace_path=tmp_path)
+        }
+
+    def test_finalize_regress_repeat_and_pending_send_back_compose_in_one_pass(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """One FINALIZE-origin regress stamps BOTH markers; the REVIEW re-entry
+        fires #1717's repeat signal and leaves #1730's marker standing for the
+        spawn claim that owns it. Neither write nor either consumption clobbers
+        the other ticket's field."""
+        from cw.dev_queue import _stage_regress
+        from cw.dispatch import apply_staged_decision
+
+        repeat_signal = capture_events(
+            "cw.dispatch.regress_repeat",
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        )
+
+        task = self._make_running_task("COMPOSE-1", stage=Stage.FINALIZE)
+        task.stage_base_ref = "sha-original"
+        assert task.finalize_regress_branch_head is None
+        assert task.pending_operator_comment is False
+
+        _stage_regress(task, Stage.IMPL)
+
+        # Both markers land from the single shared-seam call. A write moved to
+        # clobber the other's field, or dropped in a merge, fails right here.
+        assert task.finalize_regress_branch_head == "sha-original"
+        assert task.pending_operator_comment is True
+
+        # The IMPL leg lands no commit; the task walks back to REVIEW with the
+        # branch head unchanged — the #1644/#1702/#1710 repeat shape — while
+        # still carrying the operator send-back stamped by the same regress.
+        task.stage = Stage.REVIEW
+        task.stage_base_ref = "sha-original"
+        task.status = QueueItemStatus.RUNNING
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        apply_staged_decision(
+            task,
+            "review_pending_approval",
+            {"status": "review_pending_approval"},
+            self._clients(tmp_path),
+        )
+
+        # #1717's signal fired and its marker is consumed...
+        assert len(repeat_signal) == 1
+        assert repeat_signal[0][1]["paused_status"] == "finalize_regress_repeat"
+        assert repeat_signal[0][1]["ticket_id"] == "COMPOSE-1"
+        assert task.finalize_regress_branch_head is None
+        # ...and #1730's marker is untouched by that consumption: its consumer
+        # is the REVIEW spawn claim (dispatch/claim.py), not the routing pass.
+        # A cross-clobber in either consumer fails here.
+        assert task.pending_operator_comment is True
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_non_finalize_regress_stamps_only_the_send_back_marker(
+        self,
+        tmp_dispatch_dirs: Path,
+    ) -> None:
+        """The two stamps carry independent gates: a REVIEW-origin regress
+        raises #1730's marker but must NOT stamp #1717's branch-head oracle,
+        which is FINALIZE-origin only. Fails if #1717's write is made
+        unconditional, or if #1730's is gated on regress origin."""
+        from cw.dev_queue import _stage_regress
+
+        task = self._make_running_task("COMPOSE-2", stage=Stage.REVIEW)
+        task.stage_base_ref = "sha-review"
+
+        _stage_regress(task, Stage.IMPL)
+
+        assert task.pending_operator_comment is True
+        assert task.finalize_regress_branch_head is None
+
+    def test_compose_send_back_marker_survives_self_heal_impl_spawn(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """Rule 5a's FINALIZE self-heal regresses to IMPL, so the IMPL spawn on
+        the way back to REVIEW must NOT consume #1730's marker — and must leave
+        #1717's oracle standing for the REVIEW-side routing consumption that
+        owns it. Fails if #1730's clear is made unconditional (the mutation that
+        would silently drop the send-back on every self-heal round trip), and
+        fails if the spawn claim clears #1717's field as collateral."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        from cw.dev_queue import _stage_regress
+
+        task = _make_ticket_task(
+            ticket_id="COMPOSE-3",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            stage=Stage.FINALIZE,
+        )
+        task.stage_base_ref = "sha-original"
+        _stage_regress(task, Stage.IMPL)
+        assert task.finalize_regress_branch_head == "sha-original"
+        assert task.pending_operator_comment is True
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        spawned = dispatch_tick(
+            simple_config, native_daemon=FakeNativeDaemonClient()
+        ).spawned
+
+        assert spawned == 1
+        after_impl = load_dev_queue().tasks[0]
+        assert after_impl.stage == Stage.IMPL
+        assert after_impl.regressed_into_stage is None  # #1794's marker consumed
+        assert after_impl.pending_operator_comment is True  # #1730's survives
+        assert after_impl.finalize_regress_branch_head == "sha-original"  # #1717's
+
+    def test_compose_review_spawn_consumes_send_back_without_touching_oracle(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """The REVIEW half: an operator ``--regress --stage review`` from
+        FINALIZE stamps both markers and lands directly at REVIEW, so the very
+        next spawn claim consumes #1730's marker. #1717's oracle must be left
+        for its own consumer (dispatch/routing.py's REVIEW-scoped gates) —
+        fails if the spawn claim clears it too, which would blind the repeat
+        detector on exactly the re-entry it exists to catch."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        from cw.dev_queue import _stage_regress
+
+        task = _make_ticket_task(
+            ticket_id="COMPOSE-4",
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            stage=Stage.FINALIZE,
+        )
+        task.stage_base_ref = "sha-original"
+        _stage_regress(task, Stage.REVIEW)
+        assert task.finalize_regress_branch_head == "sha-original"
+        assert task.pending_operator_comment is True
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        spawned = dispatch_tick(
+            simple_config, native_daemon=FakeNativeDaemonClient()
+        ).spawned
+
+        assert spawned == 1
+        after_review = load_dev_queue().tasks[0]
+        assert after_review.stage == Stage.REVIEW
+        assert after_review.pending_operator_comment is False  # consumed here
+        assert after_review.finalize_regress_branch_head == "sha-original"  # not
+
+    def test_branch_staleness_park_composes_with_both_reentry_markers(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """The three-way compose: #1823's gate parks the very REVIEW re-entry
+        that is simultaneously a #1717 same-branch-head repeat and a #1730
+        send-back carrier.
+
+        #1823 put ``_should_gate_for_branch_staleness`` between #1717's
+        consumption and every downstream gate, on a path that ``return``s
+        early. Three ways that could have broken the contract silently, one
+        assertion each below:
+
+        - the early return skips ``_maybe_emit_finalize_regress_repeat_signal``
+          → #1717's repeat signal is swallowed on exactly the re-entry it
+          exists to surface (the gate's park is a park, not an advance, so the
+          signal must still ride alongside it);
+        - the new gate is placed *ahead* of ``_consume_finalize_regress_repeat``
+          → #1717's oracle is never consumed and the repeat detector latches;
+        - the new park clears session anchors broadly → #1730's marker is
+          dropped before the REVIEW spawn that owns it ever runs.
+        """
+        from cw.dev_queue import BRANCH_STALENESS_GATE_DISPOSITION, _stage_regress
+        from cw.dispatch import apply_staged_decision
+        from cw.dispatch import review_gates as rg_mod
+
+        # Same patch point as TestBranchStalenessGate._set_staleness above:
+        # review_gates imports the probe at module top, so that binding — not
+        # the defining module's — is the one routing actually calls.
+        monkeypatch.setattr(
+            rg_mod, "has_overlapping_branch_staleness", lambda _p, _b: True
+        )
+        repeat_signal = capture_events(
+            "cw.dispatch.regress_repeat",
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        )
+
+        task = self._make_running_task("COMPOSE-5", stage=Stage.FINALIZE)
+        task.stage_base_ref = "sha-original"
+        _stage_regress(task, Stage.IMPL)
+        assert task.finalize_regress_branch_head == "sha-original"
+        assert task.pending_operator_comment is True
+
+        # Same walk back to REVIEW as the one-pass test: no commit landed, so
+        # the branch head still matches the oracle.
+        task.stage = Stage.REVIEW
+        task.stage_base_ref = "sha-original"
+        task.status = QueueItemStatus.RUNNING
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        apply_staged_decision(
+            task,
+            "review_pending_approval",
+            {"status": "review_pending_approval", "scope": {"tier": "small"}},
+            self._clients(tmp_path),
+        )
+
+        # #1823's gate won the park...
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == BRANCH_STALENESS_GATE_DISPOSITION
+        assert task.stage == Stage.REVIEW
+        # ...without swallowing #1717's companion signal or its consumption...
+        assert len(repeat_signal) == 1
+        assert repeat_signal[0][1]["paused_status"] == "finalize_regress_repeat"
+        assert repeat_signal[0][1]["ticket_id"] == "COMPOSE-5"
+        assert task.finalize_regress_branch_head is None
+        # ...and leaving #1730's marker standing for the REVIEW spawn claim,
+        # which is the only consumer entitled to clear it.
+        assert task.pending_operator_comment is True
 
 
 # ---------------------------------------------------------------------------

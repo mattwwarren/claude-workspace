@@ -148,6 +148,24 @@ def test_push_verify_recipe_matches_across_both_sites() -> None:
     assert finalize_recipe == prep_pr_recipe
 
 
+def test_dispatch_runbook_review_stage_delivery_table_present() -> None:
+    """#1730: the runbook must document what actually reaches a requeued
+    worker per stage, so an operator can predict send-back delivery."""
+    content = _doc("dispatch-runbook.md")
+    heading = "Review-stage send-back: what actually reaches the worker (#1730)"
+    assert heading in content
+    section = content[content.index(heading) :]
+    for row in ("`plan`", "`impl`", "`review`"):
+        assert row in section
+
+
+def test_dispatch_runbook_degrade_event_documented() -> None:
+    """#1730: the degrade event and its non-blocking contract must be documented."""
+    content = _doc("dispatch-runbook.md")
+    assert "requeue.review_delivery_degraded" in content
+    assert "does not block the transition" in content
+
+
 def test_dispatch_runbook_95_symptom_no_longer_unconditional() -> None:
     content = _doc("dispatch-runbook.md")
     assert "The branch is pushed to origin;" not in content

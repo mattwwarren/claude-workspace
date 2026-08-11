@@ -38,6 +38,7 @@ from cw.models import (
     DispatchSkipReason,
     OrchestratorEventType,
     QueueItemStatus,
+    Stage,
 )
 from cw.worktree import (
     check_not_main_checkout,
@@ -771,6 +772,14 @@ def _spawn_claimed_task(
                     # entry (the false positive the cumulative regress_attempts
                     # counter would have produced).
                     stored_task.regressed_into_stage = None
+                    # #1730: stage-gated clear -- unlike regressed_into_stage
+                    # (cleared unconditionally at the next spawn), this marker
+                    # must survive an intervening non-REVIEW spawn (e.g. Rule
+                    # 5a's self-heal regresses to IMPL, not REVIEW) so it is
+                    # only consumed when a REVIEW-stage session is actually
+                    # about to read the delivered comments.
+                    if stored_task.stage == Stage.REVIEW:
+                        stored_task.pending_operator_comment = False
                     # R5: stamp stage_base_ref -- non-fatal on failure
                     try:
                         head_sha = subprocess.check_output(

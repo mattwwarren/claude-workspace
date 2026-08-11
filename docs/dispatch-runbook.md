@@ -556,6 +556,60 @@ defect.
 `--regress` to allow a **backward** target on a blocked ticket (e.g. a
 plan-deviation review exit back to `impl`).
 
+#### Review-stage send-back: what actually reaches the worker (#1730)
+
+Posting a send-back comment on the ticket and then requeuing does **not**, on
+its own, guarantee the worker reads it. Stage 0 does not re-run between
+pipeline stages, so `.cw/context.json`'s cached `comments` array is only as
+fresh as the last stage that rewrote it. What each stage does on re-entry:
+
+- `plan` — live-fetches comments and body on every invocation
+  (`auto-dev-plan.md`, "Comments and body are live, not cached"). A send-back
+  always lands.
+- `impl` — live-fetches comments on every invocation and rewrites the cached
+  array (`auto-dev-impl.md`, #1794). A send-back always lands.
+- `review` — live-fetches comments on every invocation (#1730), on **both**
+  execution backends: `claude-native` inlines them into every reviewer prompt
+  as Business Context, and `codex` inlines them via
+  `cw.codex_review._context._load_operator_comments`. The codex path is
+  `github-issues`-only — a `codex` REVIEW backend on any other tracker has no
+  in-process fetch op and cannot deliver them.
+
+A requeue that lands at `review` additionally stamps
+`TicketTask.pending_operator_comment` when it arrived via `--regress` (or Rule
+5a's FINALIZE self-heal). That marker rides into the worker's
+`queue_metadata` at spawn and tells the review stage to treat the fetched
+comments as a **binding** adjudication input rather than background context;
+it is cleared once a REVIEW-stage spawn has consumed it, so it survives an
+intervening IMPL spawn.
+
+A review-stage requeue that cannot deliver comments degrades loudly
+(`requeue.review_delivery_degraded` event, carrying `reason` / `backend` /
+`tracker`, **forwarded to the operator channel by default** — #1730) and
+proceeds — it **does not block the transition**. This is deliberate: `impl`
+hard-exits on a missing plan while `review` and `finalize` degrade, and a
+hard-fail guard here would invert that codified asymmetry (see
+`src/cw/dev_queue/requeue.py`'s `_apply_requeue_stage`). Watch for the event
+with `cw event tail` after any send-back requeue; if it fires, the reviewer
+ran without your comment and its verdict should be read accordingly.
+
+**#1717 coordination.** `pending_operator_comment` is stamped at the shared
+`_stage_regress` chokepoint alongside #1794's `regressed_into_stage`. #1717's
+`finalize_regress_branch_head` is designed to stamp at the same point; per
+the Unified Re-entry Contract on #1730/#1717, each marker is written and
+cleared independently, and whichever ticket lands second owns the compose
+test. Both markers now exist and coexist at that seam. In one
+`_stage_regress` call it stamps `pending_operator_comment` unconditionally
+(gate at the consumption site: `dispatch/claim.py` clears it only at a
+REVIEW-stage spawn) and, when the regress origin was `FINALIZE`,
+`finalize_regress_branch_head` from the pre-clear `stage_base_ref` (#1717's
+repeat detector reads-and-clears it at the first REVIEW re-entry,
+`dispatch/regress_repeat.py`). Neither write clobbers the other's field and
+clearing either leaves the other untouched — the compose case (a re-entry
+that is simultaneously a same-branch-head repeat *and* carries a pending
+send-back) is covered by `tests/test_dispatch.py`'s
+`TestUnifiedReentryContractCompose`.
+
 ### Attempt-cap reset (environmental burn)
 
 See also: CANCELLED row recovery (above) — a different terminal condition

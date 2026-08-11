@@ -23,7 +23,7 @@ from cw.dev_queue import (
     unblock_ticket,
 )
 from cw.events import record_event
-from cw.gh import _FETCH_COMMENTS_TIMEOUT, _fetch_issue_comments, post_issue_comment
+from cw.gh import FETCH_COMMENTS_TIMEOUT, fetch_issue_comments, post_issue_comment
 from cw.models import (
     DEFAULT_LANE,
     OrchestratorEventType,
@@ -176,8 +176,8 @@ def _post_plan_approved_marker(
         return False
 
     repo_cwd = _git_dir(get_client(resolved))
-    comments = _fetch_issue_comments(
-        ticket_id, timeout=_FETCH_COMMENTS_TIMEOUT, cwd=repo_cwd
+    comments = fetch_issue_comments(
+        ticket_id, timeout=FETCH_COMMENTS_TIMEOUT, cwd=repo_cwd
     )
     if comments is None:
         click.echo(

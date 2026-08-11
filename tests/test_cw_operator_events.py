@@ -158,6 +158,13 @@ class TestAdmitsFilterEngine:
         )
         assert _admits(event, self._default_forward()) is True
 
+    def test_requeue_review_delivery_degraded_admitted_by_default(self) -> None:
+        """REQUEUE_REVIEW_DELIVERY_DEGRADED forwards unconditionally (#1730)."""
+        event = OrchestratorEvent(
+            type=OrchestratorEventType.REQUEUE_REVIEW_DELIVERY_DEGRADED, payload={}
+        )
+        assert _admits(event, self._default_forward()) is True
+
     def test_concierge_recovered_not_admitted_by_default(self) -> None:
         """CONCIERGE_RECOVERED is audit-trail only — NOT in the default
         forward set (#1015, Q3)."""

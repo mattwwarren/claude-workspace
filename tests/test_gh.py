@@ -600,6 +600,39 @@ class TestBranchExistsOnOrigin:
         assert captured == [want_cwd]
 
 
+class TestFetchIssueComments:
+    """Tests for the public fetch_issue_comments (#1730).
+
+    Formerly the module-private ``_fetch_issue_comments``; renamed in place so
+    the codex review backend can import it without reaching for a private name.
+    Behavior is unchanged — these tests pin the contract at the new name.
+    """
+
+    def test_fetch_issue_comments_returns_list(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        comments = [{"body": "first"}, {"body": "second"}]
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            lambda *_a, **_kw: _make_run_result(0, json.dumps({"comments": comments})),
+        )
+        assert gh.fetch_issue_comments("1730", timeout=5) == comments
+
+    def test_fetch_issue_comments_returns_none_on_gh_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("cw.gh._sp.run", lambda *_a, **_kw: _make_run_result(1, ""))
+        assert gh.fetch_issue_comments("1730", timeout=5) is None
+
+    def test_fetch_issue_comments_returns_none_on_malformed_json(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.gh._sp.run", lambda *_a, **_kw: _make_run_result(0, "not json{{")
+        )
+        assert gh.fetch_issue_comments("1730", timeout=5) is None
+
+
 class TestFetchApprovedPlanComment:
     """Tests for fetch_approved_plan_comment."""
 
@@ -657,6 +690,19 @@ class TestFetchApprovedPlanComment:
         )
         result = fetch_approved_plan_comment("896")
         assert result == plan_body
+
+    def test_fetch_approved_plan_comment_still_works_after_rename(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#1730: the internal call site was updated to the renamed public
+        helper — fetch_approved_plan_comment's own behavior is unchanged."""
+        plan_body = "Plan.\n<!-- plan-spec-reviewed: 2026-01-01 v1 -->"
+        comments = [{"body": plan_body, "author": {"login": "mattwwarren"}}]
+        monkeypatch.setattr(
+            "cw.gh._sp.run",
+            self._make_dispatched_run(comments, "mattwwarren"),
+        )
+        assert fetch_approved_plan_comment("896") == plan_body
 
     def test_returns_latest_when_multiple_plan_comments(
         self, monkeypatch: pytest.MonkeyPatch
