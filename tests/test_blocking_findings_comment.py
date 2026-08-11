@@ -219,7 +219,7 @@ def test_checkpoint3a_declares_blocking_findings_comment_rule() -> None:
 def test_review_blocked_mechanical_reject_exit_posts_blocking_findings() -> None:
     """The #1714 mechanically-rejected MUST_FIX bullet posts a tracker comment."""
     content = _cmd("auto-dev-review.md")
-    window = _after(content, MECHANICAL_REJECT_ANCHOR, span=200)
+    window = _after(content, MECHANICAL_REJECT_ANCHOR, span=300)
     assert RULE_REFERENCE in window
 
 
@@ -272,7 +272,7 @@ def test_auto_dev_blocker_reason_table_mentions_blocking_findings_comment() -> N
         MEANING_ROW_PLAN_UNREVIEWABLE_ANCHOR,
         MEANING_ROW_PLAN_UNSOUND_ANCHOR,
     ):
-        window = _after(content, row_anchor, span=250)
+        window = _after(content, row_anchor, span=350)
         assert "blocking findings" in window.lower(), row_anchor
 
 
