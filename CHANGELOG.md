@@ -8,6 +8,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`session_inspect` emits the full `Session` field set instead of a
+  hand-maintained subset (#1624):** the human-readable session detail view
+  now derives its displayed fields from `Session.model_dump()` rather than a
+  drift-prone, hand-maintained field list — new `Session` fields
+  automatically appear in `session_inspect` output without a matching code
+  change.
+
 - **Degraded/failed reviewer verdict without a stated reason is now a
   contract violation (#1806):** `ReviewerFindingsDocument` rejects
   `status="degraded"`/`status="failed"` with an empty or missing
