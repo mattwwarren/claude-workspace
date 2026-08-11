@@ -110,12 +110,12 @@ The rows below define the deterministic headless action for every interactive ga
 | S1 plan review, both markers present + current | AUTO-SKIP (no reviewer spawn, no marker re-append) |
 | S1 spec review, NO_ISSUES / SHOULD_FIX / PRINCIPLE only | Append `plan-spec-reviewed` marker, continue |
 | S1 spec review, MUST_FIX, 1st cycle | Spawn plan-revision agent (Step 1f.4), re-review once |
-| S1 spec review, MUST_FIX persists after 1 revision | EXIT `blocked` with `blocker.reason: "plan_unreviewable"` |
+| S1 spec review, MUST_FIX persists after 1 revision | EXIT `blocked` with `blocker.reason: "plan_unreviewable"` (also posts blocking findings as a tracker comment, #1815) |
 | S1 soundness review, NO_ISSUES | Append `plan-soundness-reviewed` marker, continue |
 | S1 soundness review, RISK (interactive) | AskUserQuestion per finding: acknowledge / treat as MUST_FIX / codify as §7. Then append marker |
 | S1 soundness review, RISK (headless) | Write `codify:` lessons to the wiki inbox + `friction_highlights`, append marker, continue (advisory — never blocks) |
 | S1 soundness review, MUST_FIX, interactive | AskUserQuestion: revise approach / override / skip ticket. On "revise" → Step 1f.4 |
-| S1 soundness review, MUST_FIX, headless OR persists after 1 revision | EXIT `blocked` with `blocker.reason: "plan_unsound"` |
+| S1 soundness review, MUST_FIX, headless OR persists after 1 revision | EXIT `blocked` with `blocker.reason: "plan_unsound"` (also posts blocking findings as a tracker comment, #1815) |
 | S1 plan reviewer agent BLOCK (either station) | EXIT `blocked` with `blocker.reason: "agent_block"` |
 | S1 scope-limit hit | EXIT `scope_exceeded` |
 | S1 forbidden-area hit | EXIT `forbidden_area` |
@@ -136,7 +136,7 @@ The rows below define the deterministic headless action for every interactive ga
 | S3 fix-loop, Small + sparse fix (Step 3b.5 criteria all hold) | Skip re-review → S4. Append `"rereview_skipped_sparse"` to `friction_highlights` |
 | S3 action list empty (every finding fixed / rejected / deferred), small | AUTO-CONTINUE → S4. Rejections recorded in PR body + `friction_highlights`; deferrals queued for merge-time ticketing (Step H3) |
 | S3 large scope, action list resolved (clean, or fix loop complete) | EXIT `review_pending_approval` (post-fix-loop diff, branch pushed, no PR); adjudication applies within the human review |
-| S3 action list non-empty after 5 fix cycles | EXIT `blocked` with `blocker.reason: "review_blocked"` |
+| S3 action list non-empty after 5 fix cycles | EXIT `blocked` with `blocker.reason: "review_blocked"` (also posts blocking findings as a tracker comment, #1815) |
 | S3 non-deferrable plan-deviation finding survives fix loop or judged beyond its scope | EXIT `blocked` with `blocker.reason: "plan_deviation"` (routes to BLOCKED_ON_USER; not finalize) |
 | S3 fix-loop cycle 3+ OR scope growth at any cycle | Append to `friction_highlights`, set `health.fix_loop_escalated: true`, continue |
 | Any other agent BLOCK (Plan / prep-pr / etc.) | EXIT `blocked` with `blocker.reason: "agent_block"` |
@@ -966,11 +966,11 @@ When `status: "blocked"`, the `blocker.reason` field carries one of:
 |---|---|
 | `impl_not_pushed` | Step 2.5 pre-gate: `origin/<branch-name>` was absent after `git fetch` — impl agent claimed done but never pushed. `retry_eligible: true`; orchestrator may re-dispatch or resume from S2 |
 | `impl_failed` | Implementation agent returned BLOCK or failed quality gates after 2 attempts |
-| `review_blocked` | MUST_FIX findings persisted after 5 fix-loop cycles (the hard cap) |
+| `review_blocked` | MUST_FIX findings persisted after 5 fix-loop cycles (the hard cap). Also posts the still-unresolved blocking findings as a tracker comment (#1815) |
 | `plan_deviation` | A non-deferrable Stage-3 finding (impl deviates from an explicit plan requirement/prohibition) survived the fix loop or was judged beyond fix-loop scope. The pipeline does not assign plan-vs-impl blame — it always exits `blocked`; the operator uses `cw dev-queue requeue --regress` to send it back to impl, or revisits the plan |
 | `plan_scope_drift` | Step 2.5 gate 2: the delivered diff touched more unplanned files than `check_plan_scope_conformance.py`'s allowance (#1779). **Mechanical and pre-review** — it is a file-set measurement taken *after impl, before review*, where `plan_deviation` above is a reviewer's *judgment* about content, raised during Stage 3. `blocker.stage` is `"stage2_impl"` (vs `plan_deviation`'s `"stage3_review"`), and `blocker.details` enumerates the specific unplanned paths — that list is the operator's entire authorization surface: requeue the parked task if the growth was legitimate, or `cw dev-queue requeue --regress` to send it back for a tighter diff. Distinct from `scope_exceeded`, which is a Status (not a blocker reason) fired *before impl started*, from the Stage-1 plan's own estimate |
-| `plan_unreviewable` | Plan Reviewer (spec station) returned MUST_FIX both before and after a single Step 1f.4 revision cycle — the plan needs human triage, not another auto-revision. No branch created |
-| `plan_unsound` | Plan Soundness Reviewer returned a MUST_FIX (direction contradicts a codified `ARCHITECTURE.md` §7/§8 rule) in a headless run, or it persisted after a Step 1f.4 revision cycle — the chosen direction needs human judgment. No branch created |
+| `plan_unreviewable` | Plan Reviewer (spec station) returned MUST_FIX both before and after a single Step 1f.4 revision cycle — the plan needs human triage, not another auto-revision. No branch created. Also posts the persisting blocking findings as a tracker comment (#1815) |
+| `plan_unsound` | Plan Soundness Reviewer returned a MUST_FIX (direction contradicts a codified `ARCHITECTURE.md` §7/§8 rule) in a headless run, or it persisted after a Step 1f.4 revision cycle — the chosen direction needs human judgment. No branch created. Also posts the persisting blocking findings as a tracker comment (#1815) |
 | `agent_block` | Any other agent returned friction level BLOCK that the pipeline could not auto-resolve |
 | `tool_denied` | The Claude Code auto-mode classifier denied a tool call mid-pipeline. Often classifier-flaky (see claude-workspace#183) so `retry_eligible: true` by default; the orchestrator may re-dispatch the ticket on a fresh session. Populate `blocker.tool_name` and `blocker.denial_reason` (verbatim classifier `Reason:` text). See Tool-Use Denial Exit section |
 
