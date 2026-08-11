@@ -41,6 +41,8 @@ from cw.codex_review._context import (
     _select_output_instructions,
 )
 from cw.codex_runner import FakeCodexRunner
+from cw.models import HOOK_CONTEXT_RELATIVE_PATH, SessionOrigin
+from cw.spawn import _write_hook_context
 from tests._codex_review_helpers import (
     _doc_json,
     _finding_payload,
@@ -49,10 +51,30 @@ from tests._codex_review_helpers import (
     _task,
     _write,
 )
-from tests.conftest import _make_diff
+from tests.conftest import _make_diff, _make_ticket_task
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+
+def _write_real_hook_context(worktree: Path, *, pending: bool) -> None:
+    """Materialize the hook context via spawn's REAL writer (#1730).
+
+    Deliberately not a hand-placed fixture: driving ``_write_hook_context`` is
+    what binds the reviewer-side read path to the spawn-side write path, so a
+    future edit that moves either end fails the assertion instead of shipping a
+    silently dead feature (#1628 — make the seam survive the fix).
+    """
+    _write_hook_context(
+        worktree,
+        session_id="s-1730",
+        session_name="test-client/auto-dev/1730",
+        client="test-client",
+        purpose="review",
+        ticket_id="1730",
+        origin=SessionOrigin.DAEMON,
+        task=_make_ticket_task(pending_operator_comment=pending),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -390,29 +412,56 @@ class TestLoadOperatorComments:
 
 
 class TestLoadPendingOperatorCommentMarker:
-    """#1730: the queue_metadata marker read, fail-safe to False throughout."""
+    """#1730: the queue_metadata marker read, fail-safe to False throughout.
+
+    Every populated case goes through the REAL spawn-side writer or through
+    ``HOOK_CONTEXT_RELATIVE_PATH``, the single constant both ends resolve —
+    never a hand-placed file at a path this test picked. The first cut of this
+    suite authored ``.cw/context.json`` itself and so agreed with a reader that
+    pointed at the wrong file: it proved the parser worked while the production
+    read missed every time and the banner never rendered. A reader/writer path
+    disagreement now fails ``test_marker_true_from_real_writer``, and a
+    regression back to the Stage 0 ticket-context file fails
+    ``test_marker_not_read_from_stage0_ticket_context``.
+    """
 
     def test_absent_context_json(self, tmp_path: Path) -> None:
         assert _load_pending_operator_comment_marker(tmp_path) is False
 
     def test_malformed_json(self, tmp_path: Path) -> None:
-        _write(tmp_path / ".cw" / "context.json", "not json{{")
+        _write(tmp_path / HOOK_CONTEXT_RELATIVE_PATH, "not json{{")
         assert _load_pending_operator_comment_marker(tmp_path) is False
 
     def test_non_dict_json(self, tmp_path: Path) -> None:
-        _write(tmp_path / ".cw" / "context.json", "[1, 2, 3]")
+        _write(tmp_path / HOOK_CONTEXT_RELATIVE_PATH, "[1, 2, 3]")
         assert _load_pending_operator_comment_marker(tmp_path) is False
 
     def test_missing_queue_metadata(self, tmp_path: Path) -> None:
-        _write(tmp_path / ".cw" / "context.json", json.dumps({"title": "t"}))
+        _write(tmp_path / HOOK_CONTEXT_RELATIVE_PATH, json.dumps({"title": "t"}))
         assert _load_pending_operator_comment_marker(tmp_path) is False
 
-    def test_marker_true(self, tmp_path: Path) -> None:
+    def test_marker_true_from_real_writer(self, tmp_path: Path) -> None:
+        """Pipeline test: spawn writes, the reviewer reads, no fixture between."""
+        _write_real_hook_context(tmp_path, pending=True)
+        assert _load_pending_operator_comment_marker(tmp_path) is True
+
+    def test_marker_false_from_real_writer(self, tmp_path: Path) -> None:
+        _write_real_hook_context(tmp_path, pending=False)
+        assert _load_pending_operator_comment_marker(tmp_path) is False
+
+    def test_marker_not_read_from_stage0_ticket_context(self, tmp_path: Path) -> None:
+        """The marker must NOT be honored out of ``.cw/context.json`` (#1730).
+
+        Different layer: that file is Stage 0 *ticket* context and is deleted
+        outright by ``_invalidate_stale_context_json`` (#1046) on a rescued
+        respawn, so dispatch state read from there would vanish. Fails if the
+        reader ever drifts back onto it.
+        """
         _write(
             tmp_path / ".cw" / "context.json",
             json.dumps({"queue_metadata": {"pending_operator_comment": True}}),
         )
-        assert _load_pending_operator_comment_marker(tmp_path) is True
+        assert _load_pending_operator_comment_marker(tmp_path) is False
 
 
 class TestParseReviewerDocument:
@@ -1446,10 +1495,7 @@ class TestPrepareReviewPass:
         """#1730: queue_metadata.pending_operator_comment=true elevates the
         comments to a binding-adjudication banner."""
         repo = self._repo_with_change(make_git_repo, "wt-1730-banner", "github-issues")
-        _write(
-            repo / ".cw" / "context.json",
-            json.dumps({"queue_metadata": {"pending_operator_comment": True}}),
-        )
+        _write_real_hook_context(repo, pending=True)
         monkeypatch.setattr(
             "cw.codex_review._context.fetch_issue_comments",
             lambda *_a, **_kw: [{"body": "SENDBACK-MARKER-1730"}],
@@ -1474,10 +1520,7 @@ class TestPrepareReviewPass:
         repo = self._repo_with_change(
             make_git_repo, "wt-1730-no-banner", "github-issues"
         )
-        _write(
-            repo / ".cw" / "context.json",
-            json.dumps({"queue_metadata": {"pending_operator_comment": False}}),
-        )
+        _write_real_hook_context(repo, pending=False)
         monkeypatch.setattr(
             "cw.codex_review._context.fetch_issue_comments",
             lambda *_a, **_kw: [{"body": "SENDBACK-MARKER-1730"}],

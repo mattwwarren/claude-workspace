@@ -26,6 +26,7 @@ from cw.exceptions import (
     WorktreeError,
 )
 from cw.models import (
+    HOOK_CONTEXT_RELATIVE_PATH,
     TERMINAL_SESSION_STATUSES,
     OrchestratorEventType,
     Session,
@@ -319,10 +320,10 @@ def _write_hook_context(
     clobbering — the prior session has not finished and we must not steal
     its hook context (issue #427 fix 2).
     """
-    claude_dir = worktree / ".claude"
+    context_path = worktree / HOOK_CONTEXT_RELATIVE_PATH
+    claude_dir = context_path.parent
     claude_dir.mkdir(parents=True, exist_ok=True)
     settings_path = claude_dir / "settings.local.json"
-    context_path = claude_dir / "cw-context.json"
 
     if origin is SessionOrigin.USER and settings_path.exists():
         msg = (

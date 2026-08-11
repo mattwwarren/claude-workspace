@@ -44,7 +44,7 @@ from cw.codex_review._capability import _probe_filesystem_capability
 from cw.codex_review._diff import _capture_diff
 from cw.gh import FETCH_COMMENTS_TIMEOUT, fetch_issue_comments
 from cw.local_runner import resolve_tier
-from cw.models import CONTEXT_JSON_RELATIVE_PATH
+from cw.models import CONTEXT_JSON_RELATIVE_PATH, HOOK_CONTEXT_RELATIVE_PATH
 from cw.review_findings import AgentSpecStatus, ReviewerFindingsDocument
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 
@@ -558,14 +558,25 @@ def _load_operator_comments(worktree: Path, ticket_id: str) -> str | None:
 
 
 def _load_pending_operator_comment_marker(worktree: Path) -> bool:
-    """Read queue_metadata.pending_operator_comment from .cw/context.json (#1730).
+    """Read ``queue_metadata.pending_operator_comment`` from the hook context.
 
-    Materialized at spawn time by ``spawn.py``'s ``_write_hook_context``,
-    cleared there (``dispatch/claim.py``) once a REVIEW-stage spawn has
-    consumed it. True means this REVIEW re-entry followed a regress that may
-    carry a pending operator send-back -- render an elevated-priority banner.
+    The source is ``<worktree>/.claude/cw-context.json``
+    (:data:`HOOK_CONTEXT_RELATIVE_PATH`) — the *dispatch/session* context
+    ``spawn.py``'s ``_write_hook_context`` materializes at spawn time — NOT the
+    sibling ``.cw/context.json`` this function's first cut read (#1730). Those
+    are different layers: ``.cw/context.json`` is Stage 0's *ticket* context and
+    is deleted outright by ``dispatch/gating.py``'s stale-context invalidation
+    (#1046) on a rescued respawn, so ``queue_metadata`` cannot live there. Both
+    ends now share the one constant so the read cannot drift off the write
+    again; the reader-vs-writer path agreement is pinned by
+    ``TestLoadPendingOperatorCommentMarker``, which drives the real writer.
+
+    The queue-side field is cleared by ``dispatch/claim.py`` once a REVIEW-stage
+    spawn has consumed it. True means this REVIEW re-entry followed a regress
+    that may carry a pending operator send-back -- render the elevated-priority
+    banner. Fail-safe to False on a missing/malformed/non-object file.
     """
-    ctx_raw = _load_optional_text(worktree / CONTEXT_JSON_RELATIVE_PATH)
+    ctx_raw = _load_optional_text(worktree / HOOK_CONTEXT_RELATIVE_PATH)
     if ctx_raw is None:
         return False
     try:

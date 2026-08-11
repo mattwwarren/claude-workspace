@@ -1627,9 +1627,11 @@ class TestPackageExportCompleteness:
 
     The models.py -> cw/models/ package split (#1320) must preserve every
     ``from cw.models import X`` call site unchanged. This asserts ``__all__``
-    equals the exhaustive historical top-level surface (49 names) — hardcoded
-    here, NOT re-derived from the package, so a dropped or renamed export is a
-    falsifiable failure rather than a tautology.
+    equals the exhaustive top-level surface (the historical 49 names, plus
+    #1730's ``HOOK_CONTEXT_RELATIVE_PATH`` = 50) — hardcoded here, NOT
+    re-derived from the package, so a dropped or renamed export is a
+    falsifiable failure rather than a tautology. A deliberate addition updates
+    this set in the same commit.
     """
 
     def test_all_matches_full_surface(self) -> None:
@@ -1655,6 +1657,7 @@ class TestPackageExportCompleteness:
             "DispatchSkipReason",
             "EventHookRegistry",
             "FocusEntry",
+            "HOOK_CONTEXT_RELATIVE_PATH",
             "HookRule",
             "LOCAL_BACKEND",
             "LaneConcurrencyOverride",
