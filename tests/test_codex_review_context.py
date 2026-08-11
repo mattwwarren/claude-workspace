@@ -1551,6 +1551,38 @@ class TestPrepareReviewPass:
         for role in prepared.roles:
             assert "SENDBACK-MARKER-1730" in prepared.prompts_by_role[role]
 
+    def test_prepare_review_pass_fetches_comments_only_once(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#1814 SHOULD_FIX regression guard: one gh call, not two.
+
+        Before the fix, `_load_operator_comments` and `_load_voided_findings`
+        each called `fetch_issue_comments` independently, so every Stage-3
+        pass shelled out to `gh issue view` twice for the identical comment
+        list. `_fetch_ticket_comments` now fetches once and both readers reuse
+        the result — this pins that call count so a future edit that drops
+        the `comments=` passthrough (reintroducing the double-fetch) fails
+        here instead of silently doubling the gh subprocess/API cost again.
+        """
+        repo = self._repo_with_change(
+            make_git_repo, "wt-1814-fetch-once", "github-issues"
+        )
+        calls: list[str] = []
+
+        def _counting_fetch(ticket_id: str, **_kw: object) -> list[dict[str, object]]:
+            calls.append(ticket_id)
+            return [{"author": {"login": "a"}, "body": "some comment"}]
+
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments", _counting_fetch
+        )
+
+        _prepare_review_pass(
+            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-fetch-once"
+        )
+
+        assert len(calls) == 1
+
     def test_prepare_review_pass_omits_comments_when_tracker_not_github(
         self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
