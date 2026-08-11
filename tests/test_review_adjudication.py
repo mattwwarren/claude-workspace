@@ -687,28 +687,45 @@ class TestVoidedFingerprintIsContentAnchored:
 
         assert list(matches) == [0]
 
-    @pytest.mark.parametrize(
-        "evidence",
-        ["+def broken():", "  def broken():  ", "-def broken():"],
-    )
-    def test_evidence_diff_marker_and_whitespace_are_normalized(
-        self, evidence: str
-    ) -> None:
+    def test_evidence_whitespace_is_normalized(self) -> None:
         matches = find_voided_matches(
-            [_accepted(_make_finding())], [_make_voided_finding(evidence=evidence)]
+            [_accepted(_make_finding())],
+            [_make_voided_finding(evidence="  def  broken():  ")],
         )
 
         assert list(matches) == [0]
 
+    def test_evidence_leading_marker_is_not_stripped(self) -> None:
+        """A leading ``+``/``-`` in evidence is real content, not stripped.
+
+        Evidence is arbitrary reviewed source text (Markdown, YAML, diffs of
+        diffs), not exclusively diff-hunk lines — a leading ``-``/``+`` can be
+        a genuine part of the code (a YAML list item, a negative literal), not
+        a diff marker. Stripping it risked collapsing two different findings
+        onto the same fingerprint, which is exactly the false positive this
+        ticket's zero-tolerance decision forbids (#1814 MUST_FIX). Same
+        principle ``test_summary_whitespace_is_normalized_but_markers_are_not_stripped``
+        already applies to ``summary``, now applied identically to ``evidence``.
+        """
+        assert (
+            find_voided_matches(
+                [_accepted(_make_finding(evidence="+def broken():"))],
+                [_make_voided_finding(evidence="def broken():")],
+            )
+            == {}
+        )
+        assert (
+            find_voided_matches(
+                [_accepted(_make_finding(evidence="-def broken():"))],
+                [_make_voided_finding(evidence="def broken():")],
+            )
+            == {}
+        )
+
     def test_summary_whitespace_is_normalized_but_markers_are_not_stripped(
         self,
     ) -> None:
-        """Prose keeps its leading ``+``/``-``: only whitespace is collapsed.
-
-        ``_normalize_diff_text``'s marker stripping is right for diff text and
-        wrong for a summary, where a leading ``-`` is an ordinary English
-        character.
-        """
+        """Prose keeps its leading ``+``/``-``: only whitespace is collapsed."""
         assert list(
             find_voided_matches(
                 [_accepted(_make_finding(summary="Bug  here"))],

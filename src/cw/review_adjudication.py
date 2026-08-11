@@ -67,7 +67,6 @@ from cw.review_findings import (
     Disposition,
     Severity,
     _line_reference_valid,
-    _normalize_diff_text,
     derive_review_counts,
 )
 
@@ -425,10 +424,17 @@ def _voided_fingerprint(
     - a genuinely new finding at the voided one's old line must NOT match,
       because sharing a location says nothing about being the same defect.
 
-    ``evidence`` goes through ``_normalize_diff_text`` (a re-derived quote may
-    or may not carry the diff marker) and then whitespace collapse; ``summary``
-    gets whitespace collapse only. ``file`` and ``severity`` are compared
-    verbatim — a void is scoped to the file and severity it was granted for.
+    ``evidence`` and ``summary`` both go through :func:`_normalize_finding_text`
+    (whitespace collapse only) — NOT ``_normalize_diff_text``, whose leading
+    ``+``/``-`` stripping is unsafe here for the same reason
+    :func:`_normalize_finding_text`'s own docstring gives for ``summary``:
+    reviewed ``evidence`` is arbitrary source text (Markdown, YAML, diffs of
+    diffs), not exclusively diff-hunk lines, so a leading ``-``/``+`` can be
+    real content rather than a diff marker. Stripping it risked collapsing two
+    genuinely different findings onto one fingerprint — exactly the false
+    positive this ticket's zero-tolerance decision forbids. ``file`` and
+    ``severity`` are compared verbatim — a void is scoped to the file and
+    severity it was granted for.
 
     Anchor-based expiry falls out of this for free: rewrite the code and the
     re-derived ``evidence`` differs, so the fingerprint stops matching and the
@@ -438,7 +444,7 @@ def _voided_fingerprint(
         severity,
         file,
         _normalize_finding_text(summary),
-        _normalize_finding_text(_normalize_diff_text(evidence)),
+        _normalize_finding_text(evidence),
     )
 
 

@@ -519,8 +519,49 @@ def _load_ticket_context(worktree: Path) -> tuple[str | None, str | None]:
     return plan_text, ticket_text
 
 
-def _load_operator_comments(worktree: Path, ticket_id: str) -> str | None:
-    """Live-fetch the ticket's comment thread as rendered text, or None (#1730).
+class _CommentsNotProvided:
+    """Sentinel default for a loader's ``comments`` param: fetch it fresh.
+
+    Distinct from ``None`` (which means "fetched, and there was nothing" —
+    unresolvable tracker or an empty/failed fetch) so a caller that already
+    fetched can hand that exact outcome, including ``None``, straight through
+    without triggering a second, redundant fetch (#1814 SHOULD_FIX).
+    """
+
+
+_COMMENTS_NOT_PROVIDED = _CommentsNotProvided()
+
+
+def _fetch_ticket_comments(
+    worktree: Path, ticket_id: str
+) -> list[dict[str, object]] | None:
+    """Fetch the ticket's raw comment list once, shared by both readers below.
+
+    :func:`_load_operator_comments` (#1730) and :func:`_load_voided_findings`
+    (#1814) each need the same live comment thread every review pass. Before
+    this helper existed they fetched it independently, so `_prepare_review_pass`
+    shelled out to ``gh issue view`` twice per pass for identical data. Extracted
+    so a caller that needs both can fetch once and pass the result to each.
+
+    Scoped to ``github-issues`` trackers because that is the only tracker with
+    a fetch op reachable from this process (``linear`` reads go through MCP
+    tools only a Claude session holds). Returns ``None`` on an unresolvable
+    tracker or a gh failure — never raises.
+    """
+    if resolve_tracker(worktree) != TRACKER_GITHUB_ISSUES:
+        return None
+    return fetch_issue_comments(ticket_id, timeout=FETCH_COMMENTS_TIMEOUT, cwd=worktree)
+
+
+def _load_operator_comments(
+    worktree: Path,
+    ticket_id: str,
+    *,
+    comments: list[dict[str, object]] | None | _CommentsNotProvided = (
+        _COMMENTS_NOT_PROVIDED
+    ),
+) -> str | None:
+    """Render the ticket's comment thread as text, or None (#1730).
 
     The codex review backend previously saw only ``.cw/context.json``'s
     title/body, so an operator send-back comment posted after Stage 0 never
@@ -529,19 +570,17 @@ def _load_operator_comments(worktree: Path, ticket_id: str) -> str | None:
     establish for the Claude-native path: fetched fresh on every review pass,
     never read from the cached ``comments`` array.
 
-    Scoped to ``github-issues`` trackers because that is the only tracker with
-    a fetch op reachable from this process (``linear`` reads go through MCP
-    tools only a Claude session holds). Degrades to ``None`` — never raises —
-    on an unresolvable tracker, a gh failure, or an empty thread: a review
-    without comments is strictly better than no review, and the requeue-side
-    ``requeue.review_delivery_degraded`` event (#1730) is what makes an
-    undeliverable pairing operator-visible.
+    ``comments`` defaults to fetching fresh via :func:`_fetch_ticket_comments`;
+    pass an already-fetched list (or ``None``) to skip a redundant fetch when a
+    caller (``_prepare_review_pass``) already has it for another reader.
+
+    Degrades to ``None`` — never raises — on an unresolvable tracker, a gh
+    failure, or an empty thread: a review without comments is strictly better
+    than no review, and the requeue-side ``requeue.review_delivery_degraded``
+    event (#1730) is what makes an undeliverable pairing operator-visible.
     """
-    if resolve_tracker(worktree) != TRACKER_GITHUB_ISSUES:
-        return None
-    comments = fetch_issue_comments(
-        ticket_id, timeout=FETCH_COMMENTS_TIMEOUT, cwd=worktree
-    )
+    if isinstance(comments, _CommentsNotProvided):
+        comments = _fetch_ticket_comments(worktree, ticket_id)
     if not comments:
         return None
     rendered: list[str] = []
@@ -559,8 +598,15 @@ def _load_operator_comments(worktree: Path, ticket_id: str) -> str | None:
     return "\n\n".join(rendered) or None
 
 
-def _load_voided_findings(worktree: Path, ticket_id: str) -> list[VoidedFinding]:
-    """Live-fetch the operator-voided findings recorded on the ticket (#1814).
+def _load_voided_findings(
+    worktree: Path,
+    ticket_id: str,
+    *,
+    comments: list[dict[str, object]] | None | _CommentsNotProvided = (
+        _COMMENTS_NOT_PROVIDED
+    ),
+) -> list[VoidedFinding]:
+    """Parse the operator-voided findings recorded on the ticket (#1814).
 
     The codex backend re-derives its findings mechanically every pass, so an
     operator's plain-English rejection of one has no effect here unless it was
@@ -568,19 +614,20 @@ def _load_voided_findings(worktree: Path, ticket_id: str) -> list[VoidedFinding]
     comment (``review_adjudication.parse_voided_findings_block``), which this
     reads back on every Stage-3 entry.
 
-    Same tracker gate, same fetch op, and the same degrade-never-raise
-    contract as :func:`_load_operator_comments` above, for the same reasons —
-    plus one specific to this record: it lives on the tracker thread rather
+    ``comments`` defaults to fetching fresh via :func:`_fetch_ticket_comments`;
+    pass an already-fetched list (or ``None``) to skip a redundant fetch when a
+    caller (``_prepare_review_pass``) already has it for another reader — same
+    shared-fetch shape as :func:`_load_operator_comments` above.
+
+    Same degrade-never-raise contract as :func:`_load_operator_comments`, plus
+    one reason specific to this record: it lives on the tracker thread rather
     than in ``.cw/`` precisely because ``dispatch/gating.py`` deletes
     ``.cw/context.json`` on the rescued-respawn path this ticket exists to
     survive. Degrading to ``[]`` means a void goes unhonored and the finding
     re-appears — visible and correctable, unlike a silent false suppression.
     """
-    if resolve_tracker(worktree) != TRACKER_GITHUB_ISSUES:
-        return []
-    comments = fetch_issue_comments(
-        ticket_id, timeout=FETCH_COMMENTS_TIMEOUT, cwd=worktree
-    )
+    if isinstance(comments, _CommentsNotProvided):
+        comments = _fetch_ticket_comments(worktree, ticket_id)
     if not comments:
         return []
     bodies = [
@@ -968,9 +1015,17 @@ def _prepare_review_pass(
     repo_policy = _load_review_policy(worktree, scope_tier)
     project_rubrics = _load_optional_text(worktree / ".claude" / "review-extras.md")
     plan_text, ticket_text = _load_ticket_context(worktree)
-    operator_comments_text = _load_operator_comments(worktree, task.ticket_id)
+    # Fetched once and handed to both readers below (#1814 SHOULD_FIX) — each
+    # independently called fetch_issue_comments for the same ticket, doubling
+    # the gh subprocess/API cost of every review pass and fix-loop cycle.
+    fetched_comments = _fetch_ticket_comments(worktree, task.ticket_id)
+    operator_comments_text = _load_operator_comments(
+        worktree, task.ticket_id, comments=fetched_comments
+    )
     pending_operator_comment = _load_pending_operator_comment_marker(worktree)
-    voided_findings = _load_voided_findings(worktree, task.ticket_id)
+    voided_findings = _load_voided_findings(
+        worktree, task.ticket_id, comments=fetched_comments
+    )
     ruff_lint_config = _load_ruff_lint_config(worktree)
     quality_gates_text = _load_claude_md_quality_gates(worktree)
     lint_grounding = _render_lint_grounding_block(
