@@ -56,6 +56,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Structured, content-anchored voided-findings suppression seam
+  (#1814):** review findings can now be explicitly voided (rather than
+  silently dropped) via a new `VoidedFinding` model and
+  `review.finding_voided` event, and the codex review path consults voided
+  findings so a previously-voided finding is suppressed on re-review by
+  content fingerprint rather than by line anchor (which shifts across
+  diffs). `cw review check-voided` exposes the suppression decision as a
+  CLI command, and ADR-0015 records why the fingerprint is
+  content-anchored. Fixes a latent bug where diff markers (`+`/`-`) were
+  stripped from void-fingerprint evidence, weakening the fingerprint match.
+
 - **REVIEW-stage requeues deliver live operator comments to codex-backend
   reviewers (#1730):** when a fresh operator comment triggers a REVIEW-stage
   requeue, the codex backend now receives that comment's content directly
