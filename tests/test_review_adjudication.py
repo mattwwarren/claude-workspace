@@ -556,3 +556,66 @@ class TestRenderDeferredFindingsMd:
             matched = by_location[(adj.file, adj.summary)]
             assert matched.disposition == expected_disposition[adj.outcome]
             assert matched.disposition_detail == adj.rationale
+
+
+class TestCoexistsWithTerminalSnapshot:
+    """#1763's ``is_terminal_snapshot`` must survive this seam untouched.
+
+    Both tickets add fields to ``ReviewVerdict``; they are additive and
+    independent (#1763 marks which persisted snapshot is authoritative, #1805
+    records adjudication disposition). Neither function here has any business
+    re-deciding a snapshot's terminality, so both must pass whatever value
+    they were handed straight through. ``model_copy(update=...)`` gives that
+    for free — these tests exist so a future refactor to a direct
+    ``ReviewVerdict(...)`` constructor (which would silently take the
+    ``True`` default) fails loudly instead of mislabelling a cycle snapshot.
+    """
+
+    @pytest.mark.parametrize("terminal", [True, False])
+    def test_apply_adjudication_preserves_is_terminal_snapshot(
+        self, terminal: bool
+    ) -> None:
+        finding = _make_finding(severity="SHOULD_FIX")
+        verdict = _verdict(_accepted(finding), is_terminal_snapshot=terminal)
+        assert verdict.is_terminal_snapshot is terminal
+
+        result = apply_adjudication(
+            verdict,
+            [_adjudication(finding, outcome="defer", rationale="out of scope")],
+        )
+
+        assert result.is_terminal_snapshot is terminal
+        # The #1805 field is stamped on the same object, not instead of it.
+        assert result.accepted[0].disposition == "deferred"
+        assert result.unmatched_adjudication_count == 0
+
+    @pytest.mark.parametrize("terminal", [True, False])
+    def test_verify_fixed_dispositions_preserves_is_terminal_snapshot(
+        self, terminal: bool
+    ) -> None:
+        finding = _make_finding(file="src/cw/other.py", line_start=10, line_end=10)
+        verdict = _verdict(
+            _accepted(finding, disposition="fixed"), is_terminal_snapshot=terminal
+        )
+
+        result = verify_fixed_dispositions(
+            verdict, _make_diff(files={"src/cw/foo.py": [10]})
+        )
+
+        assert result.is_terminal_snapshot is terminal
+        assert result.accepted[0].disposition == "dropped"
+
+    def test_consolidate_shaped_verdict_defaults_to_terminal_and_zero_unmatched(
+        self,
+    ) -> None:
+        """The one direct ``ReviewVerdict(...)`` construction site's shape.
+
+        ``consolidate_verdict`` passes neither field, so both take their
+        defaults: ``is_terminal_snapshot=True`` (a freshly consolidated verdict
+        IS its pass's outcome, per #1763's docstring) and
+        ``unmatched_adjudication_count=0`` (nothing has been adjudicated yet).
+        """
+        verdict = _verdict(_accepted(_make_finding(severity="SHOULD_FIX")))
+
+        assert verdict.is_terminal_snapshot is True
+        assert verdict.unmatched_adjudication_count == 0
