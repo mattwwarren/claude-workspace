@@ -75,6 +75,23 @@ def test_review_checkpoint3a_references_pending_operator_comment_marker() -> Non
     assert wrong not in content
 
 
+def test_review_operator_settled_finding_lands_in_adjudications_array() -> None:
+    """#1730 x #1805: a finding an operator comment settles must still be
+    recorded as an ADJUDICATIONS entry with a rationale naming that comment.
+
+    #1805 made the ADJUDICATIONS array the single source `cw review
+    adjudicate` serializes both the verdict and .cw/deferred-findings.md
+    from. If (4c)'s binding-comment rule left the operator's own decision
+    implicit, it would be the one adjudication recorded in prose only --
+    re-opening, from a new direction, the "recorded in only one of the two
+    places" defect #1805 exists to close."""
+    content = _cmd("auto-dev-review.md")
+    assert "An operator-settled finding is adjudicated exactly like any other" in (
+        content
+    )
+    assert "`ADJUDICATIONS` array below" in content
+
+
 def test_impl_spawn_heading_announces_scope_based_model() -> None:
     """Impl heading announces scope-resolved $IMPL_MODEL."""
     content = _cmd("auto-dev-impl.md")
