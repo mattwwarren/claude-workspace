@@ -56,6 +56,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`branch_freshness` ticket-branch staleness probe closes both REVIEW approve
+  paths against a stale branch (#1823):** REVIEW-scoped approvals no longer
+  advance a task whose ticket branch has drifted behind its tracked base
+  without first routing through the branch-staleness park — both approve paths
+  (the direct approve and the walk-path approve) are now closed against it, not
+  just one. The REVIEW-scoped gate table was extracted out of
+  `src/cw/dispatch/routing.py` into a new `src/cw/dispatch/review_gates.py`
+  module as part of adding the probe, shrinking `routing.py` toward the
+  ~1000-line module ceiling instead of growing it further.
+
 - **Claude-native review adjudication seam with `cw review adjudicate`/`verify-fixes` subcommands (#1805):**
   review findings can now carry an `accepted`/`rejected`/`deferred`/`dropped`
   disposition and be adjudicated without shelling out to the codex CLI — `cw
