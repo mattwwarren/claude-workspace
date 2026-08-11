@@ -8,6 +8,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A persisted cycle verdict snapshot no longer disagrees silently with the
+  reported blocker (#1763):** the fix loop writes one
+  `cycleN-review-verdict.json` per cycle (#1739), but nothing on disk said
+  which one actually backed the returned `Blocker.details` — so an operator
+  opening `cycle0-review-verdict.json` "by habit" read a legitimately-empty
+  `rejected_must_fix` while the blocker cited a MUST_FIX that a later cycle's
+  re-review mechanically rejected (#1729). `ReviewVerdict` gains an in-band
+  `is_terminal_snapshot` marker: each per-cycle persist stamps it `false`, and
+  each true fix-loop exit path re-writes exactly the one file it rendered its
+  details from with `true`, so at most one snapshot per session ever reads
+  terminal. The `friction_highlights` pointer now also names the specific
+  snapshot filename instead of only the diagnostics bundle directory.
+  `docs/session-disposition.md` records the reading rule as Gotcha 4.
 - **`session_inspect` emits the full `Session` field set instead of a
   hand-maintained subset (#1624):** the human-readable session detail view
   now derives its displayed fields from `Session.model_dump()` rather than a

@@ -13,10 +13,22 @@ on the executor-neutral finding contract (#1237). ``CodexExecutor.spawn()``'s
 Step 3 delegates to :func:`run_review_with_fix_loop` instead of ``run_review``.
 
 Every cycle's full ``ReviewVerdict`` (findings intact) is persisted under the
-diagnostics bundle dir as it completes, and a pointer to the latest persisted
-cycle is threaded into ``friction_highlights`` on every exit path, so whichever
-cycle's verdict actually produced the terminal disposition — not just cycle
-0's — stays discoverable from the sentinel (#1485, #1739).
+diagnostics bundle dir as it completes, and a pointer naming that cycle's
+specific snapshot FILE is threaded into ``friction_highlights`` on every exit
+path, so whichever cycle's verdict actually produced the terminal disposition —
+not just cycle 0's — stays discoverable from the sentinel (#1485, #1739, #1763).
+
+The pointer is an out-of-band signal, so the snapshots also carry an in-band
+one: each per-cycle persist stamps ``is_terminal_snapshot=False`` (a fix-loop
+persist is never final at the moment it is written), and each true exit path
+re-writes exactly the one file its returned ``Blocker.details`` was rendered
+from with ``is_terminal_snapshot=True`` (#1763). An operator reading a snapshot
+straight off disk can then tell whether its ``rejected_must_fix`` is the set the
+reported blocker cites, instead of assuming cycle 0's file is authoritative and
+reading a legitimately-empty one (#1729). Two exit paths deliberately finalize
+nothing: a mechanically-rejected cycle-0 verdict never enters the loop (no
+snapshot is ever written), and an unparseable rereview's park details come from
+``_format_failures_detail`` rather than any persisted verdict.
 
 Cross-cycle finding identity is tracked by ``review_findings._dedup_key`` so a
 finding that survives every cycle (or flaps out and back) is counted exactly
@@ -32,7 +44,7 @@ from __future__ import annotations
 import logging
 import subprocess
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from cw.codex_review import (
     _CATEGORY_TO_REASON,
@@ -95,11 +107,31 @@ def _verdict_snapshot_filename(cycle: int) -> str:
     return f"cycle{cycle}-review-verdict.json"
 
 
+class _PersistedSnapshot(NamedTuple):
+    """The latest persisted per-cycle verdict snapshot.
+
+    Carries the ``friction_highlights`` *pointer* alongside the *cycle* index
+    it was written for, so an exit path can re-open that exact file to stamp
+    the terminal marker (#1763) instead of re-deriving the cycle from loop
+    state that has already moved on.
+    """
+
+    pointer: str
+    cycle: int
+
+
 def _persist_cycle_snapshot(
     verdict: ReviewVerdict, *, session_id: str, cycle: int
-) -> str:
-    """Persist *cycle*'s full verdict (findings intact) and return a
-    ``friction_highlights`` pointer to it.
+) -> _PersistedSnapshot:
+    """Persist *cycle*'s full verdict (findings intact) and return a pointer
+    to it plus the cycle it was written for.
+
+    The persisted copy is always stamped ``is_terminal_snapshot=False``
+    explicitly rather than inheriting the model default: a fix-loop persist is
+    by construction not final at the moment it is written, since the loop may
+    still run another cycle. Terminality is stamped later, by
+    :func:`_finalize_snapshot`, from the exit path that actually knows the
+    disposition. The caller's in-memory *verdict* is never mutated.
 
     Mirrors ``persist_diagnostics_bundle``'s never-raise contract: a write
     failure is logged and swallowed rather than blocking the fix loop.
@@ -107,16 +139,46 @@ def _persist_cycle_snapshot(
     bundle = diagnostics_bundle_dir(session_id)
     try:
         bundle.mkdir(parents=True, exist_ok=True)
-        write_review_verdict(verdict, bundle / _verdict_snapshot_filename(cycle))
+        write_review_verdict(
+            verdict.model_copy(update={"is_terminal_snapshot": False}),
+            bundle / _verdict_snapshot_filename(cycle),
+        )
     except OSError:
         _log.warning(
             "cycle-%d findings snapshot write failed for session %s",
             cycle,
             session_id,
         )
-    return append_diagnostics_pointer(
-        f"cycle-{cycle} MUST_FIX findings snapshot persisted", session_id=session_id
+    pointer = append_diagnostics_pointer(
+        f"cycle-{cycle} MUST_FIX findings snapshot persisted "
+        f"({_verdict_snapshot_filename(cycle)})",
+        session_id=session_id,
     )
+    return _PersistedSnapshot(pointer=pointer, cycle=cycle)
+
+
+def _finalize_snapshot(verdict: ReviewVerdict, *, session_id: str, cycle: int) -> None:
+    """Re-persist *cycle*'s snapshot marked as this session's terminal one.
+
+    Called from each true fix-loop exit path with the SAME verdict object that
+    the returned ``Blocker.details``/``AutoDevResult`` is derived from — before
+    any exit-path rewrite of ``verdict.review``, so the file on disk keeps
+    agreeing with the persist that produced it and differs from its
+    intermediate version in exactly one field.
+
+    Same never-raise contract as :func:`_persist_cycle_snapshot`.
+    """
+    try:
+        write_review_verdict(
+            verdict.model_copy(update={"is_terminal_snapshot": True}),
+            diagnostics_bundle_dir(session_id) / _verdict_snapshot_filename(cycle),
+        )
+    except OSError:
+        _log.warning(
+            "cycle-%d terminal findings snapshot write failed for session %s",
+            cycle,
+            session_id,
+        )
 
 
 def _with_snapshot_pointer(highlights: list[str], snapshot_pointer: str) -> list[str]:
@@ -387,7 +449,7 @@ def _park_fix_failure(
     stderr: str,
     exit_code: int | None,
     verdict: ReviewVerdict | None,
-    snapshot_pointer: str,
+    snapshot: _PersistedSnapshot,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Park the ticket on a failed fix invocation, persisting a diagnostics bundle.
 
@@ -405,6 +467,8 @@ def _park_fix_failure(
     operator explicitly deferred it as a candidate fast-follow ticket rather
     than expanding that diff (see #1705 Decisions #2).
     """
+    if verdict is not None:
+        _finalize_snapshot(verdict, session_id=session_id, cycle=snapshot.cycle)
     reason = _CATEGORY_TO_REASON[category]
     failure = build_executor_failure(
         category=category,
@@ -434,7 +498,7 @@ def _park_fix_failure(
     blocked = blocked.model_copy(
         update={
             "friction_highlights": _with_snapshot_pointer(
-                blocked.friction_highlights, snapshot_pointer
+                blocked.friction_highlights, snapshot.pointer
             )
         }
     )
@@ -445,13 +509,14 @@ def _park_survivors(
     *,
     task: TicketTask,
     worktree: Path,
+    session_id: str,
     reason: str,
     verdict: ReviewVerdict,
     open_findings: dict[_DedupKey, AcceptedFinding],
     cycle0_review: Review,
     cycle_count: int,
     retry_eligible: bool | None,
-    snapshot_pointer: str,
+    snapshot: _PersistedSnapshot,
     had_real_commit: bool,
 ) -> tuple[AutoDevResult, ReviewVerdict]:
     """Park a still-blocking review (cap or budget exhausted) with survivor detail.
@@ -459,7 +524,14 @@ def _park_survivors(
     Builds the terminal ``Review`` and the survivor-only verdict, renders the
     verdict comment into ``Blocker.details``, and sets ``fix_loop_escalated`` on
     the health block when the cycle count reached the escalation threshold.
+
+    Finalizes the persisted snapshot from the ORIGINAL *verdict* argument, not
+    the ``survivors`` object rebuilt below: ``_survivors_only_verdict``'s update
+    dict never touches ``rejected``/``rejected_must_fix``, so the two agree on
+    the field #1763 is about, and the file on disk stays the one
+    ``_persist_cycle_snapshot`` wrote rather than a loop-exit reconstruction.
     """
+    _finalize_snapshot(verdict, session_id=session_id, cycle=snapshot.cycle)
     review = _finalize_review(
         cycle0_review=cycle0_review,
         final_verdict=verdict,
@@ -487,7 +559,7 @@ def _park_survivors(
             "review": review,
             "health": health,
             "friction_highlights": _with_snapshot_pointer(
-                blocked.friction_highlights, snapshot_pointer
+                blocked.friction_highlights, snapshot.pointer
             ),
         }
     )
@@ -498,12 +570,13 @@ def _park_scope_violation(
     *,
     task: TicketTask,
     worktree: Path,
+    session_id: str,
     cycle: int,
     violations: list[_SensitiveHit],
     cycle0_review: Review,
     open_findings: dict[_DedupKey, AcceptedFinding],
     verdict: ReviewVerdict,
-    snapshot_pointer: str,
+    snapshot: _PersistedSnapshot,
     had_real_commit: bool,
 ) -> tuple[AutoDevResult, ReviewVerdict]:
     """Park a fix cycle whose commit would touch a sensitive out-of-scope path.
@@ -519,7 +592,14 @@ def _park_scope_violation(
     real-commit tracker (#1723) — this cycle's own commit never landed (that
     is why it is being parked), so the caller's already-accumulated value is
     what is forwarded, not a fresh computation.
+
+    ORDERING (#1763): the snapshot is finalized FIRST, from the verdict as
+    persisted, because the rebind below replaces ``verdict.review`` with the
+    loop's reconstructed cross-cycle ``Review``. Finalizing after the rebind
+    would rewrite the on-disk file's ``review`` block with counts the
+    intermediate persist never had.
     """
+    _finalize_snapshot(verdict, session_id=session_id, cycle=snapshot.cycle)
     review = _finalize_review(
         cycle0_review=cycle0_review,
         final_verdict=verdict,
@@ -553,7 +633,7 @@ def _park_scope_violation(
             "review": review,
             "health": health,
             "friction_highlights": _with_snapshot_pointer(
-                blocked.friction_highlights, snapshot_pointer
+                blocked.friction_highlights, snapshot.pointer
             ),
         }
     )
@@ -566,7 +646,8 @@ def _clean_exit(
     cycle0_review: Review,
     open_findings: dict[_DedupKey, AcceptedFinding],
     cycle: int,
-    snapshot_pointer: str,
+    snapshot: _PersistedSnapshot,
+    session_id: str,
     had_real_commit: bool,
 ) -> tuple[AutoDevResult, ReviewVerdict]:
     """Return the clean-exit result with the terminal review + escalation patched.
@@ -577,7 +658,17 @@ def _clean_exit(
     executor's Step 4b still carries the terminal ``_rereview()`` pass's own
     ``fix_cycles_used=0``, numerically indistinguishable from a genuinely
     clean first pass.
+
+    "Clean" is a pre-existing misnomer for one branch this function also
+    serves: a cycle-N rereview that mechanically-rejects a MUST_FIX with zero
+    other open findings arrives here already blocked
+    (``codex_must_fix_mechanically_rejected``), because ``blocking`` is False
+    while ``rejected_must_fix`` is not (#1714/#1729). That is exactly the case
+    #1763's terminal marker exists for, so the snapshot is finalized here —
+    BEFORE the ``verdict.review`` rebind below, for the same reason spelled out
+    in :func:`_park_scope_violation`.
     """
+    _finalize_snapshot(verdict, session_id=session_id, cycle=snapshot.cycle)
     review = _finalize_review(
         cycle0_review=cycle0_review,
         final_verdict=verdict,
@@ -592,7 +683,7 @@ def _clean_exit(
             "review": review,
             "health": health,
             "friction_highlights": _with_snapshot_pointer(
-                result.friction_highlights, snapshot_pointer
+                result.friction_highlights, snapshot.pointer
             ),
         }
     )
@@ -615,7 +706,7 @@ def _run_fix_and_commit(
     cycle0_files: frozenset[str],
     scope_tier: ScopeTier,
     cycle0_review: Review,
-    snapshot_pointer: str,
+    snapshot: _PersistedSnapshot,
     had_real_commit_so_far: bool,
 ) -> tuple[tuple[AutoDevResult, ReviewVerdict | None] | None, str | None]:
     """Run one cycle's fix invocation and commit; return ``(park, commit_sha)``.
@@ -646,7 +737,7 @@ def _run_fix_and_commit(
                 stderr=result.stderr,
                 exit_code=result.returncode,
                 verdict=verdict,
-                snapshot_pointer=snapshot_pointer,
+                snapshot=snapshot,
             ),
             None,
         )
@@ -656,12 +747,13 @@ def _run_fix_and_commit(
             _park_scope_violation(
                 task=task,
                 worktree=worktree,
+                session_id=session_id,
                 cycle=cycle,
                 violations=violations,
                 cycle0_review=cycle0_review,
                 open_findings=open_findings,
                 verdict=verdict,
-                snapshot_pointer=snapshot_pointer,
+                snapshot=snapshot,
                 had_real_commit=had_real_commit_so_far,
             ),
             None,
@@ -684,7 +776,7 @@ def _run_fix_and_commit(
                 stderr=exc.stderr or str(exc),
                 exit_code=exc.returncode,
                 verdict=verdict,
-                snapshot_pointer=snapshot_pointer,
+                snapshot=snapshot,
             ),
             None,
         )
@@ -779,7 +871,7 @@ def run_review_with_fix_loop(
     scope_tier = resolve_tier(task.scope_hint)
     plan_text, ticket_text = _load_ticket_context(worktree)
     open_findings = _track_open_findings({}, verdict.accepted)
-    snapshot_pointer = _persist_cycle_snapshot(verdict, session_id=session_id, cycle=0)
+    snapshot = _persist_cycle_snapshot(verdict, session_id=session_id, cycle=0)
     # #1723: true iff at least one fix cycle so far produced a real commit
     # (OR'd across cycles) — distinguishes a genuine fix from a fix loop
     # that converged purely because every cycle's fix invocation was a no-op.
@@ -791,13 +883,14 @@ def run_review_with_fix_loop(
             return _park_survivors(
                 task=task,
                 worktree=worktree,
+                session_id=session_id,
                 reason=CODEX_BUDGET_EXHAUSTED,
                 verdict=verdict,
                 open_findings=open_findings,
                 cycle0_review=cycle0_review,
                 cycle_count=cycle - 1,
                 retry_eligible=True,
-                snapshot_pointer=snapshot_pointer,
+                snapshot=snapshot,
                 had_real_commit=had_real_commit,
             )
         park, commit_sha = _run_fix_and_commit(
@@ -815,7 +908,7 @@ def run_review_with_fix_loop(
             cycle0_files=cycle0_files,
             scope_tier=scope_tier,
             cycle0_review=cycle0_review,
-            snapshot_pointer=snapshot_pointer,
+            snapshot=snapshot,
             had_real_commit_so_far=had_real_commit,
         )
         if park is not None:
@@ -831,19 +924,21 @@ def run_review_with_fix_loop(
             session_id=session_id,
         )
         if verdict is None:
+            # No cycle-N snapshot was persisted (the persist call below is
+            # never reached) and this park's details come from
+            # `_format_failures_detail`, not from any persisted verdict — so
+            # nothing is finalized here (#1763).
             return (
                 result.model_copy(
                     update={
                         "friction_highlights": _with_snapshot_pointer(
-                            result.friction_highlights, snapshot_pointer
+                            result.friction_highlights, snapshot.pointer
                         )
                     }
                 ),
                 None,
             )
-        snapshot_pointer = _persist_cycle_snapshot(
-            verdict, session_id=session_id, cycle=cycle
-        )
+        snapshot = _persist_cycle_snapshot(verdict, session_id=session_id, cycle=cycle)
         open_findings = _track_open_findings(open_findings, verdict.accepted)
         if not open_findings:
             return _clean_exit(
@@ -852,19 +947,21 @@ def run_review_with_fix_loop(
                 cycle0_review,
                 open_findings,
                 cycle,
-                snapshot_pointer,
+                snapshot,
+                session_id=session_id,
                 had_real_commit=had_real_commit,
             )
 
     return _park_survivors(
         task=task,
         worktree=worktree,
+        session_id=session_id,
         reason=CODEX_MUST_FIX_FINDINGS,
         verdict=verdict,
         open_findings=open_findings,
         cycle0_review=cycle0_review,
         cycle_count=_MAX_FIX_CYCLES,
         retry_eligible=None,
-        snapshot_pointer=snapshot_pointer,
+        snapshot=snapshot,
         had_real_commit=had_real_commit,
     )
