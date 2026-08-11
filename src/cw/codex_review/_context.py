@@ -42,7 +42,7 @@ import yaml
 
 from cw.codex_review._capability import _probe_filesystem_capability
 from cw.codex_review._diff import _capture_diff
-from cw.gh import _FETCH_COMMENTS_TIMEOUT, fetch_issue_comments
+from cw.gh import FETCH_COMMENTS_TIMEOUT, fetch_issue_comments
 from cw.local_runner import resolve_tier
 from cw.models import CONTEXT_JSON_RELATIVE_PATH
 from cw.review_findings import AgentSpecStatus, ReviewerFindingsDocument
@@ -538,7 +538,7 @@ def _load_operator_comments(worktree: Path, ticket_id: str) -> str | None:
     if resolve_tracker(worktree) != TRACKER_GITHUB_ISSUES:
         return None
     comments = fetch_issue_comments(
-        ticket_id, timeout=_FETCH_COMMENTS_TIMEOUT, cwd=worktree
+        ticket_id, timeout=FETCH_COMMENTS_TIMEOUT, cwd=worktree
     )
     if not comments:
         return None

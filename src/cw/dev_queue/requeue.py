@@ -14,7 +14,7 @@ inside ``unblock_ticket``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from cw.config import get_client
 from cw.dev_queue.crud import _APPROVABLE_STATUSES, _find_ticket
@@ -208,15 +208,28 @@ def _apply_requeue_stage(
     return False
 
 
+class _ReviewDeliverability(NamedTuple):
+    """Verdict from :func:`_review_reentry_deliverable` (GitHub #1730).
+
+    A named 4-tuple rather than a bare one so a future reorder of fields is a
+    mypy-catchable error at every call/unpack site instead of a silent bug.
+    """
+
+    deliverable: bool
+    reason: str
+    backend: str
+    tracker: str | None
+
+
 def _review_reentry_deliverable(
     task: TicketTask, client_cfg: ClientConfig
-) -> tuple[bool, str, str, str | None]:
+) -> _ReviewDeliverability:
     """True iff a REVIEW-stage re-entry can deliver operator tracker context.
 
-    Returns ``(deliverable, reason, backend, tracker)``. ``backend`` and
-    ``tracker`` are always returned (even when ``deliverable`` is True, or when
-    ``tracker`` was never consulted because ``backend`` alone already settled
-    the verdict) so the caller can fold them into the
+    Returns a :class:`_ReviewDeliverability`. ``backend`` and ``tracker`` are
+    always populated (even when ``deliverable`` is True, or when ``tracker``
+    was never consulted because ``backend`` alone already settled the
+    verdict) so the caller can fold them into the
     ``REQUEUE_REVIEW_DELIVERY_DEGRADED`` payload for machine consumption
     (GitHub #1730) without a second, possibly-drifting resolution call.
     ``tracker`` is ``None`` when unresolvable (no ``tracking.primary.system``
@@ -247,11 +260,11 @@ def _review_reentry_deliverable(
     backend = resolve_executor_config(Stage.REVIEW, task, client_cfg).backend
     tracker = resolve_tracker(client_cfg.workspace_path)
     if backend == CLAUDE_NATIVE_BACKEND:
-        return True, "", backend, tracker
+        return _ReviewDeliverability(True, "", backend, tracker)
     if backend == CODEX_BACKEND:
         if tracker == TRACKER_GITHUB_ISSUES:
-            return True, "", backend, tracker
-        return (
+            return _ReviewDeliverability(True, "", backend, tracker)
+        return _ReviewDeliverability(
             False,
             (
                 f"REVIEW-stage backend 'codex' for client {client_cfg.name!r} can only"
@@ -260,7 +273,7 @@ def _review_reentry_deliverable(
             backend,
             tracker,
         )
-    return (
+    return _ReviewDeliverability(
         False,
         f"REVIEW-stage backend {backend!r} has no operator-comment delivery path",
         backend,

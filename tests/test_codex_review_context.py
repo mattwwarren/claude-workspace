@@ -363,6 +363,31 @@ class TestLoadOperatorComments:
         )
         assert _load_operator_comments(self._github_repo(tmp_path), "T-1") is None
 
+    def test_joins_multiple_comments_with_blank_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#1730: this ticket delivers the full operator thread, not just a
+        single comment -- the multi-comment join path must be covered."""
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments",
+            lambda *_a, **_kw: [
+                {
+                    "author": {"login": "a"},
+                    "createdAt": "2026-08-10T00:00:00Z",
+                    "body": "BODY1",
+                },
+                {
+                    "author": {"login": "b"},
+                    "createdAt": "2026-08-10T01:00:00Z",
+                    "body": "BODY2",
+                },
+            ],
+        )
+        rendered = _load_operator_comments(self._github_repo(tmp_path), "T-1")
+        assert rendered == (
+            "### a (2026-08-10T00:00:00Z)\nBODY1\n\n### b (2026-08-10T01:00:00Z)\nBODY2"
+        )
+
 
 class TestLoadPendingOperatorCommentMarker:
     """#1730: the queue_metadata marker read, fail-safe to False throughout."""

@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 _GH_PR_STATE_MERGED = "MERGED"
 _PR_EXISTS_TIMEOUT = 10
 _PLAN_MARKER = "<!-- plan-spec-reviewed"
-_FETCH_COMMENTS_TIMEOUT = 30
+FETCH_COMMENTS_TIMEOUT = 30
 _POST_COMMENT_TIMEOUT_SECONDS = 30
 _PR_VIEW_TIMEOUT = 15
 # Field list hydrated per PR by the serve-tick pass (GitHub #929). Order is
@@ -421,7 +421,7 @@ def _comment_has_marker(comment: dict[str, Any]) -> bool:
 
 
 def fetch_approved_plan_comment(
-    ticket_id: str, *, timeout: int = _FETCH_COMMENTS_TIMEOUT
+    ticket_id: str, *, timeout: int = FETCH_COMMENTS_TIMEOUT
 ) -> str | None:
     """Return the body of the latest approved plan comment on a GitHub issue.
 
