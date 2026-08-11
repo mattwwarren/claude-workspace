@@ -45,6 +45,7 @@ from cw.codex_review._diff import _capture_diff
 from cw.gh import FETCH_COMMENTS_TIMEOUT, fetch_issue_comments
 from cw.local_runner import resolve_tier
 from cw.models import CONTEXT_JSON_RELATIVE_PATH, HOOK_CONTEXT_RELATIVE_PATH
+from cw.review_adjudication import parse_voided_findings_block
 from cw.review_findings import AgentSpecStatus, ReviewerFindingsDocument
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 
@@ -54,6 +55,7 @@ if TYPE_CHECKING:
     from cw.codex_review._capability import _CodexFilesystemCapability
     from cw.codex_runner import CodexRunner
     from cw.models import TicketTask
+    from cw.review_adjudication import VoidedFinding
     from cw.review_findings import AgentSpecSource, CapturedDiff
 
 _log = logging.getLogger(__name__)
@@ -557,6 +559,36 @@ def _load_operator_comments(worktree: Path, ticket_id: str) -> str | None:
     return "\n\n".join(rendered) or None
 
 
+def _load_voided_findings(worktree: Path, ticket_id: str) -> list[VoidedFinding]:
+    """Live-fetch the operator-voided findings recorded on the ticket (#1814).
+
+    The codex backend re-derives its findings mechanically every pass, so an
+    operator's plain-English rejection of one has no effect here unless it was
+    given a structured anchor. That anchor is a JSON sentinel inside a ticket
+    comment (``review_adjudication.parse_voided_findings_block``), which this
+    reads back on every Stage-3 entry.
+
+    Same tracker gate, same fetch op, and the same degrade-never-raise
+    contract as :func:`_load_operator_comments` above, for the same reasons —
+    plus one specific to this record: it lives on the tracker thread rather
+    than in ``.cw/`` precisely because ``dispatch/gating.py`` deletes
+    ``.cw/context.json`` on the rescued-respawn path this ticket exists to
+    survive. Degrading to ``[]`` means a void goes unhonored and the finding
+    re-appears — visible and correctable, unlike a silent false suppression.
+    """
+    if resolve_tracker(worktree) != TRACKER_GITHUB_ISSUES:
+        return []
+    comments = fetch_issue_comments(
+        ticket_id, timeout=FETCH_COMMENTS_TIMEOUT, cwd=worktree
+    )
+    if not comments:
+        return []
+    bodies = [
+        body for comment in comments if isinstance(body := comment.get("body"), str)
+    ]
+    return parse_voided_findings_block(bodies)
+
+
 def _load_pending_operator_comment_marker(worktree: Path) -> bool:
     """Read ``queue_metadata.pending_operator_comment`` from the hook context.
 
@@ -884,6 +916,12 @@ class _ReviewPassInputs(NamedTuple):
     in ``roles`` order — same shape and same reason as ``capability``: the
     prompts were built from it, so the caller records it on the verdict rather
     than re-reading the filesystem to reconstruct where each spec came from.
+
+    ``voided_findings`` (#1814) is the operator-settled REJECT record fetched
+    off the ticket thread. Unlike the three above it never reaches a prompt —
+    it is consumed after synthesis, by ``apply_voided_suppression``. It rides
+    here anyway so the fetch happens once per pass, at the one place both
+    ``run_review`` and the fix loop's per-cycle re-review already share.
     """
 
     roles: list[str]
@@ -892,6 +930,7 @@ class _ReviewPassInputs(NamedTuple):
     reviewed_sha: str
     capability: _CodexFilesystemCapability
     agent_spec_status: list[AgentSpecStatus]
+    voided_findings: list[VoidedFinding]
 
 
 def _prepare_review_pass(
@@ -931,6 +970,7 @@ def _prepare_review_pass(
     plan_text, ticket_text = _load_ticket_context(worktree)
     operator_comments_text = _load_operator_comments(worktree, task.ticket_id)
     pending_operator_comment = _load_pending_operator_comment_marker(worktree)
+    voided_findings = _load_voided_findings(worktree, task.ticket_id)
     ruff_lint_config = _load_ruff_lint_config(worktree)
     quality_gates_text = _load_claude_md_quality_gates(worktree)
     lint_grounding = _render_lint_grounding_block(
@@ -978,4 +1018,5 @@ def _prepare_review_pass(
         reviewed_sha=reviewed_sha,
         capability=capability,
         agent_spec_status=[resolutions[role].status for role in roles],
+        voided_findings=voided_findings,
     )

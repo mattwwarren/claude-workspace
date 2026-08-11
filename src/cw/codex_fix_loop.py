@@ -340,12 +340,22 @@ def _track_open_findings(
     is implicitly fixed this cycle). A finding that flaps out and back reappears
     under the same dedup key and is counted once. SHOULD_FIX/NIT/PRINCIPLE
     findings never enter the tracker.
+
+    "Open" requires ``disposition == "fixed"`` as well as MUST_FIX severity
+    (#1814). ``"fixed"`` is the optimistic post-consolidate default and is the
+    only value a genuinely still-open finding can carry at this point in the
+    pipeline — nothing has adjudicated it yet. Any other value means something
+    upstream already decided its fate: ``apply_voided_suppression`` stamps
+    ``"rejected"`` on a finding the operator settled, which is already out of
+    ``must_fix``/``blocking``, so handing it to the fix agent would re-open
+    exactly the decision the operator made. Severity alone cannot exclude it —
+    a voided MUST_FIX keeps its MUST_FIX severity.
     """
     survivors = dict(open_findings)
     current = {
         _dedup_key(af.finding): af
         for af in accepted
-        if af.finding.severity == _MUST_FIX
+        if af.finding.severity == _MUST_FIX and af.disposition == "fixed"
     }
     for key in list(survivors):
         if key not in current:
@@ -821,6 +831,10 @@ def _rereview(
         metrics_by_role=metrics_by_role,
         capability=prepared.capability,
         agent_spec_status=prepared.agent_spec_status,
+        # #1814: re-fetched and re-applied every cycle, not carried over from
+        # cycle 0 — an operator can void a finding mid-loop, and a fix cycle
+        # can rewrite the code out from under a void's content anchor.
+        voided_findings=prepared.voided_findings,
     )
 
 
