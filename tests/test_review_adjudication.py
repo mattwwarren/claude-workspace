@@ -892,6 +892,12 @@ class TestVoidedFindingsBlockRoundTrip:
             "no sentinel here at all",
             "<!-- VOIDED-REVIEW-FINDINGS\n{not json\nVOIDED-REVIEW-FINDINGS -->",
             "<!-- VOIDED-REVIEW-FINDINGS\n{}\nVOIDED-REVIEW-FINDINGS -->",
+            # Valid JSON, wrong top-level shape (a bare list, not the
+            # {"schema_version", "voided"} envelope).
+            '<!-- VOIDED-REVIEW-FINDINGS\n["not", "an", "envelope"]\n'
+            "VOIDED-REVIEW-FINDINGS -->",
+            '<!-- VOIDED-REVIEW-FINDINGS\n{"voided": "not a list"}\n'
+            "VOIDED-REVIEW-FINDINGS -->",
             '<!-- VOIDED-REVIEW-FINDINGS\n{"voided": [{"file": ""}]}\n'
             "VOIDED-REVIEW-FINDINGS -->",
             "<!-- VOIDED-REVIEW-FINDINGS\ntruncated with no closing",
