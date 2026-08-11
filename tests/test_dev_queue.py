@@ -4119,6 +4119,42 @@ class TestApproveTicket:
         with pytest.raises(ApproveGateError, match="not at an approval gate"):
             approve_ticket("GEN-500", "genhealth")
 
+    def test_approve_fails_closed_on_branch_staleness_park(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """#1823: a branch-staleness park cannot be released by ``approve``.
+
+        The row still carries ``review_pending_approval`` on its *sentinel* --
+        the staleness gate diverges only ``task.disposition`` -- so without the
+        explicit disposition check in ``_not_at_approval_gate`` the row would
+        read as "at the approval gate" and silently ship a stale tree.
+        """
+        from cw.config import save_state
+        from cw.dev_queue import BRANCH_STALENESS_GATE_DISPOSITION, approve_ticket
+        from cw.exceptions import ApproveGateError
+        from cw.models import CwState
+
+        _write_client_yaml(tmp_config_dir, tmp_path)
+        task = _make_blocked_task(
+            stage=Stage.REVIEW,
+            session_id="sess0009",
+            disposition=BRANCH_STALENESS_GATE_DISPOSITION,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        session = _make_session(
+            session_id="sess0009",
+            last_result={"status": "review_pending_approval"},
+        )
+        save_state(CwState(sessions=[session]))
+
+        with pytest.raises(ApproveGateError, match="not at an approval gate"):
+            approve_ticket("GEN-500", "genhealth")
+
+        store = load_dev_queue()
+        t = next(t for t in store.tasks if t.ticket_id == "GEN-500")
+        assert t.stage == Stage.REVIEW
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
     def test_approve_missing_session_raises(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
@@ -4320,8 +4356,9 @@ class TestApproveTicket:
     ) -> None:
         """The `approve` CLI path's own signoff-park site (approval.py) emits
         SESSION_NEEDS_ATTENTION too, via the shared _park_signoff_gate helper
-        (#1552). The emit executes inside cw.dispatch.routing (where
-        _park_signoff_gate is defined) regardless of the calling module."""
+        (#1552). The emit executes inside cw.dispatch.review_gates (where
+        _park_signoff_gate is defined since the #1823 extraction) regardless of
+        the calling module."""
         from cw.config import save_state
         from cw.dev_queue import approve_ticket
         from cw.dispatch import _SIGNOFF_GATE_REASON
@@ -4329,7 +4366,7 @@ class TestApproveTicket:
 
         _write_client_yaml(tmp_config_dir, tmp_path)
         attention = capture_events(
-            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+            "cw.dispatch.review_gates", OrchestratorEventType.SESSION_NEEDS_ATTENTION
         )
         task = _make_blocked_task(stage=Stage.REVIEW, session_id="sess-signoff-attn")
         task.signoff = "operator"

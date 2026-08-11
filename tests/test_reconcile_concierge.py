@@ -322,6 +322,37 @@ class TestRecipeFalseParkRequeue:
         assert store.tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
         assert store.tasks[0].disposition == "codex_must_fix_mechanically_rejected"
 
+    def test_branch_staleness_park_is_not_false_park_eligible(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """#1823: a dead-session row parked ``branch_behind_main`` is NOT
+        auto-recovered by the false-park requeue recipe.
+
+        Third member of the same family as ``review_health_gate`` (#1702) and
+        ``codex_must_fix_mechanically_rejected`` (#1714): auto-requeuing it
+        would spin a genuinely stale branch back through the pipeline without
+        an operator ever rebasing it, defeating the gate.
+        """
+        from cw.dev_queue import BRANCH_STALENESS_GATE_DISPOSITION
+        from cw.reconcile.concierge import _FALSE_PARK_ELIGIBLE_DISPOSITIONS
+
+        assert BRANCH_STALENESS_GATE_DISPOSITION not in (
+            _FALSE_PARK_ELIGIBLE_DISPOSITIONS
+        )
+
+        task = _make_task(disposition=BRANCH_STALENESS_GATE_DISPOSITION, attempts=1)
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[]))
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config()
+        )
+
+        assert recovered == []
+        store = load_dev_queue()
+        assert store.tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+        assert store.tasks[0].disposition == "branch_behind_main"
+
     def test_ceiling_refusal_leaves_row_parked(self, tmp_config_dir: Path) -> None:
         """A1/A2: at the global attempt ceiling, the row is refused, not requeued."""
         task = _make_task(disposition="stalled_retry_cap_parked", attempts=10)

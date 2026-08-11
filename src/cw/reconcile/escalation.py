@@ -35,6 +35,7 @@ from datetime import UTC, datetime
 
 from cw.auto_dev_result import PAUSED_FOR_USER_INPUT_STATUSES
 from cw.dev_queue import (
+    BRANCH_STALENESS_GATE_DISPOSITION,
     REVIEW_HEALTH_GATE_DISPOSITION,
     REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
     dev_queue_lock,
@@ -99,10 +100,18 @@ ESCALATION_PARK_MINUTES = 45
 # initiated quality signal, so its escalation clock starts immediately. Also
 # kept out of _REAP_ELIGIBLE_DISPOSITIONS_BASE for the same reason -- concierge
 # auto-requeuing it would misread a dropped finding as a session glitch.
+#
+# GitHub #1823 joins as a FIFTH union term on the same reasoning again: a
+# branch-staleness park is an unresolved, non-operator-initiated quality signal
+# whose clock starts immediately -- nobody chose to stop this ticket, main
+# moved underneath it. Also kept out of _REAP_ELIGIBLE_DISPOSITIONS_BASE, or
+# concierge would auto-requeue a genuinely stale branch instead of an operator
+# rebasing it.
 _ELIGIBLE_DISPOSITIONS: frozenset[str | None] = frozenset(
     (PAUSED_FOR_USER_INPUT_STATUSES - {"premises_pending_verification"})
     | _REAP_ELIGIBLE_DISPOSITIONS_BASE
     | {
+        BRANCH_STALENESS_GATE_DISPOSITION,
         REVIEW_HEALTH_GATE_DISPOSITION,
         REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
     }

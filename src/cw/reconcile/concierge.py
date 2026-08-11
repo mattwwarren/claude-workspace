@@ -103,6 +103,12 @@ from cw.reconcile._shared import (
 # without a human ever seeing the signal -- exactly what #1702 exists to
 # prevent. Escalation (cw.reconcile.escalation) pages the operator on it
 # instead; drain (cw.dev_queue.drain) releases it on an explicit operator call.
+#
+# GitHub #1823: BRANCH_STALENESS_GATE_DISPOSITION ("branch_behind_main") is
+# excluded on identical reasoning and must not be added here either. Requeuing
+# a stale branch does not make it fresh -- the row would spin straight back
+# into the same park (or worse, slip past it) without anyone rebasing. The
+# recovery is an operator rebase followed by an explicit requeue/drain.
 from cw.reconcile._shared import (
     _REAP_ELIGIBLE_DISPOSITIONS_BASE as _FALSE_PARK_ELIGIBLE_DISPOSITIONS,
 )

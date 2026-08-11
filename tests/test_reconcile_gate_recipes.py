@@ -263,6 +263,27 @@ class TestDetect:
             == []
         )
 
+    def test_detect_auto_approve_review_excludes_branch_staleness_park(self) -> None:
+        """#1823: a branch-staleness park is never auto-approved.
+
+        The recipe's five-field clean-review predicate is derived entirely from
+        ``session.last_result``, which the staleness gate never mutates — so a
+        staleness-parked row satisfies every existing condition and would be
+        auto-approved unless it is excluded on ``task.disposition``.
+        """
+        from cw.dev_queue import BRANCH_STALENESS_GATE_DISPOSITION
+
+        task = _make_task(disposition=BRANCH_STALENESS_GATE_DISPOSITION)
+        session = _make_session(last_result=_clean_result())
+        state = CwState(sessions=[session])
+
+        assert (
+            _detect_auto_approve_review(
+                state, [task], clients=_SEAM1_CLIENTS, config=_config()
+            )
+            == []
+        )
+
     def test_wrong_last_result_status_yields_none(self) -> None:
         task = _make_task()
         session = _make_session(
