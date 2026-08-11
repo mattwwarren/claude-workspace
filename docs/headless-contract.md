@@ -240,7 +240,7 @@ Full v3 shape with Phase B and Phase E fields (issue #174):
 | Reason | Meaning |
 |---|---|
 | `impl_failed` | Implementation agent returned BLOCK or failed quality gates after 2 attempts. |
-| `review_blocked` | MUST_FIX findings persisted after 5 fix-loop cycles (the hard cap). |
+| `review_blocked` | MUST_FIX findings persisted after 5 fix-loop cycles (the hard cap). Also posts the still-unresolved blocking findings as a tracker comment (#1815). |
 | `plan_deviation` | A non-deferrable Stage-3 finding (impl deviates from an explicit plan requirement/prohibition) survived the fix loop or was judged beyond fix-loop scope. The pipeline does not assign plan-vs-impl blame — it exits `blocked`; the operator uses `cw dev-queue requeue --regress` to send it back to impl, or revisits the plan. |
 | `plan_scope_drift` | Step 2.5 gate 2: the delivered diff touched more unplanned files than `.claude/scripts/check_plan_scope_conformance.py`'s allowance — `max(abs_floor, round(plan_file_count * (ratio - 1)))`, v1 defaults `ratio=1.5` / `abs_floor=5`, overridable per-repo via `[tool.cw.scope_conformance]` in `pyproject.toml` (#1779). Mechanical and pre-review: a file-set measurement taken *after impl, before review*, where `plan_deviation` is a reviewer's judgment about content raised during Stage 3. `blocker.stage` is `"stage2_impl"`, and `blocker.details` enumerates the specific unplanned paths — the operator's entire authorization surface. Distinct from the `scope_exceeded` **status**, which fires *before impl started* from the Stage-1 plan's own estimate and carries no blocker at all. |
 | `agent_block` | Any other agent returned friction level BLOCK that the pipeline could not auto-resolve. |

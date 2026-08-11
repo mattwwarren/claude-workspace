@@ -8,6 +8,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`plan_unreviewable`/`plan_unsound`/`review_blocked` blocked exits now post
+  their MUST_FIX finding(s) to the tracker (#1815):** these three headless
+  exits carried the blocking finding(s) only inside the `blocked` sentinel's
+  structured payload — no tracker comment was ever posted, so the next round
+  (or a human triaging the ticket) had no visibility into *why* the plan or
+  review was rejected without digging through the session transcript.
+  `.claude/commands/auto-dev-plan.md` and `.claude/commands/auto-dev-review.md`
+  now declare a shared `## Blocking Review Findings` header — the same
+  greppable-fixed-header idiom `## Pending Verification Scan` already uses
+  for the Step 1c park exits (#1650) — and post the persisting station's
+  finding(s) verbatim before exiting. `auto-dev.md`'s decision tables and
+  `docs/headless-contract.md` are updated to note the new comment.
 - **A persisted cycle verdict snapshot no longer disagrees silently with the
   reported blocker (#1763):** the fix loop writes one
   `cycleN-review-verdict.json` per cycle (#1739), but nothing on disk said
