@@ -598,7 +598,17 @@ ran without your comment and its verdict should be read accordingly.
 `finalize_regress_branch_head` is designed to stamp at the same point; per
 the Unified Re-entry Contract on #1730/#1717, each marker is written and
 cleared independently, and whichever ticket lands second owns the compose
-test. As of #1730, `finalize_regress_branch_head` does not exist yet.
+test. Both markers now exist and coexist at that seam. In one
+`_stage_regress` call it stamps `pending_operator_comment` unconditionally
+(gate at the consumption site: `dispatch/claim.py` clears it only at a
+REVIEW-stage spawn) and, when the regress origin was `FINALIZE`,
+`finalize_regress_branch_head` from the pre-clear `stage_base_ref` (#1717's
+repeat detector reads-and-clears it at the first REVIEW re-entry,
+`dispatch/regress_repeat.py`). Neither write clobbers the other's field and
+clearing either leaves the other untouched — the compose case (a re-entry
+that is simultaneously a same-branch-head repeat *and* carries a pending
+send-back) is covered by `tests/test_dispatch.py`'s
+`TestUnifiedReentryContractCompose`.
 
 ### Attempt-cap reset (environmental burn)
 
