@@ -29,14 +29,10 @@ from cw.auto_dev_result import (
 )
 from cw.codex_review import CODEX_MUST_FIX_MECHANICALLY_REJECTED
 from cw.config import (
-    load_effective_config,
     load_state,
 )
 from cw.dev_queue import (
-    FINALIZE_GATE_HELD_DISPOSITION,
-    REVIEW_HEALTH_GATE_DISPOSITION,
     REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
-    SIGNOFF_GATE_DISPOSITION,
     _advance_task_pointer,
     _extract_pr_url,
     _hold_aware_disposition,
@@ -46,6 +42,25 @@ from cw.dev_queue import (
 from cw.dispatch.regress_repeat import (
     _consume_finalize_regress_repeat,
     _maybe_emit_finalize_regress_repeat_signal,
+)
+
+# The REVIEW-scoped gate table (#1823 extraction). Imported at module top in
+# this direction only: review_gates reaches back into this module for
+# _resolve_scope_tier / _APPROVAL_GATE_REASON via function-level deferred
+# imports, so promoting either of those to a module-top import there recreates
+# a real cycle. Same shape as gating.py <-> claim.py since #1310, guarded by
+# test_dispatch_package_submodules_import_without_cycle.
+from cw.dispatch.review_gates import (
+    _park_branch_staleness_gate,
+    _park_finalize_hold,
+    _park_review_health_gate,
+    _park_scope_hint_gate,
+    _park_signoff_gate,
+    _should_force_hold_finalize,
+    _should_gate_for_branch_staleness,
+    _should_gate_for_review_health,
+    _should_gate_for_scope_hint,
+    _should_gate_for_signoff,
 )
 from cw.events import record_event
 from cw.models import (
@@ -58,7 +73,6 @@ from cw.models import (
 if TYPE_CHECKING:
     from cw.models import (
         ClientConfig,
-        OrchestratorConfig,
         TicketTask,
     )
 
@@ -116,26 +130,6 @@ _INVALID_STAGE_REASON = "invalid_stage_config"
 _AWAITING_OPERATOR_REASON = "awaiting_operator_availability"
 
 
-# paused_status written to SESSION_NEEDS_ATTENTION when the RFC 0011 A3
-# proactive finalize hold parks a ticket at the REVIEW->FINALIZE checkpoint.
-# Deliberately distinct from dev_queue.lifecycle.FINALIZE_GATE_HELD_DISPOSITION
-# ("finalize_gate_held") -- that constant classifies TicketTask.disposition,
-# this one is a paused_status string. Different namespaces, same event. Follows
-# the _APPROVAL_GATE_REASON / _UNKNOWN_CLIENT_REASON convention above. See
-# GitHub #1160.
-_FINALIZE_HOLD_REASON = "finalize_hold"
-
-
-# paused_status written to SESSION_NEEDS_ATTENTION when the RFC 0007
-# Phase 3 operator-signoff gate parks a ticket at the REVIEW->FINALIZE
-# ship checkpoint (GitHub #990, #1552). Shares its literal string value
-# with dev_queue.lifecycle.SIGNOFF_GATE_DISPOSITION (task.disposition) by
-# deliberate choice on this ticket -- unlike the _FINALIZE_HOLD_REASON /
-# FINALIZE_GATE_HELD_DISPOSITION pair, which uses distinct strings across
-# the two namespaces. See GitHub #1552.
-_SIGNOFF_GATE_REASON = "signoff_gate"
-
-
 # paused_status written to SESSION_NEEDS_ATTENTION when Rule 1 parks an
 # earlier-stage scope-gated approval sentinel instead of auto-advancing it
 # (GitHub #1676 follow-up). Deliberately distinct from _APPROVAL_GATE_REASON
@@ -143,17 +137,6 @@ _SIGNOFF_GATE_REASON = "signoff_gate"
 # this one means "the sentinel never reached task.stage, so its tier verdict
 # cannot be trusted to auto-advance regardless of tier."
 _EARLIER_STAGE_REPORT_REASON = "earlier_stage_report"
-
-
-# paused_status written to SESSION_NEEDS_ATTENTION when the #1702 review-health
-# gate parks a REVIEW-stage ticket whose sentinel reported
-# health.recommendation == "EXIT_FOR_HUMAN_REVIEW". Shares its literal string
-# value with dev_queue.lifecycle.REVIEW_HEALTH_GATE_DISPOSITION
-# (task.disposition) by deliberate choice, following the _SIGNOFF_GATE_REASON /
-# SIGNOFF_GATE_DISPOSITION precedent above rather than the _FINALIZE_HOLD_REASON
-# / FINALIZE_GATE_HELD_DISPOSITION one -- still two constants in two namespaces,
-# do not collapse them.
-_REVIEW_HEALTH_GATE_REASON = "review_health_gate"
 
 
 # paused_status written to SESSION_NEEDS_ATTENTION when the #1714 gate parks a
@@ -166,14 +149,6 @@ _REVIEW_HEALTH_GATE_REASON = "review_health_gate"
 # codex_review.CODEX_MUST_FIX_MECHANICALLY_REJECTED, which is the *blocker
 # reason* the sentinel carries; that one is imported, not re-derived.
 _MUST_FIX_MECHANICALLY_REJECTED_REASON = "codex_must_fix_mechanically_rejected"
-
-
-# The single Health.recommendation value that means "the producer does not
-# vouch for this work". Pinned as a constant rather than an inline literal
-# because it is compared against a raw sentinel dict (post-model_dump), where
-# the schema's Literal type gives no compile-time protection against a typo.
-# See cw.auto_dev_result.schema.Health.recommendation.
-_DEGRADED_HEALTH_RECOMMENDATION = "EXIT_FOR_HUMAN_REVIEW"
 
 
 # Paused-status values that carry a non-empty breadcrumbs string derived
@@ -198,11 +173,11 @@ _DEGRADED_HEALTH_RECOMMENDATION = "EXIT_FOR_HUMAN_REVIEW"
 # here does NOT by itself cause a breadcrumb to be emitted for it: the
 # producing _park_* helper must independently stamp non-empty breadcrumbs
 # content at its own call site. Every gate-class park other than
-# _park_must_fix_mechanically_rejected (_park_finalize_hold,
-# _park_signoff_gate, _park_scope_hint_gate, _park_review_health_gate, and the
-# _stage_advance_unchecked config-error paths) hardcodes breadcrumbs="" and is
-# deliberately excluded from this set -- membership for one of those would be
-# cosmetic, not a fix (#1729).
+# _park_must_fix_mechanically_rejected (review_gates.py's _park_finalize_hold,
+# _park_signoff_gate, _park_scope_hint_gate, _park_review_health_gate and
+# _park_branch_staleness_gate, plus the _stage_advance_unchecked config-error
+# paths here) hardcodes breadcrumbs="" and is deliberately excluded from this
+# set -- membership for one of those would be cosmetic, not a fix (#1729).
 #
 # #1775 reaffirms this for _park_review_health_gate specifically: a degraded
 # reviewer's stated reason (ReviewerRunRecord.detail, threaded through
@@ -259,50 +234,6 @@ def _extract_scope_tier(last_result: dict[str, object] | None) -> str | None:
     return scope_val.get("tier") if isinstance(scope_val, dict) else None
 
 
-def _resolve_health_recommendation(last_result: dict[str, object] | None) -> str | None:
-    """Pull ``health.recommendation`` off a raw sentinel dict (#1702).
-
-    Same defensive isinstance-guard shape as ``_extract_scope_tier`` above: a
-    missing, null, or non-dict ``health`` block resolves to ``None`` rather
-    than raising. ``health`` is required by the ``AutoDevResult`` schema, so a
-    schema-valid sentinel always carries it -- but this function is also
-    reachable from paths that never validated (Rule 6's non-dict fallback
-    parks ``abandoned`` before either gated function runs, so it cannot reach
-    here today; the guard is belt-and-suspenders against a future caller).
-    """
-    health_val = last_result.get("health") if last_result is not None else None
-    if not isinstance(health_val, dict):
-        return None
-    recommendation = health_val.get("recommendation")
-    return recommendation if isinstance(recommendation, str) else None
-
-
-def _should_gate_for_review_health(last_result: dict[str, object] | None) -> bool:
-    """True iff *last_result* reports degraded review health (#1702).
-
-    ``_derive_health`` (codex review) computes an accurate
-    ``Health.recommendation`` from real reviewer participation, but before
-    #1702 nothing downstream read it -- ``_route_stage_success`` and
-    ``_route_scope_gated_approval`` advanced purely off ``status``, so a review
-    that self-reported "I could not vouch for this" still shipped unattended.
-
-    Callers MUST scope this to ``task.stage == Stage.REVIEW``. It is
-    deliberately NOT stage-agnostic: ``local_runner.synthesize_git_result``
-    hardcodes ``EXIT_FOR_HUMAN_REVIEW`` on its only success path (#1580) as an
-    honest "I have no reviewer, so I cannot claim this is vetted" default, not
-    a derived review signal. Gating on that at IMPL stage would misread the
-    default as a real degraded-review verdict and permanently park every
-    LOCAL-backend IMPL completion, silently disabling the documented unattended
-    ``IMPL -> REVIEW`` auto-advance (config/CONFIG_REFERENCE.md).
-
-    Anything other than the degraded literal -- ``"PROCEED"``, a missing or
-    malformed ``health`` block, a non-str value -- is "not degraded", so this
-    is a pure boolean gate with no effect on any pre-existing routing path.
-    """
-    recommendation = _resolve_health_recommendation(last_result)
-    return recommendation == _DEGRADED_HEALTH_RECOMMENDATION
-
-
 def _persist_carried_context(
     task: TicketTask, last_result: dict[str, object] | None
 ) -> None:
@@ -349,277 +280,6 @@ def _resolve_scope_tier(
     if isinstance(tier, str):
         return tier
     return task.scope_hint
-
-
-def _should_gate_for_scope_hint(
-    task: TicketTask, last_result: dict[str, object] | None
-) -> bool:
-    """True iff the resolved scope tier requires parking at the REVIEW boundary
-    (#1617).
-
-    Mirrors ``_should_gate_for_signoff``/``_should_force_hold_finalize``'s
-    two-arg predicate shape so all three REVIEW-scoped gate checks read
-    identically at each call site. Deliberately checks for exactly
-    ``SCOPE_TIER_LARGE``, NOT Rule 1's conservative "not small" semantics
-    (``_resolve_scope_tier(...) != SCOPE_TIER_SMALL``, which also catches an
-    unresolved/``None`` tier): ``STAGE_SUCCESS_STATUSES`` sentinels
-    (``stage_complete``/``shipped``) routinely omit ``scope.tier`` entirely --
-    it is only meaningful on a scope-gated-approval sentinel -- so treating
-    "unknown" as "gate" here would park nearly every ordinary REVIEW->FINALIZE
-    advance. Reuses ``_resolve_scope_tier`` so this predicate and Rule 1's
-    escalate-only precedence never drift.
-    """
-    return _resolve_scope_tier(last_result, task) == SCOPE_TIER_LARGE
-
-
-def resolve_signoff(
-    task: TicketTask,
-    clients: dict[str, ClientConfig],
-    config: OrchestratorConfig,
-) -> Literal["operator"] | None:
-    """Resolve the effective operator-signoff policy for *task* (RFC 0007 Phase 3).
-
-    Precedence (highest to lowest), mirroring ``resolve_reap_policy``
-    (reconcile/_shared.py) but with a 3rd tier for the per-ticket override:
-      1. ``TicketTask.signoff`` -- per-ticket override (``cw dev-queue add
-         --signoff operator``).
-      2. ``LaneConfig.signoff`` in the task's client config.
-      3. ``OrchestratorConfig.default_signoff`` -- global default; ``"none"``
-         resolves to ``None`` (no gate).
-
-    A task whose client is absent from *clients*, or whose lane name is not
-    declared in that client's lanes, falls through to the global default --
-    keeps behaviour identical to the pre-#990 read for any task that predates
-    lane stamping. See GitHub #990.
-    """
-    if task.signoff is not None:
-        return task.signoff
-    client_cfg = clients.get(task.client)
-    if client_cfg is not None:
-        for lane_cfg in client_cfg.effective_lanes:
-            if lane_cfg.name == task.lane and lane_cfg.signoff is not None:
-                return lane_cfg.signoff
-    return config.default_signoff if config.default_signoff != "none" else None
-
-
-def _should_gate_for_signoff(
-    task: TicketTask, clients: dict[str, ClientConfig]
-) -> bool:
-    """True iff *task* requires an explicit operator signoff before advancing.
-
-    Lazily loads ``OrchestratorConfig`` itself -- the single call site for that
-    load -- so ``_route_staged_decision``/``apply_staged_decision`` (and
-    ``approve_ticket`` in dev_queue.py, its other caller) keep their existing
-    signatures unchanged (#990). Mirrors the ad hoc ``load_effective_config()``
-    calls already made elsewhere in ``run_dispatch_loop``.
-    """
-    config = load_effective_config()
-    return resolve_signoff(task, clients, config) is not None
-
-
-def resolve_hold_finalize(
-    task: TicketTask,
-    clients: dict[str, ClientConfig],
-    config: OrchestratorConfig,
-) -> Literal["manual"] | None:
-    """Resolve the effective proactive finalize-hold policy for *task*.
-
-    Precedence (highest to lowest), mirroring ``resolve_signoff`` above:
-      1. ``TicketTask.hold_finalize`` -- per-ticket override (``cw dev-queue
-         add --hold-finalize``).
-      2. ``LaneConfig.finalize_gate`` in the task's client config.
-      3. ``OrchestratorConfig.default_finalize_gate`` -- global default;
-         ``"auto"`` resolves to ``None`` (no hold).
-
-    A task whose client is absent from *clients*, or whose lane name is not
-    declared in that client's lanes, falls through to the global default --
-    identical fall-through semantics to ``resolve_signoff``. See GitHub #1160
-    (RFC 0011 A3).
-    """
-    if task.hold_finalize is not None:
-        return task.hold_finalize
-    client_cfg = clients.get(task.client)
-    if client_cfg is not None:
-        for lane_cfg in client_cfg.effective_lanes:
-            if lane_cfg.name == task.lane and lane_cfg.finalize_gate is not None:
-                return lane_cfg.finalize_gate
-    default = config.default_finalize_gate
-    return default if default != "auto" else None
-
-
-def _should_force_hold_finalize(
-    task: TicketTask, clients: dict[str, ClientConfig]
-) -> bool:
-    """True iff *task* must stop before an unattended finalize (RFC 0011 A3).
-
-    Lazily loads ``OrchestratorConfig`` itself -- the single call site for that
-    load -- so the three REVIEW-scoped gate sites and ``_approve_ticket_locked``
-    keep their existing signatures unchanged. Exact sibling of
-    ``_should_gate_for_signoff`` above, including the two-arg shape. See GitHub
-    #1160.
-    """
-    config = load_effective_config()
-    return resolve_hold_finalize(task, clients, config) is not None
-
-
-def _park_finalize_hold(task: TicketTask) -> None:
-    """Park *task* BLOCKED_ON_USER for an A3 force-hold (RFC 0011 A3, #1160).
-
-    Shared by all three REVIEW-scoped gate sites so neither the attention
-    payload nor the status/disposition pairing can drift between them; the
-    surrounding control flow (``return "parked"`` vs falling through an
-    ``if``/``elif``/``else``) stays at each call site because it differs per
-    site.
-    """
-    record_event(
-        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-        {
-            "session_id": task.session_id or "",
-            "session_name": "",
-            "client": task.client,
-            "ticket_id": task.ticket_id,
-            "claude_session_id": None,
-            "paused_status": _FINALIZE_HOLD_REASON,
-            "breadcrumbs": "",
-            "crashed": False,
-            "lane": task.lane,
-        },
-        correlation_id=task.ticket_id,
-    )
-    transition_task_status(
-        task,
-        QueueItemStatus.BLOCKED_ON_USER,
-        disposition=FINALIZE_GATE_HELD_DISPOSITION,
-    )
-
-
-def _park_signoff_gate(task: TicketTask) -> None:
-    """Park *task* AWAITING_OPERATOR_SIGNOFF for the RFC 0007 Phase 3 ship
-    checkpoint (REVIEW->FINALIZE, #990, #1552).
-
-    Shared by all four signoff-park sites -- three in this module's staged
-    -decision routing table, plus dev_queue.approval's `approve` CLI path
-    -- so neither the attention payload nor the status/disposition pairing
-    can drift between them (mirrors _park_finalize_hold above). Before
-    #1552 none of the four sites emitted SESSION_NEEDS_ATTENTION at park
-    time; the gap was only latency, not permanent silence -- the durable
-    escalation sweep (cw.reconcile.escalation) still fires OPERATOR_
-    ESCALATION once, ESCALATION_PARK_MINUTES later, for any park this
-    helper does not reach (e.g. one already parked before this shipped).
-    """
-    # Why: emits before transition_task_status, matching _park_finalize_hold's
-    # existing order above -- a #1552 review pass flagged the resulting crash
-    # window (event durably logged before the caller's save_dev_queue()
-    # persists the status change) but this ordering is an established,
-    # unchanged pattern across every _park_* helper in this module, not new
-    # risk introduced here; diverging just for this one helper would break
-    # the field-for-field mirroring this ticket was explicitly scoped to do.
-    record_event(
-        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-        {
-            "session_id": task.session_id or "",
-            "session_name": "",
-            "client": task.client,
-            "ticket_id": task.ticket_id,
-            "claude_session_id": None,
-            "paused_status": _SIGNOFF_GATE_REASON,
-            "breadcrumbs": "",
-            "crashed": False,
-            "lane": task.lane,
-        },
-        correlation_id=task.ticket_id,
-    )
-    transition_task_status(
-        task,
-        QueueItemStatus.AWAITING_OPERATOR_SIGNOFF,
-        disposition=SIGNOFF_GATE_DISPOSITION,
-    )
-
-
-def _park_scope_hint_gate(task: TicketTask) -> None:
-    """Park *task* BLOCKED_ON_USER for a ``scope_hint=="large"`` escalation at
-    the REVIEW->FINALIZE boundary (#1617).
-
-    Shared by ``_route_stage_success`` and ``_walk_stage_pointer_forward`` --
-    the two REVIEW-scoped park-decision sites that (unlike
-    ``_route_scope_gated_approval``, Rule 1) do not naturally carry a
-    status-derived disposition to stamp, since their incoming sentinel status
-    (``stage_complete``/``shipped``) is not itself an approval-gated status.
-    Reuses ``_APPROVAL_GATE_REASON`` as both the ``SESSION_NEEDS_ATTENTION``
-    ``paused_status`` and the task ``disposition``, mirroring
-    ``_park_finalize_hold``/``_park_signoff_gate``'s fixed-disposition-constant
-    shape. Deliberately NOT used by ``_route_scope_gated_approval`` itself:
-    that site's existing disposition is the incoming sentinel status (e.g.
-    ``"review_pending_approval"``), an established, test-covered behavior this
-    ticket does not change.
-    """
-    record_event(
-        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-        {
-            "session_id": task.session_id or "",
-            "session_name": "",
-            "client": task.client,
-            "ticket_id": task.ticket_id,
-            "claude_session_id": None,
-            "paused_status": _APPROVAL_GATE_REASON,
-            "breadcrumbs": "",
-            "crashed": False,
-            "lane": task.lane,
-        },
-        correlation_id=task.ticket_id,
-    )
-    transition_task_status(
-        task, QueueItemStatus.BLOCKED_ON_USER, disposition=_APPROVAL_GATE_REASON
-    )
-
-
-def _park_review_health_gate(task: TicketTask) -> None:
-    """Park *task* BLOCKED_ON_USER for degraded review health (#1702).
-
-    Shared by ``_route_stage_success`` (Rule 3) and
-    ``_route_scope_gated_approval`` (Rule 1) so neither the attention payload
-    nor the status/disposition pairing can drift between the two sites.
-    Field-for-field mirror of ``_park_scope_hint_gate`` above, including its
-    emit-before-transition ordering (see ``_park_signoff_gate``'s note on why
-    that ordering is kept uniform across every ``_park_*`` helper here).
-
-    BLOCKED_ON_USER, not AWAITING_OPERATOR_SIGNOFF: the signoff status means
-    "waiting for an operator to authorize a shippable result", and this result
-    is not yet shippable -- there is nothing to authorize until review is
-    re-run. Accordingly ``cw dev-queue approve`` fails closed on a row parked
-    this way (``approval.py``'s gate-release condition matches neither the
-    scope-gated statuses nor the approval-gate disposition); the intended
-    recovery is ``cw dev-queue requeue``/``drain``.
-
-    ``breadcrumbs`` is hardcoded ``""`` here, deliberately (#1729) -- see the
-    module-level comment above ``BREADCRUMB_ELIGIBLE_PAUSED_STATUSES``. #1775
-    reaffirms that choice specifically for a degraded reviewer's stated
-    reason: it has no data path into this function's scope (``task`` only,
-    no ``ReviewVerdict`` in hand) and does not need one, because
-    ``render_verdict_comment`` has already posted it to the ticket by the
-    time this park runs -- mirroring how ``_park_must_fix_mechanically_rejected``
-    below documents its own deliberate divergence from this same convention.
-    """
-    record_event(
-        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
-        {
-            "session_id": task.session_id or "",
-            "session_name": "",
-            "client": task.client,
-            "ticket_id": task.ticket_id,
-            "claude_session_id": None,
-            "paused_status": _REVIEW_HEALTH_GATE_REASON,
-            "breadcrumbs": "",
-            "crashed": False,
-            "lane": task.lane,
-        },
-        correlation_id=task.ticket_id,
-    )
-    transition_task_status(
-        task,
-        QueueItemStatus.BLOCKED_ON_USER,
-        disposition=REVIEW_HEALTH_GATE_DISPOSITION,
-    )
 
 
 def _park_must_fix_mechanically_rejected(task: TicketTask) -> None:
@@ -988,6 +648,18 @@ def _walk_stage_pointer_forward(
         # _consume_finalize_regress_repeat itself no-ops at any non-REVIEW
         # stage.
         is_repeat = _consume_finalize_regress_repeat(task, original_stage_base_ref)
+        if task.stage == Stage.REVIEW and _should_gate_for_branch_staleness(
+            task, clients
+        ):
+            # Why first: every gate below reasons about a sentinel produced
+            # against this branch's tree. If the tree no longer matches
+            # origin/<default> in a file-overlapping way, that sentinel's
+            # verdict -- scope, health, everything -- describes a tree that is
+            # not what would ship (#1823).
+            _park_branch_staleness_gate(task)
+            _record_scope_routing_decision(task, last_result, _RULE_STAGE_WALK)
+            _maybe_emit_finalize_regress_repeat_signal(task, is_repeat)
+            return "parked"
         if task.stage == Stage.REVIEW and _should_gate_for_scope_hint(
             task, last_result
         ):
@@ -1127,6 +799,16 @@ def _route_scope_gated_approval(
     # No hop has run yet in this function, so task.stage_base_ref is still
     # the live, un-cleared claim-time value here.
     is_repeat = _consume_finalize_regress_repeat(task, task.stage_base_ref)
+    if task.stage == Stage.REVIEW and _should_gate_for_branch_staleness(task, clients):
+        # Why ahead of even the review-health gate: a stale tree undermines
+        # every downstream signal, including the health recommendation itself
+        # -- the review that produced it reviewed a tree that is not what would
+        # ship. Returns immediately, so a stale row never reaches tier
+        # resolution at any tier (#1823).
+        _park_branch_staleness_gate(task)
+        _record_scope_routing_decision(task, last_result, _RULE_SCOPE_GATED_APPROVAL)
+        _maybe_emit_finalize_regress_repeat_signal(task, is_repeat)
+        return
     if task.stage == Stage.REVIEW and _should_gate_for_review_health(last_result):
         _park_review_health_gate(task)
         _record_scope_routing_decision(task, last_result, _RULE_SCOPE_GATED_APPROVAL)
@@ -1224,8 +906,15 @@ def _route_stage_success(
     # _route_scope_gated_approval's identical placement). No hop has run yet
     # in this function, so task.stage_base_ref is still the live value.
     is_repeat = _consume_finalize_regress_repeat(task, task.stage_base_ref)
-    if task.stage == Stage.REVIEW and _should_gate_for_review_health(last_result):
-        # Why first: every gate below is an authorization or scope-workflow
+    if task.stage == Stage.REVIEW and _should_gate_for_branch_staleness(task, clients):
+        # Why first: the gates below ask "may this ship?" and "is there
+        # anything shippable here?" -- both about a sentinel produced against
+        # this branch's tree. A tree that is behind origin/<default> with
+        # overlapping churn makes those answers describe something other than
+        # what would actually ship, so it is answered first (#1823).
+        _park_branch_staleness_gate(task)
+    elif task.stage == Stage.REVIEW and _should_gate_for_review_health(last_result):
+        # Why here: every gate below is an authorization or scope-workflow
         # question ("may this ship?"); this one is a quality question ("is
         # there anything shippable here?"). A review that self-reported
         # EXIT_FOR_HUMAN_REVIEW has not vouched for its own coverage, so

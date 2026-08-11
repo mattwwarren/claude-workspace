@@ -108,18 +108,30 @@ if TYPE_CHECKING:
 
 
 def test_dispatch_package_submodules_import_without_cycle() -> None:
-    """The gating/claim/lanes submodules import with no ImportError (#1310).
+    """The gating/claim/lanes/routing/review_gates submodules import cleanly.
 
-    Fast-fails the gating<->claim circular-import risk: gating imports claim at
-    module top and claim reaches back into gating via a function-level deferred
-    import, so a regression that promotes that deferred import to module top
-    would surface here as an ImportError before the rest of the suite collects.
+    Fast-fails the gating<->claim circular-import risk (#1310): gating imports
+    claim at module top and claim reaches back into gating via a function-level
+    deferred import, so a regression that promotes that deferred import to
+    module top would surface here as an ImportError before the rest of the
+    suite collects.
+
+    #1823 added a second pair of the identical shape: ``routing`` imports
+    ``review_gates`` at module top, while ``review_gates`` reaches back into
+    ``routing`` for ``_resolve_scope_tier``/``_APPROVAL_GATE_REASON`` via
+    function-level deferred imports. Both modules are named explicitly below so
+    the guard genuinely covers that pair rather than passing incidentally.
     """
-    from cw.dispatch import claim, gating, lanes
+    from cw.dispatch import claim, gating, lanes, review_gates, routing
 
     assert gating is not None
     assert claim is not None
     assert lanes is not None
+    assert routing is not None
+    assert review_gates is not None
+    # The two-way pair resolves in both directions at runtime.
+    assert routing._should_gate_for_branch_staleness is not None
+    assert review_gates._park_scope_hint_gate is not None
 
 
 # ---------------------------------------------------------------------------
@@ -9000,8 +9012,11 @@ class TestApplyStagedDecision:
         from cw.dev_queue import FINALIZE_GATE_HELD_DISPOSITION
         from cw.dispatch import apply_staged_decision
 
+        # #1823: resolve_hold_finalize's load_effective_config() call moved to
+        # cw.dispatch.review_gates with the gate table; monkeypatch.setattr
+        # binds by the *calling* module's name, so the target moves with it.
         monkeypatch.setattr(
-            "cw.dispatch.routing.load_effective_config",
+            "cw.dispatch.review_gates.load_effective_config",
             lambda: OrchestratorConfig(default_finalize_gate="manual"),
         )
         task = self._make_running_task("FH-GLOBAL-1", stage=Stage.REVIEW)
@@ -9105,8 +9120,10 @@ class TestApplyStagedDecision:
         SESSION_NEEDS_ATTENTION carrying paused_status=finalize_hold (#1160)."""
         from cw.dispatch import _FINALIZE_HOLD_REASON, apply_staged_decision
 
+        # #1823: _park_finalize_hold now lives in cw.dispatch.review_gates, and
+        # capture_events patches record_event by the *calling* module's binding.
         attention = capture_events(
-            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+            "cw.dispatch.review_gates", OrchestratorEventType.SESSION_NEEDS_ATTENTION
         )
         clients = self._clients(tmp_path)
 
@@ -9248,8 +9265,12 @@ class TestApplyStagedDecision:
         pre-existing reference implementation, already covered elsewhere."""
         from cw.dispatch import _APPROVAL_GATE_REASON, apply_staged_decision
 
+        # #1823: _park_scope_hint_gate now lives in cw.dispatch.review_gates,
+        # and capture_events patches record_event by the *calling* module's
+        # binding. (_APPROVAL_GATE_REASON itself still lives in routing.py --
+        # only the emitting function moved.)
         attention = capture_events(
-            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+            "cw.dispatch.review_gates", OrchestratorEventType.SESSION_NEEDS_ATTENTION
         )
         clients = self._clients(tmp_path)
 
@@ -9362,8 +9383,10 @@ class TestApplyStagedDecision:
         SESSION_NEEDS_ATTENTION carrying paused_status=signoff_gate (#1552)."""
         from cw.dispatch import _SIGNOFF_GATE_REASON, apply_staged_decision
 
+        # #1823: _park_signoff_gate now lives in cw.dispatch.review_gates, and
+        # capture_events patches record_event by the *calling* module's binding.
         attention = capture_events(
-            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+            "cw.dispatch.review_gates", OrchestratorEventType.SESSION_NEEDS_ATTENTION
         )
         clients = self._clients(tmp_path)
 
@@ -10366,8 +10389,11 @@ class TestApplyStagedDecision:
         from cw.dev_queue import REVIEW_HEALTH_GATE_DISPOSITION
         from cw.dispatch import apply_staged_decision
 
+        # #1823: _park_review_health_gate now lives in cw.dispatch.review_gates,
+        # and capture_events patches record_event by the *calling* module's
+        # binding.
         attention = capture_events(
-            "cw.dispatch.routing", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+            "cw.dispatch.review_gates", OrchestratorEventType.SESSION_NEEDS_ATTENTION
         )
 
         task = self._make_running_task("RHG-SC-1", stage=Stage.REVIEW)
@@ -10706,6 +10732,261 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.disposition == "review_health_gate"
         assert task.stage == Stage.REVIEW
+
+
+# ---------------------------------------------------------------------------
+# TestBranchStalenessGate (#1823)
+# ---------------------------------------------------------------------------
+
+
+class TestBranchStalenessGate:
+    """GitHub #1823: the fifth REVIEW-scoped gate.
+
+    A ticket whose branch is behind ``origin/<default_branch>`` AND whose
+    intervening main commits touch a file the branch itself touches parks
+    ``BLOCKED_ON_USER``/``branch_behind_main`` instead of advancing or parking
+    under its ordinary sentinel status.
+
+    The git-level overlap detection itself is covered end-to-end against real
+    repos in ``tests/test_dispatch_branch_freshness.py``; these tests pin the
+    *routing* behavior, so they stub ``has_overlapping_branch_staleness`` at
+    its consumption point in ``cw.dispatch.review_gates``.
+    """
+
+    def _make_running_task(
+        self,
+        ticket_id: str,
+        stage: Stage = Stage.REVIEW,
+        scope_hint: str | None = None,
+    ) -> TicketTask:
+        task = _make_ticket_task(
+            ticket_id=ticket_id,
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            stage=stage,
+            scope_hint=scope_hint,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        return task
+
+    def _clients(self, tmp_path: Path) -> dict[str, ClientConfig]:
+        return {
+            "test-client": ClientConfig(name="test-client", workspace_path=tmp_path)
+        }
+
+    def _set_staleness(self, monkeypatch: pytest.MonkeyPatch, *, stale: bool) -> None:
+        """Stub the git-level overlap probe at its consumption point.
+
+        ``review_gates`` imports ``has_overlapping_branch_staleness`` at module
+        top, so the binding that must be patched is the one in
+        ``cw.dispatch.review_gates`` -- not the defining module.
+        """
+        from cw.dispatch import review_gates as rg_mod
+
+        monkeypatch.setattr(
+            rg_mod, "has_overlapping_branch_staleness", lambda _p, _b: stale
+        )
+
+    def test_review_pending_approval_branch_staleness_gate_parks_on_overlap(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """#1823: a small-tier review_pending_approval on a stale branch parks.
+
+        This is the incident shape (#1730/#1805): without the gate the small
+        tier auto-advances REVIEW->FINALIZE on a tree that no longer matches
+        origin/main.
+        """
+        from cw.dev_queue import BRANCH_STALENESS_GATE_DISPOSITION
+        from cw.dispatch import apply_staged_decision
+
+        self._set_staleness(monkeypatch, stale=True)
+        attention = capture_events(
+            "cw.dispatch.review_gates", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+
+        task = self._make_running_task("BSG-1", stage=Stage.REVIEW)
+        task.session_id = "sess-bsg-1"
+        last_result: dict[str, object] = {
+            "status": "review_pending_approval",
+            "scope": {"tier": "small"},
+        }
+        apply_staged_decision(
+            task, "review_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == BRANCH_STALENESS_GATE_DISPOSITION
+        assert task.disposition == "branch_behind_main"
+        assert task.stage == Stage.REVIEW  # not advanced to FINALIZE
+
+        assert len(attention) == 1
+        _event_type, payload, correlation_id = attention[0]
+        assert payload["paused_status"] == "branch_behind_main"
+        assert payload["ticket_id"] == "BSG-1"
+        assert correlation_id == "BSG-1"
+
+    def test_review_pending_approval_large_tier_gate_parks_before_tier_check(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#1823: the staleness gate runs ahead of tier resolution.
+
+        A large-tier row would otherwise park with the verbatim
+        ``review_pending_approval`` disposition -- which ``cw dev-queue
+        approve`` releases. The staleness disposition must win so the row
+        fails ``approve`` closed.
+        """
+        from cw.dev_queue import BRANCH_STALENESS_GATE_DISPOSITION
+        from cw.dispatch import apply_staged_decision
+
+        self._set_staleness(monkeypatch, stale=True)
+
+        task = self._make_running_task("BSG-2", stage=Stage.REVIEW)
+        last_result: dict[str, object] = {
+            "status": "review_pending_approval",
+            "scope": {"tier": "large"},
+        }
+        apply_staged_decision(
+            task, "review_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == BRANCH_STALENESS_GATE_DISPOSITION
+        assert task.disposition != "review_pending_approval"
+
+    def test_review_pending_approval_disjoint_staleness_not_gated(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Option B's negative case: no file overlap → ordinary routing resumes."""
+        from cw.dispatch import apply_staged_decision
+
+        self._set_staleness(monkeypatch, stale=False)
+
+        task = self._make_running_task("BSG-3", stage=Stage.REVIEW)
+        last_result: dict[str, object] = {
+            "status": "review_pending_approval",
+            "scope": {"tier": "small"},
+        }
+        apply_staged_decision(
+            task, "review_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.disposition != "branch_behind_main"
+        assert task.stage == Stage.FINALIZE  # small tier advanced unattended
+
+    def test_stage_complete_branch_staleness_gate_parks(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#1823: Rule 3's stage-success arm gates too, ahead of review health."""
+        from cw.dev_queue import BRANCH_STALENESS_GATE_DISPOSITION
+        from cw.dispatch import apply_staged_decision
+
+        self._set_staleness(monkeypatch, stale=True)
+
+        task = self._make_running_task("BSG-4", stage=Stage.REVIEW)
+        last_result: dict[str, object] = {
+            "status": "stage_complete",
+            "health": {
+                "any_incomplete_risk": True,
+                "recommendation": "EXIT_FOR_HUMAN_REVIEW",
+            },
+        }
+        apply_staged_decision(
+            task, "stage_complete", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        # staleness outranks the #1702 review-health gate at the same site
+        assert task.disposition == BRANCH_STALENESS_GATE_DISPOSITION
+        assert task.stage == Stage.REVIEW
+
+    def test_walk_stage_pointer_forward_branch_staleness_gate_parks(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#1823: the multi-hop stage walk stops at its REVIEW rung."""
+        from cw.dev_queue import BRANCH_STALENESS_GATE_DISPOSITION
+        from cw.dispatch import apply_staged_decision
+
+        self._set_staleness(monkeypatch, stale=True)
+
+        task = self._make_running_task("BSG-5", stage=Stage.IMPL)
+        task.session_id = "sess-bsg-5"
+        apply_staged_decision(
+            task,
+            "blocked",
+            {"status": "blocked", "stage_reached": "stage4b_pr_create"},
+            self._clients(tmp_path),
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == BRANCH_STALENESS_GATE_DISPOSITION
+        assert task.stage == Stage.REVIEW  # walk stopped at the REVIEW rung
+
+    def test_impl_stage_staleness_is_not_gated(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The gate is REVIEW-scoped, mirroring all four sibling gates."""
+        from cw.dispatch import apply_staged_decision
+
+        self._set_staleness(monkeypatch, stale=True)
+
+        task = self._make_running_task("BSG-6", stage=Stage.IMPL)
+        apply_staged_decision(
+            task,
+            "stage_complete",
+            {"status": "stage_complete"},
+            self._clients(tmp_path),
+        )
+
+        assert task.disposition != "branch_behind_main"
+        assert task.stage == Stage.REVIEW  # advanced IMPL->REVIEW unattended
+
+    def test_branch_staleness_gate_disposition_excluded_from_hold_dispositions(
+        self,
+    ) -> None:
+        """A staleness park is pending a *rebase*, not pending an operator "yes".
+
+        Same treatment REVIEW_HEALTH_GATE_DISPOSITION gets: HOLD_DISPOSITIONS
+        membership would also make it eligible for concierge's false-park
+        auto-requeue (same _REAP_ELIGIBLE_DISPOSITIONS_BASE lineage) and defeat
+        the gate.
+        """
+        from cw.dev_queue import BRANCH_STALENESS_GATE_DISPOSITION, HOLD_DISPOSITIONS
+
+        assert BRANCH_STALENESS_GATE_DISPOSITION not in HOLD_DISPOSITIONS
+
+    def test_unknown_client_fails_open(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A task whose client is absent from *clients* cannot resolve a default
+        branch, so the predicate fails open rather than guessing "main"."""
+        from cw.dispatch.review_gates import _should_gate_for_branch_staleness
+
+        self._set_staleness(monkeypatch, stale=True)
+
+        task = self._make_running_task("BSG-7", stage=Stage.REVIEW)
+        assert _should_gate_for_branch_staleness(task, {}) is False
 
 
 # ---------------------------------------------------------------------------

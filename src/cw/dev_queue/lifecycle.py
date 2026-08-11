@@ -122,6 +122,27 @@ REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION = (
     "codex_must_fix_mechanically_rejected"
 )
 
+# Disposition stamped when dispatch's REVIEW-stage routing refuses to advance a
+# ticket whose branch is behind origin/<default_branch> AND whose intervening
+# main commits touch a file the branch itself touches (#1823). The narrow,
+# file-overlap-scoped rule -- a branch that has merely fallen behind, with
+# disjoint churn, is not parked.
+#
+# Shares its literal string value with dispatch.review_gates.
+# _BRANCH_STALENESS_REASON (a SESSION_NEEDS_ATTENTION paused_status) by the
+# same deliberate choice REVIEW_HEALTH_GATE_DISPOSITION / _REVIEW_HEALTH_GATE_
+# REASON already make -- still two constants in two namespaces, do not collapse
+# them.
+#
+# Same set-membership treatment as the two dispositions above, for the same
+# reason. Deliberately NOT a HOLD_DISPOSITIONS member: a stale branch clears by
+# rebasing and re-running, not by an operator saying "proceed anyway", and
+# membership would also silently make it eligible for concierge's false-park
+# auto-requeue recipe (same _REAP_ELIGIBLE_DISPOSITIONS_BASE lineage), which
+# would spin a genuinely stale branch back through the pipeline and defeat the
+# gate outright.
+BRANCH_STALENESS_GATE_DISPOSITION = "branch_behind_main"
+
 # Textually identical to cw.reconcile._shared._NEEDS_SALVAGE_REASON
 # ("needs_salvage") but a SEPARATE constant, not an import of it: _shared
 # imports FROM cw.dev_queue (dev_queue -> reconcile is the only cycle-safe
