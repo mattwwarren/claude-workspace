@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from cw.auto_dev_result import Review
 from cw.codex_review import (
     CODEX_BUDGET_EXHAUSTED,
     CODEX_ERROR,
@@ -24,12 +25,16 @@ from cw.codex_review._capability import (
     _CodexFilesystemCapability,
     _CodexFingerprint,
 )
+from cw.events import read_events
 from cw.executor_diagnostics import diagnostics_bundle_dir
+from cw.models.enums import OrchestratorEventType
 from cw.review_findings import (
+    AcceptedFinding,
     AgentSpecSource,
     AgentSpecStatus,
     ReviewerRunFailure,
     ReviewerRunRecord,
+    ReviewVerdict,
     consolidate_verdict,
 )
 from tests._codex_review_helpers import _task
@@ -40,12 +45,13 @@ from tests._reconcile_helpers import (
     _make_stale_base_repo,
 )
 from tests.conftest import _make_diff, _make_finding, _make_reviewer_doc
+from tests.test_review_adjudication import _make_voided_finding
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from cw.review_findings import ReviewerFindingsDocument
+    from cw.review_findings import Finding, ReviewerFindingsDocument
 
 
 # ---------------------------------------------------------------------------
@@ -617,6 +623,250 @@ class TestSynthesizeCodexReviewResultMechanicalRejection:
 # ---------------------------------------------------------------------------
 # render_verdict_comment
 # ---------------------------------------------------------------------------
+
+
+class TestSynthesizeCodexReviewResultVoidedSuppression:
+    """#1814: an operator-voided finding cannot re-park the codex backend."""
+
+    def _doc(self, *findings: Finding) -> ReviewerFindingsDocument:
+        return _make_reviewer_doc(*findings)
+
+    def test_voided_must_fix_no_longer_blocks(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """Acceptance criterion (b), codex path: an identical re-derived
+        finding is suppressed rather than re-parked."""
+        worktree = make_git_repo("wt-synth-voided")
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[self._doc(_make_finding(severity="MUST_FIX"))],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-voided",
+            default_branch="main",
+            fix_loop_enabled=False,
+            voided_findings=[_make_voided_finding()],
+        )
+
+        assert result.status == "stage_complete"
+        assert verdict is not None
+        assert verdict.blocking is False
+        assert verdict.must_fix == []
+        assert verdict.accepted[0].disposition == "rejected"
+
+    def test_non_matching_must_fix_still_blocks_alongside_a_void(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-synth-voided-mixed")
+        diff = _make_diff(
+            "def broken():", "return 1", files={"src/cw/foo.py": [10, 11]}
+        )
+        live = _make_finding(
+            severity="MUST_FIX",
+            line_start=11,
+            line_end=11,
+            summary="A genuinely new bug",
+            evidence="return 1",
+        )
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[self._doc(_make_finding(severity="MUST_FIX"), live)],
+            failures=[],
+            diff=diff,
+            reviewed_sha="sha",
+            session_id="s-voided-mixed",
+            default_branch="main",
+            fix_loop_enabled=False,
+            voided_findings=[_make_voided_finding()],
+        )
+
+        assert result.status == "blocked"
+        assert result.blocker is not None
+        assert result.blocker.reason == CODEX_MUST_FIX_FINDINGS
+        assert verdict is not None
+        assert verdict.blocking is True
+        assert [f.summary for f in verdict.must_fix] == ["A genuinely new bug"]
+        assert [af.disposition for af in verdict.accepted] == ["rejected", "fixed"]
+
+    def test_suppression_emits_event_correlated_to_the_ticket(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-synth-voided-event")
+        synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[self._doc(_make_finding(severity="MUST_FIX"))],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-voided-event",
+            default_branch="main",
+            fix_loop_enabled=False,
+            voided_findings=[_make_voided_finding()],
+        )
+
+        events = read_events(event_types=[OrchestratorEventType.REVIEW_FINDING_VOIDED])
+        assert len(events) == 1
+        assert events[0].correlation_id == _task().ticket_id
+        assert events[0].payload["file"] == "src/cw/foo.py"
+        assert events[0].payload["severity"] == "MUST_FIX"
+        assert events[0].payload["operator_comment_id"]
+
+    def test_no_voided_findings_leaves_the_blocking_path_intact(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-synth-voided-none")
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[self._doc(_make_finding(severity="MUST_FIX"))],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-voided-none",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+
+        assert result.status == "blocked"
+        assert verdict is not None
+        assert verdict.blocking is True
+        assert (
+            read_events(event_types=[OrchestratorEventType.REVIEW_FINDING_VOIDED]) == []
+        )
+
+
+class TestRenderFindingsIsDispositionAware:
+    """#1814/A1: a suppressed finding must not render as a live one.
+
+    ``_render_findings`` filtered ``verdict.accepted`` on ``severity`` alone,
+    discarding ``disposition`` before the loop body ran — so a voided
+    (``"rejected"``) or #1805-dropped MUST_FIX rendered byte-identically to a
+    still-blocking one. Annotation only: nothing is filtered or reordered.
+    """
+
+    def _verdict(
+        self, *accepted: AcceptedFinding, **overrides: object
+    ) -> ReviewVerdict:
+        must_fix = [
+            af.finding
+            for af in accepted
+            if af.finding.severity == "MUST_FIX" and af.disposition == "fixed"
+        ]
+        payload: dict[str, object] = {
+            "blocking": bool(must_fix),
+            "must_fix": must_fix,
+            "reviewed_sha": "sha",
+            "accepted": list(accepted),
+            "review": Review(
+                must_fix_initial=len(must_fix),
+                should_fix=sum(
+                    1 for af in accepted if af.finding.severity == "SHOULD_FIX"
+                ),
+                fix_cycles_used=0,
+                deferred=0,
+                agents_run=1,
+            ),
+        }
+        payload.update(overrides)
+        return ReviewVerdict.model_validate(payload)
+
+    def _accepted(self, finding: Finding, **overrides: object) -> AcceptedFinding:
+        payload: dict[str, object] = {"finding": finding, "reviewers": ["R"]}
+        payload.update(overrides)
+        return AcceptedFinding.model_validate(payload)
+
+    def _bullet(self, body: str, summary: str) -> str:
+        return next(
+            ln for ln in body.splitlines() if ln.startswith("- ") and summary in ln
+        )
+
+    @pytest.mark.parametrize("severity", ["MUST_FIX", "SHOULD_FIX"])
+    def test_suppressed_finding_line_differs_from_a_live_one(
+        self, severity: str
+    ) -> None:
+        live = _make_finding(severity=severity, summary="still live")
+        suppressed = _make_finding(
+            severity=severity, summary="voided by the operator", evidence="return 1"
+        )
+        body = render_verdict_comment(
+            self._verdict(
+                self._accepted(live),
+                self._accepted(
+                    suppressed,
+                    disposition="rejected",
+                    disposition_detail="voided by operator comment alice@2026-08-11",
+                ),
+            ),
+            fix_loop_enabled=False,
+        )
+
+        assert f"### {severity}" in body
+        live_line = self._bullet(body, "still live")
+        suppressed_line = self._bullet(body, "voided by the operator")
+        assert "suppressed" not in live_line
+        assert "suppressed" in suppressed_line
+        assert "rejected" in suppressed_line
+        assert "voided by operator comment alice@2026-08-11" in suppressed_line
+
+    def test_dropped_disposition_gets_the_identical_treatment(self) -> None:
+        """#1805's ``"dropped"`` exposure is closed by the same change."""
+        dropped = _make_finding(severity="MUST_FIX", summary="nobody decided this")
+        body = render_verdict_comment(
+            self._verdict(
+                self._accepted(
+                    dropped,
+                    disposition="dropped",
+                    disposition_detail="no adjudication entry recorded",
+                )
+            ),
+            fix_loop_enabled=False,
+        )
+
+        line = self._bullet(body, "nobody decided this")
+        assert "suppressed" in line
+        assert "dropped" in line
+
+    def test_blank_disposition_detail_still_annotates(self) -> None:
+        finding = _make_finding(severity="SHOULD_FIX", summary="deferred one")
+        body = render_verdict_comment(
+            self._verdict(self._accepted(finding, disposition="deferred")),
+            fix_loop_enabled=False,
+        )
+
+        line = self._bullet(body, "deferred one")
+        assert "_(suppressed — deferred)_" in line
+
+    def test_headline_count_and_finding_list_never_disagree(self) -> None:
+        """The BLOCKING count reflects only live findings; the list shows both."""
+        live = _make_finding(severity="MUST_FIX", summary="still live")
+        suppressed = _make_finding(
+            severity="MUST_FIX", summary="voided one", evidence="return 1"
+        )
+        body = render_verdict_comment(
+            self._verdict(
+                self._accepted(live),
+                self._accepted(
+                    suppressed, disposition="rejected", disposition_detail="voided"
+                ),
+            ),
+            fix_loop_enabled=False,
+        )
+
+        assert "**BLOCKING** — 1 MUST_FIX finding(s)" in body
+        assert "still live" in body
+        assert "voided one" in body
+
+    def test_all_fixed_verdict_renders_no_annotation(self) -> None:
+        body = render_verdict_comment(
+            self._verdict(self._accepted(_make_finding(severity="MUST_FIX"))),
+            fix_loop_enabled=False,
+        )
+
+        assert "suppressed" not in body
 
 
 class TestRenderVerdictComment:

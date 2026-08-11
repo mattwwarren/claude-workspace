@@ -53,6 +53,30 @@ def test_all_orchestrator_event_types_round_trip() -> None:
         assert restored.id == event.id
 
 
+def test_review_finding_voided_round_trips_and_is_cli_recordable(
+    tmp_events_dir: Path,
+) -> None:
+    """#1814: the suppression audit event is a first-class bus member.
+
+    ``cli.queues._VALID_EVENT_TYPES`` is derived from the enum, so there is no
+    second list to update — this asserts that derivation rather than a copy.
+    """
+    from cw.cli.queues import _VALID_EVENT_TYPES
+
+    ev = events_record_event(
+        OrchestratorEventType.REVIEW_FINDING_VOIDED,
+        {"file": "src/cw/foo.py", "severity": "MUST_FIX"},
+        correlation_id="T-1814",
+    )
+    inbox = tmp_events_dir / "inbox.jsonl"
+    data = json.loads(inbox.read_text().splitlines()[0])
+    assert data["type"] == "review.finding_voided"
+    assert data["correlation_id"] == "T-1814"
+    restored = OrchestratorEvent.model_validate_json(ev.model_dump_json())
+    assert restored.type is OrchestratorEventType.REVIEW_FINDING_VOIDED
+    assert "review.finding_voided" in _VALID_EVENT_TYPES
+
+
 def test_orchestrator_event_defaults() -> None:
     """OrchestratorEvent auto-generates id, created_at, and defaults payload."""
     event = OrchestratorEvent(type=OrchestratorEventType.PR_REGISTERED)
