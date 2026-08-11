@@ -37,11 +37,12 @@ if TYPE_CHECKING:
     from cw.models import TicketTask
 
 # paused_status written to the #1717 companion SESSION_NEEDS_ATTENTION event.
-# Distinct from every existing gate's paused_status (_APPROVAL_GATE_REASON,
-# _FINALIZE_HOLD_REASON, _SIGNOFF_GATE_REASON, _REVIEW_HEALTH_GATE_REASON,
-# routing.py): this signal rides ALONGSIDE whichever of those the ordinary
-# park already emitted, as a second, independent event -- it does not
-# replace or reclassify the ordinary park.
+# Distinct from every existing gate's paused_status (_APPROVAL_GATE_REASON in
+# routing.py; _FINALIZE_HOLD_REASON, _SIGNOFF_GATE_REASON,
+# _REVIEW_HEALTH_GATE_REASON in dispatch/review_gates.py post-#1823): this
+# signal rides ALONGSIDE whichever of those the ordinary park already
+# emitted, as a second, independent event -- it does not replace or
+# reclassify the ordinary park.
 _FINALIZE_REGRESS_REPEAT_REASON = "finalize_regress_repeat"
 
 
@@ -53,7 +54,7 @@ def _consume_finalize_regress_repeat(
     No-ops (returns ``False`` without touching the marker) when
     ``task.stage != Stage.REVIEW`` -- the marker is only ever meaningful on
     REVIEW's re-entry, mirroring the existing convention on
-    ``dispatch.routing._should_gate_for_review_health``. Callers must still
+    ``dispatch.review_gates._should_gate_for_review_health``. Callers must still
     call this at most once per REVIEW-stage routing pass, since the marker is
     cleared as a side effect regardless of the outcome.
 

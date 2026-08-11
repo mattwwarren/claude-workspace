@@ -78,10 +78,11 @@ AWAITING_OPERATOR_DISPOSITION = "awaiting_operator"
 # Disposition stamped when a park is a *proactive* hold -- "an operator asked
 # this ticket to stop before an unattended finalize", not "we could not reach
 # anyone" (RFC 0011 A3, #1160). Textually distinct from
-# dispatch.routing._FINALIZE_HOLD_REASON ("finalize_hold"): that one is a
-# SESSION_NEEDS_ATTENTION paused_status string, this one classifies
-# TicketTask.disposition. Different namespaces -- do not confuse them. Released
-# by an explicit ``cw dev-queue approve``.
+# dispatch.review_gates._FINALIZE_HOLD_REASON ("finalize_hold", moved from
+# dispatch.routing by #1823): that one is a SESSION_NEEDS_ATTENTION
+# paused_status string, this one classifies TicketTask.disposition. Different
+# namespaces -- do not confuse them. Released by an explicit
+# ``cw dev-queue approve``.
 FINALIZE_GATE_HELD_DISPOSITION = "finalize_gate_held"
 
 # Disposition stamped when dispatch's REVIEW-stage routing refuses to advance a

@@ -15,11 +15,15 @@ it would spuriously park healthy tickets on every busy repo.
 Two hard contracts:
 
 * **Fail open, never raise.** Every unresolvable state (no worktree, no
-  ``origin/<default>`` ref, detached HEAD, git missing, a non-zero git exit)
-  resolves to ``False`` — "not stale". A false positive parks a healthy ticket
-  and costs an operator; a false negative costs at most one stale review, which
-  is the status quo this ticket improves on. Mirrors
-  ``worktree.compute_branch_diff_scope``'s identical fail-to-None shape.
+  ``origin/<default>`` ref, git missing, a non-zero git exit) resolves to
+  ``False`` — "not stale". A false positive parks a healthy ticket and costs
+  an operator; a false negative costs at most one stale review, which is the
+  status quo this ticket improves on. Mirrors
+  ``worktree.compute_branch_diff_scope``'s identical fail-to-None shape. Note
+  this module has no special case for a detached HEAD worktree: unlike a
+  missing ref or a git failure, ``git rev-list``/``git diff`` work identically
+  regardless of branch attachment, so a detached HEAD is measured normally,
+  not treated as an unresolvable state.
 * **No network calls.** This runs inside the dispatch loop's
   ``dev_queue_lock()`` critical section. It reads the *already-fetched* local
   ``origin/<default_branch>`` ref and never fetches; detection latency is

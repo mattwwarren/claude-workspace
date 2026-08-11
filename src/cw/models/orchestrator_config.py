@@ -139,7 +139,8 @@ class LaneConfig(BaseModel):
     signoff: Literal["operator"] | None = None
     # Lane-level proactive finalize-hold override (RFC 0011 A3, #1160). None
     # defers to OrchestratorConfig.default_finalize_gate. Overridden by
-    # TicketTask.hold_finalize -- see resolve_hold_finalize (dispatch/routing.py).
+    # TicketTask.hold_finalize -- see resolve_hold_finalize
+    # (dispatch/review_gates.py, moved from dispatch/routing.py by #1823).
     finalize_gate: Literal["manual"] | None = None
     # Lane-level override for the codex backend's autonomous MUST_FIX fix loop
     # (#1553, superseding the removed ClientConfig.codex_fix_loop_enabled from
