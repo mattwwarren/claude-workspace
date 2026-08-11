@@ -147,20 +147,56 @@ class TestHasOverlappingBranchStaleness:
     def test_git_diff_name_only_failure_fails_open(
         self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """git vanishing before the name-only diff → "not stale", never a raise."""
+        """git vanishing before the name-only diff → "not stale", never a raise.
+
+        Raises only on the ``diff`` invocation, deliberately: a blanket raise
+        would short-circuit in ``_is_behind_default`` and never exercise
+        ``_touched_files``' own OSError arm at all.
+        """
+        import subprocess as sp
+
         from cw.dispatch import branch_freshness as bf_mod
 
         repo = _make_stale_branch_repo(
             make_git_repo, "bf-diff-fail", branch_touches=_SHARED_FILE
         )
+        real_run_git = bf_mod._run_git
 
-        def boom(*args: str, cwd: object, check: bool = True) -> None:
-            msg = "git not found"
-            raise OSError(msg)
+        def boom_on_diff(
+            *args: str, cwd: Path, check: bool = True
+        ) -> sp.CompletedProcess[str]:
+            if args and args[0] == "diff":
+                msg = "git not found"
+                raise OSError(msg)
+            return real_run_git(*args, cwd=cwd, check=check)
 
-        monkeypatch.setattr(bf_mod, "_run_git", boom)
+        monkeypatch.setattr(bf_mod, "_run_git", boom_on_diff)
 
         assert bf_mod.has_overlapping_branch_staleness(repo, "main") is False
+
+    def test_branch_side_diff_failure_fails_open(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The *second* ``_touched_files`` call failing also fails open.
+
+        The main-side probe succeeds and only the branch-side one goes
+        unmeasurable — the arm a single blanket-failure test cannot reach.
+        """
+        from cw.dispatch import branch_freshness as bf_mod
+
+        repo = _make_stale_branch_repo(
+            make_git_repo, "bf-branch-side-fail", branch_touches=_SHARED_FILE
+        )
+        calls: list[str] = []
+
+        def only_first_succeeds(_path: Path, rev_range: str) -> set[str] | None:
+            calls.append(rev_range)
+            return {_SHARED_FILE} if len(calls) == 1 else None
+
+        monkeypatch.setattr(bf_mod, "_touched_files", only_first_succeeds)
+
+        assert bf_mod.has_overlapping_branch_staleness(repo, "main") is False
+        assert len(calls) == 2
 
     def test_diff_nonzero_returncode_fails_open(
         self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
