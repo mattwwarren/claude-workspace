@@ -21,6 +21,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   terminal. The `friction_highlights` pointer now also names the specific
   snapshot filename instead of only the diagnostics bundle directory.
   `docs/session-disposition.md` records the reading rule as Gotcha 4.
+- **`session_inspect` emits the full `Session` field set instead of a
+  hand-maintained subset (#1624):** the human-readable session detail view
+  now derives its displayed fields from `Session.model_dump()` rather than a
+  drift-prone, hand-maintained field list — new `Session` fields
+  automatically appear in `session_inspect` output without a matching code
+  change.
 
 - **Degraded/failed reviewer verdict without a stated reason is now a
   contract violation (#1806):** `ReviewerFindingsDocument` rejects
@@ -37,6 +43,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `_OUTPUT_SCHEMA_RULES` now state the reason requirement explicitly.
 
 ### Added
+
+- **`finalize_regress_repeat` companion signal for FINALIZE self-heal
+  round-trips with no new commit (#1717):** a FINALIZE self-heal regress
+  (#770) that reverts a ticket to `Stage.IMPL` but produces no new commit
+  lands back at REVIEW with an unchanged branch head, re-parking the ticket
+  with an identical disposition and burning an attempt each cycle with no
+  operator-visible signal that this is a *repeat*, not a fresh park (the
+  #1644/#1702/#1710 incidents). `src/cw/dispatch/regress_repeat.py` now
+  fires `"finalize_regress_repeat"` alongside the ordinary park whenever a
+  pass genuinely re-parks the task with the branch head unchanged since the
+  regress, and the monitor surfaces it. Also fixes a latent bug in the
+  multi-hop stage-walk path where `_advance_task_pointer` cleared
+  `task.stage_base_ref` before the walk's REVIEW-rung repeat check could
+  read it, meaning the walk-path route could never have detected a genuine
+  repeat despite looking identically wired to the directly-tested routing
+  functions; the REVIEW-stage guard is also deduplicated so it fires once
+  per pass instead of once per call site.
 
 - **`cw doctor` preflight check for missing reviewer agent specs (#1776):**
   new `agent-spec-drift` check runs per configured client, resolving every

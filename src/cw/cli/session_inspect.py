@@ -34,30 +34,16 @@ def _resolve_session(session_ref: str) -> Session | None:
 
 
 def _session_to_dict(session: Session) -> dict[str, object]:
-    """Project a Session to the 17-field wire schema."""
-    return {
-        "id": session.id,
-        "name": session.name,
-        "client": session.client,
-        "purpose": session.purpose.value,
-        "status": session.status.value,
-        "origin": session.origin.value,
-        "started_at": session.started_at.isoformat() if session.started_at else None,
-        "completed_at": (
-            session.completed_at.isoformat() if session.completed_at else None
-        ),
-        "completed_reason": (
-            session.completed_reason.value if session.completed_reason else None
-        ),
-        "idle_at": session.idle_at.isoformat() if session.idle_at else None,
-        "worktree_path": str(session.worktree_path) if session.worktree_path else None,
-        "branch": session.branch,
-        "surface_ref": session.surface_ref,
-        "claude_session_id": session.claude_session_id,
-        "lane": session.lane,
-        "last_result": session.last_result,
-        "cost_usd": session.cost_usd,
-    }
+    """Full Session field set for session show/list --json (GitHub #1624).
+
+    Field count is driven entirely by the Session model, not a hand-listed
+    subset — mirrors PR #1620's ``_task_to_dict`` (GitHub #1618). Note:
+    datetime fields (``started_at``, ``completed_at``, ``idle_at``) now
+    serialize with a "Z" suffix (``model_dump(mode="json")``'s pydantic-core
+    representation) instead of the prior hand-rolled ``.isoformat()``'s
+    "+00:00" — a disclosed, intentional breaking change.
+    """
+    return session.model_dump(mode="json")
 
 
 def _print_session_human(session: Session) -> None:
@@ -79,6 +65,14 @@ def _print_session_human(session: Session) -> None:
     click.echo(f"lane: {session.lane}")
     click.echo(f"last_result: {session.last_result}")
     click.echo(f"cost_usd: {session.cost_usd}")
+    stage = session.stage.value if session.stage else None
+    click.echo(f"stage: {stage}")
+    last_result_source = (
+        session.last_result_source.value if session.last_result_source else None
+    )
+    click.echo(f"last_result_source: {last_result_source}")
+    reap_reason = session.reap_reason.value if session.reap_reason else None
+    click.echo(f"reap_reason: {reap_reason}")
 
 
 def _print_session_list_human(sessions: list[Session]) -> None:

@@ -20,32 +20,16 @@ from cw.cli.session_inspect import (
 )
 from cw.config import load_state, save_state
 from cw.models import (
+    CompletionReason,
+    LastResultSource,
+    ReapReason,
     Session,
     SessionOrigin,
     SessionPurpose,
     SessionStatus,
+    Stage,
 )
 from tests.conftest import _make_daemon_session, _make_diff
-
-_EXPECTED_SESSION_FIELDS = {
-    "id",
-    "name",
-    "client",
-    "purpose",
-    "status",
-    "origin",
-    "started_at",
-    "completed_at",
-    "completed_reason",
-    "idle_at",
-    "worktree_path",
-    "branch",
-    "surface_ref",
-    "claude_session_id",
-    "lane",
-    "last_result",
-    "cost_usd",
-}
 
 
 def _make_session(
@@ -64,25 +48,28 @@ def _make_session(
     last_result: dict[str, object] | None = None,
     cost_usd: float | None = None,
     started_at: datetime | None = None,
+    **overrides: object,
 ) -> Session:
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
-    return _make_daemon_session(
-        id=session_id,
-        name=name,
-        client=client,
-        purpose=purpose,
-        status=status,
-        origin=origin,
-        workspace_path=workspace,
-        worktree_path=worktree_path,
-        branch=branch,
-        surface_ref=surface_ref,
-        claude_session_id=claude_session_id,
-        last_result=last_result,
-        cost_usd=cost_usd,
-        started_at=started_at or datetime(2025, 6, 1, 12, 0, 0, tzinfo=UTC),
-    )
+    kwargs: dict[str, object] = {
+        "id": session_id,
+        "name": name,
+        "client": client,
+        "purpose": purpose,
+        "status": status,
+        "origin": origin,
+        "workspace_path": workspace,
+        "worktree_path": worktree_path,
+        "branch": branch,
+        "surface_ref": surface_ref,
+        "claude_session_id": claude_session_id,
+        "last_result": last_result,
+        "cost_usd": cost_usd,
+        "started_at": started_at or datetime(2025, 6, 1, 12, 0, 0, tzinfo=UTC),
+    }
+    kwargs.update(overrides)
+    return _make_daemon_session(**kwargs)
 
 
 def _seed(session: Session) -> None:
@@ -99,7 +86,7 @@ class TestSessionShow:
         result = runner.invoke(main, ["session", "show", "abcd", "--json"])
         assert result.exit_code == 0
         data = json.loads(result.output)
-        assert set(data.keys()) == _EXPECTED_SESSION_FIELDS
+        assert set(data.keys()) == set(Session.model_fields.keys())
         assert data["id"] == "abcd1234"
         assert data["client"] == "test-client"
 
@@ -163,6 +150,107 @@ class TestSessionShow:
         data = json.loads(result.output)
         assert isinstance(data["worktree_path"], str)
         assert data["worktree_path"] == str(wt)
+
+    def test_show_json_field_drift_guard(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Guards against session_inspect's hand-listed dict silently dropping
+        fields as Session grows (GitHub #1624)."""
+        session = _make_session(tmp_path)
+        _seed(session)
+        runner = CliRunner()
+        result = runner.invoke(main, ["session", "show", "abcd1234", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        missing = set(Session.model_fields.keys()) - set(data.keys())
+        assert not missing, f"session show --json is missing fields: {sorted(missing)}"
+
+    def test_show_json_includes_previously_missing_fields(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        session = _make_session(
+            tmp_path,
+            stage=Stage.REVIEW,
+            last_result_source=LastResultSource.STOP_HOOK_HARVEST,
+            reap_reason=ReapReason.IDLE_STALL,
+            parent_session_id="parent1",
+        )
+        _seed(session)
+        runner = CliRunner()
+        result = runner.invoke(main, ["session", "show", "abcd1234", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["stage"] == "review"
+        assert data["last_result_source"] == "stop_hook_harvest"
+        assert data["reap_reason"] == "idle_stall"
+        assert data["parent_session_id"] == "parent1"
+
+    def test_show_json_datetime_fields_use_z_suffix(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """model_dump(mode="json") emits an RFC3339 "Z" suffix instead of the
+        prior hand-rolled .isoformat()'s "+00:00" — an intentional, disclosed
+        breaking change for session show/list --json (GitHub #1624), matching
+        PR #1620's precedent for TicketTask's created_at."""
+        session = _make_session(
+            tmp_path,
+            started_at=datetime(2025, 6, 1, 12, 0, 0, tzinfo=UTC),
+            completed_at=datetime(2025, 6, 1, 13, 0, 0, tzinfo=UTC),
+            idle_at=datetime(2025, 6, 1, 12, 30, 0, tzinfo=UTC),
+        )
+        _seed(session)
+        runner = CliRunner()
+        result = runner.invoke(main, ["session", "show", "abcd1234", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        for field in ("started_at", "completed_at", "idle_at"):
+            assert data[field].endswith("Z"), data[field]
+            assert "+00:00" not in data[field], data[field]
+
+    def test_show_json_enum_and_path_representations_unchanged(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Regression lock: purpose/status/origin/completed_reason keep
+        emitting the bare .value string under model_dump(mode="json") — same
+        representation as the pre-#1624 hand-listed dict. worktree_path's
+        str(...) representation is covered separately by
+        test_show_worktree_path_serialized_as_str above."""
+        session = _make_session(
+            tmp_path,
+            purpose=SessionPurpose.DEBT,
+            status=SessionStatus.COMPLETED,
+            origin=SessionOrigin.DAEMON,
+            completed_reason=CompletionReason.NORMAL,
+        )
+        _seed(session)
+        runner = CliRunner()
+        result = runner.invoke(main, ["session", "show", "abcd1234", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["purpose"] == "debt"
+        assert data["status"] == "completed"
+        assert data["origin"] == "daemon"
+        assert data["completed_reason"] == "normal"
+
+    def test_show_human_output_surfaces_operator_relevant_fields(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """_print_session_human independently hand-lists fields (GitHub
+        #1624) — guard that stage/last_result_source/reap_reason are
+        rendered with their values, not just present as labels."""
+        session = _make_session(
+            tmp_path,
+            stage=Stage.IMPL,
+            last_result_source=LastResultSource.GIT_SYNTHESIS,
+            reap_reason=ReapReason.WALL_CLOCK_BUDGET,
+        )
+        _seed(session)
+        runner = CliRunner()
+        result = runner.invoke(main, ["session", "show", "abcd1234"])
+        assert result.exit_code == 0
+        assert "stage: impl" in result.output
+        assert "last_result_source: git_synthesis" in result.output
+        assert "reap_reason: wall_clock_budget" in result.output
 
 
 class TestSessionList:
@@ -290,7 +378,21 @@ class TestSessionList:
         data = json.loads(result.output)
         assert isinstance(data, list)
         assert len(data) == 1
-        assert set(data[0].keys()) == _EXPECTED_SESSION_FIELDS
+        assert set(data[0].keys()) == set(Session.model_fields.keys())
+
+    def test_list_json_field_drift_guard(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """Guards against session_inspect's hand-listed dict silently
+        dropping fields as Session grows (GitHub #1624)."""
+        session = _make_session(tmp_path)
+        _seed(session)
+        runner = CliRunner()
+        result = runner.invoke(main, ["session", "list", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        missing = set(Session.model_fields.keys()) - set(data[0].keys())
+        assert not missing, f"session list --json is missing fields: {sorted(missing)}"
 
     def test_list_human_output_shows_headers(
         self, tmp_config_dir: Path, tmp_path: Path
