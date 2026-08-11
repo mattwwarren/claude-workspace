@@ -1006,6 +1006,17 @@ def _classify_finding(
     case into ``evidence_not_in_diff`` at the very next check below —
     intentional; #1743 owns the anchor-resolution axis, #1738 owns
     evidence-quote matching.
+
+    #1816 investigated this exact ``evidence_not_in_diff`` outcome for a
+    whole-function structural claim (evidence describing an aggregate
+    property of a function's body rather than quoting any diff line —
+    reconstructed in ``tests/test_review_findings.py``'s
+    ``Test9491MustFixCaseReconstruction``) and concluded the rejection is
+    CORRECT: such a claim has no diff-resident string form at any offset, so
+    no window-matching change here could ever satisfy it. No predicate
+    change resulted; this is the reviewer/codex output contract's problem
+    (see ``.claude/commands/auto-dev-review.md``'s verbatim-evidence
+    requirement), not a matcher defect.
     """
     if finding.severity not in _VALID_SEVERITIES:
         return "invalid_severity"

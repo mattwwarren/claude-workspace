@@ -30,6 +30,7 @@ from cw.review_findings import (
     _anchor_in_enclosing_def,
     _classify_finding,
     _enclosing_def_span,
+    _evidence_in_claimed_lines,
     _line_reference_valid,
     _reconcile_evidence_window,
     _select_rejected_must_fix,
@@ -1397,6 +1398,48 @@ class Test9491MustFixCaseReconstruction:
     than a verbatim quote of diff-resident text, so it is rejected
     ``evidence_not_in_diff`` — a third axis, distinct from both #1743
     (anchor validity) and #1738 (window construction).
+
+    #1816 root-caused which check actually fails and concluded the rejection
+    is CORRECT — no predicate change, matcher untouched:
+
+    - The failing predicate is ``_evidence_in_claimed_lines``
+      (``src/cw/review_findings.py:821``), specifically its
+      ``_reconcile_evidence_window`` call
+      (``src/cw/review_findings.py:863``), invoked from
+      ``_classify_finding`` (``src/cw/review_findings.py:1018-1021``).
+      ``_line_reference_valid`` (``src/cw/review_findings.py:650``) PASSES —
+      the claimed line 9491 resolves via ordinary #1715 near-line tolerance
+      (nearest added line 9494, distance 3) — and stays completely untouched
+      by #1816; it was never the failing check for this fixture.
+    - The finding's evidence
+      ("...now exceeds the 50-line function threshold and covers two
+      independent contracts.") is not a quote of any diff line — it
+      describes an aggregate property of the whole function body. No amount
+      of window widening can make a structural claim like this satisfy a
+      verbatim-substring check, because the property being asserted has no
+      diff-resident string form at any offset.
+    - Verdict is corroborated by three independent sources: (1) the reviewer
+      contract itself mandates verbatim evidence —
+      ``.claude/commands/auto-dev-review.md:121`` (``"evidence": "<verbatim
+      diff substring>"``) and ``:132`` ("`evidence` MUST be a verbatim
+      substring of the diff text at the claimed lines — `cw review
+      consolidate` (Checkpoint 3a) rejects any finding whose evidence
+      doesn't literally appear there."); (2) ``_classify_finding``'s own
+      docstring already anticipates and names this exact outcome ("This can
+      turn a previously `invalid_line_reference` case into
+      `evidence_not_in_diff` at the very next check below — intentional;
+      #1743 owns the anchor-resolution axis, #1738 owns evidence-quote
+      matching."); (3) the sibling fixture
+      ``TestPromptsGetPurposePromptStructuralFinding`` below reproduces the
+      identical shape on an independent real diff (#1703/
+      ``get_purpose_prompt``), and its own test —
+      ``test_1703_classified_evidence_not_in_diff_matching_production`` — is
+      already named to assert this is expected, real production behavior,
+      not a bug.
+    - Conclusion: the class of finding this fixture reconstructs (a
+      whole-function structural claim with no verbatim diff quote) is a
+      defect in the reviewer/codex output contract, not in this matcher —
+      out of scope for a matcher fix. See #1816 for the full investigation.
     """
 
     def test_9491_line_reference_valid_via_near_line_tolerance(self) -> None:
@@ -1406,6 +1449,27 @@ class Test9491MustFixCaseReconstruction:
         diff = _pr1729_captured_diff()
         finding = Finding(**_PR1729_9491_MUST_FIX_FINDING_KWARGS)
         assert _line_reference_valid(diff, finding) is True
+
+    def test_9491_evidence_check_is_the_specific_failing_predicate(self) -> None:
+        # #1816: locks in WHICH check fails. _line_reference_valid passes
+        # (anchor resolves via ordinary #1715 near-line tolerance -- claimed
+        # 9491 is distance 3 from the nearest genuine added line, 9494) --
+        # only _evidence_in_claimed_lines fails, because finding.evidence is
+        # aggregate prose about the whole function, never a verbatim diff
+        # quote.
+        diff = _pr1729_captured_diff()
+        finding = Finding(**_PR1729_9491_MUST_FIX_FINDING_KWARGS)
+        assert _line_reference_valid(diff, finding) is True
+        assert (
+            _evidence_in_claimed_lines(
+                diff,
+                finding.file,
+                finding.evidence,
+                finding.line_start,
+                finding.line_end,
+            )
+            is False
+        )
 
     def test_9491_classified_evidence_not_in_diff(self) -> None:
         diff = _pr1729_captured_diff()
@@ -1421,7 +1485,12 @@ class Test9491MustFixCaseReconstruction:
         )
         assert accepted == []
         assert rejected[0].reason == "evidence_not_in_diff"
-        assert rejected[0].detail != ""
+        assert rejected[0].detail == (
+            "evidence is 1 line(s) long but the declared range "
+            "line_start=9491, line_end=None spans 1 line(s); no window "
+            "within ±3 lines of the declared range contains the "
+            "evidence text verbatim"
+        )
 
     def test_9491_parks_as_rejected_must_fix_via_consolidate_verdict(self) -> None:
         # Mirrors
