@@ -38,10 +38,12 @@ from cw.codex_review._context import (
     _REVIEWER_ROLE_AGENT_FILES,
     _load_operator_comments,
     _load_pending_operator_comment_marker,
+    _load_voided_findings,
     _select_output_instructions,
 )
 from cw.codex_runner import FakeCodexRunner
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH, SessionOrigin
+from cw.review_adjudication import render_voided_findings_block
 from cw.spawn import _write_hook_context
 from tests._codex_review_helpers import (
     _doc_json,
@@ -52,6 +54,7 @@ from tests._codex_review_helpers import (
     _write,
 )
 from tests.conftest import _make_diff, _make_ticket_task
+from tests.test_review_adjudication import _make_voided_finding
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -409,6 +412,91 @@ class TestLoadOperatorComments:
         assert rendered == (
             "### a (2026-08-10T00:00:00Z)\nBODY1\n\n### b (2026-08-10T01:00:00Z)\nBODY2"
         )
+
+
+class TestLoadVoidedFindings:
+    """#1814: the voided-findings sentinel read, degrading to [] throughout.
+
+    Same tracker gate, same fetch op, and the same never-raise contract as
+    :class:`TestLoadOperatorComments` above — a Stage-3 pass that cannot reach
+    the tracker must still review, it just cannot honor a void it never saw.
+    """
+
+    def _github_repo(self, tmp_path: Path) -> Path:
+        _write(
+            tmp_path / ".claude" / "project-config.yaml",
+            "tracking:\n  primary:\n    system: github-issues\n",
+        )
+        return tmp_path
+
+    def test_returns_empty_when_tracker_unresolvable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _fail_if_called(*_a: object, **_kw: object) -> None:
+            msg = "must not fetch when the tracker is unknown"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments", _fail_if_called
+        )
+        assert _load_voided_findings(tmp_path, "T-1") == []
+
+    def test_returns_empty_on_fetch_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments", lambda *_a, **_kw: None
+        )
+        assert _load_voided_findings(self._github_repo(tmp_path), "T-1") == []
+
+    def test_returns_empty_on_empty_thread(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments", lambda *_a, **_kw: []
+        )
+        assert _load_voided_findings(self._github_repo(tmp_path), "T-1") == []
+
+    def test_returns_empty_when_no_comment_carries_a_sentinel(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments",
+            lambda *_a, **_kw: [{"author": {"login": "a"}, "body": "just prose"}],
+        )
+        assert _load_voided_findings(self._github_repo(tmp_path), "T-1") == []
+
+    def test_parses_the_sentinel_out_of_the_comment_thread(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        entry = _make_voided_finding()
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments",
+            lambda *_a, **_kw: [
+                {"author": {"login": "a"}, "body": "unrelated send-back"},
+                {"author": None, "body": None},
+                {
+                    "author": {"login": "b"},
+                    "body": render_voided_findings_block([entry]),
+                },
+            ],
+        )
+        assert _load_voided_findings(self._github_repo(tmp_path), "T-1") == [entry]
+
+    def test_prepare_review_pass_carries_voided_findings(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The loader's output reaches ``_ReviewPassInputs`` (#1814)."""
+        repo = make_git_repo("wt-prepare-voided")
+        entry = _make_voided_finding()
+        monkeypatch.setattr(
+            "cw.codex_review._context._load_voided_findings",
+            lambda *_a, **_kw: [entry],
+        )
+        prepared = _prepare_review_pass(
+            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-voided"
+        )
+        assert prepared.voided_findings == [entry]
 
 
 class TestLoadPendingOperatorCommentMarker:
@@ -1462,6 +1550,38 @@ class TestPrepareReviewPass:
         assert prepared.roles
         for role in prepared.roles:
             assert "SENDBACK-MARKER-1730" in prepared.prompts_by_role[role]
+
+    def test_prepare_review_pass_fetches_comments_only_once(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#1814 SHOULD_FIX regression guard: one gh call, not two.
+
+        Before the fix, `_load_operator_comments` and `_load_voided_findings`
+        each called `fetch_issue_comments` independently, so every Stage-3
+        pass shelled out to `gh issue view` twice for the identical comment
+        list. `_fetch_ticket_comments` now fetches once and both readers reuse
+        the result — this pins that call count so a future edit that drops
+        the `comments=` passthrough (reintroducing the double-fetch) fails
+        here instead of silently doubling the gh subprocess/API cost again.
+        """
+        repo = self._repo_with_change(
+            make_git_repo, "wt-1814-fetch-once", "github-issues"
+        )
+        calls: list[str] = []
+
+        def _counting_fetch(ticket_id: str, **_kw: object) -> list[dict[str, object]]:
+            calls.append(ticket_id)
+            return [{"author": {"login": "a"}, "body": "some comment"}]
+
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments", _counting_fetch
+        )
+
+        _prepare_review_pass(
+            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-fetch-once"
+        )
+
+        assert len(calls) == 1
 
     def test_prepare_review_pass_omits_comments_when_tracker_not_github(
         self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch

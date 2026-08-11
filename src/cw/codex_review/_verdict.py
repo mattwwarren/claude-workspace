@@ -23,6 +23,7 @@ from cw.codex_review._const import (
 )
 from cw.executor_diagnostics import append_diagnostics_pointer
 from cw.local_runner import _SCHEMA_VERSION, make_blocked, resolve_tier
+from cw.review_adjudication import apply_voided_suppression
 from cw.review_findings import consolidate_verdict
 from cw.worktree import compute_branch_diff_scope
 
@@ -32,7 +33,9 @@ if TYPE_CHECKING:
     from cw.auto_dev_result import Review
     from cw.codex_review._capability import _CodexFilesystemCapability
     from cw.models import TicketTask
+    from cw.review_adjudication import VoidedFinding
     from cw.review_findings import (
+        AcceptedFinding,
         AgentSpecStatus,
         CapturedDiff,
         ReviewerFindingsDocument,
@@ -51,6 +54,16 @@ _log = logging.getLogger(__name__)
 # must never gate/filter/reorder findings (R0, #1555). HIGH is the common
 # case and stays unmarked to keep the common path uncluttered.
 _CONFIDENCE_ANNOTATION = " _({confidence} confidence)_"
+
+# A non-"fixed" disposition means the finding is no longer blocking — voided
+# by an operator ("rejected", #1814), deferred, or never decided ("dropped",
+# #1805). Before this annotation existed, `_render_findings` filtered on
+# severity alone and discarded `disposition` before the loop body ran, so a
+# suppressed MUST_FIX rendered byte-identically to a live one and the posted
+# comment lied about its own contents. Display-only, exactly like
+# _CONFIDENCE_ANNOTATION above: nothing is filtered, reordered, or split into
+# a second heading.
+_DISPOSITION_ANNOTATION = " _(suppressed — {disposition}{detail})_"
 
 
 def _format_failures_detail(
@@ -150,6 +163,7 @@ def synthesize_codex_review_result(
     metrics_by_role: dict[str, ReviewerRunMetrics] | None = None,
     capability: _CodexFilesystemCapability | None = None,
     agent_spec_status: list[AgentSpecStatus] | None = None,
+    voided_findings: list[VoidedFinding] | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Map consolidated review documents to a typed AutoDevResult.
 
@@ -197,6 +211,16 @@ def synthesize_codex_review_result(
     :func:`_derive_health` — a reviewer that ran unspecified still produced a
     document, and its degradation is reported, not adjudicated here.
 
+    ``voided_findings`` (#1814) is the operator-settled REJECT record fetched
+    off the ticket thread. Unlike every optional argument above it is NOT
+    merely recorded: a matching re-derived finding is stamped
+    ``disposition="rejected"`` and drops out of ``must_fix``/``blocking``
+    before the disposition table below is consulted. It has to be applied here
+    rather than at either call site because both of them — ``core.run_review``
+    and the fix loop's ``_rereview`` — reach the blocking check through this
+    function, and a suppression applied at only one would let the same voided
+    finding re-park the run from the other.
+
     ``fix_loop_enabled`` (#1705) is the caller's own already-known fix-loop
     state, threaded only as far as :func:`render_verdict_comment` on the
     blocking branch — it discriminates a fix-loop-disabled single pass from a
@@ -228,6 +252,14 @@ def synthesize_codex_review_result(
             capability,
         ),
         agent_spec_status,
+    )
+    # #1814: applied between consolidation and the disposition table, so every
+    # branch below (blocking, mechanically-rejected, partial, clean) sees the
+    # suppressed state. The returned adjudications are the Claude path's to
+    # record; this path has no ADJUDICATIONS array and needs none — the same
+    # outcome is already stamped on `verdict.accepted`.
+    verdict, _voided_adjudications = apply_voided_suppression(
+        verdict, voided_findings or [], ticket_id=task.ticket_id
     )
     if verdict.blocking:
         blocked = make_blocked(
@@ -299,16 +331,35 @@ def synthesize_codex_review_result(
     return result, verdict
 
 
+def _disposition_annotation(accepted: AcceptedFinding) -> str:
+    """Annotate a finding whose disposition says it is no longer blocking.
+
+    ``""`` for the ``"fixed"`` default (the common case stays uncluttered,
+    same convention as HIGH confidence). ``disposition_detail`` is appended
+    when the producer recorded one — it carries the *why* (which operator
+    comment voided it, which adjudication deferred it), which is the whole
+    point of surfacing this on the posted comment rather than only in the
+    persisted verdict artifact.
+    """
+    if accepted.disposition == "fixed":
+        return ""
+    detail = f": {accepted.disposition_detail}" if accepted.disposition_detail else ""
+    return _DISPOSITION_ANNOTATION.format(
+        disposition=accepted.disposition, detail=detail
+    )
+
+
 def _render_findings(
     verdict: ReviewVerdict, severity: Severity, heading: str
 ) -> list[str]:
-    findings = [
-        af.finding for af in verdict.accepted if af.finding.severity == severity
-    ]
-    if not findings:
+    # Iterates the AcceptedFinding, not just `.finding`, so `disposition` is
+    # still in scope in the loop body (#1814/A1).
+    accepted = [af for af in verdict.accepted if af.finding.severity == severity]
+    if not accepted:
         return []
     lines = [f"### {heading}", ""]
-    for finding in findings:
+    for af in accepted:
+        finding = af.finding
         loc = finding.file
         if finding.line_start is not None:
             loc = f"{loc}:{finding.line_start}"
@@ -317,7 +368,8 @@ def _render_findings(
             if finding.confidence == "HIGH"
             else _CONFIDENCE_ANNOTATION.format(confidence=finding.confidence)
         )
-        lines.append(f"- **{loc}**{annotation} — {finding.summary}")
+        suppression = _disposition_annotation(af)
+        lines.append(f"- **{loc}**{annotation}{suppression} — {finding.summary}")
     lines.append("")
     return lines
 

@@ -1373,6 +1373,51 @@ gate-recipe failure path, this emits no latch and performs no mutation.
 
 `correlation_id` is the `ticket_id`.
 
+### `review.finding_voided`
+
+**Emitter:** `apply_voided_suppression` (`cw.review_adjudication`), reached
+from `synthesize_codex_review_result` (`cw.codex_review._verdict`) on the codex
+backend and from `cw review check-voided` (`cw.cli.review`) on the
+Claude-native backend.
+**Payload:**
+```json
+{
+  "file": "<str>",
+  "severity": "MUST_FIX | SHOULD_FIX | NIT | PRINCIPLE",
+  "summary": "<str>",
+  "operator_comment_id": "<str>",
+  "voided_at": "<str>",
+  "original_rationale": "<str>"
+}
+```
+**Semantics:** GitHub #1814. One event per re-derived review finding that was
+suppressed because its content fingerprint matched a `VoidedFinding` the
+operator had already settled — the finding is stamped
+`disposition="rejected"` and leaves `must_fix`/`blocking` without any reviewer
+or coordinating session adjudicating it in that pass.
+
+That is the whole reason this event is mandatory rather than optional. Every
+other way a finding stops blocking leaves a decision record somewhere in the
+same pass (an `Adjudication` entry, a fix commit, a `RejectedFinding`);
+suppression's record was written on an earlier pass, possibly by a different
+backend, so without this event a finding simply vanishes from one review to
+the next with nothing local explaining why. `apply_voided_suppression` emits
+it inline for that reason — suppressing and recording the suppression are not
+separable steps (see [ADR-0015](adr/0015-voided-finding-suppression-is-content-anchored.md)).
+
+`operator_comment_id` is the `"<author>@<created_at>"` composite the
+coordinating session recorded when it minted the void; `voided_at` and
+`original_rationale` come from the same record, so an operator reading this
+event can find the settling comment without re-fetching the whole thread.
+
+Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`
+(`orchestrator_config.py`): a suppression firing is the *expected* outcome of
+an operator decision they already made, so forwarding it would page them about
+their own instruction being honored. It is an audit trail, consulted when a
+finding's disappearance needs explaining.
+
+`correlation_id` is the `ticket_id`.
+
 ### Operator-attention channel (RFC 0008 W3, #1002)
 
 A server-side filter (`cw.cw_operator_events`) forwards a declarative subset

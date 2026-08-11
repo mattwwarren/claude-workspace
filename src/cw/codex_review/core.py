@@ -44,6 +44,9 @@ def run_review(
     ``fix_loop_enabled`` (#1705) is forwarded to
     :func:`synthesize_codex_review_result`, which threads it into
     :func:`render_verdict_comment` on the blocking branch.
+
+    The prepared pass's ``voided_findings`` (#1814) are forwarded to the same
+    function, which applies them before deciding whether the pass blocks.
     """
     prepared = _prepare_review_pass(
         task, worktree, default_branch, runner=runner, session_id=session_id
@@ -70,4 +73,5 @@ def run_review(
         metrics_by_role=metrics_by_role,
         capability=prepared.capability,
         agent_spec_status=prepared.agent_spec_status,
+        voided_findings=prepared.voided_findings,
     )

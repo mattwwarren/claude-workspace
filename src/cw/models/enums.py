@@ -337,6 +337,17 @@ class OrchestratorEventType(StrEnum):
     # the reviewer, which is why -- unlike SCOPE_ROUTING_DECISION -- it IS in
     # _DEFAULT_OPERATOR_EVENT_TYPES (orchestrator_config.py).
     REQUEUE_REVIEW_DELIVERY_DEGRADED = "requeue.review_delivery_degraded"
+    # GitHub #1814 -- one re-derived review finding was suppressed because it
+    # matched a VoidedFinding the operator had already settled. Namespaced by
+    # its owning module (review_adjudication.py), same convention as
+    # SCOPE_ROUTING_DECISION / REQUEUE_REVIEW_DELIVERY_DEGRADED above.
+    # Mandatory, not optional: suppression is the one act in the review
+    # pipeline that makes a finding disappear without any reviewer or
+    # coordinating session deciding so in that pass, and this event is the
+    # only durable record that it happened. `apply_voided_suppression` emits
+    # it inline for exactly that reason -- suppressing and recording the
+    # suppression are not separable steps (see ADR-0015).
+    REVIEW_FINDING_VOIDED = "review.finding_voided"
 
 
 class DispatchSkipReason(StrEnum):

@@ -51,6 +51,7 @@ from tests.conftest import (
     _make_reviewer_doc,
     _make_ticket_task,
 )
+from tests.test_review_adjudication import _make_voided_finding
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -576,6 +577,68 @@ class TestFixLoopDispositionTracking:
         sf = _accepted(_SF)
         updated = _track_open_findings({}, [sf])
         assert updated == {}
+
+    def test_suppressed_must_fix_never_enters_tracker(self) -> None:
+        """#1814: a voided MUST_FIX must not be handed to the fix agent.
+
+        Before this ticket the filter read ``severity == MUST_FIX`` with no
+        disposition check, so a finding ``apply_voided_suppression`` had just
+        stamped ``"rejected"`` — already removed from ``must_fix``/``blocking``
+        — was still tracked as open and fed to the next cycle's fix prompt.
+        """
+        voided = _accepted(_MF_A).model_copy(
+            update={
+                "disposition": "rejected",
+                "disposition_detail": "suppressed: voided by operator comment",
+            }
+        )
+        still_open = _accepted(_MF_B)
+
+        updated = _track_open_findings({}, [voided, still_open])
+
+        assert list(updated) == [_dedup_key(still_open.finding)]
+
+    def test_previously_tracked_finding_drops_out_once_voided(self) -> None:
+        """A void landing mid-loop retires an already-tracked finding."""
+        af = _accepted(_MF_A)
+        open_findings = {_dedup_key(af.finding): af}
+        voided = af.model_copy(
+            update={
+                "disposition": "rejected",
+                "disposition_detail": "suppressed: voided by operator comment",
+            }
+        )
+
+        assert _track_open_findings(open_findings, [voided]) == {}
+
+
+class TestVoidedFindingNeverEngagesFixLoop:
+    """#1814: a cycle-0 MUST_FIX the operator already voided ends the run."""
+
+    def test_voided_sole_must_fix_returns_with_zero_fix_cycles(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-voided-no-loop")
+        monkeypatch.setattr(
+            "cw.codex_review._context._load_voided_findings",
+            lambda *_a, **_kw: [
+                _make_voided_finding(
+                    severity="MUST_FIX",
+                    file="new.py",
+                    summary="MFA",
+                    evidence="def broken():",
+                )
+            ],
+        )
+        runner = _FixLoopRunner([_MF_DOC])
+
+        result, verdict = _run_loop(runner, worktree)
+
+        assert runner.fix_calls == 0
+        assert result.status == "stage_complete"
+        assert verdict is not None
+        assert verdict.blocking is False
+        assert verdict.accepted[0].disposition == "rejected"
 
 
 # ---------------------------------------------------------------------------

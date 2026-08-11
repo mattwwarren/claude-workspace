@@ -18,6 +18,7 @@ from tests._codex_review_helpers import (
     _task,
 )
 from tests.conftest import _make_reviewer_doc
+from tests.test_review_adjudication import _make_voided_finding
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -100,6 +101,57 @@ class TestPrepareReviewPass:
         # #1773: the prepared pass's per-role agent-spec status reaches the
         # verdict through run_review's synthesis hop.
         assert {s.role for s in verdict.agent_spec_status} == set(prepared.roles)
+
+    def test_run_review_threads_prepared_voided_findings_into_synthesis(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # #1814: same passthrough shape as the #1773 assertion above, for the
+        # voided-findings hop. Covers core.py's own
+        # prepared.voided_findings -> synthesize_codex_review_result threading;
+        # the suppression function itself is unit-tested elsewhere.
+        repo = make_git_repo("wt-prepare-voided-run")
+        _git(repo, "checkout", "-b", "feature")
+        (repo / "mod.py").write_text("def broken():\n", encoding="utf-8")
+        _git(repo, "add", "mod.py")
+        _git(repo, "commit", "-m", "add mod.py")
+
+        monkeypatch.setattr(
+            "cw.codex_review._context._load_voided_findings",
+            lambda *_a, **_kw: [
+                _make_voided_finding(
+                    severity="MUST_FIX",
+                    file="mod.py",
+                    summary="Bug here",
+                    evidence="def broken():",
+                )
+            ],
+        )
+        prepared = _prepare_review_pass(
+            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-voided-run"
+        )
+        results = [_ok_result() for _ in prepared.roles]
+        results[0] = _ok_result(
+            findings=[
+                _finding_payload(
+                    severity="MUST_FIX", file="mod.py", line_start=1, line_end=1
+                )
+            ]
+        )
+        result, verdict = run_review(
+            runner=_SequencedRunner(results),
+            task=_task(),
+            worktree=repo,
+            default_branch="main",
+            model=None,
+            wall_clock_budget_seconds=None,
+            session_id="sess-voided-run",
+            fix_loop_enabled=False,
+        )
+
+        assert verdict is not None
+        assert verdict.blocking is False
+        assert result.status == "stage_complete"
+        assert [af.disposition for af in verdict.accepted] == ["rejected"]
 
 
 # ---------------------------------------------------------------------------
