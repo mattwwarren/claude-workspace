@@ -44,7 +44,11 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 Severity = Literal["MUST_FIX", "SHOULD_FIX", "NIT", "PRINCIPLE"]
-Disposition = Literal["fixed", "rejected", "deferred"]
+# "dropped" (#1805) is the terminal state for an accepted finding that nobody
+# actually decided the fate of: no matching adjudication entry, or a "fixed"
+# claim the fix-cycle diff does not substantiate. It is stamped exclusively by
+# ``cw.review_adjudication`` — ``consolidate_verdict`` never produces it.
+Disposition = Literal["fixed", "rejected", "deferred", "dropped"]
 ReviewerHealthStatus = Literal["ok", "degraded", "failed"]
 Confidence = Literal["HIGH", "MEDIUM", "LOW"]
 # The filesystem-capability mode reviewers actually ran under (#1709); see
@@ -246,11 +250,24 @@ class AcceptedFinding(BaseModel):
     so a survivor of validation/dedup carries the optimistic terminal
     disposition. Downstream consumers (a fix-loop adapter) overwrite it, and
     :func:`derive_review_counts` treats ``"deferred"`` specially.
+
+    ``"dropped"`` (#1805) is never stamped here — only
+    :mod:`cw.review_adjudication` produces it, for a finding no adjudication
+    decision covered or a ``"fixed"`` claim the fix-cycle diff does not
+    substantiate. :func:`consolidate_verdict`'s own contract is unchanged:
+    optimistic default in, adapter overwrites it later.
+
+    ``disposition_detail`` is the free-text "why" paired with the closed
+    ``disposition`` enum, mirroring :attr:`RejectedFinding.detail`'s pairing
+    with its own ``reason`` Literal. Blank for the default disposition; the
+    adjudication rationale (reject/defer) or the downgrade explanation
+    (dropped) otherwise.
     """
 
     finding: Finding
     reviewers: list[str]
     disposition: Disposition = "fixed"
+    disposition_detail: str = ""
 
 
 class ReviewerRunMetrics(TypedDict, total=False):
@@ -384,6 +401,14 @@ class ReviewVerdict(BaseModel):
     disposition is known. It exists so an operator reading a snapshot off disk
     can tell whether its ``rejected_must_fix`` is the one backing the reported
     ``Blocker.details`` (#1729).
+
+    ``unmatched_adjudication_count`` (#1805) is written solely by
+    :func:`cw.review_adjudication.apply_adjudication`: the number of
+    adjudication entries that matched no accepted finding (stale anchor,
+    ambiguous same-location collision, shadowed duplicate). Like
+    ``capability_mode``, it is purely recorded here — nothing in this module
+    reads it back; the approval gate surfaces it so a silently-degraded
+    adjudication is visible rather than invisible.
     """
 
     schema_version: Literal[1] = _REVIEW_VERDICT_SCHEMA_VERSION
@@ -412,6 +437,10 @@ class ReviewVerdict(BaseModel):
     # #1763: see the class docstring — True unless a fix-loop caller explicitly
     # marks this persisted snapshot as a superseded intermediate cycle.
     is_terminal_snapshot: bool = True
+    # #1805: adjudication entries that matched no accepted finding. Additive
+    # and default-0 (the `rejected_must_fix`/`stripped_escalations` precedent):
+    # `consolidate_verdict` never touches it, only `apply_adjudication` does.
+    unmatched_adjudication_count: int = 0
 
 
 class CapturedDiff(BaseModel):

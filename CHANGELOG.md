@@ -8,6 +8,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`plan_unreviewable`/`plan_unsound`/`review_blocked` blocked exits now post
+  their MUST_FIX finding(s) to the tracker (#1815):** these three headless
+  exits carried the blocking finding(s) only inside the `blocked` sentinel's
+  structured payload — no tracker comment was ever posted, so the next round
+  (or a human triaging the ticket) had no visibility into *why* the plan or
+  review was rejected without digging through the session transcript.
+  `.claude/commands/auto-dev-plan.md` and `.claude/commands/auto-dev-review.md`
+  now declare a shared `## Blocking Review Findings` header — the same
+  greppable-fixed-header idiom `## Pending Verification Scan` already uses
+  for the Step 1c park exits (#1650) — and post the persisting station's
+  finding(s) verbatim before exiting. `auto-dev.md`'s decision tables and
+  `docs/headless-contract.md` are updated to note the new comment.
 - **A persisted cycle verdict snapshot no longer disagrees silently with the
   reported blocker (#1763):** the fix loop writes one
   `cycleN-review-verdict.json` per cycle (#1739), but nothing on disk said
@@ -43,6 +55,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `_OUTPUT_SCHEMA_RULES` now state the reason requirement explicitly.
 
 ### Added
+
+- **Claude-native review adjudication seam with `cw review adjudicate`/`verify-fixes` subcommands (#1805):**
+  review findings can now carry an `accepted`/`rejected`/`deferred`/`dropped`
+  disposition and be adjudicated without shelling out to the codex CLI — `cw
+  review adjudicate` records FIX/REJECT/DEFER decisions per finding, `cw
+  review verify-fixes` re-checks `fixed` dispositions against the fix-cycle
+  diff and downgrades unsubstantiated claims to `dropped`, and
+  `.cw/deferred-findings.md` no longer renders adjudication entries that
+  don't match a real finding (and no longer double-counts them in the
+  deferred-count filter).
 
 - **`finalize_regress_repeat` companion signal for FINALIZE self-heal
   round-trips with no new commit (#1717):** a FINALIZE self-heal regress

@@ -733,11 +733,22 @@ class TestSeverityAndDispositionLiterals:
             _make_finding(severity="CRITICAL")
 
     def test_valid_dispositions_round_trip(self) -> None:
-        for disp in ("fixed", "rejected", "deferred"):
+        # "dropped" (#1805) is the state for an accepted finding with no
+        # adjudication decision, or a "fixed" claim that failed diff
+        # verification -- stamped only by cw.review_adjudication.
+        for disp in ("fixed", "rejected", "deferred", "dropped"):
             af = AcceptedFinding(
                 finding=_make_finding(), reviewers=["r"], disposition=disp
             )
             assert af.disposition == disp
+
+    def test_disposition_detail_defaults_blank(self) -> None:
+        af = AcceptedFinding(finding=_make_finding(), reviewers=["r"])
+        assert af.disposition_detail == ""
+
+    def test_unmatched_adjudication_count_defaults_zero(self) -> None:
+        verdict = consolidate_verdict([], _make_diff(), "abc1234")
+        assert verdict.unmatched_adjudication_count == 0
 
     def test_invalid_disposition_rejected(self) -> None:
         with pytest.raises(ValidationError):
