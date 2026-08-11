@@ -196,6 +196,19 @@ class Finding(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _check_no_diff_anchor_file_is_na(self) -> Finding:
+        # The docstring above documents "N/A" as the required literal — a
+        # per-reviewer freeform value here is the exact "unknown_file"
+        # silent-drop this marker exists to close (#1817 review, 2026-08-11).
+        if self.no_diff_anchor and self.file != "N/A":
+            msg = (
+                "a finding with no_diff_anchor=True must have "
+                f'file="N/A" (got file={self.file!r})'
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def _check_line_range(self) -> Finding:
         if (
             self.line_start is not None

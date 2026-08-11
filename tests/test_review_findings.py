@@ -1888,6 +1888,19 @@ class TestNoDiffAnchorFindings:
                 )
             )
 
+    def test_no_diff_anchor_with_non_na_file_raises_validation_error(self) -> None:
+        # #1817 review (2026-08-11): the docstring's "N/A" literal requirement
+        # was documented but unenforced — this is the enforcement.
+        with pytest.raises(ValidationError):
+            Finding.model_validate(
+                _finding_kwargs(
+                    no_diff_anchor=True,
+                    file="src/cw/review_findings.py",
+                    line_start=None,
+                    line_end=None,
+                )
+            )
+
     def test_no_diff_anchor_finding_preserves_reviewer_text(self) -> None:
         finding = _make_finding(
             no_diff_anchor=True,
