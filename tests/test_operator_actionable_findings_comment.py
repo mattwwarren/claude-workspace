@@ -30,6 +30,8 @@ RULE_REFERENCE = "operator-actionable findings comment rule"
 SENTINEL = "operator actionable findings posted: review_operator_actionable"
 EXIT_REASON = "review_operator_actionable"
 
+# The fenced schema block itself, not the prose mention of it further up.
+SCHEMA_SNIPPET_ANCHOR = '<<<REVIEW_FINDINGS\n{"reviewer_role"'
 STEP_3C_ANCHOR = "### Step 3c: Verify the `fixed` claims against the diff (#1805)"
 CHECKPOINT_3A_CLOSING_ANCHOR = (
     "**Headless:** Always run reviewers, then adjudicate every finding per "
@@ -91,14 +93,14 @@ def _step1a_section() -> str:
 def test_review_findings_schema_snippet_documents_no_diff_anchor() -> None:
     """The REVIEW_FINDINGS block reviewers must emit carries the new field."""
     content = _cmd("auto-dev-review.md")
-    window = _after(content, "<<<REVIEW_FINDINGS", span=1200)
+    window = _after(content, SCHEMA_SNIPPET_ANCHOR, span=1200)
     assert "no_diff_anchor" in window
 
 
 def test_reviewer_guidance_pins_the_na_file_literal() -> None:
     """Round-5 Q5: the fixed literal, not a per-reviewer convention."""
     content = _cmd("auto-dev-review.md")
-    window = _after(content, "<<<REVIEW_FINDINGS", span=3000)
+    window = _after(content, SCHEMA_SNIPPET_ANCHOR, span=2000)
     assert '"file": "N/A"' in window
     assert "no_diff_anchor" in window
     assert "line_start" in window
@@ -223,11 +225,14 @@ def test_step3c_scopes_the_override_to_its_two_funnelled_exits() -> None:
 
 
 def test_step3c_override_routes_to_blocked_on_user() -> None:
+    """The exit's routing shape mirrors `plan_deviation`'s, verbatim."""
     section = _step3c_section()
     window = _after(section, EXIT_REASON, span=900)
-    assert "blocked" in window
     assert "stage3_review" in window
     assert "BLOCKED_ON_USER" in window
+    assert "not to finalize" in window
+    # It overrides the round's natural conclusion rather than racing it.
+    assert "instead of" in window
 
 
 # ---------------------------------------------------------------------------

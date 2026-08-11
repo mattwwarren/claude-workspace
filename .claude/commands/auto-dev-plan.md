@@ -28,7 +28,7 @@ For each ticket in the queue:
 
 1. **Tracked tickets:** Read the issue description AND comments via the active
    tracker's fetch ops (`get_issue` + `list_comments` for `linear`; a single
-   `gh issue view <n> --json title,body,comments` for `github-issues`). **Pipeline-authored comment exclusion (#1650):** content inside any comment bearing this file's own fixed headers (`## Pending Verification Scan`, `## Multi-Marker Gate Blocked`, `## Blocking Review Findings`) MUST NOT be treated as an existing plan — in particular, a consolidated park's `### Draft plan (unreviewed — context only)` sub-section is pipeline-authored and unreviewed; resume of pipeline drafts goes through `.cw/plan-draft.md` only (the Step 1a.0 check above). Look for content that constitutes an implementation plan — specifically:
+   `gh issue view <n> --json title,body,comments` for `github-issues`). **Pipeline-authored comment exclusion (#1650):** content in a comment bearing a pipeline fixed header (`## Pending Verification Scan`, `## Multi-Marker Gate Blocked`, `## Blocking Review Findings`, `## Operator-Actionable Review Findings`) MUST NOT be treated as an existing plan — in particular, a consolidated park's `### Draft plan (unreviewed — context only)` sub-section is pipeline-authored and unreviewed; resume of pipeline drafts goes through `.cw/plan-draft.md` only (the Step 1a.0 check above). Look for content that constitutes an implementation plan — specifically:
    - File paths with described changes
    - Phased approach (tests + implementation)
    - Estimated scope (files/lines)
