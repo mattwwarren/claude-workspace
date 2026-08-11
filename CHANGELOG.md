@@ -56,6 +56,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Claude-native review adjudication seam with `cw review adjudicate`/`verify-fixes` subcommands (#1805):**
+  review findings can now carry an `accepted`/`rejected`/`deferred`/`dropped`
+  disposition and be adjudicated without shelling out to the codex CLI — `cw
+  review adjudicate` records FIX/REJECT/DEFER decisions per finding, `cw
+  review verify-fixes` re-checks `fixed` dispositions against the fix-cycle
+  diff and downgrades unsubstantiated claims to `dropped`, and
+  `.cw/deferred-findings.md` no longer renders adjudication entries that
+  don't match a real finding (and no longer double-counts them in the
+  deferred-count filter).
+
 - **`finalize_regress_repeat` companion signal for FINALIZE self-heal
   round-trips with no new commit (#1717):** a FINALIZE self-heal regress
   (#770) that reverts a ticket to `Stage.IMPL` but produces no new commit

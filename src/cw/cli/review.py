@@ -12,6 +12,14 @@ adoption of the same wrapping the Codex adapter already performs in
 ``cw.codex_review`` (#1236) — the CLI is the machine-extraction boundary the
 ``/auto-dev-review`` command's coordinating session calls after each reviewer
 subagent's ``REVIEW_FINDINGS`` block is extracted from its prose response.
+
+``cw review adjudicate <path>`` and ``cw review verify-fixes <path>`` (#1805)
+are the two steps after that: the first stamps the session's own FIX / REJECT
+/ DEFER decisions into the verdict (and renders the matching
+``.cw/deferred-findings.md``), the second downgrades any ``"fixed"``
+disposition the fix-cycle diff does not substantiate. Adjudication stays a
+judgment call made by the coordinating session — these commands only make its
+outcome machine-readable instead of re-typed into two places.
 """
 
 from __future__ import annotations
@@ -21,12 +29,21 @@ from pathlib import Path
 import click
 from pydantic import BaseModel, Field, ValidationError
 
+from cw.atomic import atomic_write_text
 from cw.cli._base import handle_errors, main
 from cw.exceptions import CwError
+from cw.review_adjudication import (
+    Adjudication,
+    apply_adjudication,
+    matched_adjudications,
+    render_deferred_findings_md,
+    verify_fixed_dispositions,
+)
 from cw.review_findings import (
     CapturedDiff,
     ReviewerFindingsDocument,
     ReviewerRunFailure,
+    ReviewVerdict,
     consolidate_verdict,
 )
 
@@ -45,6 +62,26 @@ class _ConsolidateInput(BaseModel):
     diff: str
     reviewed_sha: str
     failed_reviewers: list[ReviewerRunFailure] = Field(default_factory=list)
+
+
+class _AdjudicateInput(BaseModel):
+    """Request envelope for ``cw review adjudicate`` (#1805).
+
+    The verdict is the one ``cw review consolidate`` printed at Checkpoint 3a;
+    the adjudications are one entry per finding the coordinating session
+    bucket-sorted. Same envelope shape as :class:`_ConsolidateInput` — owned by
+    this CLI module, not by the library it calls.
+    """
+
+    verdict: ReviewVerdict
+    adjudications: list[Adjudication] = Field(default_factory=list)
+
+
+class _VerifyFixesInput(BaseModel):
+    """Request envelope for ``cw review verify-fixes`` (#1805)."""
+
+    verdict: ReviewVerdict
+    diff: str
 
 
 def _build_captured_diff(diff_text: str) -> CapturedDiff:
@@ -71,6 +108,24 @@ def _build_captured_diff(diff_text: str) -> CapturedDiff:
         file_line_text=file_line_text,
         file_window_text=file_window_text,
     )
+
+
+def _parse_payload_or_exit[InputT: BaseModel](path: str, model: type[InputT]) -> InputT:
+    """Read PATH ('-' for stdin) and validate it against *model*, or exit 1.
+
+    The three ``cw review`` payload commands share one failure shape —
+    ``field.path: message`` lines on stderr, exit 1 — so they share the
+    reading and validating too rather than letting three copies drift.
+    """
+    from cw.result import _format_errors, _read_json_payload
+
+    payload = _read_json_payload(path)
+    try:
+        return model.model_validate(payload)
+    except ValidationError as exc:
+        for line in _format_errors(exc):
+            click.echo(line, err=True)
+        raise click.exceptions.Exit(1) from exc
 
 
 @main.group(name="review")
@@ -182,15 +237,7 @@ def review_consolidate(
     On success: exits 0, prints the ReviewVerdict as JSON to stdout.
     On failure: exits 1, prints 'field.path: message' lines to stderr.
     """
-    from cw.result import _format_errors, _read_json_payload
-
-    payload = _read_json_payload(path)
-    try:
-        parsed = _ConsolidateInput.model_validate(payload)
-    except ValidationError as exc:
-        for line in _format_errors(exc):
-            click.echo(line, err=True)
-        raise click.exceptions.Exit(1) from exc
+    parsed = _parse_payload_or_exit(path, _ConsolidateInput)
 
     if no_tree_evidence:
         resolved_worktree = None
@@ -204,5 +251,76 @@ def review_consolidate(
         parsed.reviewed_sha,
         worktree=resolved_worktree,
         failed_reviewers=parsed.failed_reviewers,
+    )
+    click.echo(verdict.model_dump_json(indent=2))
+
+
+@review.command(name="adjudicate")
+@click.argument("path")
+@click.option(
+    "--deferred-findings-out",
+    default=None,
+    type=click.Path(path_type=Path),
+    help=(
+        "Also render the rejected/deferred adjudications to this path "
+        "(the .cw/deferred-findings.md artifact Stage 4 Step 4d consumes). "
+        "Nothing is written when every finding was fixed."
+    ),
+)
+@handle_errors
+def review_adjudicate(path: str, deferred_findings_out: Path | None) -> None:
+    """Stamp adjudication outcomes into a ReviewVerdict (#1805).
+
+    PATH is a file path or '-' for stdin. Payload: {"verdict": <the
+    ReviewVerdict from `cw review consolidate`>, "adjudications": [{"severity":
+    ..., "file": ..., "line_start": ..., "line_end": ..., "evidence": ...,
+    "summary": ..., "outcome": "fix|reject|defer", "rationale": ...}]}.
+
+    Each accepted finding is stamped from its matching adjudication entry;
+    a finding no entry covers is stamped "dropped", and blocking/must_fix/
+    review.deferred are recomputed from the stamped result. An entry matching
+    no finding never fails the command — it is counted in the printed
+    verdict's `unmatched_adjudication_count` so the approval gate can see it,
+    and is excluded from the rendered `--deferred-findings-out` artifact (an
+    entry nobody's disposition reflects must not appear there as if it did).
+
+    On success: exits 0, prints the stamped ReviewVerdict as JSON to stdout.
+    On failure: exits 1, prints 'field.path: message' lines to stderr.
+    """
+    parsed = _parse_payload_or_exit(path, _AdjudicateInput)
+    verdict = apply_adjudication(parsed.verdict, parsed.adjudications)
+
+    if deferred_findings_out is not None:
+        applied = matched_adjudications(parsed.verdict.accepted, parsed.adjudications)
+        rendered = render_deferred_findings_md(applied)
+        # "" means every finding was fixed — the documented rule is to omit
+        # the file entirely rather than leave an empty artifact behind.
+        if rendered:
+            deferred_findings_out.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_text(deferred_findings_out, rendered)
+
+    click.echo(verdict.model_dump_json(indent=2))
+
+
+@review.command(name="verify-fixes")
+@click.argument("path")
+@handle_errors
+def review_verify_fixes(path: str) -> None:
+    """Downgrade 'fixed' dispositions the fix-cycle diff does not substantiate.
+
+    PATH is a file path or '-' for stdin. Payload: {"verdict": <the adjudicated
+    ReviewVerdict>, "diff": "<raw unified diff text of the fix cycles>"}.
+
+    A "fixed" finding whose cited file/line the diff never touched becomes
+    "dropped", with the reason in `disposition_detail`. Record-only: no gate
+    is re-evaluated and no fix cycle is triggered — the caller surfaces the
+    downgrade in friction_highlights.
+
+    On success: exits 0, prints the downgraded ReviewVerdict as JSON to stdout.
+    On failure: exits 1, prints 'field.path: message' lines to stderr.
+    """
+    parsed = _parse_payload_or_exit(path, _VerifyFixesInput)
+    verdict = verify_fixed_dispositions(
+        parsed.verdict, _build_captured_diff(parsed.diff)
     )
     click.echo(verdict.model_dump_json(indent=2))

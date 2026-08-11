@@ -350,6 +350,19 @@ class TestDetect:
             == []
         )
 
+    def test_deferred_greater_than_zero_blocks_predicate_directly(self) -> None:
+        """#1805: a genuinely deferred finding blocks the clean-review predicate.
+
+        Direct ``_predicate_holds``-level assertion (the integration-level
+        ``{"deferred": 1}`` case above proves the same via
+        ``_detect_auto_approve_review``). ``review.deferred`` becomes a real
+        count on the Claude-native path once ``apply_adjudication`` is wired in
+        — this pins the decision point that consumes it.
+        """
+        snapshot = _clean_review_snapshot(_clean_result(deferred=1))
+        assert snapshot is not None
+        assert _predicate_holds(snapshot) is False
+
     def test_clean_review_with_zero_agents_run_does_not_satisfy_predicate(
         self,
     ) -> None:
