@@ -407,6 +407,34 @@ class TestVerifyFixedDispositions:
         assert result.accepted[0].disposition_detail == "kept"
         assert caplog.records == []
 
+    def test_downgrade_of_a_must_fix_leaves_blocking_and_must_fix_stale(self) -> None:
+        """Record-only (#1805 R1): a downgrade never re-opens the gate.
+
+        Realistic pipeline shape: apply_adjudication stamps a MUST_FIX
+        'fixed' (blocking becomes False), then verify_fixed_dispositions
+        downgrades it to 'dropped' because the fix-cycle diff never touched
+        it. blocking/must_fix are deliberately left as apply_adjudication set
+        them -- verify_fixed_dispositions relabels the record, it does not
+        recompute the gate. The caller (auto-dev-review.md Step 3c) is
+        responsible for surfacing the downgrade via friction_highlights.
+        """
+        finding = _make_finding(
+            severity="MUST_FIX", file="src/cw/other.py", line_start=10, line_end=10
+        )
+        adjudicated = apply_adjudication(
+            _verdict(_accepted(finding)), [_adjudication(finding, outcome="fix")]
+        )
+        assert adjudicated.blocking is False
+        assert adjudicated.must_fix == []
+
+        result = verify_fixed_dispositions(
+            adjudicated, _make_diff(files={"src/cw/unrelated.py": [1]})
+        )
+
+        assert result.accepted[0].disposition == "dropped"
+        assert result.blocking is False
+        assert result.must_fix == []
+
 
 # Split across two source lines only to stay under the 88-column ruff limit;
 # the rendered artifact is a single line (asserted byte-for-byte below).

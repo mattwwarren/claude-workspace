@@ -34,8 +34,8 @@ second consumer ever needs *this* seam (not merely the ``Disposition`` /
 to write an ADR; until then this docstring is the record of why they differ.
 
 Public surface: :class:`Adjudication`, :data:`AdjudicationOutcome`,
-:func:`apply_adjudication`, :func:`verify_fixed_dispositions`,
-:func:`render_deferred_findings_md`.
+:func:`apply_adjudication`, :func:`matched_adjudications`,
+:func:`verify_fixed_dispositions`, :func:`render_deferred_findings_md`.
 """
 
 from __future__ import annotations
@@ -50,6 +50,7 @@ from cw.review_findings import (
     Disposition,
     Severity,
     _line_reference_valid,
+    derive_review_counts,
 )
 
 if TYPE_CHECKING:
@@ -68,9 +69,6 @@ _OUTCOME_DISPOSITIONS: dict[AdjudicationOutcome, Disposition] = {
 }
 
 _MUST_FIX = "MUST_FIX"
-# The two severities that feed the gate aggregates; NIT/PRINCIPLE never do
-# (mirrors `derive_review_counts`'s own filter).
-_GATE_SEVERITIES = (_MUST_FIX, "SHOULD_FIX")
 
 #: ``disposition_detail`` for a finding no adjudication entry covered.
 NO_ENTRY_DETAIL = "no adjudication entry recorded for this finding"
@@ -213,6 +211,27 @@ def _match_adjudications(
     return matched, unconsumed
 
 
+def matched_adjudications(
+    accepted: list[AcceptedFinding], adjudications: list[Adjudication]
+) -> list[Adjudication]:
+    """The subset of *adjudications* that :func:`apply_adjudication` applies.
+
+    Callers rendering ``.cw/deferred-findings.md`` (or any other artifact
+    derived from the adjudication payload) must filter through this first —
+    passing the raw, unfiltered *adjudications* list to
+    :func:`render_deferred_findings_md` would let an entry that matched no
+    accepted finding (stale anchor, an ambiguous same-location collision, a
+    shadowed duplicate — the exact cases counted in
+    ``ReviewVerdict.unmatched_adjudication_count``) still appear in the
+    rendered markdown as if it had been applied, even though the verdict
+    itself never recorded that decision. That reintroduces this ticket's own
+    "two records disagree" failure one layer down, inside the fix meant to
+    remove it.
+    """
+    matched, _ = _match_adjudications(accepted, adjudications)
+    return list(matched.values())
+
+
 def _stamp(accepted: AcceptedFinding, entry: Adjudication | None) -> AcceptedFinding:
     """Return *accepted* carrying *entry*'s decision (or the no-decision state)."""
     if entry is None:
@@ -278,11 +297,12 @@ def apply_adjudication(
         for af in stamped
         if af.finding.severity == _MUST_FIX and af.disposition == "dropped"
     ]
-    deferred = sum(
-        1
-        for af in stamped
-        if af.disposition == "deferred" and af.finding.severity in _GATE_SEVERITIES
-    )
+    # Borrow derive_review_counts's own deferred-counting rule instead of
+    # duplicating its (severity, disposition) filter here — only `.deferred`
+    # is used; must_fix_initial/should_fix/agents_run from that call are
+    # discarded, since those three stay pinned at the frozen cycle-0 baseline
+    # (see the docstring above), never recomputed from `stamped`.
+    deferred = derive_review_counts(stamped).deferred
     return verdict.model_copy(
         update={
             "accepted": stamped,

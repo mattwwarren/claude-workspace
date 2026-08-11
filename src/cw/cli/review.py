@@ -35,6 +35,7 @@ from cw.exceptions import CwError
 from cw.review_adjudication import (
     Adjudication,
     apply_adjudication,
+    matched_adjudications,
     render_deferred_findings_md,
     verify_fixed_dispositions,
 )
@@ -279,7 +280,9 @@ def review_adjudicate(path: str, deferred_findings_out: Path | None) -> None:
     a finding no entry covers is stamped "dropped", and blocking/must_fix/
     review.deferred are recomputed from the stamped result. An entry matching
     no finding never fails the command — it is counted in the printed
-    verdict's `unmatched_adjudication_count` so the approval gate can see it.
+    verdict's `unmatched_adjudication_count` so the approval gate can see it,
+    and is excluded from the rendered `--deferred-findings-out` artifact (an
+    entry nobody's disposition reflects must not appear there as if it did).
 
     On success: exits 0, prints the stamped ReviewVerdict as JSON to stdout.
     On failure: exits 1, prints 'field.path: message' lines to stderr.
@@ -288,7 +291,8 @@ def review_adjudicate(path: str, deferred_findings_out: Path | None) -> None:
     verdict = apply_adjudication(parsed.verdict, parsed.adjudications)
 
     if deferred_findings_out is not None:
-        rendered = render_deferred_findings_md(parsed.adjudications)
+        applied = matched_adjudications(parsed.verdict.accepted, parsed.adjudications)
+        rendered = render_deferred_findings_md(applied)
         # "" means every finding was fixed — the documented rule is to omit
         # the file entirely rather than leave an empty artifact behind.
         if rendered:

@@ -668,6 +668,43 @@ class TestReviewAdjudicateCommand:
         assert verdict["accepted"][0]["disposition"] == "dropped"
         assert verdict["blocking"] is True
 
+    def test_deferred_findings_out_excludes_unmatched_entry(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """An adjudication entry that matched no finding must not appear in
+        the rendered artifact as if the verdict recorded that decision --
+        the verdict itself stamped this finding "dropped", not "deferred".
+        """
+        out = tmp_path / "deferred-findings.md"
+        accepted = _accepted_payload(line_start=2, line_end=2)
+        payload = {
+            "verdict": _verdict_payload(accepted),
+            "adjudications": [
+                {
+                    "severity": "MUST_FIX",
+                    "file": "src/cw/foo.py",
+                    "line_start": 99,
+                    "line_end": 99,
+                    "summary": "Stale entry",
+                    "outcome": "defer",
+                    "rationale": "stale anchor, matches nothing",
+                }
+            ],
+        }
+        result = runner.invoke(
+            main,
+            ["review", "adjudicate", "-", "--deferred-findings-out", str(out)],
+            input=json.dumps(payload),
+        )
+        assert result.exit_code == 0, result.output
+        verdict = json.loads(result.output)
+        assert verdict["unmatched_adjudication_count"] == 1
+        assert verdict["accepted"][0]["disposition"] == "dropped"
+        # Nothing was actually applied, so the documented "omit the file
+        # entirely when every finding was fixed" rule's sibling case -- no
+        # *applied* rejection/deferral -- also skips the write.
+        assert not out.exists()
+
     def test_deferred_findings_out_writes_documented_block(
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
