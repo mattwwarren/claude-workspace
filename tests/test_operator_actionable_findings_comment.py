@@ -38,7 +38,7 @@ CHECKPOINT_3A_CLOSING_ANCHOR = (
 
 ROW_OPERATOR_ACTIONABLE_ANCHOR = (
     "| S3 accepted MUST_FIX finding whose remedy is outside the diff "
-    '(`no_diff_anchor`) | EXIT `blocked` with `blocker.reason: '
+    "(`no_diff_anchor`) | EXIT `blocked` with `blocker.reason: "
     '"review_operator_actionable"`'
 )
 MEANING_ROW_OPERATOR_ACTIONABLE_ANCHOR = (

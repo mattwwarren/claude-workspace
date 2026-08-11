@@ -58,17 +58,21 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 
-AdjudicationOutcome = Literal["fix", "reject", "defer"]
+AdjudicationOutcome = Literal["fix", "reject", "defer", "operator_action"]
 
-# The three genuine, recorded post-adjudication decisions. Every other
+# The four genuine, recorded post-adjudication decisions. Every other
 # disposition an accepted finding can end at is an absence of decision.
 _OUTCOME_DISPOSITIONS: dict[AdjudicationOutcome, Disposition] = {
     "fix": "fixed",
     "reject": "rejected",
     "defer": "deferred",
+    "operator_action": "operator_actionable",
 }
 
 _MUST_FIX = "MUST_FIX"
+
+#: The one outcome scoped to a single severity (#1817, Decision C2).
+_OPERATOR_ACTION: AdjudicationOutcome = "operator_action"
 
 #: ``disposition_detail`` for a finding no adjudication entry covered.
 NO_ENTRY_DETAIL = "no adjudication entry recorded for this finding"
@@ -104,6 +108,17 @@ class Adjudication(BaseModel):
     ``summary`` is render-only: :func:`render_deferred_findings_md` fills the
     documented ``"<summary>"`` slot from it, so rendering needs no second
     lookup against the verdict.
+
+    ``outcome="operator_action"`` (#1817) is the OPERATOR ACTIONABLE bucket:
+    the session accepts the finding but its remedy is outside this diff, so it
+    is posted to the tracker as an operator checklist item rather than fixed,
+    rejected, or deferred to PR-body time. It is scoped to ``MUST_FIX``
+    severity at the model (Decision C2) — a SHOULD_FIX finding with no diff
+    anchor routes through ordinary DEFER — so the enforcement survives a
+    prose-only edit of ``auto-dev-review.md``'s bucket rules. Its ``rationale``
+    is REQUIRED by the same ``outcome != "fix"`` gate every other non-fix
+    outcome goes through, and must name the concrete action the operator needs
+    to take rather than restate the finding.
     """
 
     severity: Severity
@@ -125,6 +140,23 @@ class Adjudication(BaseModel):
             msg = (
                 f"an adjudication with outcome={self.outcome!r} must record a "
                 "non-empty rationale"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _check_operator_action_is_must_fix(self) -> Adjudication:
+        # #1817 Decision C2: OPERATOR ACTIONABLE is a MUST_FIX-only route.
+        # Enforced here rather than only in auto-dev-review.md's bucket prose
+        # so a SHOULD_FIX can never silently regain the route through an
+        # instruction-file edit — the same reason the rationale gate above is
+        # a model validator rather than a documented convention.
+        if self.outcome == _OPERATOR_ACTION and self.severity != _MUST_FIX:
+            msg = (
+                f"an adjudication with outcome={_OPERATOR_ACTION!r} must have "
+                f"severity={_MUST_FIX!r} (got {self.severity!r}) — a non-"
+                "MUST_FIX finding whose remedy is outside the diff routes "
+                "through ordinary DEFER"
             )
             raise ValueError(msg)
         return self
@@ -258,8 +290,14 @@ def apply_adjudication(
     ``_survivors_only_verdict`` (see the module docstring for why the Codex
     path's inverted ``"deferred"`` semantics do not transfer):
 
-    - ``"fixed"``/``"rejected"``/``"deferred"`` are all genuine recorded
-      decisions post-adjudication — all three stop blocking.
+    - ``"fixed"``/``"rejected"``/``"deferred"``/``"operator_actionable"`` are
+      all genuine recorded decisions post-adjudication — all four stop
+      blocking. ``"operator_actionable"`` (#1817) stopping ``blocking`` here is
+      deliberate and does not make the finding invisible: Stage 3 still exits
+      ``blocked`` for it via a separate prose-level gate keyed on the
+      ``ADJUDICATIONS`` entry (``blocker.reason: "review_operator_actionable"``,
+      ``auto-dev-review.md`` Step 3c), exactly the way ``plan_deviation``
+      already exits independently of ``ReviewVerdict.blocking``.
     - ``"dropped"`` — nobody decided — is the ONLY disposition that still
       counts toward ``must_fix``/``blocking``, erring toward gate failure over
       silent pass-through.
@@ -384,6 +422,12 @@ def render_deferred_findings_md(adjudications: list[Adjudication]) -> str:
     Returns ``""`` when there is nothing to record (every finding was fixed):
     the documented rule is "omit the file entirely", so the caller skips the
     write rather than leaving an empty artifact behind.
+
+    ``operator_action`` entries (#1817) fall through untouched by design — an
+    operator-actionable finding is posted directly to the ticket at
+    Checkpoint 3a under its own header, not deferred to PR-body time, so
+    rendering it here would duplicate it onto a surface whose whole purpose
+    (Step H3's merge-time ticket sweep) it has already bypassed.
     """
     rejected = [a for a in adjudications if a.outcome == "reject"]
     deferred = [a for a in adjudications if a.outcome == "defer"]
