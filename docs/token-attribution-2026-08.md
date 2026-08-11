@@ -117,8 +117,9 @@ current data (see Limitations).
 - ticket 1784 — stages: impl, review, finalize — 58 turns
 - ticket 1788 — stages: impl, review, finalize — 50 turns
 - ticket 1776 — stages: intake, plan — 60 turns (added specifically to
-  restore intake/plan stage coverage lost when two live/growing sessions had
-  to be dropped — see Limitations)
+  restore intake stage coverage lost when two live/growing sessions had to be
+  dropped — see Limitations; plan stage was already covered independently by
+  ticket 1730)
 
 **Workers — lane `bdf6a9bf` (repo `agentic-dev-squad`, 4 distinct tickets,
 all finalize-only in-sample):**
@@ -230,8 +231,11 @@ raw un-isolated payload):**
 - `context.json` — 24,160 tokens extracted (vs. 38,158 raw; 36.7%
   reduction from clause-scoping)
 - `plan.md` — 47,358 tokens extracted (vs. 50,881 raw; 6.9% reduction)
-- `handoff` — 10,778 tokens extracted (0% reduction — every in-sample hit
-  was already a clean `Read` call or command-bounded `cat`; found only in
+- `handoff` — 10,778 tokens extracted (0% reduction — all but one in-sample
+  hit was already a clean `Read` call or command-bounded `cat`; the
+  remaining hit (`agentic-dev-squad` orchestrator, 2,932 tokens) is tagged
+  `upper_bound` in `constituents.json` but carries zero numeric delta from
+  its raw value, so the 10,778 total and 0% reduction stand; found only in
   the 3 orchestrator sessions, never in a worker session — headless
   `/auto-dev` workers don't consume handoff docs)
 - `pr_status` — 3,197 tokens extracted (vs. 18,257 raw; **82.5%**
