@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+from cw.models import CONTEXT_JSON_RELATIVE_PATH, HOOK_CONTEXT_RELATIVE_PATH
+
 COMMANDS = Path(__file__).parent.parent / ".claude" / "commands"
 
 
@@ -55,9 +57,22 @@ def test_review_business_context_bullet_marks_comments_binding() -> None:
 
 def test_review_checkpoint3a_references_pending_operator_comment_marker() -> None:
     """#1730: Checkpoint 3a must name the queue_metadata marker that elevates
-    the live-fetched comments."""
+    the live-fetched comments, and must point at the file it is actually
+    written to. A bare substring check on the marker name alone previously
+    passed unchanged whether the doc named the wrong file (.cw/context.json,
+    which never carries queue_metadata) or the right one -- the same
+    reader/writer path-drift bug already caught, and given a mutation-proof
+    test, on the codex-backend code path (test_codex_review_context.py's
+    test_marker_not_read_from_stage0_ticket_context). This test pins both
+    occurrences (the Orientation banner and Checkpoint 3a's (4c)) to the
+    shared HOOK_CONTEXT_RELATIVE_PATH constant instead."""
     content = _cmd("auto-dev-review.md")
-    assert "queue_metadata.pending_operator_comment" in content
+    hook_path = HOOK_CONTEXT_RELATIVE_PATH.as_posix()
+    marker = "`queue_metadata.pending_operator_comment`"
+    correct = f"`{hook_path}`'s {marker}"
+    wrong = f"`{CONTEXT_JSON_RELATIVE_PATH.as_posix()}`'s {marker}"
+    assert content.count(correct) == 2
+    assert wrong not in content
 
 
 def test_impl_spawn_heading_announces_scope_based_model() -> None:
