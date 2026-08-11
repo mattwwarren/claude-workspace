@@ -186,9 +186,21 @@ weight to dilute it against.
 ### Reviewer (codex; not in this sample — cited per task instruction, not
 re-measured)
 
-cw records **zero** token/usage fields for codex reviewers today (#1710's
-own framing: "cw measures nothing about reviewer cost today"). Two real
-figures exist from prior work, both cited here rather than re-derived:
+**Instrumentation status (corrected post-review — see Limitations).** At
+#1710's filing, cw recorded zero token/usage fields for codex reviewers
+("cw measures nothing about reviewer cost today" — #1710's own framing at
+the time). That is no longer current: #1710 merged 2026-08-07 (PR #1721,
+commit `9c4ebdb2`), and `ReviewerRunRecord` /
+`src/cw/codex_review/_audit_events.py` now carry `input_tokens`,
+`cached_input_tokens`, and `reasoning_tokens` per reviewer run (verified
+2026-08-11 via `grep -rn "input_tokens\|cached_input_tokens\|reasoning_tokens"
+src/cw/review_findings.py src/cw/codex_review/_audit_events.py`). This
+assessment's sample (selected 2026-08-10/11) contains **no reviewer-class
+sessions at all** — codex reviewer figures below are cited from prior
+tickets, not measured from real post-#1710 production data, so the ~3 days
+of production reviewer telemetry that now exists since #1710 landed is an
+unexamined gap (see Limitations). Two real figures exist from prior work,
+both cited here rather than re-derived:
 
 - **#1710**'s plan-stage grounding captured two real JSONL usage snapshots
   from the live `codex exec --json` event stream: a clean run with no tool
@@ -204,8 +216,8 @@ figures exist from prior work, both cited here rather than re-derived:
   evidence, not a benchmark," cache warmth uncontrolled): an ordinary
   isolated codex reviewer invocation cost 47,542 total input tokens (13,824
   cached) vs. 40,605 for a lean-profile invocation (19,200 cached);
-  comparing uncached input specifically, 33,718 vs. 21,405 — roughly 37%
-  lower.
+  comparing uncached input specifically, 33,718 vs. 21,405 — a 12,313-token
+  difference, 36.5% lower.
 
 ## Variable bookkeeping cost
 
@@ -331,18 +343,45 @@ not filed here, since no Work Cloud numbers exist in this assessment to
 substantiate a savings percentage. Evidence: `attribution.json.mcp_detail`,
 `probes.json`.
 
+**Per-configured-server breakdown (~estimated: tool count ×
+`tokens_per_deferred_tool`, 11.43 — `probes.json` variants with
+`kind: "estimated"`; none of these six servers were live-probed directly,
+unlike playwright/chrome-devtools above, which are measured).** This is
+the direct, named answer to #1810's "Linear MCP = 23% of context" headline
+observation, for the local-cw code path this assessment actually measured:
+
+- **Linear** — 37 tools → ~423 tokens ≈ **0.48%** of worker fixed-cost mean
+  (88,260.6). The specific server the issue names, at 1/48th the weight the
+  Work Cloud observation reported.
+- **Notion** — 16 tools → ~183 tokens ≈ **0.21%**
+- **Slack** — 13 tools → ~149 tokens ≈ **0.17%**
+- **Google Calendar** (connector) — 9 tools → ~103 tokens ≈ **0.12%**
+- **Gmail** (connector) — 7 tools → ~80 tokens ≈ **0.09%**
+- **sonarqube** — 17 tools → ~194 tokens ≈ **0.22%** — flagged uncertain in
+  `probes.json` (tool count sourced from a historical allow-list entry, not
+  corroborated by a live `claude mcp list` at probe time)
+
+Sum of all six ≈ 1,132 tokens, well under the 2,044-token `default-real`
+delta already reported above — the two live-connected, measured servers
+(playwright 242, chrome-devtools 356) plus overlap/rounding account for the
+rest. Even Linear alone, the server the issue names by name, does not
+approach a double-digit percentage of local worker fixed cost — reinforcing
+the Work-Cloud-scoping verdict above rather than changing it.
+
 **4. Lean reviewer profiles (#1711 generalization) — reviewer (codex)
 class — CLEARS 10% by #1711's own numbers; already tracked, no new ticket
 drafted.** #1711's probe: 47,542 vs. 40,605 total input tokens (14.6%
-reduction), 33,718 vs. 21,405 uncached (36.7% reduction) — both above the
+reduction), 33,718 vs. 21,405 uncached (36.5% reduction) — both above the
 10% bar. Confidence: **LOW-MEDIUM** — #1711 self-describes its own number
 as "directional evidence, not a benchmark" (single run, cache warmth
 uncontrolled). #1549's call-count multiplier (up to 59 codex calls/ticket
 on large tier with the fix loop enabled) means any confirmed per-call
 saving compounds substantially. **No new ticket is drafted for this lever**
 — #1711 is already open and already scopes exactly this work, including
-citing #1710 (needed prerequisite instrumentation — "cw measures nothing
-about reviewer cost today") as a dependency in its own "Related" section.
+citing #1710 as a prerequisite dependency in its own "Related" section.
+#1710 has since merged (PR #1721, 2026-08-07 — see the Reviewer-class
+section above), so that prerequisite is now satisfied and a real
+before/after benchmark using #1710's landed instrumentation is unblocked.
 Filing a duplicate would violate scope discipline; the actionable
 recommendation is to continue #1711, citing #1549's multiplier as added
 urgency for prioritization.
@@ -455,6 +494,20 @@ probe.
 
 ## Reconciliation & limitations
 
+- **Reviewer-class instrumentation gap (post-review addition).** #1710
+  (per-role codex reviewer token/usage metrics) merged 2026-08-07, three-ish
+  days before this assessment's 2026-08-10/11 sample selection. This
+  assessment's sample contains **no reviewer-class sessions** — the
+  Reviewer-class figures cited above (#1710, #1549, #1711) are pulled from
+  those tickets' own text, not measured from real production data. That
+  means the ~3 days of real post-#1710 reviewer telemetry that now exists
+  in production (`ReviewerRunRecord.input_tokens` /
+  `cached_input_tokens` / `reasoning_tokens`, populated by
+  `src/cw/codex_review/_audit_events.py`) was never pulled into this
+  assessment — an unexamined-data gap, not a measurement. A follow-up pass
+  extending Tasks 1-5's pipeline to the reviewer class using this now-real
+  instrumentation would directly ground #1711's "directional evidence, not
+  a benchmark" caveat in real numbers instead of a single synthetic probe.
 - **chars/4 estimator.** Uncalibrated by design for non-MCP content (Task
   3). The one calibration attempt made in this assessment (Task 4, for MCP
   tool schemas) found the naive chars/4 model breaks entirely against the
