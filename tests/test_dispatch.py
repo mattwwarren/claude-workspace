@@ -11074,6 +11074,16 @@ class TestUnifiedReentryContractCompose:
       #1717's marker → fails if either consumer clears the other's field;
     - ``pending_operator_comment`` survives a non-REVIEW spawn but is consumed
       by a REVIEW spawn → fails if #1730's clear is stamped ungated by stage.
+
+    #1823 extension: that ticket inserted a FIFTH REVIEW-scoped gate
+    (``_should_gate_for_branch_staleness``) directly into this seam — between
+    ``_consume_finalize_regress_repeat`` and the #1702 health gate, on an
+    early-return park path. ``lifecycle.py`` auto-merged with no conflict, so
+    nothing forced the composition to be re-proved. The tests above do NOT
+    reach that path: ``_make_ticket_task`` leaves ``worktree_path`` at ``None``
+    and ``has_overlapping_branch_staleness`` short-circuits to ``False`` there,
+    making the new gate silently inert. The three-way case is therefore pinned
+    explicitly below.
     """
 
     def _make_running_task(
@@ -11245,6 +11255,79 @@ class TestUnifiedReentryContractCompose:
         assert after_review.stage == Stage.REVIEW
         assert after_review.pending_operator_comment is False  # consumed here
         assert after_review.finalize_regress_branch_head == "sha-original"  # not
+
+    def test_branch_staleness_park_composes_with_both_reentry_markers(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        """The three-way compose: #1823's gate parks the very REVIEW re-entry
+        that is simultaneously a #1717 same-branch-head repeat and a #1730
+        send-back carrier.
+
+        #1823 put ``_should_gate_for_branch_staleness`` between #1717's
+        consumption and every downstream gate, on a path that ``return``s
+        early. Three ways that could have broken the contract silently, one
+        assertion each below:
+
+        - the early return skips ``_maybe_emit_finalize_regress_repeat_signal``
+          → #1717's repeat signal is swallowed on exactly the re-entry it
+          exists to surface (the gate's park is a park, not an advance, so the
+          signal must still ride alongside it);
+        - the new gate is placed *ahead* of ``_consume_finalize_regress_repeat``
+          → #1717's oracle is never consumed and the repeat detector latches;
+        - the new park clears session anchors broadly → #1730's marker is
+          dropped before the REVIEW spawn that owns it ever runs.
+        """
+        from cw.dev_queue import BRANCH_STALENESS_GATE_DISPOSITION, _stage_regress
+        from cw.dispatch import apply_staged_decision
+        from cw.dispatch import review_gates as rg_mod
+
+        # Same patch point as TestBranchStalenessGate._set_staleness above:
+        # review_gates imports the probe at module top, so that binding — not
+        # the defining module's — is the one routing actually calls.
+        monkeypatch.setattr(
+            rg_mod, "has_overlapping_branch_staleness", lambda _p, _b: True
+        )
+        repeat_signal = capture_events(
+            "cw.dispatch.regress_repeat",
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        )
+
+        task = self._make_running_task("COMPOSE-5", stage=Stage.FINALIZE)
+        task.stage_base_ref = "sha-original"
+        _stage_regress(task, Stage.IMPL)
+        assert task.finalize_regress_branch_head == "sha-original"
+        assert task.pending_operator_comment is True
+
+        # Same walk back to REVIEW as the one-pass test: no commit landed, so
+        # the branch head still matches the oracle.
+        task.stage = Stage.REVIEW
+        task.stage_base_ref = "sha-original"
+        task.status = QueueItemStatus.RUNNING
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        apply_staged_decision(
+            task,
+            "review_pending_approval",
+            {"status": "review_pending_approval", "scope": {"tier": "small"}},
+            self._clients(tmp_path),
+        )
+
+        # #1823's gate won the park...
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == BRANCH_STALENESS_GATE_DISPOSITION
+        assert task.stage == Stage.REVIEW
+        # ...without swallowing #1717's companion signal or its consumption...
+        assert len(repeat_signal) == 1
+        assert repeat_signal[0][1]["paused_status"] == "finalize_regress_repeat"
+        assert repeat_signal[0][1]["ticket_id"] == "COMPOSE-5"
+        assert task.finalize_regress_branch_head is None
+        # ...and leaving #1730's marker standing for the REVIEW spawn claim,
+        # which is the only consumer entitled to clear it.
+        assert task.pending_operator_comment is True
 
 
 # ---------------------------------------------------------------------------
