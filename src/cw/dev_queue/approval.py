@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 from cw.config import get_client
 from cw.dev_queue.crud import _APPROVABLE_STATUSES, _find_ticket
 from cw.dev_queue.lifecycle import (
+    BRANCH_STALENESS_GATE_DISPOSITION,
     _advance_task_pointer,
     _clear_signoff_gate,
     _plan_is_reviewed,
@@ -190,10 +191,23 @@ def _not_at_approval_gate(session: Session, task: TicketTask) -> bool:
     ``review_pending_approval`` release path), or the task's ``disposition``
     records a park armed by the ``scope_hint`` escalation gate
     (``_APPROVAL_GATE_REASON``, GitHub #1640). ``approve`` proceeds if either
-    condition holds.
+    condition holds -- unless the #1823 branch-staleness override below fires
+    first, which vetoes both.
     """
     from cw.auto_dev_result import SCOPE_GATED_APPROVAL_STATUSES
     from cw.dispatch import _APPROVAL_GATE_REASON
+
+    # #1823: ahead of both conditions below, and returning True unconditionally
+    # rather than joining the `and`. A branch-staleness park leaves the
+    # *sentinel* untouched -- session.last_result.status is still
+    # "review_pending_approval" -- and only diverges task.disposition. So
+    # not_at_status_gate is False and not_at_disposition_gate is True, the
+    # `and` yields False, and the row would read as "at the approval gate":
+    # `approve` would release a ticket whose reviewed tree no longer matches
+    # origin/<default_branch>. The gate must fail closed until the branch is
+    # rebased; recovery is `cw dev-queue requeue`/`drain`, not `approve`.
+    if task.disposition == BRANCH_STALENESS_GATE_DISPOSITION:
+        return True
 
     not_at_status_gate = (
         session.last_result is None

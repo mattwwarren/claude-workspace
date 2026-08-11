@@ -225,6 +225,14 @@ ignore = [
 # top, so claim's own reach back into gating must be function-level. Inline
 # import is the sanctioned mechanism, not a workaround.
 "src/cw/dispatch/claim.py" = ["PLC0415"]
+# review_gates defers cw.dispatch.routing's _resolve_scope_tier (inside
+# _should_gate_for_scope_hint) and _APPROVAL_GATE_REASON (inside
+# _park_scope_hint_gate) to break the routing ↔ review_gates circular
+# dependency (#1823): routing imports review_gates at module top, so
+# review_gates' own reach back into routing must be function-level. Identical
+# shape and rationale to the claim.py entry above. Inline import is the
+# sanctioned mechanism, not a workaround.
+"src/cw/dispatch/review_gates.py" = ["PLC0415"]
 # loop_health defers the cw.doctor.wedge._collapse_blocked_on_user_tasks import
 # inside _reap_session_by_selector to break the wedge ↔ loop_health circular
 # dependency (#1314): wedge imports _gh_pr_states/_reap_session_by_selector from

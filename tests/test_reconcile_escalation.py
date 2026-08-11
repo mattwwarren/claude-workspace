@@ -23,8 +23,9 @@ from tests.conftest import _make_ticket_task
 
 _NOW = datetime(2026, 7, 6, 12, 0, 0, tzinfo=UTC)
 
-# The 7 escalation-eligible (status, disposition) combos per the binding
-# two-branch formula.
+# The escalation-eligible (status, disposition) combos per the binding
+# two-branch formula. Grows as new park classes join _ELIGIBLE_DISPOSITIONS
+# (#1702, #1714, #1823) — deliberately not pinned to a fixed count.
 _ELIGIBLE_COMBOS: list[tuple[QueueItemStatus, str | None]] = [
     (QueueItemStatus.BLOCKED_ON_USER, "ambiguities_pending_resolution"),
     (QueueItemStatus.BLOCKED_ON_USER, "plan_pending_approval"),
@@ -54,6 +55,10 @@ _ELIGIBLE_COMBOS: list[tuple[QueueItemStatus, str | None]] = [
     # review-health gate above — an unresolved, non-operator-initiated quality
     # signal, not a deliberately-armed operator stop.
     (QueueItemStatus.BLOCKED_ON_USER, "codex_must_fix_mechanically_rejected"),
+    # #1823: a branch-staleness park is the same class again — an unresolved,
+    # non-operator-initiated quality signal whose escalation clock starts
+    # immediately, not a deliberately-armed operator stop.
+    (QueueItemStatus.BLOCKED_ON_USER, "branch_behind_main"),
     (QueueItemStatus.AWAITING_OPERATOR_SIGNOFF, None),
     (QueueItemStatus.AWAITING_OPERATOR_SIGNOFF, "signoff_gate"),
     (QueueItemStatus.FAILED, None),
@@ -118,6 +123,19 @@ class TestEligibilityFormula:
             now=fire_time + timedelta(minutes=ESCALATION_PARK_MINUTES)
         )
         assert fired == []
+
+    def test_branch_staleness_park_is_escalation_eligible(self) -> None:
+        """#1823: the disposition constant itself is in the eligible set.
+
+        The parametrized case above proves the *behaviour* off the literal
+        string; this pins the literal to ``BRANCH_STALENESS_GATE_DISPOSITION``
+        so the two can never drift apart silently.
+        """
+        from cw.dev_queue import BRANCH_STALENESS_GATE_DISPOSITION
+        from cw.reconcile.escalation import _ELIGIBLE_DISPOSITIONS
+
+        assert BRANCH_STALENESS_GATE_DISPOSITION == "branch_behind_main"
+        assert BRANCH_STALENESS_GATE_DISPOSITION in _ELIGIBLE_DISPOSITIONS
 
     def test_premises_pending_verification_not_eligible(
         self, tmp_config_dir: Path

@@ -64,6 +64,7 @@ from cw.config import load_effective_clients, load_state
 from cw.dev_queue import (
     _PLAN_SOUNDNESS_MARKER,
     _PLAN_SPEC_MARKER,
+    BRANCH_STALENESS_GATE_DISPOSITION,
     _approve_ticket_locked,
     _marker_version,
     _newest_by_created_at,
@@ -425,12 +426,25 @@ def _detect_auto_approve_review(
     does change (``transition_task_status`` unconditionally clears it on
     every status transition, including a same-status re-park by a fresh
     review session).
+
+    A row parked by the #1823 branch-staleness gate is excluded outright,
+    however clean its sentinel reads — see the inline note at that guard.
     """
     candidates: list[GateRecipeCandidate] = []
     for task in tasks:
         if task.status != QueueItemStatus.BLOCKED_ON_USER:
             continue
         if task.gate_recipe_failed_at is not None:
+            continue
+        # #1823: the five-field clean-review predicate below is derived
+        # entirely from session.last_result, which the branch-staleness gate
+        # never mutates -- it diverges only task.disposition. So a
+        # staleness-parked row satisfies every other condition here and would
+        # be auto-approved on any lane with this recipe enabled, silently
+        # shipping a tree that no longer matches origin/<default_branch>.
+        # Excluded on disposition, mirroring dev_queue.approval's own
+        # fail-closed override for the manual `approve` path.
+        if task.disposition == BRANCH_STALENESS_GATE_DISPOSITION:
             continue
         if task.session_id is None:
             continue

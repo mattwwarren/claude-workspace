@@ -8,6 +8,11 @@ dispatch), ``tick``/``loop`` (tick orchestration and the event loop), and
 ``__init__`` re-exports the full historical public + private surface so every
 ``from cw.dispatch import X`` import site and downstream call path keeps working
 unchanged.
+
+#1823 continued the split with two more submodules, re-exported the same way:
+``review_gates`` (the five REVIEW-scoped gate predicate/park pairs, extracted
+out of ``routing``) and ``branch_freshness`` (ticket-branch staleness against
+``origin/<default_branch>``). A fuller ``routing`` split remains #1728's job.
 """
 
 from __future__ import annotations
@@ -84,43 +89,48 @@ from cw.dispatch.regress_repeat import (
     _consume_finalize_regress_repeat,
     _maybe_emit_finalize_regress_repeat_signal,
 )
+from cw.dispatch.review_gates import (
+    _BRANCH_STALENESS_REASON,
+    _FINALIZE_HOLD_REASON,
+    _REVIEW_HEALTH_GATE_REASON,
+    _SIGNOFF_GATE_REASON,
+    _park_branch_staleness_gate,
+    _park_review_health_gate,
+    _park_scope_hint_gate,
+    _park_signoff_gate,
+    _resolve_health_recommendation,
+    _should_force_hold_finalize,
+    _should_gate_for_branch_staleness,
+    _should_gate_for_review_health,
+    _should_gate_for_scope_hint,
+    _should_gate_for_signoff,
+    resolve_hold_finalize,
+    resolve_signoff,
+)
 from cw.dispatch.routing import (
     _APPROVAL_GATE_REASON,
     _AWAITING_OPERATOR_REASON,
     _EARLIER_STAGE_REPORT_REASON,
-    _FINALIZE_HOLD_REASON,
     _INVALID_STAGE_REASON,
     _PLAN_PARKED_REASON,
-    _REVIEW_HEALTH_GATE_REASON,
     _RULE_GATE_RELEASE,
-    _SIGNOFF_GATE_REASON,
     _STAGE_REACHED_TO_STAGE,
     _UNKNOWN_CLIENT_REASON,
     BREADCRUMB_ELIGIBLE_PAUSED_STATUSES,
     _accumulate_task_cost,
     _classify_sentinel_stage_position,
     _extract_scope_tier,
-    _park_review_health_gate,
-    _park_scope_hint_gate,
-    _park_signoff_gate,
     _persist_carried_context,
     _record_scope_routing_decision,
-    _resolve_health_recommendation,
     _resolve_scope_tier,
     _resolve_stage_walk,
     _route_scope_gated_approval,
     _route_stage_success,
     _route_staged_decision,
-    _should_force_hold_finalize,
-    _should_gate_for_review_health,
-    _should_gate_for_scope_hint,
-    _should_gate_for_signoff,
     _stage_advance_unchecked,
     _StagePosition,
     _walk_stage_pointer_forward,
     apply_staged_decision,
-    resolve_hold_finalize,
-    resolve_signoff,
 )
 from cw.dispatch.tick import (
     DispatchTickResult,
@@ -144,6 +154,7 @@ __all__ = [
     "_AVAILABILITY_PROBE_TIMEOUT_SECONDS",
     "_AVAILABILITY_PROBE_TTL_SECONDS",
     "_AWAITING_OPERATOR_REASON",
+    "_BRANCH_STALENESS_REASON",
     "_CODEX_CAPABILITY_GATE_TIMEOUT_SECONDS",
     "_CODEX_CAPABILITY_PARK_CIRCUIT_THRESHOLD",
     "_CODEX_CAPABILITY_PROBE_TTL_SECONDS",
@@ -193,6 +204,7 @@ __all__ = [
     "_lane_stats_for_client",
     "_maybe_emit_finalize_regress_repeat_signal",
     "_maybe_notify_lane_starved",
+    "_park_branch_staleness_gate",
     "_park_review_health_gate",
     "_park_running_task_blocked_on_user",
     "_park_scope_hint_gate",
@@ -223,6 +235,7 @@ __all__ = [
     "_route_stage_success",
     "_route_staged_decision",
     "_should_force_hold_finalize",
+    "_should_gate_for_branch_staleness",
     "_should_gate_for_review_health",
     "_should_gate_for_scope_hint",
     "_should_gate_for_signoff",
