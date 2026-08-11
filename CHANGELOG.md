@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.33.0] - 2026-08-11
+
 ### Fixed
 
 - **`plan_unreviewable`/`plan_unsound`/`review_blocked` blocked exits now post
