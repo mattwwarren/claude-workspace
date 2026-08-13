@@ -439,6 +439,8 @@ class TestReviewConsolidateCommand:
             # Always emitted, 0 here — only `cw review adjudicate` ever sets
             # it non-zero.
             "unmatched_adjudication_count",
+            "previous_reviewed_sha",
+            "debt",
         }
         assert verdict["unmatched_adjudication_count"] == 0
         assert verdict["capability_mode"] is None
