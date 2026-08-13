@@ -589,9 +589,7 @@ class TestFixInvocation:
         _git(worktree, "add", "fix.py")
 
         with caplog.at_level(logging.WARNING, logger="cw.codex_fix_loop"):
-            sha = _commit_fix_cycle(
-                worktree, cycle=1, findings=[_make_finding()]
-            )
+            sha = _commit_fix_cycle(worktree, cycle=1, findings=[_make_finding()])
 
         assert sha is not None
         assert sha == _head(worktree)
