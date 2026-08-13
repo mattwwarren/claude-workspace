@@ -1387,7 +1387,7 @@ Claude-native backend.
 ```json
 {
   "file": "<str>",
-  "severity": "MUST_FIX | SHOULD_FIX | NIT | PRINCIPLE",
+  "severity": "MUST_FIX | SHOULD_FIX | DEBT | NIT | PRINCIPLE",
   "summary": "<str>",
   "operator_comment_id": "<str>",
   "voided_at": "<str>",
@@ -1419,6 +1419,43 @@ Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`
 an operator decision they already made, so forwarding it would page them about
 their own instruction being honored. It is an audit trail, consulted when a
 finding's disappearance needs explaining.
+
+`correlation_id` is the `ticket_id`.
+
+### `review.treadmill_detected`
+
+**Emitter:** `_emit_treadmill_diagnostic` (`cw.codex_fix_loop_convergence`),
+reached from `_track_open_findings` on every in-loop fix cycle.
+**Payload:**
+```json
+{
+  "file": "<str>",
+  "severity": "MUST_FIX",
+  "summary": "<str>",
+  "fingerprint": ["<file>", "<normalized summary>"],
+  "previous_reviewed_sha": "<str>"
+}
+```
+**Semantics:** GitHub #1837. One event per newly-appearing MUST_FIX finding the
+fix loop's admission gate refused: the finding is on code the latest fix cycle
+did not touch, and it carried neither a `transitive_impact_evidence` quote
+found verbatim in the delta nor a `release_critical_exception` whose evidence
+is present in the current worktree. The finding is promoted into
+`ReviewVerdict.debt` instead of joining the open-findings set.
+
+Same rationale as `review.finding_voided` above: this is the one place a
+MUST_FIX stops blocking without any reviewer or coordinating session
+adjudicating it in that pass, so the refusal needs a durable record of its
+own. `fingerprint` is `review_debt.fingerprint_v1`'s `(file, normalized
+summary)` pair — `null` only for a `file="N/A"` finding, which cannot be
+fingerprinted at all. `previous_reviewed_sha` is the head the refused cycle's
+delta was taken from, so an operator can reconstruct exactly what the gate
+compared against.
+
+Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`
+(`orchestrator_config.py`), for the same reason: a gate refusal is the
+expected steady-state outcome on any branch with pre-existing debt, and the
+debt itself is already surfaced on the posted review comment.
 
 `correlation_id` is the `ticket_id`.
 
