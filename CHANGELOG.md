@@ -8,6 +8,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`cw dev-queue add --stage <plan|impl|review|finalize>` (#1682):** a
+  removed row previously had no direct path back onto the queue at a
+  specific stage — the only recovery was `add` → `cancel` → `requeue
+  --from-cancelled --stage <x>`. `add --stage` closes that gap, reusing
+  `requeue --stage`'s exact vocabulary (now a shared `_STAGE_CHOICES`
+  constant) and its per-client pipeline-membership check (now a shared
+  `_validate_stage_in_pipeline` helper in `cw.dev_queue.crud`, called by both
+  `add_ticket` and `_apply_requeue_stage`). An unrecognized `--stage` value
+  fails loudly at Click's parse step — exit code 2, no row inserted, no
+  silent fallback to the default stage. Enqueuing off-`plan` also stamps
+  `TicketTask.stage_high_water` (matching what the 3-step workaround already
+  produced) and adds `"stage"` to the `TICKET_ENQUEUED` event payload.
+  Omitting the flag preserves today's default behavior exactly. See
+  `docs/dispatch-runbook.md` §2.
+
 - **Unresolved sub-agent spawns are stamped, detected, and routed to a
   terminal disposition (#1646):** a worker that dies (or pauses forever)
   mid-spawn was invisible to every transcript-based signal — no terminal
