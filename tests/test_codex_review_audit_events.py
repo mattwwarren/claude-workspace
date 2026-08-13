@@ -288,3 +288,15 @@ class TestExtractTerminalErrorMessage:
             '{"type":"turn.failed","error":{"message":"second"}}\n'
         )
         assert _extract_terminal_error_message(stdout) == "second"
+
+    def test_malformed_last_turn_failed_does_not_fall_back_to_earlier_valid_one(
+        self,
+    ) -> None:
+        # #1836 review finding: a later turn.failed with no usable
+        # error.message must win with None, not silently resurrect an
+        # earlier, superseded valid message.
+        stdout = (
+            '{"type":"turn.failed","error":{"message":"first"}}\n'
+            '{"type":"turn.failed","error":"boom"}\n'
+        )
+        assert _extract_terminal_error_message(stdout) is None

@@ -152,10 +152,24 @@ class TestSynthesizeCodexReviewResult:
         assert "local_executor" not in result.next_actions[0]
 
     @pytest.mark.parametrize(
-        "reason", [CODEX_BUDGET_EXHAUSTED, CODEX_TIMEOUT, CODEX_ERROR]
+        ("reason", "expect_retry"),
+        [
+            (CODEX_BUDGET_EXHAUSTED, True),
+            (CODEX_TIMEOUT, True),
+            # #1836 review finding: the partial-review branch must derive
+            # retry_eligible the same way the zero-documents branch does — a
+            # capacity blip hitting one role among several must not silently
+            # fall back to non-retry-eligible just because other roles still
+            # produced documents.
+            (CODEX_MODEL_CAPACITY, True),
+            (CODEX_ERROR, None),
+        ],
     )
     def test_partial_review_blocked(
-        self, make_git_repo: Callable[[str], Path], reason: str
+        self,
+        make_git_repo: Callable[[str], Path],
+        reason: str,
+        expect_retry: bool | None,
     ) -> None:
         # Decision 7 (#1236): a non-blocking verdict (no MUST_FIX among the
         # roles that DID run) still blocks when at least one selected role
@@ -177,6 +191,7 @@ class TestSynthesizeCodexReviewResult:
         assert result.status == "blocked"
         assert result.blocker is not None
         assert result.blocker.reason == CODEX_REVIEW_PARTIAL
+        assert result.blocker.retry_eligible == expect_retry
         assert "Performance Reviewer" in result.blocker.details
         assert reason in result.blocker.details
         # The review counts derived from the roles that DID run still survive

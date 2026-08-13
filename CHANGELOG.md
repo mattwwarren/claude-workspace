@@ -75,7 +75,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reason changes: the fine-grained `ExecutorFailureCategory` stays
   `nonzero_exit`, so the persisted diagnostics bundle and every other
   consumer of the shared taxonomy are untouched, and any nonzero exit without
-  that exact phrasing still parks as `CODEX_ERROR`.
+  that exact phrasing still parks as `CODEX_ERROR`. `retry_eligible` is now
+  transient-derived on both the zero-documents *and* partial-review
+  (`CODEX_REVIEW_PARTIAL`) dispositions — a capacity blip hitting one role
+  while others still produced documents (the likelier shape for a
+  concurrently-dispatched review) no longer falls back to non-retry-eligible.
 
 - **`cw queue peek`'s STOP-by-age reason splits "approaches" vs "exceeded"
   wording (#1795):** the STOP-age message now says `age Nmin approaches

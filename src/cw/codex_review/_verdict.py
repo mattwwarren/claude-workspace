@@ -186,7 +186,11 @@ def synthesize_codex_review_result(
       producing one (a partial review) → blocked/CODEX_REVIEW_PARTIAL — a
       review that silently proceeded on an incomplete roster would be exactly
       the "spuriously clean sentinel" risk the ``agents_run`` gate exists to
-      catch (Decision 7, #1236).
+      catch (Decision 7, #1236). ``retry_eligible`` is derived from
+      ``failures`` the same way as the zero-documents branch above (#1836
+      review finding): a capacity blip hitting one role while others still
+      produced documents must not silently fall back to non-retry-eligible
+      just because the roster wasn't a total wipeout.
     - otherwise (documents complete, no MUST_FIX)  → stage_complete
 
     Returns ``(result, verdict)``; ``verdict`` is ``None`` only on the zero-
@@ -284,11 +288,15 @@ def synthesize_codex_review_result(
         )
         return dropped.model_copy(update={"review": verdict.review}), verdict
     if failures:
+        partial_transient = any(
+            f.reason in _TRANSIENT_FAILURE_REASONS for f in failures
+        )
         partial = make_blocked(
             ticket_id=task.ticket_id,
             worktree=worktree,
             reason=CODEX_REVIEW_PARTIAL,
             details=_format_failures_detail(failures, session_id=session_id),
+            retry_eligible=True if partial_transient else None,
             stage_reached=STAGE3_REVIEW,
             next_actions=_CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
         )

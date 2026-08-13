@@ -166,6 +166,11 @@ def _extract_terminal_error_message(stdout: str) -> str | None:
     for event in _iter_events(stdout):
         if event.get("type") != _TURN_FAILED:
             continue
+        # Reset on every turn.failed, even a malformed one — otherwise a
+        # later turn.failed with no usable error.message would silently fall
+        # back to an earlier, superseded message instead of None (#1836
+        # review finding).
+        message = None
         error = event.get("error")
         if not isinstance(error, dict):
             continue
