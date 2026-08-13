@@ -127,6 +127,47 @@ class TestSummarizeStatusChecks:
         assert result["ok"] is True
         assert result["pending_count"] == 1
 
+    def test_pure_infra_cancellation_is_ok(self) -> None:
+        # GitHub #1684: CANCELLED/STARTUP_FAILURE alone (no genuine failure
+        # conclusion in the same run) is a provider-side/infra event, not a
+        # real test/build failure -- ok stays True. failing still lists all
+        # three entries (evidence/display is unchanged, only the boolean).
+        rollup = [
+            _checkrun("COMPLETED", "CANCELLED", name="test (macos-latest)"),
+            _checkrun("COMPLETED", "CANCELLED", name="test (macos-latest) 2"),
+            _checkrun("COMPLETED", "STARTUP_FAILURE", name="runner-boot"),
+        ]
+        result = _summarize_status_checks(rollup)
+        assert result["ok"] is True
+        assert len(result["failing"]) == 3
+
+    def test_genuine_failure_with_cascaded_cancellations_is_not_ok(self) -> None:
+        # A real FAILURE alongside cascaded CANCELLED siblings (GitHub
+        # Actions' own fail-fast cancelling sibling jobs after a real
+        # failure) must still fail -- the infra-only carve-out does not
+        # suppress a genuine failure present in the same run.
+        rollup = [
+            _checkrun("COMPLETED", "FAILURE", name="check-changelog"),
+            _checkrun("COMPLETED", "CANCELLED", name="test (ubuntu-latest)"),
+            _checkrun("COMPLETED", "CANCELLED", name="test (windows-latest)"),
+        ]
+        result = _summarize_status_checks(rollup)
+        assert result["ok"] is False
+        assert any(f["conclusion"] == "FAILURE" for f in result["failing"])
+
+    def test_startup_failure_alone_is_ok(self) -> None:
+        rollup = [_checkrun("COMPLETED", "STARTUP_FAILURE")]
+        result = _summarize_status_checks(rollup)
+        assert result["ok"] is True
+
+    @pytest.mark.parametrize("conclusion", ["TIMED_OUT", "ACTION_REQUIRED", "STALE"])
+    def test_other_genuine_failure_conclusions_alone_are_not_ok(
+        self, conclusion: str
+    ) -> None:
+        rollup = [_checkrun("COMPLETED", conclusion)]
+        result = _summarize_status_checks(rollup)
+        assert result["ok"] is False
+
 
 class TestAttentionState:
     def test_row0_draft_returns_none(self) -> None:
@@ -605,6 +646,58 @@ class TestDerivePrStateCommentReview:
         pr_state = _derive_pr_state(_URL, self_login="the-operator")
         assert pr_state is not None
         assert pr_state.attention_state == "ready_to_approve"
+
+    def test_infra_only_cancellation_is_not_ci_failing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # GitHub #1684: a rollup of only CANCELLED checkruns must not read as
+        # ci_failing -- with everything else defaulted (CLEAN merge state, no
+        # review decision, no reviewers), it falls through to ready_to_approve.
+        monkeypatch.setattr(
+            "cw.pr_hydrate.fetch_pr_view",
+            lambda *_a, **_kw: _pr_view_payload(
+                statusCheckRollup=[
+                    _checkrun("COMPLETED", "CANCELLED"),
+                    _checkrun("COMPLETED", "CANCELLED"),
+                ]
+            ),
+        )
+        pr_state = _derive_pr_state(_URL, self_login=None)
+        assert pr_state is not None
+        assert pr_state.attention_state == "ready_to_approve"
+
+    def test_infra_only_cancellation_with_changes_requested_falls_through_to_changes_requested(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.pr_hydrate.fetch_pr_view",
+            lambda *_a, **_kw: _pr_view_payload(
+                statusCheckRollup=[
+                    _checkrun("COMPLETED", "CANCELLED"),
+                    _checkrun("COMPLETED", "CANCELLED"),
+                ],
+                reviewDecision="CHANGES_REQUESTED",
+            ),
+        )
+        pr_state = _derive_pr_state(_URL, self_login=None)
+        assert pr_state is not None
+        assert pr_state.ci_ok is True
+        assert pr_state.attention_state == "changes_requested"
+
+    def test_infra_only_cancellation_with_zero_reviewers_falls_through_to_no_reviewer(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.pr_hydrate.fetch_pr_view",
+            lambda *_a, **_kw: _pr_view_payload(
+                statusCheckRollup=[_checkrun("COMPLETED", "CANCELLED")],
+                reviewDecision="REVIEW_REQUIRED",
+            ),
+        )
+        pr_state = _derive_pr_state(_URL, self_login=None)
+        assert pr_state is not None
+        assert pr_state.ci_ok is True
+        assert pr_state.attention_state == "no_reviewer"
 
 
 class TestPushPollParity:
@@ -1242,6 +1335,69 @@ class TestHydrateEmitsEvents:
         assert task.pr_state is not None
         assert task.pr_state.is_draft is True
         assert task.pr_state.reviewer_count == 1
+
+    def test_infra_only_transition_does_not_emit_ci_failed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # GitHub #1684: a prior-healthy PR (ci_ok=True) whose latest fetch is
+        # CANCELLED-only must not transition to ci_failing / emit PR_CI_FAILED.
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1",
+                        client="acme",
+                        pr_url=_URL,
+                        pr_state=PrState(
+                            state="OPEN",
+                            ci_ok=True,
+                            hydrated_at=datetime(2000, 1, 1, tzinfo=UTC),
+                        ),
+                    )
+                ]
+            )
+        )
+        monkeypatch.setattr(
+            "cw.pr_hydrate.fetch_pr_view",
+            lambda *_a, **_kw: _pr_view_payload(
+                statusCheckRollup=[
+                    _checkrun("COMPLETED", "CANCELLED"),
+                    _checkrun("COMPLETED", "CANCELLED"),
+                ]
+            ),
+        )
+        hydrate_pr_states(OrchestratorConfig())
+        events = read_events(event_types=[OrchestratorEventType.PR_CI_FAILED])
+        assert events == []
+
+    def test_genuine_failure_transition_still_emits_ci_failed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1",
+                        client="acme",
+                        pr_url=_URL,
+                        pr_state=PrState(
+                            state="OPEN",
+                            ci_ok=True,
+                            hydrated_at=datetime(2000, 1, 1, tzinfo=UTC),
+                        ),
+                    )
+                ]
+            )
+        )
+        monkeypatch.setattr(
+            "cw.pr_hydrate.fetch_pr_view",
+            lambda *_a, **_kw: _pr_view_payload(
+                statusCheckRollup=[_checkrun("COMPLETED", "FAILURE")]
+            ),
+        )
+        hydrate_pr_states(OrchestratorConfig())
+        events = read_events(event_types=[OrchestratorEventType.PR_CI_FAILED])
+        assert len(events) == 1
 
 
 class TestMultiTaskRouting:
