@@ -666,7 +666,7 @@ class TestDerivePrStateCommentReview:
         assert pr_state is not None
         assert pr_state.attention_state == "ready_to_approve"
 
-    def test_infra_only_cancellation_with_changes_requested_falls_through_to_changes_requested(
+    def test_infra_only_cancellation_with_changes_requested_falls_through(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
