@@ -26,9 +26,11 @@ from cw.events import record_event
 from cw.gh import FETCH_COMMENTS_TIMEOUT, fetch_issue_comments, post_issue_comment
 from cw.models import (
     DEFAULT_LANE,
+    DEFAULT_STAGE,
     OrchestratorEventType,
     QueueItemStatus,
     SessionOrigin,
+    Stage,
     TicketTask,
 )
 from cw.native_daemon import get_native_daemon_client
@@ -41,6 +43,11 @@ from ._group import dev_queue
 # distinct from lifecycle.py's `_PLAN_SPEC_MARKER`/`_PLAN_SOUNDNESS_MARKER`
 # pair (the coded plan-quality-review gate). See GitHub #1419.
 _PLAN_APPROVED_MARKER = "<!-- auto-dev-plan-approved -->"
+
+# Stage vocabulary shared by `dev-queue add --stage` and `dev-queue requeue
+# --stage` (GitHub #1682) -- HARDEN is excluded, matching requeue's original
+# precedent. A single constant keeps the two `click.Choice`s from drifting.
+_STAGE_CHOICES = ("plan", "impl", "review", "finalize")
 
 
 @dev_queue.command(name="add")
@@ -84,6 +91,18 @@ _PLAN_APPROVED_MARKER = "<!-- auto-dev-plan-approved -->"
         " (RFC 0011 A3)."
     ),
 )
+@click.option(
+    "--stage",
+    "stage_override",
+    type=click.Choice(_STAGE_CHOICES),
+    default=None,
+    help=(
+        "Stage to enqueue this ticket at (default: plan). Shares the same"
+        " stage vocabulary as `cw dev-queue requeue --stage` — see"
+        " docs/dispatch-runbook.md for the recovery scenario this covers"
+        " (GitHub #1682)."
+    ),
+)
 @handle_errors
 def dev_queue_add(
     tickets: tuple[str, ...],
@@ -93,6 +112,7 @@ def dev_queue_add(
     lane_name: str,
     signoff: Literal["operator"] | None,
     hold_finalize: bool,
+    stage_override: str | None,
 ) -> None:
     """Enqueue one or more tickets for dispatch."""
     config = load_orchestrator_config()
@@ -100,6 +120,12 @@ def dev_queue_add(
     # (the --post-marker shape) rather than a click.Choice like --signoff;
     # translate it to the model's Literal here, at the single call site.
     hold_finalize_value: Literal["manual"] | None = "manual" if hold_finalize else None
+    # Computed once outside the per-ticket loop, matching hold_finalize_value's
+    # existing pattern. Only reachable with a value already validated by
+    # Click's Choice, so Stage(...) cannot raise here.
+    stage_value: Stage = (
+        Stage(stage_override) if stage_override is not None else DEFAULT_STAGE
+    )
     for ticket_id in tickets:
         resolved = resolve_client(ticket_id, config, client)
         try:
@@ -111,6 +137,7 @@ def dev_queue_add(
                 lane=lane_name,
                 signoff=signoff,
                 hold_finalize=hold_finalize_value,
+                stage=stage_value,
             )
         except ValidationError as exc:
             msg = f"Invalid ticket '{ticket_id}': {exc.errors()[0]['msg']}"
@@ -128,7 +155,12 @@ def dev_queue_add(
             continue
         record_event(
             OrchestratorEventType.TICKET_ENQUEUED,
-            {"ticket_id": ticket_id, "client": resolved, "priority": priority},
+            {
+                "ticket_id": ticket_id,
+                "client": resolved,
+                "priority": priority,
+                "stage": task.stage.value,
+            },
         )
         click.echo(f"Enqueued {ticket_id} -> {resolved} (priority={priority})")
 
@@ -296,7 +328,7 @@ def dev_queue_approve(ticket_id: str, client: str | None, post_marker: bool) -> 
 @click.option(
     "--stage",
     "stage_override",
-    type=click.Choice(["plan", "impl", "review", "finalize"]),
+    type=click.Choice(_STAGE_CHOICES),
     default=None,
     help="Stage to requeue at (default: current stage). Forward-only.",
 )
