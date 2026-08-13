@@ -167,8 +167,7 @@ class TestEligibilityFormula:
 
         assert _UNRESOLVED_SUBAGENT_SPAWN_REASON not in _REAP_ELIGIBLE_DISPOSITIONS_BASE
         assert (
-            _UNRESOLVED_SUBAGENT_SPAWN_REASON
-            not in _FALSE_PARK_ELIGIBLE_DISPOSITIONS
+            _UNRESOLVED_SUBAGENT_SPAWN_REASON not in _FALSE_PARK_ELIGIBLE_DISPOSITIONS
         )
 
     def test_premises_pending_verification_not_eligible(

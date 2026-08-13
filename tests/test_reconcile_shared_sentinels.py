@@ -2496,18 +2496,14 @@ class TestReadUnresolvedSubagentSpawn:
         """unresolved_count > 0 → True."""
         from cw.reconcile._shared import _read_unresolved_subagent_spawn
 
-        self._write_context(
-            tmp_path, {"agent_spawn_stamp": {"unresolved_count": 1}}
-        )
+        self._write_context(tmp_path, {"agent_spawn_stamp": {"unresolved_count": 1}})
         assert _read_unresolved_subagent_spawn(tmp_path) is True
 
     def test_false_when_count_is_zero(self, tmp_path: Path) -> None:
         """A resolved spawn (count back to 0) → False."""
         from cw.reconcile._shared import _read_unresolved_subagent_spawn
 
-        self._write_context(
-            tmp_path, {"agent_spawn_stamp": {"unresolved_count": 0}}
-        )
+        self._write_context(tmp_path, {"agent_spawn_stamp": {"unresolved_count": 0}})
         assert _read_unresolved_subagent_spawn(tmp_path) is False
 
     def test_false_when_absent(self, tmp_path: Path) -> None:
@@ -2528,9 +2524,7 @@ class TestReadUnresolvedSubagentSpawn:
         """``True`` is an int in Python — it must not read as a live count."""
         from cw.reconcile._shared import _read_unresolved_subagent_spawn
 
-        self._write_context(
-            tmp_path, {"agent_spawn_stamp": {"unresolved_count": True}}
-        )
+        self._write_context(tmp_path, {"agent_spawn_stamp": {"unresolved_count": True}})
         assert _read_unresolved_subagent_spawn(tmp_path) is False
 
     def test_fail_open_on_malformed_json(self, tmp_path: Path) -> None:

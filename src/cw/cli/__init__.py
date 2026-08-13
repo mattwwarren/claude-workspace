@@ -13,6 +13,7 @@ from __future__ import annotations
 
 # Command submodules — imported for their command-registration side effects.
 from cw.cli import (
+    agent_spawn_stamp,
     channels,
     config_cmds,
     focus,
@@ -90,6 +91,7 @@ __all__ = [
     "_spawn_complete_impl",
     "_spawn_create_impl",
     "_transcript_age_seconds",
+    "agent_spawn_stamp",
     "channels",
     "config_cmds",
     "focus",

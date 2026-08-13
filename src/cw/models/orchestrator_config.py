@@ -100,6 +100,23 @@ CONTEXT_JSON_RELATIVE_PATH: Path = Path(".cw", "context.json")
 # pointed at .cw/context.json and silently always returned False.
 HOOK_CONTEXT_RELATIVE_PATH: Path = Path(".claude", "cw-context.json")
 
+# Keys of the ``agent_spawn_stamp`` object inside cw-context.json (#1646).
+# Three modules touch this one object across two layers that cannot import
+# each other -- ``cw.spawn`` seeds it, ``cw.cli.agent_spawn_stamp``'s
+# PreToolUse/PostToolUse pair increments and decrements it, and
+# ``cw.reconcile._shared`` reads it during phantom classification. They live
+# beside HOOK_CONTEXT_RELATIVE_PATH for exactly the reason its own docstring
+# gives: a reader that hand-types the literal is one typo away from silently
+# always returning the default, the defect #1730 shipped.
+#
+# Shape: {"unresolved_count": int, "last_stamped_at": isoformat str | None}.
+# A counter rather than a flag because Claude Code can dispatch several
+# subagent tool_use blocks in one assistant turn, so two Pre hooks can fire
+# before either Post does -- a boolean would lose the second spawn.
+AGENT_SPAWN_STAMP_KEY = "agent_spawn_stamp"
+AGENT_SPAWN_UNRESOLVED_COUNT_KEY = "unresolved_count"
+AGENT_SPAWN_LAST_STAMPED_AT_KEY = "last_stamped_at"
+
 
 class StageExecutorConfig(BaseModel):
     """Executor configuration for a single pipeline stage (RFC 0005 A1, dormant)."""

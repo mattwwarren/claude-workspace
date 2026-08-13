@@ -3044,12 +3044,9 @@ class TestUnresolvedSubagentSpawnDisposition:
 
         by_id = {t.ticket_id: t for t in load_dev_queue().tasks}
         assert (
-            by_id["uss-mixed-flagged"].disposition
-            == _UNRESOLVED_SUBAGENT_SPAWN_REASON
+            by_id["uss-mixed-flagged"].disposition == _UNRESOLVED_SUBAGENT_SPAWN_REASON
         )
-        assert (
-            by_id["uss-mixed-plain"].disposition == ReapReason.PHANTOM_SURFACE.value
-        )
+        assert by_id["uss-mixed-plain"].disposition == ReapReason.PHANTOM_SURFACE.value
 
     def test_dirty_worktree_with_unresolved_spawn_uses_distinct_disposition(
         self,
@@ -3214,9 +3211,7 @@ class TestUnresolvedSubagentSpawnDisposition:
             unresolved_subagent_spawn=True,
         )
 
-        _act_on_phantom_candidates(
-            state, [candidate], now=now, config=_auto_config()
-        )
+        _act_on_phantom_candidates(state, [candidate], now=now, config=_auto_config())
 
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == "uss-nopolicy-1")
         assert t.status == QueueItemStatus.BLOCKED_ON_USER
