@@ -59,7 +59,7 @@ def test_pm_reviewer_adopted_match_is_suppressed_not_downgraded() -> None:
     content = _agent("product-manager-reviewer.md")
     window = _after(content, "Matches an entry in `## Adopted Assumptions`", span=400)
     assert "suppress the candidate ambiguity entirely" in window
-    assert "downgrade it to a note" not in window
+    assert "do not downgrade it to a note" in window
 
 
 def test_pm_reviewer_states_park_asymmetry() -> None:
