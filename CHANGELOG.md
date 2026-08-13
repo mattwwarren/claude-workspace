@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`codex_review` gets its own blocked `next_actions` label (#1835):** added
+  an optional `next_actions` override to `local_runner.make_blocked`, and a
+  new `_CODEX_REVIEW_BLOCKED_NEXT_ACTIONS` constant so `codex_review`'s four
+  blocked-result call sites no longer inherit `local_runner`'s
+  LocalExecutor-specific `user_resolve_local_executor_failure` default. A
+  Codex CLI subprocess failure was previously mislabeled as a
+  LocalExecutor/aider failure, costing a full transcript dig to diagnose.
+
 ## [1.33.0] - 2026-08-11
 
 ### Fixed
