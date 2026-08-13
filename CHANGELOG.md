@@ -6,10 +6,43 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`codex_review` gets its own blocked `next_actions` label (#1835):** added
+  an optional `next_actions` override to `local_runner.make_blocked`, and a
+  new `_CODEX_REVIEW_BLOCKED_NEXT_ACTIONS` constant so `codex_review`'s four
+  blocked-result call sites no longer inherit `local_runner`'s
+  LocalExecutor-specific `user_resolve_local_executor_failure` default. A
+  Codex CLI subprocess failure was previously mislabeled as a
+  LocalExecutor/aider failure, costing a full transcript dig to diagnose.
+
 ## [1.33.0] - 2026-08-11
 
 ### Fixed
 
+- **A MUST_FIX finding whose remedy is outside the diff now has an
+  operator-actionable route instead of being silently dropped (#1817):** a
+  reviewer finding whose fix is not a code change at all — an acceptance
+  criterion demanding a follow-up ticket that was never filed (#1764) — had no
+  honest way to be expressed. Reviewers invented a fake `file` value, which
+  `_classify_finding` then mechanically rejected as `unknown_file`, routing a
+  genuine MUST_FIX into #1714's operator park behind an anchor nobody could
+  trust. `Finding` gains an explicit `no_diff_anchor` marker (with `file`
+  pinned to the literal `"N/A"` and line anchors rejected outright), and
+  `_classify_finding` short-circuits to acceptance on it before any anchoring
+  check runs. `Disposition` gains `"operator_actionable"` and
+  `AdjudicationOutcome` gains `"operator_action"` mapped to it — a genuine
+  recorded decision that stops blocking the verdict, scoped to `MUST_FIX`
+  severity at the model so a SHOULD_FIX cannot regain the route through a
+  prose-only edit. `.claude/commands/auto-dev-review.md` declares a fourth
+  adjudication bucket, a `## Operator-Actionable Review Findings` tracker
+  checklist rule triggered by the adjudication entry (not by the exit reason),
+  and a `blocker.reason: "review_operator_actionable"` override wired at
+  Step 3c. A finding that is *also* NON_DEFERRABLE never reaches the new
+  bucket — it keeps exiting `plan_deviation` — so that exit is folded into the
+  #1815 blocking-findings comment rule as a third trigger site, closing the
+  one blocked-exit door that rule did not cover. `auto-dev.md`,
+  `auto-dev-plan.md` and `docs/headless-contract.md` are updated to match.
 - **`plan_unreviewable`/`plan_unsound`/`review_blocked` blocked exits now post
   their MUST_FIX finding(s) to the tracker (#1815):** these three headless
   exits carried the blocking finding(s) only inside the `blocked` sentinel's

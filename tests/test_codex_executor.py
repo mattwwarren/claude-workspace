@@ -795,6 +795,26 @@ def test_make_blocked_stage_reached_override(tmp_path: Path) -> None:
     assert result.blocker.stage == "stage3_review"
 
 
+def test_make_blocked_next_actions_backward_compat(tmp_path: Path) -> None:
+    """make_blocked without next_actions defaults to the LocalExecutor label —
+    the 13 existing callers that don't pass it must see no behavior change
+    (#1835)."""
+    result = make_blocked(ticket_id="T-1", worktree=tmp_path, reason="some_reason")
+    assert result.next_actions == ["user_resolve_local_executor_failure"]
+
+
+def test_make_blocked_next_actions_override(tmp_path: Path) -> None:
+    """make_blocked propagates an explicit next_actions override, proving the
+    new plumbing round-trips through Pydantic validation (#1835)."""
+    result = make_blocked(
+        ticket_id="T-1",
+        worktree=tmp_path,
+        reason="some_reason",
+        next_actions=["user_resolve_something_else"],
+    )
+    assert result.next_actions == ["user_resolve_something_else"]
+
+
 class TestCodexCapabilityDiagnosis:
     """Direct tests for the shared codex capability probe (#1238).
 
