@@ -2,7 +2,10 @@
 
 The ``dispatch_state.json`` sidecar holds transient dispatch-loop coordination
 state — usage-limit backoff expiry, the fleet-wide gh-availability probe cache
-(RFC 0011 A5), and the per-client main-checkout-drift attention latches (#1258).
+(RFC 0011 A5), the per-client main-checkout-drift attention latches (#1258),
+and a per-(client, ticket) marker recording an in-flight blocking review, so
+``cw dev-queue status``/``cw doctor`` can distinguish a dead dispatch loop from
+one legitimately busy (#1742).
 Extracted from ``cw.config``; depends on ``cw.config`` for the state-dir
 accessors and the #1017 write guard, one-directional (``cw.config`` never
 imports this module).
@@ -58,6 +61,43 @@ class AvailabilityProbeCache(NamedTuple):
     latched: bool  # True once SESSION_NEEDS_ATTENTION has fired for the
     # current unbroken run of failures; False once a subsequent fresh probe
     # succeeds (edge-triggered reset).
+
+
+class ExecutorBlockedMarker(NamedTuple):
+    """One in-flight, loop-blocking executor review (#1742).
+
+    Persisted in DISPATCH_STATE_FILE under the ``"executor_blocked"`` key,
+    one entry per ``f"{client}/{ticket_id}"``. A NamedTuple, not a pydantic
+    BaseModel, for the same reason as :class:`AvailabilityProbeCache`:
+    transient runtime state with no durability or migration contract.
+
+    Deliberately non-durable. It is written when a review starts and cleared
+    in a ``finally:`` when it ends, so the only way one survives its owning
+    work is a process death — and the review itself dies with that process
+    (it runs on a daemon thread). ``clear_all_executor_blocked_markers()``
+    at dispatch-loop boot therefore closes the whole crash window, which is
+    why there is no schema version and no per-entry expiry ceiling.
+
+    ``executor`` is free text ("codex" today) so a future non-codex blocking
+    executor needs no schema change. ``reviewer_role`` is reserved for
+    per-role granularity and is ``None`` at whole-review granularity.
+    """
+
+    client: str
+    ticket_id: str
+    executor: str
+    reviewer_role: str | None
+    started_at: datetime
+    session_id: str
+
+
+def _executor_blocked_key(client: str, ticket_id: str) -> str:
+    """Composite sidecar key for one (client, ticket) marker.
+
+    Mirrors the ``f"{client}/{lane}"`` composite-key convention already used
+    for ``ClientConcurrencyOverride.lanes``.
+    """
+    return f"{client}/{ticket_id}"
 
 
 @contextlib.contextmanager
@@ -315,5 +355,158 @@ def save_main_drift_latches(latches: dict[str, bool]) -> None:
         logger.warning(
             "dispatch_state: failed to persist main_drift_latches (clients=%s)",
             sorted(latches),
+            exc_info=True,
+        )
+
+
+def _parse_executor_blocked_entry(entry: object) -> ExecutorBlockedMarker | None:
+    """Validate one raw ``"executor_blocked"`` entry, or None when malformed.
+
+    Per-entry rather than all-or-nothing (unlike ``load_main_drift_latches``):
+    several concurrent reviews share this key, so one bad entry must not
+    blind the reader to every live marker beside it.
+    """
+    if not isinstance(entry, dict):
+        return None
+    client = entry.get("client")
+    ticket_id = entry.get("ticket_id")
+    executor = entry.get("executor")
+    reviewer_role = entry.get("reviewer_role")
+    started_at = entry.get("started_at")
+    session_id = entry.get("session_id")
+    if (
+        not isinstance(client, str)
+        or not isinstance(ticket_id, str)
+        or not isinstance(executor, str)
+        or not isinstance(session_id, str)
+        or not isinstance(started_at, str)
+        or not (reviewer_role is None or isinstance(reviewer_role, str))
+    ):
+        return None
+    try:
+        parsed_started_at = datetime.fromisoformat(started_at)
+    except ValueError:
+        return None
+    return ExecutorBlockedMarker(
+        client=client,
+        ticket_id=ticket_id,
+        executor=executor,
+        reviewer_role=reviewer_role,
+        started_at=parsed_started_at,
+        session_id=session_id,
+    )
+
+
+def load_executor_blocked_markers() -> dict[str, ExecutorBlockedMarker]:
+    """Load every in-flight executor-blocked marker (#1742).
+
+    Returns ``{}`` when the file is absent, unreadable, malformed, or missing
+    the ``"executor_blocked"`` key. Individual malformed entries are dropped
+    rather than raised on or poisoning their well-formed siblings.
+    """
+    path = DISPATCH_STATE_FILE
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    entries = raw.get("executor_blocked")
+    if not isinstance(entries, dict):
+        return {}
+    markers: dict[str, ExecutorBlockedMarker] = {}
+    for key, entry in entries.items():
+        if not isinstance(key, str):
+            continue
+        marker = _parse_executor_blocked_entry(entry)
+        if marker is not None:
+            markers[key] = marker
+    return markers
+
+
+def save_executor_blocked_marker(marker: ExecutorBlockedMarker) -> None:
+    """Record one in-flight executor-blocked marker (#1742).
+
+    Read-merge-writes the shared sidecar so the other keys are preserved
+    rather than clobbered (#1157), and merges into the existing
+    ``"executor_blocked"`` dict so concurrent reviews on other clients keep
+    their own entries. Silently swallows write errors — a failed persist just
+    means ``cw dev-queue status`` reports ``[STALE]`` instead of ``[BLOCKED]``
+    for this review (acceptable degradation: legibility, not correctness).
+    """
+    try:
+        refuse_real_state_write(DISPATCH_STATE_FILE)
+        DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with dispatch_state_lock():
+            payload = _load_dispatch_state_raw()
+            entries = payload.get("executor_blocked")
+            if not isinstance(entries, dict):
+                entries = {}
+            entries[_executor_blocked_key(marker.client, marker.ticket_id)] = {
+                "client": marker.client,
+                "ticket_id": marker.ticket_id,
+                "executor": marker.executor,
+                "reviewer_role": marker.reviewer_role,
+                "started_at": marker.started_at.isoformat(),
+                "session_id": marker.session_id,
+            }
+            payload["executor_blocked"] = entries
+            atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
+    except OSError:
+        logger.warning(
+            "dispatch_state: failed to persist executor_blocked marker (%s/%s)",
+            marker.client,
+            marker.ticket_id,
+            exc_info=True,
+        )
+
+
+def clear_executor_blocked_marker(client: str, ticket_id: str) -> None:
+    """Drop one in-flight executor-blocked marker; no-op when absent (#1742).
+
+    Called from a ``finally:`` on the review path, so it must never raise:
+    a swallowed failure leaves a stale marker that the next process boot's
+    ``clear_all_executor_blocked_markers()`` sweeps up anyway.
+    """
+    try:
+        refuse_real_state_write(DISPATCH_STATE_FILE)
+        DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with dispatch_state_lock():
+            payload = _load_dispatch_state_raw()
+            entries = payload.get("executor_blocked")
+            if not isinstance(entries, dict):
+                return
+            entries.pop(_executor_blocked_key(client, ticket_id), None)
+            payload["executor_blocked"] = entries
+            atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
+    except OSError:
+        logger.warning(
+            "dispatch_state: failed to clear executor_blocked marker (%s/%s)",
+            client,
+            ticket_id,
+            exc_info=True,
+        )
+
+
+def clear_all_executor_blocked_markers() -> None:
+    """Wipe every executor-blocked marker — dispatch-loop boot only (#1742).
+
+    Any marker still on disk at process start is orphaned by construction:
+    the review that wrote it ran on a daemon thread that died with the prior
+    process. This is the crash-durability story for a deliberately
+    non-durable marker, and the reason it carries no schema version.
+    """
+    try:
+        refuse_real_state_write(DISPATCH_STATE_FILE)
+        DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with dispatch_state_lock():
+            payload = _load_dispatch_state_raw()
+            payload["executor_blocked"] = {}
+            atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
+    except OSError:
+        logger.warning(
+            "dispatch_state: failed to clear executor_blocked markers at boot",
             exc_info=True,
         )
