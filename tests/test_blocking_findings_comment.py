@@ -85,6 +85,23 @@ HEADLESS_CONTRACT_REVIEW_BLOCKED_ANCHOR = (
     "cycles (the hard cap)."
 )
 
+# --- #1817: the same rule extended to the third exit site, plan_deviation ---
+PLAN_DEVIATION_EXIT_RULE_ANCHOR = (
+    "**Exit rule.** If a NON_DEFERRABLE finding cannot be fixed within the "
+    'fix loop, or is judged **"beyond fix-loop scope,"**'
+)
+PLAN_DEVIATION_SENTINEL = "blocking findings posted: plan_deviation"
+
+ROW_PLAN_DEVIATION_ANCHOR = (
+    "| S3 non-deferrable plan-deviation finding survives fix loop or judged "
+    'beyond its scope | EXIT `blocked` with `blocker.reason: "plan_deviation"`'
+)
+MEANING_ROW_PLAN_DEVIATION_ANCHOR = (
+    "| `plan_deviation` | A non-deferrable Stage-3 finding (impl deviates "
+    "from an explicit plan requirement/prohibition) survived the fix loop or "
+    "was judged beyond fix-loop scope."
+)
+
 
 def _cmd(name: str) -> str:
     return (COMMANDS / name).read_text()
@@ -286,3 +303,45 @@ def test_headless_contract_review_blocked_description_updated() -> None:
     content = _doc("headless-contract.md")
     window = _after(content, HEADLESS_CONTRACT_REVIEW_BLOCKED_ANCHOR, span=200)
     assert "blocking findings" in window.lower()
+
+
+# ---------------------------------------------------------------------------
+# 13-16. #1817: the same rule now also covers the plan_deviation exit — the one
+# blocked exit door #1815 left uncovered, which a non-diff-anchorable
+# NON_DEFERRABLE finding routes through.
+# ---------------------------------------------------------------------------
+
+
+def test_blocking_findings_rule_names_plan_deviation_trigger() -> None:
+    """The Checkpoint 3a rule paragraph names a third trigger condition."""
+    section = _checkpoint3a_section()
+    assert "plan_deviation" in section
+    # Severity scope of the third trigger is deliberately NOT MUST_FIX-only:
+    # 4a's NON_DEFERRABLE test is not itself severity-scoped.
+    assert "NON_DEFERRABLE" in section
+    assert "regardless of severity" in section
+
+
+def test_plan_deviation_exit_posts_blocking_findings() -> None:
+    """The 4a Exit rule posts the tracker comment and names its sentinel."""
+    content = _cmd("auto-dev-review.md")
+    window = _after(content, PLAN_DEVIATION_EXIT_RULE_ANCHOR, span=1200)
+    assert RULE_REFERENCE in window
+    assert PLAN_DEVIATION_SENTINEL in window
+    assert "friction_highlights" in window
+
+
+def test_auto_dev_plan_deviation_row_mentions_blocking_findings_comment() -> None:
+    """auto-dev.md's decision row and meaning row note the tracker comment."""
+    content = _cmd("auto-dev.md")
+    for row_anchor in (ROW_PLAN_DEVIATION_ANCHOR, MEANING_ROW_PLAN_DEVIATION_ANCHOR):
+        window = _after(content, row_anchor, span=400)
+        assert "blocking findings" in window.lower(), row_anchor
+
+
+def test_headless_contract_plan_deviation_row_mentions_blocking_findings() -> None:
+    """docs/headless-contract.md's two plan_deviation rows note the comment."""
+    content = _doc("headless-contract.md")
+    for row_anchor in (ROW_PLAN_DEVIATION_ANCHOR, MEANING_ROW_PLAN_DEVIATION_ANCHOR):
+        window = _after(content, row_anchor, span=400)
+        assert "blocking findings" in window.lower(), row_anchor

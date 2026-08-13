@@ -649,6 +649,69 @@ class TestReviewAdjudicateCommand:
         assert verdict["review"]["deferred"] == 1
         assert verdict["unmatched_adjudication_count"] == 0
 
+    def test_no_diff_anchor_round_trip_reaches_operator_actionable(
+        self, runner: CliRunner
+    ) -> None:
+        """#1817 end-to-end through the real JSON boundary the pipeline uses.
+
+        A non-diff-anchorable MUST_FIX survives ``consolidate`` (never
+        mechanically rejected as ``unknown_file``) and ``adjudicate`` stamps it
+        ``operator_actionable`` — a recorded decision, so it stops blocking.
+        """
+        finding = _make_finding(
+            severity="MUST_FIX",
+            no_diff_anchor=True,
+            file="N/A",
+            line_start=None,
+            line_end=None,
+            summary="AC3's follow-up ticket was never filed",
+            evidence="AC3: a follow-up ticket must exist before this ships",
+        )
+        doc = _make_reviewer_doc(
+            finding, reviewer_role="Product Manager Reviewer", status="ok"
+        )
+        consolidated = runner.invoke(
+            main,
+            ["review", "consolidate", "-"],
+            input=json.dumps(
+                _consolidate_payload(documents=[doc.model_dump(mode="json")])
+            ),
+        )
+        assert consolidated.exit_code == 0, consolidated.output
+        verdict = json.loads(consolidated.output)
+        assert verdict["rejected"] == []
+        assert verdict["rejected_must_fix"] == []
+        assert verdict["accepted"][0]["finding"]["no_diff_anchor"] is True
+        assert verdict["blocking"] is True
+
+        payload = {
+            "verdict": verdict,
+            "adjudications": [
+                {
+                    "severity": "MUST_FIX",
+                    "file": "N/A",
+                    "line_start": None,
+                    "line_end": None,
+                    "evidence": "AC3: a follow-up ticket must exist before this ships",
+                    "summary": "AC3's follow-up ticket was never filed",
+                    "outcome": "operator_action",
+                    "rationale": (
+                        "acceptance criterion 3 requires a follow-up ticket; "
+                        "none exists — operator must file it before this ships"
+                    ),
+                }
+            ],
+        }
+        result = runner.invoke(
+            main, ["review", "adjudicate", "-"], input=json.dumps(payload)
+        )
+        assert result.exit_code == 0, result.output
+        adjudicated = json.loads(result.output)
+        assert adjudicated["accepted"][0]["disposition"] == "operator_actionable"
+        assert adjudicated["blocking"] is False
+        assert adjudicated["must_fix"] == []
+        assert adjudicated["unmatched_adjudication_count"] == 0
+
     def test_unmatched_entry_surfaces_count_in_printed_json(
         self, runner: CliRunner
     ) -> None:
