@@ -59,6 +59,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Codex fix-cycle retries its commit once after a pre-commit hook rewrites
+  files (#1855):** a repo-local pre-commit hook that reformats staged files
+  (ruff-format, black, prettier) exits non-zero on the run where it changes
+  something — standard "hook modified files, nothing was committed" behavior.
+  `_commit_fix_cycle` now re-stages and retries the commit exactly once before
+  giving up, so a correct, fully-written fix is no longer stranded uncommitted
+  in the worktree. A second failure still surfaces as the same
+  `CalledProcessError`/`codex_error` as before — no regression.
+
 - **`cw queue peek`'s STOP-by-age reason splits "approaches" vs "exceeded"
   wording (#1795):** the STOP-age message now says `age Nmin approaches
   60-min timeout` while `age_min` is still below the 60-min ceiling
