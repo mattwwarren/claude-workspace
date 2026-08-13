@@ -323,9 +323,15 @@ class TestSynthesizeCodexReviewResult:
 
 
 class TestSynthesizeCodexReviewResultHealth:
-    @pytest.mark.parametrize("status", ["degraded", "failed"])
+    @pytest.mark.parametrize(
+        ("status", "reviewer_role"),
+        [("degraded", "Architecture Reviewer"), ("failed", "Test Reviewer")],
+    )
     def test_non_ok_document_status_downgrades_health(
-        self, make_git_repo: Callable[[str], Path], status: str
+        self,
+        make_git_repo: Callable[[str], Path],
+        status: str,
+        reviewer_role: str,
     ) -> None:
         # #1551: a reviewer document that is not status="ok" means that
         # role's coverage was reduced (degraded) or it self-reported failure
@@ -335,8 +341,16 @@ class TestSynthesizeCodexReviewResultHealth:
         # review that wasn't actually clean. status="failed" requires empty
         # findings (_check_failed_has_no_findings), so both branches share
         # the same no-findings, no-failures shape here.
+        #
+        # #1856: "degraded" is pinned to a non-Test-Reviewer role because
+        # ("Test Reviewer", "degraded") is now specifically carved out of
+        # this downgrade (see TestTestReviewerDegradedCarveOut below) --
+        # this test still proves the *general* claim that a degraded/failed
+        # reviewer of some role downgrades health. "failed" stays on the
+        # fixture-default Test Reviewer role to prove a self-reported
+        # failure still downgrades health regardless of role.
         worktree = make_git_repo(f"wt-synth-health-{status}")
-        doc = _make_reviewer_doc(status=status)
+        doc = _make_reviewer_doc(status=status, reviewer_role=reviewer_role)
         result, verdict = synthesize_codex_review_result(
             task=_task(),
             worktree=worktree,
@@ -434,9 +448,14 @@ class TestSynthesizeCodexReviewResultHealth:
         # #1775: proves the detail-copy fix reaches the real call path (not
         # just consolidate_verdict in isolation), and that existing health
         # behavior for a degraded document is unchanged by the addition.
+        # #1856: reviewer_role pinned off "Test Reviewer" so this keeps
+        # testing the general degraded-detail-copy path rather than
+        # colliding with the new Test-Reviewer-degraded carve-out.
         worktree = make_git_repo("wt-synth-health-detail")
         doc = _make_reviewer_doc(
-            status="degraded", detail="sandbox lacked filesystem access"
+            status="degraded",
+            detail="sandbox lacked filesystem access",
+            reviewer_role="Architecture Reviewer",
         )
         result, verdict = synthesize_codex_review_result(
             task=_task(),
@@ -455,6 +474,93 @@ class TestSynthesizeCodexReviewResultHealth:
         assert result.health.recommendation == "EXIT_FOR_HUMAN_REVIEW"
         assert verdict is not None
         assert verdict.agents_run[0].detail == "sandbox lacked filesystem access"
+
+
+class TestTestReviewerDegradedCarveOut:
+    """#1856: Test Reviewer's read-only-sandbox ``status="degraded"`` is a
+    structurally-forced signal (it was never capable of running pytest under
+    the codex review sandbox, on any ticket, ever — see
+    ``src/cw/codex_review/_roles.py``'s read-only posture), not a substantive
+    coverage gap, so it is excluded from ``_derive_health``'s confidence
+    computation. The carve-out is narrow: (role, status) == ("Test Reviewer",
+    "degraded") only.
+    """
+
+    def test_test_reviewer_degraded_status_excluded_from_health(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-1856-test-reviewer-degraded")
+        doc = _make_reviewer_doc(status="degraded")  # default role: Test Reviewer
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-synth",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+        assert result.status == "stage_complete"
+        assert result.health.lowest_agent_confidence == "HIGH"
+        assert result.health.any_incomplete_risk is False
+        assert result.health.recommendation == "PROCEED"
+        assert verdict is not None
+
+    def test_test_reviewer_failed_status_still_downgrades_health(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        # The carve-out is status-scoped, not role-blanket: a Test Reviewer
+        # document that self-reports "failed" (not "degraded") still
+        # downgrades health.
+        worktree = make_git_repo("wt-1856-test-reviewer-failed")
+        doc = _make_reviewer_doc(status="failed")  # default role: Test Reviewer
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-synth",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+        assert result.status == "stage_complete"
+        assert result.health.lowest_agent_confidence == "MEDIUM"
+        assert result.health.any_incomplete_risk is True
+        assert result.health.recommendation == "EXIT_FOR_HUMAN_REVIEW"
+        assert verdict is not None
+
+    def test_test_reviewer_degraded_with_another_degraded_role_still_downgrades_health(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        # A substantive degradation on another role must still gate, even
+        # when it coexists with the sandbox-caused Test Reviewer one.
+        worktree = make_git_repo("wt-1856-mixed-degraded")
+        documents = [
+            _make_reviewer_doc(status="degraded"),  # Test Reviewer, carved out
+            _make_reviewer_doc(
+                status="degraded", reviewer_role="Architecture Reviewer"
+            ),
+        ]
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=documents,
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-synth",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+        assert result.status == "stage_complete"
+        assert result.health.lowest_agent_confidence == "MEDIUM"
+        assert result.health.any_incomplete_risk is True
+        assert result.health.recommendation == "EXIT_FOR_HUMAN_REVIEW"
+        assert verdict is not None
 
 
 class TestSynthesizeCodexReviewResultMetrics:
