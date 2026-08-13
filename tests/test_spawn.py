@@ -809,6 +809,54 @@ class TestHookSettingsTemplate:
             for entry in pretooluse_entries
         )
 
+    def test_hook_settings_template_includes_agent_spawn_pretooluse(self) -> None:
+        """#1646: a subagent-tool PreToolUse entry sits alongside the Bash guard."""
+        from cw.spawn import _AGENT_TOOL_MATCHER, _HOOK_SETTINGS_TEMPLATE
+
+        entries = _HOOK_SETTINGS_TEMPLATE["hooks"]["PreToolUse"]
+        assert any(
+            entry.get("matcher") == _AGENT_TOOL_MATCHER
+            and entry["hooks"][0]["command"] == "cw agent-spawn-pre"
+            for entry in entries
+        )
+        # Must not regress the pre-existing Bash guard entry.
+        assert any(entry.get("matcher") == "Bash" for entry in entries)
+
+    def test_hook_settings_template_includes_agent_spawn_posttooluse(self) -> None:
+        """#1646: a PostToolUse key now exists, matched to the same tool."""
+        from cw.spawn import _AGENT_TOOL_MATCHER, _HOOK_SETTINGS_TEMPLATE
+
+        entries = _HOOK_SETTINGS_TEMPLATE["hooks"]["PostToolUse"]
+        assert any(
+            entry.get("matcher") == _AGENT_TOOL_MATCHER
+            and entry["hooks"][0]["command"] == "cw agent-spawn-post"
+            for entry in entries
+        )
+
+    def test_agent_tool_matcher_is_anchored_and_matches_captured_tool_name(
+        self,
+    ) -> None:
+        """The matcher matches the empirically-captured tool name, and only it.
+
+        Both facts were captured live (2026-08-12) against Claude Code with a
+        temporary catch-all hook in a dispatch worktree: a subagent spawn
+        reports ``tool_name: "Agent"`` (NOT ``"Task"``, which the ticket prose
+        assumed), and an anchored alternation matcher fires for it while
+        leaving ``Bash`` alone. The anchor is load-bearing — unanchored
+        ``Task`` would also match unrelated tool names such as ``TaskStop``.
+        """
+        import re
+
+        from cw.spawn import _AGENT_TOOL_MATCHER
+
+        pattern = re.compile(_AGENT_TOOL_MATCHER)
+        assert pattern.search("Agent")
+        # Legacy/alternate name kept for version robustness.
+        assert pattern.search("Task")
+        assert not pattern.search("Bash")
+        assert not pattern.search("TaskStop")
+        assert not pattern.search("AgentOutputStyle")
+
 
 class TestHookContextInjection:
     """Tests for the Stop-hook + cw-context file injection (issue #147)."""
@@ -2401,10 +2449,10 @@ class TestCwContextWorkspacePath:
         tmp_path: Path,
         make_git_repo: Callable[[str], Path],
     ) -> None:
-        """cw-context.json schema_version is current (4 after the #1730 addition)."""
+        """cw-context.json schema_version is current (5 after the #1646 addition)."""
         from cw.spawn import CW_CONTEXT_SCHEMA_VERSION, spawn_create_impl
 
-        assert CW_CONTEXT_SCHEMA_VERSION == 4
+        assert CW_CONTEXT_SCHEMA_VERSION == 5
 
         client = _make_client(tmp_path, name="schema-v2-client")
         daemon = FakeNativeDaemonClient()
@@ -2419,7 +2467,90 @@ class TestCwContextWorkspacePath:
         )
 
         context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
-        assert context["schema_version"] == 4
+        assert context["schema_version"] == 5
+
+
+class TestAgentSpawnStampSeeding:
+    """_write_hook_context seeds the #1646 unresolved-subagent-spawn stamp."""
+
+    @pytest.mark.parametrize("origin", [SessionOrigin.DAEMON, SessionOrigin.USER])
+    def test_write_hook_context_seeds_unresolved_spawn_counter_at_zero(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        origin: SessionOrigin,
+    ) -> None:
+        """Both origins get the stamp seeded to a resolved (zero) count.
+
+        Parametrized over origin rather than over purpose/stage: both existing
+        call sites (``spawn_create_impl``, ``session.resume_session``) flow
+        through this one writer and differ only in origin, so origin is the
+        axis that actually varies at the seam.
+        """
+        from cw.models import (
+            AGENT_SPAWN_LAST_STAMPED_AT_KEY,
+            AGENT_SPAWN_STAMP_KEY,
+            AGENT_SPAWN_UNRESOLVED_COUNT_KEY,
+        )
+        from cw.spawn import _write_hook_context
+
+        worktree = tmp_path / f"wt-1646-{origin.value}"
+        worktree.mkdir()
+
+        _write_hook_context(
+            worktree,
+            session_id="sess1646",
+            session_name="client-a/impl",
+            client="client-a",
+            purpose="impl",
+            ticket_id="1646",
+            origin=origin,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        stamp = context[AGENT_SPAWN_STAMP_KEY]
+        assert stamp[AGENT_SPAWN_UNRESOLVED_COUNT_KEY] == 0
+        assert stamp[AGENT_SPAWN_LAST_STAMPED_AT_KEY] is None
+
+
+class TestHookMechanismIsPurposeAndStageAgnostic:
+    """#1646: the stamp mechanism must key only off worktree_path/cw-context.
+
+    Structural rather than parametrized on purpose. ``SessionPurpose`` has no
+    correspondence to the four pipeline stages (those live in the separate
+    ``Stage`` enum), and every stage-dispatch call site passes
+    ``purpose=SessionPurpose.IMPL`` unconditionally — so a parametrized
+    round-trip would only prove that a string survives a dict assignment. What
+    can actually regress is somebody later adding an ``if purpose == ...``
+    branch to one of these three functions, and that is what this asserts
+    against.
+    """
+
+    def test_hook_mechanism_has_no_purpose_or_stage_conditionals(self) -> None:
+        """None of the three mechanism seams branch on purpose or stage."""
+        import inspect
+        import re
+
+        from cw.reconcile._shared import _read_unresolved_subagent_spawn
+        from cw.spawn import _write_hook_context
+
+        forbidden = re.compile(
+            r"(if|elif|match)\b[^\n]*\b(purpose|SessionPurpose|stage|Stage)\b"
+        )
+        for func in (_write_hook_context, _read_unresolved_subagent_spawn):
+            source = inspect.getsource(func)
+            assert not forbidden.search(source), (
+                f"{func.__name__} gained a purpose/stage conditional — the #1646 "
+                "stamp mechanism must key only off worktree_path/cw-context.json"
+            )
+
+    def test_hook_settings_template_has_no_purpose_or_stage_keys(self) -> None:
+        """The settings template is a constant, not a per-purpose computation."""
+        from cw.spawn import _HOOK_SETTINGS_TEMPLATE
+
+        rendered = json.dumps(_HOOK_SETTINGS_TEMPLATE)
+        assert "purpose" not in rendered
+        assert "stage" not in rendered
 
 
 class TestSpawnCreateImplCsidBackfill:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -221,6 +222,47 @@ def _write_project_config_yaml(root: Path, content: str) -> None:
     config_dir = root / ".claude"
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "project-config.yaml").write_text(content, encoding="utf-8")
+
+
+def _write_hook_context_file(
+    worktree: Path, workspace_path: Path | None = None
+) -> None:
+    """Materialize ``<worktree>/.claude/cw-context.json`` via the real writer.
+
+    Hoisted from ``test_cli_guard.py``'s private ``_write_context`` (#1646) so
+    the guard hook tests and the agent-spawn-stamp hook tests share one
+    materializer. Using the real ``_write_hook_context`` (rather than a
+    hand-written JSON literal) is deliberate: it keeps every hook test reading
+    the exact context shape production writes, including new schema fields.
+    """
+    from cw.spawn import _write_hook_context
+
+    _write_hook_context(
+        worktree,
+        session_id="sess940g",
+        session_name="client-a/impl",
+        client="client-a",
+        purpose="impl",
+        ticket_id="940",
+        origin=SessionOrigin.DAEMON,
+        workspace_path=workspace_path,
+    )
+
+
+def _invoke_hook_command(command: str, payload: dict[str, object]) -> Any:
+    """``CliRunner``-invoke hook subcommand *command* with *payload* on stdin.
+
+    Returns the click ``Result``. Hoisted from ``test_cli_guard.py``'s private
+    ``_invoke`` (#1646) and generalized over the command name, since every cw
+    hook handler shares the same "JSON object on stdin, exit code is the
+    contract" surface.
+    """
+    from click.testing import CliRunner
+
+    from cw.cli import main
+
+    runner = CliRunner()
+    return runner.invoke(main, [command], input=json.dumps(payload))
 
 
 def plan_body(*, spec: bool = True, soundness: bool = True) -> str:

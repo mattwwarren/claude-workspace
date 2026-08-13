@@ -31,6 +31,7 @@ from cw.config import (
 )
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.models import (
+    HOOK_CONTEXT_RELATIVE_PATH,
     ClientConfig,
     CompletionReason,
     CwState,
@@ -2474,6 +2475,92 @@ class TestWorktreeDirtyByPath:
             lambda _p: (_ for _ in ()).throw(RuntimeError("git failure")),
         )
         assert _worktree_dirty_by_path("client-a", tmp_path / "wt") is False
+
+
+class TestReadUnresolvedSubagentSpawn:
+    """Unit tests for _read_unresolved_subagent_spawn (#1646).
+
+    Fail-open in one direction only: every ambiguous outcome (no file, no key,
+    corrupt JSON, wrong types, no path at all) must read False. Reporting a
+    spawn as unresolved on ambiguous evidence would park healthy tickets.
+    """
+
+    @staticmethod
+    def _write_context(worktree: Path, payload: object) -> None:
+        (worktree / ".claude").mkdir(parents=True, exist_ok=True)
+        (worktree / HOOK_CONTEXT_RELATIVE_PATH).write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+
+    def test_true_when_marker_present(self, tmp_path: Path) -> None:
+        """unresolved_count > 0 → True."""
+        from cw.reconcile._shared import _read_unresolved_subagent_spawn
+
+        self._write_context(
+            tmp_path, {"agent_spawn_stamp": {"unresolved_count": 1}}
+        )
+        assert _read_unresolved_subagent_spawn(tmp_path) is True
+
+    def test_false_when_count_is_zero(self, tmp_path: Path) -> None:
+        """A resolved spawn (count back to 0) → False."""
+        from cw.reconcile._shared import _read_unresolved_subagent_spawn
+
+        self._write_context(
+            tmp_path, {"agent_spawn_stamp": {"unresolved_count": 0}}
+        )
+        assert _read_unresolved_subagent_spawn(tmp_path) is False
+
+    def test_false_when_absent(self, tmp_path: Path) -> None:
+        """A pre-v5 context with no stamp key at all → False (legacy shape)."""
+        from cw.reconcile._shared import _read_unresolved_subagent_spawn
+
+        self._write_context(tmp_path, {"schema_version": 4, "session_id": "x"})
+        assert _read_unresolved_subagent_spawn(tmp_path) is False
+
+    def test_false_when_stamp_is_not_a_dict(self, tmp_path: Path) -> None:
+        """A stamp key holding a scalar → False, not a crash."""
+        from cw.reconcile._shared import _read_unresolved_subagent_spawn
+
+        self._write_context(tmp_path, {"agent_spawn_stamp": 3})
+        assert _read_unresolved_subagent_spawn(tmp_path) is False
+
+    def test_false_when_count_is_bool(self, tmp_path: Path) -> None:
+        """``True`` is an int in Python — it must not read as a live count."""
+        from cw.reconcile._shared import _read_unresolved_subagent_spawn
+
+        self._write_context(
+            tmp_path, {"agent_spawn_stamp": {"unresolved_count": True}}
+        )
+        assert _read_unresolved_subagent_spawn(tmp_path) is False
+
+    def test_fail_open_on_malformed_json(self, tmp_path: Path) -> None:
+        """A corrupt cw-context.json → False, never raises."""
+        from cw.reconcile._shared import _read_unresolved_subagent_spawn
+
+        (tmp_path / ".claude").mkdir(parents=True)
+        (tmp_path / HOOK_CONTEXT_RELATIVE_PATH).write_text(
+            "{ truncated", encoding="utf-8"
+        )
+        assert _read_unresolved_subagent_spawn(tmp_path) is False
+
+    def test_fail_open_on_non_dict_context(self, tmp_path: Path) -> None:
+        """A context that parses to a list → False."""
+        from cw.reconcile._shared import _read_unresolved_subagent_spawn
+
+        self._write_context(tmp_path, [])
+        assert _read_unresolved_subagent_spawn(tmp_path) is False
+
+    def test_fail_open_on_missing_file(self, tmp_path: Path) -> None:
+        """A worktree with no .claude/cw-context.json → False."""
+        from cw.reconcile._shared import _read_unresolved_subagent_spawn
+
+        assert _read_unresolved_subagent_spawn(tmp_path / "gone") is False
+
+    def test_fail_open_on_missing_worktree_path(self) -> None:
+        """worktree_path=None (USER-origin sessions) → False."""
+        from cw.reconcile._shared import _read_unresolved_subagent_spawn
+
+        assert _read_unresolved_subagent_spawn(None) is False
 
 
 # ---------------------------------------------------------------------------
