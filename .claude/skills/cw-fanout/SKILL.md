@@ -278,10 +278,13 @@ bump a queue-transition-only monitor twice. The wave monitor MUST watch three
 signals per ticket:
 
 1. **Queue transitions** — the `wave_status.py` diff (4a above).
-2. **Transcript-mtime LIVE/STALE flips** — newest `*.jsonl` under
-   `~/.claude/projects/<worktree-slug>-dev-<T>/`; STALE when untouched
-   > 15-20 min while the ticket is non-terminal (use ~20 min for review
-   stages — reviewer subagents are parent-silent for long stretches).
+2. **Transcript idle-time LIVE/STALE flips** — the elapsed time since the
+   newest `*.jsonl`'s **last parsed record** (what `cw queue peek`'s
+   `idle_min` reports), not the file's `mtime` — mtime can advance well
+   after the last record was written and reads as "live" on a session that
+   has gone silent (#1795). STALE when idle time > 15-20 min while the
+   ticket is non-terminal (use ~20 min for review stages — reviewer
+   subagents are parent-silent for long stretches).
 3. **New worktree commits** — `git -C <wt> rev-parse --short HEAD` changes
    (positive progress proof: silence + LIVE = genuinely working).
 
@@ -290,14 +293,16 @@ started against an already-stale world silently baselines the outage and
 never fires.
 
 **The liveness decision ladder (before ANY park/requeue action):**
-- Transcript **< 2 min old** → the session is ALIVE regardless of row status.
-  Do NOT requeue (double-spawn, the #919 class). Wait for its sentinel; the
-  #918 late-sentinel rescue recovers a falsely-parked row.
-- Transcript **flat ≥ 45 min** (or two consecutive 20-min stale checks with
-  no queue movement) → dead regardless of a `running` row. Adopt-check, then
-  `cw spawn close <sid> --confirmed-dead` and requeue/re-add.
-- In between → arm a bounded one-shot deadline check (resume-or-dead), don't
-  guess.
+- **Idle time < 2 min** (last transcript record, not mtime) → the session
+  is ALIVE regardless of row status. Do NOT requeue (double-spawn, the
+  #919 class). Wait for its sentinel; the #918 late-sentinel rescue
+  recovers a falsely-parked row.
+- **Idle time ≥ 45 min flat** (or two consecutive 20-min stale checks with
+  no new records and no queue movement) → dead regardless of a `running`
+  row. Adopt-check, then `cw spawn close <sid> --confirmed-dead` and
+  requeue/re-add.
+- In between → arm a bounded one-shot deadline check (resume-or-dead),
+  don't guess.
 
 ### Step 5 — report + disposition
 
