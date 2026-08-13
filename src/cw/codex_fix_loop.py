@@ -30,9 +30,16 @@ nothing: a mechanically-rejected cycle-0 verdict never enters the loop (no
 snapshot is ever written), and an unparseable rereview's park details come from
 ``_format_failures_detail`` rather than any persisted verdict.
 
-Cross-cycle finding identity is tracked by ``review_findings._dedup_key`` so a
-finding that survives every cycle (or flaps out and back) is counted exactly
-once. The terminal published ``Review`` is reconstructed here rather than read
+Cross-cycle finding identity is tracked by ``review_debt.fingerprint_v1``
+(#1837) so a finding that survives every cycle — or flaps out and back, or
+gets re-raised a few lines further down after a fix moved it — is counted
+exactly once. From cycle 1 onward the re-review covers only the delta since
+the previous reviewed head, and the admission gate in
+``codex_fix_loop_convergence`` decides which newly-appearing MUST_FIX findings
+this cycle actually caused; the rest are recorded in the verdict's debt ledger
+rather than restarting the loop.
+
+The terminal published ``Review`` is reconstructed here rather than read
 from any single ``derive_review_counts`` call: ``must_fix_initial`` is cycle 0's
 pre-defer snapshot, ``deferred`` is the cross-cycle survivor count, and
 ``fix_cycles_used`` is the loop's own cycle counter — three values no single
@@ -46,6 +53,11 @@ import subprocess
 import time
 from typing import TYPE_CHECKING, NamedTuple
 
+from cw.codex_fix_loop_convergence import (
+    _OpenFindingKey,
+    _survivors_only_verdict,
+    _track_open_findings,
+)
 from cw.codex_review import (
     _CATEGORY_TO_REASON,
     _MIN_ROLE_TIMEOUT_SECONDS,
@@ -71,17 +83,24 @@ from cw.executor_diagnostics import (
     persist_diagnostics_bundle,
 )
 from cw.local_runner import make_blocked, resolve_tier
-from cw.review_findings import _dedup_key, write_review_verdict
+from cw.review_debt import dedupe_debt
+from cw.review_findings import write_review_verdict
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from cw.auto_dev_result import AutoDevResult, Health, Review, ScopeTier
     from cw.codex_review import _SensitiveHit
+    from cw.codex_review._context import _ReviewPassInputs
     from cw.codex_runner import CodexRunner
     from cw.executor_diagnostics import ExecutorFailureCategory
     from cw.models import TicketTask
-    from cw.review_findings import AcceptedFinding, Finding, ReviewVerdict
+    from cw.review_findings import (
+        AcceptedFinding,
+        DebtRecord,
+        Finding,
+        ReviewVerdict,
+    )
 
 _log = logging.getLogger(__name__)
 
@@ -94,10 +113,6 @@ _ESCALATE_AT_CYCLE = 3
 # invocation plus one re-review role turn, so it must be able to afford two
 # per-role floors. Never start a fix cycle with less remaining budget.
 _FIX_CYCLE_FLOOR_SECONDS = 2 * _MIN_ROLE_TIMEOUT_SECONDS
-
-# Matches review_findings._dedup_key's return shape (severity, file,
-# line_start, line_end, evidence); None line endpoints map to -1 there.
-_DedupKey = tuple[str, str, int, int, str]
 
 _MUST_FIX = "MUST_FIX"
 
@@ -352,46 +367,11 @@ def _scope_violations(
     return _load_sensitive_hits(worktree, out_of_scope, scope_tier)
 
 
-def _track_open_findings(
-    open_findings: dict[_DedupKey, AcceptedFinding],
-    accepted: list[AcceptedFinding],
-) -> dict[_DedupKey, AcceptedFinding]:
-    """Update the cross-cycle open-MUST_FIX tracker from a re-review's accepted set.
-
-    Keys whose finding is present in *accepted*'s MUST_FIX subset stay / get
-    refreshed / get added; keys absent from that subset are dropped (the finding
-    is implicitly fixed this cycle). A finding that flaps out and back reappears
-    under the same dedup key and is counted once. SHOULD_FIX/NIT/PRINCIPLE
-    findings never enter the tracker.
-
-    "Open" requires ``disposition == "fixed"`` as well as MUST_FIX severity
-    (#1814). ``"fixed"`` is the optimistic post-consolidate default and is the
-    only value a genuinely still-open finding can carry at this point in the
-    pipeline — nothing has adjudicated it yet. Any other value means something
-    upstream already decided its fate: ``apply_voided_suppression`` stamps
-    ``"rejected"`` on a finding the operator settled, which is already out of
-    ``must_fix``/``blocking``, so handing it to the fix agent would re-open
-    exactly the decision the operator made. Severity alone cannot exclude it —
-    a voided MUST_FIX keeps its MUST_FIX severity.
-    """
-    survivors = dict(open_findings)
-    current = {
-        _dedup_key(af.finding): af
-        for af in accepted
-        if af.finding.severity == _MUST_FIX and af.disposition == "fixed"
-    }
-    for key in list(survivors):
-        if key not in current:
-            del survivors[key]
-    survivors.update(current)
-    return survivors
-
-
 def _finalize_review(
     *,
     cycle0_review: Review,
     final_verdict: ReviewVerdict,
-    open_findings: dict[_DedupKey, AcceptedFinding],
+    open_findings: dict[_OpenFindingKey, AcceptedFinding],
     cycle_count: int,
     had_real_commit: bool,
 ) -> Review:
@@ -413,38 +393,6 @@ def _finalize_review(
             "deferred": len(open_findings),
             "fix_cycles_used": cycle_count,
             "had_real_commit": had_real_commit,
-        }
-    )
-
-
-def _survivors_only_verdict(
-    final_verdict: ReviewVerdict,
-    open_findings: dict[_DedupKey, AcceptedFinding],
-    review: Review,
-) -> ReviewVerdict:
-    """Rebuild a capped-exit verdict whose blocking state is survivor-derived.
-
-    ``blocking`` is computed DIRECTLY from ``open_findings`` — NOT re-derived
-    from ``bool(must_fix)`` over the disposition-stamped ``accepted`` list,
-    which would spuriously read ``False`` once survivors are stamped
-    ``disposition="deferred"`` for reporting. Each surviving MUST_FIX finding is
-    stamped ``deferred`` in ``accepted``; every other accepted finding is
-    unchanged. ``must_fix`` is exactly the survivor set.
-    """
-    survivor_keys = set(open_findings)
-    accepted = [
-        af.model_copy(update={"disposition": "deferred"})
-        if af.finding.severity == _MUST_FIX and _dedup_key(af.finding) in survivor_keys
-        else af
-        for af in final_verdict.accepted
-    ]
-    must_fix = [af.finding for af in open_findings.values()]
-    return final_verdict.model_copy(
-        update={
-            "blocking": bool(open_findings),
-            "must_fix": must_fix,
-            "accepted": accepted,
-            "review": review,
         }
     )
 
@@ -545,7 +493,7 @@ def _park_survivors(
     session_id: str,
     reason: str,
     verdict: ReviewVerdict,
-    open_findings: dict[_DedupKey, AcceptedFinding],
+    open_findings: dict[_OpenFindingKey, AcceptedFinding],
     cycle0_review: Review,
     cycle_count: int,
     retry_eligible: bool | None,
@@ -607,7 +555,7 @@ def _park_scope_violation(
     cycle: int,
     violations: list[_SensitiveHit],
     cycle0_review: Review,
-    open_findings: dict[_DedupKey, AcceptedFinding],
+    open_findings: dict[_OpenFindingKey, AcceptedFinding],
     verdict: ReviewVerdict,
     snapshot: _PersistedSnapshot,
     had_real_commit: bool,
@@ -677,7 +625,7 @@ def _clean_exit(
     result: AutoDevResult,
     verdict: ReviewVerdict,
     cycle0_review: Review,
-    open_findings: dict[_DedupKey, AcceptedFinding],
+    open_findings: dict[_OpenFindingKey, AcceptedFinding],
     cycle: int,
     snapshot: _PersistedSnapshot,
     session_id: str,
@@ -728,7 +676,7 @@ def _run_fix_and_commit(
     runner: CodexRunner,
     task: TicketTask,
     worktree: Path,
-    open_findings: dict[_DedupKey, AcceptedFinding],
+    open_findings: dict[_OpenFindingKey, AcceptedFinding],
     model: str | None,
     timeout_seconds: int | None,
     session_id: str,
@@ -825,10 +773,28 @@ def _rereview(
     model: str | None,
     remaining: float | None,
     session_id: str,
-) -> tuple[AutoDevResult, ReviewVerdict | None]:
-    """Run a fresh full per-role review pass for one fix cycle."""
+    previous_reviewed_sha: str,
+    prior_open_findings: list[Finding],
+) -> tuple[AutoDevResult, ReviewVerdict | None, _ReviewPassInputs]:
+    """Run a per-role review pass over the delta since the last cycle (#1837).
+
+    Reviews ``previous_reviewed_sha..HEAD``, not the whole branch: a full
+    rescan surfaces fresh findings on code no fix cycle touched, which is the
+    treadmill this ticket exists to stop. ``prior_open_findings`` is inlined
+    so the reviewers still see what remains unresolved from earlier cycles.
+
+    Returns the prepared inputs alongside the usual pair — the caller needs
+    this cycle's ``delta_diff``/``delta_changed_files`` to run the admission
+    gate, and they are captured here.
+    """
     prepared = _prepare_review_pass(
-        task, worktree, default_branch, runner=runner, session_id=session_id
+        task,
+        worktree,
+        default_branch,
+        runner=runner,
+        session_id=session_id,
+        delta_from_sha=previous_reviewed_sha,
+        prior_open_findings=prior_open_findings,
     )
     documents, failures, metrics_by_role = run_codex_roles(
         runner=runner,
@@ -839,12 +805,12 @@ def _rereview(
         wall_clock_budget_seconds=_budget_seconds(remaining),
         session_id=session_id,
     )
-    return synthesize_codex_review_result(
+    result, verdict = synthesize_codex_review_result(
         task=task,
         worktree=worktree,
         documents=documents,
         failures=failures,
-        diff=prepared.diff,
+        diff=prepared.delta_diff if prepared.delta_diff is not None else prepared.diff,
         reviewed_sha=prepared.reviewed_sha,
         session_id=session_id,
         default_branch=default_branch,
@@ -859,6 +825,23 @@ def _rereview(
         # can rewrite the code out from under a void's content anchor.
         voided_findings=prepared.voided_findings,
     )
+    if verdict is not None:
+        verdict = verdict.model_copy(
+            update={"previous_reviewed_sha": previous_reviewed_sha}
+        )
+    return result, verdict, prepared
+
+
+def _stamp_debt(
+    verdict: ReviewVerdict, debt_ledger: dict[tuple[str, str], DebtRecord]
+) -> ReviewVerdict:
+    """Stamp the run's accumulated debt onto *verdict*.
+
+    Applied after every tracker update so whichever exit path returns this
+    verdict carries the ledger as of that moment — the loop has several exits
+    and threading a stamp onto each one separately is how one gets missed.
+    """
+    return verdict.model_copy(update={"debt": dedupe_debt(list(debt_ledger.values()))})
 
 
 def run_review_with_fix_loop(
@@ -907,7 +890,24 @@ def run_review_with_fix_loop(
     cycle0_files = frozenset(cycle0_changed)
     scope_tier = resolve_tier(task.scope_hint)
     plan_text, ticket_text = _load_ticket_context(worktree)
-    open_findings = _track_open_findings({}, verdict.accepted)
+    # #1837: one ledger object threaded through every cycle, accumulating the
+    # findings the loop records instead of acting on.
+    debt_ledger: dict[tuple[str, str], DebtRecord] = {}
+    open_findings = _track_open_findings(
+        {},
+        verdict.accepted,
+        # Cycle 0 has no prior head to restrict a "genuinely new" finding
+        # against, so the admission gate never runs on this call and every
+        # MUST_FIX the full-PR pass found still blocks.
+        delta_diff=None,
+        delta_changed_files=None,
+        debt_ledger=debt_ledger,
+        previous_reviewed_sha=None,
+        reviewed_sha=verdict.reviewed_sha,
+        worktree=worktree,
+        ticket_id=task.ticket_id,
+    )
+    verdict = _stamp_debt(verdict, debt_ledger)
     snapshot = _persist_cycle_snapshot(verdict, session_id=session_id, cycle=0)
     # #1723: true iff at least one fix cycle so far produced a real commit
     # (OR'd across cycles) — distinguishes a genuine fix from a fix loop
@@ -951,7 +951,8 @@ def run_review_with_fix_loop(
         if park is not None:
             return park
         had_real_commit = had_real_commit or commit_sha is not None
-        result, verdict = _rereview(
+        previous_reviewed_sha = verdict.reviewed_sha
+        result, verdict, prepared = _rereview(
             runner=runner,
             task=task,
             worktree=worktree,
@@ -959,6 +960,8 @@ def run_review_with_fix_loop(
             model=model,
             remaining=_remaining_budget(deadline),
             session_id=session_id,
+            previous_reviewed_sha=previous_reviewed_sha,
+            prior_open_findings=[af.finding for af in open_findings.values()],
         )
         if verdict is None:
             # No cycle-N snapshot was persisted (the persist call below is
@@ -975,8 +978,19 @@ def run_review_with_fix_loop(
                 ),
                 None,
             )
+        open_findings = _track_open_findings(
+            open_findings,
+            verdict.accepted,
+            delta_diff=prepared.delta_diff,
+            delta_changed_files=prepared.delta_changed_files,
+            debt_ledger=debt_ledger,
+            previous_reviewed_sha=previous_reviewed_sha,
+            reviewed_sha=verdict.reviewed_sha,
+            worktree=worktree,
+            ticket_id=task.ticket_id,
+        )
+        verdict = _stamp_debt(verdict, debt_ledger)
         snapshot = _persist_cycle_snapshot(verdict, session_id=session_id, cycle=cycle)
-        open_findings = _track_open_findings(open_findings, verdict.accepted)
         if not open_findings:
             return _clean_exit(
                 result,

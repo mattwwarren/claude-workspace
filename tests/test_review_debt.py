@@ -145,7 +145,9 @@ class TestPromoteDebtFinding:
 class TestDedupeDebt:
     def test_same_fingerprint_collapses_first_discovered_wins(self) -> None:
         first = _make_debt_record(summary="Update code at line 42", discovery_sha="aaa")
-        second = _make_debt_record(summary="Update code at line 99", discovery_sha="bbb")
+        second = _make_debt_record(
+            summary="Update code at line 99", discovery_sha="bbb"
+        )
 
         merged = dedupe_debt([first, second])
 

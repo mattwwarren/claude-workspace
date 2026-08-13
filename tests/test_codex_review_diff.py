@@ -197,9 +197,7 @@ class TestCaptureDeltaDiff:
         # delta capture over `_capture_diff`'s full `main...HEAD` range.
         assert "first.py" not in diff.text
 
-    def test_no_op_delta_is_empty(
-        self, make_git_repo: Callable[[str], Path]
-    ) -> None:
+    def test_no_op_delta_is_empty(self, make_git_repo: Callable[[str], Path]) -> None:
         repo = make_git_repo("wt-delta-noop")
         _git(repo, "checkout", "-b", "feature")
         (repo / "only.py").write_text("alpha = 1\n", encoding="utf-8")

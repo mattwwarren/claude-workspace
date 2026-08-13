@@ -651,6 +651,48 @@ def _render_rejected_must_fix(verdict: ReviewVerdict) -> list[str]:
     return lines
 
 
+def _render_delta_note(verdict: ReviewVerdict) -> list[str]:
+    """Say which head this pass's diff was taken from, when it was a delta.
+
+    ``None`` means say nothing (``_render_capability_note``'s convention): the
+    pass reviewed the whole branch, which is the unremarkable case.
+    """
+    if verdict.previous_reviewed_sha is None:
+        return []
+    return [
+        "This pass reviewed only what changed since "
+        f"`{verdict.previous_reviewed_sha}` (fix-loop delta review).",
+        "",
+    ]
+
+
+def _render_debt_note(verdict: ReviewVerdict) -> list[str]:
+    """Render the debt the fix loop recorded instead of acting on (#1837).
+
+    Two kinds land here: accepted DEBT-severity findings, and MUST_FIX
+    findings the loop's admission gate refused because the latest fix cycle
+    did not cause them. Neither blocks, and neither should vanish — this
+    section is where an operator finds out what was set aside.
+
+    Empty-returns-``[]``, mirroring ``_render_failed_roles_note``. The list is
+    already deduplicated by fingerprint before it reaches the verdict, so
+    there is no "already rendered" bookkeeping to do here.
+    """
+    if not verdict.debt:
+        return []
+    lines = ["### Debt — recorded, not blocking", ""]
+    for record in verdict.debt:
+        lines.append(
+            f"- **{record.file}** — {record.summary} "
+            f"({record.tracking_disposition}, fingerprint "
+            f"`{record.fingerprint[1]}`)"
+        )
+        if record.suggested_follow_up:
+            lines.append(f"  - {record.suggested_follow_up}")
+    lines.append("")
+    return lines
+
+
 def render_verdict_comment(verdict: ReviewVerdict, *, fix_loop_enabled: bool) -> str:
     """Render a consolidated verdict into a GitHub-issue-comment markdown body.
 
@@ -695,7 +737,9 @@ def render_verdict_comment(verdict: ReviewVerdict, *, fix_loop_enabled: bool) ->
     lines.extend(_render_degraded_roles_note(verdict))
     lines.extend(_render_capability_note(verdict))
     lines.extend(_render_agent_spec_note(verdict))
+    lines.extend(_render_delta_note(verdict))
     lines.extend(_render_rejected_must_fix(verdict))
+    lines.extend(_render_debt_note(verdict))
     lines.extend(_render_findings(verdict, "MUST_FIX", "MUST_FIX"))
     lines.extend(_render_findings(verdict, "SHOULD_FIX", "SHOULD_FIX"))
     return "\n".join(lines).rstrip() + "\n"

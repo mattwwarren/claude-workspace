@@ -9,6 +9,7 @@ substantiated release-critical exception), diverting the rest into a debt ledger
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import pytest
@@ -45,7 +46,6 @@ from tests.conftest import _make_diff, _make_finding
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
 _TICKET = "1837"
 _FAKE_REREVIEW_REASON = "fake_rereview_result"
@@ -74,7 +74,7 @@ def _track(
         "debt_ledger": {},
         "previous_reviewed_sha": None,
         "reviewed_sha": "headsha",
-        "worktree": None,
+        "worktree": Path(),
         "ticket_id": _TICKET,
     }
     kwargs.update(overrides)
@@ -180,9 +180,7 @@ class TestAdmitNewMustFix:
             finding, _delta(), self._CHANGED, worktree=tmp_path
         ) == (False, "unsubstantiated_evidence")
 
-    def test_out_of_delta_with_neither_field_is_treadmill(
-        self, tmp_path: Path
-    ) -> None:
+    def test_out_of_delta_with_neither_field_is_treadmill(self, tmp_path: Path) -> None:
         finding = _make_finding(file="src/cw/consumer.py")
         assert _admit_new_must_fix(
             finding, _delta(), self._CHANGED, worktree=tmp_path
@@ -197,8 +195,12 @@ class TestAdmitNewMustFix:
 class TestTrackOpenFindingsIdentity:
     def test_line_movement_does_not_create_a_new_identity(self) -> None:
         """AC10: the same finding re-raised at a new line is one survivor."""
-        first = _accepted(summary="Missing null check at line 10", line_start=10)
-        moved = _accepted(summary="Missing null check at line 40", line_start=40)
+        first = _accepted(
+            summary="Missing null check at line 10", line_start=10, line_end=10
+        )
+        moved = _accepted(
+            summary="Missing null check at line 40", line_start=40, line_end=40
+        )
 
         open_findings = _track({}, [first])
         updated = _track(
@@ -228,9 +230,7 @@ class TestTrackOpenFindingsIdentity:
         assert list(updated) == list(open_findings)
 
     def test_na_file_finding_falls_back_to_the_dedup_key(self) -> None:
-        af = _accepted(
-            file="N/A", no_diff_anchor=True, line_start=None, line_end=None
-        )
+        af = _accepted(file="N/A", no_diff_anchor=True, line_start=None, line_end=None)
         open_findings = _track({}, [af])
         assert list(open_findings) == [_dedup_key(af.finding)]
         assert _open_finding_key(af.finding) == _dedup_key(af.finding)
@@ -256,9 +256,7 @@ class TestTrackOpenFindingsAdmission:
             worktree=worktree,
         )
 
-    def test_new_out_of_delta_finding_is_diverted_to_debt(
-        self, tmp_path: Path
-    ) -> None:
+    def test_new_out_of_delta_finding_is_diverted_to_debt(self, tmp_path: Path) -> None:
         ledger: dict[tuple[str, str], DebtRecord] = {}
         af = _accepted(file="src/cw/consumer.py", summary="Old unrelated smell")
 
@@ -428,9 +426,7 @@ class _FakeRereview:
 
     def __call__(self, **kwargs: Any) -> tuple[Any, ReviewVerdict, _FakePrepared]:
         self.previous_shas.append(kwargs["previous_reviewed_sha"])
-        self.prior_summaries.append(
-            [f.summary for f in kwargs["prior_open_findings"]]
-        )
+        self.prior_summaries.append([f.summary for f in kwargs["prior_open_findings"]])
         index = min(self.calls, len(self._cycles) - 1)
         self.calls += 1
         accepted = self._cycles[index]
@@ -449,9 +445,8 @@ class _FakeRereview:
 
 
 @pytest.fixture
-def _loop_repo(make_git_repo: Callable[[str], Path]) -> Path:
-    repo = make_git_repo("wt-convergence")
-    return repo
+def loop_repo(make_git_repo: Callable[[str], Path]) -> Path:
+    return make_git_repo("wt-convergence")
 
 
 def _drive_loop(
@@ -492,7 +487,7 @@ def _drive_loop(
 
 class TestConvergence:
     def test_convergence_fixture_does_not_reach_cycle_cap(
-        self, monkeypatch: pytest.MonkeyPatch, _loop_repo: Path
+        self, monkeypatch: pytest.MonkeyPatch, loop_repo: Path
     ) -> None:
         """Three cycles of fresh out-of-delta findings converge instead of capping.
 
@@ -507,7 +502,7 @@ class TestConvergence:
 
         result, verdict, fake = _drive_loop(
             monkeypatch,
-            _loop_repo,
+            loop_repo,
             [original],
             [
                 [original, finding_a],
@@ -531,12 +526,12 @@ class TestConvergence:
         assert len(events) == 3
 
     def test_previous_sha_and_prior_findings_are_threaded(
-        self, monkeypatch: pytest.MonkeyPatch, _loop_repo: Path
+        self, monkeypatch: pytest.MonkeyPatch, loop_repo: Path
     ) -> None:
         original = _accepted(summary="Original bug", file="src/cw/producer.py")
 
         _result, verdict, fake = _drive_loop(
-            monkeypatch, _loop_repo, [original], [[original], []]
+            monkeypatch, loop_repo, [original], [[original], []]
         )
 
         assert verdict is not None
@@ -546,7 +541,7 @@ class TestConvergence:
         assert fake.prior_summaries[1] == ["Original bug"]
 
     def test_regression_from_latest_fix_still_blocks(
-        self, monkeypatch: pytest.MonkeyPatch, _loop_repo: Path
+        self, monkeypatch: pytest.MonkeyPatch, loop_repo: Path
     ) -> None:
         """A new MUST_FIX anchored INSIDE the delta is the fix's own regression."""
         original = _accepted(summary="Original bug", file="src/cw/producer.py")
@@ -558,7 +553,7 @@ class TestConvergence:
         )
 
         result, verdict, _fake = _drive_loop(
-            monkeypatch, _loop_repo, [original], [[regression]]
+            monkeypatch, loop_repo, [original], [[regression]]
         )
 
         assert verdict is not None
@@ -567,7 +562,7 @@ class TestConvergence:
         assert [f.summary for f in verdict.must_fix] == ["Fix introduced a crash"]
 
     def test_transitive_impact_on_unchanged_consumer_still_blocks(
-        self, monkeypatch: pytest.MonkeyPatch, _loop_repo: Path
+        self, monkeypatch: pytest.MonkeyPatch, loop_repo: Path
     ) -> None:
         original = _accepted(summary="Original bug", file="src/cw/producer.py")
         transitive = _accepted(
@@ -577,7 +572,7 @@ class TestConvergence:
         )
 
         result, verdict, _fake = _drive_loop(
-            monkeypatch, _loop_repo, [original], [[transitive]]
+            monkeypatch, loop_repo, [original], [[transitive]]
         )
 
         assert verdict is not None
@@ -589,10 +584,10 @@ class TestConvergence:
         assert verdict.debt == []
 
     def test_release_critical_exception_admits_old_code_blocker(
-        self, monkeypatch: pytest.MonkeyPatch, _loop_repo: Path
+        self, monkeypatch: pytest.MonkeyPatch, loop_repo: Path
     ) -> None:
-        (_loop_repo / "src" / "cw").mkdir(parents=True, exist_ok=True)
-        (_loop_repo / "src" / "cw" / "consumer.py").write_text(
+        (loop_repo / "src" / "cw").mkdir(parents=True, exist_ok=True)
+        (loop_repo / "src" / "cw" / "consumer.py").write_text(
             "before\ndef broken():\nafter\n", encoding="utf-8"
         )
         original = _accepted(summary="Original bug", file="src/cw/producer.py")
@@ -604,7 +599,7 @@ class TestConvergence:
         )
 
         result, verdict, _fake = _drive_loop(
-            monkeypatch, _loop_repo, [original], [[release_critical]]
+            monkeypatch, loop_repo, [original], [[release_critical]]
         )
 
         assert verdict is not None
@@ -614,7 +609,7 @@ class TestConvergence:
         assert verdict.debt == []
 
     def test_unsubstantiated_release_critical_exception_becomes_debt(
-        self, monkeypatch: pytest.MonkeyPatch, _loop_repo: Path
+        self, monkeypatch: pytest.MonkeyPatch, loop_repo: Path
     ) -> None:
         original = _accepted(summary="Original bug", file="src/cw/producer.py")
         unsubstantiated = _accepted(
@@ -625,7 +620,7 @@ class TestConvergence:
         )
 
         result, verdict, _fake = _drive_loop(
-            monkeypatch, _loop_repo, [original], [[unsubstantiated]]
+            monkeypatch, loop_repo, [original], [[unsubstantiated]]
         )
 
         assert verdict is not None
