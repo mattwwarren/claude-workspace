@@ -171,8 +171,8 @@ def synthesize_codex_review_result(
     Disposition:
     - zero documents (all roles failed/skipped) → blocked/CODEX_REVIEW_UNPARSEABLE,
       with ``failures`` folded into ``details`` and ``retry_eligible=True`` when
-      at least one failure is transient (``codex_timeout``/``budget_exhausted``)
-      (MUST_FIX 2, #1236).
+      at least one failure is transient (``codex_timeout``/``budget_exhausted``/
+      ``codex_model_capacity``) (MUST_FIX 2, #1236; capacity added by #1836).
     - consolidated verdict is blocking            → blocked/CODEX_MUST_FIX_FINDINGS
     - verdict carries a mechanically-rejected MUST_FIX (validation dropped it
       before adjudication) → blocked/CODEX_MUST_FIX_MECHANICALLY_REJECTED

@@ -814,11 +814,14 @@ class TestIsModelCapacityError:
         assert _is_model_capacity_error(result) is True
 
     def test_capacity_phrasing_is_case_insensitive(self) -> None:
-        result = CodexRunResult(
-            returncode=1,
-            stdout=_audit_fixture("capacity_turn_failed.jsonl").upper(),
-            stderr="",
+        # Only the message is uppercased: codex's wire vocabulary ("type":
+        # "turn.failed") is matched exactly, so uppercasing the whole stream
+        # would test the event-name match, not the phrase match.
+        stdout = (
+            '{"type":"turn.failed","error":{"message":'
+            '"SELECTED MODEL IS AT CAPACITY. PLEASE TRY A DIFFERENT MODEL."}}\n'
         )
+        result = CodexRunResult(returncode=1, stdout=stdout, stderr="")
         assert _is_model_capacity_error(result) is True
 
     def test_unrelated_turn_failed_does_not_match(self) -> None:
