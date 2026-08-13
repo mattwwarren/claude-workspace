@@ -67,6 +67,17 @@ _CONFIDENCE_ANNOTATION = " _({confidence} confidence)_"
 _DISPOSITION_ANNOTATION = " _(suppressed — {disposition}{detail})_"
 
 
+def _has_transient_failure(failures: list[ReviewerRunFailure]) -> bool:
+    """True when at least one of *failures* is retry-eligible (#1836).
+
+    Single source of truth for both `synthesize_codex_review_result` blocked
+    dispositions (zero-documents and partial-review) that derive
+    `Blocker.retry_eligible` from `_TRANSIENT_FAILURE_REASONS` — kept as one
+    function so the two branches can't drift on what "transient" means.
+    """
+    return any(f.reason in _TRANSIENT_FAILURE_REASONS for f in failures)
+
+
 def _format_failures_detail(
     failures: list[ReviewerRunFailure], *, session_id: str
 ) -> str:
@@ -234,13 +245,12 @@ def synthesize_codex_review_result(
     ``metrics_by_role``, it is unused on the zero-documents branch.
     """
     if not documents:
-        transient = any(f.reason in _TRANSIENT_FAILURE_REASONS for f in failures)
         result = make_blocked(
             ticket_id=task.ticket_id,
             worktree=worktree,
             reason=CODEX_REVIEW_UNPARSEABLE,
             details=_format_failures_detail(failures, session_id=session_id),
-            retry_eligible=True if transient else None,
+            retry_eligible=_has_transient_failure(failures) or None,
             stage_reached=STAGE3_REVIEW,
             next_actions=_CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
         )
@@ -288,15 +298,12 @@ def synthesize_codex_review_result(
         )
         return dropped.model_copy(update={"review": verdict.review}), verdict
     if failures:
-        partial_transient = any(
-            f.reason in _TRANSIENT_FAILURE_REASONS for f in failures
-        )
         partial = make_blocked(
             ticket_id=task.ticket_id,
             worktree=worktree,
             reason=CODEX_REVIEW_PARTIAL,
             details=_format_failures_detail(failures, session_id=session_id),
-            retry_eligible=True if partial_transient else None,
+            retry_eligible=_has_transient_failure(failures) or None,
             stage_reached=STAGE3_REVIEW,
             next_actions=_CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
         )
