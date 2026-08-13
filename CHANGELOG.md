@@ -44,6 +44,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`cw queue peek`'s STOP-by-age reason splits "approaches" vs "exceeded"
+  wording (#1795):** the STOP-age message now says `age Nmin approaches
+  60-min timeout` while `age_min` is still below the 60-min ceiling
+  (`STOP_CEILING_MIN`), and `age Nmin exceeded 60-min timeout` once at or
+  past it — previously the text always said "approaches" even after a
+  session blew well past the ceiling. The `cw-queue-peek` and `cw-fanout`
+  skill docs were also corrected: the liveness-signal wording now describes
+  idle time since the last **parsed transcript record** (what `idle_min`
+  reports), not file `mtime`, which can advance after a session has gone
+  silent and falsely read as "live."
+
 - **Infra-only CANCELLED/STARTUP_FAILURE checkruns no longer flip `ci_ok`
   to `False` (#1684):** `_summarize_status_checks` in `src/cw/pr_hydrate.py`
   now treats a CANCELLED or STARTUP_FAILURE conclusion as `ci_ok` when every
