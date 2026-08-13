@@ -16,6 +16,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Codex CLI subprocess failure was previously mislabeled as a
   LocalExecutor/aider failure, costing a full transcript dig to diagnose.
 
+### Fixed
+
+- **Infra-only CANCELLED/STARTUP_FAILURE checkruns no longer flip `ci_ok`
+  to `False` (#1684):** `_summarize_status_checks` in `src/cw/pr_hydrate.py`
+  now treats a CANCELLED or STARTUP_FAILURE conclusion as `ci_ok` when every
+  other checkrun on the PR passed — a pure GitHub-infra outage (e.g. a runner
+  cancellation) was previously indistinguishable from a real code failure,
+  which wrongly fired the `ci_failing` attention state, dispatched an
+  `auto_fix_ci` session, and paged the operator for an outage that needed no
+  code change.
+
 ## [1.33.0] - 2026-08-11
 
 ### Fixed
