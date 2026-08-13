@@ -616,8 +616,24 @@ def test_close_drift_step_closes_nothing_when_no_drift_issues_open(
 def test_close_drift_step_queries_only_open_drift_labelled_issues() -> None:
     """The query is repo-global, so its filters are the only blast-radius guard."""
     script = _script(CLOSE_DRIFT_STEP_ID)
-    assert f'--label "{DRIFT_LABEL}"' in script
+    assert '--label "$DISPATCH_DRIFT_LABEL"' in script
     assert "--state open" in script
+
+
+def test_job_declares_dispatch_drift_label_once_for_both_consumers() -> None:
+    """Single source of truth: the close step and the dry-run summary both
+    read `$DISPATCH_DRIFT_LABEL` from job-level `env:` rather than each
+    hardcoding the literal, so relabeling can't desync one from the other."""
+    assert _workflow()["jobs"][JOB]["env"]["DISPATCH_DRIFT_LABEL"] == DRIFT_LABEL
+    assert '--label "$DISPATCH_DRIFT_LABEL"' in _script(CLOSE_DRIFT_STEP_ID)
+    assert '--label "$DISPATCH_DRIFT_LABEL"' in _dry_run_summary_script()
+
+
+def test_close_drift_step_has_continue_on_error() -> None:
+    """The tag/release are already shipped by earlier steps in this job; a
+    transient gh API hiccup while closing housekeeping issues afterward
+    shouldn't flip an otherwise-successful release job red."""
+    assert _step(CLOSE_DRIFT_STEP_ID)["continue-on-error"] is True
 
 
 def _dry_run_summary_script() -> str:

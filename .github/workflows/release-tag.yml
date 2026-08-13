@@ -52,6 +52,10 @@ jobs:
       issues: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Single source of truth for the "Close dispatch-drift issues" step and
+      # the "Dry-run summary" step below, which both query this label — a
+      # relabel in one without the other would silently desync them (#1799).
+      DISPATCH_DRIFT_LABEL: dispatch-drift
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
 
@@ -223,6 +227,10 @@ jobs:
       - name: Close dispatch-drift issues
         id: close-drift-issues
         if: steps.guard.outputs.match == 'true' && inputs.dry_run != true
+        # The tag/release were already created by the earlier steps in this
+        # job; a transient gh API hiccup while closing housekeeping issues
+        # afterward shouldn't flip an otherwise-successful release job red.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # NOT `github.ref_name` (what release.yml uses): that workflow is
@@ -231,7 +239,7 @@ jobs:
           RELEASE_TAG: v${{ steps.guard.outputs.version }}
         run: |
           gh issue list \
-            --label "dispatch-drift" \
+            --label "$DISPATCH_DRIFT_LABEL" \
             --state open \
             --json number \
             --jq '.[].number' | \
@@ -263,7 +271,7 @@ jobs:
             # close`. The query is repo-global (not scoped to this ref), so a
             # close reachable from the dry-run arm would sweep every open
             # drift issue on a run contracted to change nothing.
-            DRIFT_ISSUES=$(gh issue list --label "dispatch-drift" --state open --json number --jq '.[].number')
+            DRIFT_ISSUES=$(gh issue list --label "$DISPATCH_DRIFT_LABEL" --state open --json number --jq '.[].number')
             if [ -z "$DRIFT_ISSUES" ]; then
               echo "No open dispatch-drift issues — WOULD close 0 issues"
             else
