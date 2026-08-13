@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.34.0] - 2026-08-13
+
 ### Added
 
 - **`cw dev-queue add --stage <plan|impl|review|finalize>` (#1682):** a
