@@ -499,6 +499,7 @@ def test_checkpoint_empty_notes_file_no_bare_heading(tmp_path: Path) -> None:
 # gate, the `issues: write` grant it needs, and the literal shell it runs.
 
 DRY_RUN_SUMMARY_NAME = "Dry-run summary"
+WARN_STEP_NAME = "Warn if dispatch-drift closer failed"
 DRIFT_LABEL = "dispatch-drift"
 CLOSE_RELEASE_TAG = "v1.33.0"
 CLOSE_COMMENT = (
@@ -508,11 +509,37 @@ CLOSE_COMMENT = (
 NO_DRIFT_LINE = "No open dispatch-drift issues — WOULD close 0 issues"
 
 
+def _step_index_by_name(name: str) -> int:
+    for index, step in enumerate(_steps()):
+        if step.get("name") == name:
+            return index
+    msg = f"No step named {name!r} in {WORKFLOW_PATH}"
+    raise AssertionError(msg)
+
+
 def test_close_drift_step_is_inserted_between_checkpoint_and_dry_run_summary() -> None:
     steps = _steps()
     assert _step_index(CHECKPOINT_STEP_ID) + 1 == _step_index(CLOSE_DRIFT_STEP_ID)
-    assert _step_index(CLOSE_DRIFT_STEP_ID) + 1 == len(steps) - 1
     assert steps[-1]["name"] == DRY_RUN_SUMMARY_NAME
+
+
+def test_warn_step_is_inserted_between_close_drift_and_dry_run_summary() -> None:
+    steps = _steps()
+    assert _step_index(CLOSE_DRIFT_STEP_ID) + 1 == _step_index_by_name(WARN_STEP_NAME)
+    assert _step_index_by_name(WARN_STEP_NAME) + 1 == len(steps) - 1
+    assert steps[-1]["name"] == DRY_RUN_SUMMARY_NAME
+
+
+def test_warn_step_gated_on_close_drift_failure() -> None:
+    """`continue-on-error` on the closer step means its failure is otherwise
+    invisible behind a green job — this step is the only surfaced signal."""
+    step = next(s for s in _steps() if s.get("name") == WARN_STEP_NAME)
+    assert step["if"] == "steps.close-drift-issues.outcome == 'failure'"
+
+
+def test_warn_step_emits_warning_annotation() -> None:
+    step = next(s for s in _steps() if s.get("name") == WARN_STEP_NAME)
+    assert "::warning::" in step["run"]
 
 
 def test_close_drift_step_gated_on_match_true_and_not_dry_run() -> None:

@@ -248,6 +248,15 @@ jobs:
               --comment "Closed by release ${RELEASE_TAG} — dispatch/reconcile/spawn changes are now shipped."
           done
 
+      # `continue-on-error` above means a failure here (rate limit, a
+      # revoked `issues: write` grant, a malformed invocation) would
+      # otherwise vanish silently behind a green job — surface it so a
+      # persistent failure doesn't strand dispatch-drift issues open again.
+      - name: Warn if dispatch-drift closer failed
+        if: steps.close-drift-issues.outcome == 'failure'
+        run: |
+          echo "::warning::Close dispatch-drift issues step failed — open dispatch-drift issues may not have been closed for this release. Check the step log and close manually if needed."
+
       - name: Dry-run summary
         if: inputs.dry_run == true
         run: |
