@@ -18,11 +18,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal
 
 from cw.config import get_client
-from cw.dev_queue.lifecycle import transition_task_status
+from cw.dev_queue.lifecycle import _raise_stage_high_water, transition_task_status
 from cw.dev_queue.storage import _lock, load_dev_queue, save_dev_queue
 from cw.events import record_event
-from cw.exceptions import CwError, LaneMoveError, LaneNotFoundError
-from cw.models import OrchestratorEventType, QueueItemStatus
+from cw.exceptions import CwError, LaneMoveError, LaneNotFoundError, RequeueStageError
+from cw.models import DEFAULT_STAGE, OrchestratorEventType, QueueItemStatus, Stage
 
 if TYPE_CHECKING:
     from cw.models import (
@@ -47,6 +47,21 @@ _APPROVABLE_STATUSES: frozenset[QueueItemStatus] = frozenset(
 )
 
 
+def _validate_stage_in_pipeline(
+    stage: Stage, stages: list[Stage], *, client: str
+) -> None:
+    """Raise ``RequeueStageError`` iff ``stage`` is not a member of ``stages``.
+
+    Shared by ``add_ticket`` (below) and ``_apply_requeue_stage``
+    (``cw.dev_queue.requeue``) — the "is this stage actually in *this
+    client's* configured pipeline" check, extracted so the two call sites
+    can never drift apart. See GitHub #1682.
+    """
+    if stage not in stages:
+        msg = f"Stage '{stage.value}' is not in the pipeline for client '{client}'."
+        raise RequeueStageError(msg)
+
+
 def add_ticket(task: TicketTask) -> bool:
     """Enqueue a TicketTask, acquiring the file lock atomically.
 
@@ -62,6 +77,8 @@ def add_ticket(task: TicketTask) -> bool:
 
     Raises:
         LaneNotFoundError: if task.lane is not declared for the client.
+        RequeueStageError: if task.stage is not in the client's configured
+            pipeline (GitHub #1682).
     """
     _active = {QueueItemStatus.PENDING, QueueItemStatus.RUNNING}
     _parked = {
@@ -73,7 +90,7 @@ def add_ticket(task: TicketTask) -> bool:
         try:
             client_cfg = get_client(task.client)
         except CwError:
-            pass  # Unknown client — lane validation deferred to dispatch
+            pass  # Unknown client — lane/stage validation deferred to dispatch
         else:
             declared_lane_names = [ln.name for ln in client_cfg.effective_lanes]
             if task.lane not in declared_lane_names:
@@ -83,6 +100,10 @@ def add_ticket(task: TicketTask) -> bool:
                     f" Run: cw lane add {task.client} {task.lane}"
                 )
                 raise LaneNotFoundError(msg)
+            stages = client_cfg.pipeline.stages
+            _validate_stage_in_pipeline(task.stage, stages, client=task.client)
+            if task.stage != DEFAULT_STAGE:
+                _raise_stage_high_water(task, stages, task.stage)
         store = load_dev_queue()
         for existing in store.tasks:
             if existing.client != task.client or existing.ticket_id != task.ticket_id:
