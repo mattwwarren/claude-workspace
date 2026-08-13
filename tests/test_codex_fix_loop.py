@@ -16,6 +16,7 @@ from cw.codex_fix_loop import (
     _MAX_FIX_CYCLES,
     _build_fix_codex_argv,
     _build_fix_prompt,
+    _commit_fix_cycle,
     _track_open_findings,
     _verdict_snapshot_filename,
     run_review_with_fix_loop,
@@ -103,6 +104,18 @@ def _head(repo: Path) -> str:
     return subprocess.check_output(
         ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
     ).strip()
+
+
+def _install_pre_commit_hook(repo: Path, script: str) -> None:
+    """Install *script* as *repo*'s ``pre-commit`` hook, made executable.
+
+    Used to simulate a repo-local hook (e.g. ruff-format) that rewrites files
+    and exits non-zero on the run where it changes something — the scenario
+    ``_commit_fix_cycle``'s retry-once exists to survive.
+    """
+    hook_path = repo / ".git" / "hooks" / "pre-commit"
+    hook_path.write_text(script, encoding="utf-8")
+    hook_path.chmod(0o755)
 
 
 def _task(*, scope_hint: str | None = None) -> TicketTask:
@@ -547,6 +560,80 @@ class TestFixInvocation:
         assert out.blocker.reason == "codex_error"  # runtime_error → codex_error
         bundle = diagnostics_bundle_dir("s-fix-commit-exc")
         assert list(bundle.glob("fix-cycle-1-runtime_error-*.json"))
+
+    def test_commit_retries_once_after_hook_rewrite_then_succeeds(
+        self,
+        make_git_repo: Callable[..., Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A pre-commit hook that rewrites a file and fails once must not park.
+
+        Mirrors ruff-format's real behavior: it exits non-zero on the pass
+        where it changes something, then succeeds on a clean re-run.
+        """
+        import logging
+
+        worktree = _worktree(make_git_repo, "wt-fix-commit-hook-retry")
+        _install_pre_commit_hook(
+            worktree,
+            "#!/bin/sh\n"
+            'counter="$(git rev-parse --git-dir)/pre-commit-calls"\n'
+            'if [ -f "$counter" ]; then\n'
+            "  exit 0\n"
+            "fi\n"
+            'echo 1 > "$counter"\n'
+            'echo "# rewritten by hook" >> new.py\n'
+            "exit 1\n",
+        )
+        _write(worktree / "fix.py", "patched = 1\n")
+        _git(worktree, "add", "fix.py")
+
+        with caplog.at_level(logging.WARNING, logger="cw.codex_fix_loop"):
+            sha = _commit_fix_cycle(
+                worktree, cycle=1, findings=[_make_finding()]
+            )
+
+        assert sha is not None
+        assert sha == _head(worktree)
+        assert any("retrying once" in r.message for r in caplog.records)
+        # The hook's own rewrite (new.py) rode along in the retried commit.
+        committed_files = subprocess.check_output(
+            ["git", "-C", str(worktree), "show", "--name-only", "--format=", sha],
+            text=True,
+        ).split()
+        assert "new.py" in committed_files
+        assert "fix.py" in committed_files
+
+    def test_commit_hook_failure_persists_after_retry_raises(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """A hook that fails every time is a real error, not a retry target.
+
+        The retry must fire exactly once — verified via the hook's own call
+        counter — and the second failure must propagate as
+        ``CalledProcessError``, unchanged from pre-retry behavior.
+        """
+        worktree = _worktree(make_git_repo, "wt-fix-commit-hook-persistent")
+        _install_pre_commit_hook(
+            worktree,
+            "#!/bin/sh\n"
+            'counter="$(git rev-parse --git-dir)/pre-commit-calls"\n'
+            'if [ -f "$counter" ]; then\n'
+            '  count=$(cat "$counter")\n'
+            "else\n"
+            "  count=0\n"
+            "fi\n"
+            'echo $((count + 1)) > "$counter"\n'
+            "exit 1\n",
+        )
+        _write(worktree / "fix.py", "patched = 1\n")
+        _git(worktree, "add", "fix.py")
+
+        with pytest.raises(subprocess.CalledProcessError):
+            _commit_fix_cycle(worktree, cycle=1, findings=[_make_finding()])
+
+        counter_path = worktree / ".git" / "pre-commit-calls"
+        assert counter_path.read_text().strip() == "2"
 
 
 # ---------------------------------------------------------------------------

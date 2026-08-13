@@ -257,8 +257,10 @@ def _commit_fix_cycle(
 
     A no-op fix (``git status --porcelain`` empty) is tolerated: no commit is
     created, a WARNING is logged, and ``None`` is returned — the cycle still
-    counts toward the cap. Any git failure raises ``CalledProcessError``, which
-    the caller treats identically to a fix-invocation failure.
+    counts toward the cap. ``git commit`` is retried exactly once, re-staging
+    first, before giving up — any git failure surviving the retry raises
+    ``CalledProcessError``, which the caller treats identically to a
+    fix-invocation failure.
     """
     status = subprocess.check_output(
         ["git", "status", "--porcelain"], cwd=worktree, text=True
@@ -272,7 +274,28 @@ def _commit_fix_cycle(
         return None
     subprocess.check_output(["git", "add", "-A"], cwd=worktree, text=True)
     message = f"fix(review): codex fix cycle {cycle} — {_fix_commit_summary(findings)}"
-    subprocess.check_output(["git", "commit", "-m", message], cwd=worktree, text=True)
+    try:
+        subprocess.check_output(
+            ["git", "commit", "-m", message], cwd=worktree, text=True
+        )
+    except subprocess.CalledProcessError:
+        # why: a repo-local pre-commit hook that REWRITES files (e.g.
+        # ruff-format) exits non-zero on the run where it changes something —
+        # standard "hook modified files, nothing was committed" behavior, not
+        # a real failure. Without a re-stage-and-retry, that legitimate
+        # rewrite looks identical to a genuine commit failure and strands a
+        # correct, fully-written fix uncommitted in the worktree. Retried
+        # exactly once: a second failure is a real error and must surface,
+        # not be swallowed.
+        _log.warning(
+            "codex fix cycle %d commit failed (possible pre-commit hook "
+            "rewrite); re-staging and retrying once",
+            cycle,
+        )
+        subprocess.check_output(["git", "add", "-A"], cwd=worktree, text=True)
+        subprocess.check_output(
+            ["git", "commit", "-m", message], cwd=worktree, text=True
+        )
     return subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=worktree, text=True
     ).strip()
