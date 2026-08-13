@@ -31,6 +31,7 @@ from cw.dev_queue import (
     save_dev_queue,
 )
 from cw.dispatch_state import (
+    clear_all_executor_blocked_markers,
     load_usage_limit_armed_at,
     load_usage_limited_until,
     save_usage_limit_armed_at,
@@ -466,6 +467,12 @@ def _run_dispatch_loop_body(
             " parked for operator inspection",
             orphaned_codex,
         )
+
+    # Any marker on disk at this point is orphaned — no daemon thread survives
+    # a process restart (#1742). Sibling of the reap above, deliberately kept
+    # separate: parking an orphaned session and clearing a stale marker are
+    # independent concerns.
+    clear_all_executor_blocked_markers()
 
     resolved_native_daemon = native_daemon or get_native_daemon_client()
     # Track stale-warn deduplication across all ticks within this run.
