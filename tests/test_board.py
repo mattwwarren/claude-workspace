@@ -659,6 +659,11 @@ class TestPrCell:
             "ready_to_approve": "READY-TO-APPROVE",
         }
 
+    def test_ci_ok_renders_ci_ok_glyph(self) -> None:
+        from cw.board import _render_pr_cell
+
+        assert _render_pr_cell(PrState(ci_ok=True)) == "CI-OK"
+
 
 class TestBadges:
     def test_reap_beats_attention_and_pr_state(self) -> None:
@@ -725,6 +730,20 @@ class TestBadges:
         from cw.board import _DASH, _row_badge
 
         assert _row_badge(ticket_id="MW-100", pr_state=None, badge_index={}) == _DASH
+
+    def test_row_badge_falls_through_to_ready_to_approve_after_infra_only_fix(
+        self,
+    ) -> None:
+        from cw.board import _row_badge
+
+        assert (
+            _row_badge(
+                ticket_id="MW-100",
+                pr_state=PrState(ci_ok=True, attention_state="ready_to_approve"),
+                badge_index={},
+            )
+            == "READY-TO-APPROVE"
+        )
 
     def test_event_older_than_window_dropped(self) -> None:
         old_event = OrchestratorEvent(

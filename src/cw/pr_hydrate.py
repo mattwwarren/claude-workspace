@@ -48,6 +48,26 @@ logger = logging.getLogger(__name__)
 _FAILED_CHECKRUN_CONCLUSIONS: frozenset[str] = frozenset(
     {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STALE", "STARTUP_FAILURE"}
 )
+# GitHub #1684 — cw-local addition on top of the ported review-monitor set
+# above: CANCELLED and STARTUP_FAILURE are GitHub's two conclusions for a
+# provider-side/infrastructure event (a run cancelled by a platform incident,
+# or a runner that never started), not a real test/build failure. A checkrun
+# landing in _FAILED_CHECKRUN_CONCLUSIONS with ONLY one of these two
+# conclusions present anywhere in the run carries no signal that the PR's
+# own code is broken -- see tests/test_pr_hydrate.py::TestSummarizeStatusChecks::
+# test_pure_infra_cancellation_is_ok. Deliberately does NOT suppress ci_failing
+# when a genuine FAILURE/TIMED_OUT/ACTION_REQUIRED/STALE conclusion is ALSO
+# present in the same run (e.g. GitHub Actions' own fail-fast cancelling
+# sibling jobs after a real failure) -- see
+# test_genuine_failure_with_cascaded_cancellations_is_not_ok. This also
+# changes what _diff_transitions' PR_CI_FAILED emission, board.py's
+# _render_pr_cell / _row_badge, and the address_review / request_reviewer
+# review-recipe dispatch gates do downstream for this shape -- all are the
+# INTENDED consequence of this fix, not untraced side effects. See
+# ## Decisions in the #1684 plan.
+_INFRA_ONLY_CHECKRUN_CONCLUSIONS: frozenset[str] = frozenset(
+    {"CANCELLED", "STARTUP_FAILURE"}
+)
 _PENDING_CHECKRUN_STATUSES: frozenset[str] = frozenset(
     {"IN_PROGRESS", "QUEUED", "WAITING", "PENDING", "REQUESTED"}
 )
@@ -111,6 +131,13 @@ def _summarize_status_checks(rollup: list[dict[str, Any]]) -> dict[str, Any]:
     ``.claude/scripts/review_monitor.py`` (un-importable — lives outside src/).
     ``ok`` is the sole source of CI truth: in-progress/pending checks never block
     it, only genuine failures do.
+
+    GitHub #1684: ``ok`` is False only when a *genuine*-failure conclusion
+    (anything in ``_FAILED_CHECKRUN_CONCLUSIONS`` other than
+    ``_INFRA_ONLY_CHECKRUN_CONCLUSIONS``) is present in ``failing`` — a run
+    whose only failing conclusions are CANCELLED/STARTUP_FAILURE (a
+    provider-side/infra event) reads as ``ok=True``. ``failing`` itself is
+    unaffected: infra-only entries still populate it for evidence/display.
     """
     failing: list[dict[str, str]] = []
     pending_count = 0
@@ -143,7 +170,14 @@ def _summarize_status_checks(rollup: list[dict[str, Any]]) -> dict[str, Any]:
                 )
             elif state_str == "PENDING":
                 pending_count += 1
-    return {"failing": failing, "pending_count": pending_count, "ok": not failing}
+    has_genuine_failure = any(
+        f["conclusion"] not in _INFRA_ONLY_CHECKRUN_CONCLUSIONS for f in failing
+    )
+    return {
+        "failing": failing,
+        "pending_count": pending_count,
+        "ok": not has_genuine_failure,
+    }
 
 
 # RFC 0010 W2 comment-review gap (#1195): cw's own review skills emit this
