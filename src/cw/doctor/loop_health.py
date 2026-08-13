@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 from cw.config import load_state, save_state, sessions_lock
 from cw.dev_queue import dev_queue_lock, save_dev_queue, transition_task_status
 from cw.dispatch import TICK_STALE_SECONDS
+from cw.dispatch_state import load_executor_blocked_markers
 from cw.doctor import _deps
 from cw.doctor._shared import CheckResult
 from cw.events import read_events, record_event
@@ -113,18 +114,30 @@ def _check_loop_health() -> list[CheckResult]:
 
 
 def _check_loop_liveness() -> list[CheckResult]:
-    """Warn when any client's last dispatch tick is stale and has pending tickets."""
+    """Warn when any client's last dispatch tick is stale and has pending tickets.
+
+    A live executor-blocked marker for the client fully suppresses the warning
+    (#1742): a stale tick with a review in flight is expected, not actionable,
+    and the warning's own remedy ("Run `cw dev-queue run`") would push the
+    operator toward a restart that kills that review. Reads the same marker
+    sidecar ``cw dev-queue status`` annotates ``[BLOCKED]`` from; suppression
+    rather than annotation because this function's contract is binary
+    warn/no-warn with no informational middle state.
+    """
     tick_data: dict[str, TickSummary] = latest_tick_summary_by_client()
     if not tick_data:
         return [
             CheckResult("loop-liveness", ok=True, warn=False, detail="no tick history")
         ]
 
+    markers = load_executor_blocked_markers()
+    blocked_clients = {marker.client for marker in markers.values()}
     now = datetime.now(UTC)
     results: list[CheckResult] = []
     for client, tick in tick_data.items():
         age = (now - tick.tick_at).total_seconds()
-        if age > TICK_STALE_SECONDS and tick.pending > 0:
+        stale_and_pending = age > TICK_STALE_SECONDS and tick.pending > 0
+        if stale_and_pending and client not in blocked_clients:
             results.append(
                 CheckResult(
                     f"loop-liveness/{client}",

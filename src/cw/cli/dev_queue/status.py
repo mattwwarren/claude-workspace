@@ -15,6 +15,7 @@ from cw.config import (
 )
 from cw.dev_queue import list_tickets
 from cw.dispatch import TICK_STALE_SECONDS
+from cw.dispatch_state import ExecutorBlockedMarker, load_executor_blocked_markers
 from cw.exceptions import CwError
 from cw.models import (
     DEFAULT_LANE,
@@ -115,6 +116,39 @@ def _emit_dev_queue_lane_breakdown(
             click.echo(f"      {label}: {occupant_str}")
 
 
+def _stale_tick_annotation(
+    client_name: str,
+    *,
+    age: int,
+    markers: dict[str, ExecutorBlockedMarker],
+    now: datetime,
+) -> str:
+    """Render the suffix for a client whose last tick has gone stale (#1742).
+
+    Tick age alone cannot tell a dead dispatch loop from a live one blocked
+    inside an executor's review — and the operator's correct response is
+    opposite between the two (restart vs. leave it alone). A live marker for
+    *client_name* resolves the ambiguity, so it wins over ``[STALE]``.
+
+    *elapsed* is measured from the marker's own ``started_at``, never from the
+    tick's *age*: those are two different clocks (how long since the loop last
+    reported vs. how long this review has been running).
+    """
+    blocked = sorted(
+        (m for m in markers.values() if m.client == client_name),
+        key=lambda m: m.started_at,
+    )
+    if not blocked:
+        return f" [STALE — no tick in {age}s]"
+    oldest = blocked[0]
+    elapsed = int((now - oldest.started_at).total_seconds())
+    more = f" (+{len(blocked) - 1} more)" if len(blocked) > 1 else ""
+    return (
+        f" [BLOCKED — {oldest.executor} review,"
+        f" ticket {oldest.ticket_id}, {elapsed}s{more}]"
+    )
+
+
 @dev_queue.command(name="status")
 @click.option("--client", "-c", default=None, help="Filter by client.")
 @click.option("--json", "output_json", is_flag=True, help="JSON dict keyed by client.")
@@ -197,6 +231,7 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
     tick_data = latest_tick_summary_by_client()
     if tick_data:
         config = load_orchestrator_config()
+        markers = load_executor_blocked_markers()
         click.echo("")
         click.echo("Last dispatch tick per client:")
         click.echo(
@@ -215,7 +250,9 @@ def dev_queue_status(client: str | None, output_json: bool, show_all: bool) -> N
                 age_secs = (now - tick.tick_at).total_seconds()
                 age = int(age_secs)
                 if age_secs > TICK_STALE_SECONDS:
-                    tick_line += f" [STALE — no tick in {age}s]"
+                    tick_line += _stale_tick_annotation(
+                        client_name, age=age, markers=markers, now=now
+                    )
                 click.echo(tick_line)
                 if tick.skip_reason == DispatchSkipReason.FRESHNESS_GATE:
                     n_pending = sum(
