@@ -153,7 +153,7 @@ If you catch yourself drafting prose that explains *why* the agent isn't needed 
    **Prompt must include:**
    - Mode declaration: `Mode: ambiguity scan`
    - The ticket: description + ALL comments in chronological order (via the active tracker's fetch ops — `get_issue` + `list_comments` for `linear`, `gh issue view <n> --json title,body,comments` for `github-issues`), or the free-text description if no ticket
-   - The plan: full text, file list, phases
+   - The plan: full text, file list, phases — full text specifically includes any `## Adopted Assumptions` / `## Self-Verified Premises` / `## Deferred Premises` sections already present (from a prior Step 4b partition pass on an earlier round of this same ticket). Do not trim or summarize the plan in a way that drops these sections — the agent cross-checks candidate findings against them per `product-manager-reviewer.md` Mode 1, and a truncated prompt silently reopens the gap this fixes (#1593).
    - Instruction to output either `AMBIGUITIES — N items` (with the question format defined in the agent spec) or exactly `NO_AMBIGUITIES`
    - The friction protocol block
    - The Health Check block (verbatim from Step 1b)
