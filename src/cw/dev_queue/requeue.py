@@ -17,7 +17,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, NamedTuple
 
 from cw.config import get_client
-from cw.dev_queue.crud import _APPROVABLE_STATUSES, _find_ticket
+from cw.dev_queue.crud import (
+    _APPROVABLE_STATUSES,
+    _find_ticket,
+    _validate_stage_in_pipeline,
+)
 from cw.dev_queue.lifecycle import (
     _PLAN_SOUNDNESS_MARKER,
     _PLAN_SPEC_MARKER,
@@ -149,12 +153,7 @@ def _apply_requeue_stage(
         return False
 
     target_stage = Stage(stage_override)
-    if target_stage not in stages:
-        msg = (
-            f"Stage '{stage_override}' is not in the pipeline"
-            f" for client '{task.client}'."
-        )
-        raise RequeueStageError(msg)
+    _validate_stage_in_pipeline(target_stage, stages, client=task.client)
 
     current_idx = stages.index(task.stage)
     target_idx = stages.index(target_stage)

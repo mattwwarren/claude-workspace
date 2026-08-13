@@ -49,7 +49,8 @@ operator channel.
 ```bash
 cw dev-queue add <TICKET-ID> [<TICKET-ID> ...] --client <client> \
   [--scope small|large] [--priority <n>] \
-  [--lane <lane>] [--signoff operator] [--hold-finalize]
+  [--lane <lane>] [--signoff operator] [--hold-finalize] \
+  [--stage plan|impl|review|finalize]
 ```
 
 - `-s/--scope` sets `TicketTask.scope_hint` (default `None`). One effect:
@@ -70,6 +71,15 @@ cw dev-queue add <TICKET-ID> [<TICKET-ID> ...] --client <client> \
   ticket ships (see below).
 - `--hold-finalize` — stop this ticket before an unattended finalize (see
   below). A boolean switch, not a value option.
+- `--stage plan|impl|review|finalize` — enqueue the ticket directly at a
+  given pipeline stage instead of the default `plan` (GitHub #1682). Shares
+  the exact same vocabulary and per-client pipeline-membership check as
+  `requeue --stage` — see "Requeue at a different stage" (§7) for the
+  vocabulary's origin. An unrecognized value fails loudly at parse time (exit
+  code 2, no row inserted); a value not declared in the client's pipeline
+  raises before the row is written. Closes a recovery gap: a row removed with
+  `cw dev-queue remove` can be re-added directly at the stage it was parked
+  at, instead of `add` → `cancel` → `requeue --from-cancelled --stage <x>`.
 
 ### The operator-signoff gate (RFC 0007 Phase 3, #990)
 
@@ -554,7 +564,9 @@ defect.
 `cw dev-queue requeue` defaults to re-running the ticket's **current** stage.
 `--stage plan|impl|review|finalize` requeues at a forward stage instead; add
 `--regress` to allow a **backward** target on a blocked ticket (e.g. a
-plan-deviation review exit back to `impl`).
+plan-deviation review exit back to `impl`). `cw dev-queue add --stage`
+(§2, GitHub #1682) shares this same `--stage` vocabulary for enqueuing a
+*new* row directly at a stage, rather than requeuing an existing one.
 
 #### Review-stage send-back: what actually reaches the worker (#1730)
 

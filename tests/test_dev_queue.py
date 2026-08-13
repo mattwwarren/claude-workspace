@@ -601,6 +601,140 @@ class TestCLIDevQueueAdd:
         assert result.exit_code != 0
         assert "fast" in result.output
 
+    def test_add_with_stage_impl_lands_task_at_impl(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """cw dev-queue add --stage impl lands the task at IMPL (GitHub #1682)."""
+        monkeypatch.setattr("cw.cli.dev_queue.crud.record_event", lambda *_, **__: None)
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "add", "ABC-5", "--client", "genhealth", "--stage", "impl"],
+        )
+        assert result.exit_code == 0, result.output
+        store = load_dev_queue()
+        assert store.tasks[0].stage == Stage.IMPL
+        assert store.tasks[0].stage_high_water == Stage.IMPL
+
+    def test_add_without_stage_defaults_to_plan(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression guard: omitting --stage keeps today's default behavior."""
+        monkeypatch.setattr("cw.cli.dev_queue.crud.record_event", lambda *_, **__: None)
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "add", "ABC-5", "--client", "genhealth"]
+        )
+        assert result.exit_code == 0, result.output
+        store = load_dev_queue()
+        assert store.tasks[0].stage == Stage.PLAN
+        assert store.tasks[0].stage_high_water is None
+
+    def test_add_with_invalid_stage_choice_exits_nonzero_and_does_not_insert(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An unrecognized --stage value fails loudly at parse time (no fallback)."""
+        monkeypatch.setattr("cw.cli.dev_queue.crud.record_event", lambda *_, **__: None)
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "add", "ABC-5", "--client", "genhealth", "--stage", "bogus"],
+        )
+        assert result.exit_code != 0
+        output_lower = result.output.lower()
+        assert "invalid choice" in output_lower or "error" in output_lower
+        store = load_dev_queue()
+        assert store.tasks == []
+
+    def test_add_with_stage_not_in_client_pipeline_exits_nonzero(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """--stage review against a pipeline that excludes review exits non-zero."""
+        ws = tmp_dev_queue / "ws"
+        clients_file().write_text(
+            f"clients:\n  genhealth:\n    workspace_path: {ws}\n"
+            "    pipeline:\n      stages: [plan, impl]\n"
+        )
+        monkeypatch.setattr("cw.cli.dev_queue.crud.record_event", lambda *_, **__: None)
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "dev-queue",
+                "add",
+                "ABC-5",
+                "--client",
+                "genhealth",
+                "--stage",
+                "review",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "not in the pipeline" in result.output
+
+    def test_add_with_stage_emits_ticket_enqueued_event_with_stage_field(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The TICKET_ENQUEUED payload carries the resolved stage (GitHub #1682)."""
+        events: list[tuple[OrchestratorEventType, dict[str, object], str | None]] = []
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.crud.record_event",
+            lambda etype, payload=None, **kw: events.append(
+                (etype, payload or {}, kw.get("correlation_id"))
+            ),
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "add", "ABC-5", "--client", "genhealth", "--stage", "impl"],
+        )
+        assert result.exit_code == 0, result.output
+        enqueued = [e for e in events if e[0] == OrchestratorEventType.TICKET_ENQUEUED]
+        assert len(enqueued) == 1
+        _, payload, _ = enqueued[0]
+        assert payload["stage"] == "impl"
+
+    def test_add_without_stage_emits_ticket_enqueued_event_with_plan_stage(
+        self,
+        tmp_dev_queue: Path,
+        tmp_orchestrator_config: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression guard: the payload's existing keys plus a default 'plan'."""
+        events: list[tuple[OrchestratorEventType, dict[str, object], str | None]] = []
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.crud.record_event",
+            lambda etype, payload=None, **kw: events.append(
+                (etype, payload or {}, kw.get("correlation_id"))
+            ),
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["dev-queue", "add", "ABC-5", "--client", "genhealth"]
+        )
+        assert result.exit_code == 0, result.output
+        enqueued = [e for e in events if e[0] == OrchestratorEventType.TICKET_ENQUEUED]
+        assert len(enqueued) == 1
+        _, payload, _ = enqueued[0]
+        assert payload["stage"] == "plan"
+        assert payload["ticket_id"] == "ABC-5"
+        assert payload["client"] == "genhealth"
+
 
 # ---------------------------------------------------------------------------
 # TestCLIDevQueueStatus
@@ -1652,6 +1786,120 @@ class TestAddTicketLaneValidation:
         assert result is True
         store = load_dev_queue()
         assert store.tasks[0].lane == "fast"
+
+
+# ---------------------------------------------------------------------------
+# Shared helper: pipeline-aware client setup (GitHub #1682)
+# ---------------------------------------------------------------------------
+
+
+def _setup_client_with_pipeline_stages(
+    tmp_config_dir: Path, tmp_path: Path, stages: list[str]
+) -> None:
+    """Write clients.yaml with a restricted pipeline for 'genhealth'."""
+    config_dir = tmp_config_dir / ".config" / "cw"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    ws = tmp_path / "ws"
+    ws.mkdir(parents=True, exist_ok=True)
+    stages_yaml = ", ".join(stages)
+    (config_dir / "clients.yaml").write_text(
+        f"clients:\n  genhealth:\n    workspace_path: {ws}\n"
+        f"    pipeline:\n      stages: [{stages_yaml}]\n"
+    )
+
+
+# ---------------------------------------------------------------------------
+# TestValidateStageInPipeline
+# ---------------------------------------------------------------------------
+
+
+class TestValidateStageInPipeline:
+    """Unit tests for the shared ``_validate_stage_in_pipeline`` helper."""
+
+    def test_stage_in_pipeline_does_not_raise(self) -> None:
+        from cw.dev_queue.crud import _validate_stage_in_pipeline
+
+        _validate_stage_in_pipeline(
+            Stage.IMPL, [Stage.PLAN, Stage.IMPL, Stage.REVIEW], client="genhealth"
+        )
+
+    def test_stage_not_in_pipeline_raises(self) -> None:
+        from cw.dev_queue.crud import _validate_stage_in_pipeline
+        from cw.exceptions import RequeueStageError
+
+        with pytest.raises(
+            RequeueStageError,
+            match=r"Stage 'review' is not in the pipeline for client 'genhealth'\.",
+        ):
+            _validate_stage_in_pipeline(
+                Stage.REVIEW, [Stage.PLAN, Stage.IMPL], client="genhealth"
+            )
+
+
+# ---------------------------------------------------------------------------
+# TestAddTicketStagePlacement (GitHub #1682)
+# ---------------------------------------------------------------------------
+
+
+class TestAddTicketStagePlacement:
+    """add_ticket places a task at an explicit stage, mirroring requeue --stage."""
+
+    @pytest.fixture
+    def patched_queue(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Patch queue file paths to tmp_path."""
+        monkeypatch.setattr("cw.config.DEV_QUEUE_FILE", tmp_path / "dev_queue.json")
+        monkeypatch.setattr("cw.config.DEV_QUEUE_LOCK", tmp_path / ".dev_queue.lock")
+        return tmp_path
+
+    def test_add_ticket_default_stage_is_plan_and_high_water_unset(
+        self, patched_queue: Path, tmp_config_dir: Path
+    ) -> None:
+        """Omitting stage preserves today's default behavior exactly."""
+        _setup_client_with_pipeline_stages(
+            tmp_config_dir, patched_queue, ["plan", "impl", "review", "finalize"]
+        )
+        task = TicketTask(ticket_id="GEN-20", client="genhealth")
+        result = add_ticket(task)
+        assert result is True
+        store = load_dev_queue()
+        assert store.tasks[0].stage == Stage.PLAN
+        assert store.tasks[0].stage_high_water is None
+
+    def test_add_ticket_with_stage_override_lands_at_stage_and_raises_high_water(
+        self, patched_queue: Path, tmp_config_dir: Path
+    ) -> None:
+        _setup_client_with_pipeline_stages(
+            tmp_config_dir, patched_queue, ["plan", "impl", "review", "finalize"]
+        )
+        task = TicketTask(ticket_id="GEN-21", client="genhealth", stage=Stage.IMPL)
+        result = add_ticket(task)
+        assert result is True
+        store = load_dev_queue()
+        assert store.tasks[0].stage == Stage.IMPL
+        assert store.tasks[0].stage_high_water == Stage.IMPL
+        assert store.tasks[0].status == QueueItemStatus.PENDING
+
+    def test_add_ticket_stage_not_in_client_pipeline_raises(
+        self, patched_queue: Path, tmp_config_dir: Path
+    ) -> None:
+        from cw.exceptions import RequeueStageError
+
+        _setup_client_with_pipeline_stages(
+            tmp_config_dir, patched_queue, ["plan", "impl"]
+        )
+        task = TicketTask(ticket_id="GEN-22", client="genhealth", stage=Stage.REVIEW)
+        with pytest.raises(RequeueStageError, match="not in the pipeline"):
+            add_ticket(task)
+
+    def test_add_ticket_unknown_client_skips_stage_validation(
+        self, patched_queue: Path
+    ) -> None:
+        """add_ticket skips stage validation when the client is not in clients.yaml."""
+        task = TicketTask(ticket_id="GEN-23", client="unknown-client", stage=Stage.IMPL)
+        result = add_ticket(task)
+        assert result is True
+        store = load_dev_queue()
+        assert store.tasks[0].stage == Stage.IMPL
 
 
 # ---------------------------------------------------------------------------
@@ -5589,6 +5837,32 @@ class TestRequeueTicket:
         with pytest.raises(RequeueStageError, match="regress"):
             requeue_ticket("GEN-500", "genhealth", stage_override="plan")
 
+    def test_requeue_stage_not_in_client_pipeline_raises(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """--stage review against a pipeline that excludes review raises.
+
+        This branch (_validate_stage_in_pipeline, extracted from the former
+        inline membership check) was previously untested — regression guard
+        added alongside the #1682 extraction to lock in the refactor.
+        """
+        from cw.dev_queue import requeue_ticket
+        from cw.exceptions import RequeueStageError
+
+        config_dir = tmp_config_dir / ".config" / "cw"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        ws = tmp_path / "ws"
+        ws.mkdir(parents=True, exist_ok=True)
+        (config_dir / "clients.yaml").write_text(
+            f"clients:\n  genhealth:\n    workspace_path: {ws}\n"
+            "    pipeline:\n      stages: [plan, impl]\n"
+        )
+        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess9004")
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        with pytest.raises(RequeueStageError, match="not in the pipeline"):
+            requeue_ticket("GEN-500", "genhealth", stage_override="review")
+
     def test_requeue_non_blocked_raises(
         self, tmp_config_dir: Path, tmp_path: Path
     ) -> None:
@@ -6599,12 +6873,25 @@ def _requeue_that_fails_for(
     from cw.exceptions import RequeueStateError
 
     def _fake_requeue_ticket(
-        ticket_id: str, client_name: str, *args: object, **kwargs: object
+        ticket_id: str,
+        client_name: str,
+        stage_override: str | None = None,
+        *,
+        allow_regress: bool = False,
+        from_cancelled: bool = False,
+        from_failed: bool = False,
     ) -> dict[str, str | bool | int]:
         if ticket_id == failing_ticket_id:
             msg = "status raced away from BLOCKED_ON_USER"
             raise RequeueStateError(msg)
-        return real_requeue_ticket(ticket_id, client_name, *args, **kwargs)
+        return real_requeue_ticket(
+            ticket_id,
+            client_name,
+            stage_override,
+            allow_regress=allow_regress,
+            from_cancelled=from_cancelled,
+            from_failed=from_failed,
+        )
 
     return _fake_requeue_ticket
 
@@ -8480,7 +8767,9 @@ class TestExtractPrUrl:
         self._extract = _extract_pr_url
 
     def test_extracts_url_from_pr_dict(self) -> None:
-        result = {"pr": {"url": "https://github.com/foo/bar/pull/42"}}
+        result: dict[str, object] = {
+            "pr": {"url": "https://github.com/foo/bar/pull/42"}
+        }
         assert self._extract(result) == "https://github.com/foo/bar/pull/42"
 
     def test_none_when_no_pr(self) -> None:

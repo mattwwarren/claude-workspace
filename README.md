@@ -133,7 +133,7 @@ Use the `/cw-session-watch` skill to read a session's exit status without hand-g
 
 | Command | Description |
 |---------|-------------|
-| `cw dev-queue add <ticket> -c <client>` | Enqueue one or more tickets for dispatch |
+| `cw dev-queue add <ticket> -c <client> [--stage <s>]` | Enqueue one or more tickets for dispatch (optionally at a given stage) |
 | `cw dev-queue run [--once]` | Dispatch pending tasks (up to concurrency cap) |
 | `cw dev-queue serve` | Run the dispatch loop with automatic restart on crash |
 | `cw dev-queue status` | Show queue state and last tick summary |
