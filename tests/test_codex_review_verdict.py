@@ -17,6 +17,7 @@ from cw.codex_review import (
     CODEX_REVIEW_PARTIAL,
     CODEX_REVIEW_UNPARSEABLE,
     CODEX_TIMEOUT,
+    _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
     _format_failures_detail,
     render_verdict_comment,
     synthesize_codex_review_result,
@@ -79,6 +80,10 @@ class TestSynthesizeCodexReviewResult:
         assert result.blocker is not None
         assert result.blocker.reason == CODEX_REVIEW_UNPARSEABLE
         assert verdict is None
+        # #1835: must carry codex_review's own next_actions label, never the
+        # LocalExecutor one make_blocked defaults to.
+        assert result.next_actions == _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS
+        assert "local_executor" not in result.next_actions[0]
 
     @pytest.mark.parametrize(
         ("reason", "expect_retry"),
@@ -138,6 +143,10 @@ class TestSynthesizeCodexReviewResult:
         assert result.blocker.details != ""
         assert "Bug here" in result.blocker.details
         assert "src/cw/foo.py:10" in result.blocker.details
+        # #1835: must carry codex_review's own next_actions label, never the
+        # LocalExecutor one make_blocked defaults to.
+        assert result.next_actions == _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS
+        assert "local_executor" not in result.next_actions[0]
 
     @pytest.mark.parametrize(
         "reason", [CODEX_BUDGET_EXHAUSTED, CODEX_TIMEOUT, CODEX_ERROR]
@@ -173,6 +182,10 @@ class TestSynthesizeCodexReviewResult:
         assert result.review.should_fix == 1
         assert verdict is not None
         assert verdict.blocking is False
+        # #1835: must carry codex_review's own next_actions label, never the
+        # LocalExecutor one make_blocked defaults to.
+        assert result.next_actions == _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS
+        assert "local_executor" not in result.next_actions[0]
 
     def test_must_fix_takes_priority_over_partial(
         self, make_git_repo: Callable[[str], Path]
@@ -264,6 +277,44 @@ class TestSynthesizeCodexReviewResult:
         assert result.review.agents_run == 1
         assert verdict is not None
         assert verdict.blocking is False
+
+    @pytest.mark.parametrize(
+        "kind", ["zero_documents", "must_fix", "mechanically_rejected", "partial"]
+    )
+    def test_blocked_next_actions_never_borrows_local_executor_label(
+        self, make_git_repo: Callable[[str], Path], kind: str
+    ) -> None:
+        """Regression guard for #1835: none of the four blocked-producing
+        branches of synthesize_codex_review_result may carry local_runner's
+        LocalExecutor-specific next_actions label — a Codex CLI subprocess
+        failure is not a LocalExecutor/aider failure."""
+        worktree = make_git_repo(f"wt-synth-regression-{kind}")
+        documents: list[ReviewerFindingsDocument] = []
+        failures: list[ReviewerRunFailure] = []
+        if kind == "zero_documents":
+            failures = [ReviewerRunFailure(role="R", reason="crash")]
+        elif kind == "must_fix":
+            documents = [_make_reviewer_doc(_make_finding(severity="MUST_FIX"))]
+        elif kind == "mechanically_rejected":
+            documents = [_mechanically_rejected_must_fix_doc()]
+        else:  # partial
+            documents = [_make_reviewer_doc(_make_finding(severity="SHOULD_FIX"))]
+            failures = [
+                ReviewerRunFailure(role="Performance Reviewer", reason=CODEX_TIMEOUT)
+            ]
+        result, _verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=documents,
+            failures=failures,
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-synth-regression",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+        assert result.status == "blocked"
+        assert result.next_actions != ["user_resolve_local_executor_failure"]
 
 
 # ---------------------------------------------------------------------------
@@ -562,6 +613,10 @@ class TestSynthesizeCodexReviewResultMechanicalRejection:
         assert verdict.blocking is False
         assert len(verdict.rejected_must_fix) == 1
         assert "dropped before adjudication" in result.blocker.details
+        # #1835: must carry codex_review's own next_actions label, never the
+        # LocalExecutor one make_blocked defaults to.
+        assert result.next_actions == _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS
+        assert "local_executor" not in result.next_actions[0]
 
     def test_partial_vs_mechanical_rejection_precedence(
         self, make_git_repo: Callable[[str], Path]
