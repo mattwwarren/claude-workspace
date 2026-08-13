@@ -394,6 +394,137 @@ def test_run_codex_review_and_complete_exception_path(
 
 
 # ---------------------------------------------------------------------------
+# ExecutorBlockedMarker lifecycle around the review (#1742)
+# ---------------------------------------------------------------------------
+
+
+def test_run_codex_review_and_complete_sets_marker_and_clears_on_success(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """A marker is live for the whole review and gone once it returns (#1742)."""
+    from datetime import UTC, datetime
+
+    from cw.dispatch_state import load_executor_blocked_markers
+
+    worktree = make_git_repo("wt-bg-marker")
+    _seed_session("bg-marker")
+    task = TicketTask(ticket_id="T-mark", client="test", stage=Stage.REVIEW)
+    result = make_blocked(
+        ticket_id="T-mark",
+        worktree=worktree,
+        reason=CODEX_REVIEW_UNPARSEABLE,
+        stage_reached="stage3_review",
+    )
+    seen: list[object] = []
+
+    def _capture_marker(**_kwargs: object) -> tuple[object, None]:
+        seen.append(load_executor_blocked_markers())
+        return (result, None)
+
+    with (
+        patch(
+            "cw.codex_background.run_review_with_fix_loop",
+            side_effect=_capture_marker,
+        ),
+        patch("cw.codex_background._record_orchestrator_event"),
+    ):
+        _run(sid="bg-marker", task=task, worktree=worktree, client=_client(worktree))
+
+    assert len(seen) == 1
+    during = seen[0]
+    assert isinstance(during, dict)
+    assert list(during) == ["test/T-mark"]
+    marker = during["test/T-mark"]
+    assert marker.client == "test"
+    assert marker.ticket_id == "T-mark"
+    assert marker.executor == "codex"
+    assert marker.session_id == "bg-marker"
+    assert abs((datetime.now(UTC) - marker.started_at).total_seconds()) < 60
+    # Cleared by the finally: once the review is done.
+    assert load_executor_blocked_markers() == {}
+
+
+def test_run_codex_review_and_complete_clears_marker_on_exception(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """The finally: must fire on the failure branch too (#1742)."""
+    from cw.dispatch_state import load_executor_blocked_markers
+
+    worktree = make_git_repo("wt-bg-marker-exc")
+    _seed_session("bg-marker-exc")
+    add_ticket(
+        TicketTask(
+            ticket_id="T-mark-exc",
+            client="test",
+            stage=Stage.REVIEW,
+            status=QueueItemStatus.RUNNING,
+            session_id="bg-marker-exc",
+        )
+    )
+    task = TicketTask(ticket_id="T-mark-exc", client="test", stage=Stage.REVIEW)
+
+    with (
+        patch(
+            "cw.codex_background.run_review_with_fix_loop",
+            side_effect=RuntimeError("git boom"),
+        ),
+        patch("cw.codex_background._record_orchestrator_event"),
+    ):
+        _run(
+            sid="bg-marker-exc",
+            task=task,
+            worktree=worktree,
+            client=_client(worktree),
+        )
+
+    assert load_executor_blocked_markers() == {}
+
+
+def test_run_codex_review_and_complete_marker_cleared_after_verdict_posting(
+    tmp_config_dir: Path,
+    make_git_repo: Callable[[str], Path],
+) -> None:
+    """Marker is live during the review and cleared after Step 4b (#1742)."""
+    from cw.dispatch_state import load_executor_blocked_markers
+
+    worktree = make_git_repo("wt-bg-marker-verdict")
+    _seed_session("bg-marker-verdict")
+    task = TicketTask(ticket_id="T-mark-v", client="test", stage=Stage.REVIEW)
+    result = make_blocked(
+        ticket_id="T-mark-v",
+        worktree=worktree,
+        reason=CODEX_REVIEW_UNPARSEABLE,
+        stage_reached="stage3_review",
+    )
+    during: list[int] = []
+
+    def _capture_marker(**_kwargs: object) -> tuple[object, object]:
+        during.append(len(load_executor_blocked_markers()))
+        return (result, object())
+
+    with (
+        patch(
+            "cw.codex_background.run_review_with_fix_loop",
+            side_effect=_capture_marker,
+        ),
+        patch("cw.codex_background.render_verdict_comment", return_value="rendered"),
+        patch("cw.codex_background._post_review_comment") as post_mock,
+    ):
+        _run(
+            sid="bg-marker-verdict",
+            task=task,
+            worktree=worktree,
+            client=_client(worktree),
+        )
+
+    assert during == [1]
+    post_mock.assert_called_once()
+    assert load_executor_blocked_markers() == {}
+
+
+# ---------------------------------------------------------------------------
 # _resolve_codex_fix_loop_enabled precedence (#1553)
 # ---------------------------------------------------------------------------
 

@@ -39,7 +39,10 @@ from tests.conftest import _make_daemon_session
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from datetime import datetime
     from pathlib import Path
+
+    from cw.dispatch_state import ExecutorBlockedMarker
 
 
 class TestLoadClients:
@@ -2683,3 +2686,291 @@ class TestMainDriftLatchesPersistence:
         assert loaded is not None
         assert loaded.available is False
         assert loaded.latched is True
+
+
+class TestExecutorBlockedMarkerPersistence:
+    """Unit tests for the per-(client, ticket) executor-blocked marker (#1742).
+
+    Sibling of TestAvailabilityProbeCachePersistence/TestMainDriftLatchesPersistence:
+    persisted in the same DISPATCH_STATE_FILE sidecar under the
+    ``"executor_blocked"`` key. Transient, non-durable state — wiped wholesale
+    at dispatch-loop process boot rather than schema-versioned.
+    """
+
+    def _marker(
+        self,
+        *,
+        client: str = "client-a",
+        ticket_id: str = "1723",
+        started_at: datetime | None = None,
+    ) -> ExecutorBlockedMarker:
+        from datetime import UTC, datetime
+
+        from cw.dispatch_state import ExecutorBlockedMarker
+
+        return ExecutorBlockedMarker(
+            client=client,
+            ticket_id=ticket_id,
+            executor="codex",
+            reviewer_role=None,
+            started_at=started_at or datetime.now(UTC),
+            session_id=f"sid-{ticket_id}",
+        )
+
+    def test_save_executor_blocked_marker_round_trips(
+        self, tmp_config_dir: Path
+    ) -> None:
+        from datetime import UTC, datetime
+
+        from cw.dispatch_state import (
+            load_executor_blocked_markers,
+            save_executor_blocked_marker,
+        )
+
+        started_at = datetime.now(UTC)
+        save_executor_blocked_marker(self._marker(started_at=started_at))
+
+        markers = load_executor_blocked_markers()
+        assert list(markers) == ["client-a/1723"]
+        marker = markers["client-a/1723"]
+        assert marker.client == "client-a"
+        assert marker.ticket_id == "1723"
+        assert marker.executor == "codex"
+        assert marker.reviewer_role is None
+        assert marker.session_id == "sid-1723"
+        assert abs((marker.started_at - started_at).total_seconds()) < 1
+
+    def test_save_executor_blocked_marker_preserves_usage_limited_until(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Writing a marker must not clobber the usage-limit key."""
+        from datetime import UTC, datetime, timedelta
+
+        from cw.dispatch_state import (
+            load_usage_limited_until,
+            save_executor_blocked_marker,
+            save_usage_limited_until,
+        )
+
+        future = datetime.now(UTC) + timedelta(hours=1)
+        save_usage_limited_until(future)
+        save_executor_blocked_marker(self._marker())
+
+        loaded = load_usage_limited_until()
+        assert loaded is not None
+        assert abs((loaded - future).total_seconds()) < 1
+
+    def test_save_executor_blocked_marker_swallows_corrupt_existing_sidecar(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A corrupt existing sidecar is replaced, not raised on (#1157)."""
+        import cw.dispatch_state
+        from cw.dispatch_state import (
+            load_executor_blocked_markers,
+            save_executor_blocked_marker,
+        )
+
+        cw.dispatch_state.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cw.dispatch_state.DISPATCH_STATE_FILE.write_text("not-json")
+        save_executor_blocked_marker(self._marker())
+
+        markers = load_executor_blocked_markers()
+        assert "client-a/1723" in markers
+
+    def test_save_executor_blocked_marker_warns_and_does_not_raise_on_oserror(
+        self,
+        tmp_config_dir: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import logging
+        from unittest.mock import patch
+
+        from cw.dispatch_state import save_executor_blocked_marker
+
+        with (
+            patch(
+                "cw.dispatch_state.atomic_write_text", side_effect=OSError("disk full")
+            ),
+            caplog.at_level(logging.WARNING, logger="cw.dispatch_state"),
+        ):
+            save_executor_blocked_marker(self._marker())
+
+        assert "executor_blocked" in caplog.text
+
+    def test_save_executor_blocked_marker_refuses_real_path(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The #1017 CwError guard must propagate, unlike the OSError above."""
+        from cw.dispatch_state import save_executor_blocked_marker
+
+        real_dispatch_state_file = _REAL_STATE_DIR / "dispatch_state.json"
+        monkeypatch.setattr(
+            "cw.dispatch_state.DISPATCH_STATE_FILE", real_dispatch_state_file
+        )
+        mock_write = MagicMock()
+        monkeypatch.setattr("cw.dispatch_state.atomic_write_text", mock_write)
+
+        with pytest.raises(CwError, match="refusing real-state write"):
+            save_executor_blocked_marker(self._marker())
+
+        mock_write.assert_not_called()
+
+    def test_clear_executor_blocked_marker_removes_only_that_entry(
+        self, tmp_config_dir: Path
+    ) -> None:
+        from cw.dispatch_state import (
+            clear_executor_blocked_marker,
+            load_executor_blocked_markers,
+            save_executor_blocked_marker,
+        )
+
+        save_executor_blocked_marker(self._marker(client="client-a", ticket_id="1"))
+        save_executor_blocked_marker(self._marker(client="client-b", ticket_id="2"))
+        clear_executor_blocked_marker("client-a", "1")
+
+        markers = load_executor_blocked_markers()
+        assert list(markers) == ["client-b/2"]
+
+    def test_clear_executor_blocked_marker_missing_entry_is_noop(
+        self, tmp_config_dir: Path
+    ) -> None:
+        from cw.dispatch_state import (
+            clear_executor_blocked_marker,
+            load_executor_blocked_markers,
+        )
+
+        clear_executor_blocked_marker("nobody", "nothing")
+        assert load_executor_blocked_markers() == {}
+
+    def test_clear_all_executor_blocked_markers_wipes_every_entry(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Boot wipe clears all markers but preserves sibling sidecar keys."""
+        from datetime import UTC, datetime, timedelta
+
+        from cw.dispatch_state import (
+            clear_all_executor_blocked_markers,
+            load_executor_blocked_markers,
+            load_usage_limited_until,
+            save_executor_blocked_marker,
+            save_usage_limited_until,
+        )
+
+        future = datetime.now(UTC) + timedelta(hours=1)
+        save_usage_limited_until(future)
+        save_executor_blocked_marker(self._marker(client="client-a", ticket_id="1"))
+        save_executor_blocked_marker(self._marker(client="client-b", ticket_id="2"))
+
+        clear_all_executor_blocked_markers()
+
+        assert load_executor_blocked_markers() == {}
+        loaded = load_usage_limited_until()
+        assert loaded is not None
+        assert abs((loaded - future).total_seconds()) < 1
+
+    def test_clear_all_executor_blocked_markers_warns_on_oserror(
+        self,
+        tmp_config_dir: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import logging
+        from unittest.mock import patch
+
+        from cw.dispatch_state import clear_all_executor_blocked_markers
+
+        with (
+            patch(
+                "cw.dispatch_state.atomic_write_text", side_effect=OSError("disk full")
+            ),
+            caplog.at_level(logging.WARNING, logger="cw.dispatch_state"),
+        ):
+            clear_all_executor_blocked_markers()
+
+        assert "executor_blocked" in caplog.text
+
+    def test_load_executor_blocked_markers_returns_empty_when_file_absent(
+        self, tmp_config_dir: Path
+    ) -> None:
+        import cw.dispatch_state
+        from cw.dispatch_state import load_executor_blocked_markers
+
+        cw.dispatch_state.DISPATCH_STATE_FILE.unlink(missing_ok=True)
+        assert load_executor_blocked_markers() == {}
+
+    def test_load_executor_blocked_markers_returns_empty_on_corrupt_json(
+        self, tmp_config_dir: Path
+    ) -> None:
+        import cw.dispatch_state
+        from cw.dispatch_state import load_executor_blocked_markers
+
+        cw.dispatch_state.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cw.dispatch_state.DISPATCH_STATE_FILE.write_text("not-json")
+        assert load_executor_blocked_markers() == {}
+
+    def test_load_executor_blocked_markers_returns_empty_when_key_absent(
+        self, tmp_config_dir: Path
+    ) -> None:
+        import json
+
+        import cw.dispatch_state
+        from cw.dispatch_state import load_executor_blocked_markers
+
+        cw.dispatch_state.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cw.dispatch_state.DISPATCH_STATE_FILE.write_text(
+            json.dumps({"usage_limited_until": None})
+        )
+        assert load_executor_blocked_markers() == {}
+
+    def test_load_executor_blocked_markers_tolerates_malformed_entry(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """One malformed entry is dropped; well-formed siblings survive."""
+        import json
+        from datetime import UTC, datetime
+
+        import cw.dispatch_state
+        from cw.dispatch_state import load_executor_blocked_markers
+
+        cw.dispatch_state.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cw.dispatch_state.DISPATCH_STATE_FILE.write_text(
+            json.dumps(
+                {
+                    "executor_blocked": {
+                        "client-a/1": {
+                            "client": "client-a",
+                            "ticket_id": "1",
+                            "executor": "codex",
+                            "reviewer_role": None,
+                            "started_at": datetime.now(UTC).isoformat(),
+                            "session_id": "sid-1",
+                        },
+                        # started_at missing → dropped, not raised on.
+                        "client-b/2": {
+                            "client": "client-b",
+                            "ticket_id": "2",
+                            "executor": "codex",
+                            "reviewer_role": None,
+                            "session_id": "sid-2",
+                        },
+                    }
+                }
+            )
+        )
+        markers = load_executor_blocked_markers()
+        assert list(markers) == ["client-a/1"]
+
+    def test_load_executor_blocked_markers_returns_empty_on_non_dict_key(
+        self, tmp_config_dir: Path
+    ) -> None:
+        import json
+
+        import cw.dispatch_state
+        from cw.dispatch_state import load_executor_blocked_markers
+
+        cw.dispatch_state.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cw.dispatch_state.DISPATCH_STATE_FILE.write_text(
+            json.dumps({"executor_blocked": ["not", "a", "dict"]})
+        )
+        assert load_executor_blocked_markers() == {}
