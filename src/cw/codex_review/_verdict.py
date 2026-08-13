@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from cw.auto_dev_result import AutoDevResult, Health, Scope
 from cw.codex_review._const import (
+    _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
     _TRANSIENT_FAILURE_REASONS,
     CODEX_MUST_FIX_FINDINGS,
     CODEX_MUST_FIX_MECHANICALLY_REJECTED,
@@ -237,6 +238,7 @@ def synthesize_codex_review_result(
             details=_format_failures_detail(failures, session_id=session_id),
             retry_eligible=True if transient else None,
             stage_reached=STAGE3_REVIEW,
+            next_actions=_CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
         )
         return result, None
     verdict = _with_agent_spec_status(
@@ -268,6 +270,7 @@ def synthesize_codex_review_result(
             reason=CODEX_MUST_FIX_FINDINGS,
             details=render_verdict_comment(verdict, fix_loop_enabled=fix_loop_enabled),
             stage_reached=STAGE3_REVIEW,
+            next_actions=_CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
         )
         return blocked.model_copy(update={"review": verdict.review}), verdict
     if verdict.rejected_must_fix:
@@ -277,6 +280,7 @@ def synthesize_codex_review_result(
             reason=CODEX_MUST_FIX_MECHANICALLY_REJECTED,
             details=render_verdict_comment(verdict, fix_loop_enabled=fix_loop_enabled),
             stage_reached=STAGE3_REVIEW,
+            next_actions=_CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
         )
         return dropped.model_copy(update={"review": verdict.review}), verdict
     if failures:
@@ -286,6 +290,7 @@ def synthesize_codex_review_result(
             reason=CODEX_REVIEW_PARTIAL,
             details=_format_failures_detail(failures, session_id=session_id),
             stage_reached=STAGE3_REVIEW,
+            next_actions=_CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
         )
         return partial.model_copy(update={"review": verdict.review}), verdict
     branch = subprocess.check_output(
