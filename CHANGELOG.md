@@ -99,6 +99,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the manual path can silently compensate for a failing automated run, and
   the playbook now documents both paths and the contract explicitly.
 
+- **`release-tag.yml`'s automated release path never closed
+  `dispatch-guard.yml`'s `dispatch-drift` issues — the closer step only
+  existed in `release.yml`'s manual-tag path (#1799):** `release.yml`'s
+  `release` job carries a "Close dispatch-drift issues" step gated on
+  `github.ref_name`, which is only meaningful for its `push: tags: ['v*']`
+  trigger. `release-tag.yml` — the workflow that actually creates the tag and
+  release on every `chore(release):` merge to `main` — had no equivalent, so
+  issues `dispatch-guard.yml` opened sat open indefinitely on the automated
+  path. `tag-release` gains its own closer step (same `gh issue list`/`gh
+  issue close` body, `RELEASE_TAG` built as `v${{ steps.guard.outputs.version
+  }}` per this file's own tag-naming convention) plus `issues: write`
+  permission, and "Dry-run summary" now reports how many `dispatch-drift`
+  issues a real run would close. `release.yml`'s copy is left in place —
+  idempotent and still correct for the manual-tag path.
+
 ## [1.33.0] - 2026-08-11
 
 ### Fixed
