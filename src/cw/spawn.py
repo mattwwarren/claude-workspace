@@ -26,6 +26,9 @@ from cw.exceptions import (
     WorktreeError,
 )
 from cw.models import (
+    AGENT_SPAWN_LAST_STAMPED_AT_KEY,
+    AGENT_SPAWN_STAMP_KEY,
+    AGENT_SPAWN_UNRESOLVED_COUNT_KEY,
     HOOK_CONTEXT_RELATIVE_PATH,
     TERMINAL_SESSION_STATUSES,
     OrchestratorEventType,
@@ -56,7 +59,12 @@ _log = logging.getLogger(__name__)
 #     signal to the REVIEW stage that this entry followed a regress and may
 #     carry an operator send-back comment to treat as a binding adjudication
 #     input rather than background context).
-CW_CONTEXT_SCHEMA_VERSION = 4
+# v5: added `agent_spawn_stamp` (#1646 — unresolved-subagent-spawn counter
+#     maintained by the `cw agent-spawn-pre` / `cw agent-spawn-post` hook pair
+#     and read by the phantom sweep, so a worker that died with a sub-agent
+#     spawn still in flight parks under its own disposition instead of the
+#     generic phantom_surface).
+CW_CONTEXT_SCHEMA_VERSION = 5
 
 
 def build_disallowed_tools_arg(patterns: list[str]) -> list[str]:
@@ -247,6 +255,23 @@ def _validate_worktree(path: Path) -> None:
         raise WorktreeError(msg)
 
 
+# Hook matcher for the subagent-spawning tool (#1646).
+#
+# The name was settled EMPIRICALLY, not from the ticket's prose. A temporary
+# catch-all hook installed in a live dispatch worktree (2026-08-12) captured a
+# real subagent spawn's PreToolUse and PostToolUse payloads: both report
+# `"tool_name": "Agent"`. The ticket text (and Claude Code's older docs) call
+# it the `Task` tool, so `Task` is kept as an alternation branch for version
+# robustness -- a wrong single guess here means the mechanism silently never
+# fires, with no fixture able to catch it.
+#
+# Anchored deliberately. Claude Code treats the matcher as a regex, and an
+# unanchored `Task` would also match unrelated tool names (`TaskStop`), pairing
+# a spurious increment with a spurious decrement. The anchored form was
+# verified against the same live harness: it fires for a subagent spawn and
+# does not fire for `Bash`.
+_AGENT_TOOL_MATCHER = "^(Agent|Task)$"
+
 _HOOK_SETTINGS_TEMPLATE = {
     "hooks": {
         "Stop": [
@@ -263,6 +288,22 @@ _HOOK_SETTINGS_TEMPLATE = {
             {
                 "matcher": "Bash",
                 "hooks": [{"type": "command", "command": "cw guard-cwd"}],
+            },
+            # #1646: stamp an unresolved-subagent-spawn marker before the
+            # spawn starts. Never blocks -- there is no failure mode in which
+            # refusing a subagent spawn is the right answer.
+            {
+                "matcher": _AGENT_TOOL_MATCHER,
+                "hooks": [{"type": "command", "command": "cw agent-spawn-pre"}],
+            },
+        ],
+        # #1646: clear the marker when the spawn returns. A worker that dies
+        # between the two leaves the marker set -- the durable evidence the
+        # phantom sweep reads. This is the first PostToolUse hook cw wires.
+        "PostToolUse": [
+            {
+                "matcher": _AGENT_TOOL_MATCHER,
+                "hooks": [{"type": "command", "command": "cw agent-spawn-post"}],
             }
         ],
     }
@@ -382,6 +423,16 @@ def _write_hook_context(
         "workspace_path": str(workspace_path.resolve())
         if workspace_path is not None
         else None,
+        # Why (#1646): seeded resolved (count 0) so the PreToolUse/PostToolUse
+        # stamp pair only ever has to read-modify-write, never create. A
+        # session that crashes with this above zero died with a sub-agent spawn
+        # still in flight -- committed work may exist behind a verification
+        # tail that never ran -- which the phantom sweep parks under its own
+        # disposition instead of the generic phantom_surface.
+        AGENT_SPAWN_STAMP_KEY: {
+            AGENT_SPAWN_UNRESOLVED_COUNT_KEY: 0,
+            AGENT_SPAWN_LAST_STAMPED_AT_KEY: None,
+        },
     }
     if task is not None:
         try:

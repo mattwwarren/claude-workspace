@@ -8,6 +8,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Unresolved sub-agent spawns are stamped, detected, and routed to a
+  terminal disposition (#1646):** a worker that dies (or pauses forever)
+  mid-spawn was invisible to every transcript-based signal — no terminal
+  sentinel, no `tool_result`, just a surface that stops — and used to land
+  under the generic `phantom_surface` disposition, indistinguishable from a
+  clean, harmless crash. `spawn._write_hook_context` now seeds an
+  `agent_spawn_stamp` counter into the worktree's `.claude/cw-context.json`
+  (schema v5); new `cw agent-spawn-pre`/`cw agent-spawn-post` hooks
+  increment/decrement it around each sub-agent spawn (matched on the
+  empirically-captured `Agent`/`Task` tool names), and the phantom sweep
+  reads the counter to stamp `_UNRESOLVED_SUBAGENT_SPAWN_REASON` instead —
+  overriding `reap_policy: auto` and routing ticket-less crashes straight to
+  a terminal state rather than an unresolvable park. See
+  `docs/session-disposition.md` §6b.
+
 - **`cw dev-queue status` distinguishes a dead dispatch loop from a busy one
   (#1742):** a stale tick alone could not tell "the loop crashed — restart it"
   from "the loop is alive and an executor is mid-review — leave it alone", and

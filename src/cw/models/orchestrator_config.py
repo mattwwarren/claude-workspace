@@ -100,6 +100,45 @@ CONTEXT_JSON_RELATIVE_PATH: Path = Path(".cw", "context.json")
 # pointed at .cw/context.json and silently always returned False.
 HOOK_CONTEXT_RELATIVE_PATH: Path = Path(".claude", "cw-context.json")
 
+# Keys of the ``agent_spawn_stamp`` object inside cw-context.json (#1646).
+# Three modules touch this one object across two layers that cannot import
+# each other -- ``cw.spawn`` seeds it, ``cw.cli.agent_spawn_stamp``'s
+# PreToolUse/PostToolUse pair increments and decrements it, and
+# ``cw.reconcile._shared`` reads it during phantom classification. They live
+# beside HOOK_CONTEXT_RELATIVE_PATH for exactly the reason its own docstring
+# gives: a reader that hand-types the literal is one typo away from silently
+# always returning the default, the defect #1730 shipped.
+#
+# Shape: {"unresolved_count": int, "last_stamped_at": isoformat str | None}.
+# A counter rather than a flag because Claude Code can dispatch several
+# subagent tool_use blocks in one assistant turn, so two Pre hooks can fire
+# before either Post does -- a boolean would lose the second spawn.
+AGENT_SPAWN_STAMP_KEY = "agent_spawn_stamp"
+AGENT_SPAWN_UNRESOLVED_COUNT_KEY = "unresolved_count"
+AGENT_SPAWN_LAST_STAMPED_AT_KEY = "last_stamped_at"
+
+
+def extract_unresolved_spawn_count(context: dict[str, object]) -> int:
+    """Return the ``agent_spawn_stamp`` counter in *context*, or 0 for any odd shape.
+
+    Shared by ``cw.cli.agent_spawn_stamp`` (write side) and
+    ``cw.reconcile._shared`` (read side) so the two independent readers of
+    this on-disk shape cannot silently drift onto different validation rules
+    (#1646 review finding) -- reconcile cannot import ``cw.cli``, so this
+    lives here instead, beside the key constants both layers already import.
+
+    A missing/non-dict stamp, a missing count, a non-int count, or a ``bool``
+    masquerading as an int (``bool`` is an ``int`` subclass in Python, so
+    ``True`` would otherwise read as a live count of 1) all read as 0.
+    """
+    stamp = context.get(AGENT_SPAWN_STAMP_KEY)
+    if not isinstance(stamp, dict):
+        return 0
+    count = stamp.get(AGENT_SPAWN_UNRESOLVED_COUNT_KEY)
+    if isinstance(count, bool) or not isinstance(count, int):
+        return 0
+    return count
+
 
 class StageExecutorConfig(BaseModel):
     """Executor configuration for a single pipeline stage (RFC 0005 A1, dormant)."""

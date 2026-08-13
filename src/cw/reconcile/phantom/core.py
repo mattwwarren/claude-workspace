@@ -23,6 +23,7 @@ from cw.models import (
 )
 from cw.reconcile import _deps
 from cw.reconcile._shared import (
+    _UNRESOLVED_SUBAGENT_SPAWN_REASON,
     ProposedAction,
     _apply_queue_mutations,
     resolve_reap_policy,
@@ -43,7 +44,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from cw.auto_dev_result import AutoDevResult
-    from cw.models import CwState
+    from cw.models import CwState, Session
     from cw.reconcile._shared import ReapCandidate
 
 
@@ -69,6 +70,27 @@ def _route_phantom_by_policy(
     immediate session.needs_attention in :func:`_act_on_phantom_candidates` so a
     still-live already_refused worker that has exhausted its veto budget surfaces
     to the operator this same tick (mirrors stalled.py's wall-clock escalation).
+
+    GitHub #1646 adds one **unconditional** reroute ahead of the policy lookup:
+    a clean crash whose worktree carries an unresolved subagent-spawn stamp goes
+    to BLOCKED_ON_USER regardless of the lane's configured ``reap_policy``, and
+    under its own disposition. ``reap_policy: auto`` is opt-in per lane and this
+    crash class is rare, but silently retrying a session that has committed work
+    behind a verification tail that never ran compounds the exact failure the
+    stamp exists to catch — so this one class is a deliberate, documented
+    exception to that policy (see docs/dispatch-runbook.md §7).
+
+    The override requires a ``ticket_id``: there is no dev-queue row to park a
+    ticket-less DAEMON session (an ad-hoc ``cw start`` ``idea``/``debt``
+    worker) under, so such a candidate falls through to the ordinary
+    policy-resolution branch below instead — the same place it landed before
+    #1646 existed. A version of this override that unconditionally intercepted
+    every unresolved-spawn candidate, ticket-less or not, would silently drop
+    the ticket-less ones from every downstream list (they satisfy none of
+    ``unresolved_spawn_mutations``, ``escalate_candidates``, or
+    ``auto_candidates``) and leave the session live forever, re-detected as
+    phantom on every future tick — a regression on ``reap_policy: auto`` lanes
+    caught during review (#1646).
     """
     effective_config = config if config is not None else OrchestratorConfig()
     clients = _deps.load_effective_clients()
@@ -77,35 +99,116 @@ def _route_phantom_by_policy(
     # that a confirmed-merged ticket is always completed, even under SIGNAL_ONLY.
     # Dirty phantoms always go to BLOCKED_ON_USER regardless of policy.
     signal_mutations: dict[str, QueueItemStatus] = {}
+    unresolved_spawn_mutations: dict[str, QueueItemStatus] = {}
     auto_candidates: list[ReapCandidate] = []
     escalate_candidates: list[ReapCandidate] = []
     for c in candidates:
-        if c.proposed_action == ProposedAction.CRASH_COMPLETE and not c.worktree_dirty:
-            if c.ticket_id and (
-                c.ticket_id in merged_ticket_ids or c.ticket_id in gh_blocked_ticket_ids
-            ):
-                auto_candidates.append(c)
-                continue
-            policy = resolve_reap_policy(c, clients, effective_config)
-            if policy is ReapPolicy.SIGNAL_ONLY:
-                if c.ticket_id:
-                    signal_mutations[c.ticket_id] = QueueItemStatus.BLOCKED_ON_USER
-                # #1449: a cap-exhausted veto on a still-live already_refused
-                # session escalates to the operator this tick (parity with the
-                # retry-cap park) instead of a silent BLOCKED_ON_USER park.
-                if c.veto_cap_exhausted:
-                    escalate_candidates.append(c)
-            else:
-                auto_candidates.append(c)
+        if c.proposed_action != ProposedAction.CRASH_COMPLETE or c.worktree_dirty:
+            auto_candidates.append(c)
+            continue
+        if c.ticket_id and (
+            c.ticket_id in merged_ticket_ids or c.ticket_id in gh_blocked_ticket_ids
+        ):
+            auto_candidates.append(c)
+            continue
+        # #1646: unconditional override -- deliberately BEFORE resolve_reap_policy,
+        # not after. Routing it afterwards would leave the AUTO branch below one
+        # refactor away from reclaiming the candidate and silently reverting it
+        # to PENDING, which is the exact retry this class must never get.
+        # Gated on ticket_id: a ticket-less candidate has no dev-queue row to
+        # park, so it falls through to ordinary policy resolution below instead
+        # of being dropped from every list (see the docstring's ticket_id note).
+        if c.unresolved_subagent_spawn and c.ticket_id:
+            unresolved_spawn_mutations[c.ticket_id] = QueueItemStatus.BLOCKED_ON_USER
+            if c.veto_cap_exhausted:
+                escalate_candidates.append(c)
+            continue
+        policy = resolve_reap_policy(c, clients, effective_config)
+        if policy is ReapPolicy.SIGNAL_ONLY:
+            if c.ticket_id:
+                signal_mutations[c.ticket_id] = QueueItemStatus.BLOCKED_ON_USER
+            # #1449: a cap-exhausted veto on a still-live already_refused
+            # session escalates to the operator this tick (parity with the
+            # retry-cap park) instead of a silent BLOCKED_ON_USER park.
+            if c.veto_cap_exhausted:
+                escalate_candidates.append(c)
         else:
             auto_candidates.append(c)
+    # Two calls, not one: _apply_queue_mutations stamps a single disposition
+    # across its whole batch, and this tick's batch is no longer homogeneous.
     if signal_mutations:
         _apply_queue_mutations(
             signal_mutations,
             clear_session_id=set(),
             disposition=ReapReason.PHANTOM_SURFACE.value,
         )
+    if unresolved_spawn_mutations:
+        _apply_queue_mutations(
+            unresolved_spawn_mutations,
+            clear_session_id=set(),
+            disposition=_UNRESOLVED_SUBAGENT_SPAWN_REASON,
+        )
     return auto_candidates, escalate_candidates
+
+
+def _mark_phantom_sessions_terminal(
+    session_by_id: dict[str, Session],
+    crash_candidates: list[ReapCandidate],
+    merged_crash_candidates: list[ReapCandidate],
+    gh_blocked_crash_candidates: list[ReapCandidate],
+    *,
+    now: datetime,
+    phantom_names: list[str],
+    pending_events: list[dict[str, object]],
+) -> None:
+    """Flip every phantom crash session to a terminal state.
+
+    Extracted from :func:`_act_on_phantom_candidates` (which had grown past the
+    statement ceiling) with behaviour unchanged. All three populations mark
+    COMPLETED with ``reap_reason=PHANTOM_SURFACE`` and land in *phantom_names*
+    so the caller stops their surfaces; they differ only in completion reason
+    and whether a ``SESSION_COMPLETED`` payload is queued:
+
+    - *merged_crash_candidates* — the PR already shipped, so NORMAL, not
+      CRASHED. Still phantom (absent from the daemon roster), so the caller
+      still needs the name for queue cleanup.
+    - *crash_candidates* — the ordinary crash; queues a completion payload.
+    - *gh_blocked_crash_candidates* — the PR state could not be verified. Marked
+      COMPLETED purely so they leave ``_LIVE_STATUSES`` and are not re-detected
+      next tick.
+    """
+    for candidate in merged_crash_candidates:
+        session = session_by_id[candidate.session_id]
+        session.status = SessionStatus.COMPLETED
+        session.completed_reason = CompletionReason.NORMAL
+        session.completed_at = now
+        session.reap_reason = ReapReason.PHANTOM_SURFACE
+        phantom_names.append(session.name)
+
+    for candidate in crash_candidates:
+        session = session_by_id[candidate.session_id]
+        session.status = SessionStatus.COMPLETED
+        session.completed_reason = CompletionReason.CRASHED
+        session.completed_at = now
+        session.reap_reason = ReapReason.PHANTOM_SURFACE
+        phantom_names.append(session.name)
+        crash_payload: dict[str, object] = {
+            "session_id": session.id,
+            "session_name": session.name,
+            "client": session.client,
+            "crashed": True,
+        }
+        if candidate.ticket_id:
+            crash_payload["ticket_id"] = candidate.ticket_id
+        pending_events.append(crash_payload)
+
+    for candidate in gh_blocked_crash_candidates:
+        session = session_by_id[candidate.session_id]
+        session.status = SessionStatus.COMPLETED
+        session.completed_reason = CompletionReason.CRASHED
+        session.completed_at = now
+        session.reap_reason = ReapReason.PHANTOM_SURFACE
+        phantom_names.append(session.name)
 
 
 def _act_on_phantom_candidates(
@@ -229,43 +332,15 @@ def _act_on_phantom_candidates(
         phantom_names=phantom_names,
     )
 
-    # Merged-complete: PR already shipped; mark COMPLETED + NORMAL, not CRASHED.
-    # Still appended to phantom_names — these sessions ARE phantom (absent from
-    # daemon roster), and callers need their names for queue cleanup below.
-    for candidate in merged_crash_candidates:
-        session = session_by_id[candidate.session_id]
-        session.status = SessionStatus.COMPLETED
-        session.completed_reason = CompletionReason.NORMAL
-        session.completed_at = now
-        session.reap_reason = ReapReason.PHANTOM_SURFACE
-        phantom_names.append(session.name)
-
-    for candidate in crash_candidates:
-        session = session_by_id[candidate.session_id]
-        session.status = SessionStatus.COMPLETED
-        session.completed_reason = CompletionReason.CRASHED
-        session.completed_at = now
-        session.reap_reason = ReapReason.PHANTOM_SURFACE
-        phantom_names.append(session.name)
-        crash_payload: dict[str, object] = {
-            "session_id": session.id,
-            "session_name": session.name,
-            "client": session.client,
-            "crashed": True,
-        }
-        if candidate.ticket_id:
-            crash_payload["ticket_id"] = candidate.ticket_id
-        pending_events.append(crash_payload)
-
-    # GH-blocked phantoms: can't verify PR; mark COMPLETED+CRASHED so they
-    # leave _LIVE_STATUSES (via status=COMPLETED) and aren't re-detected.
-    for candidate in gh_blocked_crash_candidates:
-        session = session_by_id[candidate.session_id]
-        session.status = SessionStatus.COMPLETED
-        session.completed_reason = CompletionReason.CRASHED
-        session.completed_at = now
-        session.reap_reason = ReapReason.PHANTOM_SURFACE
-        phantom_names.append(session.name)
+    _mark_phantom_sessions_terminal(
+        session_by_id,
+        crash_candidates,
+        merged_crash_candidates,
+        gh_blocked_crash_candidates,
+        now=now,
+        phantom_names=phantom_names,
+        pending_events=pending_events,
+    )
 
     # Write-ordering: queue first (task → PENDING), session second
     # (session → COMPLETED) — mirrors the canonical ordering in
@@ -280,6 +355,14 @@ def _act_on_phantom_candidates(
         for c in crash_candidates
         if c.ticket_id is not None and c.worktree_dirty
     }
+    # #1646: a dirty crash never reaches _route_phantom_by_policy's override
+    # (that branch only handles clean crashes), so the distinct disposition has
+    # to be selected inside the dirty branch of the queue mutation instead.
+    unresolved_spawn_ticket_ids = {
+        c.ticket_id
+        for c in crash_candidates
+        if c.ticket_id is not None and c.unresolved_subagent_spawn
+    }
 
     # Queue mutations — written before session state (safe-fail direction).
     _apply_phantom_queue_mutations(
@@ -292,6 +375,7 @@ def _act_on_phantom_candidates(
         dirty_ticket_ids,
         ticket_ids_to_revert,
         merged_completed_ids,
+        unresolved_spawn_ticket_ids,
     )
 
     save_state(state)

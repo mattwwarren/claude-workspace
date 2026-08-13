@@ -137,6 +137,39 @@ class TestEligibilityFormula:
         assert BRANCH_STALENESS_GATE_DISPOSITION == "branch_behind_main"
         assert BRANCH_STALENESS_GATE_DISPOSITION in _ELIGIBLE_DISPOSITIONS
 
+    def test_unresolved_subagent_spawn_park_is_escalation_eligible(self) -> None:
+        """#1646: the new phantom reason keeps its predecessor's operator page.
+
+        Without this, splitting the clean-crash reroute's disposition off
+        ``phantom_surface`` would silently drop the split-off rows out of
+        ``_ELIGIBLE_DISPOSITIONS`` — a park that pages nobody, which is the
+        opposite of what #1646 exists to do.
+        """
+        from cw.reconcile._shared import _UNRESOLVED_SUBAGENT_SPAWN_REASON
+        from cw.reconcile.escalation import _ELIGIBLE_DISPOSITIONS
+
+        assert _UNRESOLVED_SUBAGENT_SPAWN_REASON in _ELIGIBLE_DISPOSITIONS
+
+    def test_unresolved_subagent_spawn_not_false_park_requeueable(self) -> None:
+        """#1646: concierge must NOT auto-requeue this class.
+
+        The mirror of the test above, and the reason the new reason joins
+        escalation's set as its own union term instead of extending the shared
+        ``_REAP_ELIGIBLE_DISPOSITIONS_BASE``: requeuing a session that died
+        mid-spawn re-runs it over possibly-committed work without a human ever
+        looking, which is precisely the silent retry the ticket forbids.
+        """
+        from cw.reconcile._shared import (
+            _REAP_ELIGIBLE_DISPOSITIONS_BASE,
+            _UNRESOLVED_SUBAGENT_SPAWN_REASON,
+        )
+        from cw.reconcile.concierge import _FALSE_PARK_ELIGIBLE_DISPOSITIONS
+
+        assert _UNRESOLVED_SUBAGENT_SPAWN_REASON not in _REAP_ELIGIBLE_DISPOSITIONS_BASE
+        assert (
+            _UNRESOLVED_SUBAGENT_SPAWN_REASON not in _FALSE_PARK_ELIGIBLE_DISPOSITIONS
+        )
+
     def test_premises_pending_verification_not_eligible(
         self, tmp_config_dir: Path
     ) -> None:

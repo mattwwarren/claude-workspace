@@ -17,8 +17,7 @@ from click.testing import CliRunner
 
 from cw.cli import main
 from cw.cli.guard import _read_hook_cwd
-from cw.models import SessionOrigin
-from cw.spawn import _write_hook_context
+from tests.conftest import _invoke_hook_command, _write_hook_context_file
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -27,23 +26,12 @@ _BLOCK_EXIT = 2
 
 
 def _write_context(worktree: Path, workspace_path: Path | None) -> None:
-    """Materialize ``<worktree>/.claude/cw-context.json`` via the real writer."""
-    _write_hook_context(
-        worktree,
-        session_id="sess940g",
-        session_name="client-a/impl",
-        client="client-a",
-        purpose="impl",
-        ticket_id="940",
-        origin=SessionOrigin.DAEMON,
-        workspace_path=workspace_path,
-    )
+    """Thin alias onto the shared conftest materializer (#1646)."""
+    _write_hook_context_file(worktree, workspace_path=workspace_path)
 
 
 def _invoke(cwd: Path) -> int:
-    runner = CliRunner()
-    result = runner.invoke(main, ["guard-cwd"], input=json.dumps({"cwd": str(cwd)}))
-    return result.exit_code
+    return int(_invoke_hook_command("guard-cwd", {"cwd": str(cwd)}).exit_code)
 
 
 def test_guard_blocks_when_cwd_is_main_checkout(tmp_path: Path) -> None:

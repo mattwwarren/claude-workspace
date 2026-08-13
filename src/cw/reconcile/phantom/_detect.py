@@ -281,12 +281,22 @@ def _detect_phantom_candidates(
             if session.origin is SessionOrigin.DAEMON
             else False
         )
+        # #1646: did this worker die with a sub-agent spawn still in flight?
+        # DAEMON-only for the same reason as worktree_dirty above — a USER
+        # session has no cw-managed worktree to have left a stamp in. Reads the
+        # same worktree_path, fail-open to False on any missing evidence.
+        unresolved_subagent_spawn = (
+            _shared.read_unresolved_subagent_spawn(session.worktree_path)
+            if session.origin is SessionOrigin.DAEMON
+            else False
+        )
         candidates.append(
             ReapCandidate(
                 session_id=session.id,
                 proposed_action=ProposedAction.CRASH_COMPLETE,
                 ticket_id=ticket_id,
                 worktree_dirty=worktree_dirty,
+                unresolved_subagent_spawn=unresolved_subagent_spawn,
                 usage_limit_detected=usage_limit_detected,
                 lane=lane,
                 client=session.client,

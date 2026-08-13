@@ -52,6 +52,7 @@ from cw.exceptions import USAGE_LIMIT_RE, EmitValidationError
 from cw.models import (
     DEFAULT_LANE,
     DEFAULT_STAGE,
+    HOOK_CONTEXT_RELATIVE_PATH,
     OCCUPIED_LANE_STATUSES,
     ClientConfig,
     CompletionReason,
@@ -66,6 +67,7 @@ from cw.models import (
     SessionStatus,
     Stage,
     TicketTask,
+    extract_unresolved_spawn_count,
 )
 from cw.reconcile import _deps
 from cw.result import (
@@ -158,6 +160,26 @@ _TIMED_OUT_MERGED_REASON = "timed_out_merged"
 # worktree has unsaved work and the task is routed to BLOCKED_ON_USER instead
 # of being retried automatically (GitHub issue #421).
 _DIRTY_WORKTREE_REASON = "dirty_worktree"
+# Disposition stamped when the phantom sweep reroutes a dead DAEMON session
+# whose worktree still carries an unresolved subagent-spawn stamp (GitHub
+# #1646). Distinct from ReapReason.PHANTOM_SURFACE on purpose: that reason says
+# only "the surface is gone", while this one says "the surface is gone AND it
+# died with a sub-agent spawn in flight", i.e. committed work may sit behind a
+# verification tail that never ran. The operator's next move differs -- check
+# the worktree/branch before requeueing rather than simply retrying.
+#
+# This is the live successor to the intent _NEEDS_SALVAGE_REASON no longer
+# serves: that constant's producer was deleted outright by ADR-0014 and it is
+# marked historical in docs/session-disposition.md. Do not wire new detection
+# into it.
+#
+# Deliberately NOT added to _REAP_ELIGIBLE_DISPOSITIONS_BASE below. That
+# frozenset feeds concierge's false-park requeue, and auto-requeuing this class
+# would silently re-run a session over possibly-committed work -- the exact
+# retry #1646 exists to stop. It IS escalation-eligible, joined as its own
+# union term in escalation.py (same split #1702/#1714/#1823 already use), so
+# splitting it off phantom_surface does not cost it its operator page.
+_UNRESOLVED_SUBAGENT_SPAWN_REASON = "unresolved_subagent_spawn"
 # paused_status written to SESSION_NEEDS_ATTENTION events when
 # complete_timed_out_merged_tasks refuses a COMPLETED transition for a
 # PENDING row with no claim history (attempts == spawn_error_count,
@@ -403,6 +425,13 @@ class ReapCandidate:
     # cross-reference the task record by hand. See #1625.
     regress_attempts: int = 0
     spawn_error_count: int = 0
+    # True when the session's worktree carries an unresolved subagent-spawn
+    # stamp (#1646) — the worker died or hung with a sub-agent spawn still in
+    # flight. Computed in phantom detect alongside worktree_dirty, from the
+    # same worktree_path, and read in the act phase to select a distinct
+    # disposition and to override a lane's reap_policy: auto. Fail-open: False
+    # whenever the evidence is missing or unreadable.
+    unresolved_subagent_spawn: bool = False
 
 
 def _apply_correction_signal_fields(
@@ -1557,6 +1586,43 @@ def _worktree_dirty_by_path(client_name: str, worktree_path: Path | None) -> boo
         return False
 
 
+def _read_unresolved_subagent_spawn(worktree_path: Path | None) -> bool:
+    """Return True iff *worktree_path* carries an unresolved subagent spawn.
+
+    Reads the ``agent_spawn_stamp`` counter the ``cw agent-spawn-pre`` /
+    ``cw agent-spawn-post`` hook pair maintains in the worktree's
+    ``.claude/cw-context.json`` (#1646). A count above zero means a subagent
+    spawn started and its matching Post hook never fired — the worker died or
+    hung mid-spawn.
+
+    Fail-open in one direction only, mirroring ``_worktree_dirty_by_path``:
+    a None path, a missing worktree, a missing or pre-v5 context, malformed
+    JSON, a non-dict payload, a non-dict stamp, a non-int count, or any other
+    error all return False. Reporting an unresolved spawn on ambiguous evidence
+    would park healthy tickets under a reason that also overrides
+    ``reap_policy: auto`` — strictly worse than missing one crash's precision.
+
+    Reads the file directly rather than via ``cw.cli._hook_io``: reconcile must
+    not import from ``cw.cli`` (the dependency runs the other way). The shared
+    path constant and the count-extraction logic both come from ``cw.models``
+    (:func:`cw.models.extract_unresolved_spawn_count`) so this reader and
+    ``cw.cli.agent_spawn_stamp``'s write-side reader cannot drift onto
+    different literals or validation rules for the same on-disk shape (#1646
+    review finding).
+    """
+    if not worktree_path:
+        return False
+    try:
+        context_path = worktree_path / HOOK_CONTEXT_RELATIVE_PATH
+        context = json.loads(context_path.read_text(encoding="utf-8"))
+        if not isinstance(context, dict):
+            return False
+        count = extract_unresolved_spawn_count(context)
+    except Exception:  # noqa: BLE001 — fail-safe on any error; mirrors _worktree_dirty_by_path
+        return False
+    return count > 0
+
+
 def _apply_queue_mutations(
     mutations: dict[str, QueueItemStatus],
     clear_session_id: set[str],
@@ -1774,3 +1840,4 @@ detect_usage_limit = _detect_usage_limit
 usage_limit_is_recent = _usage_limit_is_recent
 salvage_terminal_result = _salvage_terminal_result
 worktree_dirty_by_path = _worktree_dirty_by_path
+read_unresolved_subagent_spawn = _read_unresolved_subagent_spawn

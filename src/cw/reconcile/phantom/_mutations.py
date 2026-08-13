@@ -27,10 +27,12 @@ from cw.models import (
     SessionStatus,
 )
 from cw.reconcile._shared import (
+    _DIRTY_WORKTREE_REASON,
     _GH_CHECK_BLOCKED_REASON,
     _PAUSED_STATUS_KEY,
     _SENTINEL_ADVANCE_REFUSED_KEY,
     _SENTINEL_STAGE_MISMATCH_REFUSED_REASON,
+    _UNRESOLVED_SUBAGENT_SPAWN_REASON,
     _apply_salvaged_completion,
     _apply_sentinel_to_task,
     _queue_status_for_salvaged,
@@ -105,13 +107,22 @@ def _apply_phantom_queue_mutations(
     dirty_ticket_ids: set[str],
     ticket_ids_to_revert: list[str],
     merged_completed_ids: list[str],
+    unresolved_spawn_ticket_ids: set[str] | None = None,
 ) -> None:
     """Apply dev-queue status changes for phantom dispositions.
 
     Mutates ``ticket_ids_to_revert`` and ``merged_completed_ids`` in place to
     surface the PENDING-reverted and merged-completed ticket IDs to the caller.
     Acquires ``dev_queue_lock``; writes only when at least one task changed.
+
+    ``unresolved_spawn_ticket_ids`` (#1646) overrides the dirty-worktree
+    disposition for rows whose worker died with a sub-agent spawn in flight.
+    Both facts are true of such a row, but only one disposition slot exists;
+    the unresolved spawn wins because it is the more specific and more
+    actionable of the two — it names *why* the verification tail never ran,
+    where "dirty" only reports that something is uncommitted.
     """
+    unresolved_spawn_ids = unresolved_spawn_ticket_ids or set()
     daemon_ticket_ids_to_revert = [
         c.ticket_id
         for c in crash_candidates
@@ -136,7 +147,11 @@ def _apply_phantom_queue_mutations(
                     transition_task_status(
                         task,
                         QueueItemStatus.BLOCKED_ON_USER,
-                        disposition="dirty_worktree",
+                        disposition=(
+                            _UNRESOLVED_SUBAGENT_SPAWN_REASON
+                            if task.ticket_id in unresolved_spawn_ids
+                            else _DIRTY_WORKTREE_REASON
+                        ),
                     )
                 else:
                     transition_task_status(task, QueueItemStatus.PENDING)
