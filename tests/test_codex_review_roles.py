@@ -836,6 +836,27 @@ class TestIsModelCapacityError:
         result = CodexRunResult(returncode=1, stdout="", stderr="boom")
         assert _is_model_capacity_error(result) is False
 
+    @pytest.mark.parametrize(
+        ("returncode", "timed_out"),
+        [
+            # a clean exit is never a capacity failure, whatever stdout says
+            (0, False),
+            # a timeout is its own (already transient) reason — never
+            # reclassified here, so CODEX_TIMEOUT keeps its meaning
+            (-1, True),
+        ],
+    )
+    def test_clean_exit_and_timeout_are_never_capacity_failures(
+        self, returncode: int, timed_out: bool
+    ) -> None:
+        result = CodexRunResult(
+            returncode=returncode,
+            stdout=_audit_fixture("capacity_turn_failed.jsonl"),
+            stderr="",
+            timed_out=timed_out,
+        )
+        assert _is_model_capacity_error(result) is False
+
     def test_capacity_phrasing_outside_turn_failed_does_not_match(self) -> None:
         # The marker is read only off the terminal turn.failed event's
         # error.message — a reviewer document or log line that merely mentions
