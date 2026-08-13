@@ -56,6 +56,9 @@ CW_STATE: Path = Path.home() / ".local/share/cw/sessions.json"
 WAIT_AGE_MIN: int = 30  # below this, almost always healthy
 PEEK_AGE_MIN: int = 45  # above this, peek even if active
 STOP_AGE_MIN: int = 55  # long-running — worth an operator look/decision
+STOP_CEILING_MIN: int = 60  # ceiling named in the STOP-by-age message; the
+# trigger (STOP_AGE_MIN) fires before this so the operator has lead time —
+# age_min >= this is "exceeded," below it is "approaches" (#1795)
 IDLE_PEEK_MIN: int = 7  # idle this long with no PR → check for stall
 IDLE_STALL_MIN: int = 15  # idle this long → likely stuck
 IDLE_POST_PR_MIN: int = 5  # idle this long after PR shipped → stuck in stage5
@@ -546,7 +549,16 @@ def _score_session(
     if sentinel_status == "shipped" and pr_state == "OPEN":
         return _stage5_rec(idle_min)
     if age_min > STOP_AGE_MIN:
-        reason = f"age {age_min:.0f}min approaches 60-min timeout — stop or hand off"
+        if age_min >= STOP_CEILING_MIN:
+            reason = (
+                f"age {age_min:.0f}min exceeded {STOP_CEILING_MIN}-min "
+                "timeout — stop or hand off"
+            )
+        else:
+            reason = (
+                f"age {age_min:.0f}min approaches {STOP_CEILING_MIN}-min "
+                "timeout — stop or hand off"
+            )
         return ("STOP", reason)
     if attempts >= STOP_ATTEMPTS_MIN and not _reached_deep_stage(stage_high_water):
         if usage_limit_detected:
