@@ -112,6 +112,10 @@ The command's recommendation is computed from this ladder. Higher rules win:
 8. **Normal range**: `age_min > 30` → **WAIT** (in expected range).
 9. **Early**: anything else → **WAIT** (early/healthy).
 
+Rule 3's STOP reason text says "approaches" when `age_min` is still below
+the referenced 60-min ceiling and "exceeded" once it's at or past it — same
+rule, wording reflects how far past the trigger the session actually is.
+
 ## Cost framing
 
 - Peek is free (~30s operator time, no API calls beyond `gh pr view`).
