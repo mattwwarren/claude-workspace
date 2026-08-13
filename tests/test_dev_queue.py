@@ -6873,12 +6873,25 @@ def _requeue_that_fails_for(
     from cw.exceptions import RequeueStateError
 
     def _fake_requeue_ticket(
-        ticket_id: str, client_name: str, *args: object, **kwargs: object
+        ticket_id: str,
+        client_name: str,
+        stage_override: str | None = None,
+        *,
+        allow_regress: bool = False,
+        from_cancelled: bool = False,
+        from_failed: bool = False,
     ) -> dict[str, str | bool | int]:
         if ticket_id == failing_ticket_id:
             msg = "status raced away from BLOCKED_ON_USER"
             raise RequeueStateError(msg)
-        return real_requeue_ticket(ticket_id, client_name, *args, **kwargs)
+        return real_requeue_ticket(
+            ticket_id,
+            client_name,
+            stage_override,
+            allow_regress=allow_regress,
+            from_cancelled=from_cancelled,
+            from_failed=from_failed,
+        )
 
     return _fake_requeue_ticket
 
@@ -8754,7 +8767,9 @@ class TestExtractPrUrl:
         self._extract = _extract_pr_url
 
     def test_extracts_url_from_pr_dict(self) -> None:
-        result = {"pr": {"url": "https://github.com/foo/bar/pull/42"}}
+        result: dict[str, object] = {
+            "pr": {"url": "https://github.com/foo/bar/pull/42"}
+        }
         assert self._extract(result) == "https://github.com/foo/bar/pull/42"
 
     def test_none_when_no_pr(self) -> None:
