@@ -1013,6 +1013,25 @@ class TestApplyVoidedSuppression:
         assert suppressed == verdict
         assert suppressed.accepted[0].disposition == "fixed"
 
+    def test_debt_finding_passes_through_untouched(self) -> None:
+        """#1837 regression lock: DEBT severity is invisible to suppression.
+
+        A DEBT finding is never in ``must_fix`` to begin with, and voided
+        matching is severity-scoped, so the new severity must not perturb this
+        seam in either direction.
+        """
+        debt = _make_finding(severity="DEBT")
+        verdict = _verdict(_accepted(_make_finding()), _accepted(debt))
+
+        suppressed, adjudications = apply_voided_suppression(
+            verdict, [_make_voided_finding()], ticket_id=_TICKET
+        )
+
+        assert len(adjudications) == 1
+        assert suppressed.accepted[1].finding == debt
+        assert suppressed.accepted[1].disposition == "fixed"
+        assert debt not in suppressed.must_fix
+
     def test_empty_voided_list_returns_verdict_unchanged(self) -> None:
         verdict = _verdict(_accepted(_make_finding()))
 

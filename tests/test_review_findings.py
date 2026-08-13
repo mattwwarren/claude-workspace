@@ -18,6 +18,7 @@ from pydantic import ValidationError
 from cw.codex_review import _parse_unified_diff
 from cw.review_findings import (
     _LINE_ANCHOR_TOLERANCE,
+    _VALID_SEVERITIES,
     AcceptedFinding,
     CapturedDiff,
     Finding,
@@ -42,6 +43,7 @@ from cw.review_findings import (
 )
 from tests.conftest import (
     _finding_kwargs,
+    _make_debt_record,
     _make_diff,
     _make_escalation,
     _make_finding,
@@ -725,7 +727,7 @@ _PR1784_ABSENT_EVIDENCE = (
 
 class TestSeverityAndDispositionLiterals:
     def test_valid_severities_round_trip(self) -> None:
-        for sev in ("MUST_FIX", "SHOULD_FIX", "NIT", "PRINCIPLE"):
+        for sev in ("MUST_FIX", "SHOULD_FIX", "DEBT", "NIT", "PRINCIPLE"):
             f = _make_finding(severity=sev)
             assert f.severity == sev
 
@@ -3349,3 +3351,71 @@ class TestReviewVerdictSchemaVersion:
                     "review": derive_review_counts([]).model_dump(),
                 }
             )
+
+
+class TestDebtSeverityAndFields:
+    """#1837: the non-blocking DEBT severity and the two admission fields."""
+
+    def test_debt_is_a_valid_severity(self) -> None:
+        assert "DEBT" in _VALID_SEVERITIES
+
+    def test_debt_finding_round_trips_as_accepted(self) -> None:
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="DEBT"))
+        accepted, rejected, stripped = validate_reviewer_document(doc, diff)
+        assert len(accepted) == 1
+        assert accepted[0].severity == "DEBT"
+        assert rejected == []
+        assert stripped == []
+
+    def test_debt_deferred_excluded_from_every_aggregate(self) -> None:
+        findings = [
+            AcceptedFinding(
+                finding=_make_finding(severity="DEBT"),
+                reviewers=["a"],
+                disposition="deferred",
+            ),
+        ]
+        review = derive_review_counts(findings)
+        assert review.deferred == 0
+        assert review.must_fix_initial == 0
+        assert review.should_fix == 0
+
+    def test_debt_alone_does_not_block(self) -> None:
+        diff = _make_diff()
+        doc = _make_reviewer_doc(_make_finding(severity="DEBT"))
+        verdict = consolidate_verdict([doc], diff, reviewed_sha="sha")
+        assert verdict.blocking is False
+        assert verdict.must_fix == []
+
+    def test_transitive_impact_evidence_defaults_blank(self) -> None:
+        assert _make_finding().transitive_impact_evidence == ""
+        finding = _make_finding(transitive_impact_evidence="def changed(x, y):")
+        assert finding.transitive_impact_evidence == "def changed(x, y):"
+
+    def test_release_critical_exception_defaults_blank(self) -> None:
+        assert _make_finding().release_critical_exception == ""
+        finding = _make_finding(release_critical_exception="unauthenticated write")
+        assert finding.release_critical_exception == "unauthenticated write"
+
+
+class TestVerdictDebtFields:
+    def test_debt_and_previous_reviewed_sha_default(self) -> None:
+        diff = _make_diff()
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_make_finding())], diff, reviewed_sha="sha"
+        )
+        assert verdict.debt == []
+        assert verdict.previous_reviewed_sha is None
+
+    def test_debt_round_trips_through_json(self) -> None:
+        diff = _make_diff()
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(_make_finding())], diff, reviewed_sha="sha"
+        )
+        stamped = verdict.model_copy(
+            update={"debt": [_make_debt_record()], "previous_reviewed_sha": "old"}
+        )
+        reloaded = ReviewVerdict.model_validate_json(stamped.model_dump_json())
+        assert reloaded.previous_reviewed_sha == "old"
+        assert reloaded.debt[0].fingerprint == ("src/cw/foo.py", "bug here")

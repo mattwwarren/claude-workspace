@@ -32,6 +32,7 @@ from cw.codex_review import (
 from cw.codex_review._capability import _PROBE_SENTINEL
 from cw.codex_review._context import (
     _CAPABLE_ONLY_MARKER,
+    _DELTA_MODE_MARKER,
     _INLINED_ONLY_MARKER,
     _OUTPUT_INSTRUCTIONS_CAPABLE,
     _OUTPUT_INSTRUCTIONS_INLINED_ONLY,
@@ -53,7 +54,7 @@ from tests._codex_review_helpers import (
     _task,
     _write,
 )
-from tests.conftest import _make_diff, _make_ticket_task
+from tests.conftest import _make_diff, _make_finding, _make_ticket_task
 from tests.test_review_adjudication import _make_voided_finding
 
 if TYPE_CHECKING:
@@ -1826,3 +1827,154 @@ class TestPrepareReviewPass:
         assert all(s.source == "none" for s in prepared.agent_spec_status)
         assert all(s.empty is True for s in prepared.agent_spec_status)
         assert all(s.empty_repo_file is False for s in prepared.agent_spec_status)
+
+
+# ---------------------------------------------------------------------------
+# Delta-mode review passes (#1837)
+# ---------------------------------------------------------------------------
+
+
+class TestDeltaModeReviewPass:
+    """`delta_from_sha`/`prior_open_findings` wiring through the whole pass."""
+
+    @staticmethod
+    def _rev(repo: Path) -> str:
+        return subprocess.check_output(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
+        ).strip()
+
+    def _two_commit_repo(
+        self, make_git_repo: Callable[[str], Path], name: str
+    ) -> tuple[Path, str]:
+        """A repo whose first feature commit is python and second is markdown."""
+        repo = make_git_repo(name)
+        _git(repo, "checkout", "-b", "feature")
+        (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
+        _git(repo, "add", "mod.py")
+        _git(repo, "commit", "-m", "add mod.py")
+        first = self._rev(repo)
+        (repo / "notes.md").write_text("# notes\n", encoding="utf-8")
+        _git(repo, "add", "notes.md")
+        _git(repo, "commit", "-m", "add notes.md")
+        return repo, first
+
+    def test_cycle_zero_default_is_unchanged(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """Regression lock: omitting the new params reproduces today's output."""
+        repo, _ = self._two_commit_repo(make_git_repo, "wt-delta-default")
+
+        prepared = _prepare_review_pass(
+            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-d0"
+        )
+
+        assert prepared.delta_diff is None
+        assert prepared.delta_changed_files is None
+        assert "mod.py" in prepared.diff.files
+        assert "notes.md" in prepared.diff.files
+        for prompt in prepared.prompts_by_role.values():
+            assert "## Unresolved Prior Findings" not in prompt
+            assert _DELTA_MODE_MARKER not in prompt
+
+    def test_delta_mode_selects_roles_from_the_delta_only(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo, first = self._two_commit_repo(make_git_repo, "wt-delta-roles")
+
+        full = _prepare_review_pass(
+            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-d1"
+        )
+        delta = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-d1",
+            delta_from_sha=first,
+        )
+
+        # The delta touches only markdown, so the python-driven roles drop out.
+        assert delta.roles == _select_reviewer_roles(
+            "small",
+            categories=_categorize_changed_files(["notes.md"]),
+            mutates_persisted_state=False,
+            has_ticket_context=False,
+        )
+        assert set(delta.roles) < set(full.roles)
+        assert delta.delta_diff is not None
+        assert set(delta.delta_diff.files) == {"notes.md"}
+        assert delta.delta_changed_files == frozenset({"notes.md"})
+        # The full diff and reviewed_sha are still captured unchanged -- the
+        # fix loop's scope-violation gate depends on the full cycle-0 file set.
+        assert "mod.py" in delta.diff.files
+        assert delta.reviewed_sha == self._rev(repo)
+        # Prompts are built against the delta, not the full PR diff.
+        for prompt in delta.prompts_by_role.values():
+            assert "def broken():" not in prompt
+            assert _DELTA_MODE_MARKER in prompt
+
+    def test_prior_open_findings_reach_the_prompt(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo, first = self._two_commit_repo(make_git_repo, "wt-delta-prior")
+
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-d2",
+            delta_from_sha=first,
+            prior_open_findings=[_make_finding(summary="STILL BROKEN HERE")],
+        )
+
+        assert prepared.roles
+        prompts = list(prepared.prompts_by_role.values())
+        assert all("## Unresolved Prior Findings" in p for p in prompts)
+        assert all("STILL BROKEN HERE" in p for p in prompts)
+
+
+class TestBuildReviewerPromptDeltaKwargs:
+    def _prompt(self, **overrides: object) -> str:
+        kwargs: dict[str, object] = {
+            "agent_spec_text": "SPEC",
+            "diff": _make_diff(),
+            "changed_files": ["src/cw/foo.py"],
+            "plan_text": None,
+            "ticket_text": None,
+            "project_rubrics": None,
+            "repo_policy_section": None,
+            "sensitive_hits": [],
+        }
+        kwargs.update(overrides)
+        return _build_reviewer_prompt("Code Quality Reviewer", **kwargs)  # type: ignore[arg-type]
+
+    def test_prior_open_findings_section_lists_file_summary_evidence(self) -> None:
+        prompt = self._prompt(
+            prior_open_findings=[
+                _make_finding(
+                    file="src/cw/bar.py",
+                    summary="Still unfixed",
+                    evidence="def broken():",
+                )
+            ]
+        )
+        assert "## Unresolved Prior Findings" in prompt
+        assert "src/cw/bar.py" in prompt
+        assert "Still unfixed" in prompt
+        assert "def broken():" in prompt
+
+    def test_prior_open_findings_omitted_by_default(self) -> None:
+        assert "## Unresolved Prior Findings" not in self._prompt()
+
+    def test_delta_mode_block_carries_its_own_marker(self) -> None:
+        prompt = self._prompt(delta_mode=True)
+        assert _DELTA_MODE_MARKER in prompt
+        assert "DEBT" in prompt
+        assert "transitive_impact_evidence" in prompt
+        assert "release_critical_exception" in prompt
+
+    def test_delta_mode_block_absent_by_default(self) -> None:
+        prompt = self._prompt()
+        assert _DELTA_MODE_MARKER not in prompt
+        assert "transitive_impact_evidence" not in prompt

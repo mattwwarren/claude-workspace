@@ -29,6 +29,7 @@ from cw.models import (
 from cw.native_daemon import FakeNativeDaemonClient
 from cw.review_findings import (
     CapturedDiff,
+    DebtRecord,
     EscalationMetadata,
     Finding,
     ReviewerFindingsDocument,
@@ -337,6 +338,26 @@ def _finding_kwargs(**overrides: object) -> dict[str, object]:
 def _make_finding(**overrides: object) -> Finding:
     """Minimal-but-valid Finding with keyword overrides (#1237)."""
     return Finding.model_validate(_finding_kwargs(**overrides))
+
+
+def _make_debt_record(**overrides: object) -> DebtRecord:
+    """Minimal-but-valid DebtRecord with keyword overrides (#1837).
+
+    Lives here alongside :func:`_make_finding` so ``test_review_debt.py`` and
+    ``test_codex_fix_loop_convergence.py`` share one builder instead of each
+    keeping a local copy. Defaults line up with ``_finding_kwargs``.
+    """
+    kwargs: dict[str, object] = {
+        "fingerprint": ("src/cw/foo.py", "bug here"),
+        "file": "src/cw/foo.py",
+        "evidence": "def broken():",
+        "summary": "Bug here",
+        "suggested_follow_up": "Fix it",
+        "discovery_sha": "deadbee",
+        "reviewer_role": "Code Quality Reviewer",
+    }
+    kwargs.update(overrides)
+    return DebtRecord.model_validate(kwargs)
 
 
 def _make_reviewer_doc(

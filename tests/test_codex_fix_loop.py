@@ -17,10 +17,10 @@ from cw.codex_fix_loop import (
     _build_fix_codex_argv,
     _build_fix_prompt,
     _commit_fix_cycle,
-    _track_open_findings,
     _verdict_snapshot_filename,
     run_review_with_fix_loop,
 )
+from cw.codex_fix_loop_convergence import _open_finding_key, _track_open_findings
 from cw.codex_review import (
     _MIN_ROLE_TIMEOUT_SECONDS,
     _REVIEWER_ROLE_AGENT_FILES,
@@ -41,7 +41,6 @@ from cw.models import Stage, TicketTask
 from cw.review_findings import (
     AcceptedFinding,
     ReviewVerdict,
-    _dedup_key,
     consolidate_verdict,
     write_review_verdict,
 )
@@ -639,6 +638,23 @@ class TestFixInvocation:
 # ---------------------------------------------------------------------------
 
 
+def _track_cycle0(
+    open_findings: dict[object, AcceptedFinding], accepted: list[AcceptedFinding]
+) -> dict[object, AcceptedFinding]:
+    """`_track_open_findings` on the cycle-0 (no-delta) seeding path (#1837)."""
+    return _track_open_findings(
+        open_findings,
+        accepted,
+        delta_diff=None,
+        delta_changed_files=None,
+        debt_ledger={},
+        previous_reviewed_sha=None,
+        reviewed_sha="sha0",
+        worktree=None,
+        ticket_id="1837",
+    )
+
+
 def _accepted(finding_dict: dict[str, object]) -> AcceptedFinding:
     return AcceptedFinding(
         finding=_make_finding(**finding_dict), reviewers=["Code Quality Reviewer"]
@@ -648,19 +664,19 @@ def _accepted(finding_dict: dict[str, object]) -> AcceptedFinding:
 class TestFixLoopDispositionTracking:
     def test_finding_absent_next_cycle_is_dropped(self) -> None:
         af = _accepted(_MF_A)
-        open_findings = {_dedup_key(af.finding): af}
+        open_findings = {_open_finding_key(af.finding): af}
         # Next cycle's accepted set no longer contains the finding → dropped.
-        updated = _track_open_findings(open_findings, [])
+        updated = _track_cycle0(open_findings, [])
         assert updated == {}
 
     def test_finding_first_seen_later_cycle_is_tracked(self) -> None:
         af = _accepted(_MF_B)
-        updated = _track_open_findings({}, [af])
-        assert _dedup_key(af.finding) in updated
+        updated = _track_cycle0({}, [af])
+        assert _open_finding_key(af.finding) in updated
 
     def test_should_fix_never_enters_tracker(self) -> None:
         sf = _accepted(_SF)
-        updated = _track_open_findings({}, [sf])
+        updated = _track_cycle0({}, [sf])
         assert updated == {}
 
     def test_suppressed_must_fix_never_enters_tracker(self) -> None:
@@ -679,14 +695,14 @@ class TestFixLoopDispositionTracking:
         )
         still_open = _accepted(_MF_B)
 
-        updated = _track_open_findings({}, [voided, still_open])
+        updated = _track_cycle0({}, [voided, still_open])
 
-        assert list(updated) == [_dedup_key(still_open.finding)]
+        assert list(updated) == [_open_finding_key(still_open.finding)]
 
     def test_previously_tracked_finding_drops_out_once_voided(self) -> None:
         """A void landing mid-loop retires an already-tracked finding."""
         af = _accepted(_MF_A)
-        open_findings = {_dedup_key(af.finding): af}
+        open_findings = {_open_finding_key(af.finding): af}
         voided = af.model_copy(
             update={
                 "disposition": "rejected",
@@ -694,7 +710,7 @@ class TestFixLoopDispositionTracking:
             }
         )
 
-        assert _track_open_findings(open_findings, [voided]) == {}
+        assert _track_cycle0(open_findings, [voided]) == {}
 
 
 class TestVoidedFindingNeverEngagesFixLoop:

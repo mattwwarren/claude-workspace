@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 from typing import TYPE_CHECKING
 
-from cw.codex_review import _capture_diff, _parse_unified_diff
+from cw.codex_review import _capture_delta_diff, _capture_diff, _parse_unified_diff
 from tests._codex_review_helpers import _git
 
 if TYPE_CHECKING:
@@ -161,3 +161,78 @@ class TestCaptureDiff:
             ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
         ).strip()
         assert reviewed_sha == head
+
+
+class TestCaptureDeltaDiff:
+    """``_capture_delta_diff`` — the two-SHA delta capture (#1837)."""
+
+    @staticmethod
+    def _rev(repo: Path, ref: str) -> str:
+        return subprocess.check_output(
+            ["git", "-C", str(repo), "rev-parse", ref], text=True
+        ).strip()
+
+    def test_captures_only_the_second_commit(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = make_git_repo("wt-delta")
+        _git(repo, "checkout", "-b", "feature")
+        (repo / "first.py").write_text("alpha = 1\n", encoding="utf-8")
+        _git(repo, "add", "first.py")
+        _git(repo, "commit", "-m", "first")
+        from_sha = self._rev(repo, "HEAD")
+        (repo / "second.py").write_text("beta = 2\ngamma = 3\n", encoding="utf-8")
+        _git(repo, "add", "second.py")
+        _git(repo, "commit", "-m", "second")
+        to_sha = self._rev(repo, "HEAD")
+
+        diff, changed_files = _capture_delta_diff(repo, from_sha, to_sha)
+
+        assert changed_files == ["second.py"]
+        assert set(diff.files) == {"second.py"}
+        assert diff.file_line_text["second.py"] == {1: "beta = 2", 2: "gamma = 3"}
+        assert diff.file_window_text["second.py"] == diff.file_line_text["second.py"]
+        assert diff.file_diffs["second.py"].startswith("+++ b/second.py")
+        # The first commit's file is entirely absent -- the whole point of a
+        # delta capture over `_capture_diff`'s full `main...HEAD` range.
+        assert "first.py" not in diff.text
+
+    def test_no_op_delta_is_empty(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = make_git_repo("wt-delta-noop")
+        _git(repo, "checkout", "-b", "feature")
+        (repo / "only.py").write_text("alpha = 1\n", encoding="utf-8")
+        _git(repo, "add", "only.py")
+        _git(repo, "commit", "-m", "only")
+        sha = self._rev(repo, "HEAD")
+
+        diff, changed_files = _capture_delta_diff(repo, sha, sha)
+
+        assert diff.files == {}
+        assert diff.file_diffs == {}
+        assert diff.file_line_text == {}
+        assert diff.file_window_text == {}
+        assert diff.text == ""
+        assert changed_files == []
+
+    def test_pure_deletion_in_changed_files_only(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        repo = make_git_repo("wt-delta-delete")
+        _git(repo, "checkout", "-b", "feature")
+        (repo / "doomed.py").write_text("alpha = 1\n", encoding="utf-8")
+        _git(repo, "add", "doomed.py")
+        _git(repo, "commit", "-m", "add doomed")
+        from_sha = self._rev(repo, "HEAD")
+        _git(repo, "rm", "doomed.py")
+        _git(repo, "commit", "-m", "remove doomed")
+        to_sha = self._rev(repo, "HEAD")
+
+        diff, changed_files = _capture_delta_diff(repo, from_sha, to_sha)
+
+        # Same contract `_capture_diff` already has: a pure deletion appears in
+        # `changed_files` but contributes nothing to the per-file maps.
+        assert changed_files == ["doomed.py"]
+        assert diff.files == {}
+        assert diff.file_diffs == {}
