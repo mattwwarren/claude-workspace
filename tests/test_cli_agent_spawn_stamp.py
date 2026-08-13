@@ -29,6 +29,7 @@ import pytest
 from cw.cli.agent_spawn_stamp import (
     _LOCK_TIMEOUT_SECS_DEFAULT,
     _context_lock,
+    _last_stamped_at,
     _unresolved_count,
 )
 from cw.models import (
@@ -302,6 +303,68 @@ def test_unresolved_count_reads_legacy_context_as_zero(tmp_path: Path) -> None:
         )
         == 3
     )
+
+
+def test_last_stamped_at_tolerates_every_odd_shape() -> None:
+    """The timestamp reader degrades to None rather than propagating junk.
+
+    It feeds the decrement path's carry-forward, so a non-str value here would
+    otherwise be written straight back into the context on the next Post.
+    """
+    assert _last_stamped_at({}) is None
+    assert _last_stamped_at({AGENT_SPAWN_STAMP_KEY: "not-a-dict"}) is None
+    assert _last_stamped_at({AGENT_SPAWN_STAMP_KEY: {}}) is None
+    assert _last_stamped_at({AGENT_SPAWN_STAMP_KEY: {"last_stamped_at": 7}}) is None
+    assert (
+        _last_stamped_at({AGENT_SPAWN_STAMP_KEY: {"last_stamped_at": "2026-01-01"}})
+        == "2026-01-01"
+    )
+
+
+def test_post_hook_survives_unexpected_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Post handler swallows a crash too — same contract as Pre.
+
+    Asserted separately rather than assumed from the Pre test: the two
+    commands carry their own independent try/except, so one could lose it
+    without the other's test noticing.
+    """
+
+    def _boom(_delta: int) -> None:
+        msg = "unexpected"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr("cw.cli.agent_spawn_stamp._adjust_unresolved_count", _boom)
+
+    result = _invoke_hook_command("agent-spawn-post", _payload(_POST_PAYLOAD, tmp_path))
+
+    assert result.exit_code == 0
+
+
+def test_post_hook_preserves_last_stamped_at_on_decrement(tmp_path: Path) -> None:
+    """Decrement carries the original timestamp forward, it does not refresh it.
+
+    ``last_stamped_at`` answers "when did the oldest unresolved spawn begin",
+    which is what an operator reading a parked row needs; refreshing it on the
+    way down would erase exactly that.
+    """
+    worktree = _stamped_worktree(tmp_path)
+
+    _invoke_hook_command("agent-spawn-pre", _payload(_PRE_PAYLOAD, worktree))
+    _invoke_hook_command("agent-spawn-pre", _payload(_PRE_PAYLOAD, worktree))
+    context = json.loads(
+        (worktree / HOOK_CONTEXT_RELATIVE_PATH).read_text(encoding="utf-8")
+    )
+    stamped_at = context[AGENT_SPAWN_STAMP_KEY]["last_stamped_at"]
+
+    _invoke_hook_command("agent-spawn-post", _payload(_POST_PAYLOAD, worktree))
+
+    context = json.loads(
+        (worktree / HOOK_CONTEXT_RELATIVE_PATH).read_text(encoding="utf-8")
+    )
+    assert context[AGENT_SPAWN_STAMP_KEY]["last_stamped_at"] == stamped_at
+    assert _read_count(worktree) == 1
 
 
 def test_lock_timeout_default_is_bounded() -> None:

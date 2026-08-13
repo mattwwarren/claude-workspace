@@ -3125,6 +3125,55 @@ class TestUnresolvedSubagentSpawnDisposition:
         t = next(t for t in load_dev_queue().tasks if t.ticket_id == "uss-dirty-plain")
         assert t.disposition == _DIRTY_WORKTREE_REASON
 
+    def test_unresolved_spawn_with_veto_cap_exhausted_still_escalates(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The override keeps #1449's cap-exhausted escalation parity.
+
+        The new branch short-circuits before the SIGNAL_ONLY branch that
+        normally collects these, so it has to carry the escalation itself —
+        otherwise flagging a candidate as an unresolved spawn would silently
+        cost it the immediate operator page it would have got as an ordinary
+        phantom.
+        """
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_phantom_candidates,
+        )
+
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+        state = _seed_phantom_task("uss-veto-1")
+
+        candidate = ReapCandidate(
+            session_id="uss-veto-1",
+            proposed_action=ProposedAction.CRASH_COMPLETE,
+            ticket_id="uss-veto-1",
+            worktree_dirty=False,
+            client="client-a",
+            unresolved_subagent_spawn=True,
+            veto_cap_exhausted=True,
+            new_veto_count=3,
+        )
+
+        _act_on_phantom_candidates(
+            state, [candidate], now=now, config=OrchestratorConfig()
+        )
+
+        # The escalation path persists the bumped counter onto the session.
+        assert state.sessions[0].consecutive_sentinel_mismatch_vetoes == 3
+        events = read_events(
+            consumer="test-uss-veto",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert any(e.payload.get("session_id") == "uss-veto-1" for e in events)
+
     def test_signal_only_unresolved_spawn_overrides_reap_policy_auto(
         self,
         tmp_config_dir: Path,
