@@ -51,6 +51,7 @@ The orchestrator will drop the reviewer from the report cleanly.
 - Code style choices the plan didn't promise to commit to (function names, file locations within an existing pattern).
 - Anything the plan explicitly addresses with a stated decision and rationale — even if you'd have chosen differently.
 - Hypothetical edge cases not implied by the ticket.
+- A question the plan itself already closed in its own `## Adopted Assumptions` / `## Self-Verified Premises` / `## Deferred Premises` sections — this is a specific, mandatory instance of the bullet above, not a new exemption; see "Before surfacing: check the plan's own resolution record" below for how to check it.
 
 ### Unverified premises (distinct from ambiguity)
 
@@ -83,6 +84,18 @@ fact, and the plan a few lines later builds the opposite.
 - **(c) Safe if false:** a false premise at that point is safe — the check precedes anything destructive or costly, and the mismatch behavior is halt-and-report, never a silent fallback.
 
 A DEFER item MUST carry two additional sub-bullets: `In-implementation check:` (the exact bounded check to run) and `On mismatch:` (the halt condition). A DEFER missing either field, or any malformed token, is treated as `NO` downstream — the same fail-closed default the `Recommendation`/`Verified` fields already use. Operator-intent questions never qualify: condition (a) excludes them by construction — a preference has no runtime observation that settles it. A premise parked as `NO` when it genuinely met the DEFER bar costs an operator round the human at a desk cannot even resolve statically; that asymmetry is what DEFER exists to remove.
+
+### Before surfacing: check the plan's own resolution record
+
+A candidate ambiguity or premise may already have been settled by the plan under review itself, not just by the ticket. This matters most on a re-scan: the plan you were handed may already carry a `## Adopted Assumptions`, `## Self-Verified Premises`, or `## Deferred Premises` section from an earlier Step 4b partition pass in this same ticket's history (see `auto-dev-plan.md` Step 4b) — each entry there is a question or claim the plan already closed, with a stated interpretation/evidence and rationale.
+
+Before emitting any candidate item (ambiguity or premise), check whether the plan body already contains an entry in one of those three sections addressing the same question or claim:
+
+- **Matches an entry in `## Adopted Assumptions`** → suppress the candidate ambiguity entirely. Do not re-emit it, and do not downgrade it to a note — an ADOPT entry is a stated decision with rationale, which is exactly the "does NOT count" exemption above; this cross-check exists to make that exemption apply consistently against this specific section instead of being missed on a re-scan of an already-partitioned plan.
+- **Matches an entry in `## Self-Verified Premises` or `## Deferred Premises`** → suppress the candidate premise entirely, the same way — the claim was already resolved (verified, or scheduled for a bounded in-implementation check) in an earlier pass.
+- **No matching entry, or the only record of the question is a prior PARK** (e.g. it only appears in an earlier `## Pending Verification Scan` tracker comment, with no subsequent `## Adopted Assumptions` entry answering it) → surface it normally. Note the asymmetry: a PARKED item stays open until answered — do not infer settlement merely because the question was asked before. Only an ADOPT (or a self-verified/deferred premise) closes it.
+
+A fresh plan with none of these three sections yet simply has no match to find — this check is a no-op on a first pass and only engages on a re-scan of a plan that already carries a prior resolution record.
 
 ### Output format
 
