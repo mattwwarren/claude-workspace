@@ -10,6 +10,7 @@ import pytest
 
 from cw.auto_dev_result import Review
 from cw.codex_review import (
+    _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
     CODEX_BUDGET_EXHAUSTED,
     CODEX_ERROR,
     CODEX_MUST_FIX_FINDINGS,
@@ -17,7 +18,6 @@ from cw.codex_review import (
     CODEX_REVIEW_PARTIAL,
     CODEX_REVIEW_UNPARSEABLE,
     CODEX_TIMEOUT,
-    _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
     _format_failures_detail,
     render_verdict_comment,
     synthesize_codex_review_result,
