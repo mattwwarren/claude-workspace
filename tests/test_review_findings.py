@@ -1846,6 +1846,175 @@ class TestUnanchoredFindings:
         assert len(stripped2) == 1
 
 
+class TestNoDiffAnchorFindings:
+    """#1817: a finding whose remedy lies outside the diff entirely.
+
+    Distinct from #1632's ``"unanchored"`` (a real path on disk that simply
+    isn't in this diff): here there is no artifact to point at at all — a
+    missing follow-up ticket, an absent acceptance-criterion discharge. The
+    marker is an explicit boolean, and ``file`` carries the fixed literal
+    ``"N/A"`` so the field stays queryable. Such a finding must never be
+    mechanically rejected as ``"unknown_file"``, which is exactly the #1764
+    silent-drop this ticket exists to close.
+    """
+
+    def test_no_diff_anchor_finding_is_accepted_without_diff_match(self) -> None:
+        finding = _make_finding(
+            no_diff_anchor=True,
+            file="N/A",
+            line_start=None,
+            line_end=None,
+            evidence="acceptance criterion 3 requires a follow-up ticket",
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), _make_diff()
+        )
+        assert accepted == [finding]
+        assert rejected == []
+
+    def test_no_diff_anchor_with_line_anchor_raises_validation_error(self) -> None:
+        # A claimed line position is meaningless when the marker asserts there
+        # is no diff to anchor it to — fail fast on the producer mistake.
+        with pytest.raises(ValidationError):
+            Finding.model_validate(
+                _finding_kwargs(
+                    no_diff_anchor=True, file="N/A", line_start=5, line_end=None
+                )
+            )
+        with pytest.raises(ValidationError):
+            Finding.model_validate(
+                _finding_kwargs(
+                    no_diff_anchor=True, file="N/A", line_start=None, line_end=7
+                )
+            )
+
+    def test_no_diff_anchor_with_non_na_file_raises_validation_error(self) -> None:
+        # #1817 review (2026-08-11): the docstring's "N/A" literal requirement
+        # was documented but unenforced — this is the enforcement.
+        with pytest.raises(ValidationError):
+            Finding.model_validate(
+                _finding_kwargs(
+                    no_diff_anchor=True,
+                    file="src/cw/review_findings.py",
+                    line_start=None,
+                    line_end=None,
+                )
+            )
+
+    def test_no_diff_anchor_finding_preserves_reviewer_text(self) -> None:
+        finding = _make_finding(
+            no_diff_anchor=True,
+            file="N/A",
+            line_start=None,
+            line_end=None,
+            summary="custom summary",
+            consequence="custom consequence",
+            suggested_fix="custom fix",
+            evidence="custom evidence",
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), _make_diff()
+        )
+        assert not rejected
+        assert accepted[0].summary == "custom summary"
+        assert accepted[0].consequence == "custom consequence"
+        assert accepted[0].suggested_fix == "custom fix"
+        assert accepted[0].evidence == "custom evidence"
+        assert accepted[0].no_diff_anchor is True
+
+    def test_no_diff_anchor_finding_escalation_still_validated_against_diff(
+        self,
+    ) -> None:
+        good_finding = _make_finding(
+            no_diff_anchor=True,
+            file="N/A",
+            line_start=None,
+            line_end=None,
+            escalation=_make_escalation(evidence_quote="def broken():"),
+        )
+        accepted, rejected, stripped = validate_reviewer_document(
+            _make_reviewer_doc(good_finding), _make_diff()
+        )
+        assert not rejected
+        assert accepted[0].escalation is not None
+        assert not stripped
+
+        bad_finding = _make_finding(
+            no_diff_anchor=True,
+            file="N/A",
+            line_start=None,
+            line_end=None,
+            escalation=_make_escalation(evidence_quote="ghost quote"),
+        )
+        accepted2, rejected2, stripped2 = validate_reviewer_document(
+            _make_reviewer_doc(bad_finding), _make_diff()
+        )
+        assert not rejected2
+        assert accepted2[0].escalation is None
+        assert len(stripped2) == 1
+
+    def test_no_diff_anchor_should_fix_also_accepted(self) -> None:
+        """Consolidation-level acceptance is severity-agnostic.
+
+        A SHOULD_FIX ``no_diff_anchor`` finding is accepted exactly like a
+        MUST_FIX one — the silent-drop side effect is fixed for both. This
+        asserts nothing about adjudication: per Decision C2 only a MUST_FIX
+        may reach the ``operator_action`` outcome (see
+        ``tests/test_review_adjudication.py``).
+        """
+        finding = _make_finding(
+            severity="SHOULD_FIX",
+            no_diff_anchor=True,
+            file="N/A",
+            line_start=None,
+            line_end=None,
+            evidence="the docs page this change needs does not exist yet",
+        )
+        accepted, rejected, _ = validate_reviewer_document(
+            _make_reviewer_doc(finding), _make_diff()
+        )
+        assert accepted == [finding]
+        assert rejected == []
+
+    def test_no_diff_anchor_finding_logs_routing(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        finding = _make_finding(
+            no_diff_anchor=True, file="N/A", line_start=None, line_end=None
+        )
+        with caplog.at_level(logging.INFO, logger="cw.review_findings"):
+            validate_reviewer_document(_make_reviewer_doc(finding), _make_diff())
+        assert "no_diff_anchor" in caplog.text
+
+    def test_pm_reviewer_missing_ticket_finding_not_mechanically_rejected(self) -> None:
+        """The literal #1764 regression: a PM finding with no diff artifact.
+
+        Before #1817 this landed in ``rejected`` as ``"unknown_file"`` and
+        therefore in ``rejected_must_fix``, hard-blocking the run through the
+        #1714 mechanical-reject path with no route to an operator action.
+        """
+        finding = _make_finding(
+            severity="MUST_FIX",
+            no_diff_anchor=True,
+            file="N/A",
+            line_start=None,
+            line_end=None,
+            summary="ticket AC3's follow-up ticket was never filed",
+            evidence=(
+                "AC3: a follow-up ticket must exist for the deferred "
+                "migration before this ships"
+            ),
+        )
+        verdict = consolidate_verdict(
+            [_make_reviewer_doc(finding, reviewer_role="Product Manager Reviewer")],
+            _make_diff(),
+            "abc1234",
+        )
+        assert [af.finding for af in verdict.accepted] == [finding]
+        assert verdict.rejected == []
+        assert verdict.rejected_must_fix == []
+
+
 # Shared fixture source for TestEnclosingDefSpan and TestAnchorInEnclosingDef.
 _ENCLOSING_DEF_SHORT_SOURCE = (
     "def helper():\n"

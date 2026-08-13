@@ -593,6 +593,221 @@ class TestRenderDeferredFindingsMd:
             assert matched.disposition_detail == adj.rationale
 
 
+def _no_diff_anchor_finding(**overrides: object) -> Finding:
+    """A #1817 marker finding: no diff artifact, fixed ``"N/A"`` file literal."""
+    kwargs: dict[str, object] = {
+        "severity": "MUST_FIX",
+        "no_diff_anchor": True,
+        "file": "N/A",
+        "line_start": None,
+        "line_end": None,
+        "summary": "AC3's follow-up ticket was never filed",
+        "evidence": "AC3: a follow-up ticket must exist before this ships",
+    }
+    kwargs.update(overrides)
+    return _make_finding(**kwargs)
+
+
+_OPERATOR_RATIONALE = (
+    "acceptance criterion 3 requires a follow-up ticket for the deferred "
+    "migration; none exists — operator must file it (or link the one that "
+    "discharges it) before this ticket can ship"
+)
+
+
+class TestOperatorActionOutcome:
+    """#1817: the OPERATOR ACTIONABLE route for a non-diff-anchorable MUST_FIX."""
+
+    def test_operator_action_outcome_requires_rationale(self) -> None:
+        finding = _no_diff_anchor_finding()
+        with pytest.raises(ValidationError):
+            _adjudication(finding, outcome="operator_action", rationale="   ")
+        # Non-blank passes — the same `outcome != "fix"` gate, no new code.
+        entry = _adjudication(
+            finding, outcome="operator_action", rationale=_OPERATOR_RATIONALE
+        )
+        assert entry.outcome == "operator_action"
+
+    def test_operator_action_outcome_requires_must_fix_severity(self) -> None:
+        """Decision C2: OPERATOR ACTIONABLE is MUST_FIX-scoped at the model.
+
+        A SHOULD_FIX ``no_diff_anchor`` finding routes through ordinary DEFER;
+        it can never legally serialize into an ``operator_action`` entry.
+        """
+        should_fix = _no_diff_anchor_finding(severity="SHOULD_FIX")
+        with pytest.raises(ValidationError):
+            _adjudication(
+                should_fix, outcome="operator_action", rationale=_OPERATOR_RATIONALE
+            )
+        for severity in ("NIT", "PRINCIPLE"):
+            with pytest.raises(ValidationError):
+                _adjudication(
+                    _no_diff_anchor_finding(severity=severity),
+                    outcome="operator_action",
+                    rationale=_OPERATOR_RATIONALE,
+                )
+
+    def test_operator_action_outcome_requires_na_file_and_no_line_anchor(
+        self,
+    ) -> None:
+        """A coordinating-session typo on file/line must fail fast (#1817 review).
+
+        Mirrors ``Finding``'s own ``_check_no_diff_anchor_file_is_na``: an
+        ``operator_action`` entry is copied straight off a ``no_diff_anchor``
+        finding, which is itself model-pinned to ``file="N/A"`` with no line
+        anchor — a mismatched entry here would fail the location-key match
+        against its ``Finding`` and silently fall back to ``"dropped"``.
+        """
+        finding = _no_diff_anchor_finding()
+        with pytest.raises(ValidationError):
+            _adjudication(
+                finding,
+                outcome="operator_action",
+                rationale=_OPERATOR_RATIONALE,
+                file="src/cw/review_findings.py",
+            )
+        with pytest.raises(ValidationError):
+            _adjudication(
+                finding,
+                outcome="operator_action",
+                rationale=_OPERATOR_RATIONALE,
+                line_start=5,
+            )
+        with pytest.raises(ValidationError):
+            _adjudication(
+                finding,
+                outcome="operator_action",
+                rationale=_OPERATOR_RATIONALE,
+                line_end=5,
+            )
+        # The correct shape still passes — the same one every other test here
+        # already constructs via _no_diff_anchor_finding()'s defaults.
+        entry = _adjudication(
+            finding, outcome="operator_action", rationale=_OPERATOR_RATIONALE
+        )
+        assert entry.file == "N/A"
+        assert entry.line_start is None
+        assert entry.line_end is None
+
+    def test_apply_adjudication_operator_action_does_not_block(self) -> None:
+        finding = _no_diff_anchor_finding()
+        verdict = _verdict(_accepted(finding))
+        assert verdict.blocking is True
+
+        result = apply_adjudication(
+            verdict,
+            [
+                _adjudication(
+                    finding, outcome="operator_action", rationale=_OPERATOR_RATIONALE
+                )
+            ],
+        )
+
+        assert result.accepted[0].disposition == "operator_actionable"
+        assert result.accepted[0].disposition_detail == _OPERATOR_RATIONALE
+        assert result.blocking is False
+        assert result.must_fix == []
+        assert result.unmatched_adjudication_count == 0
+
+    def test_unadjudicated_no_diff_anchor_must_fix_still_blocks_as_dropped(
+        self,
+    ) -> None:
+        """AC4: #1714's no-silent-drop guarantee composes with the new marker."""
+        finding = _no_diff_anchor_finding()
+        verdict = _verdict(_accepted(finding))
+
+        result = apply_adjudication(verdict, [])
+
+        assert result.accepted[0].disposition == "dropped"
+        assert result.accepted[0].disposition_detail == _NO_ENTRY_DETAIL
+        assert result.blocking is True
+        assert result.must_fix == [finding]
+
+    def test_apply_adjudication_composes_all_four_outcomes_in_one_pass(self) -> None:
+        fixed = _make_finding(severity="MUST_FIX", line_start=10, line_end=10)
+        rejected = _make_finding(
+            severity="SHOULD_FIX",
+            file="src/cw/bar.py",
+            line_start=20,
+            line_end=20,
+            summary="Rejected one",
+        )
+        deferred = _make_finding(
+            severity="SHOULD_FIX",
+            file="src/cw/baz.py",
+            line_start=30,
+            line_end=30,
+            summary="Deferred one",
+        )
+        operator = _no_diff_anchor_finding()
+        dropped = _make_finding(
+            severity="MUST_FIX",
+            file="src/cw/qux.py",
+            line_start=40,
+            line_end=40,
+            summary="Nobody decided this one",
+        )
+        verdict = _verdict(
+            _accepted(fixed),
+            _accepted(rejected),
+            _accepted(deferred),
+            _accepted(operator),
+            _accepted(dropped),
+        )
+        stale = _adjudication(
+            _make_finding(
+                severity="MUST_FIX",
+                file="src/cw/gone.py",
+                line_start=99,
+                line_end=99,
+            ),
+            outcome="reject",
+            rationale="stale anchor, matches nothing",
+        )
+
+        result = apply_adjudication(
+            verdict,
+            [
+                _adjudication(fixed),
+                _adjudication(rejected, outcome="reject", rationale="deliberate"),
+                _adjudication(deferred, outcome="defer", rationale="out of scope"),
+                _adjudication(
+                    operator,
+                    outcome="operator_action",
+                    rationale=_OPERATOR_RATIONALE,
+                ),
+                stale,
+            ],
+        )
+
+        assert [af.disposition for af in result.accepted] == [
+            "fixed",
+            "rejected",
+            "deferred",
+            "operator_actionable",
+            "dropped",
+        ]
+        assert result.unmatched_adjudication_count == 1
+        # Only the genuinely undecided MUST_FIX still blocks.
+        assert result.must_fix == [dropped]
+        assert result.blocking is True
+
+    def test_render_deferred_findings_md_ignores_operator_action_entries(self) -> None:
+        """``operator_action`` posts to the ticket, never to the PR body."""
+        entry = Adjudication(
+            severity="MUST_FIX",
+            file="N/A",
+            summary="AC3's follow-up ticket was never filed",
+            outcome="operator_action",
+            rationale=_OPERATOR_RATIONALE,
+        )
+        assert render_deferred_findings_md([entry]) == ""
+
+        rendered = render_deferred_findings_md([entry, _deferred_adj()])
+        assert "DEFERRED-REVIEW-FINDINGS" in rendered
+        assert "AC3's follow-up ticket was never filed" not in rendered
+
+
 class TestCoexistsWithTerminalSnapshot:
     """#1763's ``is_terminal_snapshot`` must survive this seam untouched.
 

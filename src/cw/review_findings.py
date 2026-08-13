@@ -48,7 +48,14 @@ Severity = Literal["MUST_FIX", "SHOULD_FIX", "NIT", "PRINCIPLE"]
 # actually decided the fate of: no matching adjudication entry, or a "fixed"
 # claim the fix-cycle diff does not substantiate. It is stamped exclusively by
 # ``cw.review_adjudication`` — ``consolidate_verdict`` never produces it.
-Disposition = Literal["fixed", "rejected", "deferred", "dropped"]
+#
+# "operator_actionable" (#1817) is a genuine recorded decision like the first
+# three: the session accepted the finding but its remedy lies outside this
+# diff (a follow-up ticket that was never filed, an absent artifact), so the
+# fix loop structurally cannot act on it and it is posted to the tracker as an
+# operator checklist item instead. Also stamped exclusively by
+# ``cw.review_adjudication``.
+Disposition = Literal["fixed", "rejected", "deferred", "dropped", "operator_actionable"]
 ReviewerHealthStatus = Literal["ok", "degraded", "failed"]
 Confidence = Literal["HIGH", "MEDIUM", "LOW"]
 # The filesystem-capability mode reviewers actually ran under (#1709); see
@@ -138,6 +145,18 @@ class Finding(BaseModel):
 
     ``line_start``/``line_end`` are ``None`` for a file-level finding (no line
     anchor); when both are set, ``line_end >= line_start`` is enforced.
+
+    ``no_diff_anchor`` (#1817) marks the finding whose remedy lies outside the
+    diff entirely — an acceptance criterion demanding a follow-up ticket that
+    was never filed, a required artifact that does not exist anywhere. This is
+    NOT #1632's ``"unanchored"`` case (a real path on disk that this diff
+    simply does not touch): there is no file to point at at all, so no
+    tree-existence check could ever resolve it. Reviewers previously expressed
+    it by inventing a fake ``file`` value, which :func:`_classify_finding` then
+    mechanically rejected as ``"unknown_file"`` — the silent-drop this marker
+    exists to close. When it is set, ``file`` MUST be the fixed literal
+    ``"N/A"``: :attr:`file` stays required and non-blank so the field remains
+    queryable, and a per-reviewer freeform value would defeat that.
     """
 
     severity: Severity
@@ -150,6 +169,7 @@ class Finding(BaseModel):
     evidence: str
     confidence: Confidence
     escalation: EscalationMetadata | None = None
+    no_diff_anchor: bool = False
 
     @field_validator("file", "summary", "consequence", "suggested_fix", "evidence")
     @classmethod
@@ -158,6 +178,35 @@ class Finding(BaseModel):
             msg = f"finding string field must be non-empty, non-whitespace (got {v!r})"
             raise ValueError(msg)
         return v
+
+    @model_validator(mode="after")
+    def _check_no_diff_anchor_has_no_line_anchor(self) -> Finding:
+        # A claimed line position is meaningless when the finding itself
+        # asserts there is no diff to anchor it to — fail fast on the producer
+        # mistake rather than carrying a contradiction into classification.
+        if self.no_diff_anchor and (
+            self.line_start is not None or self.line_end is not None
+        ):
+            msg = (
+                "a finding with no_diff_anchor=True must not claim a line "
+                f"anchor (got line_start={self.line_start}, "
+                f"line_end={self.line_end})"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _check_no_diff_anchor_file_is_na(self) -> Finding:
+        # The docstring above documents "N/A" as the required literal — a
+        # per-reviewer freeform value here is the exact "unknown_file"
+        # silent-drop this marker exists to close (#1817 review, 2026-08-11).
+        if self.no_diff_anchor and self.file != "N/A":
+            msg = (
+                "a finding with no_diff_anchor=True must have "
+                f'file="N/A" (got file={self.file!r})'
+            )
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _check_line_range(self) -> Finding:
@@ -251,11 +300,12 @@ class AcceptedFinding(BaseModel):
     disposition. Downstream consumers (a fix-loop adapter) overwrite it, and
     :func:`derive_review_counts` treats ``"deferred"`` specially.
 
-    ``"dropped"`` (#1805) is never stamped here — only
-    :mod:`cw.review_adjudication` produces it, for a finding no adjudication
-    decision covered or a ``"fixed"`` claim the fix-cycle diff does not
-    substantiate. :func:`consolidate_verdict`'s own contract is unchanged:
-    optimistic default in, adapter overwrites it later.
+    ``"dropped"`` (#1805) and ``"operator_actionable"`` (#1817) are never
+    stamped here — only :mod:`cw.review_adjudication` produces them, the first
+    for a finding no adjudication decision covered (or a ``"fixed"`` claim the
+    fix-cycle diff does not substantiate), the second for an accepted MUST_FIX
+    whose remedy lies outside this diff. :func:`consolidate_verdict`'s own
+    contract is unchanged: optimistic default in, adapter overwrites it later.
 
     ``disposition_detail`` is the free-text "why" paired with the closed
     ``disposition`` enum, mirroring :attr:`RejectedFinding.detail`'s pairing
@@ -969,6 +1019,31 @@ def _evidence_window_discrepancy_detail(finding: Finding) -> str:
     )
 
 
+def _classify_anchored_finding(
+    finding: Finding,
+    diff: CapturedDiff,
+    changed: frozenset[str],
+    worktree: Path | None,
+) -> RejectedFindingReason | None:
+    """The diff-anchoring half of :func:`_classify_finding`'s check order.
+
+    Split out of that function to keep its return count under the ``PLR0911``
+    ceiling once #1817's ``no_diff_anchor`` short-circuit was added — the same
+    reason :func:`_classify_unanchored_file` was split out for #1632. Every
+    check here presumes the finding claims a diff anchor at all; see
+    :func:`_classify_finding`'s docstring for the semantics of each.
+    """
+    if finding.file not in changed:
+        return _classify_unanchored_file(finding.file, worktree)
+    if not _line_reference_valid(diff, finding, worktree):
+        return "invalid_line_reference"
+    if not _evidence_in_claimed_lines(
+        diff, finding.file, finding.evidence, finding.line_start, finding.line_end
+    ):
+        return "evidence_not_in_diff"
+    return None
+
+
 def _classify_finding(
     finding: Finding,
     diff: CapturedDiff,
@@ -978,7 +1053,9 @@ def _classify_finding(
     """Return the rejection reason for *finding*, or ``None`` if it passes.
 
     Check order (first failure wins): severity → evidence-present →
-    file-known → line-in-range → evidence-in-claimed-lines. The
+    no-diff-anchor short-circuit → file-known → line-in-range →
+    evidence-in-claimed-lines (the last three delegated to
+    :func:`_classify_anchored_finding`). The
     ``invalid_line_reference`` check MUST run before the evidence check so that
     ``_evidence_in_claimed_lines`` only builds a window from confirmed-real
     changed lines (possibly snapped within tolerance) — a bogus line reference
@@ -1017,20 +1094,22 @@ def _classify_finding(
     change resulted; this is the reviewer/codex output contract's problem
     (see ``.claude/commands/auto-dev-review.md``'s verbatim-evidence
     requirement), not a matcher defect.
+
+    ``no_diff_anchor`` (#1817) short-circuits to acceptance before any
+    anchoring check runs: the finding declares it has no diff artifact at all,
+    so ``file`` is the ``"N/A"`` literal rather than a diff key and the model
+    already guarantees no line anchor — every remaining check would be a
+    category error, and the ``"unknown_file"`` verdict they produce today is
+    the exact silent-drop that marker exists to close. The severity and
+    evidence-present checks above still validly apply to it.
     """
     if finding.severity not in _VALID_SEVERITIES:
         return "invalid_severity"
     if _is_blank(finding.evidence):
         return "missing_evidence"
-    if finding.file not in changed:
-        return _classify_unanchored_file(finding.file, worktree)
-    if not _line_reference_valid(diff, finding, worktree):
-        return "invalid_line_reference"
-    if not _evidence_in_claimed_lines(
-        diff, finding.file, finding.evidence, finding.line_start, finding.line_end
-    ):
-        return "evidence_not_in_diff"
-    return None
+    if finding.no_diff_anchor:
+        return None
+    return _classify_anchored_finding(finding, diff, changed, worktree)
 
 
 def validate_reviewer_document(
@@ -1084,6 +1163,18 @@ def validate_reviewer_document(
                 doc.reviewer_role,
                 index,
                 finding.file,
+            )
+        if finding.no_diff_anchor:
+            # Mirrors the "unanchored" INFO above: a finding that skipped the
+            # mechanical checks is always announced, so an operator can tell a
+            # genuinely-verified acceptance from a marker-driven one.
+            _log.info(
+                "auto-dev: routed no_diff_anchor finding to adjudication "
+                "(remedy is outside the diff; no mechanical anchor check "
+                "performed) (reviewer_role=%s, finding_index=%d, severity=%s)",
+                doc.reviewer_role,
+                index,
+                finding.severity,
             )
         resolved_finding = _resolved_finding(diff, finding)
         escalation = finding.escalation
