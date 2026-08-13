@@ -13,10 +13,17 @@ import pytest
 from pydantic import ValidationError
 
 from cw.auto_dev_result import Review
+from cw.events import read_events
+from cw.models.enums import OrchestratorEventType
 from cw.review_adjudication import (
     Adjudication,
+    VoidedFinding,
     apply_adjudication,
+    apply_voided_suppression,
+    find_voided_matches,
+    parse_voided_findings_block,
     render_deferred_findings_md,
+    render_voided_findings_block,
     verify_fixed_dispositions,
 )
 from cw.review_findings import AcceptedFinding, Finding, ReviewVerdict
@@ -24,6 +31,7 @@ from cw.review_findings import AcceptedFinding, Finding, ReviewVerdict
 from .conftest import _make_diff, _make_finding
 
 _LOGGER = "cw.review_adjudication"
+_TICKET = "T-1814"
 
 
 def _accepted(finding: Finding, **overrides: object) -> AcceptedFinding:
@@ -72,6 +80,33 @@ def _adjudication(finding: Finding, **overrides: object) -> Adjudication:
     }
     kwargs.update(overrides)
     return Adjudication.model_validate(kwargs)
+
+
+def _make_voided_finding(**overrides: object) -> VoidedFinding:
+    """Minimal-but-valid :class:`VoidedFinding` with keyword overrides (#1814).
+
+    Defaults line up with ``conftest._finding_kwargs`` so
+    ``_make_voided_finding()`` matches ``_make_finding()`` under
+    :func:`find_voided_matches` with no argument juggling at the call site.
+
+    Deliberately defined here rather than in ``tests/conftest.py``: unlike
+    ``_make_finding``/``_make_reviewer_doc``/``_make_diff``, ``VoidedFinding``
+    is one ticket's machinery, not a source type every test file needs. The
+    consumer test files import it from this module, the same cross-file helper
+    idiom ``tests/_codex_review_helpers.py`` already establishes.
+    """
+    kwargs: dict[str, object] = {
+        "severity": "MUST_FIX",
+        "file": "src/cw/foo.py",
+        "summary": "Bug here",
+        "evidence": "def broken():",
+        "operator_comment_id": "mattwwarren@2026-08-11T02:43:30Z",
+        "operator_comment_excerpt": "this is intentional, do not re-raise it",
+        "voided_at": "2026-08-11T02:43:30Z",
+        "original_rationale": "deliberate design choice, documented in the ADR",
+    }
+    kwargs.update(overrides)
+    return VoidedFinding.model_validate(kwargs)
 
 
 _NO_ENTRY_DETAIL = "no adjudication entry recorded for this finding"
@@ -834,3 +869,320 @@ class TestCoexistsWithTerminalSnapshot:
 
         assert verdict.is_terminal_snapshot is True
         assert verdict.unmatched_adjudication_count == 0
+
+
+class TestVoidedFingerprintIsContentAnchored:
+    """#1814: identity is (severity, file, summary, evidence) — never lines."""
+
+    def test_same_location_different_content_is_not_suppressed(self) -> None:
+        """Acceptance criterion (a): a genuinely NEW finding at a voided
+        finding's file+line is never suppressed."""
+        fresh = _make_finding(
+            summary="A different bug entirely",
+            evidence="def also_broken():",
+            line_start=10,
+            line_end=10,
+        )
+        # VoidedFinding carries no line anchor at all — that absence IS the
+        # zero-false-positive guarantee, not an omission.
+        assert find_voided_matches([_accepted(fresh)], [_make_voided_finding()]) == {}
+
+    def test_same_content_different_file_is_not_suppressed(self) -> None:
+        moved_file = _make_finding(file="src/cw/bar.py")
+
+        assert (
+            find_voided_matches([_accepted(moved_file)], [_make_voided_finding()]) == {}
+        )
+
+    def test_same_content_different_lines_is_suppressed(self) -> None:
+        """Line drift (#1715-style code motion) must not break the anchor."""
+        drifted = _make_finding(line_start=417, line_end=419)
+
+        matches = find_voided_matches([_accepted(drifted)], [_make_voided_finding()])
+
+        assert list(matches) == [0]
+
+    def test_evidence_whitespace_is_normalized(self) -> None:
+        matches = find_voided_matches(
+            [_accepted(_make_finding())],
+            [_make_voided_finding(evidence="  def  broken():  ")],
+        )
+
+        assert list(matches) == [0]
+
+    def test_evidence_leading_marker_is_not_stripped(self) -> None:
+        """A leading ``+``/``-`` in evidence is real content, not stripped.
+
+        Evidence is arbitrary reviewed source text (Markdown, YAML, diffs of
+        diffs), not exclusively diff-hunk lines — a leading ``-``/``+`` can be
+        a genuine part of the code (a YAML list item, a negative literal), not
+        a diff marker. Stripping it risked collapsing two different findings
+        onto the same fingerprint, which is exactly the false positive this
+        ticket's zero-tolerance decision forbids (#1814 MUST_FIX). Same
+        principle ``test_summary_whitespace_is_normalized_but_markers_are_not_stripped``
+        already applies to ``summary``, now applied identically to ``evidence``.
+        """
+        assert (
+            find_voided_matches(
+                [_accepted(_make_finding(evidence="+def broken():"))],
+                [_make_voided_finding(evidence="def broken():")],
+            )
+            == {}
+        )
+        assert (
+            find_voided_matches(
+                [_accepted(_make_finding(evidence="-def broken():"))],
+                [_make_voided_finding(evidence="def broken():")],
+            )
+            == {}
+        )
+
+    def test_summary_whitespace_is_normalized_but_markers_are_not_stripped(
+        self,
+    ) -> None:
+        """Prose keeps its leading ``+``/``-``: only whitespace is collapsed."""
+        assert list(
+            find_voided_matches(
+                [_accepted(_make_finding(summary="Bug  here"))],
+                [_make_voided_finding(summary=" Bug here ")],
+            )
+        ) == [0]
+        assert (
+            find_voided_matches(
+                [_accepted(_make_finding(summary="-Bug here"))],
+                [_make_voided_finding(summary="Bug here")],
+            )
+            == {}
+        )
+
+    def test_different_severity_is_not_suppressed(self) -> None:
+        should_fix = _make_finding(severity="SHOULD_FIX")
+
+        assert (
+            find_voided_matches([_accepted(should_fix)], [_make_voided_finding()]) == {}
+        )
+
+
+class TestApplyVoidedSuppression:
+    """#1814: the shared suppression seam both backends consult."""
+
+    def test_matched_must_fix_is_rejected_and_stops_blocking(self) -> None:
+        voided_finding = _make_finding()
+        live_finding = _make_finding(
+            summary="A real, unadjudicated bug", evidence="def also_broken():"
+        )
+        verdict = _verdict(_accepted(voided_finding), _accepted(live_finding))
+
+        suppressed, adjudications = apply_voided_suppression(
+            verdict, [_make_voided_finding()], ticket_id=_TICKET
+        )
+
+        assert suppressed.blocking is True
+        assert suppressed.must_fix == [live_finding]
+        assert suppressed.accepted[0].disposition == "rejected"
+        assert "mattwwarren@2026-08-11T02:43:30Z" in (
+            suppressed.accepted[0].disposition_detail
+        )
+        assert suppressed.accepted[1].disposition == "fixed"
+        assert len(adjudications) == 1
+        assert adjudications[0].outcome == "reject"
+        assert adjudications[0].rationale.strip()
+        assert adjudications[0].summary == voided_finding.summary
+
+    def test_sole_must_fix_voided_clears_blocking(self) -> None:
+        verdict = _verdict(_accepted(_make_finding()))
+
+        suppressed, adjudications = apply_voided_suppression(
+            verdict, [_make_voided_finding()], ticket_id=_TICKET
+        )
+
+        assert suppressed.blocking is False
+        assert suppressed.must_fix == []
+        assert len(adjudications) == 1
+
+    def test_no_matches_returns_verdict_unchanged(self) -> None:
+        verdict = _verdict(_accepted(_make_finding()))
+
+        suppressed, adjudications = apply_voided_suppression(
+            verdict,
+            [_make_voided_finding(file="src/cw/unrelated.py")],
+            ticket_id=_TICKET,
+        )
+
+        assert adjudications == []
+        assert suppressed == verdict
+        assert suppressed.accepted[0].disposition == "fixed"
+
+    def test_empty_voided_list_returns_verdict_unchanged(self) -> None:
+        verdict = _verdict(_accepted(_make_finding()))
+
+        suppressed, adjudications = apply_voided_suppression(
+            verdict, [], ticket_id=_TICKET
+        )
+
+        assert adjudications == []
+        assert suppressed == verdict
+
+    def test_frozen_baseline_fields_preserved_verbatim(self) -> None:
+        """Mirrors ``apply_adjudication``'s own frozen-cycle-0 contract (R3)."""
+        verdict = _verdict(
+            _accepted(_make_finding()),
+            _accepted(_make_finding(severity="SHOULD_FIX", summary="Style nit")),
+        )
+
+        suppressed, _adjudications = apply_voided_suppression(
+            verdict, [_make_voided_finding()], ticket_id=_TICKET
+        )
+
+        assert suppressed.review.must_fix_initial == verdict.review.must_fix_initial
+        assert suppressed.review.should_fix == verdict.review.should_fix
+        assert suppressed.review.agents_run == verdict.review.agents_run
+        assert suppressed.review.deferred == verdict.review.deferred
+        assert suppressed.is_terminal_snapshot == verdict.is_terminal_snapshot
+
+    def test_suppression_emits_one_event_per_match(self) -> None:
+        verdict = _verdict(_accepted(_make_finding()))
+
+        apply_voided_suppression(verdict, [_make_voided_finding()], ticket_id=_TICKET)
+
+        events = read_events(event_types=[OrchestratorEventType.REVIEW_FINDING_VOIDED])
+        assert len(events) == 1
+        assert events[0].correlation_id == _TICKET
+        assert events[0].payload["file"] == "src/cw/foo.py"
+        assert events[0].payload["severity"] == "MUST_FIX"
+        assert (
+            events[0].payload["operator_comment_id"]
+            == "mattwwarren@2026-08-11T02:43:30Z"
+        )
+        assert events[0].payload["voided_at"] == "2026-08-11T02:43:30Z"
+        assert events[0].payload["original_rationale"] == (
+            "deliberate design choice, documented in the ADR"
+        )
+
+    def test_no_match_emits_no_event(self) -> None:
+        verdict = _verdict(_accepted(_make_finding()))
+
+        apply_voided_suppression(
+            verdict, [_make_voided_finding(file="src/cw/other.py")], ticket_id=_TICKET
+        )
+
+        assert (
+            read_events(event_types=[OrchestratorEventType.REVIEW_FINDING_VOIDED]) == []
+        )
+
+
+class TestVoidedFindingsBlockRoundTrip:
+    """#1814: the ticket-comment JSON sentinel is machine-parsed, not prose."""
+
+    def test_render_parse_round_trips(self) -> None:
+        entries = [
+            _make_voided_finding(),
+            _make_voided_finding(
+                severity="SHOULD_FIX",
+                file="src/cw/bar.py",
+                summary="Second void",
+                evidence="def other():",
+            ),
+        ]
+
+        assert parse_voided_findings_block([render_voided_findings_block(entries)]) == (
+            entries
+        )
+
+    def test_render_embeds_its_own_header(self) -> None:
+        rendered = render_voided_findings_block([_make_voided_finding()])
+
+        assert rendered.startswith("## Voided Review Findings")
+        assert "VOIDED-REVIEW-FINDINGS" in rendered
+
+    def test_render_empty_list_writes_nothing(self) -> None:
+        assert render_voided_findings_block([]) == ""
+
+    def test_distinct_entries_across_comments_are_unioned(self) -> None:
+        first = _make_voided_finding()
+        second = _make_voided_finding(summary="Second void", evidence="def other():")
+
+        parsed = parse_voided_findings_block(
+            [
+                f"prose\n\n{render_voided_findings_block([first])}",
+                f"other prose\n\n{render_voided_findings_block([second])}",
+            ]
+        )
+
+        assert parsed == [first, second]
+
+    def test_repeated_entry_across_comments_is_deduplicated(self) -> None:
+        entry = _make_voided_finding()
+        body = render_voided_findings_block([entry])
+
+        assert parse_voided_findings_block([body, body]) == [entry]
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "",
+            "no sentinel here at all",
+            "<!-- VOIDED-REVIEW-FINDINGS\n{not json\nVOIDED-REVIEW-FINDINGS -->",
+            "<!-- VOIDED-REVIEW-FINDINGS\n{}\nVOIDED-REVIEW-FINDINGS -->",
+            # Valid JSON, wrong top-level shape (a bare list, not the
+            # {"schema_version", "voided"} envelope).
+            '<!-- VOIDED-REVIEW-FINDINGS\n["not", "an", "envelope"]\n'
+            "VOIDED-REVIEW-FINDINGS -->",
+            '<!-- VOIDED-REVIEW-FINDINGS\n{"voided": "not a list"}\n'
+            "VOIDED-REVIEW-FINDINGS -->",
+            '<!-- VOIDED-REVIEW-FINDINGS\n{"voided": [{"file": ""}]}\n'
+            "VOIDED-REVIEW-FINDINGS -->",
+            "<!-- VOIDED-REVIEW-FINDINGS\ntruncated with no closing",
+        ],
+    )
+    def test_malformed_or_absent_sentinel_degrades_to_empty(self, body: str) -> None:
+        assert parse_voided_findings_block([body]) == []
+
+    def test_one_malformed_block_does_not_discard_a_valid_sibling(self) -> None:
+        entry = _make_voided_finding()
+        parsed = parse_voided_findings_block(
+            [
+                "<!-- VOIDED-REVIEW-FINDINGS\n{not json\nVOIDED-REVIEW-FINDINGS -->",
+                render_voided_findings_block([entry]),
+            ]
+        )
+
+        assert parsed == [entry]
+
+
+class TestVoidedAndOrdinaryAdjudicationsCompose:
+    """#1814/#1816/#1817 compose check — whichever of the three lands last.
+
+    Re-verified at implementation time: #1816 landed as a test-only change to
+    ``tests/test_review_findings.py`` and #1817 is still open, so neither
+    sibling has contributed a compose test here and #1814 owns it.
+
+    The specific coexistence risk: ``apply_voided_suppression`` auto-generates
+    ``reject`` entries that the coordinating session then appends to its OWN
+    ``ADJUDICATIONS`` array alongside its ordinary ``fix``/``defer`` entries.
+    If the two erased each other, one finding's outcome would silently take
+    the other's — the exact "two records disagree" defect this whole sprint
+    has been closing.
+    """
+
+    def test_auto_generated_reject_and_ordinary_fix_coexist(self) -> None:
+        voided_finding = _make_finding()
+        fixed_finding = _make_finding(
+            summary="A real bug the session fixed",
+            evidence="def also_broken():",
+            line_start=20,
+            line_end=20,
+        )
+        verdict = _verdict(_accepted(voided_finding), _accepted(fixed_finding))
+
+        suppressed, auto = apply_voided_suppression(
+            verdict, [_make_voided_finding()], ticket_id=_TICKET
+        )
+        adjudications = [*auto, _adjudication(fixed_finding, outcome="fix")]
+        stamped = apply_adjudication(suppressed, adjudications)
+
+        assert stamped.accepted[0].disposition == "rejected"
+        assert stamped.accepted[1].disposition == "fixed"
+        assert stamped.blocking is False
+        assert stamped.must_fix == []
+        assert stamped.unmatched_adjudication_count == 0

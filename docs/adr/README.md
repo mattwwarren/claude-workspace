@@ -57,6 +57,7 @@ When an ADR is superseded, edit the old one's status line — don't delete it.
 | [0012](0012-cw-never-grants-github-review-approvals.md) | cw never grants a GitHub review approval | Accepted |
 | [0013](0013-agent-delegated-ticket-work.md) | Provider-portable ticket work is agent work; cw keeps one GitHub-only programmatic client | Accepted |
 | [0014](0014-timers-never-destroy-work.md) | Timers never destroy work — elapsed time is a signal, not a trigger | Accepted |
+| [0015](0015-voided-finding-suppression-is-content-anchored.md) | Voided-finding suppression is content-anchored, never positional | Accepted |
 
 ADR-0000 is the foundational record — the trajectory it captures is
 assumed as ground truth by every subsequent ADR.

@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`codex_review` gets its own blocked `next_actions` label (#1835):** added
+  an optional `next_actions` override to `local_runner.make_blocked`, and a
+  new `_CODEX_REVIEW_BLOCKED_NEXT_ACTIONS` constant so `codex_review`'s four
+  blocked-result call sites no longer inherit `local_runner`'s
+  LocalExecutor-specific `user_resolve_local_executor_failure` default. A
+  Codex CLI subprocess failure was previously mislabeled as a
+  LocalExecutor/aider failure, costing a full transcript dig to diagnose.
+
+## [1.33.0] - 2026-08-11
+
 ### Fixed
 
 - **A MUST_FIX finding whose remedy is outside the diff now has an
@@ -78,6 +90,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `_OUTPUT_SCHEMA_RULES` now state the reason requirement explicitly.
 
 ### Added
+
+- **Structured, content-anchored voided-findings suppression seam
+  (#1814):** review findings can now be explicitly voided (rather than
+  silently dropped) via a new `VoidedFinding` model and
+  `review.finding_voided` event, and the codex review path consults voided
+  findings so a previously-voided finding is suppressed on re-review by
+  content fingerprint rather than by line anchor (which shifts across
+  diffs). `cw review check-voided` exposes the suppression decision as a
+  CLI command, and ADR-0015 records why the fingerprint is
+  content-anchored. Fixes a latent bug where diff markers (`+`/`-`) were
+  stripped from void-fingerprint evidence, weakening the fingerprint match.
 
 - **REVIEW-stage requeues deliver live operator comments to codex-backend
   reviewers (#1730):** when a fresh operator comment triggers a REVIEW-stage

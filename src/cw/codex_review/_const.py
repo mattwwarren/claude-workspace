@@ -90,6 +90,15 @@ CODEX_FIX_SCOPE_VIOLATION = "codex_fix_scope_violation"
 # identical review pass reproduces the identical rejection.
 CODEX_MUST_FIX_MECHANICALLY_REJECTED = "codex_must_fix_mechanically_rejected"
 
+# next_actions label for codex_review's own blocked-result synthesis (#1835)
+# — must NOT borrow local_runner._FIXED_NEXT_ACTIONS
+# ("user_resolve_local_executor_failure"), which mislabels a Codex CLI
+# subprocess failure as a LocalExecutor/aider failure. Kept prefixed
+# user_resolve_ so it satisfies schema.USER_DIRECTED_PREFIXES and the
+# blocked+terminal-reject next_actions invariant (see schema.py
+# _check_next_actions_invariants).
+_CODEX_REVIEW_BLOCKED_NEXT_ACTIONS: list[str] = ["user_resolve_codex_review_failure"]
+
 # Failure reasons transient enough that a retry might succeed without any
 # code/config change on our side (the role either never got a turn at all, or
 # codex itself timed out) — used to set Blocker.retry_eligible so reconcile

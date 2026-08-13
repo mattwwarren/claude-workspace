@@ -385,8 +385,13 @@ def make_blocked(
     retry_eligible: bool | None = None,
     retry_delay_seconds: int | None = None,
     stage_reached: StageReached = "stage2_impl",
+    next_actions: list[str] | None = None,
 ) -> AutoDevResult:
-    """Return a typed blocked AutoDevResult for any LocalExecutor failure mode."""
+    """Return a typed blocked AutoDevResult for any LocalExecutor failure mode.
+
+    ``next_actions`` defaults to the LocalExecutor label but callers outside
+    that subsystem should pass their own (#1835).
+    """
     return AutoDevResult(
         schema_version=_SCHEMA_VERSION,
         ticket_id=ticket_id,
@@ -403,7 +408,7 @@ def make_blocked(
             retry_eligible=retry_eligible,
             retry_delay_seconds=retry_delay_seconds,
         ),
-        next_actions=_FIXED_NEXT_ACTIONS,
+        next_actions=next_actions if next_actions is not None else _FIXED_NEXT_ACTIONS,
         worktree_path=str(worktree),
     )
 
