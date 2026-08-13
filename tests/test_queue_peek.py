@@ -770,6 +770,51 @@ class TestRecommend:
         )
         assert rec == "STOP"
         assert "timeout" in reason
+        assert "approaches" in reason
+
+    def test_age_exceeds_ceiling_returns_stop_with_exceeded_wording(self) -> None:
+        rec, reason = queue_peek.recommend(
+            age_min=128.7,
+            idle_min=0.0,
+            pr_state=None,
+            sentinel_status=None,
+            attempts=1,
+        )
+        assert rec == "STOP"
+        assert "exceeded" in reason
+        assert "approaches" not in reason
+
+    def test_age_exactly_at_ceiling_returns_exceeded_wording(self) -> None:
+        rec, reason = queue_peek.recommend(
+            age_min=60.0,
+            idle_min=0.0,
+            pr_state=None,
+            sentinel_status=None,
+            attempts=1,
+        )
+        assert rec == "STOP"
+        assert "exceeded" in reason
+
+    def test_age_just_below_ceiling_returns_approaching_wording(self) -> None:
+        rec, reason = queue_peek.recommend(
+            age_min=59.9,
+            idle_min=0.0,
+            pr_state=None,
+            sentinel_status=None,
+            attempts=1,
+        )
+        assert rec == "STOP"
+        assert "approaches" in reason
+
+    def test_long_idle_no_pr_stays_stop_not_suppressed_by_wording_fix(self) -> None:
+        rec, _ = queue_peek.recommend(
+            age_min=128.7,
+            idle_min=128.7,
+            pr_state=None,
+            sentinel_status=None,
+            attempts=1,
+        )
+        assert rec == "STOP"
 
     def test_high_attempts_returns_stop(self) -> None:
         rec, reason = queue_peek.recommend(
