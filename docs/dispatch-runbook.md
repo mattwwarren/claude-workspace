@@ -637,6 +637,16 @@ cw dev-queue run &                  # restart, verify fresh tick (no [STALE])
 Editing that file with a loop alive silently loses the edit to a tick's
 read-modify-write (observed twice, 2026-07-04).
 
+**`[BLOCKED — codex review, ticket <T>, <N>s]` is not `[STALE]` (#1742).**
+When a client's tick line carries that annotation instead, the dispatch loop
+is alive and an executor is mid-review; the number is how long *that review*
+has been running, not how long since the last tick. It is expected and
+non-actionable: **do not restart the loop.** A restart kills the review's
+daemon thread mid-flight, and it takes every other client's in-flight review
+with it. `cw doctor` suppresses its `loop-liveness` warning for the same
+reason. Wait for the annotation to clear; only a tick line still reading
+`[STALE — no tick in Ns]` (no marker) means the loop may genuinely be dead.
+
 ### Circuit-breaker pause and held slots
 
 - `cw dev-queue status` lane line shows `[PAUSED]` → the #875 per-lane

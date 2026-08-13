@@ -24,9 +24,12 @@ import pytest
 
 from cw.dispatch_state import (
     AvailabilityProbeCache,
+    ExecutorBlockedMarker,
     load_availability_probe_cache,
+    load_executor_blocked_markers,
     load_usage_limited_until,
     save_availability_probe_cache,
+    save_executor_blocked_marker,
     save_main_drift_latches,
     save_usage_limited_until,
 )
@@ -147,6 +150,57 @@ class TestDispatchStateLockConcurrency:
 
         raw = json.loads(cw.dispatch_state.DISPATCH_STATE_FILE.read_text())
         assert raw["main_drift_latches"] == latches
+
+    def test_concurrent_marker_and_usage_limit_writes_both_survive(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Thread A writes usage_limited_until, thread B writes an executor marker.
+
+        Same barrier-synchronized shape as the availability-probe test above,
+        for the fourth sidecar writer added by #1742.
+        """
+        barrier = threading.Barrier(2)
+        errors: list[Exception] = []
+        future = datetime.now(UTC) + timedelta(hours=1)
+        marker = ExecutorBlockedMarker(
+            client="acme",
+            ticket_id="1723",
+            executor="codex",
+            reviewer_role=None,
+            started_at=datetime.now(UTC),
+            session_id="sid-1723",
+        )
+
+        def write_usage_limit() -> None:
+            barrier.wait()
+            try:
+                save_usage_limited_until(future)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        def write_marker() -> None:
+            barrier.wait()
+            try:
+                save_executor_blocked_marker(marker)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        t1 = threading.Thread(target=write_usage_limit)
+        t2 = threading.Thread(target=write_marker)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        assert not errors, f"save_* raised: {errors}"
+
+        loaded_limit = load_usage_limited_until()
+        assert loaded_limit is not None
+        assert abs((loaded_limit - future).total_seconds()) < 1
+
+        markers = load_executor_blocked_markers()
+        assert "acme/1723" in markers
+        assert markers["acme/1723"].executor == "codex"
 
     @pytest.mark.parametrize("n_threads", [5, 10])
     def test_many_concurrent_dispatch_state_writes_all_survive(

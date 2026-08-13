@@ -7445,6 +7445,175 @@ class TestDevQueueStatusWithTick:
         assert data["attn-client"]["needs_attn"] == 1
 
 
+class TestDevQueueStatusBlockedAnnotation:
+    """`[BLOCKED — <executor> review, ...]` replaces `[STALE]` when live (#1742).
+
+    A stale tick alone cannot distinguish a dead dispatch loop from one whose
+    executor is legitimately mid-review. The executor-blocked marker sidecar
+    resolves that ambiguity at the one render site.
+    """
+
+    @staticmethod
+    def _patch_tick(
+        monkeypatch: pytest.MonkeyPatch, client_name: str, *, age_seconds: int
+    ) -> None:
+        from datetime import timedelta
+
+        from cw.orchestrate import TickSummary
+
+        tick = TickSummary(
+            claimed=0,
+            pending=1,
+            running=0,
+            cap=3,
+            skip_reason="none",
+            tick_at=datetime.now(UTC) - timedelta(seconds=age_seconds),
+        )
+        monkeypatch.setattr(
+            "cw.cli.dev_queue.status.latest_tick_summary_by_client",
+            lambda: {client_name: tick},
+        )
+
+    @staticmethod
+    def _save_marker(
+        client_name: str, ticket_id: str, *, started_seconds_ago: int
+    ) -> None:
+        from datetime import timedelta
+
+        from cw.dispatch_state import (
+            ExecutorBlockedMarker,
+            save_executor_blocked_marker,
+        )
+
+        save_executor_blocked_marker(
+            ExecutorBlockedMarker(
+                client=client_name,
+                ticket_id=ticket_id,
+                executor="codex",
+                reviewer_role=None,
+                started_at=datetime.now(UTC) - timedelta(seconds=started_seconds_ago),
+                session_id=f"sid-{ticket_id}",
+            )
+        )
+
+    def test_blocked_annotation_replaces_stale_when_marker_present(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cw.dev_queue import add_ticket
+        from cw.models import QueueItemStatus, TicketTask
+
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-800",
+                client="blocked-client",
+                status=QueueItemStatus.PENDING,
+            )
+        )
+        self._patch_tick(monkeypatch, "blocked-client", age_seconds=850)
+        self._save_marker("blocked-client", "1723", started_seconds_ago=449)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "[BLOCKED — codex review, ticket 1723," in result.output
+        assert "[STALE" not in result.output
+        # Elapsed comes from the marker's own started_at, not the tick age.
+        assert "449s]" in result.output
+        assert "(+" not in result.output
+
+    def test_stale_still_renders_when_no_marker_present(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression guard: the common case is unchanged."""
+        from cw.dev_queue import add_ticket
+        from cw.models import QueueItemStatus, TicketTask
+
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-801",
+                client="stale-client",
+                status=QueueItemStatus.PENDING,
+            )
+        )
+        self._patch_tick(monkeypatch, "stale-client", age_seconds=850)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "[STALE — no tick in " in result.output
+        assert "[BLOCKED" not in result.output
+
+    def test_stale_still_renders_when_marker_is_for_another_client(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Marker lookup is client-scoped, not fleet-global."""
+        from cw.dev_queue import add_ticket
+        from cw.models import QueueItemStatus, TicketTask
+
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-802",
+                client="client-a",
+                status=QueueItemStatus.PENDING,
+            )
+        )
+        self._patch_tick(monkeypatch, "client-a", age_seconds=850)
+        self._save_marker("client-b", "1723", started_seconds_ago=100)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "[STALE — no tick in " in result.output
+        assert "[BLOCKED" not in result.output
+
+    def test_blocked_annotation_shows_plus_n_more_for_multiple_markers(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Oldest marker wins the line; the rest collapse to a count suffix."""
+        from cw.dev_queue import add_ticket
+        from cw.models import QueueItemStatus, TicketTask
+
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-803",
+                client="busy-client",
+                status=QueueItemStatus.PENDING,
+            )
+        )
+        self._patch_tick(monkeypatch, "busy-client", age_seconds=850)
+        self._save_marker("busy-client", "1723", started_seconds_ago=449)
+        self._save_marker("busy-client", "1724", started_seconds_ago=100)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "[BLOCKED — codex review, ticket 1723, 449s (+1 more)]" in result.output
+        assert "1724" not in result.output
+
+    def test_fresh_tick_with_marker_shows_neither_annotation(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fresh tick already proves the loop alive — the marker is moot."""
+        from cw.dev_queue import add_ticket
+        from cw.models import QueueItemStatus, TicketTask
+
+        add_ticket(
+            TicketTask(
+                ticket_id="GEN-804",
+                client="fresh-client",
+                status=QueueItemStatus.PENDING,
+            )
+        )
+        self._patch_tick(monkeypatch, "fresh-client", age_seconds=10)
+        self._save_marker("fresh-client", "1723", started_seconds_ago=5)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "status"])
+        assert result.exit_code == 0, result.output
+        assert "[STALE" not in result.output
+        assert "[BLOCKED" not in result.output
+
+
 class TestDevQueueTasksPrState:
     """`cw dev-queue tasks` surfaces pr_state fields/column (#929)."""
 
