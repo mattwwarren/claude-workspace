@@ -161,6 +161,26 @@ class Adjudication(BaseModel):
             raise ValueError(msg)
         return self
 
+    @model_validator(mode="after")
+    def _check_operator_action_has_no_diff_anchor(self) -> Adjudication:
+        # Mirrors Finding._check_no_diff_anchor_file_is_na: an operator_action
+        # entry is copied straight off a no_diff_anchor Finding, which is
+        # itself model-pinned to file="N/A" with no line anchor. Enforcing the
+        # same shape here means a coordinating-session typo on this entry's
+        # file/line fields fails fast instead of silently missing the
+        # location-key match against its Finding (#1817 review, 2026-08-11).
+        no_line_anchor = self.line_start is None and self.line_end is None
+        if self.outcome == _OPERATOR_ACTION and (
+            self.file != "N/A" or not no_line_anchor
+        ):
+            msg = (
+                f"an adjudication with outcome={_OPERATOR_ACTION!r} must have "
+                f'file="N/A" and no line anchor (got file={self.file!r}, '
+                f"line_start={self.line_start}, line_end={self.line_end})"
+            )
+            raise ValueError(msg)
+        return self
+
 
 def _location_key(
     severity: str, file: str, line_start: int | None, line_end: int | None

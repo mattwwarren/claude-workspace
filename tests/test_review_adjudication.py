@@ -612,6 +612,48 @@ class TestOperatorActionOutcome:
                     rationale=_OPERATOR_RATIONALE,
                 )
 
+    def test_operator_action_outcome_requires_na_file_and_no_line_anchor(
+        self,
+    ) -> None:
+        """A coordinating-session typo on file/line must fail fast (#1817 review).
+
+        Mirrors ``Finding``'s own ``_check_no_diff_anchor_file_is_na``: an
+        ``operator_action`` entry is copied straight off a ``no_diff_anchor``
+        finding, which is itself model-pinned to ``file="N/A"`` with no line
+        anchor — a mismatched entry here would fail the location-key match
+        against its ``Finding`` and silently fall back to ``"dropped"``.
+        """
+        finding = _no_diff_anchor_finding()
+        with pytest.raises(ValidationError):
+            _adjudication(
+                finding,
+                outcome="operator_action",
+                rationale=_OPERATOR_RATIONALE,
+                file="src/cw/review_findings.py",
+            )
+        with pytest.raises(ValidationError):
+            _adjudication(
+                finding,
+                outcome="operator_action",
+                rationale=_OPERATOR_RATIONALE,
+                line_start=5,
+            )
+        with pytest.raises(ValidationError):
+            _adjudication(
+                finding,
+                outcome="operator_action",
+                rationale=_OPERATOR_RATIONALE,
+                line_end=5,
+            )
+        # The correct shape still passes — the same one every other test here
+        # already constructs via _no_diff_anchor_finding()'s defaults.
+        entry = _adjudication(
+            finding, outcome="operator_action", rationale=_OPERATOR_RATIONALE
+        )
+        assert entry.file == "N/A"
+        assert entry.line_start is None
+        assert entry.line_end is None
+
     def test_apply_adjudication_operator_action_does_not_block(self) -> None:
         finding = _no_diff_anchor_finding()
         verdict = _verdict(_accepted(finding))
