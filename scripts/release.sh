@@ -11,6 +11,31 @@ fi
 
 VERSION=$1
 
+# Commit-subject pre-flight guard. Must stay byte-identical to the accepted
+# pattern in .github/workflows/release-tag.yml's guard step — pinned by
+# tests/test_release_sh.py::test_release_sh_guard_regex_matches_release_tag_workflow.
+# Do not edit one without the other.
+SUBJECT_PATTERN='^chore\(release\):\ (v|bump\ version\ to\ )([0-9]+\.[0-9]+\.[0-9]+)(\ \(#[0-9]+\))?$'
+
+if [ "${RELEASE_SH_SKIP_SUBJECT_GUARD:-}" != "1" ]; then
+    SUBJECT=$(git log -1 --pretty=%s)
+    if [[ "$SUBJECT" =~ $SUBJECT_PATTERN ]]; then
+        : # Accepted release-commit subject — proceed.
+    elif [[ "$SUBJECT" == "chore(release):"* ]]; then
+        echo "Error: commit subject starts with 'chore(release):' but matches neither accepted release-commit form:"
+        echo "  chore(release): vX.Y.Z"
+        echo "  chore(release): bump version to X.Y.Z"
+        echo "(both optionally suffixed with ' (#<PR number>)' from a squash merge)"
+        echo "Subject was: \"$SUBJECT\""
+        echo "See .github/workflows/release-tag.yml's guard step and docs/release-playbook.md's"
+        echo "'Release mechanics' section for the commit-subject contract this enforces."
+        echo "Override only if you know what you're doing: RELEASE_SH_SKIP_SUBJECT_GUARD=1"
+        exit 1
+    fi
+    # Anything else (no "chore(release):" prefix at all) is not a release
+    # commit subject and proceeds unchecked, mirroring release-tag.yml.
+fi
+
 # Verify version in pyproject.toml matches
 PYPROJECT_VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' pyproject.toml)
 if [ "$PYPROJECT_VERSION" != "$VERSION" ]; then

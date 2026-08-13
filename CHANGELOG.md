@@ -16,6 +16,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Codex CLI subprocess failure was previously mislabeled as a
   LocalExecutor/aider failure, costing a full transcript dig to diagnose.
 
+### Fixed
+
+- **Release-tag commit-subject contract documented, and `scripts/release.sh`
+  now guards it (#1707):** the two release-tagging paths —
+  `.github/workflows/release-tag.yml` (automatic) and `scripts/release.sh`
+  (manual) — shared a machine-parsed commit-subject contract that only the
+  workflow enforced; `docs/release-playbook.md` never mentioned the workflow
+  existed. `scripts/release.sh` gains a pre-flight guard (byte-identical
+  regex, pinned by an anti-drift test; opt-out via
+  `RELEASE_SH_SKIP_SUBJECT_GUARD=1`) that catches a mis-shaped subject before
+  the manual path can silently compensate for a failing automated run, and
+  the playbook now documents both paths and the contract explicitly.
+
 ## [1.33.0] - 2026-08-11
 
 ### Fixed
