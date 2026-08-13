@@ -47,6 +47,9 @@ from cw.models.orchestrator_config import (
     _DEFAULT_OPERATOR_EVENT_TYPES,
     _DEFAULT_OPERATOR_TASK_TRANSITION_STATUSES,
     _USAGE_LIMIT_BACKOFF_SECONDS,
+    AGENT_SPAWN_LAST_STAMPED_AT_KEY,
+    AGENT_SPAWN_STAMP_KEY,
+    AGENT_SPAWN_UNRESOLVED_COUNT_KEY,
     CLAUDE_NATIVE_BACKEND,
     CODEX_BACKEND,
     CONTEXT_JSON_RELATIVE_PATH,
@@ -64,6 +67,7 @@ from cw.models.orchestrator_config import (
     OrchestratorConfig,
     StageExecutorConfig,
     StagePipelineConfig,
+    extract_unresolved_spawn_count,
 )
 from cw.models.session import LocalLivenessHandle, Session
 from cw.models.state import CW_STATE_SCHEMA_VERSION, CwState
@@ -80,6 +84,9 @@ from cw.models.tasks import (
 )
 
 __all__ = [
+    "AGENT_SPAWN_LAST_STAMPED_AT_KEY",
+    "AGENT_SPAWN_STAMP_KEY",
+    "AGENT_SPAWN_UNRESOLVED_COUNT_KEY",
     "CLAUDE_NATIVE_BACKEND",
     "CODEX_BACKEND",
     "CONTEXT_JSON_RELATIVE_PATH",
@@ -134,4 +141,5 @@ __all__ = [
     "WatchedPr",
     "_validate_gate_recipe_keys",
     "_validate_review_recipe_keys",
+    "extract_unresolved_spawn_count",
 ]

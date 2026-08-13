@@ -44,7 +44,10 @@ from cw.dev_queue import (
 )
 from cw.events import record_event
 from cw.models import OrchestratorEventType, QueueItemStatus
-from cw.reconcile._shared import _REAP_ELIGIBLE_DISPOSITIONS_BASE
+from cw.reconcile._shared import (
+    _REAP_ELIGIBLE_DISPOSITIONS_BASE,
+    _UNRESOLVED_SUBAGENT_SPAWN_REASON,
+)
 
 # P1 (round-4 binding decision): a flat threshold, NOT per-stage. This is
 # distinct from park-marker-poison's OWN transcript-staleness check inside
@@ -107,6 +110,15 @@ ESCALATION_PARK_MINUTES = 45
 # moved underneath it. Also kept out of _REAP_ELIGIBLE_DISPOSITIONS_BASE, or
 # concierge would auto-requeue a genuinely stale branch instead of an operator
 # rebasing it.
+#
+# GitHub #1646 joins as a SIXTH union term, and here the split is load-bearing
+# in BOTH directions. The unresolved-subagent-spawn reroute carves a subset out
+# of the phantom_surface population that _REAP_ELIGIBLE_DISPOSITIONS_BASE
+# already covers, so omitting it here would silently REMOVE escalation coverage
+# those rows have today -- a park that pages nobody, the opposite of what #1646
+# exists to do. Adding it to the shared base instead would hand the same rows to
+# concierge's false-park requeue, which would re-run a session over
+# possibly-committed work without a human ever looking. Escalate, never requeue.
 _ELIGIBLE_DISPOSITIONS: frozenset[str | None] = frozenset(
     (PAUSED_FOR_USER_INPUT_STATUSES - {"premises_pending_verification"})
     | _REAP_ELIGIBLE_DISPOSITIONS_BASE
@@ -114,6 +126,7 @@ _ELIGIBLE_DISPOSITIONS: frozenset[str | None] = frozenset(
         BRANCH_STALENESS_GATE_DISPOSITION,
         REVIEW_HEALTH_GATE_DISPOSITION,
         REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
+        _UNRESOLVED_SUBAGENT_SPAWN_REASON,
     }
 )
 

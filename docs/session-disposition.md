@@ -299,6 +299,7 @@ where one already existed:
 | stalled-sweep SIGNAL_ONLY reroute *(historical, ADR-0014)* | `ReapReason.WALL_CLOCK_BUDGET` |
 | idle-sweep SIGNAL_ONLY reroute *(historical, ADR-0014)* | `ReapReason.IDLE_STALL` |
 | phantom-sweep SIGNAL_ONLY reroute (clean crash) | `ReapReason.PHANTOM_SURFACE` |
+| phantom-sweep unresolved-subagent-spawn reroute (#1646) | `_UNRESOLVED_SUBAGENT_SPAWN_REASON` ("unresolved_subagent_spawn") — a clean *or* dirty crash whose worktree still carries an unresolved spawn stamp. Takes precedence over both `PHANTOM_SURFACE` and `dirty_worktree`, and **overrides `reap_policy: auto`**. See §6b |
 | phantom gh-check-blocked route | `_GH_CHECK_BLOCKED_REASON` |
 | salvage LOW-path flag *(historical, ADR-0014)* | `_NEEDS_SALVAGE_REASON` |
 | terminal-sibling park (`tasks.py`) | `ReapReason.TERMINAL_SIBLING` |
@@ -350,6 +351,79 @@ A vetoed candidate emits `session.park_vetoed` (see
 `consecutive_vetoes` — instead of `session.reap_proposed` /
 `session.needs_attention`, and the session simply continues running —
 the sweep re-evaluates it again next tick until the veto cap is hit.
+
+---
+
+### 6b. Unresolved sub-agent spawns (#1646)
+
+A worker can die — or pause forever — while a sub-agent spawn is still in
+flight. That failure is invisible to every transcript-based signal: no terminal
+sentinel is written, no `tool_result` is ever recorded, and the surface simply
+stops. Reconstructing it after the fact from the transcript is guesswork, and
+the generic `phantom_surface` disposition it used to land under says only "the
+surface is gone" — which is also what a clean, harmless crash looks like.
+
+**Mechanism.** `spawn._write_hook_context` seeds an `agent_spawn_stamp` object
+into the worktree's `.claude/cw-context.json` (schema v5):
+
+```json
+"agent_spawn_stamp": { "unresolved_count": 0, "last_stamped_at": null }
+```
+
+A `PreToolUse` hook (`cw agent-spawn-pre`) increments `unresolved_count` before
+a sub-agent spawn starts; a `PostToolUse` hook (`cw agent-spawn-post`)
+decrements it when the spawn returns. Both are matched on
+`spawn._AGENT_TOOL_MATCHER`. If the worker dies between the two, the count stays
+above zero **on disk, in its own worktree** — durable state, not an inference.
+The phantom sweep reads it via `reconcile._shared._read_unresolved_subagent_spawn`
+during candidate classification and stamps
+`_UNRESOLVED_SUBAGENT_SPAWN_REASON` instead of `PHANTOM_SURFACE` /
+`dirty_worktree`.
+
+It is a **counter, not a flag**: Claude Code can dispatch several sub-agent
+`tool_use` blocks in one assistant turn, so two Pre hooks can fire before either
+Post does, and a boolean would lose the second spawn. Decrements floor at zero,
+so a Post with no matching Pre (a reused worktree, a hook wired mid-flight)
+cannot swallow the next real crash.
+
+**Matcher name.** The subagent tool reports `tool_name: "Agent"` — captured
+empirically from a live hook payload, *not* taken from the prose, which calls it
+the `Task` tool. The matcher is an anchored alternation over both names: the
+alternation is version robustness, and the anchor keeps unrelated names like
+`TaskStop` from pairing a spurious increment with a spurious decrement.
+
+**Fail-open, in one direction only.** A missing worktree, a missing or pre-v5
+context, malformed JSON, a non-dict payload, a wrong-typed count, or any other
+error all read as `False` — an ordinary phantom. The asymmetry is deliberate:
+this disposition also overrides `reap_policy: auto` (below), so a false positive
+parks a healthy ticket, which is strictly worse than losing one crash's
+precision. The hooks themselves never block a tool call and never exit non-zero;
+lock contention is a bounded non-blocking retry that skips the stamp rather than
+stalling the live worker's turn.
+
+**`reap_policy: auto` override.** This one class always parks
+`BLOCKED_ON_USER`, even on a lane configured `reap_policy: auto` — a deliberate,
+documented exception to that policy's silent PENDING revert. `auto` is opt-in
+per lane and this crash class is rare, but silently retrying a session that has
+committed work behind a verification tail that never ran compounds exactly the
+failure the stamp exists to catch. The override runs *before*
+`resolve_reap_policy` is consulted at all (`phantom/core.py`), so the AUTO branch
+cannot reclaim the candidate. The pre-existing merged-PR / gh-blocked fast path
+still wins ahead of it: if the work already landed, how the session died no
+longer matters.
+
+**Escalation, not requeue.** The reason is escalation-eligible (its own union
+term in `reconcile.escalation._ELIGIBLE_DISPOSITIONS`) so splitting it off
+`phantom_surface` does not cost these rows their operator page. It is
+deliberately **not** in `_REAP_ELIGIBLE_DISPOSITIONS_BASE`, which would hand it
+to concierge's false-park requeue — re-running a session over possibly-committed
+work without a human ever looking is the precise outcome this ticket forbids.
+
+**Not to be confused with the salvage machinery.** `_NEEDS_SALVAGE_REASON` /
+`TicketTask.salvage_no_sentinel_at` look like they cover this and do not: that
+producer was deleted outright by ADR-0014 and the reason is marked *historical*
+in the table above. Nothing sets it. Do not wire new no-sentinel detection into
+it. Related: #1630, #1625.
 
 ---
 

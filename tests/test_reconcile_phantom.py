@@ -7,6 +7,7 @@ events.
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -2899,6 +2900,563 @@ class TestActOnPhantomCandidatesSignalOnly:
         store = load_dev_queue()
         t = next(t for t in store.tasks if t.ticket_id == "auto-phantom-1")
         assert t.status == QueueItemStatus.PENDING
+
+
+def _seed_phantom_task(ticket_id: str) -> CwState:
+    """Seed one RUNNING task + its DAEMON phantom session; return the state."""
+    sess = _mk_session(ticket_id, "gone-ref")
+    sess.origin = SessionOrigin.DAEMON
+    sess.name = f"client-a/auto-dev/{ticket_id}"
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(
+        DevQueueStore(
+            tasks=[
+                TicketTask(
+                    ticket_id=ticket_id,
+                    client="client-a",
+                    status=QueueItemStatus.RUNNING,
+                    session_id=ticket_id,
+                )
+            ]
+        )
+    )
+    return state
+
+
+class TestUnresolvedSubagentSpawnDisposition:
+    """#1646: a crash with an unresolved subagent spawn parks distinguishably.
+
+    The generic ``phantom_surface`` disposition cannot tell "the surface
+    vanished" from "the worker died with a sub-agent spawn still in flight" —
+    the latter means committed work may exist behind a verification tail that
+    never ran. These tests pin the distinct reason, and the deliberate
+    ``reap_policy: auto`` override that keeps this class from being silently
+    retried.
+    """
+
+    def test_signal_only_routes_unresolved_spawn_crash_to_distinct_disposition(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Clean crash + unresolved spawn → the new reason, not phantom_surface."""
+        from cw.reconcile import (
+            _UNRESOLVED_SUBAGENT_SPAWN_REASON,
+            ProposedAction,
+            ReapCandidate,
+            _act_on_phantom_candidates,
+        )
+
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+        state = _seed_phantom_task("uss-phantom-1")
+
+        candidate = ReapCandidate(
+            session_id="uss-phantom-1",
+            proposed_action=ProposedAction.CRASH_COMPLETE,
+            ticket_id="uss-phantom-1",
+            worktree_dirty=False,
+            client="client-a",
+            unresolved_subagent_spawn=True,
+        )
+
+        reverted, _names, _usage, _salvaged, _results, _ = _act_on_phantom_candidates(
+            state, [candidate], now=now, config=OrchestratorConfig()
+        )
+
+        assert "uss-phantom-1" not in reverted
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "uss-phantom-1")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert t.disposition == _UNRESOLVED_SUBAGENT_SPAWN_REASON
+        assert t.disposition != ReapReason.PHANTOM_SURFACE.value
+
+    def test_signal_only_plain_crash_still_uses_phantom_surface(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A flagged and an unflagged candidate in one tick get distinct reasons.
+
+        Regression guard on the disposition split: ``_route_phantom_by_policy``
+        previously applied a single disposition to the whole batch, so a naive
+        implementation would stamp both tickets with whichever reason won.
+        """
+        from cw.reconcile import (
+            _UNRESOLVED_SUBAGENT_SPAWN_REASON,
+            ProposedAction,
+            ReapCandidate,
+            _act_on_phantom_candidates,
+        )
+
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+        flagged = _mk_session("uss-mixed-flagged", "gone-ref")
+        flagged.origin = SessionOrigin.DAEMON
+        flagged.name = "client-a/auto-dev/uss-mixed-flagged"
+        plain = _mk_session("uss-mixed-plain", "gone-ref")
+        plain.origin = SessionOrigin.DAEMON
+        plain.name = "client-a/auto-dev/uss-mixed-plain"
+        state = CwState(sessions=[flagged, plain])
+        save_state(state)
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id=tid,
+                        client="client-a",
+                        status=QueueItemStatus.RUNNING,
+                        session_id=tid,
+                    )
+                    for tid in ("uss-mixed-flagged", "uss-mixed-plain")
+                ]
+            )
+        )
+
+        candidates = [
+            ReapCandidate(
+                session_id="uss-mixed-flagged",
+                proposed_action=ProposedAction.CRASH_COMPLETE,
+                ticket_id="uss-mixed-flagged",
+                worktree_dirty=False,
+                client="client-a",
+                unresolved_subagent_spawn=True,
+            ),
+            ReapCandidate(
+                session_id="uss-mixed-plain",
+                proposed_action=ProposedAction.CRASH_COMPLETE,
+                ticket_id="uss-mixed-plain",
+                worktree_dirty=False,
+                client="client-a",
+            ),
+        ]
+
+        _act_on_phantom_candidates(
+            state, candidates, now=now, config=OrchestratorConfig()
+        )
+
+        by_id = {t.ticket_id: t for t in load_dev_queue().tasks}
+        assert (
+            by_id["uss-mixed-flagged"].disposition == _UNRESOLVED_SUBAGENT_SPAWN_REASON
+        )
+        assert by_id["uss-mixed-plain"].disposition == ReapReason.PHANTOM_SURFACE.value
+
+    def test_dirty_worktree_with_unresolved_spawn_uses_distinct_disposition(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Dirty + unresolved spawn → the new reason wins over ``dirty_worktree``.
+
+        Both facts are true; the unresolved spawn is the more specific and more
+        actionable one (it names *why* the tail never ran), so it takes
+        precedence in the single disposition slot.
+        """
+        from cw.reconcile import (
+            _UNRESOLVED_SUBAGENT_SPAWN_REASON,
+            ProposedAction,
+            ReapCandidate,
+            _act_on_phantom_candidates,
+        )
+
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+        state = _seed_phantom_task("uss-dirty-1")
+
+        candidate = ReapCandidate(
+            session_id="uss-dirty-1",
+            proposed_action=ProposedAction.CRASH_COMPLETE,
+            ticket_id="uss-dirty-1",
+            worktree_dirty=True,
+            client="client-a",
+            unresolved_subagent_spawn=True,
+        )
+
+        _act_on_phantom_candidates(
+            state, [candidate], now=now, config=OrchestratorConfig()
+        )
+
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "uss-dirty-1")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert t.disposition == _UNRESOLVED_SUBAGENT_SPAWN_REASON
+
+    def test_dirty_worktree_without_unresolved_spawn_keeps_dirty_reason(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression guard: an ordinary dirty crash keeps ``dirty_worktree``."""
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_phantom_candidates,
+        )
+        from cw.reconcile._shared import _DIRTY_WORKTREE_REASON
+
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+        state = _seed_phantom_task("uss-dirty-plain")
+
+        candidate = ReapCandidate(
+            session_id="uss-dirty-plain",
+            proposed_action=ProposedAction.CRASH_COMPLETE,
+            ticket_id="uss-dirty-plain",
+            worktree_dirty=True,
+            client="client-a",
+        )
+
+        _act_on_phantom_candidates(
+            state, [candidate], now=now, config=OrchestratorConfig()
+        )
+
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "uss-dirty-plain")
+        assert t.disposition == _DIRTY_WORKTREE_REASON
+
+    def test_unresolved_spawn_with_veto_cap_exhausted_still_escalates(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The override keeps #1449's cap-exhausted escalation parity.
+
+        The new branch short-circuits before the SIGNAL_ONLY branch that
+        normally collects these, so it has to carry the escalation itself —
+        otherwise flagging a candidate as an unresolved spawn would silently
+        cost it the immediate operator page it would have got as an ordinary
+        phantom.
+        """
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_phantom_candidates,
+        )
+
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+        state = _seed_phantom_task("uss-veto-1")
+
+        candidate = ReapCandidate(
+            session_id="uss-veto-1",
+            proposed_action=ProposedAction.CRASH_COMPLETE,
+            ticket_id="uss-veto-1",
+            worktree_dirty=False,
+            client="client-a",
+            unresolved_subagent_spawn=True,
+            veto_cap_exhausted=True,
+            new_veto_count=3,
+        )
+
+        _act_on_phantom_candidates(
+            state, [candidate], now=now, config=OrchestratorConfig()
+        )
+
+        # The escalation path persists the bumped counter onto the session.
+        assert state.sessions[0].consecutive_sentinel_mismatch_vetoes == 3
+        events = read_events(
+            consumer="test-uss-veto",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert any(e.payload.get("session_id") == "uss-veto-1" for e in events)
+
+    def test_signal_only_unresolved_spawn_overrides_reap_policy_auto(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A ``reap_policy: auto`` lane still parks this crash class.
+
+        Operator decision (#1646 pre-flight resolution 3): ``auto`` is opt-in
+        per lane and this crash class is rare, but silently reverting a session
+        that has committed work behind a skipped verification tail compounds
+        exactly the failure the ticket exists to catch. So the override bypasses
+        ``resolve_reap_policy`` entirely rather than deferring to the lane.
+        """
+        from cw.reconcile import (
+            _UNRESOLVED_SUBAGENT_SPAWN_REASON,
+            ProposedAction,
+            ReapCandidate,
+            _act_on_phantom_candidates,
+        )
+
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+        state = _seed_phantom_task("uss-auto-1")
+
+        candidate = ReapCandidate(
+            session_id="uss-auto-1",
+            proposed_action=ProposedAction.CRASH_COMPLETE,
+            ticket_id="uss-auto-1",
+            worktree_dirty=False,
+            client="client-a",
+            unresolved_subagent_spawn=True,
+        )
+
+        reverted, _names, _usage, _salvaged, _results, _ = _act_on_phantom_candidates(
+            state, [candidate], now=now, config=_auto_config()
+        )
+
+        # Would be reverted to PENDING under auto without the override.
+        assert "uss-auto-1" not in reverted
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "uss-auto-1")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+        assert t.disposition == _UNRESOLVED_SUBAGENT_SPAWN_REASON
+
+    def test_unresolved_spawn_override_does_not_touch_resolve_reap_policy(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The override short-circuits before the policy lookup even runs.
+
+        Pinned explicitly because "route it to BLOCKED_ON_USER anyway" could
+        also be written *after* the lookup — which would leave the AUTO branch
+        one refactor away from reclaiming the candidate.
+        """
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_phantom_candidates,
+        )
+
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+        )
+
+        def _boom(*_args: object, **_kwargs: object) -> ReapPolicy:
+            msg = "resolve_reap_policy must not be consulted for this class"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr("cw.reconcile.phantom.core.resolve_reap_policy", _boom)
+
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+        state = _seed_phantom_task("uss-nopolicy-1")
+
+        candidate = ReapCandidate(
+            session_id="uss-nopolicy-1",
+            proposed_action=ProposedAction.CRASH_COMPLETE,
+            ticket_id="uss-nopolicy-1",
+            worktree_dirty=False,
+            client="client-a",
+            unresolved_subagent_spawn=True,
+        )
+
+        _act_on_phantom_candidates(state, [candidate], now=now, config=_auto_config())
+
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "uss-nopolicy-1")
+        assert t.status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_merged_ticket_completes_despite_unresolved_spawn(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The merged-PR fast path still wins — the work already landed.
+
+        Guards the ordering of the new override against the #637 fast path: a
+        confirmed-merged ticket must complete regardless of how its session
+        died, so the override must be added *after* that check, not before.
+        """
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_phantom_candidates,
+        )
+
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+        state = _seed_phantom_task("uss-merged-1")
+
+        candidate = ReapCandidate(
+            session_id="uss-merged-1",
+            proposed_action=ProposedAction.CRASH_COMPLETE,
+            ticket_id="uss-merged-1",
+            worktree_dirty=False,
+            client="client-a",
+            unresolved_subagent_spawn=True,
+        )
+
+        _act_on_phantom_candidates(
+            state,
+            [candidate],
+            now=now,
+            config=OrchestratorConfig(),
+            merged_ticket_ids=frozenset({"uss-merged-1"}),
+        )
+
+        t = next(t for t in load_dev_queue().tasks if t.ticket_id == "uss-merged-1")
+        assert t.status == QueueItemStatus.COMPLETED
+        assert t.disposition == "shipped"
+
+    def test_ticketless_unresolved_spawn_still_completes_terminal(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A ticket-less DAEMON crash (ad-hoc ``cw start`` idea/debt worker)
+        with an unresolved spawn still reaches a terminal session state.
+
+        There is no dev-queue row to park such a candidate under, so the
+        override must not unconditionally swallow it — that left the session
+        live forever, re-detected as phantom on every future reconcile tick
+        with no escalation (#1646 review MUST_FIX). It must fall through to
+        ordinary policy resolution instead, exactly like it did before #1646
+        existed: under ``reap_policy: auto`` that means the normal AUTO branch
+        marks the session COMPLETED/CRASHED.
+        """
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_phantom_candidates,
+        )
+
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+        sess = _mk_session("uss-noticket-1", "gone-ref")
+        sess.origin = SessionOrigin.DAEMON
+        sess.name = "client-a/idea"
+        state = CwState(sessions=[sess])
+        save_state(state)
+
+        candidate = ReapCandidate(
+            session_id="uss-noticket-1",
+            proposed_action=ProposedAction.CRASH_COMPLETE,
+            ticket_id=None,
+            worktree_dirty=False,
+            client="client-a",
+            unresolved_subagent_spawn=True,
+        )
+
+        _act_on_phantom_candidates(state, [candidate], now=now, config=_auto_config())
+
+        updated = next(s for s in state.sessions if s.id == "uss-noticket-1")
+        assert updated.status == SessionStatus.COMPLETED
+        assert updated.completed_reason == CompletionReason.CRASHED
+        assert updated.reap_reason == ReapReason.PHANTOM_SURFACE
+
+
+def test_detect_phantom_candidates_reads_unresolved_spawn_from_worktree(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1646: a real stamped cw-context.json flows into the candidate flag."""
+    from cw.reconcile import _detect_phantom_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    wt = tmp_path / "wt-unresolved-spawn"
+    (wt / ".claude").mkdir(parents=True)
+    (wt / ".claude" / "cw-context.json").write_text(
+        json.dumps({"schema_version": 5, "agent_spawn_stamp": {"unresolved_count": 1}}),
+        encoding="utf-8",
+    )
+    sess = _mk_phantom_daemon_session("phantom-uss-1", started_at, worktree_path=wt)
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+    snap = _state_queue_snapshot()
+
+    candidates = _detect_phantom_candidates(
+        state,
+        phantom_set={sess.id},
+        now=started_at,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].unresolved_subagent_spawn is True
+    # Detect phase stays read-only.
+    assert _state_queue_snapshot() == snap
+
+
+def test_detect_phantom_candidates_unresolved_spawn_false_without_stamp(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worktree that is simply gone → False, and the tick does not crash.
+
+    The fail-open acceptance criterion at the detect layer: an inaccessible
+    worktree must classify as an ordinary phantom, never block the sweep.
+    """
+    from cw.reconcile import _detect_phantom_candidates
+
+    started_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    sess = _mk_phantom_daemon_session(
+        "phantom-uss-2", started_at, worktree_path=tmp_path / "never-existed"
+    )
+    state = CwState(sessions=[sess])
+    save_state(state)
+    save_dev_queue(DevQueueStore(tasks=[]))
+
+    candidates = _detect_phantom_candidates(
+        state,
+        phantom_set={sess.id},
+        now=started_at,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].unresolved_subagent_spawn is False
+
+
+def test_gone_worktree_still_parks_as_plain_phantom_surface(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1646 fail-open at the disposition layer: no evidence → phantom_surface."""
+    from cw.reconcile import (
+        ProposedAction,
+        ReapCandidate,
+        _act_on_phantom_candidates,
+    )
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+    )
+    now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+    state = _seed_phantom_task("uss-gone-wt")
+
+    candidate = ReapCandidate(
+        session_id="uss-gone-wt",
+        proposed_action=ProposedAction.CRASH_COMPLETE,
+        ticket_id="uss-gone-wt",
+        worktree_dirty=False,
+        client="client-a",
+        worktree_path=None,
+        unresolved_subagent_spawn=False,
+    )
+
+    _act_on_phantom_candidates(state, [candidate], now=now, config=OrchestratorConfig())
+
+    t = next(t for t in load_dev_queue().tasks if t.ticket_id == "uss-gone-wt")
+    assert t.status == QueueItemStatus.BLOCKED_ON_USER
+    assert t.disposition == ReapReason.PHANTOM_SURFACE.value
 
 
 # ---------------------------------------------------------------------------

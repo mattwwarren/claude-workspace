@@ -1628,7 +1628,9 @@ class TestPackageExportCompleteness:
     The models.py -> cw/models/ package split (#1320) must preserve every
     ``from cw.models import X`` call site unchanged. This asserts ``__all__``
     equals the exhaustive top-level surface (the historical 49 names, plus
-    #1730's ``HOOK_CONTEXT_RELATIVE_PATH`` = 50) — hardcoded here, NOT
+    #1730's ``HOOK_CONTEXT_RELATIVE_PATH`` = 50, plus #1646's three
+    ``AGENT_SPAWN_*`` stamp keys = 53, plus #1646's own review-fix-loop
+    addition of ``extract_unresolved_spawn_count`` = 54) — hardcoded here, NOT
     re-derived from the package, so a dropped or renamed export is a
     falsifiable failure rather than a tautology. A deliberate addition updates
     this set in the same commit.
@@ -1638,6 +1640,9 @@ class TestPackageExportCompleteness:
         from cw import models
 
         expected = {
+            "AGENT_SPAWN_LAST_STAMPED_AT_KEY",
+            "AGENT_SPAWN_STAMP_KEY",
+            "AGENT_SPAWN_UNRESOLVED_COUNT_KEY",
             "CLAUDE_NATIVE_BACKEND",
             "CODEX_BACKEND",
             "CONTEXT_JSON_RELATIVE_PATH",
@@ -1692,5 +1697,36 @@ class TestPackageExportCompleteness:
             "_USAGE_LIMIT_BACKOFF_SECONDS",
             "_validate_gate_recipe_keys",
             "_validate_review_recipe_keys",
+            "extract_unresolved_spawn_count",
         }
         assert set(models.__all__) == expected
+
+
+class TestExtractUnresolvedSpawnCount:
+    """#1646 review fix: the one shared count-extraction rule both the
+    write-side hook reader (``cw.cli.agent_spawn_stamp._unresolved_count``)
+    and the read-side phantom-sweep reader
+    (``cw.reconcile._shared._read_unresolved_subagent_spawn``) now delegate
+    to, so the two layers cannot independently drift onto different
+    validation rules for the same on-disk ``agent_spawn_stamp`` shape.
+    """
+
+    @pytest.mark.parametrize(
+        ("context", "expected"),
+        [
+            ({"agent_spawn_stamp": {"unresolved_count": 2}}, 2),
+            ({"agent_spawn_stamp": {"unresolved_count": 0}}, 0),
+            ({}, 0),
+            ({"agent_spawn_stamp": "not-a-dict"}, 0),
+            ({"agent_spawn_stamp": {}}, 0),
+            ({"agent_spawn_stamp": {"unresolved_count": True}}, 0),
+            ({"agent_spawn_stamp": {"unresolved_count": "1"}}, 0),
+            ({"agent_spawn_stamp": {"unresolved_count": None}}, 0),
+        ],
+    )
+    def test_extract_unresolved_spawn_count(
+        self, context: dict[str, object], expected: int
+    ) -> None:
+        from cw.models import extract_unresolved_spawn_count
+
+        assert extract_unresolved_spawn_count(context) == expected
