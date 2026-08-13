@@ -4992,6 +4992,64 @@ class TestCheckLoopLiveness:
         results = _check_loop_liveness()
         assert not any(r.warn for r in results)
 
+    @staticmethod
+    def _save_marker(client_name: str, ticket_id: str = "1723") -> None:
+        from cw.dispatch_state import (
+            ExecutorBlockedMarker,
+            save_executor_blocked_marker,
+        )
+
+        save_executor_blocked_marker(
+            ExecutorBlockedMarker(
+                client=client_name,
+                ticket_id=ticket_id,
+                executor="codex",
+                reviewer_role=None,
+                started_at=datetime.now(UTC),
+                session_id=f"sid-{ticket_id}",
+            )
+        )
+
+    def test_stale_tick_with_pending_and_live_marker_does_not_warn(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """A live executor-blocked marker suppresses the liveness warn (#1742)."""
+        from datetime import timedelta
+
+        from cw.doctor import _check_loop_liveness
+
+        stale_at = datetime.now(UTC) - timedelta(seconds=200)
+        monkeypatch.setattr(
+            "cw.doctor.loop_health.latest_tick_summary_by_client",
+            lambda: {
+                "test-client": self._make_tick_summary(pending=2, tick_at=stale_at)
+            },
+        )
+        self._save_marker("test-client")
+        results = _check_loop_liveness()
+        assert not any(r.warn for r in results)
+
+    def test_stale_tick_with_pending_and_marker_for_other_client_still_warns(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_config_dir: Path
+    ) -> None:
+        """Suppression is client-scoped, not fleet-global (#1742)."""
+        from datetime import timedelta
+
+        from cw.doctor import _check_loop_liveness
+
+        stale_at = datetime.now(UTC) - timedelta(seconds=200)
+        monkeypatch.setattr(
+            "cw.doctor.loop_health.latest_tick_summary_by_client",
+            lambda: {
+                "test-client": self._make_tick_summary(pending=2, tick_at=stale_at)
+            },
+        )
+        self._save_marker("other-client")
+        results = _check_loop_liveness()
+        warn_results = [r for r in results if r.warn]
+        assert len(warn_results) == 1
+        assert "test-client" in warn_results[0].name
+
     def test_run_doctor_includes_liveness_check(
         self,
         monkeypatch: pytest.MonkeyPatch,

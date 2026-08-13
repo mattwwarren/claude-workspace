@@ -27,12 +27,18 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from cw.codex_fix_loop import run_review_with_fix_loop
 from cw.codex_review import STAGE3_REVIEW, render_verdict_comment
 from cw.config import load_effective_config, sessions_lock
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
+from cw.dispatch_state import (
+    ExecutorBlockedMarker,
+    clear_executor_blocked_marker,
+    save_executor_blocked_marker,
+)
 from cw.events import record_event as _record_orchestrator_event
 from cw.gh import post_issue_comment
 from cw.local_runner import UNEXPECTED_ERROR, make_blocked
@@ -252,6 +258,12 @@ def _run_codex_review_and_complete(
     re-raised exception, so instead of re-raising, this reverts the claimed
     task itself — the recovery dispatch's own ``except`` handler used to
     perform.
+
+    Marker lifecycle (#1742): an :class:`~cw.dispatch_state.ExecutorBlockedMarker`
+    is written on entry and cleared in a ``finally:``, so an operator reading
+    ``cw dev-queue status``/``cw doctor`` during a long review sees
+    ``[BLOCKED — codex review, ...]`` rather than ``[STALE]`` and knows not to
+    restart the loop out from under this thread.
     """
     # Function-level import breaks the cw.executor <-> cw.codex_background
     # cycle: executor.py imports this module at its top, and the name below is
@@ -264,6 +276,20 @@ def _run_codex_review_and_complete(
     from cw.executor import _complete_session_via_door
 
     try:
+        # #1742: mark the loop as legitimately busy for the whole review. Set
+        # outside any sessions_lock() block, honouring dispatch_state_lock()'s
+        # documented ordering (sessions_lock -> dispatch_state_lock only).
+        save_executor_blocked_marker(
+            ExecutorBlockedMarker(
+                client=client.name,
+                ticket_id=task.ticket_id,
+                executor="codex",
+                reviewer_role=None,
+                started_at=datetime.now(UTC),
+                session_id=sid,
+            )
+        )
+
         # Step 3: per-role review pass + bounded fix loop (#1392). The
         # lane-scoped fix_loop_enabled gate (#1553) resolves here rather than
         # being threaded through the StageExecutor Protocol.
@@ -325,3 +351,8 @@ def _run_codex_review_and_complete(
         from cw.dispatch.claim import _revert_claimed_task_to_pending
 
         _revert_claimed_task_to_pending(client.name, task.ticket_id, stamp_backoff=True)
+    finally:
+        # #1742: fires on every exit path — the return out of ``try``, the
+        # return out of ``except``, and a BaseException the except clause does
+        # not catch. The review is over either way, so the marker must go.
+        clear_executor_blocked_marker(client.name, task.ticket_id)

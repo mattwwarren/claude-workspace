@@ -89,15 +89,60 @@ to `False` — it takes effect on the next reconcile tick, no redeploy.
 
 ## Release mechanics
 
-- `scripts/release.sh <version>` creates and pushes the release tag; the
-  version bump in `pyproject.toml` precedes it (`cw.__version__` is resolved
-  dynamically from the installed distribution — there is no separate version
-  literal to edit).
-- **Before cutting a release, ensure `uv.lock` is re-locked to the new version**
-  (see #1101). The v1.18.0 cut left `uv.lock` lagging at the prior version,
-  which later shows up as a dirty main checkout that trips `main_checkout_drift`
-  and eventually freshness-gates dispatch. Re-lock as part of the release, or
-  the next cut repeats the cycle.
+There are two release-tagging paths, and they are not peers — one is the
+default, the other is the exception.
+
+### Two tagging paths
+
+- **`.github/workflows/release-tag.yml` ("Release Tag") is the default,
+  primary mechanism.** It fires automatically on every push to `main`, reads
+  the HEAD commit's subject, and — if the subject matches the commit-subject
+  contract below — tags the release and cuts the matching GitHub Release with
+  CHANGELOG-derived notes. No manual step is needed for the common case.
+- **`scripts/release.sh <version>` is the manual exception path.** Use it
+  when the automated job needs a human-driven or out-of-band cut, or as a
+  stopgap while `release-tag.yml` itself is being diagnosed. The version bump
+  in `pyproject.toml` precedes it (`cw.__version__` is resolved dynamically
+  from the installed distribution — there is no separate version literal to
+  edit).
+
+**Running `scripts/release.sh` successfully does not excuse a failing
+`Release Tag` run.** A red `Release Tag` job on the release commit is still a
+bug to fix — a wrong commit subject, a workflow defect — even if the tag and
+release ended up correct via the manual path. This line exists because of a
+real incident: the v1.27.0 and v1.28.0 cuts both used the commit subject
+`chore(release): cut vX.Y.Z`, which matches neither accepted form below, so
+`Release Tag` failed loudly on both while the manual path silently
+compensated — nobody noticed until the pattern repeated.
+
+### Commit-subject contract
+
+Both paths key off the same machine-parsed commit-subject contract —
+`release-tag.yml`'s guard step parses it to decide whether to tag at all, and
+`scripts/release.sh`'s own guard (added after the incident above) checks it
+too, refusing to proceed on a `chore(release):`-prefixed subject that matches
+neither accepted form. The accepted forms, verbatim:
+
+```
+chore(release): vX.Y.Z
+chore(release): bump version to X.Y.Z
+```
+
+Both forms may be suffixed with `(#<PR number>)` — a squash merge appends the
+PR number automatically.
+
+`scripts/release.sh`'s guard can be bypassed with
+`RELEASE_SH_SKIP_SUBJECT_GUARD=1` for a deliberate, informed override — not a
+way to silence the check out of habit; use it only when you have a specific
+reason the commit subject won't match and you've confirmed that's fine.
+
+### Keeping `uv.lock` in sync
+
+**Before cutting a release, ensure `uv.lock` is re-locked to the new version**
+(see #1101). The v1.18.0 cut left `uv.lock` lagging at the prior version,
+which later shows up as a dirty main checkout that trips `main_checkout_drift`
+and eventually freshness-gates dispatch. Re-lock as part of the release, or
+the next cut repeats the cycle.
 
 ## What does *not* ride the RFC release
 

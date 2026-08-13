@@ -7131,6 +7131,36 @@ class TestDispatchLoopExitedEvent:
         assert evt_payload["normal"] is True
         assert evt_payload["exception_type"] is None
 
+    def test_boot_pass_clears_stale_executor_blocked_markers(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """#1742: a marker at boot is orphaned — no thread outlives its process."""
+        from cw.dispatch_state import (
+            ExecutorBlockedMarker,
+            load_executor_blocked_markers,
+            save_executor_blocked_marker,
+        )
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        save_executor_blocked_marker(
+            ExecutorBlockedMarker(
+                client="test-client",
+                ticket_id="1723",
+                executor="codex",
+                reviewer_role=None,
+                started_at=datetime.now(UTC),
+                session_id="sid-1723",
+            )
+        )
+        assert load_executor_blocked_markers() != {}
+
+        daemon = FakeNativeDaemonClient()
+        run_dispatch_loop(once=True, native_daemon=daemon)
+
+        assert load_executor_blocked_markers() == {}
+
     def test_loop_exited_event_on_crash(
         self,
         tmp_dispatch_dirs: Path,

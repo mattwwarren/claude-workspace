@@ -8,6 +8,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`cw dev-queue status` distinguishes a dead dispatch loop from a busy one
+  (#1742):** a stale tick alone could not tell "the loop crashed — restart it"
+  from "the loop is alive and an executor is mid-review — leave it alone", and
+  both rendered as `[STALE — no tick in Ns]`. The dispatch-side codex worker
+  now records a transient `ExecutorBlockedMarker` in the `dispatch_state.json`
+  sidecar for the duration of a review, so `cw dev-queue status` renders
+  `[BLOCKED — codex review, ticket 1723, 449s]` instead and `cw doctor`
+  suppresses its `loop-liveness` warning. Markers are wiped at dispatch-loop
+  boot — a review's daemon thread never outlives its process, so any marker
+  surviving a restart is orphaned by construction.
+
 - **`codex_review` gets its own blocked `next_actions` label (#1835):** added
   an optional `next_actions` override to `local_runner.make_blocked`, and a
   new `_CODEX_REVIEW_BLOCKED_NEXT_ACTIONS` constant so `codex_review`'s four
@@ -26,6 +37,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   which wrongly fired the `ci_failing` attention state, dispatched an
   `auto_fix_ci` session, and paged the operator for an outage that needed no
   code change.
+
+- **Release-tag commit-subject contract documented, and `scripts/release.sh`
+  now guards it (#1707):** the two release-tagging paths —
+  `.github/workflows/release-tag.yml` (automatic) and `scripts/release.sh`
+  (manual) — shared a machine-parsed commit-subject contract that only the
+  workflow enforced; `docs/release-playbook.md` never mentioned the workflow
+  existed. `scripts/release.sh` gains a pre-flight guard (byte-identical
+  regex, pinned by an anti-drift test; opt-out via
+  `RELEASE_SH_SKIP_SUBJECT_GUARD=1`) that catches a mis-shaped subject before
+  the manual path can silently compensate for a failing automated run, and
+  the playbook now documents both paths and the contract explicitly.
 
 ## [1.33.0] - 2026-08-11
 
