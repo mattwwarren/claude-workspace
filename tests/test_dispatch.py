@@ -7136,7 +7136,7 @@ class TestDispatchLoopExitedEvent:
         tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
-        """#1742: a marker on disk at boot is orphaned — no thread outlives a process."""
+        """#1742: a marker at boot is orphaned — no thread outlives its process."""
         from cw.dispatch_state import (
             ExecutorBlockedMarker,
             load_executor_blocked_markers,

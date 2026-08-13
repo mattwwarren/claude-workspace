@@ -418,8 +418,6 @@ def load_executor_blocked_markers() -> dict[str, ExecutorBlockedMarker]:
         return {}
     markers: dict[str, ExecutorBlockedMarker] = {}
     for key, entry in entries.items():
-        if not isinstance(key, str):
-            continue
         marker = _parse_executor_blocked_entry(entry)
         if marker is not None:
             markers[key] = marker

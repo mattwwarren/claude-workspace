@@ -2974,3 +2974,83 @@ class TestExecutorBlockedMarkerPersistence:
             json.dumps({"executor_blocked": ["not", "a", "dict"]})
         )
         assert load_executor_blocked_markers() == {}
+
+    def test_load_executor_blocked_markers_returns_empty_on_non_dict_document(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """Valid JSON that is not an object at the top level → {}, not a raise."""
+        import json
+
+        import cw.dispatch_state
+        from cw.dispatch_state import load_executor_blocked_markers
+
+        cw.dispatch_state.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cw.dispatch_state.DISPATCH_STATE_FILE.write_text(json.dumps(["a", "list"]))
+        assert load_executor_blocked_markers() == {}
+
+    def test_load_executor_blocked_markers_drops_non_dict_entry(
+        self, tmp_config_dir: Path
+    ) -> None:
+        import json
+
+        import cw.dispatch_state
+        from cw.dispatch_state import load_executor_blocked_markers
+
+        cw.dispatch_state.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cw.dispatch_state.DISPATCH_STATE_FILE.write_text(
+            json.dumps({"executor_blocked": {"client-a/1": "not-a-dict"}})
+        )
+        assert load_executor_blocked_markers() == {}
+
+    def test_load_executor_blocked_markers_drops_unparseable_started_at(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """A str started_at that isn't an ISO timestamp is dropped, not raised on."""
+        import json
+
+        import cw.dispatch_state
+        from cw.dispatch_state import load_executor_blocked_markers
+
+        cw.dispatch_state.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cw.dispatch_state.DISPATCH_STATE_FILE.write_text(
+            json.dumps(
+                {
+                    "executor_blocked": {
+                        "client-a/1": {
+                            "client": "client-a",
+                            "ticket_id": "1",
+                            "executor": "codex",
+                            "reviewer_role": None,
+                            "started_at": "yesterday-ish",
+                            "session_id": "sid-1",
+                        }
+                    }
+                }
+            )
+        )
+        assert load_executor_blocked_markers() == {}
+
+    def test_clear_executor_blocked_marker_warns_and_does_not_raise_on_oserror(
+        self,
+        tmp_config_dir: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The finally: caller must never see a raise from the clear (#1742)."""
+        import logging
+        from unittest.mock import patch
+
+        from cw.dispatch_state import (
+            clear_executor_blocked_marker,
+            save_executor_blocked_marker,
+        )
+
+        save_executor_blocked_marker(self._marker())
+        with (
+            patch(
+                "cw.dispatch_state.atomic_write_text", side_effect=OSError("disk full")
+            ),
+            caplog.at_level(logging.WARNING, logger="cw.dispatch_state"),
+        ):
+            clear_executor_blocked_marker("client-a", "1723")
+
+        assert "executor_blocked" in caplog.text
