@@ -172,7 +172,7 @@ def test_guard_non_release_subject_passes_through_unchecked(
 
 def _pattern_from_workflow() -> str:
     script = _script(GUARD_STEP_ID)
-    match = re.search(r'=~ (.+?) \]\]; then', script)
+    match = re.search(r"=~ (.+?) \]\]; then", script)
     assert match, f"could not find guard regex in {GUARD_STEP_ID!r} step"
     return match.group(1)
 
@@ -185,5 +185,5 @@ def _pattern_from_release_sh() -> str:
 
 
 def test_release_sh_guard_regex_matches_release_tag_workflow() -> None:
-    """Anti-drift pin: the two copies of the accepted-pattern regex must never diverge."""
+    """Anti-drift pin: the two regex copies must never diverge."""
     assert _pattern_from_release_sh() == _pattern_from_workflow()
