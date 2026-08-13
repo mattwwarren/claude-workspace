@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.34.0] - 2026-08-13
+
 ### Added
 
 - **`cw dev-queue add --stage <plan|impl|review|finalize>` (#1682):** a
@@ -58,6 +60,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   LocalExecutor/aider failure, costing a full transcript dig to diagnose.
 
 ### Fixed
+
+- **Review health gate no longer parks clean work on Test Reviewer's
+  read-only-sandbox degradation (#1856):** `_derive_health` treated any
+  reviewer document with `status != "ok"` as reason to downgrade health to
+  `EXIT_FOR_HUMAN_REVIEW`, including a Test Reviewer document that
+  self-reports `status="degraded"` because it can never start pytest under
+  codex review's unconditionally read-only sandbox (`_roles.py`'s
+  `--sandbox read-only`, the MUST_FIX 4 remedy from #1236) — a structural
+  limitation true on every ticket, not a signal about the diff under review.
+  `_derive_health` now excludes exactly the `("Test Reviewer", "degraded")`
+  pair from its confidence computation via the new
+  `_is_environment_muted_degradation` predicate; a Test Reviewer
+  `status="failed"` document, or a `"degraded"` document from any other
+  role, still downgrades health and still parks. Real test verification is
+  unaffected: the IMPL-stage worker and CI both run the actual test suite
+  elsewhere in the pipeline — the codex Test Reviewer was never capable of
+  running tests itself, on any ticket.
 
 - **Codex fix-cycle retries its commit once after a pre-commit hook rewrites
   files (#1855):** a repo-local pre-commit hook that reformats staged files

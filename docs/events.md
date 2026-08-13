@@ -597,6 +597,10 @@ open enum; consumers MUST tolerate unknown values. Known values:
   review — `cw dev-queue requeue` (or `cw dev-queue drain`, which selects this
   disposition); `cw dev-queue approve` deliberately fails closed here, because
   there is nothing shippable to authorize until review is re-run. See #1702.
+  As of #1856, a Test-Reviewer-only `status="degraded"` document — the
+  read-only-sandbox tax (Test Reviewer can never start pytest under codex
+  review's read-only sandbox) — no longer triggers this park; see
+  `_derive_health` in `src/cw/codex_review/_verdict.py`.
 - `"codex_must_fix_mechanically_rejected"` — Rule 5: a `blocked` sentinel whose
   `blocker.reason` is `codex_must_fix_mechanically_rejected`. Review produced a
   MUST_FIX finding, but `review_findings`' validation dropped it before
