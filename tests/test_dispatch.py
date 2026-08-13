@@ -10787,6 +10787,13 @@ class TestApplyStagedDecision:
 
         Proves the wiring between ``_derive_health``'s real output and the new
         gate -- not just a hand-built ``last_result`` dict.
+
+        ``reviewer_role="Architecture Reviewer"`` is deliberate post-#1856:
+        the fixture-default "Test Reviewer" role's ``status="degraded"`` is
+        now specifically carved out of health downgrade (see
+        ``test_test_reviewer_only_degraded_document_does_not_park_end_to_end``
+        below), so this park-path regression test pins a role the carve-out
+        does not apply to.
         """
         from cw.codex_review import synthesize_codex_review_result
         from cw.dispatch import apply_staged_decision
@@ -10797,7 +10804,11 @@ class TestApplyStagedDecision:
         result, _verdict = synthesize_codex_review_result(
             task=_codex_task(),
             worktree=worktree,
-            documents=[_make_reviewer_doc(status="degraded")],
+            documents=[
+                _make_reviewer_doc(
+                    status="degraded", reviewer_role="Architecture Reviewer"
+                )
+            ],
             failures=[],
             diff=_make_diff(),
             reviewed_sha="sha",
@@ -10819,6 +10830,49 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.disposition == "review_health_gate"
         assert task.stage == Stage.REVIEW
+
+    def test_test_reviewer_only_degraded_document_does_not_park_end_to_end(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[..., Path],
+    ) -> None:
+        """#1856 AC3 end-to-end: a Test-Reviewer-only ``status="degraded"``
+        document — the read-only-sandbox tax (Test Reviewer cannot start
+        pytest under codex review's read-only sandbox) — must NOT trigger the
+        review-health-gate park. Mirrors
+        ``test_codex_review_degraded_document_parks_without_signoff`` above,
+        but with the fixture-default Test Reviewer role, run through the same
+        real ``synthesize_codex_review_result`` -> ``apply_staged_decision``
+        path.
+        """
+        from cw.codex_review import synthesize_codex_review_result
+        from cw.dispatch import apply_staged_decision
+        from tests._codex_review_helpers import _task as _codex_task
+        from tests.conftest import _make_diff, _make_reviewer_doc
+
+        worktree = make_git_repo("wt-1856-test-reviewer-only-degraded")
+        result, _verdict = synthesize_codex_review_result(
+            task=_codex_task(),
+            worktree=worktree,
+            documents=[_make_reviewer_doc(status="degraded")],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-1856",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+        assert result.health.recommendation == "PROCEED"
+
+        task = self._make_running_task("RHG-E2E-2", stage=Stage.REVIEW)
+        apply_staged_decision(
+            task, result.status, result.model_dump(mode="json"), self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.FINALIZE
+        assert task.disposition != "review_health_gate"
 
 
 # ---------------------------------------------------------------------------
