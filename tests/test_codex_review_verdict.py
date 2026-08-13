@@ -13,6 +13,7 @@ from cw.codex_review import (
     _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
     CODEX_BUDGET_EXHAUSTED,
     CODEX_ERROR,
+    CODEX_MODEL_CAPACITY,
     CODEX_MUST_FIX_FINDINGS,
     CODEX_MUST_FIX_MECHANICALLY_REJECTED,
     CODEX_REVIEW_PARTIAL,
@@ -90,6 +91,8 @@ class TestSynthesizeCodexReviewResult:
         [
             (CODEX_BUDGET_EXHAUSTED, True),
             (CODEX_TIMEOUT, True),
+            # #1836: a provider-capacity blip is transient too.
+            (CODEX_MODEL_CAPACITY, True),
             (CODEX_ERROR, None),
         ],
     )

@@ -13,12 +13,14 @@ import pytest
 from cw.codex_review import (
     CODEX_BUDGET_EXHAUSTED,
     CODEX_ERROR,
+    CODEX_MODEL_CAPACITY,
     CODEX_REVIEW_UNPARSEABLE,
     CODEX_TIMEOUT,
     _build_generic_codex_argv,
     _classify_codex_failure,
     _codex_scratch_dir,
     _is_audit_flag_rejection,
+    _is_model_capacity_error,
     _run_codex_role,
     run_codex_roles,
 )
@@ -389,6 +391,20 @@ class TestClassifyCodexFailure:
         result = CodexRunResult(returncode=1, stdout="", stderr="boom")
         assert _classify_codex_failure(result) == "nonzero_exit"
 
+    def test_nonzero_exit_capacity_shaped_stdout_still_classifies_as_nonzero_exit(
+        self,
+    ) -> None:
+        # #1836 pins the category taxonomy: the model-capacity reclassification
+        # happens on the coarse ReviewerRunFailure.reason inside
+        # _run_codex_role, never on the fine-grained ExecutorFailureCategory
+        # (which is shared with codex_fix_loop and the aider executor).
+        result = CodexRunResult(
+            returncode=1,
+            stdout=_audit_fixture("capacity_turn_failed.jsonl"),
+            stderr="",
+        )
+        assert _classify_codex_failure(result) == "nonzero_exit"
+
     def test_missing_output(self) -> None:
         result = CodexRunResult(
             returncode=0, stdout="", stderr="", output_file_content=None
@@ -496,6 +512,87 @@ def test_run_codex_role_spawn_error_surfaces_codex_error_reason(
     path = _bundle_file("sess-spawn", "code-quality-reviewer", "spawn_error")
     persisted = ExecutorFailure.model_validate_json(path.read_text())
     assert persisted.category == "spawn_error"
+
+
+def test_run_codex_role_model_capacity_surfaces_transient_reason(
+    tmp_path: Path,
+) -> None:
+    """#1836: a turn.failed model-capacity error must classify as the
+    transient CODEX_MODEL_CAPACITY reason, not the parking CODEX_ERROR."""
+    runner = _SequencedRunner(
+        [
+            CodexRunResult(
+                returncode=1,
+                stdout=_audit_fixture("capacity_turn_failed.jsonl"),
+                stderr="",
+            )
+        ]
+    )
+    _doc, failure, _metrics = _run_one_role(
+        runner, tmp_path, session_id="sess-capacity"
+    )
+    assert failure is not None
+    assert failure.reason == CODEX_MODEL_CAPACITY
+    # diagnostics bundle stays keyed by the fine-grained category
+    # (nonzero_exit) — the reason override does not touch persistence.
+    path = _bundle_file("sess-capacity", "code-quality-reviewer", "nonzero_exit")
+    persisted = ExecutorFailure.model_validate_json(path.read_text())
+    assert persisted.category == "nonzero_exit"
+
+
+def test_run_codex_role_unrelated_nonzero_exit_still_codex_error(
+    tmp_path: Path,
+) -> None:
+    """A plain nonzero exit (no capacity phrasing anywhere in stdout)
+    must keep parking as CODEX_ERROR — #1836's fix must not blanket-
+    retry every turn.failed."""
+    runner = _SequencedRunner([CodexRunResult(returncode=1, stdout="", stderr="boom")])
+    _doc, failure, _metrics = _run_one_role(
+        runner, tmp_path, session_id="sess-plain-error"
+    )
+    assert failure is not None
+    assert failure.reason == CODEX_ERROR
+
+
+def test_run_codex_role_non_capacity_turn_failed_still_codex_error(
+    tmp_path: Path,
+) -> None:
+    """The strongest #1836 regression case: a real (redacted) turn.failed
+    capture that is not a capacity blip still parks as CODEX_ERROR."""
+    runner = _SequencedRunner(
+        [
+            CodexRunResult(
+                returncode=1, stdout=_audit_fixture("failed_turn.jsonl"), stderr=""
+            )
+        ]
+    )
+    _doc, failure, _metrics = _run_one_role(
+        runner, tmp_path, session_id="sess-failed-turn"
+    )
+    assert failure is not None
+    assert failure.reason == CODEX_ERROR
+
+
+def test_run_codex_role_capacity_phrasing_in_stderr_only_still_codex_error(
+    tmp_path: Path,
+) -> None:
+    """#1836 is scoped to the parsed JSONL stream: unstructured stderr is not
+    sniffed, so a capacity-shaped stderr with no turn.failed event keeps
+    today's parking behavior rather than silently widening the override."""
+    runner = _SequencedRunner(
+        [
+            CodexRunResult(
+                returncode=1,
+                stdout="",
+                stderr="Selected model is at capacity. Please try a different model.",
+            )
+        ]
+    )
+    _doc, failure, _metrics = _run_one_role(
+        runner, tmp_path, session_id="sess-capacity-stderr"
+    )
+    assert failure is not None
+    assert failure.reason == CODEX_ERROR
 
 
 # ---------------------------------------------------------------------------
@@ -700,6 +797,53 @@ class TestIsAuditFlagRejection:
             returncode=2, stdout="", stderr="ERROR: Unexpected Argument '--json'"
         )
         assert _is_audit_flag_rejection(result) is True
+
+
+# ---------------------------------------------------------------------------
+# _is_model_capacity_error — the transient-reason override gate (#1836)
+# ---------------------------------------------------------------------------
+
+
+class TestIsModelCapacityError:
+    def test_capacity_phrasing_matches(self) -> None:
+        result = CodexRunResult(
+            returncode=1,
+            stdout=_audit_fixture("capacity_turn_failed.jsonl"),
+            stderr="",
+        )
+        assert _is_model_capacity_error(result) is True
+
+    def test_capacity_phrasing_is_case_insensitive(self) -> None:
+        result = CodexRunResult(
+            returncode=1,
+            stdout=_audit_fixture("capacity_turn_failed.jsonl").upper(),
+            stderr="",
+        )
+        assert _is_model_capacity_error(result) is True
+
+    def test_unrelated_turn_failed_does_not_match(self) -> None:
+        # A real (redacted) turn.failed capture that is NOT a capacity blip —
+        # the sniff must be phrase-specific, not "any turn.failed".
+        result = CodexRunResult(
+            returncode=1, stdout=_audit_fixture("failed_turn.jsonl"), stderr=""
+        )
+        assert _is_model_capacity_error(result) is False
+
+    def test_empty_stdout_does_not_match(self) -> None:
+        result = CodexRunResult(returncode=1, stdout="", stderr="boom")
+        assert _is_model_capacity_error(result) is False
+
+    def test_capacity_phrasing_outside_turn_failed_does_not_match(self) -> None:
+        # The marker is read only off the terminal turn.failed event's
+        # error.message — a reviewer document or log line that merely mentions
+        # the phrase must never make a permanent failure look retry-eligible.
+        stdout = (
+            '{"type":"item.completed","item":{"id":"i0","type":"agent_message",'
+            '"text":"the queue is at capacity"}}\n'
+            '{"type":"turn.completed","usage":{"input_tokens":1}}\n'
+        )
+        result = CodexRunResult(returncode=1, stdout=stdout, stderr="")
+        assert _is_model_capacity_error(result) is False
 
 
 # ---------------------------------------------------------------------------

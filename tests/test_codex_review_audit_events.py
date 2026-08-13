@@ -18,7 +18,10 @@ from pathlib import Path
 
 import pytest
 
-from cw.codex_review._audit_events import _parse_codex_audit_events
+from cw.codex_review._audit_events import (
+    _extract_terminal_error_message,
+    _parse_codex_audit_events,
+)
 
 _FIXTURE_DIR = Path(__file__).parent / "fixtures" / "codex_audit_events"
 
@@ -230,3 +233,58 @@ class TestParseCodexAuditEventsUnexpectedToolAttempts:
         metrics = _parse_codex_audit_events(stdout, duration_seconds=1.0)
         assert metrics["tool_call_counts"] == {}
         assert metrics["unexpected_tool_attempts"] == []
+
+
+class TestExtractTerminalErrorMessage:
+    """#1836: the terminal ``turn.failed`` event's ``error.message``.
+
+    Deliberately a free function rather than a ``ReviewerRunMetrics`` field —
+    the value drives a failure *classification* (retry-eligibility), and that
+    metrics bag's documented invariant (R3, #1710) is that nothing in it is
+    read by health, blocking, or gate logic.
+    """
+
+    def test_capacity_message_extracted(self) -> None:
+        assert (
+            _extract_terminal_error_message(_fixture("capacity_turn_failed.jsonl"))
+            == "Selected model is at capacity. Please try a different model."
+        )
+
+    def test_redacted_failed_turn_message_extracted(self) -> None:
+        assert (
+            _extract_terminal_error_message(_fixture("failed_turn.jsonl"))
+            == "<redacted upstream error>"
+        )
+
+    def test_no_turn_failed_returns_none(self) -> None:
+        assert _extract_terminal_error_message(_fixture("clean_no_tools.jsonl")) is None
+
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            "",
+            "   \n\n  ",
+            "this is not json at all\nneither is this",
+            "[]",
+            "null",
+            '"just a string"',
+            "123",
+        ],
+    )
+    def test_non_jsonl_stdout_returns_none(self, stdout: str) -> None:
+        assert _extract_terminal_error_message(stdout) is None
+
+    def test_error_field_not_a_dict_returns_none(self) -> None:
+        stdout = '{"type":"turn.failed","error":"boom"}\n'
+        assert _extract_terminal_error_message(stdout) is None
+
+    def test_message_field_not_a_string_returns_none(self) -> None:
+        stdout = '{"type":"turn.failed","error":{"message":42}}\n'
+        assert _extract_terminal_error_message(stdout) is None
+
+    def test_last_turn_failed_wins(self) -> None:
+        stdout = (
+            '{"type":"turn.failed","error":{"message":"first"}}\n'
+            '{"type":"turn.failed","error":{"message":"second"}}\n'
+        )
+        assert _extract_terminal_error_message(stdout) == "second"
