@@ -3310,6 +3310,56 @@ class TestUnresolvedSubagentSpawnDisposition:
         assert t.status == QueueItemStatus.COMPLETED
         assert t.disposition == "shipped"
 
+    def test_ticketless_unresolved_spawn_still_completes_terminal(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A ticket-less DAEMON crash (ad-hoc ``cw start`` idea/debt worker)
+        with an unresolved spawn still reaches a terminal session state.
+
+        There is no dev-queue row to park such a candidate under, so the
+        override must not unconditionally swallow it — that left the session
+        live forever, re-detected as phantom on every future reconcile tick
+        with no escalation (#1646 review MUST_FIX). It must fall through to
+        ordinary policy resolution instead, exactly like it did before #1646
+        existed: under ``reap_policy: auto`` that means the normal AUTO branch
+        marks the session COMPLETED/CRASHED.
+        """
+        from cw.reconcile import (
+            ProposedAction,
+            ReapCandidate,
+            _act_on_phantom_candidates,
+        )
+
+        monkeypatch.setattr(
+            "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
+        )
+        now = datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+        sess = _mk_session("uss-noticket-1", "gone-ref")
+        sess.origin = SessionOrigin.DAEMON
+        sess.name = "client-a/idea"
+        state = CwState(sessions=[sess])
+        save_state(state)
+
+        candidate = ReapCandidate(
+            session_id="uss-noticket-1",
+            proposed_action=ProposedAction.CRASH_COMPLETE,
+            ticket_id=None,
+            worktree_dirty=False,
+            client="client-a",
+            unresolved_subagent_spawn=True,
+        )
+
+        _act_on_phantom_candidates(state, [candidate], now=now, config=_auto_config())
+
+        updated = next(s for s in state.sessions if s.id == "uss-noticket-1")
+        assert updated.status == SessionStatus.COMPLETED
+        assert updated.completed_reason == CompletionReason.CRASHED
+        assert updated.reap_reason == ReapReason.PHANTOM_SURFACE
+
 
 def test_detect_phantom_candidates_reads_unresolved_spawn_from_worktree(
     tmp_config_dir: Path,

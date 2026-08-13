@@ -50,8 +50,6 @@ from cw.dev_queue import (
 from cw.events import read_events, record_event
 from cw.exceptions import USAGE_LIMIT_RE, EmitValidationError
 from cw.models import (
-    AGENT_SPAWN_STAMP_KEY,
-    AGENT_SPAWN_UNRESOLVED_COUNT_KEY,
     DEFAULT_LANE,
     DEFAULT_STAGE,
     HOOK_CONTEXT_RELATIVE_PATH,
@@ -69,6 +67,7 @@ from cw.models import (
     SessionStatus,
     Stage,
     TicketTask,
+    extract_unresolved_spawn_count,
 )
 from cw.reconcile import _deps
 from cw.result import (
@@ -1605,8 +1604,11 @@ def _read_unresolved_subagent_spawn(worktree_path: Path | None) -> bool:
 
     Reads the file directly rather than via ``cw.cli._hook_io``: reconcile must
     not import from ``cw.cli`` (the dependency runs the other way). The shared
-    path/key constants come from ``cw.models`` so the two readers cannot drift
-    onto different literals.
+    path constant and the count-extraction logic both come from ``cw.models``
+    (:func:`cw.models.extract_unresolved_spawn_count`) so this reader and
+    ``cw.cli.agent_spawn_stamp``'s write-side reader cannot drift onto
+    different literals or validation rules for the same on-disk shape (#1646
+    review finding).
     """
     if not worktree_path:
         return False
@@ -1615,13 +1617,7 @@ def _read_unresolved_subagent_spawn(worktree_path: Path | None) -> bool:
         context = json.loads(context_path.read_text(encoding="utf-8"))
         if not isinstance(context, dict):
             return False
-        stamp = context.get(AGENT_SPAWN_STAMP_KEY)
-        if not isinstance(stamp, dict):
-            return False
-        count = stamp.get(AGENT_SPAWN_UNRESOLVED_COUNT_KEY)
-        # bool is an int subclass — exclude it so `true` never reads as a count.
-        if isinstance(count, bool) or not isinstance(count, int):
-            return False
+        count = extract_unresolved_spawn_count(context)
     except Exception:  # noqa: BLE001 — fail-safe on any error; mirrors _worktree_dirty_by_path
         return False
     return count > 0

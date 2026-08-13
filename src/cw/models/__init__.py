@@ -67,6 +67,7 @@ from cw.models.orchestrator_config import (
     OrchestratorConfig,
     StageExecutorConfig,
     StagePipelineConfig,
+    extract_unresolved_spawn_count,
 )
 from cw.models.session import LocalLivenessHandle, Session
 from cw.models.state import CW_STATE_SCHEMA_VERSION, CwState
@@ -140,4 +141,5 @@ __all__ = [
     "WatchedPr",
     "_validate_gate_recipe_keys",
     "_validate_review_recipe_keys",
+    "extract_unresolved_spawn_count",
 ]

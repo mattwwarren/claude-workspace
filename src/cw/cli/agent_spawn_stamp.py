@@ -43,6 +43,7 @@ from cw.models import (
     AGENT_SPAWN_STAMP_KEY,
     AGENT_SPAWN_UNRESOLVED_COUNT_KEY,
     HOOK_CONTEXT_RELATIVE_PATH,
+    extract_unresolved_spawn_count,
 )
 
 if TYPE_CHECKING:
@@ -93,17 +94,13 @@ def _context_lock(context_path: Path) -> Iterator[bool]:
 def _unresolved_count(context: dict[str, object]) -> int:
     """Return the stamp's current count, treating every odd shape as 0.
 
-    A pre-v5 context has no stamp key at all, and a hand-edited one can hold
-    anything. ``bool`` is excluded explicitly because it is an ``int`` subclass
-    in Python, so ``True`` would otherwise read as a live count of 1.
+    Thin wrapper over :func:`cw.models.extract_unresolved_spawn_count`, kept
+    under this local name since call sites and tests already reference it —
+    the validation logic itself lives in ``cw.models`` so this write-side
+    reader and ``cw.reconcile._shared``'s read-side reader cannot drift onto
+    different rules for the same on-disk shape (#1646 review finding).
     """
-    stamp = context.get(AGENT_SPAWN_STAMP_KEY)
-    if not isinstance(stamp, dict):
-        return 0
-    count = stamp.get(AGENT_SPAWN_UNRESOLVED_COUNT_KEY)
-    if isinstance(count, bool) or not isinstance(count, int):
-        return 0
-    return count
+    return extract_unresolved_spawn_count(context)
 
 
 def _last_stamped_at(context: dict[str, object]) -> str | None:

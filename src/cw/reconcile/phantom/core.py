@@ -79,6 +79,18 @@ def _route_phantom_by_policy(
     behind a verification tail that never ran compounds the exact failure the
     stamp exists to catch — so this one class is a deliberate, documented
     exception to that policy (see docs/dispatch-runbook.md §7).
+
+    The override requires a ``ticket_id``: there is no dev-queue row to park a
+    ticket-less DAEMON session (an ad-hoc ``cw start`` ``idea``/``debt``
+    worker) under, so such a candidate falls through to the ordinary
+    policy-resolution branch below instead — the same place it landed before
+    #1646 existed. A version of this override that unconditionally intercepted
+    every unresolved-spawn candidate, ticket-less or not, would silently drop
+    the ticket-less ones from every downstream list (they satisfy none of
+    ``unresolved_spawn_mutations``, ``escalate_candidates``, or
+    ``auto_candidates``) and leave the session live forever, re-detected as
+    phantom on every future tick — a regression on ``reap_policy: auto`` lanes
+    caught during review (#1646).
     """
     effective_config = config if config is not None else OrchestratorConfig()
     clients = _deps.load_effective_clients()
@@ -103,11 +115,11 @@ def _route_phantom_by_policy(
         # not after. Routing it afterwards would leave the AUTO branch below one
         # refactor away from reclaiming the candidate and silently reverting it
         # to PENDING, which is the exact retry this class must never get.
-        if c.unresolved_subagent_spawn:
-            if c.ticket_id:
-                unresolved_spawn_mutations[c.ticket_id] = (
-                    QueueItemStatus.BLOCKED_ON_USER
-                )
+        # Gated on ticket_id: a ticket-less candidate has no dev-queue row to
+        # park, so it falls through to ordinary policy resolution below instead
+        # of being dropped from every list (see the docstring's ticket_id note).
+        if c.unresolved_subagent_spawn and c.ticket_id:
+            unresolved_spawn_mutations[c.ticket_id] = QueueItemStatus.BLOCKED_ON_USER
             if c.veto_cap_exhausted:
                 escalate_candidates.append(c)
             continue
