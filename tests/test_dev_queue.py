@@ -650,7 +650,8 @@ class TestCLIDevQueueAdd:
             ["dev-queue", "add", "ABC-5", "--client", "genhealth", "--stage", "bogus"],
         )
         assert result.exit_code != 0
-        assert "invalid choice" in result.output.lower() or "error" in result.output.lower()
+        output_lower = result.output.lower()
+        assert "invalid choice" in output_lower or "error" in output_lower
         store = load_dev_queue()
         assert store.tasks == []
 
@@ -1828,7 +1829,7 @@ class TestValidateStageInPipeline:
 
         with pytest.raises(
             RequeueStageError,
-            match="Stage 'review' is not in the pipeline for client 'genhealth'.",
+            match=r"Stage 'review' is not in the pipeline for client 'genhealth'\.",
         ):
             _validate_stage_in_pipeline(
                 Stage.REVIEW, [Stage.PLAN, Stage.IMPL], client="genhealth"
@@ -1883,7 +1884,9 @@ class TestAddTicketStagePlacement:
     ) -> None:
         from cw.exceptions import RequeueStageError
 
-        _setup_client_with_pipeline_stages(tmp_config_dir, patched_queue, ["plan", "impl"])
+        _setup_client_with_pipeline_stages(
+            tmp_config_dir, patched_queue, ["plan", "impl"]
+        )
         task = TicketTask(ticket_id="GEN-22", client="genhealth", stage=Stage.REVIEW)
         with pytest.raises(RequeueStageError, match="not in the pipeline"):
             add_ticket(task)
@@ -1892,9 +1895,7 @@ class TestAddTicketStagePlacement:
         self, patched_queue: Path
     ) -> None:
         """add_ticket skips stage validation when the client is not in clients.yaml."""
-        task = TicketTask(
-            ticket_id="GEN-23", client="unknown-client", stage=Stage.IMPL
-        )
+        task = TicketTask(ticket_id="GEN-23", client="unknown-client", stage=Stage.IMPL)
         result = add_ticket(task)
         assert result is True
         store = load_dev_queue()
