@@ -1628,7 +1628,8 @@ class TestPackageExportCompleteness:
     The models.py -> cw/models/ package split (#1320) must preserve every
     ``from cw.models import X`` call site unchanged. This asserts ``__all__``
     equals the exhaustive top-level surface (the historical 49 names, plus
-    #1730's ``HOOK_CONTEXT_RELATIVE_PATH`` = 50) — hardcoded here, NOT
+    #1730's ``HOOK_CONTEXT_RELATIVE_PATH`` = 50, plus #1646's three
+    ``AGENT_SPAWN_*`` stamp keys = 53) — hardcoded here, NOT
     re-derived from the package, so a dropped or renamed export is a
     falsifiable failure rather than a tautology. A deliberate addition updates
     this set in the same commit.
@@ -1638,6 +1639,9 @@ class TestPackageExportCompleteness:
         from cw import models
 
         expected = {
+            "AGENT_SPAWN_LAST_STAMPED_AT_KEY",
+            "AGENT_SPAWN_STAMP_KEY",
+            "AGENT_SPAWN_UNRESOLVED_COUNT_KEY",
             "CLAUDE_NATIVE_BACKEND",
             "CODEX_BACKEND",
             "CONTEXT_JSON_RELATIVE_PATH",

@@ -657,6 +657,26 @@ read-modify-write (observed twice, 2026-07-04).
   clears it. **Now partially mechanized** — see §11.1's
   `park_marker_poison_clear` recipe (requires `concierge_enabled: true` and
   `consecutive_salvage_skips >= 1` on a confirmed-dead session).
+- `disposition: unresolved_subagent_spawn` (#1646) is **not** an ordinary
+  `phantom_surface` crash — do not just requeue it. It means the worker died
+  or hung with a sub-agent spawn still in flight, so committed work may exist
+  behind a verification tail that never ran. **Check the worktree and branch
+  before requeueing:** look for commits ahead of the base branch, and for a
+  half-finished stage the transcript never reported. Once you know what
+  landed, requeue at the right stage (or close the ticket if the work is
+  already good). The evidence is durable — `agent_spawn_stamp.unresolved_count`
+  in the worktree's `.claude/cw-context.json`, with `last_stamped_at` giving
+  the time the spawn began.
+- **This one class parks even on a `reap_policy: auto` lane.** That is a
+  deliberate, documented exception (see
+  [`docs/session-disposition.md` §6b](session-disposition.md)), not a bug in
+  your lane config: `auto`'s silent PENDING revert would re-run a session over
+  possibly-committed work with nobody looking, which compounds the exact
+  failure the stamp exists to catch. Everything else on an `auto` lane keeps
+  reverting as configured. The reason is escalation-eligible (§11.2), so a row
+  left parked here still pages after 45 minutes; it is deliberately excluded
+  from concierge's auto-requeue (§11.1) for the same reason the override
+  exists.
 
 ### Quota walls: probe before pausing
 
@@ -1129,7 +1149,8 @@ Runs **unconditionally** every reconcile tick (not gated by
 `concierge_enabled`) — a `TicketTask` sitting in the escalation-eligible set
 (disposition ∈ `ambiguities_pending_resolution` / `plan_pending_approval` /
 `review_pending_approval` / `stalled_retry_cap_parked` / `silently_idle` /
-`idle_stall` / `wall_clock_budget` / `phantom_surface` / `None` while
+`idle_stall` / `wall_clock_budget` / `phantom_surface` /
+`unresolved_subagent_spawn` / `None` while
 `BLOCKED_ON_USER`, or any `AWAITING_OPERATOR_SIGNOFF`/`FAILED` row) for more
 than 45 minutes fires one `operator.escalation` event — a single page per
 parked episode, not a repeat-every-tick alarm. See `docs/events.md` for the
