@@ -13,6 +13,7 @@ from cw.codex_review import (
     _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
     CODEX_BUDGET_EXHAUSTED,
     CODEX_ERROR,
+    CODEX_MODEL_CAPACITY,
     CODEX_MUST_FIX_FINDINGS,
     CODEX_MUST_FIX_MECHANICALLY_REJECTED,
     CODEX_REVIEW_PARTIAL,
@@ -95,6 +96,8 @@ class TestSynthesizeCodexReviewResult:
         [
             (CODEX_BUDGET_EXHAUSTED, True),
             (CODEX_TIMEOUT, True),
+            # #1836: a provider-capacity blip is transient too.
+            (CODEX_MODEL_CAPACITY, True),
             (CODEX_ERROR, None),
         ],
     )
@@ -154,10 +157,24 @@ class TestSynthesizeCodexReviewResult:
         assert "local_executor" not in result.next_actions[0]
 
     @pytest.mark.parametrize(
-        "reason", [CODEX_BUDGET_EXHAUSTED, CODEX_TIMEOUT, CODEX_ERROR]
+        ("reason", "expect_retry"),
+        [
+            (CODEX_BUDGET_EXHAUSTED, True),
+            (CODEX_TIMEOUT, True),
+            # #1836 review finding: the partial-review branch must derive
+            # retry_eligible the same way the zero-documents branch does — a
+            # capacity blip hitting one role among several must not silently
+            # fall back to non-retry-eligible just because other roles still
+            # produced documents.
+            (CODEX_MODEL_CAPACITY, True),
+            (CODEX_ERROR, None),
+        ],
     )
     def test_partial_review_blocked(
-        self, make_git_repo: Callable[[str], Path], reason: str
+        self,
+        make_git_repo: Callable[[str], Path],
+        reason: str,
+        expect_retry: bool | None,
     ) -> None:
         # Decision 7 (#1236): a non-blocking verdict (no MUST_FIX among the
         # roles that DID run) still blocks when at least one selected role
@@ -179,6 +196,7 @@ class TestSynthesizeCodexReviewResult:
         assert result.status == "blocked"
         assert result.blocker is not None
         assert result.blocker.reason == CODEX_REVIEW_PARTIAL
+        assert result.blocker.retry_eligible == expect_retry
         assert "Performance Reviewer" in result.blocker.details
         assert reason in result.blocker.details
         # The review counts derived from the roles that DID run still survive
@@ -191,6 +209,36 @@ class TestSynthesizeCodexReviewResult:
         # LocalExecutor one make_blocked defaults to.
         assert result.next_actions == _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS
         assert "local_executor" not in result.next_actions[0]
+
+    def test_partial_review_retry_eligible_true_when_any_failure_transient(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        # #1836 review finding: test_partial_review_blocked above only ever
+        # supplies a single failing role per case, so it can't distinguish
+        # any(...) from "check failures[0] only". Pin the actual motivating
+        # shape — one role capacity-blipped while another failed for an
+        # unrelated, non-transient reason — and confirm retry_eligible is
+        # still True.
+        worktree = make_git_repo("wt-synth-partial-mixed-reasons")
+        doc = _make_reviewer_doc(_make_finding(severity="SHOULD_FIX"))
+        result, _verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[
+                ReviewerRunFailure(role="Performance Reviewer", reason=CODEX_ERROR),
+                ReviewerRunFailure(
+                    role="Architecture Reviewer", reason=CODEX_MODEL_CAPACITY
+                ),
+            ],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-synth",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+        assert result.blocker is not None
+        assert result.blocker.retry_eligible is True
 
     def test_must_fix_takes_priority_over_partial(
         self, make_git_repo: Callable[[str], Path]

@@ -61,6 +61,24 @@ CODEX_ERROR = "codex_error"
 CODEX_REVIEW_UNPARSEABLE = "codex_review_unparseable"
 CODEX_MUST_FIX_FINDINGS = "codex_must_fix_findings"
 CODEX_BUDGET_EXHAUSTED = "budget_exhausted"
+# The provider reported its model momentarily out of capacity ("Selected model
+# is at capacity. Please try a different model.", codex exit 1 + a terminal
+# turn.failed carrying that message) — #1836. Its own code rather than a
+# reused sibling, for the same reason CODEX_MUST_FIX_MECHANICALLY_REJECTED is
+# not CODEX_MUST_FIX_FINDINGS:
+#
+# - not CODEX_ERROR: that is the generic bucket for every *other* nonzero
+#   exit, and it is deliberately non-transient (a real error reproduces on
+#   retry). Leaving capacity blips there is exactly the #1836 bug — the ticket
+#   parked instead of self-healing.
+# - not CODEX_TIMEOUT: codex did not time out; it answered promptly, with a
+#   refusal. Anything reading `reason` as "wall-clock timeout" (the
+#   _run_codex_role warning, _format_failures_detail) would be misinformed.
+# - not CODEX_BUDGET_EXHAUSTED: that reason is reserved for the shared-
+#   deadline loop *skip* (run_codex_roles, which never reaches
+#   _classify_codex_failure), so borrowing it would make a role that ran and
+#   got a turn indistinguishable from one never attempted.
+CODEX_MODEL_CAPACITY = "codex_model_capacity"
 # A partial review (some roles produced documents, but at least one selected
 # role skipped or errored without one) blocks rather than silently shipping a
 # reduced review pass — Decision 7 (#1236 finish spec).
@@ -100,10 +118,13 @@ CODEX_MUST_FIX_MECHANICALLY_REJECTED = "codex_must_fix_mechanically_rejected"
 _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS: list[str] = ["user_resolve_codex_review_failure"]
 
 # Failure reasons transient enough that a retry might succeed without any
-# code/config change on our side (the role either never got a turn at all, or
-# codex itself timed out) — used to set Blocker.retry_eligible so reconcile
-# can self-heal instead of parking the ticket (MUST_FIX 2).
-_TRANSIENT_FAILURE_REASONS = frozenset({CODEX_TIMEOUT, CODEX_BUDGET_EXHAUSTED})
+# code/config change on our side (the role either never got a turn at all,
+# codex itself timed out, or codex reported that the provider was momentarily
+# out of capacity) — used to set Blocker.retry_eligible so reconcile can
+# self-heal instead of parking the ticket (MUST_FIX 2; #1836 added the third).
+_TRANSIENT_FAILURE_REASONS = frozenset(
+    {CODEX_TIMEOUT, CODEX_BUDGET_EXHAUSTED, CODEX_MODEL_CAPACITY}
+)
 
 # Shared-deadline loop floor (Comment 3): never hand codex a per-role timeout
 # below this; a role that cannot get at least this much budget is skipped as
