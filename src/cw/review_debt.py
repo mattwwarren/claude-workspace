@@ -25,19 +25,14 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
-from cw.review_findings import DebtRecord
+from cw.review_findings import FINGERPRINT_VERSION, DebtRecord
 
 if TYPE_CHECKING:
     from cw.review_findings import AcceptedFinding
 
 _log = logging.getLogger(__name__)
-
-# Stamped on every DebtRecord this module builds, and exported so a consumer
-# can tell which normalizer produced a stored fingerprint before comparing
-# against it.
-FINGERPRINT_VERSION: Literal["FINGERPRINT_V1"] = "FINGERPRINT_V1"
 
 # The file value #1817 requires on a finding with no diff anchor at all. Such
 # a finding has no stable path to key by, so it is never fingerprinted.

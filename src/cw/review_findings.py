@@ -74,6 +74,11 @@ AgentSpecSource = Literal["repo", "global", "none"]
 # the only value this ticket ever produces; the other two exist for the
 # follow-up that actually files the tickets (#1838).
 TrackingDisposition = Literal["FILED", "ALREADY_TRACKED", "NEEDS_FILING"]
+# The fingerprint-normalizer version stamped on every DebtRecord (#1837).
+# Defined here, next to the model that owns the field, rather than in
+# cw.review_debt (which imports it) -- a single source of truth so a future
+# version bump can't update one site and silently miss the other.
+FINGERPRINT_VERSION: Literal["FINGERPRINT_V1"] = "FINGERPRINT_V1"
 # The six reasons a finding can be rejected outright (used by
 # :attr:`RejectedFinding.reason` and :func:`_classify_finding`'s return type).
 # Split from the escalation-strip reason (R6): a stripped escalation is a
@@ -468,7 +473,7 @@ class DebtRecord(BaseModel):
     """
 
     fingerprint: tuple[str, str]
-    fingerprint_version: Literal["FINGERPRINT_V1"] = "FINGERPRINT_V1"
+    fingerprint_version: Literal["FINGERPRINT_V1"] = FINGERPRINT_VERSION
     rule_id: str = ""
     file: str
     symbol: str = ""
