@@ -1904,9 +1904,12 @@ class TestDeltaModeReviewPass:
         assert delta.delta_diff is not None
         assert set(delta.delta_diff.files) == {"notes.md"}
         assert delta.delta_changed_files == frozenset({"notes.md"})
-        # The full diff and reviewed_sha are still captured unchanged -- the
-        # fix loop's scope-violation gate depends on the full cycle-0 file set.
-        assert "mod.py" in delta.diff.files
+        # `diff` is the SAME object as `delta_diff` in delta mode -- no second
+        # full-branch diff is captured, since the fix loop's scope-violation
+        # gate reads its own cycle-0-captured file set, not this field
+        # (#1837 Performance SHOULD_FIX).
+        assert delta.diff is delta.delta_diff
+        assert "mod.py" not in delta.diff.files
         assert delta.reviewed_sha == self._rev(repo)
         # Prompts are built against the delta, not the full PR diff.
         for prompt in delta.prompts_by_role.values():

@@ -41,7 +41,11 @@ from typing import TYPE_CHECKING, NamedTuple
 import yaml
 
 from cw.codex_review._capability import _probe_filesystem_capability
-from cw.codex_review._diff import _capture_delta_diff, _capture_diff
+from cw.codex_review._diff import (
+    _capture_delta_diff,
+    _capture_diff,
+    _capture_head_sha,
+)
 from cw.gh import FETCH_COMMENTS_TIMEOUT, fetch_issue_comments
 from cw.local_runner import resolve_tier
 from cw.models import CONTEXT_JSON_RELATIVE_PATH, HOOK_CONTEXT_RELATIVE_PATH
@@ -1029,10 +1033,12 @@ class _ReviewPassInputs(NamedTuple):
     ``delta_diff``/``delta_changed_files`` (#1837) are the fix-loop re-review
     pair: the diff between the previous reviewed head and this one, and its
     changed-path set. Both are ``None`` on cycle 0, which reviews the whole
-    branch — the caller reads that as "use ``diff``". When they are set, the
-    prompts above were built against the delta, not ``diff``; ``diff`` itself
-    is still captured unchanged because the fix loop's scope-violation gate
-    needs the full cycle-0 file set.
+    branch — the caller reads that as "use ``diff``". When they are set,
+    ``diff`` is the SAME object as ``delta_diff`` (not a separately-captured
+    full branch diff): the fix loop's scope-violation gate reads ``cycle0_files``,
+    captured once at cycle 0 in ``run_review_with_fix_loop``, not this field, so
+    a second full ``git diff``/parse on every in-loop cycle bought nothing and
+    was removed (#1837 Performance SHOULD_FIX).
     """
 
     roles: list[str]
@@ -1079,24 +1085,27 @@ def _prepare_review_pass(
     fix-loop re-review pass: role selection, sensitive-hit scanning, and every
     prompt are built from the delta between *delta_from_sha* and the current
     head instead of the whole branch diff, and the still-open findings from
-    earlier cycles are inlined for context. The full ``diff``/``reviewed_sha``
-    are still captured either way — the fix loop's scope-violation gate needs
-    the full cycle-0 file set. Both default to ``None``, so ``run_review``'s
-    cycle-0 call site is unchanged.
+    earlier cycles are inlined for context. In this mode ``reviewed_sha`` is
+    captured via a bare ``git rev-parse HEAD`` and ``diff`` is the delta
+    itself — no second full ``_capture_diff`` runs, since nothing downstream
+    reads a full branch diff off an in-loop pass (the fix loop's
+    scope-violation gate uses its own cycle-0-captured file set). Both
+    parameters default to ``None``, so ``run_review``'s cycle-0 call site is
+    unchanged.
     """
     capability = _probe_filesystem_capability(runner=runner, session_id=session_id)
-    diff, reviewed_sha, changed_files = _capture_diff(worktree, default_branch)
     delta_diff: CapturedDiff | None = None
     delta_changed_files: frozenset[str] | None = None
     if delta_from_sha is not None:
+        reviewed_sha = _capture_head_sha(worktree)
         delta_diff, delta_changed_list = _capture_delta_diff(
             worktree, delta_from_sha, reviewed_sha
         )
         delta_changed_files = frozenset(delta_changed_list)
         changed_files = delta_changed_list
-        diff_for_prompts = delta_diff
+        diff = delta_diff
     else:
-        diff_for_prompts = diff
+        diff, reviewed_sha, changed_files = _capture_diff(worktree, default_branch)
     scope_tier = resolve_tier(task.scope_hint)
     categories = _categorize_changed_files(changed_files)
     sensitive_hits = _load_sensitive_hits(worktree, changed_files, scope_tier)
@@ -1140,7 +1149,7 @@ def _prepare_review_pass(
         role: _build_reviewer_prompt(
             role,
             agent_spec_text=resolutions[role].text,
-            diff=diff_for_prompts,
+            diff=diff,
             changed_files=changed_files,
             plan_text=plan_text,
             ticket_text=ticket_text,
