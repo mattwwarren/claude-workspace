@@ -144,6 +144,42 @@ def _apply_usage(event: dict[str, object], metrics: ReviewerRunMetrics) -> None:
     metrics["reasoning_tokens"] = _as_int(usage.get("reasoning_output_tokens"))
 
 
+def _extract_terminal_error_message(stdout: str) -> str | None:
+    """Return the last ``turn.failed`` event's ``error.message``, or ``None``.
+
+    Sibling of :func:`_parse_codex_audit_events` sharing its tolerance
+    contract: never raises, never logs, and degrades to ``None`` for a
+    malformed, truncated, or entirely non-JSONL *stdout* — including the
+    flag-rejection retry's non-``--json`` output, which has no event stream at
+    all. The *last* ``turn.failed`` wins, matching the parser's
+    "``terminal_event`` is the last recognized event" rule.
+
+    Deliberately **not** folded into :class:`ReviewerRunMetrics` (#1836): that
+    bag's documented invariant (R3, #1710) is that it is purely observational
+    — no health, blocking, or gate decision reads any of it — and this value's
+    entire purpose is to drive one (``_roles._is_model_capacity_error`` ->
+    retry-eligibility). A free function keeps audit telemetry and failure
+    classification on the separate sides of the boundary the module already
+    implies.
+    """
+    message: str | None = None
+    for event in _iter_events(stdout):
+        if event.get("type") != _TURN_FAILED:
+            continue
+        # Reset on every turn.failed, even a malformed one — otherwise a
+        # later turn.failed with no usable error.message would silently fall
+        # back to an earlier, superseded message instead of None (#1836
+        # review finding).
+        message = None
+        error = event.get("error")
+        if not isinstance(error, dict):
+            continue
+        raw = error.get("message")
+        if isinstance(raw, str):
+            message = raw
+    return message
+
+
 def _parse_codex_audit_events(
     stdout: str, *, duration_seconds: float
 ) -> ReviewerRunMetrics:

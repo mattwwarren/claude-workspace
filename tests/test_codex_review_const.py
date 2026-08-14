@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from typing import get_args
 
-from cw.codex_review import _CATEGORY_TO_REASON, _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS
+from cw.codex_review import (
+    _CATEGORY_TO_REASON,
+    _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
+    _TRANSIENT_FAILURE_REASONS,
+    CODEX_ERROR,
+    CODEX_MODEL_CAPACITY,
+)
 from cw.executor_diagnostics import ExecutorFailureCategory
 
 
@@ -25,3 +31,16 @@ def test_codex_review_blocked_next_actions_is_user_directed() -> None:
     assert _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS[0].startswith(
         ("user_resolve_", "user_decide_", "user_verify_")
     )
+
+
+def test_codex_model_capacity_is_transient() -> None:
+    """#1836: a provider-capacity blip must be retry-eligible, not parked."""
+    assert CODEX_MODEL_CAPACITY in _TRANSIENT_FAILURE_REASONS
+
+
+def test_codex_model_capacity_is_its_own_reason_code() -> None:
+    """#1836: distinct from the generic CODEX_ERROR bucket, and never wired
+    into _CATEGORY_TO_REASON — the override lives in _run_codex_role, so the
+    fine-grained category taxonomy stays untouched."""
+    assert CODEX_MODEL_CAPACITY != CODEX_ERROR
+    assert CODEX_MODEL_CAPACITY not in _CATEGORY_TO_REASON.values()

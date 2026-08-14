@@ -87,6 +87,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in the worktree. A second failure still surfaces as the same
   `CalledProcessError`/`codex_error` as before — no regression.
 
+- **Codex model-capacity errors are retried instead of parking the ticket
+  (#1836):** a `codex exec` reviewer role that failed with `{"type":
+  "turn.failed","error":{"message":"Selected model is at capacity. Please try
+  a different model."}}` (exit 1) parked the ticket `blocked_on_user` — a
+  definitionally transient provider blip needing an operator to un-stick it.
+  Root cause: `_classify_codex_failure` maps every nonzero exit to
+  `nonzero_exit` → `CODEX_ERROR`, and only `CODEX_TIMEOUT` /
+  `CODEX_BUDGET_EXHAUSTED` were in `_TRANSIENT_FAILURE_REASONS`, the set that
+  drives `Blocker.retry_eligible`. `_run_codex_role` now sniffs the terminal
+  `turn.failed` event's `error.message` (via the new
+  `_extract_terminal_error_message`) for the narrow, case-insensitive `at
+  capacity` marker and overrides the coarse reason to the new, transient
+  `CODEX_MODEL_CAPACITY`, so reconcile self-heals the role. Only the coarse
+  reason changes: the fine-grained `ExecutorFailureCategory` stays
+  `nonzero_exit`, so the persisted diagnostics bundle and every other
+  consumer of the shared taxonomy are untouched, and any nonzero exit without
+  that exact phrasing still parks as `CODEX_ERROR`. `retry_eligible` is now
+  transient-derived on both the zero-documents *and* partial-review
+  (`CODEX_REVIEW_PARTIAL`) dispositions — a capacity blip hitting one role
+  while others still produced documents (the likelier shape for a
+  concurrently-dispatched review) no longer falls back to non-retry-eligible.
+
 - **`cw queue peek`'s STOP-by-age reason splits "approaches" vs "exceeded"
   wording (#1795):** the STOP-age message now says `age Nmin approaches
   60-min timeout` while `age_min` is still below the 60-min ceiling

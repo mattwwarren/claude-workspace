@@ -24,12 +24,14 @@ from typing import TYPE_CHECKING
 from cw.codex_review._audit_events import (
     _TURN_COMPLETED,
     _TURN_FAILED,
+    _extract_terminal_error_message,
     _parse_codex_audit_events,
 )
 from cw.codex_review._const import (
     _CATEGORY_TO_REASON,
     _MIN_ROLE_TIMEOUT_SECONDS,
     CODEX_BUDGET_EXHAUSTED,
+    CODEX_MODEL_CAPACITY,
     _is_spawn_error,
 )
 from cw.codex_review._context import _parse_reviewer_document
@@ -71,6 +73,16 @@ _FLAG_REJECTION_MARKERS = (
 # from _audit_events's own wire-name constants so the two modules cannot drift
 # on codex's terminal-event vocabulary (#1710 review finding).
 _TERMINAL_EVENTS = frozenset({_TURN_COMPLETED, _TURN_FAILED})
+
+# The one phrase observed in a real provider-capacity refusal (#1836): codex
+# exits 1 with a terminal turn.failed whose error.message reads "Selected model
+# is at capacity. Please try a different model." Deliberately this single
+# narrow substring and not a marker tuple ("rate limit", "overloaded", ...):
+# the wording is codex/provider-controlled and unobserved beyond this one
+# capture, and every phrase added here converts some class of permanent
+# failure into an auto-retried one. A false negative is safe — the role parks
+# as CODEX_ERROR, exactly today's behavior.
+_MODEL_CAPACITY_MARKER = "at capacity"
 
 
 def _codex_scratch_dir(session_id: str) -> Path:
@@ -194,6 +206,35 @@ def _is_audit_flag_rejection(result: CodexRunResult) -> bool:
     return any(marker in lowered for marker in _FLAG_REJECTION_MARKERS) and any(
         flag in result.stderr for flag in _AUDIT_ARGV_FLAGS
     )
+
+
+def _is_model_capacity_error(result: CodexRunResult) -> bool:
+    """True when *result*'s terminal ``turn.failed`` reports a capacity blip.
+
+    Sibling of :func:`_is_audit_flag_rejection` in shape and philosophy — a
+    narrow, false-negative-safe content sniff over a ``CodexRunResult`` — but
+    it gates a *reason* reclassification rather than a retry of the
+    invocation: a provider momentarily out of capacity is definitionally
+    transient, so it must reach ``Blocker.retry_eligible`` as
+    :data:`CODEX_MODEL_CAPACITY` instead of parking the ticket as the generic,
+    non-transient ``CODEX_ERROR`` (#1836).
+
+    Read strictly off the parsed JSONL stream's terminal ``error.message``,
+    never off raw stdout or stderr: a reviewer document (or a log line) that
+    merely mentions the phrase must not make a permanent failure look
+    retry-eligible.
+
+    Known blind spot, matching today's behavior rather than regressing it: a
+    capacity failure surfacing only on :func:`_run_codex_role`'s
+    degrade-and-retry invocation — where :func:`_is_audit_flag_rejection`
+    stripped ``--json``, so codex emits no event stream — is invisible to this
+    sniff and falls back to ``CODEX_ERROR``. No code change covers that
+    without a stderr sniff whose real wording nobody has captured.
+    """
+    if result.timed_out or result.returncode == 0:
+        return False
+    message = _extract_terminal_error_message(result.stdout)
+    return message is not None and _MODEL_CAPACITY_MARKER in message.lower()
 
 
 def _persist_codex_role_diagnostics(
@@ -323,6 +364,11 @@ def _run_codex_role(
 
     category = _classify_codex_failure(result)
     reason = _CATEGORY_TO_REASON[category]
+    if category == "nonzero_exit" and _is_model_capacity_error(result):
+        # #1836: override the coarse reason only. *category* stays
+        # "nonzero_exit" so the shared ExecutorFailureCategory taxonomy (and
+        # the diagnostics bundle keyed by it) is untouched.
+        reason = CODEX_MODEL_CAPACITY
     _log.warning("codex review role %r failed: %s (%s)", role, reason, category)
     _persist_codex_role_diagnostics(
         session_id=session_id,

@@ -39,6 +39,7 @@ from __future__ import annotations
 
 from cw.codex_review._audit_events import (
     _EXPECTED_REVIEWER_ITEM_TYPES,
+    _extract_terminal_error_message,
     _parse_codex_audit_events,
 )
 from cw.codex_review._capability import (
@@ -56,6 +57,7 @@ from cw.codex_review._const import (
     CODEX_BUDGET_EXHAUSTED,
     CODEX_ERROR,
     CODEX_FIX_SCOPE_VIOLATION,
+    CODEX_MODEL_CAPACITY,
     CODEX_MUST_FIX_FINDINGS,
     CODEX_MUST_FIX_MECHANICALLY_REJECTED,
     CODEX_REVIEW_PARTIAL,
@@ -111,6 +113,7 @@ from cw.codex_review._roles import (
     _classify_codex_output_failure,
     _codex_scratch_dir,
     _is_audit_flag_rejection,
+    _is_model_capacity_error,
     _persist_codex_role_diagnostics,
     _run_codex_role,
     _slug,
@@ -129,6 +132,7 @@ __all__ = [
     "CODEX_BUDGET_EXHAUSTED",
     "CODEX_ERROR",
     "CODEX_FIX_SCOPE_VIOLATION",
+    "CODEX_MODEL_CAPACITY",
     "CODEX_MUST_FIX_FINDINGS",
     "CODEX_MUST_FIX_MECHANICALLY_REJECTED",
     "CODEX_REVIEW_PARTIAL",
@@ -167,9 +171,11 @@ __all__ = [
     "_classify_codex_failure",
     "_classify_codex_output_failure",
     "_codex_scratch_dir",
+    "_extract_terminal_error_message",
     "_format_failures_detail",
     "_hit_from_entry",
     "_is_audit_flag_rejection",
+    "_is_model_capacity_error",
     "_load_agent_spec_fallback_gate",
     "_load_claude_md_quality_gates",
     "_load_optional_text",

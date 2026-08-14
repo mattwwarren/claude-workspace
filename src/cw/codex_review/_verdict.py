@@ -91,6 +91,17 @@ def _is_environment_muted_degradation(doc: ReviewerFindingsDocument) -> bool:
     return doc.reviewer_role == _TEST_REVIEWER_ROLE and doc.status == "degraded"
 
 
+def _has_transient_failure(failures: list[ReviewerRunFailure]) -> bool:
+    """True when at least one of *failures* is retry-eligible (#1836).
+
+    Single source of truth for both `synthesize_codex_review_result` blocked
+    dispositions (zero-documents and partial-review) that derive
+    `Blocker.retry_eligible` from `_TRANSIENT_FAILURE_REASONS` — kept as one
+    function so the two branches can't drift on what "transient" means.
+    """
+    return any(f.reason in _TRANSIENT_FAILURE_REASONS for f in failures)
+
+
 def _format_failures_detail(
     failures: list[ReviewerRunFailure], *, session_id: str
 ) -> str:
@@ -207,8 +218,8 @@ def synthesize_codex_review_result(
     Disposition:
     - zero documents (all roles failed/skipped) → blocked/CODEX_REVIEW_UNPARSEABLE,
       with ``failures`` folded into ``details`` and ``retry_eligible=True`` when
-      at least one failure is transient (``codex_timeout``/``budget_exhausted``)
-      (MUST_FIX 2, #1236).
+      at least one failure is transient (``codex_timeout``/``budget_exhausted``/
+      ``codex_model_capacity``) (MUST_FIX 2, #1236; capacity added by #1836).
     - consolidated verdict is blocking            → blocked/CODEX_MUST_FIX_FINDINGS
     - verdict carries a mechanically-rejected MUST_FIX (validation dropped it
       before adjudication) → blocked/CODEX_MUST_FIX_MECHANICALLY_REJECTED
@@ -222,7 +233,11 @@ def synthesize_codex_review_result(
       producing one (a partial review) → blocked/CODEX_REVIEW_PARTIAL — a
       review that silently proceeded on an incomplete roster would be exactly
       the "spuriously clean sentinel" risk the ``agents_run`` gate exists to
-      catch (Decision 7, #1236).
+      catch (Decision 7, #1236). ``retry_eligible`` is derived from
+      ``failures`` the same way as the zero-documents branch above (#1836
+      review finding): a capacity blip hitting one role while others still
+      produced documents must not silently fall back to non-retry-eligible
+      just because the roster wasn't a total wipeout.
     - otherwise (documents complete, no MUST_FIX)  → stage_complete
 
     Returns ``(result, verdict)``; ``verdict`` is ``None`` only on the zero-
@@ -266,13 +281,12 @@ def synthesize_codex_review_result(
     ``metrics_by_role``, it is unused on the zero-documents branch.
     """
     if not documents:
-        transient = any(f.reason in _TRANSIENT_FAILURE_REASONS for f in failures)
         result = make_blocked(
             ticket_id=task.ticket_id,
             worktree=worktree,
             reason=CODEX_REVIEW_UNPARSEABLE,
             details=_format_failures_detail(failures, session_id=session_id),
-            retry_eligible=True if transient else None,
+            retry_eligible=_has_transient_failure(failures) or None,
             stage_reached=STAGE3_REVIEW,
             next_actions=_CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
         )
@@ -325,6 +339,7 @@ def synthesize_codex_review_result(
             worktree=worktree,
             reason=CODEX_REVIEW_PARTIAL,
             details=_format_failures_detail(failures, session_id=session_id),
+            retry_eligible=_has_transient_failure(failures) or None,
             stage_reached=STAGE3_REVIEW,
             next_actions=_CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
         )
