@@ -49,6 +49,7 @@ _log = logging.getLogger(__name__)
 # imports this module — the same local-constant convention
 # `review_adjudication` already uses for this identical string.
 _MUST_FIX = "MUST_FIX"
+_DEBT = "DEBT"
 
 # Matches review_findings._dedup_key's return shape (severity, file,
 # line_start, line_end, evidence); None line endpoints map to -1 there.
@@ -100,11 +101,16 @@ def _admit_new_must_fix(
     """Decide whether a genuinely-new MUST_FIX may enter the fix loop.
 
     Returns ``(admit, reason)``. The four admitting/rejecting reasons are
-    distinct strings, not a bool plus prose, because the caller routes on them:
-    ``"unsubstantiated_evidence"`` in particular is deliberately NOT folded
-    into ``"treadmill"`` — a reviewer that invoked the release-critical
-    exception and failed to substantiate it is a different operator-facing
-    signal from a reviewer that never claimed a link at all.
+    distinct strings, not a bool plus prose: ``"unsubstantiated_evidence"`` in
+    particular is deliberately NOT folded into ``"treadmill"`` — a reviewer
+    that invoked the release-critical exception and failed to substantiate it
+    is conceptually a different case from a reviewer that never claimed a link
+    at all. The current caller (:func:`_track_open_findings`) does not itself
+    branch on *reason* — both rejection reasons route to the same debt-ledger
+    diversion and ``REVIEW_TREADMILL_DETECTED`` event, whose payload was
+    deliberately scoped to five fields by operator pre-flight resolution and
+    does not carry *reason*. *reason* exists for tests and any future caller
+    that does need the distinction.
     """
     if _finding_in_delta(finding, delta_changed_files):
         return True, "in_delta"
@@ -210,7 +216,7 @@ def _track_open_findings(
             del survivors[key]
 
     for af in accepted:
-        if af.finding.severity == "DEBT":
+        if af.finding.severity == _DEBT:
             _ledger_debt(af, debt_ledger=debt_ledger, discovery_sha=reviewed_sha)
 
     for key, af in current.items():
