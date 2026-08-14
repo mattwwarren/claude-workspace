@@ -1954,7 +1954,7 @@ class TestRenderDebtNote:
 
     def test_previous_reviewed_sha_renders_only_when_set(self) -> None:
         unset = render_verdict_comment(self._verdict(), fix_loop_enabled=True)
-        assert "previously reviewed" not in unset.lower()
+        assert "reviewed only what changed since" not in unset
 
         set_body = render_verdict_comment(
             self._verdict(previous_reviewed_sha="0ldsha1"), fix_loop_enabled=True
