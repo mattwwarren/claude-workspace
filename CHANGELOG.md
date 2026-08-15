@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Reviewer `schema_mismatch` on `no_diff_anchor: null` (#1817 regression):
+  `Finding.no_diff_anchor` was added as `bool = False` without a
+  `mode="before"` None-normalizer, unlike `detail`/`findings` on
+  `ReviewerFindingsDocument`. The OpenAI strict-schema transform
+  (`to_openai_strict_schema`) makes it nullable+required, so `codex exec
+  --output-schema` faithfully emits `"no_diff_anchor": null` on every
+  finding that doesn't use the #1817 no-diff-anchor marker — and
+  `ReviewerFindingsDocument.model_validate()` rejected `null` for a `bool`
+  field, classifying the entire reviewer document as `schema_mismatch`.
+  Every reviewer role with ≥1 finding failed. Added
+  `_null_no_diff_anchor_to_default` mirroring the existing
+  `_null_detail_to_default` / `_null_findings_to_default` pattern, plus a
+  round-trip test that would have caught the gap at #1817 time.
+
 ## [1.34.0] - 2026-08-13
 
 ### Added
