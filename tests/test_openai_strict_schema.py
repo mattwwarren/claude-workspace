@@ -31,6 +31,7 @@ _VALID_FINDING: dict[str, Any] = {
     "evidence": "def broken():",
     "confidence": "HIGH",
     "escalation": None,
+    "no_diff_anchor": None,
 }
 
 
@@ -172,6 +173,24 @@ class TestRoundTripValidation:
         assert doc.findings[0].line_start is None
         assert doc.findings[0].line_end is None
         assert doc.findings[0].escalation is None
+
+    def test_round_trip_model_validate_null_no_diff_anchor(self) -> None:
+        # #1817 added `no_diff_anchor: bool = False` to Finding without a
+        # matching None-normalizer (unlike detail/findings on the document).
+        # The strict-schema transform makes it nullable+required, so codex
+        # faithfully sends `null` on every finding that doesn't use the
+        # no-diff-anchor marker — and model_validate rejected `null` for a
+        # `bool` field, classifying the entire reviewer document as
+        # schema_mismatch. This test would have caught the gap at #1817
+        # time if it had existed then.
+        payload = {
+            "reviewer_role": "R",
+            "status": "ok",
+            "detail": "",
+            "findings": [{**_VALID_FINDING, "no_diff_anchor": None}],
+        }
+        doc = ReviewerFindingsDocument.model_validate(payload)
+        assert doc.findings[0].no_diff_anchor is False
 
     def test_non_null_values_still_validate_normally(self) -> None:
         payload = {

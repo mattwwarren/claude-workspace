@@ -171,6 +171,20 @@ class Finding(BaseModel):
     escalation: EscalationMetadata | None = None
     no_diff_anchor: bool = False
 
+    @field_validator("no_diff_anchor", mode="before")
+    @classmethod
+    def _null_no_diff_anchor_to_default(cls, v: bool | None) -> bool:
+        # Why: an OpenAI strict-mode schema (#1364) wraps every previously-
+        # optional field as nullable rather than omittable, so codex may send
+        # an explicit `null` for a field it left at its default. Normalize
+        # before pydantic's type coercion instead of widening
+        # `no_diff_anchor`'s Python-level type to `bool | None`. Mirrors the
+        # existing `_null_detail_to_default` / `_null_findings_to_default`
+        # on ReviewerFindingsDocument — #1817 added the field without the
+        # matching normalizer, so every codex-produced finding with
+        # `no_diff_anchor: null` failed model_validate as a schema_mismatch.
+        return False if v is None else v
+
     @field_validator("file", "summary", "consequence", "suggested_fix", "evidence")
     @classmethod
     def _reject_blank(cls, v: str) -> str:
