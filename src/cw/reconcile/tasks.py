@@ -774,9 +774,7 @@ def _release_variant_a(task: TicketTask, policy: ReapPolicy) -> None:
         # created (automerge_not_armed) -- mirrors
         # complete_timed_out_merged_tasks's identical disposition="shipped"
         # for the same "PR merged, no further gh call needed" shape.
-        transition_task_status(
-            task, QueueItemStatus.COMPLETED, disposition="shipped"
-        )
+        transition_task_status(task, QueueItemStatus.COMPLETED, disposition="shipped")
         task.session_id = None
     else:
         task.stale_gate_detected_at = datetime.now(UTC)
