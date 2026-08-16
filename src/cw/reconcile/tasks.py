@@ -698,15 +698,30 @@ _STALE_GATE_CONSUMER = "dev_queue_stale_gate"
 # stamp for a failed auto-merge arm on an already-created PR (both parks
 # populate task.pr_url -- merge_pending directly, automerge_not_armed via the
 # pr_info fallback threaded in dispatch/routing.py).
+#
+# The "automerge_not_armed" / "prior_pipeline_pr_open" reason literals
+# themselves are NOT re-declared here -- _is_variant_a_gate_task and
+# _is_variant_b_gate_task below import them directly from
+# cw.dispatch.routing (the sole producer that stamps task.blocked_reason
+# with these values) via a function-level deferred import, so a locally
+# re-declared copy can never drift from the producer with no compiler
+# signal. Deferred, not module-top, because cw.dispatch's package __init__
+# imports cw.reconcile at module level (loop.py/gating.py/lanes.py), so a
+# top-level `from cw.dispatch.routing import ...` here creates a real
+# circular import at package-init time (confirmed: ImportError "cannot
+# import name 'reconcile' from partially initialized module 'cw.reconcile'"
+# via gating.py's `from cw.reconcile import reconcile`). Same shape as the
+# #698 reconcile._shared -> cw.dispatch precedent and the #1310 gating<->
+# claim pair -- see cw.reconcile._shared.classify_sentinel_stage_position
+# and cw.dispatch.claim's deferred `from cw.dispatch.gating import
+# _invalidate_stale_context_json`.
 _VARIANT_A_MERGE_PENDING_DISPOSITION = "merge_pending"
 _VARIANT_A_BLOCKED_DISPOSITION = "blocked"
-_VARIANT_A_AUTOMERGE_NOT_ARMED_REASON = "automerge_not_armed"
 
 # Variant B gate-class markers: a BLOCKED_ON_USER row with no PR of its own,
 # parked behind a DIFFERENT ticket's open PR (dispatch/routing.py Rule 5,
 # merge_gate_blocked/prior_pipeline_pr_open).
 _VARIANT_B_DISPOSITION = "merge_gate_blocked"
-_VARIANT_B_PRIOR_PIPELINE_PR_OPEN_REASON = "prior_pipeline_pr_open"
 
 _PROPOSED_ACTION_VARIANT_A = "release_stale_gate_variant_a"
 _PROPOSED_ACTION_VARIANT_B = "release_stale_gate_variant_b"
@@ -718,18 +733,28 @@ def _is_variant_a_gate_task(task: TicketTask) -> bool:
         return False
     if task.disposition == _VARIANT_A_MERGE_PENDING_DISPOSITION:
         return True
+    # Function-level import breaks the cw.dispatch<->cw.reconcile package
+    # import cycle -- see the comment above _VARIANT_A_MERGE_PENDING_
+    # DISPOSITION.
+    from cw.dispatch.routing import _AUTOMERGE_NOT_ARMED_REASON
+
     return (
         task.disposition == _VARIANT_A_BLOCKED_DISPOSITION
-        and task.blocked_reason == _VARIANT_A_AUTOMERGE_NOT_ARMED_REASON
+        and task.blocked_reason == _AUTOMERGE_NOT_ARMED_REASON
     )
 
 
 def _is_variant_b_gate_task(task: TicketTask) -> bool:
     """True iff *task* is a BLOCKED_ON_USER row parked behind ANOTHER ticket's PR."""
+    # Function-level import breaks the cw.dispatch<->cw.reconcile package
+    # import cycle -- see the comment above _VARIANT_A_MERGE_PENDING_
+    # DISPOSITION.
+    from cw.dispatch.routing import _PRIOR_PIPELINE_PR_OPEN_REASON
+
     return (
         task.status == QueueItemStatus.BLOCKED_ON_USER
         and task.disposition == _VARIANT_B_DISPOSITION
-        and task.blocked_reason == _VARIANT_B_PRIOR_PIPELINE_PR_OPEN_REASON
+        and task.blocked_reason == _PRIOR_PIPELINE_PR_OPEN_REASON
         and task.blocked_on_pr is not None
     )
 
