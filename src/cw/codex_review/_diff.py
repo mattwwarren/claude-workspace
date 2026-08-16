@@ -121,6 +121,40 @@ def _parse_unified_diff(
     return file_diffs, file_line_text, file_window_text, changed_files
 
 
+def _capture_head_sha(worktree: Path) -> str:
+    """Return HEAD's SHA via a bare ``git rev-parse HEAD`` (#1837).
+
+    The cheap half of what :func:`_capture_diff` does, split out so a caller
+    that only needs the head SHA — the fix loop's delta-mode review pass —
+    doesn't also pay for a full ``git diff`` subprocess call and unified-diff
+    parse it has no use for.
+    """
+    return subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=worktree, text=True
+    ).strip()
+
+
+def _build_captured_diff(diff_text: str) -> tuple[CapturedDiff, list[str]]:
+    """Parse *diff_text* and build the :class:`CapturedDiff` it describes.
+
+    Shared by :func:`_capture_diff` and :func:`_capture_delta_diff` (#1837) so
+    the CapturedDiff-construction shape — deriving ``files`` from
+    ``file_line_text`` so the two can never drift — can't silently diverge
+    between the two capture paths.
+    """
+    file_diffs, file_line_text, file_window_text, changed_files = _parse_unified_diff(
+        diff_text
+    )
+    diff = CapturedDiff(
+        text=diff_text,
+        files={f: sorted(lines) for f, lines in file_line_text.items()},
+        file_diffs=file_diffs,
+        file_line_text=file_line_text,
+        file_window_text=file_window_text,
+    )
+    return diff, changed_files
+
+
 def _capture_diff(
     worktree: Path, default_branch: str
 ) -> tuple[CapturedDiff, str, list[str]]:
@@ -133,23 +167,33 @@ def _capture_diff(
     deletions), parsed from this same diff text rather than a second
     subprocess call (SHOULD_FIX 11, #1236).
     """
-    reviewed_sha = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=worktree, text=True
-    ).strip()
+    reviewed_sha = _capture_head_sha(worktree)
     diff_text = subprocess.check_output(
         ["git", "diff", "--no-color", f"{default_branch}...HEAD"],
         cwd=worktree,
         text=True,
     )
-    file_diffs, file_line_text, file_window_text, changed_files = _parse_unified_diff(
-        diff_text
-    )
-    files = {f: sorted(lines) for f, lines in file_line_text.items()}
-    diff = CapturedDiff(
-        text=diff_text,
-        files=files,
-        file_diffs=file_diffs,
-        file_line_text=file_line_text,
-        file_window_text=file_window_text,
-    )
+    diff, changed_files = _build_captured_diff(diff_text)
     return diff, reviewed_sha, changed_files
+
+
+def _capture_delta_diff(
+    worktree: Path, from_sha: str, to_sha: str
+) -> tuple[CapturedDiff, list[str]]:
+    """Capture ``git diff <from_sha>..<to_sha>`` as a :class:`CapturedDiff` (#1837).
+
+    The two-SHA sibling of :func:`_capture_diff`, reusing
+    :func:`_parse_unified_diff` (via :func:`_build_captured_diff`) unchanged.
+    Two-dot, not three-dot: both endpoints are concrete commits on the same
+    branch, so there is no merge-base to resolve — unlike ``_capture_diff``'s
+    ``<default_branch>...HEAD`` range.
+
+    Returns ``(diff, changed_files)``. There is no ``reviewed_sha`` in the
+    tuple because the caller already knows it: it is *to_sha*.
+    """
+    diff_text = subprocess.check_output(
+        ["git", "diff", "--no-color", f"{from_sha}..{to_sha}"],
+        cwd=worktree,
+        text=True,
+    )
+    return _build_captured_diff(diff_text)

@@ -21,7 +21,7 @@ Public surface:
   :class:`AcceptedFinding`, :class:`ReviewerRunRecord`,
   :class:`ReviewerRunMetrics`, :class:`ReviewerRunFailure`,
   :class:`AgentSpecStatus`, :class:`StrippedEscalation`,
-  :class:`ReviewVerdict`, :class:`CapturedDiff`.
+  :class:`ReviewVerdict`, :class:`CapturedDiff`, :class:`DebtRecord`.
 - Functions: :func:`validate_reviewer_document`, :func:`dedupe_findings`,
   :func:`derive_review_counts`, :func:`consolidate_verdict`,
   :func:`write_review_verdict`.
@@ -43,7 +43,12 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 
-Severity = Literal["MUST_FIX", "SHOULD_FIX", "NIT", "PRINCIPLE"]
+# "DEBT" (#1837) is the non-blocking severity for a real problem the reviewer
+# found on code this diff did not cause: it is tracked in the verdict's debt
+# ledger for later filing rather than handed to the fix loop. Like
+# NIT/PRINCIPLE it is excluded from every gate-feeding aggregate by the
+# existing `severity in {MUST_FIX, SHOULD_FIX}` filters, with no extra code.
+Severity = Literal["MUST_FIX", "SHOULD_FIX", "DEBT", "NIT", "PRINCIPLE"]
 # "dropped" (#1805) is the terminal state for an accepted finding that nobody
 # actually decided the fate of: no matching adjudication entry, or a "fixed"
 # claim the fix-cycle diff does not substantiate. It is stamped exclusively by
@@ -65,6 +70,15 @@ CapabilityMode = Literal["capable", "degraded"]
 # (#1773): the repo-local ``.claude/agents/`` copy, the operator's global
 # ``~/.claude/agents/`` fallback, or nowhere at all. See AgentSpecStatus.
 AgentSpecSource = Literal["repo", "global", "none"]
+# Where a DebtRecord stands with the issue tracker (#1837). "NEEDS_FILING" is
+# the only value this ticket ever produces; the other two exist for the
+# follow-up that actually files the tickets (#1838).
+TrackingDisposition = Literal["FILED", "ALREADY_TRACKED", "NEEDS_FILING"]
+# The fingerprint-normalizer version stamped on every DebtRecord (#1837).
+# Defined here, next to the model that owns the field, rather than in
+# cw.review_debt (which imports it) -- a single source of truth so a future
+# version bump can't update one site and silently miss the other.
+FINGERPRINT_VERSION: Literal["FINGERPRINT_V1"] = "FINGERPRINT_V1"
 # The six reasons a finding can be rejected outright (used by
 # :attr:`RejectedFinding.reason` and :func:`_classify_finding`'s return type).
 # Split from the escalation-strip reason (R6): a stripped escalation is a
@@ -170,6 +184,17 @@ class Finding(BaseModel):
     confidence: Confidence
     escalation: EscalationMetadata | None = None
     no_diff_anchor: bool = False
+    # #1837: the two fields a reviewer uses to argue a finding on code the
+    # latest fix cycle did NOT touch still belongs in this fix loop.
+    # ``transitive_impact_evidence`` is a verbatim quote from the delta
+    # demonstrating the causal link; ``release_critical_exception`` is the
+    # rationale for invoking the release-critical carve-out (the string itself
+    # IS the required justification — non-blank means "invoked"). Both blank
+    # by default, so a reviewer that has never heard of them degrades to the
+    # pre-#1837 shape: the finding is treated as treadmill and downgraded to
+    # tracked debt rather than blocking the loop.
+    transitive_impact_evidence: str = ""
+    release_critical_exception: str = ""
 
     @field_validator("no_diff_anchor", mode="before")
     @classmethod
@@ -442,6 +467,38 @@ class StrippedEscalation(BaseModel):
     reason: EscalationStripReason = _ESCALATION_STRIP_REASON
 
 
+class DebtRecord(BaseModel):
+    """One tracked debt item carried on a verdict (#1837).
+
+    Produced by :mod:`cw.review_debt` from an accepted DEBT-severity finding,
+    or from a MUST_FIX the fix loop's admission gate refused (a treadmill
+    finding on code the latest fix cycle never touched). Either way the
+    finding is recorded rather than acted on, so the loop can converge without
+    the problem going unremembered.
+
+    ``fingerprint`` is the ``(file, normalized_summary)`` pair
+    :func:`cw.review_debt.fingerprint_v1` produces, stored alongside the
+    ``fingerprint_version`` that generated it so a later normalizer revision
+    can tell which records it can still compare against.
+
+    ``rule_id`` and ``symbol`` are always blank today — :class:`Finding` has no
+    source field for either — and exist so a future producer that does know
+    them has a typed home instead of a schema change.
+    """
+
+    fingerprint: tuple[str, str]
+    fingerprint_version: Literal["FINGERPRINT_V1"] = FINGERPRINT_VERSION
+    rule_id: str = ""
+    file: str
+    symbol: str = ""
+    evidence: str
+    summary: str
+    suggested_follow_up: str
+    discovery_sha: str
+    tracking_disposition: TrackingDisposition = "NEEDS_FILING"
+    reviewer_role: str = ""
+
+
 class ReviewVerdict(BaseModel):
     """Consolidated review outcome across all reviewers (#1108 artifact).
 
@@ -505,6 +562,16 @@ class ReviewVerdict(BaseModel):
     # and default-0 (the `rejected_must_fix`/`stripped_escalations` precedent):
     # `consolidate_verdict` never touches it, only `apply_adjudication` does.
     unmatched_adjudication_count: int = 0
+    # #1837: the head this pass's diff was taken FROM, set only on a fix-loop
+    # re-review (cycle N reviews `previous_reviewed_sha..reviewed_sha`, not
+    # the whole PR). `None` means the pass reviewed the full branch diff.
+    # Purely recorded, same convention as `capability_mode` above.
+    previous_reviewed_sha: str | None = None
+    # #1837: findings recorded rather than acted on — accepted DEBT-severity
+    # findings plus MUST_FIX findings the fix loop's admission gate refused.
+    # Deduplicated by fingerprint before it is stamped, so the renderer needs
+    # no already-seen bookkeeping of its own.
+    debt: list[DebtRecord] = Field(default_factory=list)
 
 
 class CapturedDiff(BaseModel):

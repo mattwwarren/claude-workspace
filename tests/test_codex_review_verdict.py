@@ -46,7 +46,12 @@ from tests._reconcile_helpers import (
     SCOPE_GUARD_LINES,
     _make_stale_base_repo,
 )
-from tests.conftest import _make_diff, _make_finding, _make_reviewer_doc
+from tests.conftest import (
+    _make_debt_record,
+    _make_diff,
+    _make_finding,
+    _make_reviewer_doc,
+)
 from tests.test_review_adjudication import _make_voided_finding
 
 if TYPE_CHECKING:
@@ -1949,3 +1954,57 @@ class TestVerdictRecordsCapabilityMode:
         assert verdict is not None
         assert verdict.capability_mode is None
         assert verdict.capability_reason is None
+
+
+# ---------------------------------------------------------------------------
+# _render_debt_note / previous_reviewed_sha (#1837)
+# ---------------------------------------------------------------------------
+
+
+class TestRenderDebtNote:
+    def _verdict(self, **overrides: object) -> ReviewVerdict:
+        payload: dict[str, object] = {
+            "blocking": False,
+            "must_fix": [],
+            "reviewed_sha": "sha",
+            "review": Review(
+                must_fix_initial=0,
+                should_fix=0,
+                fix_cycles_used=0,
+                deferred=0,
+                agents_run=1,
+            ),
+        }
+        payload.update(overrides)
+        return ReviewVerdict.model_validate(payload)
+
+    def test_empty_debt_renders_nothing(self) -> None:
+        body = render_verdict_comment(self._verdict(), fix_loop_enabled=False)
+        assert "### Debt" not in body
+
+    def test_debt_section_names_file_summary_and_disposition(self) -> None:
+        record = _make_debt_record(
+            file="src/cw/bar.py",
+            summary="Duplicated helper",
+            fingerprint=("src/cw/bar.py", "duplicated helper"),
+        )
+        body = render_verdict_comment(
+            self._verdict(debt=[record]), fix_loop_enabled=True
+        )
+
+        # `###`, matching `_render_rejected_must_fix`'s sub-section convention.
+        assert "### Debt" in body
+        assert "## Debt" not in body.replace("### Debt", "")
+        assert "src/cw/bar.py" in body
+        assert "Duplicated helper" in body
+        assert "NEEDS_FILING" in body
+        assert "duplicated helper" in body
+
+    def test_previous_reviewed_sha_renders_only_when_set(self) -> None:
+        unset = render_verdict_comment(self._verdict(), fix_loop_enabled=True)
+        assert "reviewed only what changed since" not in unset
+
+        set_body = render_verdict_comment(
+            self._verdict(previous_reviewed_sha="0ldsha1"), fix_loop_enabled=True
+        )
+        assert "0ldsha1" in set_body

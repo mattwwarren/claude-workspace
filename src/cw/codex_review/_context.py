@@ -41,7 +41,11 @@ from typing import TYPE_CHECKING, NamedTuple
 import yaml
 
 from cw.codex_review._capability import _probe_filesystem_capability
-from cw.codex_review._diff import _capture_diff
+from cw.codex_review._diff import (
+    _capture_delta_diff,
+    _capture_diff,
+    _capture_head_sha,
+)
 from cw.gh import FETCH_COMMENTS_TIMEOUT, fetch_issue_comments
 from cw.local_runner import resolve_tier
 from cw.models import CONTEXT_JSON_RELATIVE_PATH, HOOK_CONTEXT_RELATIVE_PATH
@@ -56,7 +60,7 @@ if TYPE_CHECKING:
     from cw.codex_runner import CodexRunner
     from cw.models import TicketTask
     from cw.review_adjudication import VoidedFinding
-    from cw.review_findings import AgentSpecSource, CapturedDiff
+    from cw.review_findings import AgentSpecSource, CapturedDiff, Finding
 
 _log = logging.getLogger(__name__)
 
@@ -179,6 +183,32 @@ _OUTPUT_SPEC_PRECEDENCE = (
     "including any literal sentinel value it defines for a no-findings "
     "result — are void for this invocation; this instruction block's JSON "
     "ReviewerFindingsDocument contract governs exclusively."
+)
+
+# The delta-mode-only marker, named for the same reason the two capability
+# markers above are: the prompt text and its regression test cannot drift.
+_DELTA_MODE_MARKER = "the diff above is a DELTA, not the full pull request"
+
+_DELTA_MODE_INSTRUCTIONS = (
+    "## Delta Review (#1837)\n"
+    f"This is a fix-loop re-review, so {_DELTA_MODE_MARKER}: it contains only "
+    "what changed since the previous review pass. Judge the delta.\n"
+    "- A problem the delta introduced, or that lives on a line the delta "
+    "touched, is an ordinary MUST_FIX.\n"
+    "- A problem on code the delta did NOT touch is `DEBT` severity, not "
+    "MUST_FIX. It will be recorded for follow-up rather than sent back to the "
+    "fix agent. Raising it as MUST_FIX will not make it block — it will be "
+    "downgraded and tracked.\n"
+    "- Two exceptions let an out-of-delta problem block anyway, and both "
+    "require proof, not assertion. Set `transitive_impact_evidence` to a "
+    "VERBATIM quote from the delta above that demonstrates the delta caused "
+    "the problem (a changed signature the unchanged consumer still calls the "
+    "old way, say). Or, for a release-critical blocker that predates this "
+    "branch entirely, set `release_critical_exception` to the rationale — and "
+    "make sure the finding's own `evidence` is a verbatim quote of the code "
+    "as it exists in the worktree right now, because that quote is checked.\n"
+    "- An unsubstantiated exception is downgraded to tracked debt, not "
+    "silently dropped."
 )
 
 _OUTPUT_INSTRUCTIONS_INLINED_ONLY = (
@@ -853,6 +883,25 @@ def _render_lint_grounding_block(
     return "\n\n".join(parts)
 
 
+def _render_prior_open_findings(findings: list[Finding]) -> str:
+    """Render the still-open MUST_FIX findings from earlier fix cycles (#1837).
+
+    Informational only: a reviewer may re-report any of these if it is still
+    present, but is not asked to restate a verdict on each. A finding simply
+    absent from a later cycle's output is treated as resolved.
+    """
+    lines = [
+        "## Unresolved Prior Findings",
+        "MUST_FIX findings still open from earlier fix cycles in this run. "
+        "Re-report any that are still present; say nothing about the ones "
+        "that are not.",
+    ]
+    lines.extend(
+        f"- **{f.file}** — {f.summary}\n  - evidence: `{f.evidence}`" for f in findings
+    )
+    return "\n".join(lines)
+
+
 def _build_reviewer_prompt(
     role: str,
     *,
@@ -868,6 +917,8 @@ def _build_reviewer_prompt(
     lint_grounding: str | None = None,
     operator_comments_text: str | None = None,
     pending_operator_comment: bool = False,
+    prior_open_findings: list[Finding] | None = None,
+    delta_mode: bool = False,
 ) -> str:
     """Materialize one reviewer's full prompt, inlining every needed section.
 
@@ -889,6 +940,11 @@ def _build_reviewer_prompt(
     re-entry followed a regress. When the marker is set, the comments section
     is prefixed with a banner making them a binding adjudication input rather
     than background context. Same safe-default convention again.
+
+    *prior_open_findings* and *delta_mode* (#1837) are the fix-loop re-review
+    pair: the MUST_FIX findings still open from earlier cycles, and the flag
+    saying the inlined diff is a delta rather than the whole pull request.
+    Both default off, so cycle 0's prompt is byte-identical to before.
     """
     parts = [
         f"# Reviewer Role: {role}",
@@ -923,9 +979,13 @@ def _build_reviewer_prompt(
         parts.append(f"## Repo Lint Configuration\n{lint_grounding}")
     if sensitive_hits:
         parts.append(_render_sensitive_block(sensitive_hits))
+    if prior_open_findings:
+        parts.append(_render_prior_open_findings(prior_open_findings))
     parts.append("## Changed Files\n" + "\n".join(changed_files))
     parts.append(f"## Diff\n{diff.text}")
     parts.append(_select_output_instructions(capable))
+    if delta_mode:
+        parts.append(_DELTA_MODE_INSTRUCTIONS)
     return "\n\n".join(parts)
 
 
@@ -969,6 +1029,16 @@ class _ReviewPassInputs(NamedTuple):
     it is consumed after synthesis, by ``apply_voided_suppression``. It rides
     here anyway so the fetch happens once per pass, at the one place both
     ``run_review`` and the fix loop's per-cycle re-review already share.
+
+    ``delta_diff``/``delta_changed_files`` (#1837) are the fix-loop re-review
+    pair: the diff between the previous reviewed head and this one, and its
+    changed-path set. Both are ``None`` on cycle 0, which reviews the whole
+    branch — the caller reads that as "use ``diff``". When they are set,
+    ``diff`` is the SAME object as ``delta_diff`` (not a separately-captured
+    full branch diff): the fix loop's scope-violation gate reads ``cycle0_files``,
+    captured once at cycle 0 in ``run_review_with_fix_loop``, not this field, so
+    a second full ``git diff``/parse on every in-loop cycle bought nothing and
+    was removed (#1837 Performance SHOULD_FIX).
     """
 
     roles: list[str]
@@ -978,6 +1048,8 @@ class _ReviewPassInputs(NamedTuple):
     capability: _CodexFilesystemCapability
     agent_spec_status: list[AgentSpecStatus]
     voided_findings: list[VoidedFinding]
+    delta_diff: CapturedDiff | None = None
+    delta_changed_files: frozenset[str] | None = None
 
 
 def _prepare_review_pass(
@@ -987,6 +1059,8 @@ def _prepare_review_pass(
     *,
     runner: CodexRunner,
     session_id: str,
+    delta_from_sha: str | None = None,
+    prior_open_findings: list[Finding] | None = None,
 ) -> _ReviewPassInputs:
     """Assemble one review pass's inputs: capture diff, select roles, build prompts.
 
@@ -1006,9 +1080,32 @@ def _prepare_review_pass(
     call — notably the fix loop's per-cycle re-review — is a cache hit that
     runs nothing, which is why the probe lives here rather than at each call
     site.
+
+    ``delta_from_sha``/``prior_open_findings`` (#1837) turn this into a
+    fix-loop re-review pass: role selection, sensitive-hit scanning, and every
+    prompt are built from the delta between *delta_from_sha* and the current
+    head instead of the whole branch diff, and the still-open findings from
+    earlier cycles are inlined for context. In this mode ``reviewed_sha`` is
+    captured via a bare ``git rev-parse HEAD`` and ``diff`` is the delta
+    itself — no second full ``_capture_diff`` runs, since nothing downstream
+    reads a full branch diff off an in-loop pass (the fix loop's
+    scope-violation gate uses its own cycle-0-captured file set). Both
+    parameters default to ``None``, so ``run_review``'s cycle-0 call site is
+    unchanged.
     """
     capability = _probe_filesystem_capability(runner=runner, session_id=session_id)
-    diff, reviewed_sha, changed_files = _capture_diff(worktree, default_branch)
+    delta_diff: CapturedDiff | None = None
+    delta_changed_files: frozenset[str] | None = None
+    if delta_from_sha is not None:
+        reviewed_sha = _capture_head_sha(worktree)
+        delta_diff, delta_changed_list = _capture_delta_diff(
+            worktree, delta_from_sha, reviewed_sha
+        )
+        delta_changed_files = frozenset(delta_changed_list)
+        changed_files = delta_changed_list
+        diff = delta_diff
+    else:
+        diff, reviewed_sha, changed_files = _capture_diff(worktree, default_branch)
     scope_tier = resolve_tier(task.scope_hint)
     categories = _categorize_changed_files(changed_files)
     sensitive_hits = _load_sensitive_hits(worktree, changed_files, scope_tier)
@@ -1063,6 +1160,8 @@ def _prepare_review_pass(
             lint_grounding=lint_grounding,
             operator_comments_text=operator_comments_text,
             pending_operator_comment=pending_operator_comment,
+            prior_open_findings=prior_open_findings,
+            delta_mode=delta_from_sha is not None,
         )
         for role in roles
     }
@@ -1074,4 +1173,6 @@ def _prepare_review_pass(
         capability=capability,
         agent_spec_status=[resolutions[role].status for role in roles],
         voided_findings=voided_findings,
+        delta_diff=delta_diff,
+        delta_changed_files=delta_changed_files,
     )

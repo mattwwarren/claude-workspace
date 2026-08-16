@@ -348,6 +348,13 @@ class OrchestratorEventType(StrEnum):
     # it inline for exactly that reason -- suppressing and recording the
     # suppression are not separable steps (see ADR-0015).
     REVIEW_FINDING_VOIDED = "review.finding_voided"
+    # GitHub #1837 -- a fix-loop re-review raised a MUST_FIX on code the latest
+    # fix cycle never touched, with no substantiated causal link, so the
+    # admission gate refused it and diverted it into the debt ledger instead
+    # of letting it restart the loop. Same namespacing and same rationale as
+    # REVIEW_FINDING_VOIDED above: the refusal is a mechanical decision nobody
+    # asked to see, and this event is the only durable record it happened.
+    REVIEW_TREADMILL_DETECTED = "review.treadmill_detected"
 
 
 class DispatchSkipReason(StrEnum):

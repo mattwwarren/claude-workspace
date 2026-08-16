@@ -100,7 +100,9 @@ from cw.codex_review._context import (
 from cw.codex_review._diff import (
     _DIFF_GIT_HEADER_RE,
     _HUNK_RE,
+    _capture_delta_diff,
     _capture_diff,
+    _capture_head_sha,
     _parse_hunk_new_start,
     _parse_unified_diff,
 )
@@ -166,7 +168,9 @@ __all__ = [
     "_SensitiveHit",
     "_build_generic_codex_argv",
     "_build_reviewer_prompt",
+    "_capture_delta_diff",
     "_capture_diff",
+    "_capture_head_sha",
     "_categorize_changed_files",
     "_classify_codex_failure",
     "_classify_codex_output_failure",

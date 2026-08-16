@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -17,10 +18,10 @@ from cw.codex_fix_loop import (
     _build_fix_codex_argv,
     _build_fix_prompt,
     _commit_fix_cycle,
-    _track_open_findings,
     _verdict_snapshot_filename,
     run_review_with_fix_loop,
 )
+from cw.codex_fix_loop_convergence import _open_finding_key, _track_open_findings
 from cw.codex_review import (
     _MIN_ROLE_TIMEOUT_SECONDS,
     _REVIEWER_ROLE_AGENT_FILES,
@@ -41,7 +42,6 @@ from cw.models import Stage, TicketTask
 from cw.review_findings import (
     AcceptedFinding,
     ReviewVerdict,
-    _dedup_key,
     consolidate_verdict,
     write_review_verdict,
 )
@@ -241,6 +241,11 @@ class _FixLoopRunner:
         )
 
 
+def _stub_prepared() -> SimpleNamespace:
+    """The two `_ReviewPassInputs` fields the loop reads off `_rereview` (#1837)."""
+    return SimpleNamespace(delta_diff=None, delta_changed_files=None)
+
+
 def _run_loop(
     runner: CodexRunner,
     worktree: Path,
@@ -365,7 +370,8 @@ class TestFixCycleFloor:
         )
         clean_result, clean_verdict = _stage_complete(worktree)
         monkeypatch.setattr(
-            "cw.codex_fix_loop._rereview", lambda **_k: (clean_result, clean_verdict)
+            "cw.codex_fix_loop._rereview",
+            lambda **_k: (clean_result, clean_verdict, _stub_prepared()),
         )
         runner = _SequencedRunner([CodexRunResult(returncode=0, stdout="", stderr="")])
         out, _ = _run_loop(runner, worktree, budget=None, session_id="s-floor-none")
@@ -389,7 +395,8 @@ class TestFixCycleFloor:
         )
         clean_result, clean_verdict = _stage_complete(worktree)
         monkeypatch.setattr(
-            "cw.codex_fix_loop._rereview", lambda **_k: (clean_result, clean_verdict)
+            "cw.codex_fix_loop._rereview",
+            lambda **_k: (clean_result, clean_verdict, _stub_prepared()),
         )
         # deadline 1000; remaining = 1000 - 940 = 60 == floor → not floored.
         monkeypatch.setattr("cw.codex_fix_loop.time.monotonic", _Clock([0.0, 940.0]))
@@ -639,6 +646,23 @@ class TestFixInvocation:
 # ---------------------------------------------------------------------------
 
 
+def _track_cycle0(
+    open_findings: dict[object, AcceptedFinding], accepted: list[AcceptedFinding]
+) -> dict[object, AcceptedFinding]:
+    """`_track_open_findings` on the cycle-0 (no-delta) seeding path (#1837)."""
+    return _track_open_findings(
+        open_findings,
+        accepted,
+        delta_diff=None,
+        delta_changed_files=None,
+        debt_ledger={},
+        previous_reviewed_sha=None,
+        reviewed_sha="sha0",
+        worktree=Path(),
+        ticket_id="1837",
+    )
+
+
 def _accepted(finding_dict: dict[str, object]) -> AcceptedFinding:
     return AcceptedFinding(
         finding=_make_finding(**finding_dict), reviewers=["Code Quality Reviewer"]
@@ -648,19 +672,19 @@ def _accepted(finding_dict: dict[str, object]) -> AcceptedFinding:
 class TestFixLoopDispositionTracking:
     def test_finding_absent_next_cycle_is_dropped(self) -> None:
         af = _accepted(_MF_A)
-        open_findings = {_dedup_key(af.finding): af}
+        open_findings = {_open_finding_key(af.finding): af}
         # Next cycle's accepted set no longer contains the finding → dropped.
-        updated = _track_open_findings(open_findings, [])
+        updated = _track_cycle0(open_findings, [])
         assert updated == {}
 
     def test_finding_first_seen_later_cycle_is_tracked(self) -> None:
         af = _accepted(_MF_B)
-        updated = _track_open_findings({}, [af])
-        assert _dedup_key(af.finding) in updated
+        updated = _track_cycle0({}, [af])
+        assert _open_finding_key(af.finding) in updated
 
     def test_should_fix_never_enters_tracker(self) -> None:
         sf = _accepted(_SF)
-        updated = _track_open_findings({}, [sf])
+        updated = _track_cycle0({}, [sf])
         assert updated == {}
 
     def test_suppressed_must_fix_never_enters_tracker(self) -> None:
@@ -679,14 +703,14 @@ class TestFixLoopDispositionTracking:
         )
         still_open = _accepted(_MF_B)
 
-        updated = _track_open_findings({}, [voided, still_open])
+        updated = _track_cycle0({}, [voided, still_open])
 
-        assert list(updated) == [_dedup_key(still_open.finding)]
+        assert list(updated) == [_open_finding_key(still_open.finding)]
 
     def test_previously_tracked_finding_drops_out_once_voided(self) -> None:
         """A void landing mid-loop retires an already-tracked finding."""
         af = _accepted(_MF_A)
-        open_findings = {_dedup_key(af.finding): af}
+        open_findings = {_open_finding_key(af.finding): af}
         voided = af.model_copy(
             update={
                 "disposition": "rejected",
@@ -694,7 +718,7 @@ class TestFixLoopDispositionTracking:
             }
         )
 
-        assert _track_open_findings(open_findings, [voided]) == {}
+        assert _track_cycle0(open_findings, [voided]) == {}
 
 
 class TestVoidedFindingNeverEngagesFixLoop:
@@ -740,12 +764,17 @@ class TestMustFixInitialSnapshot:
         runner = _FixLoopRunner(
             [_MF_DOC, _MF_DOC, _MF_DOC, _MF_AB_DOC, _MF_AB_DOC, _MF_AB_DOC]
         )
-        out, _ = _run_loop(runner, worktree, session_id="s-snap-new")
+        out, verdict = _run_loop(runner, worktree, session_id="s-snap-new")
 
         assert out.status == "blocked"
-        # must_fix_initial is cycle 0's snapshot (1), even though deferred grew.
+        # must_fix_initial is cycle 0's snapshot (1), unaffected by later cycles.
         assert out.review.must_fix_initial == 1
-        assert out.review.deferred == 2
+        # #1837: MF_B first appears at a later cycle on code no fix cycle
+        # touched, so the admission gate records it as debt instead of letting
+        # it join the survivor set. Only cycle 0's MF_A is deferred.
+        assert out.review.deferred == 1
+        assert verdict is not None
+        assert [r.summary for r in verdict.debt] == ["MFB"]
         assert out.review.fix_cycles_used == _MAX_FIX_CYCLES
 
     def test_cycle0_survivor_counted_in_both_initial_and_deferred(
@@ -765,18 +794,30 @@ class TestMustFixInitialSnapshot:
 
 
 class TestDeferredCumulativeTracking:
-    def test_deferred_counts_distinct_findings_from_any_cycle(
+    def test_deferred_counts_distinct_cycle0_findings(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-defer-distinct")
-        # MF_A open throughout; MF_B arrives from pass 3.
-        runner = _FixLoopRunner(
-            [_MF_DOC, _MF_DOC, _MF_DOC, _MF_AB_DOC, _MF_AB_DOC, _MF_AB_DOC]
-        )
+        # Both MF_A and MF_B are open from cycle 0 and never clear.
+        runner = _FixLoopRunner([_MF_AB_DOC])
         out, _ = _run_loop(runner, worktree, session_id="s-defer-distinct")
         assert out.review.deferred == 2
 
-    def test_flapping_finding_counted_once_at_cap(
+    def test_later_cycle_out_of_delta_finding_is_recorded_not_deferred(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """#1837: a finding no fix cycle caused becomes debt, not a survivor."""
+        worktree = _worktree(make_git_repo, "wt-defer-late")
+        # MF_A open throughout; MF_B arrives from pass 3 on untouched code.
+        runner = _FixLoopRunner(
+            [_MF_DOC, _MF_DOC, _MF_DOC, _MF_AB_DOC, _MF_AB_DOC, _MF_AB_DOC]
+        )
+        out, verdict = _run_loop(runner, worktree, session_id="s-defer-late")
+        assert out.review.deferred == 1
+        assert verdict is not None
+        assert [r.summary for r in verdict.debt] == ["MFB"]
+
+    def test_flapping_finding_recorded_once_at_cap(
         self, make_git_repo: Callable[..., Path]
     ) -> None:
         worktree = _worktree(make_git_repo, "wt-defer-flap")
@@ -784,9 +825,13 @@ class TestDeferredCumulativeTracking:
         runner = _FixLoopRunner(
             [_MF_AB_DOC, _MF_DOC, _MF_DOC, _MF_DOC, _MF_AB_DOC, _MF_AB_DOC]
         )
-        out, _ = _run_loop(runner, worktree, session_id="s-defer-flap")
-        # Both A and B open at cap, B counted exactly once despite flapping.
-        assert out.review.deferred == 2
+        out, verdict = _run_loop(runner, worktree, session_id="s-defer-flap")
+        # #1837: dropping out and coming back makes MF_B new again, and it is
+        # out of every delta, so it is recorded rather than re-deferred --
+        # exactly once, despite being re-raised on two separate cycles.
+        assert out.review.deferred == 1
+        assert verdict is not None
+        assert [r.summary for r in verdict.debt] == ["MFB"]
 
 
 # ---------------------------------------------------------------------------
@@ -1834,8 +1879,13 @@ class TestTerminalSnapshotMarker:
         worktree = _worktree(make_git_repo, "wt-term-mech")
         # Cycle 0 blocks on a real MUST_FIX; a fix cycle actually runs; the
         # cycle-1 rereview raises a mechanically-rejected MUST_FIX instead.
+        # The fix cycle edits `new.py` (not an unrelated file) so that file is
+        # in cycle 1's delta — #1837 reviews the delta, and a finding on a file
+        # OUTSIDE it takes #1632's "unanchored" path (accepted) rather than
+        # being mechanically rejected, which is not the case under test here.
         runner = _FixLoopRunner(
-            [_MF_DOC, _MF_MECH_REJECTED_DOC], fix_behaviors=[_editor()]
+            [_MF_DOC, _MF_MECH_REJECTED_DOC],
+            fix_behaviors=[_editor("new.py", _CONTENT + "# fix cycle 1\n")],
         )
         out, verdict = _run_loop(runner, worktree, session_id="s-term-mech")
 
