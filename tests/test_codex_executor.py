@@ -23,7 +23,11 @@ import pytest
 from cw import codex_background
 from cw.auto_dev_result import AutoDevResult
 from cw.codex_background import join_outstanding_codex_threads
-from cw.codex_review import CODEX_MUST_FIX_FINDINGS, CODEX_REVIEW_UNPARSEABLE
+from cw.codex_review import (
+    _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
+    CODEX_MUST_FIX_FINDINGS,
+    CODEX_REVIEW_UNPARSEABLE,
+)
 from cw.codex_runner import FakeCodexRunner
 from cw.config import load_state
 from cw.dev_queue import add_ticket, load_dev_queue
@@ -171,6 +175,7 @@ def test_codex_executor_wrong_stage_blocked(
     assert result.stage_reached == "stage3_review"
     assert result.blocker is not None
     assert result.blocker.reason == CODEX_REVIEW_ONLY
+    assert result.next_actions == _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS
 
 
 def test_codex_executor_codex_not_found(
@@ -194,6 +199,7 @@ def test_codex_executor_codex_not_found(
     assert result.stage_reached == "stage3_review"
     assert result.blocker is not None
     assert result.blocker.reason == CODEX_NOT_FOUND
+    assert result.next_actions == _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS
 
 
 # ---------------------------------------------------------------------------

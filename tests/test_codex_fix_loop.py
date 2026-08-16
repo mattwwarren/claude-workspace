@@ -23,6 +23,7 @@ from cw.codex_fix_loop import (
 )
 from cw.codex_fix_loop_convergence import _open_finding_key, _track_open_findings
 from cw.codex_review import (
+    _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
     _MIN_ROLE_TIMEOUT_SECONDS,
     _REVIEWER_ROLE_AGENT_FILES,
     CODEX_BUDGET_EXHAUSTED,
@@ -473,6 +474,7 @@ class TestFixInvocation:
         assert out.blocker is not None
         assert out.blocker.reason == "codex_timeout"
         assert out.blocker.retry_eligible is True
+        assert out.next_actions == _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS
         bundle = diagnostics_bundle_dir("s-fix-timeout")
         assert list(bundle.glob("fix-cycle-1-timeout-*.json"))
 
@@ -491,6 +493,7 @@ class TestFixInvocation:
         assert out.blocker.reason == "codex_error"
         # A hard error is not transient → not retry-eligible.
         assert out.blocker.retry_eligible is None
+        assert out.next_actions == _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS
         bundle = diagnostics_bundle_dir("s-fix-error")
         assert list(bundle.glob("fix-cycle-1-nonzero_exit-*.json"))
 
@@ -888,6 +891,7 @@ class TestFixLoopCapAndEscalation:
         assert out.review.fix_cycles_used == _MAX_FIX_CYCLES
         assert out.health.fix_loop_escalated is True
         assert runner.fix_calls == _MAX_FIX_CYCLES
+        assert out.next_actions == _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS
         # details render the survivor verdict comment.
         assert "BLOCKING" in out.blocker.details
 
@@ -1637,6 +1641,7 @@ class TestScopeViolationGate:
         assert "sensitive" in out.blocker.details.lower()
         assert out.review.fix_cycles_used == 1
         assert out.review.must_fix_initial == 1
+        assert out.next_actions == _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS
         assert out.blocker.retry_eligible is None
 
     def test_out_of_scope_sensitive_modification_parks_verdict_stamped(
