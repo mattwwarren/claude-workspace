@@ -314,6 +314,15 @@ def transition_task_status(
     # requirement structurally: cw.cw_operator_events._peek_flushable_digest
     # only ever sees tasks whose marker is still set.
     task.attention_digest_buffered_at = None
+    # GitHub #1713: same unconditional-clear treatment for the stale-gate
+    # detection latch and its cross-reference companion -- a status
+    # transition means whatever gate episode stale_gate_detected_at/
+    # blocked_on_pr described (if any) has ended, so a fresh parked episode
+    # always starts with a clean latch. release_stale_gated_tasks re-stamps
+    # stale_gate_detected_at on its next sweep if the row is still (or newly)
+    # gate-stale under ReapPolicy.SIGNAL_ONLY.
+    task.stale_gate_detected_at = None
+    task.blocked_on_pr = None
     if old_status != new_status:
         # Why: emit inline while callers still hold dev_queue_lock. record_event
         # takes the events-inbox lock (_inbox_lock) *inside* dev_queue_lock; the
@@ -399,6 +408,34 @@ def _extract_pr_url(last_result: dict[str, object] | None) -> str | None:
     if isinstance(pr, dict):
         url = pr.get("url")
         return str(url) if url is not None else None
+    return None
+
+
+def _extract_pr_url_or_info(last_result: dict[str, object] | None) -> str | None:
+    """Like :func:`_extract_pr_url`, with a ``pr_info`` fallback (GitHub #1713).
+
+    ``pr`` is schema-forbidden from being non-null when ``status=="blocked"``
+    (``_check_status_pairings``), so an ``automerge_not_armed`` park -- a
+    ``blocked`` status carrying a real, already-created PR -- can never
+    populate ``pr.url``. The producer instead emits the PR's identity in a
+    separate, unmodeled ``pr_info`` object (``.claude/commands/
+    auto-dev-finalize.md``'s ``automerge_not_armed`` sentinel template:
+    ``pr_info: {number, url, auto_merge, base}``). This helper tries the
+    modeled ``pr`` field first (shipped/merge_pending's normal shape), then
+    falls back to ``pr_info.url`` so the ``automerge_not_armed`` park can also
+    stamp ``TicketTask.pr_url`` and become hydratable by
+    ``cw.pr_hydrate._is_candidate`` (previously permanently skipped -- see
+    that predicate's ``if not task.pr_url: return False`` gate).
+    """
+    url = _extract_pr_url(last_result)
+    if url is not None:
+        return url
+    if last_result is None:
+        return None
+    pr_info = last_result.get("pr_info")
+    if isinstance(pr_info, dict):
+        info_url = pr_info.get("url")
+        return str(info_url) if info_url is not None else None
     return None
 
 
