@@ -284,7 +284,7 @@ jobs:
             if [ -z "$DRIFT_ISSUES" ]; then
               echo "No open dispatch-drift issues — WOULD close 0 issues"
             else
-              COUNT=$(echo "$DRIFT_ISSUES" | wc -l)
+              COUNT=$(echo "$DRIFT_ISSUES" | wc -l | tr -d ' ')
               echo "WOULD close $COUNT open dispatch-drift issue(s): $(echo "$DRIFT_ISSUES" | sed 's/^/#/' | paste -sd' ' -)"
             fi
           else
