@@ -29,7 +29,7 @@ from cw.codex_background import (
     _start_daemon_thread,
     join_outstanding_codex_threads,
 )
-from cw.codex_review import CODEX_REVIEW_UNPARSEABLE
+from cw.codex_review import _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS, CODEX_REVIEW_UNPARSEABLE
 from cw.config import load_state, save_state
 from cw.dev_queue import add_ticket, load_dev_queue
 from cw.local_runner import UNEXPECTED_ERROR, make_blocked
@@ -383,6 +383,7 @@ def test_run_codex_review_and_complete_exception_path(
     assert persisted.status == "blocked"
     assert persisted.blocker is not None
     assert persisted.blocker.reason == UNEXPECTED_ERROR
+    assert persisted.next_actions == _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS
     # SESSION_COMPLETED is deliberately NOT emitted on the failure branch.
     assert events == []
     # The claimed task is handed back for a later tick, with backoff stamped.

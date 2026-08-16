@@ -622,6 +622,16 @@ that is simultaneously a same-branch-head repeat *and* carries a pending
 send-back) is covered by `tests/test_dispatch.py`'s
 `TestUnifiedReentryContractCompose`.
 
+None of the three per-arrival markers currently survives a spawn that dies
+with no sentinel ever emitted — each clears at (or shortly after) the spawn
+that consumes it, not at the point the marker was actually acted on. GitHub
+#1801 evaluated this gap for `regressed_into_stage` specifically and
+accepted it as a documented limitation rather than changing the clear
+timing (see the field's comment in `src/cw/models/tasks.py` for the full
+reasoning). Whether `pending_operator_comment` and
+`finalize_regress_branch_head` share the same exposure is an open,
+out-of-scope question if this is ever revisited.
+
 ### Attempt-cap reset (environmental burn)
 
 See also: CANCELLED row recovery (above) — a different terminal condition

@@ -8,6 +8,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Accepted-limitation decision record for the no-sentinel regress-marker
+  gap (#1801):** `TicketTask.regressed_into_stage` (#1794) does not survive
+  a spawn that dies before ever emitting a sentinel — the marker is
+  consumed and cleared at spawn time (`dispatch/claim.py`), well before any
+  reconcile reap could observe the death. Evaluated changing the clear to a
+  sentinel-gated one and rejected it: it would fragment the shared
+  `_stage_regress` seam this field co-stamps alongside
+  `pending_operator_comment`/`finalize_regress_branch_head`, and it
+  reintroduces the same false-negative shape at the impl guard's early
+  `blocked`-exit path. No behavior changed — this documents the accepted
+  gap (comments in `src/cw/models/tasks.py`, `dispatch/claim.py`,
+  `.claude/commands/auto-dev-impl.md`, `docs/dispatch-runbook.md`) and adds
+  characterization tests pinning that reconcile's reap path never touches
+  the field and that the second post-death spawn still carries no regress
+  signal.
+
 - **Codex review findings, treadmill/convergence tracking, and review debt
   (#1837):** extends `cw.review_findings` and `cw.codex_fix_loop` with
   delta-per-fix-cycle review handling, and adds two new modules —
@@ -17,6 +33,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and `cw.models.enums`.
 
 ### Fixed
+
+- **Codex-subsystem `make_blocked()` call sites silently borrowed
+  LocalExecutor's `next_actions` label instead of the Codex-review one
+  (#1842):** `#1835` fixed this for the 4 call sites in
+  `cw.codex_review._verdict`, but 6 more sites — 2 in `executor.py`'s
+  `CodexExecutor.spawn`, 1 in `codex_background.py`, and 3 in
+  `codex_fix_loop.py` — still called raw `local_runner.make_blocked()` and
+  either explicitly passed `next_actions=_CODEX_REVIEW_BLOCKED_NEXT_ACTIONS`
+  or silently defaulted to the LocalExecutor-specific label, the same
+  N-patched-sites shape #1835 left behind. Added `make_codex_blocked()` — a
+  thin wrapper around `make_blocked()` that permanently bakes in the correct
+  `next_actions` and takes no override — and migrated all 10 Codex-subsystem
+  call sites onto it, so every future Codex call site inherits the right
+  label by construction instead of remembering to pass it. LocalExecutor/
+  aider and OpencodeExecutor call sites are unchanged.
+
+- **`/prep-pr`'s default Python quality gates didn't include `ruff format`
+  (#1867):** `ECOSYSTEM_GATES["pyproject.toml"]` in
+  `.claude/scripts/prep_pr_state.py` ran `ruff check`, `mypy`, and `pytest`
+  before PR creation but never checked formatting — a client repo with no
+  `## Quality Gates` override in its own `CLAUDE.md` could land a PR with
+  unformatted code that CI's separate `ruff format --check` gate would then
+  reject (the review-bingo-hub incident, #45/#48, PRs #52/#57). Added a
+  `ruff-format` `Gate` entry (`uv run ruff format --check .`, autofix `uv run
+  ruff format .`) immediately after the existing `ruff` entry, so the
+  fail-fast ruff-family checks run before `mypy`/`pytest`. Repos needing a
+  scoped or custom format command already override via the CLAUDE.md
+  `## Quality Gates` section — no change needed to that merge logic.
 
 - **Reviewer `schema_mismatch` on `no_diff_anchor: null` (#1817 regression):
   `Finding.no_diff_anchor` was added as `bool = False` without a

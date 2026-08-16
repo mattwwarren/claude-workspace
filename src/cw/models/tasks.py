@@ -201,6 +201,21 @@ class TicketTask(BaseModel):
     # forward advance crosses the same stage (GitHub #1794); it also cannot be
     # reset on ordinary advance without defeating the FINALIZE self-heal cap
     # (GitHub #770, FINALIZE_REGRESS_CAP in auto_dev_result/schema.py).
+    #
+    # Accepted limitation (GitHub #1801): this field does NOT survive a
+    # spawn that dies with no sentinel ever emitted. claim.py's spawn-time
+    # clear (below/#1794) runs the moment the marker is written into the
+    # worker's queue_metadata -- well before any reap could run -- so a
+    # bare `--regress` whose first post-regress session dies silently loses
+    # the signal for good. #1801 evaluated changing the clear to a
+    # sentinel-gated one and rejected it: it would fragment the shared
+    # `_stage_regress` seam this field co-stamps with
+    # `pending_operator_comment`/`finalize_regress_branch_head` (each
+    # already clears on its own independent rule), and it reintroduces the
+    # same false-negative shape at Orientation's early `blocked` exit
+    # (before the Pre-Stage Detector Guard ever runs). The comment-staleness
+    # check remains the backstop for the common case; this is a rare,
+    # already-partially-mitigated compound trigger, not silently unhandled.
     regressed_into_stage: Stage | None = None
     # Branch-head oracle for the #1717 FINALIZE-regress repeat detector: set
     # by _stage_regress to the pre-regress stage_base_ref, but ONLY when

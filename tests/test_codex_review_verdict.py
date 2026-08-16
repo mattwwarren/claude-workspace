@@ -3,6 +3,7 @@ rendering (#1236, #1239)."""
 
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import TYPE_CHECKING
 
@@ -20,6 +21,7 @@ from cw.codex_review import (
     CODEX_REVIEW_UNPARSEABLE,
     CODEX_TIMEOUT,
     _format_failures_detail,
+    make_codex_blocked,
     render_verdict_comment,
     synthesize_codex_review_result,
 )
@@ -368,6 +370,69 @@ class TestSynthesizeCodexReviewResult:
         )
         assert result.status == "blocked"
         assert result.next_actions != ["user_resolve_local_executor_failure"]
+
+
+# ---------------------------------------------------------------------------
+# make_codex_blocked — shared Codex-subsystem blocked-result constructor
+# ---------------------------------------------------------------------------
+
+
+class TestMakeCodexBlocked:
+    def test_make_codex_blocked_next_actions_is_baked_in(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-make-codex-blocked-next-actions")
+        result = make_codex_blocked(
+            ticket_id="T-1", worktree=worktree, reason="whatever"
+        )
+        assert result.next_actions == _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS
+        assert result.next_actions != ["user_resolve_local_executor_failure"]
+
+    def test_make_codex_blocked_defaults_stage3_review(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-make-codex-blocked-stage-default")
+        result = make_codex_blocked(
+            ticket_id="T-1", worktree=worktree, reason="whatever"
+        )
+        assert result.stage_reached == "stage3_review"
+        assert result.blocker is not None
+        assert result.blocker.stage == "stage3_review"
+
+    def test_make_codex_blocked_stage_reached_override_still_works(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-make-codex-blocked-stage-override")
+        result = make_codex_blocked(
+            ticket_id="T-1",
+            worktree=worktree,
+            reason="whatever",
+            stage_reached="stage2_impl",
+        )
+        assert result.stage_reached == "stage2_impl"
+        assert result.blocker is not None
+        assert result.blocker.stage == "stage2_impl"
+
+    def test_make_codex_blocked_forwards_details_retry_fields(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-make-codex-blocked-retry-fields")
+        result = make_codex_blocked(
+            ticket_id="T-1",
+            worktree=worktree,
+            reason="whatever",
+            details="some detail",
+            retry_eligible=True,
+            retry_delay_seconds=30,
+        )
+        assert result.blocker is not None
+        assert result.blocker.details == "some detail"
+        assert result.blocker.retry_eligible is True
+        assert result.blocker.retry_delay_seconds == 30
+
+    def test_make_codex_blocked_has_no_next_actions_parameter(self) -> None:
+        params = inspect.signature(make_codex_blocked).parameters
+        assert "next_actions" not in params
 
 
 # ---------------------------------------------------------------------------

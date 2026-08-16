@@ -223,6 +223,11 @@ ECOSYSTEM_GATES: dict[str, list[Gate]] = {
             command="uv run ruff check .",
             autofix="uv run ruff check --fix .",
         ),
+        Gate(
+            name="ruff-format",
+            command="uv run ruff format --check .",
+            autofix="uv run ruff format .",
+        ),
         Gate(name="mypy", command="uv run mypy ."),
         Gate(name="pytest", command="uv run pytest"),
     ],

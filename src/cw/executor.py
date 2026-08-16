@@ -16,7 +16,7 @@ from cw.codex_background import (
     _stamp_session_id_on_running_task,
 )
 from cw.codex_review import (
-    STAGE3_REVIEW,
+    make_codex_blocked,
 )
 from cw.codex_review._const import _CODEX_VERSION_RE
 from cw.codex_runner import CodexRunner, RealCodexRunner
@@ -816,7 +816,7 @@ def _complete_session_via_door(
 class CodexExecutor:
     """StageExecutor backed by prompt-driven ``codex exec`` reviewers (#1236).
 
-    REVIEW-only: spawn() returns make_blocked(reason=CODEX_REVIEW_ONLY) if
+    REVIEW-only: spawn() returns make_codex_blocked(reason=CODEX_REVIEW_ONLY) if
     called on any stage other than REVIEW. Step 3 delegates to
     ``codex_review.run_review``, which runs a per-reviewer-role loop of generic
     ``codex exec`` calls (each fed a materialized prompt over stdin), validates
@@ -883,18 +883,16 @@ class CodexExecutor:
         # Step 2: Pre-flight checks (first match assigns result).
         result: AutoDevResult | None = None
         if stage != Stage.REVIEW:
-            result = make_blocked(
+            result = make_codex_blocked(
                 ticket_id=task.ticket_id,
                 worktree=worktree,
                 reason=CODEX_REVIEW_ONLY,
-                stage_reached=STAGE3_REVIEW,
             )
         elif shutil.which("codex") is None:
-            result = make_blocked(
+            result = make_codex_blocked(
                 ticket_id=task.ticket_id,
                 worktree=worktree,
                 reason=CODEX_NOT_FOUND,
-                stage_reached=STAGE3_REVIEW,
             )
 
         if result is not None:

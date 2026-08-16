@@ -65,12 +65,12 @@ from cw.codex_review import (
     CODEX_BUDGET_EXHAUSTED,
     CODEX_FIX_SCOPE_VIOLATION,
     CODEX_MUST_FIX_FINDINGS,
-    STAGE3_REVIEW,
     _capture_diff,
     _classify_codex_failure,
     _load_sensitive_hits,
     _load_ticket_context,
     _prepare_review_pass,
+    make_codex_blocked,
     render_verdict_comment,
     run_codex_roles,
     run_review,
@@ -82,7 +82,7 @@ from cw.executor_diagnostics import (
     diagnostics_bundle_dir,
     persist_diagnostics_bundle,
 )
-from cw.local_runner import make_blocked, resolve_tier
+from cw.local_runner import resolve_tier
 from cw.review_debt import dedupe_debt
 from cw.review_findings import write_review_verdict
 
@@ -468,13 +468,12 @@ def _park_fix_failure(
         f"codex fix cycle {cycle} failed ({reason})", session_id=session_id
     )
     transient = reason in _TRANSIENT_FAILURE_REASONS
-    blocked = make_blocked(
+    blocked = make_codex_blocked(
         ticket_id=task.ticket_id,
         worktree=worktree,
         reason=reason,
         details=detail,
         retry_eligible=True if transient else None,
-        stage_reached=STAGE3_REVIEW,
     )
     blocked = blocked.model_copy(
         update={
@@ -521,7 +520,7 @@ def _park_survivors(
         had_real_commit=had_real_commit,
     )
     survivors = _survivors_only_verdict(verdict, open_findings, review)
-    blocked = make_blocked(
+    blocked = make_codex_blocked(
         ticket_id=task.ticket_id,
         worktree=worktree,
         reason=reason,
@@ -530,7 +529,6 @@ def _park_survivors(
         # was, by construction, enabled for this run.
         details=render_verdict_comment(survivors, fix_loop_enabled=True),
         retry_eligible=retry_eligible,
-        stage_reached=STAGE3_REVIEW,
     )
     health = blocked.health.model_copy(
         update={"fix_loop_escalated": cycle_count >= _ESCALATE_AT_CYCLE}
@@ -598,13 +596,12 @@ def _park_scope_violation(
             *lines,
         ]
     )
-    blocked = make_blocked(
+    blocked = make_codex_blocked(
         ticket_id=task.ticket_id,
         worktree=worktree,
         reason=CODEX_FIX_SCOPE_VIOLATION,
         details=details,
         retry_eligible=None,
-        stage_reached=STAGE3_REVIEW,
     )
     health = blocked.health.model_copy(
         update={"fix_loop_escalated": cycle >= _ESCALATE_AT_CYCLE}
