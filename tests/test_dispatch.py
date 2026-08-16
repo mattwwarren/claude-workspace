@@ -7898,6 +7898,38 @@ class TestApplyStagedDecision:
         assert task.status == QueueItemStatus.BLOCKED_ON_USER
         assert task.blocked_on_pr is None
 
+    def test_prior_pipeline_pr_open_multiple_pr_references_leaves_blocked_on_pr_none(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Fail-closed: the producer contract permits ``details`` to name
+        MORE THAN ONE overlapping PR (auto-dev-finalize.md: "When multiple
+        open PRs overlap, list all overlapping PRs in details"). Picking
+        only the first match would let release_stale_gated_tasks release
+        this row the moment that ONE PR merges, even though another
+        file-overlapping PR named in the same details string is still open.
+        Ambiguous -> leave blocked_on_pr None, same fail-closed posture as
+        the malformed-details case above."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("PPPO-3", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "merge_gate_blocked",
+            "blocker": {
+                "stage": "stage4a_merge_gate",
+                "reason": "prior_pipeline_pr_open",
+                "details": (
+                    "PR #88 (dev/x) and PR #90 (dev/y) are both open and "
+                    "share files with this branch: src/cw/foo.py"
+                ),
+            },
+        }
+        apply_staged_decision(
+            task, "merge_gate_blocked", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.blocked_on_pr is None
+
     def test_stage_advance_unchecked_unknown_client_stamps_disposition(
         self,
         tmp_dispatch_dirs: Path,
