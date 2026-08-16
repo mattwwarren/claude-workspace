@@ -337,7 +337,7 @@ Use today's date and each station's current marker version. By the time Step 1g 
 **Scope tier:** <small|large> (<N> files, ~<M> lines, forbidden_touched=<bool>)
 ```
 
-This is the one reliable, machine-greppable location the three downstream readers (`auto-dev-impl.md:61`, `auto-dev-review.md`'s tier-resolution step, `auto-dev-finalize.md:31` — all already loosely matching this shape via "or similar Stage-1c marker") depend on, rather than relying on free-text presentation happening to be greppable. Exactly one occurrence must exist in the persisted plan — a later stage that rewrites it (see `auto-dev-review.md`'s one-time tier downgrade) replaces it in place rather than appending a second occurrence.
+This is the one reliable, machine-greppable location the three downstream readers (`auto-dev-impl.md:59`, `auto-dev-review.md`'s tier-resolution step, `auto-dev-finalize.md:31` — all already loosely matching this shape via "or similar Stage-1c marker") depend on, rather than relying on free-text presentation happening to be greppable. Exactly one occurrence must exist in the persisted plan — a later stage that rewrites it (see `auto-dev-review.md`'s one-time tier downgrade) replaces it in place rather than appending a second occurrence.
 
 If the plan was loaded from Linear in Step 1a and already contained a current marker, preserve it as-is. If the plan was revised in Step 1f.4, stamp with today's date.
 
