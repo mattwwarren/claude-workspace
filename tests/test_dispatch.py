@@ -2003,6 +2003,89 @@ class TestDispatchTickSpawnErrors:
         assert task.regressed_into_stage is None
         assert task.regress_attempts == 1  # cumulative counter untouched
 
+    def test_regress_marker_lost_when_first_spawn_dies_before_sentinel(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#1801: reproduces the reported gap end-to-end and pins the accepted
+        (not fixed) behavior. A bare --regress whose first post-regress spawn
+        dies before emitting any sentinel loses the regressed_into_stage
+        signal for good -- claim.py's spawn-time clear (#1794) already ran
+        before the death was ever detected, so reconcile's reap path (which
+        never touches this field, see test_reconcile_tasks.py's sibling
+        no-op test) has nothing left to preserve. This is the deliberate,
+        documented inversion of the ticket's literal AC3 wording: the plan's
+        decision is accept-and-document, not survive-the-death, so this test
+        characterizes the CURRENT (unchanged) behavior."""
+        from cw.dev_queue import _stage_regress
+        from cw.reconcile import revert_timed_out_tasks
+        from cw.worktree import worktree_path_for
+        from tests._reconcile_helpers import _mk_daemon_session_with_worktree
+
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+
+        ticket_id = "GEN-1801D"
+        task = TicketTask(
+            ticket_id=ticket_id,
+            client="test-client",
+            stage=Stage.REVIEW,
+            status=QueueItemStatus.RUNNING,
+        )
+        _stage_regress(task, Stage.IMPL)
+        assert task.regressed_into_stage == Stage.IMPL
+        add_ticket(task)
+
+        daemon = FakeNativeDaemonClient()
+        spawned = dispatch_tick(simple_config, native_daemon=daemon).spawned
+        assert spawned == 1
+
+        running_task = load_dev_queue().tasks[0]
+        assert running_task.status == QueueItemStatus.RUNNING
+        # #1794: the spawn already consumed and cleared the marker.
+        assert running_task.regressed_into_stage is None
+        session_id = running_task.session_id
+        assert session_id is not None
+
+        branch = f"{sample_client_config.feature_branch_prefix}/{ticket_id}"
+        worktree_path = worktree_path_for(sample_client_config, branch)
+
+        # Simulate the reported shape: the spawned session dies with no
+        # sentinel ever emitted -- no SESSION_COMPLETED, just TIMED_OUT.
+        timed_out_session = _mk_daemon_session_with_worktree(
+            session_id, SessionStatus.TIMED_OUT, worktree_path
+        )
+        save_state(CwState(sessions=[timed_out_session]))
+
+        monkeypatch.setattr("cw.reconcile._deps.checked_out_branch", lambda _p: branch)
+        monkeypatch.setattr(
+            "cw.reconcile._shared.get_client", lambda _name: sample_client_config
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: False
+        )
+
+        reverted = revert_timed_out_tasks()
+        assert ticket_id in reverted
+
+        pending_task = load_dev_queue().tasks[0]
+        assert pending_task.status == QueueItemStatus.PENDING
+        assert pending_task.session_id is None
+
+        second_daemon = FakeNativeDaemonClient()
+        respawned = dispatch_tick(simple_config, native_daemon=second_daemon).spawned
+        assert respawned == 1
+
+        context = json.loads(
+            (worktree_path / ".claude" / "cw-context.json").read_text()
+        )
+        # #1801: accepted limitation, not a fix -- the second spawn's
+        # queue_metadata still carries no regress signal, even though the
+        # ticket really was regressed and the first spawn never acted on it.
+        assert context["queue_metadata"]["regressed_into_stage"] is None
+
     def test_successful_review_spawn_clears_pending_operator_comment(
         self,
         tmp_dispatch_dirs: Path,

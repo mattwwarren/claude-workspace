@@ -8,6 +8,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Accepted-limitation decision record for the no-sentinel regress-marker
+  gap (#1801):** `TicketTask.regressed_into_stage` (#1794) does not survive
+  a spawn that dies before ever emitting a sentinel — the marker is
+  consumed and cleared at spawn time (`dispatch/claim.py`), well before any
+  reconcile reap could observe the death. Evaluated changing the clear to a
+  sentinel-gated one and rejected it: it would fragment the shared
+  `_stage_regress` seam this field co-stamps alongside
+  `pending_operator_comment`/`finalize_regress_branch_head`, and it
+  reintroduces the same false-negative shape at the impl guard's early
+  `blocked`-exit path. No behavior changed — this documents the accepted
+  gap (comments in `src/cw/models/tasks.py`, `dispatch/claim.py`,
+  `.claude/commands/auto-dev-impl.md`, `docs/dispatch-runbook.md`) and adds
+  characterization tests pinning that reconcile's reap path never touches
+  the field and that the second post-death spawn still carries no regress
+  signal.
+
 - **Codex review findings, treadmill/convergence tracking, and review debt
   (#1837):** extends `cw.review_findings` and `cw.codex_fix_loop` with
   delta-per-fix-cycle review handling, and adds two new modules —

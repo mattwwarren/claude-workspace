@@ -771,6 +771,11 @@ def _spawn_claimed_task(
                     # Clear it so it never leaks into a later, unrelated stage
                     # entry (the false positive the cumulative regress_attempts
                     # counter would have produced).
+                    # #1801: this clear is unconditional and runs BEFORE any
+                    # reap could ever observe a no-sentinel death, which is
+                    # why a spawn that dies silently loses the signal for
+                    # good -- evaluated and accepted, see the field's comment
+                    # in src/cw/models/tasks.py for the full reasoning.
                     stored_task.regressed_into_stage = None
                     # #1730: stage-gated clear -- unlike regressed_into_stage
                     # (cleared unconditionally at the next spawn), this marker

@@ -64,6 +64,14 @@ def test_guard_stale_comments_delivered_as_binding_instructions() -> None:
     assert "as new, binding instructions to read and act on" in section
 
 
+def test_guard_known_limitation_cites_1801() -> None:
+    """#1801 evaluated and accepted the no-sentinel-death gap this sentence
+    describes -- the prose cross-references the ticket that made that call."""
+    section = _guard_section()
+    assert "Known limitation" in section
+    assert "#1801" in section
+
+
 def test_guard_fails_open_on_script_exit_2() -> None:
     """A malformed input must not block the pipeline — exit 2 degrades to the
     unchanged short-circuit behaviour, with a friction breadcrumb."""
