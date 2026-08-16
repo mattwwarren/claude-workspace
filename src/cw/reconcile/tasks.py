@@ -862,8 +862,11 @@ def release_stale_gated_tasks() -> list[str]:
 
     released_ids: list[str] = []
     # Snapshot fields needed for event emission after the lock (lock-order
-    # invariant #765 -- record_event acquires _inbox_lock).
-    pending_events: list[tuple[str, str, str, str]] = []
+    # invariant #765 -- record_event acquires _inbox_lock). session_id is
+    # captured BEFORE _release_variant_a/_release_variant_b run (both clear
+    # task.session_id under the AUTO branch) -- mirrors
+    # park_terminal_sibling_tasks's orig_session_id precedent exactly.
+    pending_events: list[tuple[str, str, str, str, str | None]] = []
 
     # PR_MERGED event IDs processed by the Variant A loop below, deferred
     # until AFTER save_dev_queue succeeds (see the advance_cursor loop below
@@ -886,6 +889,7 @@ def release_stale_gated_tasks() -> list[str]:
             # same batch (e.g. two events resolving to the same row) so a
             # stale index entry can never double-release.
             if task is not None and _is_variant_a_gate_task(task):
+                orig_session_id = task.session_id
                 policy = _resolve_task_policy(
                     task.client, task.lane, clients, orchestrator_config
                 )
@@ -897,6 +901,7 @@ def release_stale_gated_tasks() -> list[str]:
                         task.client,
                         task.lane,
                         _PROPOSED_ACTION_VARIANT_A,
+                        orig_session_id,
                     )
                 )
                 changed = True
@@ -910,13 +915,20 @@ def release_stale_gated_tasks() -> list[str]:
                 continue
             if task.blocked_on_pr not in merged_by_client.get(task.client, set()):
                 continue
+            orig_session_id = task.session_id
             policy = _resolve_task_policy(
                 task.client, task.lane, clients, orchestrator_config
             )
             _release_variant_b(task, policy)
             released_ids.append(task.ticket_id)
             pending_events.append(
-                (task.ticket_id, task.client, task.lane, _PROPOSED_ACTION_VARIANT_B)
+                (
+                    task.ticket_id,
+                    task.client,
+                    task.lane,
+                    _PROPOSED_ACTION_VARIANT_B,
+                    orig_session_id,
+                )
             )
             changed = True
 
@@ -947,11 +959,11 @@ def release_stale_gated_tasks() -> list[str]:
             advance_cursor(_STALE_GATE_CONSUMER, event_id)
 
     # Emit events after dev_queue_lock releases (lock-order invariant #765).
-    for ticket_id, client, lane, proposed_action in pending_events:
+    for ticket_id, client, lane, proposed_action, session_id in pending_events:
         record_event(
             OrchestratorEventType.SESSION_REAP_PROPOSED,
             {
-                "session_id": None,
+                "session_id": session_id,
                 "session_name": None,
                 "client": client,
                 "ticket_id": ticket_id,

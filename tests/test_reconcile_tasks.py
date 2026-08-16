@@ -1883,6 +1883,45 @@ def test_release_stale_gated_tasks_lane_reap_policy_override(
     assert reloaded.disposition == "shipped"
 
 
+def test_release_stale_gated_tasks_reap_proposed_carries_real_session_id(
+    tmp_config_dir: Path,
+) -> None:
+    """SESSION_REAP_PROPOSED must carry the task's real session_id, not a
+    hardcoded None (GitHub #1713 review SHOULD_FIX 5). The concrete
+    downstream consumer, cli/orchestrate.py's _drain_reap_proposals, does
+    ``payload.get("session_id", "")`` and looks that up against
+    state.sessions -- a hardcoded None means the key IS present with value
+    None, so ``.get`` returns None (not the "" default) and the lookup
+    always misses, silently discarding which session was live when the
+    gate was detected stale. Mirrors park_terminal_sibling_tasks's
+    orig_session_id precedent: captured BEFORE the release helper clears
+    task.session_id."""
+    task = _make_ticket_task(
+        ticket_id="SG-A8",
+        client="client-a",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        disposition="merge_pending",
+        pr_url="https://github.com/foo/bar/pull/49",
+        session_id="live-session-1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    save_state(CwState(sessions=[]))
+    _emit_pr_merged(client="client-a", ticket_id="SG-A8", repo="foo/bar", pr_number=49)
+
+    released = release_stale_gated_tasks()
+
+    assert released == ["SG-A8"]
+    events = read_events()
+    reap_events = [
+        e
+        for e in events
+        if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+        and e.payload.get("ticket_id") == "SG-A8"
+    ]
+    assert len(reap_events) == 1
+    assert reap_events[0].payload["session_id"] == "live-session-1"
+
+
 def test_release_stale_gated_tasks_event_not_lost_when_save_dev_queue_raises(
     tmp_config_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
