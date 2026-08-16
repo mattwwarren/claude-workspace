@@ -529,7 +529,7 @@ After `/prep-pr` returns with a PR number:
 
    **If the gate is clean** (no UI files in diff, OR UI files plus media markers in body): proceed to step 2.
 
-2. **Append review adjudication to the PR body (record-now for DEFER + REJECT):** Stage 3 (Checkpoint 3a) owns adjudication and stashes outcomes in `.cw/deferred-findings.md`. The pipeline session is gone by merge time (especially under `auto_merge: false`), so filing deferrals must be merge-triggered — Step H3 of the next sweep harvests the `DEFERRED-REVIEW-FINDINGS` block. Read the current PR body (`gh pr view <pr-number> --json body --jq .body`), append the artifacts from `.cw/deferred-findings.md`, and re-write via `gh pr edit <pr-number> --body-file -`:
+2. **Append review adjudication to the PR body (record-now for DEFER + REJECT):** Stage 3 (Checkpoint 3a) owns adjudication and stashes outcomes in `.cw/deferred-findings.md`. The pipeline session is gone by merge time (especially under `auto_merge: false`), so filing deferrals must be merge-triggered — Step H3 of the next sweep harvests the `DEFERRED-REVIEW-FINDINGS` block. Read the current PR body (`gh pr view <pr-number> --json body --jq .body`), then author the concatenated PR-body content (existing body + `.cw/deferred-findings.md` artifacts) via the **Write tool** — see CLAUDE.md's **Agent File Operations** rule — to a scratch path (e.g. `.cw/pr-body.md`). Re-write via `gh pr edit <pr-number> --body-file .cw/pr-body.md`:
 
    The format written to the PR body (verbatim from `.cw/deferred-findings.md`):
 

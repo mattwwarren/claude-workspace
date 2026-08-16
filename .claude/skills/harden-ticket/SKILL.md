@@ -212,6 +212,8 @@ typed models over magic numbers and raw dicts (say so explicitly; reviewers
 flag these). Restate any scope exclusion verbatim. End with `Proceed.` and the
 marker `<!-- auto-dev-preflight-resolutions -->`.
 
+Author the comment body via the **Write tool** — see CLAUDE.md's **Agent File Operations** rule.
+
 Post it to the issue (`gh issue comment <N> --body-file ...`). The dispatched
 worker reads issue comments, so this is what makes the next plan correct.
 
