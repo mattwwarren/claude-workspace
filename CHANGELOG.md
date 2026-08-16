@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Codex review findings, treadmill/convergence tracking, and review debt
+  (#1837):** extends `cw.review_findings` and `cw.codex_fix_loop` with
+  delta-per-fix-cycle review handling, and adds two new modules —
+  `cw.review_debt` (review-debt tracking) and
+  `cw.codex_fix_loop_convergence` (fix-loop convergence/treadmill
+  detection) — plus supporting changes to the `cw.codex_review` package
+  and `cw.models.enums`.
+
 ## [1.34.0] - 2026-08-13
 
 ### Added
