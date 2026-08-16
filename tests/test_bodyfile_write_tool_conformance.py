@@ -78,8 +78,14 @@ def test_claude_md_agent_file_operations_gains_body_rule() -> None:
 def test_claude_md_existing_table_rows_unchanged() -> None:
     """The pre-existing 4-row table survives the addition verbatim."""
     content = _claude_md()
-    assert "| Copy file | `Read` source then `Write` destination | `Bash(cp ...)` |" in content
-    assert "| Move file | `Read` then `Write` then `Bash(rm)` | `Bash(mv ...)` |" in content
+    assert (
+        "| Copy file | `Read` source then `Write` destination | `Bash(cp ...)` |"
+        in content
+    )
+    assert (
+        "| Move file | `Read` then `Write` then `Bash(rm)` | `Bash(mv ...)` |"
+        in content
+    )
     assert "| Create file | `Write` | `Bash(echo >)` |" in content
     assert "| Read file | `Read` | `Bash(cat)` |" in content
 
@@ -127,7 +133,7 @@ def test_cw_followup_anti_pattern_removed() -> None:
 
 
 def test_cw_followup_replacement_uses_write_tool() -> None:
-    """The replacement instructs the Write tool, immediately preceding --body-file post."""
+    """The replacement instructs the Write tool, preceding --body-file post."""
     content = _skill("cw-followup/SKILL.md")
     assert "Use the **Write tool**" in content
     assert "CLAUDE.md's **Agent File Operations** rule" in content
