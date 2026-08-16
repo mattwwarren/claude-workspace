@@ -88,6 +88,28 @@ def _on_block(workflow: dict[Any, Any]) -> dict[str, Any]:
     return on_block
 
 
+def _stub_gh(tmp_path: Path, *, exit_code: int, stdout: str = "") -> Path:
+    """Write an executable ``gh`` stub into a fresh bin dir and return it (#1799).
+
+    Hoist of the byte-identical private copy in
+    test_changelog_gate_workflow.py, which is deliberately left unmodified
+    (same convention as ``_load_workflow`` above); this is the canonical
+    version a new workflow-guard test should import rather than adding a
+    third copy. Imported today by test_release_tag_workflow.py's dry-run
+    summary tests, whose script shells out to ``gh issue list``.
+    """
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_gh = fake_bin / "gh"
+    # Quoted heredoc ('GH_STDOUT_EOF') -- no shell interpolation of `stdout`'s
+    # contents, matching how a real `gh` payload is opaque data.
+    fake_gh.write_text(
+        f"#!/bin/sh\ncat <<'GH_STDOUT_EOF'\n{stdout}GH_STDOUT_EOF\nexit {exit_code}\n"
+    )
+    fake_gh.chmod(0o755)
+    return fake_bin
+
+
 def _seed_daemon_session(
     tmp_path: Path,
     tmp_config_dir: Path,
