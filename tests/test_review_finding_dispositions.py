@@ -165,6 +165,22 @@ class TestRenderParseFindingDispositionBlockRoundTrip:
         )
         assert parse_finding_disposition_block([body]) == {}
 
+    def test_non_object_dispositions_value_degrades_to_empty(self) -> None:
+        body = (
+            "<!-- REVIEW-FINDING-DISPOSITIONS\n"
+            '{"schema_version": 1, "dispositions": ["not", "a", "map"]}\n'
+            "REVIEW-FINDING-DISPOSITIONS -->"
+        )
+        assert parse_finding_disposition_block([body]) == {}
+
+    def test_missing_dispositions_key_degrades_to_empty(self) -> None:
+        body = (
+            "<!-- REVIEW-FINDING-DISPOSITIONS\n"
+            '{"schema_version": 1}\n'
+            "REVIEW-FINDING-DISPOSITIONS -->"
+        )
+        assert parse_finding_disposition_block([body]) == {}
+
     def test_missing_marker_yields_empty(self) -> None:
         assert parse_finding_disposition_block(["just prose", ""]) == {}
 
