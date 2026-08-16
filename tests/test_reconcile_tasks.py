@@ -403,6 +403,52 @@ def test_revert_timed_out_clean_worktree_routes_to_pending(
     assert "to-clean" in reverted
 
 
+def test_revert_timed_out_does_not_touch_regressed_into_stage(
+    tmp_config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1801: reap's revert-to-PENDING path never clobbers whatever value is
+    in regressed_into_stage -- it only mutates status/session_id. This pins
+    the invariant so a future change to the field's clearing timing can rely
+    on reap being a safe no-op, independent of when upstream (claim.py)
+    actually clears it today."""
+    wt_path = tmp_path / "wt-to-clean-marker"
+    sess = _mk_daemon_session_with_worktree(
+        "to-clean-marker", SessionStatus.TIMED_OUT, wt_path
+    )
+    save_state(CwState(sessions=[sess]))
+
+    task = TicketTask(
+        ticket_id="to-clean-marker",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="to-clean-marker",
+        regressed_into_stage=Stage.IMPL,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    monkeypatch.setattr(
+        "cw.reconcile._deps.checked_out_branch", lambda _p: "auto-dev/to-clean-marker"
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.get_client",
+        lambda name: ClientConfig(name=name, workspace_path=tmp_path / "ws"),
+    )
+    monkeypatch.setattr(
+        "cw.reconcile._shared.worktree_has_unsaved_work", lambda _c, _b: False
+    )
+
+    reverted = revert_timed_out_tasks()
+
+    store = load_dev_queue()
+    updated_task = next(t for t in store.tasks if t.ticket_id == "to-clean-marker")
+    assert updated_task.status == QueueItemStatus.PENDING
+    assert updated_task.session_id is None
+    assert updated_task.regressed_into_stage == Stage.IMPL
+    assert "to-clean-marker" in reverted
+
+
 def test_revert_completed_silent_dirty_worktree_routes_to_blocked_on_user(
     tmp_config_dir: Path,
     tmp_path: Path,
