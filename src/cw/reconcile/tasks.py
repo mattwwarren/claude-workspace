@@ -865,6 +865,11 @@ def release_stale_gated_tasks() -> list[str]:
     # invariant #765 -- record_event acquires _inbox_lock).
     pending_events: list[tuple[str, str, str, str]] = []
 
+    # PR_MERGED event IDs processed by the Variant A loop below, deferred
+    # until AFTER save_dev_queue succeeds (see the advance_cursor loop below
+    # this `with` block for why).
+    processed_event_ids: list[str] = []
+
     with dev_queue_lock():
         store = load_dev_queue()
         changed = False
@@ -895,7 +900,7 @@ def release_stale_gated_tasks() -> list[str]:
                     )
                 )
                 changed = True
-            advance_cursor(_STALE_GATE_CONSUMER, event.id)
+            processed_event_ids.append(event.id)
 
         # Variant B: dev-queue-wide cross-reference scan (no event stream
         # names these rows directly -- see docstring).
@@ -917,6 +922,29 @@ def release_stale_gated_tasks() -> list[str]:
 
         if changed:
             save_dev_queue(store)
+
+        # Advance cursors only AFTER the mutation batch above is durably
+        # persisted (crash-safety fix, GitHub #1713 review). Advancing the
+        # cursor inside the Variant A loop (the pre-fix shape) permanently
+        # consumed a PR_MERGED event before its corresponding release was
+        # written -- a crash, or a save_dev_queue failure (disk full, lock
+        # I/O), between the two left the task stuck BLOCKED_ON_USER forever
+        # with no future trigger, reproducing inside this very mechanism the
+        # exact silent-staleness failure class #1713 exists to close.
+        # PR_MERGED fires once per PR (first-observation dedup), so there is
+        # no second chance.
+        #
+        # If save_dev_queue raises above, this loop never runs: the
+        # exception propagates out of this `with dev_queue_lock():` block
+        # (releasing the lock), up through release_stale_gated_tasks(), to
+        # _run_stale_gate_release_guarded's broad-catch wrapper in
+        # dispatch/loop.py, which logs and retries next tick. The cursor was
+        # never advanced, so the retry re-reads the same events and
+        # re-derives the same mutation -- safe to repeat because the on-disk
+        # dev-queue state is unchanged when save_dev_queue itself is what
+        # failed (no partial write reaches disk; see atomic_write_text).
+        for event_id in processed_event_ids:
+            advance_cursor(_STALE_GATE_CONSUMER, event_id)
 
     # Emit events after dev_queue_lock releases (lock-order invariant #765).
     for ticket_id, client, lane, proposed_action in pending_events:

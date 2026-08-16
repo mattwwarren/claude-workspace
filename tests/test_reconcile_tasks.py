@@ -1881,3 +1881,59 @@ def test_release_stale_gated_tasks_lane_reap_policy_override(
     reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-A6")
     assert reloaded.status == QueueItemStatus.COMPLETED
     assert reloaded.disposition == "shipped"
+
+
+def test_release_stale_gated_tasks_event_not_lost_when_save_dev_queue_raises(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A PR_MERGED event must not be lost if save_dev_queue raises mid-call
+    (GitHub #1713 review MUST_FIX 1: cursor-advances-before-persist bug).
+
+    Pre-fix, ``advance_cursor`` ran unconditionally inside the Variant A
+    loop, before the batched ``save_dev_queue`` that actually persists the
+    release. A crash (or a raising ``save_dev_queue`` -- disk full, lock
+    I/O) in that window permanently consumed the ``PR_MERGED`` event (fires
+    once per PR, first-observation dedup) with no corresponding mutation
+    ever written, leaving the task stuck BLOCKED_ON_USER forever. This test
+    simulates that failure and confirms a retry, once ``save_dev_queue``
+    works again, still sees (and releases) the task -- proving the cursor
+    was not advanced on the failing call.
+    """
+    task = _make_ticket_task(
+        ticket_id="SG-A7",
+        client="client-a",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        disposition="merge_pending",
+        pr_url="https://github.com/foo/bar/pull/48",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    save_state(CwState(sessions=[]))
+    _emit_pr_merged(client="client-a", ticket_id="SG-A7", repo="foo/bar", pr_number=48)
+
+    real_save_dev_queue = save_dev_queue
+
+    def _raise_once(store: DevQueueStore) -> None:
+        msg = "simulated save_dev_queue failure"
+        raise OSError(msg)
+
+    monkeypatch.setattr("cw.reconcile.tasks.save_dev_queue", _raise_once)
+
+    with pytest.raises(OSError, match="simulated save_dev_queue failure"):
+        release_stale_gated_tasks()
+
+    # The mutation never persisted -- task is unchanged on disk.
+    still_blocked = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-A7")
+    assert still_blocked.status == QueueItemStatus.BLOCKED_ON_USER
+    assert still_blocked.stale_gate_detected_at is None
+
+    # save_dev_queue works normally now. If the cursor had been advanced on
+    # the failing call, this second pass would silently drop the event and
+    # return []. It must instead release the task, proving the event was
+    # not lost.
+    monkeypatch.setattr("cw.reconcile.tasks.save_dev_queue", real_save_dev_queue)
+    released = release_stale_gated_tasks()
+
+    assert released == ["SG-A7"]
+    reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-A7")
+    assert reloaded.stale_gate_detected_at is not None
