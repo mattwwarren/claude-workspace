@@ -162,6 +162,7 @@ from cw.reconcile.stalled import (
 from cw.reconcile.tasks import (
     complete_timed_out_merged_tasks,
     park_terminal_sibling_tasks,
+    release_stale_gated_tasks,
     revert_completed_silent_tasks,
     revert_timed_out_tasks,
 )
@@ -244,6 +245,7 @@ __all__ = [
     "park_terminal_sibling_tasks",
     "reconcile",
     "record_session_liveness_changes",
+    "release_stale_gated_tasks",
     "resolve_concierge_recipe_enabled",
     "resolve_reap_policy",
     "revert_completed_silent_tasks",
