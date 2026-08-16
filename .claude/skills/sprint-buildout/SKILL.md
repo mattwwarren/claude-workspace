@@ -111,6 +111,8 @@ themselves.
    gh issue comment <bug-number> --body-file <scratch>/rationale.md
    ```
 
+   Author `<scratch>/rationale.md` via the **Write tool** — see CLAUDE.md's **Agent File Operations** rule.
+
    The rationale comment names the specific shared code path — cite the
    exact `file:line` overlap evidence from step 2, not a generic "related to
    this RFC" note. These are standard `gh` CLI commands (`gh issue edit

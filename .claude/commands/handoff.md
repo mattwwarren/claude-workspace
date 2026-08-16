@@ -95,7 +95,7 @@ When this skill is invoked:
    - Identify decisions made
 3. **Generate handoff document(s):**
    - Use appropriate template for reason type
-   - Write to `.handoffs/` (workspace) or `~/.claude/handoffs/` (global)
+   - Write to `.handoffs/` (workspace) or `~/.claude/handoffs/` (global), via the **Write tool** — see CLAUDE.md's **Agent File Operations** rule
    - For debug-fork, create two documents
 4. **Display summary:**
    - Show handoff location(s)

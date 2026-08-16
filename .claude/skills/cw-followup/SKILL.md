@@ -159,8 +159,12 @@ To append to the ticket body without losing the existing content:
 
 ```bash
 TICKET=$(jq -r '.raw_payload.ticket_id' <<<"$RESULT")
-gh issue view "$TICKET" --repo mattwwarren/claude-workspace --json body --jq .body > /tmp/body.md
-cat /tmp/decisions.md >> /tmp/body.md
+gh issue view "$TICKET" --repo mattwwarren/claude-workspace --json body --jq .body
+```
+
+Use the **Write tool** to author the concatenated result (the existing body above, plus the decisions section) to a scratch file — see CLAUDE.md's **Agent File Operations** rule.
+
+```bash
 gh issue edit "$TICKET" --repo mattwwarren/claude-workspace --body-file /tmp/body.md
 ```
 
