@@ -17,4 +17,5 @@ zellij-plugin/target/
 .claude/scheduled_tasks.lock
 .claude/prep-pr-state.json
 .claude/cw-context.json
+.claude/cw-context.json.lock
 docs/handoffs/

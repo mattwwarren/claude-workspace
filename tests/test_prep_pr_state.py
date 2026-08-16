@@ -13,7 +13,7 @@ import sys
 import types
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 import pytest
 
@@ -414,3 +414,61 @@ class TestGateElapsedExceedsCeiling:
         assert set(out.keys()) == {"elapsed_s", "ceiling_s", "exceeded"}
         assert out["ceiling_s"] == 600
         assert isinstance(out["exceeded"], bool)
+
+
+# ---------------------------------------------------------------------------
+# #1867: ECOSYSTEM_GATES["pyproject.toml"] default gate list — ruff-format gate
+# ---------------------------------------------------------------------------
+
+
+class TestEcosystemGatesPyproject:
+    def _detect(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> dict[str, Any]:
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\n')
+        monkeypatch.chdir(tmp_path)
+        return cast("dict[str, Any]", _mod.detect_gates())
+
+    def test_default_gates_include_ruff_format(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = self._detect(tmp_path, monkeypatch)
+        names = [g["name"] for g in result["gates"]]
+        assert "ruff-format" in names
+
+    def test_ruff_format_gate_command_and_autofix(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = self._detect(tmp_path, monkeypatch)
+        ruff_format = next(g for g in result["gates"] if g["name"] == "ruff-format")
+        assert ruff_format["command"] == "uv run ruff format --check ."
+        assert ruff_format["autofix"] == "uv run ruff format ."
+
+    def test_ruff_check_and_ruff_format_are_distinct_gates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = self._detect(tmp_path, monkeypatch)
+        names = [g["name"] for g in result["gates"]]
+        assert names.count("ruff") == 1
+        assert names.count("ruff-format") == 1
+
+    def test_existing_default_gates_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = self._detect(tmp_path, monkeypatch)
+        names = {g["name"] for g in result["gates"]}
+        assert names == {"ruff", "ruff-format", "mypy", "pytest"}
+
+    def test_claude_md_override_still_wins_for_ruff_format(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\n')
+        _write_claude_md(
+            tmp_path,
+            "# Project\n\n## Quality Gates\n\n"
+            "- ruff-format: uv run ruff format --check review_bingo_hub\n",
+        )
+        monkeypatch.chdir(tmp_path)
+        result = cast("dict[str, Any]", _mod.detect_gates())
+        ruff_format = next(g for g in result["gates"] if g["name"] == "ruff-format")
+        assert ruff_format["command"] == "uv run ruff format --check review_bingo_hub"
