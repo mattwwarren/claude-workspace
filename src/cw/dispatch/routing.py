@@ -12,6 +12,7 @@ operator-signoff policy, and accumulates per-session cost onto the task.
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING, Literal
 
 from cw.auto_dev_result import (
@@ -35,6 +36,7 @@ from cw.dev_queue import (
     REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
     _advance_task_pointer,
     _extract_pr_url,
+    _extract_pr_url_or_info,
     _hold_aware_disposition,
     _stage_regress,
     transition_task_status,
@@ -94,6 +96,44 @@ _RULE_GATE_RELEASE = "gate_release"
 # paused_status written to SESSION_NEEDS_ATTENTION when a session parks at plan
 # stage (ambiguities_pending_resolution / premises_pending_verification).
 _PLAN_PARKED_REASON = "plan_parked"
+
+
+# Rule 5 blocker.reason literals this module reason-keys on directly (GitHub
+# #1713). Deliberately local literals, not an import of
+# cw.auto_dev_result.parse.BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN: that
+# constant is the *parser's* BlockedResult reason code (a synthetic result for
+# a sentinel the parser itself could not extract), a different producer/
+# context from this module's read of a well-formed AutoDevResult's
+# blocker.reason -- textually identical value, deliberately separate constant,
+# same precedent as dev_queue.lifecycle._SALVAGE_NO_SENTINEL_DISPOSITION vs.
+# reconcile._shared._NEEDS_SALVAGE_REASON.
+_AUTOMERGE_NOT_ARMED_REASON = "automerge_not_armed"
+_PRIOR_PIPELINE_PR_OPEN_REASON = "prior_pipeline_pr_open"
+
+# Matches "PR #<N>" in a prior_pipeline_pr_open blocker.details string (see
+# .claude/commands/auto-dev-finalize.md's template: "PR #<number>
+# (<headRefName>) is open and shares files..."). Extracts the FIRST such
+# reference -- the blocking PR this ticket's own park names itself against,
+# even when details lists multiple overlapping PRs.
+_BLOCKING_PR_NUMBER_RE = re.compile(r"PR #(\d+)")
+
+
+def _extract_blocked_on_pr(details: object) -> int | None:
+    """Extract the blocking PR number from a prior_pipeline_pr_open blocker.
+
+    Regex-only (R3 precedent, mirrors ``_marker_version``): no structured
+    field carries this reference (GitHub #1713 root-cause chain, Variant B) --
+    the producer only ever emits it inside ``blocker.details`` free text.
+    Fails closed (returns ``None``) on a malformed or absent ``details``
+    rather than raising, so a producer wording drift degrades to "no
+    cross-reference" instead of crashing dispatch routing.
+    """
+    if not isinstance(details, str):
+        return None
+    match = _BLOCKING_PR_NUMBER_RE.search(details)
+    if match is None:
+        return None
+    return int(match.group(1))
 
 
 # paused_status written to SESSION_NEEDS_ATTENTION when Rule 1 parks a
@@ -1139,12 +1179,38 @@ def _route_staged_decision(
             },
             correlation_id=task.ticket_id,
         )
+        # GitHub #1713 Variant A: automerge_not_armed parks a real, already-
+        # created PR, but the schema forbids `pr` from being non-null on a
+        # `blocked` status -- the producer carries the PR's identity in the
+        # unmodeled `pr_info` object instead (see
+        # _extract_pr_url_or_info's docstring). Without this, task.pr_url
+        # never gets stamped and cw.pr_hydrate._is_candidate permanently
+        # skips the row -- it is never polled, so it can never observe its
+        # own PR merging.
+        gate_pr_url = (
+            _extract_pr_url_or_info(last_result)
+            if blocker_reason == _AUTOMERGE_NOT_ARMED_REASON
+            else None
+        )
         transition_task_status(
             task,
             QueueItemStatus.BLOCKED_ON_USER,
             disposition=disposition,
+            pr_url=gate_pr_url,
             blocked_reason=blocker_reason,
         )
+        # GitHub #1713 Variant B: prior_pipeline_pr_open blocks this ticket
+        # behind a DIFFERENT ticket's open PR -- this row has no PR of its
+        # own yet, so pr_url/pr_hydrate can't help. Stamp the blocking PR's
+        # bare number (regex-extracted from blocker.details, the only place
+        # the producer emits it -- see _extract_blocked_on_pr) directly on
+        # task AFTER transition_task_status returns: that call's unconditional
+        # latch-clear (mirrors escalation_parked_at) zeroes blocked_on_pr as
+        # part of every transition, so stamping before the call would be
+        # immediately wiped.
+        if blocker_reason == _PRIOR_PIPELINE_PR_OPEN_REASON:
+            details = blocker.get("details") if isinstance(blocker, dict) else None
+            task.blocked_on_pr = _extract_blocked_on_pr(details)
     else:
         # Rule 6: None/not dict/missing status -- conservative fallback
         # Why: unparseable sentinel must never silently advance/complete
