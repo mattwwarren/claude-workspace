@@ -112,9 +112,14 @@ _PRIOR_PIPELINE_PR_OPEN_REASON = "prior_pipeline_pr_open"
 
 # Matches "PR #<N>" in a prior_pipeline_pr_open blocker.details string (see
 # .claude/commands/auto-dev-finalize.md's template: "PR #<number>
-# (<headRefName>) is open and shares files..."). Extracts the FIRST such
-# reference -- the blocking PR this ticket's own park names itself against,
-# even when details lists multiple overlapping PRs.
+# (<headRefName>) is open and shares files..."). The producer contract
+# (same doc, line ~122: "When multiple open PRs overlap, list all
+# overlapping PRs in `details`") documents that details may legitimately
+# name MORE THAN ONE overlapping PR when a row is blocked on several at
+# once -- _extract_blocked_on_pr below scans every match and fails closed
+# (returns None) unless exactly one is found, rather than silently picking
+# the first and mismatching the release condition against a still-open
+# second PR.
 _BLOCKING_PR_NUMBER_RE = re.compile(r"PR #(\d+)")
 
 
@@ -124,16 +129,22 @@ def _extract_blocked_on_pr(details: object) -> int | None:
     Regex-only (R3 precedent, mirrors ``_marker_version``): no structured
     field carries this reference (GitHub #1713 root-cause chain, Variant B) --
     the producer only ever emits it inside ``blocker.details`` free text.
-    Fails closed (returns ``None``) on a malformed or absent ``details``
-    rather than raising, so a producer wording drift degrades to "no
-    cross-reference" instead of crashing dispatch routing.
+    Fails closed (returns ``None``) on a malformed/absent ``details`` or on
+    ANY count of matches other than exactly one, rather than raising or
+    guessing. A malformed/absent details degrades to "no cross-reference"
+    instead of crashing dispatch routing; an ambiguous multi-PR block (the
+    producer contract permits ``details`` to name more than one overlapping
+    PR) degrades to the same "no cross-reference" blind spot the ticket's
+    orphaned-reference case already accepts, rather than releasing the row
+    the moment ONE of several blocking PRs merges while another
+    file-overlapping PR is still open.
     """
     if not isinstance(details, str):
         return None
-    match = _BLOCKING_PR_NUMBER_RE.search(details)
-    if match is None:
+    matches = _BLOCKING_PR_NUMBER_RE.findall(details)
+    if len(matches) != 1:
         return None
-    return int(match.group(1))
+    return int(matches[0])
 
 
 # paused_status written to SESSION_NEEDS_ATTENTION when Rule 1 parks a
