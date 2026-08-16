@@ -330,6 +330,14 @@ When spawning parallel agents with `run_in_background: true`:
 | Create file | `Write` | `Bash(echo >)` |
 | Read file | `Read` | `Bash(cat)` |
 
+**gh body files:** author every `gh pr create`, `gh issue comment`, `gh issue edit`,
+and `gh pr edit` body via the **Write tool** to a disk file, then pass
+`--body-file <path>`. Never heredoc-inline a body into the command (e.g.
+`--body "$(cat <<EOF ... EOF)"`) or `$(cat ...)` it from a Bash-composed
+temp file — the same "Bash heredoc/redirection blocks on prompts, Write
+tool doesn't" rule above applies to command bodies, not just file
+copy/move/create.
+
 ---
 
 # Code Writing Process
