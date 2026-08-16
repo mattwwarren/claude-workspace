@@ -13,7 +13,9 @@ refusal coverage, not happy-path coverage.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import subprocess
 import sys
@@ -90,13 +92,15 @@ def _list_file(tmp_path: Path, paths: list[Path]) -> Path:
     return listing
 
 
-def _run(tmp_path: Path, paths: list[Path], *, json_flag: bool = True) -> tuple[int, str]:
+def _run(
+    tmp_path: Path,
+    paths: list[Path],
+    *,
+    json_flag: bool = True,
+) -> tuple[int, str]:
     argv = ["resolve", "--conflicted-files", str(_list_file(tmp_path, paths))]
     if json_flag:
         argv.append("--json")
-    import io
-    import contextlib
-
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         code = _mod.main(argv)
@@ -296,7 +300,9 @@ def test_blank_lines_do_not_defeat_import_union() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _run_cli(listing: Path, *, json_flag: bool = True) -> subprocess.CompletedProcess[str]:
+def _run_cli(
+    listing: Path, *, json_flag: bool = True
+) -> subprocess.CompletedProcess[str]:
     argv = [
         sys.executable,
         str(_SCRIPT),

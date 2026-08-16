@@ -40,7 +40,8 @@ def _scripts_group() -> list[str]:
     for pythonpath, modules in _mod.GROUPS:
         if pythonpath == ".claude/scripts":
             return list(modules)
-    raise AssertionError("no '.claude/scripts' entry in check_imports.GROUPS")
+    message = "no '.claude/scripts' entry in check_imports.GROUPS"
+    raise AssertionError(message)
 
 
 def test_classify_merge_conflict_in_groups() -> None:

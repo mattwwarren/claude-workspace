@@ -58,7 +58,9 @@ def test_semantic_resolve_section_inserted_before_blocker_template() -> None:
 
 def test_rebase_fallthrough_comment_retargeted_to_semantic_resolve() -> None:
     content = _finalize()
-    assert "# If rebase fails with conflicts here → abort and emit blocker" not in content
+    assert (
+        "# If rebase fails with conflicts here → abort and emit blocker" not in content
+    )
     assert (
         "# If rebase fails with conflicts here → abort and attempt semantic"
         " auto-resolve (see below)" in content
@@ -122,7 +124,7 @@ def test_success_path_records_friction_highlight() -> None:
 
 
 def test_no_finalize_regress_blocker_reasons_change() -> None:
-    assert FINALIZE_REGRESS_BLOCKER_REASONS == frozenset({"agent_block"})
+    assert frozenset({"agent_block"}) == FINALIZE_REGRESS_BLOCKER_REASONS
 
 
 def test_no_mutex_or_concurrency_language_introduced() -> None:
