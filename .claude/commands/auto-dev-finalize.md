@@ -18,16 +18,16 @@ In standalone headless invocation: emit `AUTO_DEV_RESULT` after this stage compl
 
 ## Resolve carried-through context before emitting the sentinel
 
-Every `AUTO_DEV_RESULT` sentinel emitted from this file requires concrete, non-null `plan_source` and `scope.tier` values (see "every field above is required" below). On a normal run these were classified back in Stage 0/1 and Stage 2; on a **concierge-rescued respawn**, the fresh worker starts from a re-materialized `.claude/cw-context.json` and has no memory of that earlier classification. Resolve both explicitly before filling in any sentinel template — do not just copy the raw `"<value carried from Stage 0/1>"` / `"<small | large — same value carried through from Stage 2 scope classification>"` placeholder text verbatim.
+Every `AUTO_DEV_RESULT` sentinel emitted from this file requires concrete, non-null `plan_source` and `scope.tier` values (see "every field above is required" below). On a normal run these were classified in Stage 0/1 and Stage 2; on a **concierge-rescued respawn** the fresh worker starts from a re-materialized `.claude/cw-context.json` with no memory of that classification. Resolve both explicitly before filling in any sentinel template — never copy the raw placeholder text verbatim.
 
 **Resolve `plan_source`:**
 1. `.claude/cw-context.json` → `queue_metadata.plan_source` — populated by dispatch's `_persist_carried_context` write-back (`_route_staged_decision`, `src/cw/dispatch/routing.py`) from the prior stage's own sentinel, so a rescue respawn's fresh claim→spawn re-materializes it here.
-2. Fallback: `.cw/context.json` — infer from the tracker (`github_issue_existing` when the ticket is a GitHub issue, the dispatch default). **If the file is absent, prose-delegate to `auto-dev-intake.md` first to materialize it** (mirroring `auto-dev-plan.md`/`auto-dev-impl.md`'s own Orientation fallback) — a concierge-rescued respawn (`task.attempts > 1`, non-local backend) has its stale `.cw/context.json` deleted before spawn (`dispatch/gating.py:_invalidate_stale_context_json`, #1046), so this step would otherwise silently fall through to step 3 on exactly the rescue path this ticket targets.
+2. Fallback: `.cw/context.json` — infer from the tracker (`github_issue_existing` when the ticket is a GitHub issue, the dispatch default). **If the file is absent, prose-delegate to `auto-dev-intake.md` first to materialize it** (mirroring `auto-dev-plan.md`/`auto-dev-impl.md`'s Orientation fallback) — a concierge-rescued respawn has its stale `.cw/context.json` deleted before spawn (`dispatch/gating.py:_invalidate_stale_context_json`, #1046), so this step would otherwise fall through to step 3 on exactly the rescue path it targets.
 3. Fallback: `"none"`.
 
 Use the resolved value in every sentinel `plan_source` field below.
 
-**Resolve `scope.tier`:** structurally mirrors `auto-dev-review.md`'s "Before emitting the sentinel, resolve `scope.tier` explicitly" section — same precedence chain, same rationale (a null tier causes `apply_staged_decision` Rule 1 to route to `BLOCKED_ON_USER`):
+**Resolve `scope.tier`:** mirrors `auto-dev-review.md`'s "Before emitting the sentinel, resolve `scope.tier` explicitly" — same precedence chain, same rationale (a null tier routes `apply_staged_decision` Rule 1 to `BLOCKED_ON_USER`):
 1. Read `.cw/plan.md` — look for an explicit `Scope tier:`, `**Scope:** Small`, `tier: small`, or similar Stage-1c marker.
 2. Fallback: read `.claude/cw-context.json` → `queue_metadata.scope_hint` (operator hint).
 3. Fallback: re-derive from the diff itself using the canonical Stage-1c thresholds — run `git diff --stat $FORK_POINT...origin/<branch-name>` and count changed files and lines. **Small** = ≤10 files AND ≤500 lines AND no forbidden-area touches; **Large** otherwise.
@@ -35,13 +35,13 @@ Use the resolved value in every sentinel `plan_source` field below.
 
 `scope.tier` must always be a concrete value (`"small"` or `"large"`) in the emitted sentinel.
 
-**R3 edge case:** `.cw/plan.md` and `.cw/deferred-findings.md` persist across a normal requeue (worktree reused, `allow_dirty_reuse=True`); the only loss path is a `StaleWorktreeError` rebuild (fresh worktree), where the plan-marker step above falls through to re-derivation and the deferred-findings section is legitimately omitted.
+**R3 edge case:** `.cw/plan.md` and `.cw/deferred-findings.md` persist across a normal requeue (`allow_dirty_reuse=True`); the only loss path is a `StaleWorktreeError` rebuild, where the plan-marker step falls through to re-derivation and the deferred-findings section is legitimately omitted.
 
 ## Stage 4: PR Creation (Merge-Gated)
 
 ### Pre-Stage Detector Guard
 
-Before invoking Step 4a, check for an existing PR on **this ticket's branch** (distinct from Step 4a, which scans all open pipeline PRs for the merge gate):
+Before invoking Step 4a, check for an existing PR on **this ticket's branch** (distinct from Step 4a, which scans all open pipeline PRs):
 
 ```bash
 gh pr view <branch-name> --json number,state,url 2>/dev/null
@@ -49,10 +49,10 @@ gh pr view <branch-name> --json number,state,url 2>/dev/null
 
 - **PR exists and is OPEN** → reuse it. Skip the `/prep-pr` create-step (Step 4c); proceed directly to Step 4d (auto-merge enablement + Linear comment if not already posted) and then Stage 5.
 - **PR exists and is MERGED** → detector should have returned `merged`; surface as already-done and exit successfully with `status: shipped`.
-- **PR exists and is CLOSED (not merged)** → EXIT `blocked` with `blocker.reason: "pr_already_terminal"`. Do not create a duplicate; the closed PR represents a human decision and the pipeline must not work around it.
+- **PR exists and is CLOSED (not merged)** → EXIT `blocked` with `blocker.reason: "pr_already_terminal"`. Do not create a duplicate — the closed PR is a human decision the pipeline must not work around.
 - **No PR exists** → proceed with normal Step 4a (Merge Gate Check) → Step 4b → Step 4c flow.
 
-This guard makes Stage 4 idempotent across session restarts. Without it, a session that dies between `/prep-pr` succeeding and Step 4d completing would re-attempt PR creation on next invocation.
+This guard makes Stage 4 idempotent across session restarts: without it, a session dying between `/prep-pr` succeeding and Step 4d completing would re-attempt PR creation.
 
 ### Step 4a: Merge Gate Check
 
@@ -88,13 +88,9 @@ Options:
 4. Abort — stop pipeline processing
 ```
 
-- **Wait** → Pause. When user says "continue", re-check PR status. If merged, proceed. If still open, re-ask.
-- **Force** → Proceed with PR creation despite open PR. **Stacked PRs are always created as DRAFTS** so they cannot accidentally merge ahead of the bottom of the stack. `/review-monitor` promotes them to ready when the parent (oldest open pipeline PR) merges. The pipeline will continue to track the new PR for merge gating on subsequent tickets — meaning a stack of 3 still leaves later tickets gated on the bottom PR.
-- **Fix** → Enter fix mode for the prior PR:
-  - If CI failing: spawn agent (`model: "sonnet"`) in that branch's worktree to fix, push
-  - If merge conflicts: fetch main, merge, resolve conflicts, push
-  - If changes requested: enter Step 5b feedback handling for that PR
-  - After fix, re-check status and re-present options
+- **Wait** → Pause. On "continue", re-check PR status: if merged, proceed; if still open, re-ask.
+- **Force** → Proceed with PR creation despite the open PR. **Stacked PRs are always created as DRAFTS** so they cannot merge ahead of the bottom of the stack; `/review-monitor` promotes them to ready when the parent (oldest open pipeline PR) merges. Later tickets stay gated on the bottom PR.
+- **Fix** → Enter fix mode for the prior PR: if CI is failing, spawn agent (`model: "sonnet"`) in that branch's worktree to fix and push; if merge conflicts, fetch main, merge, resolve, push; if changes requested, enter Step 5b feedback handling for that PR. Then re-check status and re-present options.
 - **Abort** → Stop pipeline, summarize state
 
 **If no open PR from this pipeline:** Proceed immediately.
@@ -110,11 +106,7 @@ Options:
    gh pr list --author @me --state open --json number,headRefName
    ```
    Filter for branches matching `<branch-prefix>/*`, excluding the current branch.
-3. For each such PR, collect its changed-file list:
-   ```bash
-   gh pr diff <number> --name-only
-   ```
-   Fallback if unavailable: `git diff --name-only origin/main...origin/<headRefName>`.
+3. For each such PR, collect its changed-file list via `gh pr diff <number> --name-only` (fallback: `git diff --name-only origin/main...origin/<headRefName>`).
 4. Compute the intersection of the candidate file list with each open PR's file list.
    - **Non-empty intersection** for any open PR → EXIT `merge_gate_blocked` with populated `blocker`:
      ```json
@@ -132,7 +124,7 @@ Options:
 
 ### Step 4b: Pipeline-Level PR Approval
 
-Present the ship summary to the user before delegating execution. This preserves the pipeline's scope-aware approval gate (scope was classified in Stage 1c and review just completed in Stage 3) — the underlying `/ship-it` is per-project and may not re-ask.
+Present the ship summary before delegating execution — this preserves the pipeline's scope-aware approval gate, since the underlying per-project `/ship-it` may not re-ask.
 
 **AskUserQuestion:**
 ```
@@ -158,30 +150,26 @@ Create PR via /prep-pr + /ship-it?
 the Step 4c.1 gate has run.** This step delegates PR creation to a `/prep-pr` agent, but
 the spawn is **gated**: your **first action is the mandatory isolation check in Step 4c.1**,
 whose result sets the spawn's `isolation` flag. Spawning here — before running 4c.1 — is the
-exact mistake that causes the guaranteed hang documented in 4c.1 (a headless finalize skipped
-straight to the spawn and hung ~40 min; #1097, #1123). The `/prep-pr` agent you spawn in 4c.2
-handles: sync-with-main (+ conflict handling), quality gate detection + re-run, and ship-it
-delegation (per-project PR creation conventions, branch naming, CI setup).
+exact mistake that causes the guaranteed hang documented in 4c.1 (#1097, #1123). The
+`/prep-pr` agent spawned in 4c.2 handles sync-with-main (+ conflict handling), quality-gate
+detection + re-run, and ship-it delegation.
 
 **Proceed to Step 4c.1 now — do not skip ahead to 4c.2.**
 
-**Why delegate:**
-- `/prep-pr` delegates to per-project `.claude/commands/ship-it.md` which knows repo-specific PR conventions (template, labels, reviewers, base branch, CI bootstrap) that the pipeline shouldn't hardcode.
-- Sync-with-main and quality-gate-rerun logic live in one place instead of being duplicated between `/auto-dev` Stage 4b and `/prep-pr` Step 1/7.
-- PR monitor registration is handled by `/prep-pr` Step 9.
+**Why delegate:** `/prep-pr` delegates to the per-project `.claude/commands/ship-it.md`, which knows repo-specific PR conventions (template, labels, reviewers, base branch, CI bootstrap) the pipeline shouldn't hardcode; it keeps sync-with-main and quality-gate-rerun logic in one place instead of duplicating them across `/auto-dev` Stage 4b and `/prep-pr` Step 1/7; and it handles PR monitor registration in its Step 9.
 
 #### Step 4c.1 — MANDATORY isolation gate (run FIRST; NEVER skip) — #766/#1047/#1097
 
 > **STOP.** Do **not** spawn the agent with `isolation: "worktree"` by default. You **MUST**
 > run the check below first and let its result choose the `isolation` flag. Skipping this
 > gate and defaulting to `isolation: "worktree"` causes a **guaranteed, non-recoverable
-> hang**: every cw-spawned finalize — both dev-queue dispatch **and** standalone `cw spawn
-> --worktree` (Impl-direct) — already runs inside a pre-provisioned worktree with the feature
-> branch checked out. A nested isolation worktree's `git checkout -B <branch>` then collides
+> hang**: every cw-spawned finalize — dev-queue dispatch **and** standalone `cw spawn
+> --worktree` alike — already runs inside a pre-provisioned worktree with the feature branch
+> checked out, so a nested isolation worktree's `git checkout -B <branch>` collides
 > (`fatal: '<branch>' is already used by worktree ...`), the agent improvises an
 > `EnterWorktree` into the real worktree, and **that call hangs with no result, killing both
-> the child and this finalize session** until the daemon fires `needs_salvage` ~40 min later
-> (observed: #1097, session `finalize`; earlier #1031/#1047).
+> the child and this finalize session** until `needs_salvage` fires ~40 min later
+> (#1097; earlier #1031/#1047).
 
 Run this exact check before spawning:
 
@@ -193,10 +181,10 @@ else
 fi
 ```
 
-`cw-context.json` is written into the worktree by **both** the dispatch path and standalone
+`cw-context.json` is written into the worktree by **both** dispatch and standalone
 `cw spawn` (`src/cw/spawn.py`), so for every headless/cw-driven finalize the answer is
-`true`. `isolation: "worktree"` is reserved solely for a human running `/auto-dev-finalize`
-by hand from a normal checkout.
+`true`. `isolation: "worktree"` is reserved for a human hand-running `/auto-dev-finalize`
+from a normal checkout.
 
 #### Step 4c.2 — spawn the agent, `isolation` flag SET BY the gate
 
@@ -205,17 +193,16 @@ Spawn a **general-purpose** agent (`model: "sonnet"`) scoped to run `/prep-pr`, 
 `isolation` flag from the gate result per the two cases below:
 
 - **`IN_DISPATCH_WORKTREE=true` (default for every headless/cw-spawned run): OMIT
-  `isolation: "worktree"` entirely.** Spawn the agent scoped to the session cwd
-  (`worktree_path` in `.claude/cw-context.json` is the authoritative anchor). No nested
-  worktree means no branch collision and no primary-checkout path to `cd` into. **Keep the
-  git-refresh sequence below unconditionally** (fetch + `checkout -B` + `merge origin/main`)
-  — it still pulls in any fix-loop pushes to `origin/<branch>` not yet reflected locally; it
-  just runs against the session cwd instead of a spawned worktree.
+  `isolation: "worktree"` entirely.** Spawn scoped to the session cwd (`worktree_path` in
+  `.claude/cw-context.json` is the authoritative anchor) — no nested worktree, so no branch
+  collision and no primary-checkout path to `cd` into. **Keep the git-refresh sequence below
+  unconditionally** (fetch + `checkout -B` + `merge origin/main`); it runs against the
+  session cwd instead of a spawned worktree.
 - **`IN_DISPATCH_WORKTREE=false` (interactive hand-run only): spawn WITH `isolation:
-  "worktree"`** and have the agent re-checkout the feature branch from origin (same
+  "worktree"`** and have the agent re-checkout the feature branch from origin (the same
   push-then-recheckout pattern as the Stage 3b fix loop) before invoking `/prep-pr`.
 
-**Permission mode (known limitation, #636 — deferred):** In headless/daemon context the worker runs under `claude --bg --permission-mode auto` (cw default, `native_daemon.py` `_DEFAULT_PERMISSION_MODE`), so the `auto` permission classifier fires on `gh pr create` inside the worktree-isolated subagent; with no TTY to approve, the call blocks and `/prep-pr` aborts. The global allowlist `Bash(gh pr:*)` does NOT suppress the classifier here. The *effective* fix is to spawn the worker with a non-`auto` `permission_mode` (cw side, requires the bypassPermissions disclaimer accepted once interactively) — **deferred** to RFC 0005's FINALIZE/REVIEW stages, which own PR creation and must carry this requirement (see #622/#621). Setting `bypassPermissions` on *this subagent spawn alone* is NOT currently effective — the worker's own `auto` mode is the source. Until the stage fix lands, a classifier block surfaces as a BLOCK (below) for manual ship.
+**Permission mode (known limitation, #636 — deferred):** headless workers run under `claude --bg --permission-mode auto` (`native_daemon.py` `_DEFAULT_PERMISSION_MODE`), so the `auto` classifier fires on `gh pr create` inside a worktree-isolated subagent and, with no TTY to approve, blocks `/prep-pr`. The allowlist `Bash(gh pr:*)` does NOT suppress it, and setting `bypassPermissions` on *this subagent spawn alone* is ineffective — the worker's own `auto` mode is the source. The effective fix (spawning the worker with a non-`auto` `permission_mode`) is **deferred** to RFC 0005's FINALIZE/REVIEW stages (#622/#621); until then a classifier block surfaces as a BLOCK below for manual ship.
 
 **Agent prompt must include:**
 - Branch name, fork point SHA (from Checkpoint 2), and ticket ID
@@ -224,36 +211,32 @@ Spawn a **general-purpose** agent (`model: "sonnet"`) scoped to run `/prep-pr`, 
   git fetch origin
   # -B (not -b): idempotent reset-to-origin. cw provisions the per-ticket
   # worktree on this same feature branch (#712), so -b would fail "already
-  # exists"; -B resets it to origin regardless.
-  # Why: runs against the session cwd when already in a dispatch worktree
-  # (#1047, see Dispatch Detection above) — the -B reset still pulls any
-  # fix-loop pushes to origin/<branch> not yet reflected locally.
+  # exists". The reset still pulls any fix-loop pushes to origin/<branch>
+  # not yet reflected locally (#1047).
   git checkout -B <branch-name> origin/<branch-name>
 
-  # Refresh with latest main — catches any upstream commits that landed
-  # between the last fix push and now. Required even though /prep-pr
-  # also merges main, because /prep-pr runs once; this is belt-and-
-  # suspenders for pipelines that push many commits across fix rounds.
+  # Refresh with latest main — catches upstream commits landed between the
+  # last fix push and now. Required even though /prep-pr also merges main,
+  # because /prep-pr runs once.
   git merge origin/main --no-edit
   ```
   If conflicts → BLOCK with file list; do NOT force.
-- Once merged cleanly, push immediately — before any quality-gate work begins (the fix for GEN-5343: the merge commit above must not exist only in this local worktree while `/prep-pr`'s quality gates run for up to 5400s):
+- Once merged cleanly, push immediately — before any quality-gate work begins (GEN-5343: the merge commit must not exist only in this local worktree while `/prep-pr`'s quality gates run for up to 5400s):
   ```bash
   git push origin HEAD:refs/heads/<branch-name>
   git fetch origin <branch-name>
   test "$(git rev-parse origin/<branch-name>)" = "$(git rev-parse HEAD)"
   ```
-  If the push fails, or the verify comparison mismatches → do NOT invoke `/prep-pr`. STOP and return a BLOCK whose text includes the verbatim push failure output (or the mismatch detail) — the Unavailability classifier below inspects this returned text and, on a signature match, emits the `push_auth_failed` sentinel via the existing template (`stage_reached: "stage4b_pr_create"`); otherwise it falls through to a generic `agent_block` per the "Any other agent BLOCK" gate-collapse row.
-  This `git push` has no `timeout` wrapper — no push site in this file family does (#1414 R9: accepted residual risk, consistent with `ship-it.md`'s existing push and `prep-pr.md`'s own Step 1 push below).
-- Instruction to invoke `/prep-pr --skip-review --base main` via the Skill tool. **If the user chose Force at Step 4a (stacking onto an open pipeline PR), append `--draft`** so `/prep-pr` passes it through to the project's `/ship-it` (`/prep-pr` Step 8 already supports `--draft` pass-through). The PR must be a draft until the parent merges.
-  - `--skip-review` is required: Stage 3 already ran scope-aware review with the full reviewer set. `/prep-pr`'s own review pass is thinner and would double up.
+  If the push fails, or the verify comparison mismatches → do NOT invoke `/prep-pr`. STOP and return a BLOCK whose text includes the verbatim push failure output (or the mismatch detail) — the Unavailability classifier below inspects that text and, on a signature match, emits the `push_auth_failed` sentinel via the existing template (`stage_reached: "stage4b_pr_create"`); otherwise it falls through to a generic `agent_block` per the "Any other agent BLOCK" gate-collapse row.
+  This `git push` has no `timeout` wrapper — no push site in this file family does (#1414 R9: accepted residual risk, consistent with `ship-it.md`'s push and `prep-pr.md`'s own Step 1 push).
+- Instruction to invoke `/prep-pr --skip-review --base main` via the Skill tool. **If the user chose Force at Step 4a (stacking onto an open pipeline PR), append `--draft`** so `/prep-pr` passes it through to the project's `/ship-it` (its Step 8 supports `--draft` pass-through). The PR must stay a draft until the parent merges. `--skip-review` is required: Stage 3 already ran the full scope-aware review set, and `/prep-pr`'s thinner pass would double up.
 
-  **Headless:** when the finalize stage itself is running headless (`--headless` in "$ARGUMENTS"), the `/prep-pr` invocation MUST include `--headless` so the flag propagates down the delegated `prep-pr` → `ship-it` chain and every interactive gate in it collapses per the gate-collapse table. Compose the invocation string as:
-  - Plain case (headless, not stacking): `/prep-pr --skip-review --base main --headless`
-  - Force + `--draft` case (headless, stacking onto an open pipeline PR per the Step 4a Force option): `/prep-pr --skip-review --base main --headless --draft`
+  **Headless:** when finalize itself runs headless (`--headless` in "$ARGUMENTS"), the `/prep-pr` invocation MUST include `--headless` so the flag propagates down the `prep-pr` → `ship-it` chain and every interactive gate collapses per the gate-collapse table:
+  - Plain case: `/prep-pr --skip-review --base main --headless`
+  - Force + `--draft` case (stacking onto an open pipeline PR): `/prep-pr --skip-review --base main --headless --draft`
 
-  Instruct the finalize subagent explicitly: any interactive prompt anywhere in the delegated `prep-pr` → `ship-it` chain that cannot be auto-resolved (e.g. `/prep-pr`'s own Step-7 "Ship anyway" gate, or a project `ship-it.md`'s tag-confirmation prompts) MUST surface as `agent_block` per the existing gate-collapse table (`docs/headless-contract.md` §2, the "Any other agent BLOCK" row) — it must NEVER be silently skipped.
-- **Required deliverable:** the JSON output of `~/.claude/scripts/prep_pr_finalize.py verify --require-automerge --json`, run from the worktree after `/prep-pr` returns. The friction report MUST include this JSON verbatim. Do NOT summarize or paraphrase it — paste it.
+  Instruct the subagent explicitly: any interactive prompt in the delegated chain that cannot be auto-resolved (`/prep-pr`'s Step-7 "Ship anyway" gate, a project `ship-it.md`'s tag confirmation) MUST surface as `agent_block` per the gate-collapse table (`docs/headless-contract.md` §2, "Any other agent BLOCK") — NEVER silently skipped.
+- **Required deliverable:** the JSON output of `~/.claude/scripts/prep_pr_finalize.py verify --require-automerge --json`, run from the worktree after `/prep-pr` returns. The friction report MUST paste this JSON verbatim — never summarized.
 - Instruction: if `/prep-pr` aborts (no project `/ship-it`, merge conflicts, gate failures), escalate as BLOCK with the specific cause — do NOT fall back to inline `gh pr create`
 - The friction protocol block
 - The following health check block verbatim:
@@ -266,11 +249,10 @@ Spawn a **general-purpose** agent (`model: "sonnet"`) scoped to run `/prep-pr`, 
   - **Recommendation**: PROCEED | EXIT_FOR_HUMAN_REVIEW
   ```
 
-**Unavailability classifier (#1049, generalized #1156 — RFC 0011 A2):** Immediately after the subagent returns — before the verify-script gate below — inspect its returned text (friction report / BLOCK message) for an unavailability failure. This covers up to three push sites whose failure text the Step 4c subagent's
-returned text can reflect, in the order a single run hits them: (1) this
-Step 4c.2 post-merge push [new, #1414], (2) `/prep-pr`'s own Step 1
-sync-with-base push [new, #1414], (3) the delegated project's `ship-it.md`
-initial `git push -u origin "$BRANCH"` (pre-existing, #1049). Match any of these signatures verbatim — this list is a PROSE MIRROR of `src/cw/unavailability.py`'s `UNAVAILABILITY_SIGNATURES` (mirror-comment pattern: `cw.dev_queue.lifecycle._PLAN_SPEC_MARKER` mirroring `gh._PLAN_MARKER`); keep the two copies in sync, see `test_unavailability_signatures_mirrored_in_prose` for the drift guard:
+**Unavailability classifier (#1049, generalized #1156 — RFC 0011 A2):** Immediately after the subagent returns — before the verify-script gate below — inspect its returned text (friction report / BLOCK message) for an unavailability failure. This covers three push sites the subagent's returned text can reflect, in the order a single run hits them: (1) this
+Step 4c.2 post-merge push [#1414], (2) `/prep-pr`'s own Step 1
+sync-with-base push [#1414], (3) the delegated project's `ship-it.md`
+initial `git push -u origin "$BRANCH"` (#1049). Match any signature verbatim — this list is a PROSE MIRROR of `src/cw/unavailability.py`'s `UNAVAILABILITY_SIGNATURES`; keep the two copies in sync, see `test_unavailability_signatures_mirrored_in_prose` for the drift guard:
 
 - Auth-failure (#1049's original four, unchanged):
   - `Permission denied (publickey)`
@@ -289,9 +271,9 @@ initial `git push -u origin "$BRANCH"` (pre-existing, #1049). Match any of these
   - `HTTP 503`
   - `HTTP 500`
 
-(`MCP-github-unreachable` is deliberately not mirrored here — no verified signature exists yet, see the module docstring in `src/cw/unavailability.py`.)
+(`MCP-github-unreachable` is deliberately not mirrored — no verified signature exists yet; see the `src/cw/unavailability.py` module docstring.)
 
-(Step 4c.5's own rebase-retry push is a separate site, checked directly by the main session — see the classifier added there below, which reuses this same signature list.)
+(Step 4c.5's own rebase-retry push is a separate site, checked directly by the main session — see the classifier below, which reuses this signature list.)
 
 If any signature is present, emit the structured `blocked` sentinel below and stop — do NOT proceed to the verify-script gate or Step 4c.5.
 
@@ -337,13 +319,13 @@ If any signature is present, emit the structured `blocked` sentinel below and st
 }
 ```
 
-**Do not add `push_auth_failed` to `FINALIZE_REGRESS_BLOCKER_REASONS`** (`auto_dev_result/schema.py`'s `FINALIZE_REGRESS_BLOCKER_REASONS`, currently `{"agent_block"}`). A locked SSH key is not fixed by re-running implementation — adding this reason to the regress set would auto-regress FINALIZE→IMPL and burn `FINALIZE_REGRESS_CAP` attempts against a still-locked key. Park for the operator instead via the sentinel above.
+**Do not add `push_auth_failed` to `FINALIZE_REGRESS_BLOCKER_REASONS`** (`auto_dev_result/schema.py`, currently `{"agent_block"}`). A locked SSH key is not fixed by re-running implementation; regressing FINALIZE→IMPL would burn `FINALIZE_REGRESS_CAP` attempts against a still-locked key. Park for the operator via the sentinel above.
 
-**cw-side classification (RFC 0011 A1, #1155):** `push_auth_failed` is now retro-classified under `OPERATOR_UNAVAILABLE_BLOCKER_REASONS` (`auto_dev_result/schema.py`), so cw tags its park with `paused_status: "awaiting_operator_availability"` instead of the generic `"blocked"`. This is a cw-side (`dispatch/routing.py`) routing change only — no change to this producer skill's sentinel shape or logic is required.
+**cw-side classification (RFC 0011 A1, #1155):** `push_auth_failed` is retro-classified under `OPERATOR_UNAVAILABLE_BLOCKER_REASONS`, so cw tags its park `paused_status: "awaiting_operator_availability"` rather than generic `"blocked"` — a cw-side (`dispatch/routing.py`) routing change only, no producer change required.
 
-**Producer note:** `push_auth_failed` is an open-enum addition to `blocker.reason` (per headless-contract.md §4.2 — `reason` is open by design, same precedent as `merge_conflict_post_push` below). Consumers surface it verbatim; no parser change needed.
+**Producer note:** `push_auth_failed` is an open-enum addition to `blocker.reason` (headless-contract.md §4.2 — `reason` is open by design, same precedent as `merge_conflict_post_push` below). Consumers surface it verbatim; no parser change needed.
 
-**Main-session re-verification (do not skip):** After the subagent returns, re-run finalize from the impl worktree (using the worktree's git context — either `cd <worktree>` or `git -C <worktree>`). This is the load-bearing check for #1140: `gh pr merge --auto` inside the subagent can report success while the read-back (`autoMergeRequest`) stays null, so this re-verification is what actually confirms auto-merge was armed.
+**Main-session re-verification (do not skip):** After the subagent returns, re-run finalize from the impl worktree (`cd <worktree>` or `git -C <worktree>`). This is the load-bearing check for #1140: `gh pr merge --auto` inside the subagent can report success while the `autoMergeRequest` read-back stays null.
 
 ```bash
 ~/.claude/scripts/prep_pr_finalize.py verify --require-automerge --require-monitor --json
@@ -353,7 +335,7 @@ Required: parse the JSON. `status` must be `"ok"` and `pr_number` must be non-nu
 
 **Interactive:** report the failed checks to the user via AskUserQuestion: "Subagent claimed ship complete but finalize failed (<failed-checks>). Re-run /prep-pr in the worktree, skip ticket, or abort pipeline?"
 
-**Headless:** inspect the parsed JSON's `checks` array. If the `automerge-enabled` check specifically is the (or one of the) failed checks, emit the `automerge_not_armed` sentinel below and stop — do NOT proceed to Step 4c.5. If failure is on any *other* check (PR existence, SHA match, monitor registration, etc.), this collapses under the existing "Any other agent BLOCK" gate-collapse row — emit `blocked` with `blocker.reason: "agent_block"` as already specified; do not invent a new reason for that branch.
+**Headless:** inspect the parsed JSON's `checks` array. If `automerge-enabled` is among the failed checks, emit the `automerge_not_armed` sentinel below and stop — do NOT proceed to Step 4c.5. Any *other* failed check (PR existence, SHA match, monitor registration) collapses under the "Any other agent BLOCK" gate-collapse row — emit `blocked` with `blocker.reason: "agent_block"`; do not invent a new reason.
 
 **Sentinel template — `automerge_not_armed` blocker:**
 
@@ -403,17 +385,15 @@ Required: parse the JSON. `status` must be `"ok"` and `pr_number` must be non-nu
 }
 ```
 
-**Do not add `automerge_not_armed` to `FINALIZE_REGRESS_BLOCKER_REASONS`** (`src/cw/auto_dev_result/schema.py:83`, currently `{"agent_block"}`). A failed auto-merge arm is not fixed by re-running implementation — adding this reason to the regress set would auto-regress FINALIZE→IMPL and burn `FINALIZE_REGRESS_CAP` attempts against a PR that already exists and just needs auto-merge re-armed. Park for the operator instead via the sentinel above.
+**Do not add `automerge_not_armed` to `FINALIZE_REGRESS_BLOCKER_REASONS`** (`src/cw/auto_dev_result/schema.py:83`, currently `{"agent_block"}`). A failed auto-merge arm is not fixed by re-running implementation; regressing FINALIZE→IMPL would burn `FINALIZE_REGRESS_CAP` attempts against a PR that already exists and just needs re-arming. Park for the operator via the sentinel above.
 
-**Producer note:** `automerge_not_armed` is an open-enum addition to `blocker.reason` (per headless-contract.md §4.2 — `reason` is open by design, same precedent as `merge_conflict_post_push` below). Consumers surface it verbatim; no parser change needed.
+**Producer note:** `automerge_not_armed` is an open-enum addition to `blocker.reason` (headless-contract.md §4.2 — `reason` is open by design). Consumers surface it verbatim; no parser change needed.
 
 **If the agent returns BLOCK due to "no project `/ship-it`":** The project hasn't been set up for automated PR creation. AskUserQuestion: "Project has no `.claude/commands/ship-it.md`. Create one manually and resume, skip this ticket (leave branch pushed), or abort pipeline?"
 
 ### Step 4c.5: Post-Push Mergeability Verification
 
-**Why this exists:** `/prep-pr` performs sync-with-main *before* it creates the PR. Once the PR is open, the world keeps moving — sibling auto-dev sessions, manual merges, or any other pushes to `origin/main` can flip a freshly-opened PR from MERGEABLE to CONFLICTING in seconds. If the worker then exits to the sentinel without re-checking, the PR sits orphaned in a CONFLICTING state until something kicks `/review-monitor`. This step closes that window.
-
-Observed incident: 2026-05-27, claude-workspace #305 — three sessions dispatched in parallel touched the same module; two merged first; the third opened PR #309 *already CONFLICTING* and the worker timed out without ever rebasing or blocking.
+**Why this exists:** `/prep-pr` syncs with main *before* creating the PR, so sibling pushes to `origin/main` can flip a freshly-opened PR to CONFLICTING before the worker exits, leaving it orphaned until something kicks `/review-monitor` (claude-workspace #305/#309). This step closes that window.
 
 **Sequence (headless and interactive alike):**
 
@@ -442,7 +422,7 @@ git rebase origin/main
 git push --force-with-lease origin HEAD:<branch-name>
 ```
 
-**Push-auth-failure check (#1049):** Before re-verifying mergeability, check this push's own output against the **full signature table listed under the Step 4c classifier above** — all three families (auth-failure, network-unreachable, GitHub 5xx / secondary-rate-limit), not just the original 4 auth signatures. If any signature is present, emit the `push_auth_failed` sentinel (same shape as the Step 4c template above) with `stage_reached` and `blocker.stage` set to `"stage5_post_create"` (this site runs after PR creation) and `blocker.details` naming this site and the matched signature, e.g. `"Step 4c.5 rebase-retry push: Permission denied (publickey)"` or `"Step 4c.5 rebase-retry push: Could not resolve host"`. Stop — do not proceed to the mergeability re-check below.
+**Push-auth-failure check (#1049):** Before re-verifying mergeability, check this push's output against the **full signature table under the Step 4c classifier above** — all three families, not just the original 4 auth signatures. On a match, emit the `push_auth_failed` sentinel (same shape as the Step 4c template) with `stage_reached` and `blocker.stage` set to `"stage5_post_create"` and `blocker.details` naming this site and the matched signature, e.g. `"Step 4c.5 rebase-retry push: Permission denied (publickey)"`. Stop — do not proceed to the mergeability re-check.
 
 After the push, re-verify mergeability once:
 
@@ -500,17 +480,17 @@ gh pr view <pr_number> --repo <owner>/<repo> --json mergeable,mergeStateStatus
 }
 ```
 
-**Critical: every field above is required.** `scope`, `plan_source`, and `health` MUST be populated with real values carried through from earlier stages. Emitting `null` or omitting them causes the consumer to fail schema validation and synthesize a separate `validation_failed` blocker — masking the real `merge_conflict_post_push` reason. This is a wider producer-side discipline (see the substrate ticket on blocker-path schema completeness).
+**Critical: every field above is required.** `scope`, `plan_source`, and `health` MUST carry real values from earlier stages. Emitting `null` or omitting them fails consumer schema validation and synthesizes a `validation_failed` blocker that masks the real `merge_conflict_post_push` reason.
 
-**Producer note:** `merge_conflict_post_push` is an open-enum addition to `blocker.reason` (per headless-contract.md §4.2 — `reason` is open by design). Consumers surface it verbatim; no parser change needed.
+**Producer note:** `merge_conflict_post_push` is an open-enum addition to `blocker.reason` (headless-contract.md §4.2 — `reason` is open by design). Consumers surface it verbatim; no parser change needed.
 
-**Defense-in-depth handoff:** the blocker is `retry_eligible: true` because `/review-monitor` (per the companion change in this PR) auto-engages on orphaned CONFLICTING PRs authored by `@me`. If `/review-monitor` succeeds in rebasing, the orchestrator can safely re-dispatch this ticket and pick up where this run left off. If `/review-monitor` also fails, human intervention takes over via `recovery_hint`.
+**Defense-in-depth handoff:** the blocker is `retry_eligible: true` because `/review-monitor` auto-engages on orphaned CONFLICTING PRs authored by `@me`. If it rebases successfully the orchestrator can re-dispatch this ticket; if it also fails, `recovery_hint` hands over to a human.
 
 ### Step 4d: Post-Ship Pipeline Bookkeeping
 
 After `/prep-pr` returns with a PR number:
 
-1. **UI Evidence Gate (orchestrator-run fact gate):** project `/ship-it` skills are expected to attach screenshots / video for UI changes, but agent self-report has been observed to silently fall through to "skip with a note." Mitigation 1 philosophy (Orchestrator-Run Completion Gates) applies — verify deterministically against the PR body, do not trust the ship-it agent's prose:
+1. **UI Evidence Gate (orchestrator-run fact gate):** project `/ship-it` skills are expected to attach screenshots / video for UI changes, but agent self-report silently falls through to "skip with a note." Same orchestrator-run-gate discipline as `auto-dev-impl.md`'s Completion Artifacts: verify deterministically against the PR body, never the agent's prose.
 
    ```bash
    # Detect non-test frontend files in the shipped diff
@@ -527,7 +507,7 @@ After `/prep-pr` returns with a PR number:
    fi
    ```
 
-   Project repos can override the frontend-file regex by placing a single-line `ui_paths_regex:` entry in `.claude/project-config.yaml` — the gate falls back to the default `^frontends/.*\.(tsx|ts)$` (minus test files) when the entry is absent. Repos with no UI surface should set `ui_paths_regex: ^$` so the gate becomes a no-op.
+   Repos can override the frontend-file regex via a single-line `ui_paths_regex:` entry in `.claude/project-config.yaml`; absent it, the gate defaults to `^frontends/.*\.(tsx|ts)$` minus test files. Repos with no UI surface should set `ui_paths_regex: ^$` to make the gate a no-op.
 
    **If the gate fires (UI files present, no media markers in body):**
 
@@ -541,19 +521,17 @@ After `/prep-pr` returns with a PR number:
    2. Ship anyway — proceed to auto-merge (you'll attach evidence post-merge)
    3. Hold — leave PR open, do NOT enable auto-merge, exit ticket
    ```
-   - **Capture now** → apply the same Dispatch Detection test as Step 4c (`.claude/cw-context.json` present). **In a dispatch worktree:** spawn a `general-purpose` agent (`model: "haiku"`, `run_in_background: true`, no `isolation` key) scoped to the session cwd — same #766/#1047 rationale as Step 4c. **Otherwise:** spawn a `general-purpose` agent (`isolation: "worktree"`, `model: "haiku"`, `run_in_background: true`). Either way, with the playwright-cli capture + `gh pr edit --body` instructions from the project's `/ship-it` Step 6b. Re-run this gate after the agent returns. Max 2 capture attempts before falling through to the "Hold" branch.
+   - **Capture now** → apply the same Dispatch Detection test as Step 4c (`.claude/cw-context.json` present). **In a dispatch worktree:** spawn a `general-purpose` agent (`model: "haiku"`, `run_in_background: true`, no `isolation` key) scoped to the session cwd — same #766/#1047 rationale as Step 4c. **Otherwise:** spawn a `general-purpose` agent (`isolation: "worktree"`, `model: "haiku"`, `run_in_background: true`). Either way, pass the playwright-cli capture + `gh pr edit --body` instructions from the project's `/ship-it` Step 6b. Re-run this gate after the agent returns; max 2 capture attempts before falling through to "Hold".
    - **Ship anyway** → continue to step 2 (auto-merge enable). Append `"ui_evidence_missing_user_override"` to `friction_highlights`.
-   - **Hold** → skip step 2 entirely (do NOT enable auto-merge). The PR exists but waits on the human to attach evidence and run `gh pr merge --auto --squash` manually. Set `pr.auto_merge: false` and `next_actions: ["attach_ui_evidence"]` in the structured output (interactive runs don't emit structured output, but a summary line at end-of-pipeline should mention it).
+   - **Hold** → skip step 2 entirely (do NOT enable auto-merge). The PR waits on the human to attach evidence and run `gh pr merge --auto --squash`. Set `pr.auto_merge: false` and `next_actions: ["attach_ui_evidence"]`.
 
-   *Headless:* never block on this — append `"ui_evidence_missing"` to `friction_highlights`, set `pr.auto_merge: false`, set `next_actions: ["attach_ui_evidence_and_enable_automerge"]`, skip step 2, continue to step 3. Status remains `shipped` because the PR exists; the human sees the missing-evidence signal in the structured output and decides whether to attach evidence and merge or close.
+   *Headless:* never block — append `"ui_evidence_missing"` to `friction_highlights`, set `pr.auto_merge: false` and `next_actions: ["attach_ui_evidence_and_enable_automerge"]`, skip step 2, continue to step 3. Status stays `shipped` because the PR exists; the human decides from the structured output.
 
    **If the gate is clean** (no UI files in diff, OR UI files plus media markers in body): proceed to step 2.
 
-   **Why fact-gated rather than trusting the ship-it agent:** the same way Mitigation 1 treats `git diff --stat` as filesystem truth, this gate treats the PR body grep as truth. The `/ship-it` agent may report "screenshots attached" with HIGH confidence and still have skipped the step — only the body content is binding.
+2. **Append review adjudication to the PR body (record-now for DEFER + REJECT):** Stage 3 (Checkpoint 3a) owns adjudication and stashes outcomes in `.cw/deferred-findings.md`. The pipeline session is gone by merge time (especially under `auto_merge: false`), so filing deferrals must be merge-triggered — Step H3 of the next sweep harvests the `DEFERRED-REVIEW-FINDINGS` block. Read the current PR body (`gh pr view <pr-number> --json body --jq .body`), append the artifacts from `.cw/deferred-findings.md`, and re-write via `gh pr edit <pr-number> --body-file -`:
 
-2. **Append review adjudication to the PR body (record-now for DEFER + REJECT):** Stage 3 (Checkpoint 3a) owns adjudication and stashes outcomes in `.cw/deferred-findings.md`. Read that file now and write its content into the PR body. The pipeline session is gone by merge time (especially under `auto_merge: false`), so filing the deferrals must be merge-triggered — Step H3 of the next sweep harvests the `DEFERRED-REVIEW-FINDINGS` block. Read the current PR body (`gh pr view <pr-number> --json body --jq .body`), append the artifacts from `.cw/deferred-findings.md`, and re-write via `gh pr edit <pr-number> --body-file -`:
-
-   The format written to the PR body (taken verbatim from `.cw/deferred-findings.md`):
+   The format written to the PR body (verbatim from `.cw/deferred-findings.md`):
 
    ```
    ## Review adjudication
@@ -569,17 +547,17 @@ After `/prep-pr` returns with a PR number:
    DEFERRED-REVIEW-FINDINGS -->
    ```
 
-   One block per PR; list every deferred finding inside the single `DEFERRED-REVIEW-FINDINGS` comment (open/close sentinels exact — Step H3 greps them verbatim). Omit the whole section when `.cw/deferred-findings.md` is absent or empty (every finding was fixed — no rejections, no deferrals). For pipeline exits that never create a PR (large-scope `review_pending_approval`, or a BLOCK), there is no body to write — rejections/deferrals stay in `friction_highlights` and surface to the human in the structured output instead.
+   One block per PR; list every deferred finding inside the single `DEFERRED-REVIEW-FINDINGS` comment (open/close sentinels exact — Step H3 greps them verbatim). Omit the section when `.cw/deferred-findings.md` is absent or empty. For pipeline exits that never create a PR (large-scope `review_pending_approval`, or a BLOCK) there is no body to write — rejections/deferrals stay in `friction_highlights` and surface in the structured output instead.
 
-3. **Enable auto-merge:** `gh pr merge <pr-number> --auto --squash`. GitHub allows enabling auto-merge on a draft PR — the merge won't trigger until the PR is marked ready (which `/review-monitor` does when the parent in the stack merges) AND CI passes. Enable unconditionally here, EXCEPT when the UI Evidence Gate above resolved to "Hold" (interactive) or fired in headless — in those cases this step is skipped and `pr.auto_merge` is set to `false`.
+3. **Enable auto-merge:** `gh pr merge <pr-number> --auto --squash`. Auto-merge may be enabled on a draft PR — it won't trigger until the PR is marked ready (`/review-monitor` does this when the stack parent merges) AND CI passes. Enable unconditionally, EXCEPT when the UI Evidence Gate above resolved to "Hold" (interactive) or fired in headless: then skip this step and set `pr.auto_merge` to `false`.
 
-   **Verify after arming (#1140 — do not skip):** Skip this sub-step entirely if the arm above itself was skipped (Hold / headless UI-evidence-missing branch) — there is nothing to verify. Otherwise, immediately after the `gh pr merge --auto` call, read back whether it actually took:
+   **Verify after arming (#1140 — do not skip):** Skip this sub-step if the arm itself was skipped (Hold / headless UI-evidence-missing branch). Otherwise, immediately after the `gh pr merge --auto` call, read back whether it took:
 
    ```bash
    ~/.claude/scripts/prep_pr_finalize.py verify --require-automerge --json
    ```
 
-   This is the **sole** auto-merge verification on the Pre-Stage Detector Guard reuse path (Step 4a's "If open PR found from this pipeline" branch skips Step 4c — and therefore Step 4c's own re-verification — entirely when reusing an existing open PR). Parse the JSON; if the `automerge-enabled` check fails:
+   This is the **sole** auto-merge verification on the Pre-Stage Detector Guard reuse path (reusing an existing open PR skips Step 4c and its re-verification entirely). Parse the JSON; if the `automerge-enabled` check fails:
 
    **Interactive:** AskUserQuestion:
    ```
@@ -597,7 +575,7 @@ After `/prep-pr` returns with a PR number:
 
    **Headless:** emit the `automerge_not_armed` sentinel — same shape as the Step 4c template above — with `blocker.stage`/`stage_reached` set to `"stage5_post_create"` and `blocker.details` naming this site, e.g. `"Step 4d auto-merge enable (reuse path): automerge-enabled check failed for PR #<N>"`. Stop — do not proceed to step 4.
 4. **Post to Linear:** Comment on the issue with PR link (skip for free-text tickets). For drafts, note in the comment: "Created as draft — stacked behind PR #<parent>; will auto-promote to ready when parent merges."
-5. **Store pipeline state:** Record PR number, branch, ticket ID for the merge gate check in Step 4a of the next ticket
+5. **Store pipeline state:** Record PR number, branch, and ticket ID for the next ticket's Step 4a merge-gate check
 6. **Headless only — emit `stage.entered` (`s4_pr_created`) then proceed to Stage 5:**
    ```bash
    cw event record stage.entered \
@@ -631,9 +609,7 @@ gh pr checks <number> --watch --fail-fast 2>/dev/null
 # Exit when: all checks conclude, or 10 minutes elapsed
 ```
 
-**If all checks pass within 10 minutes:** Log "CI passing" and proceed to Step 5b.
-
-**If any check fails:**
+**If all checks pass within 10 minutes:** Log "CI passing" and proceed to Step 5b. **If any check fails:**
 
 **AskUserQuestion:**
 ```
@@ -648,7 +624,7 @@ Options:
 3. Abort — stop pipeline
 ```
 
-- **Fix** → Spawn agent (`model: "sonnet"`) in the worktree to investigate CI failure, apply fix, push to branch. Loop back to Step 5a for the new push. Max 2 fix attempts, then escalate.
+- **Fix** → Spawn agent (`model: "sonnet"`) in the worktree to investigate CI failure, apply fix, push to branch. Loop back to Step 5a. Max 2 fix attempts, then escalate.
 - **Ignore** → Proceed (user handles CI manually)
 - **Abort** → Stop pipeline
 
@@ -658,7 +634,7 @@ Options:
 
 ### Step 5b: Initial Review Feedback Check
 
-Check for early review comments (reviewers may be fast, or may have been tagged for auto-review):
+Check for early review comments:
 
 ```bash
 gh api repos/{owner}/{repo}/pulls/<number>/reviews --jq '.[] | select(.state != "COMMENTED" and .state != "APPROVED") | {user: .user.login, state: .state, body: .body}'
@@ -686,9 +662,9 @@ Options:
 3. Discuss — I'll draft reply comments for your review before posting
 ```
 
-- **Address** → Spawn agent (`model: "sonnet"`) in the worktree. Agent reads all review comments, applies fixes, pushes to branch. Post a reply to each addressed comment summarizing the fix. Loop back to Step 5a for CI wait on the new push.
+- **Address** → Spawn agent (`model: "sonnet"`) in the worktree. Agent reads all review comments, applies fixes, pushes to branch, and replies to each addressed comment summarizing the fix. Loop back to Step 5a for CI wait on the new push.
 - **Skip** → Proceed to next ticket
-- **Discuss** → Draft reply comments for each piece of feedback. Present drafts to user via AskUserQuestion before posting. Post approved replies via `gh api`.
+- **Discuss** → Draft reply comments for each piece of feedback, present them via AskUserQuestion before posting, then post approved replies via `gh api`.
 
 ### Step 5c: Continue to Next Ticket
 
@@ -699,7 +675,7 @@ Options:
 
 ## Stage 4+5 Completion (headless only)
 
-After PR creation, auto-merge enablement, and CI monitoring are complete, emit the `done` event and the `AUTO_DEV_RESULT` sentinel.
+After PR creation, auto-merge enablement, and CI monitoring complete, emit the `done` event and the `AUTO_DEV_RESULT` sentinel.
 
 **Only in standalone `/auto-dev-finalize <ticket-id> --headless` invocation. In the interactive monolith chain, `auto-dev.md` owns the `done` event and the final sentinel.**
 
