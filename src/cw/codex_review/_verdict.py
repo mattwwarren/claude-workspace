@@ -31,7 +31,7 @@ from cw.worktree import compute_branch_diff_scope
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cw.auto_dev_result import Review
+    from cw.auto_dev_result import Review, StageReached
     from cw.codex_review._capability import _CodexFilesystemCapability
     from cw.models import TicketTask
     from cw.review_adjudication import VoidedFinding
@@ -197,6 +197,36 @@ def _with_agent_spec_status(
     return verdict.model_copy(update={"agent_spec_status": agent_spec_status})
 
 
+def make_codex_blocked(
+    *,
+    ticket_id: str,
+    worktree: Path,
+    reason: str,
+    details: str = "",
+    retry_eligible: bool | None = None,
+    retry_delay_seconds: int | None = None,
+    stage_reached: StageReached = STAGE3_REVIEW,
+) -> AutoDevResult:
+    """Codex-subsystem-owned blocked-result constructor (#1842).
+
+    Thin wrapper around ``local_runner.make_blocked()`` that permanently
+    bakes in ``next_actions=_CODEX_REVIEW_BLOCKED_NEXT_ACTIONS`` — every
+    Codex-subsystem call site uses this instead of raw ``make_blocked()``
+    so a new Codex-subsystem call site inherits the correct label by
+    construction. Deliberately no ``next_actions`` parameter here.
+    """
+    return make_blocked(
+        ticket_id=ticket_id,
+        worktree=worktree,
+        reason=reason,
+        details=details,
+        retry_eligible=retry_eligible,
+        retry_delay_seconds=retry_delay_seconds,
+        stage_reached=stage_reached,
+        next_actions=_CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
+    )
+
+
 def synthesize_codex_review_result(
     *,
     task: TicketTask,
@@ -281,14 +311,12 @@ def synthesize_codex_review_result(
     ``metrics_by_role``, it is unused on the zero-documents branch.
     """
     if not documents:
-        result = make_blocked(
+        result = make_codex_blocked(
             ticket_id=task.ticket_id,
             worktree=worktree,
             reason=CODEX_REVIEW_UNPARSEABLE,
             details=_format_failures_detail(failures, session_id=session_id),
             retry_eligible=_has_transient_failure(failures) or None,
-            stage_reached=STAGE3_REVIEW,
-            next_actions=_CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
         )
         return result, None
     verdict = _with_agent_spec_status(
@@ -314,34 +342,28 @@ def synthesize_codex_review_result(
         verdict, voided_findings or [], ticket_id=task.ticket_id
     )
     if verdict.blocking:
-        blocked = make_blocked(
+        blocked = make_codex_blocked(
             ticket_id=task.ticket_id,
             worktree=worktree,
             reason=CODEX_MUST_FIX_FINDINGS,
             details=render_verdict_comment(verdict, fix_loop_enabled=fix_loop_enabled),
-            stage_reached=STAGE3_REVIEW,
-            next_actions=_CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
         )
         return blocked.model_copy(update={"review": verdict.review}), verdict
     if verdict.rejected_must_fix:
-        dropped = make_blocked(
+        dropped = make_codex_blocked(
             ticket_id=task.ticket_id,
             worktree=worktree,
             reason=CODEX_MUST_FIX_MECHANICALLY_REJECTED,
             details=render_verdict_comment(verdict, fix_loop_enabled=fix_loop_enabled),
-            stage_reached=STAGE3_REVIEW,
-            next_actions=_CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
         )
         return dropped.model_copy(update={"review": verdict.review}), verdict
     if failures:
-        partial = make_blocked(
+        partial = make_codex_blocked(
             ticket_id=task.ticket_id,
             worktree=worktree,
             reason=CODEX_REVIEW_PARTIAL,
             details=_format_failures_detail(failures, session_id=session_id),
             retry_eligible=_has_transient_failure(failures) or None,
-            stage_reached=STAGE3_REVIEW,
-            next_actions=_CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
         )
         return partial.model_copy(update={"review": verdict.review}), verdict
     branch = subprocess.check_output(

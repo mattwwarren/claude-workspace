@@ -31,7 +31,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from cw.codex_fix_loop import run_review_with_fix_loop
-from cw.codex_review import STAGE3_REVIEW, render_verdict_comment
+from cw.codex_review import make_codex_blocked, render_verdict_comment
 from cw.config import load_effective_config, sessions_lock
 from cw.dev_queue import dev_queue_lock, load_dev_queue, save_dev_queue
 from cw.dispatch_state import (
@@ -41,7 +41,7 @@ from cw.dispatch_state import (
 )
 from cw.events import record_event as _record_orchestrator_event
 from cw.gh import post_issue_comment
-from cw.local_runner import UNEXPECTED_ERROR, make_blocked
+from cw.local_runner import UNEXPECTED_ERROR
 from cw.models import OrchestratorEventType, QueueItemStatus
 from cw.worktree import _git_dir
 
@@ -219,21 +219,20 @@ def _complete_session_as_unexpected_error(
 
     Shared by ``CodexExecutor.spawn()``'s synchronous pre-flight-failure branch
     (``cw.executor``) and this module's own background-thread except branch
-    below — both built the identical ``make_blocked(reason=UNEXPECTED_ERROR,
-    stage_reached=STAGE3_REVIEW)`` payload independently before this extraction
-    (#1727 round 5 DRY fix). ``guard_already_completed=True`` since either
-    caller may be racing the completion door's own success path.
+    below — both built the identical ``make_codex_blocked(reason=
+    UNEXPECTED_ERROR)`` payload independently before this extraction (#1727
+    round 5 DRY fix). ``guard_already_completed=True`` since either caller may
+    be racing the completion door's own success path.
     """
     from cw.executor import _complete_session_via_door
 
     with sessions_lock():
         _complete_session_via_door(
             sid=sid,
-            payload=make_blocked(
+            payload=make_codex_blocked(
                 ticket_id=task.ticket_id,
                 worktree=worktree,
                 reason=UNEXPECTED_ERROR,
-                stage_reached=STAGE3_REVIEW,
             ).model_dump(mode="json"),
             guard_already_completed=True,
         )

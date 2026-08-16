@@ -125,6 +125,7 @@ from cw.codex_review._verdict import (
     _CONFIDENCE_ANNOTATION,
     _format_failures_detail,
     _render_findings,
+    make_codex_blocked,
     render_verdict_comment,
     synthesize_codex_review_result,
 )
@@ -205,6 +206,7 @@ __all__ = [
     "_select_output_instructions",
     "_select_reviewer_roles",
     "_slug",
+    "make_codex_blocked",
     "render_verdict_comment",
     "run_codex_roles",
     "run_review",
