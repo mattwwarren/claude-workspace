@@ -1713,6 +1713,74 @@ def test_release_stale_gated_tasks_auto_policy_requeues_variant_b(
     assert reap_events[0].payload["proposed_action"] == "release_stale_gate_variant_b"
 
 
+def test_release_stale_gated_tasks_variant_b_signal_only_stamps(
+    tmp_config_dir: Path,
+) -> None:
+    """Default signal_only: Variant B stamps stale_gate_detected_at without
+    mutating status, symmetric with Variant A's signal_only test."""
+    blocking = _make_ticket_task(
+        ticket_id="SG-B-BLOCKER2",
+        client="client-a",
+        status=QueueItemStatus.COMPLETED,
+        pr_url="https://github.com/foo/bar/pull/60",
+        pr_state=PrState(state="MERGED"),
+    )
+    blocked = _make_ticket_task(
+        ticket_id="SG-B3",
+        client="client-a",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        disposition="merge_gate_blocked",
+        blocked_reason="prior_pipeline_pr_open",
+        blocked_on_pr=60,
+    )
+    save_dev_queue(DevQueueStore(tasks=[blocking, blocked]))
+    save_state(CwState(sessions=[]))
+
+    released = release_stale_gated_tasks()
+
+    assert released == ["SG-B3"]
+    reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-B3")
+    assert reloaded.status == QueueItemStatus.BLOCKED_ON_USER
+    assert reloaded.stale_gate_detected_at is not None
+    assert reloaded.blocked_on_pr == 60
+
+
+def test_release_stale_gated_tasks_variant_b_ignores_merged_task_without_pr_url(
+    tmp_config_dir: Path,
+) -> None:
+    """A MERGED pr_state task with no pr_url (or an unparseable one) is
+    excluded from the cross-reference index rather than raising."""
+    blocking_no_url = _make_ticket_task(
+        ticket_id="SG-B-BLOCKER3",
+        client="client-a",
+        status=QueueItemStatus.COMPLETED,
+        pr_state=PrState(state="MERGED"),
+    )
+    blocking_bad_url = _make_ticket_task(
+        ticket_id="SG-B-BLOCKER4",
+        client="client-a",
+        status=QueueItemStatus.COMPLETED,
+        pr_url="not-a-github-pr-url",
+        pr_state=PrState(state="MERGED"),
+    )
+    blocked = _make_ticket_task(
+        ticket_id="SG-B4",
+        client="client-a",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        disposition="merge_gate_blocked",
+        blocked_reason="prior_pipeline_pr_open",
+        blocked_on_pr=61,
+    )
+    save_dev_queue(DevQueueStore(tasks=[blocking_no_url, blocking_bad_url, blocked]))
+    save_state(CwState(sessions=[]))
+
+    released = release_stale_gated_tasks()
+
+    assert released == []
+    reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-B4")
+    assert reloaded.stale_gate_detected_at is None
+
+
 def test_release_stale_gated_tasks_variant_b_no_cross_reference_is_noop(
     tmp_config_dir: Path,
 ) -> None:

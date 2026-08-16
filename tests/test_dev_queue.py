@@ -8825,6 +8825,45 @@ class TestExtractPrUrl:
         assert self._extract({"pr": {}}) is None
 
 
+class TestExtractPrUrlOrInfo:
+    """Unit tests for _extract_pr_url_or_info (#1713)."""
+
+    def setup_method(self) -> None:
+        from cw.dev_queue import _extract_pr_url_or_info
+
+        self._extract = _extract_pr_url_or_info
+
+    def test_prefers_pr_dict_over_pr_info(self) -> None:
+        """When `pr` is already populated (shipped/merge_pending shape), it
+        wins over pr_info -- the fallback is never consulted."""
+        result: dict[str, object] = {
+            "pr": {"url": "https://github.com/foo/bar/pull/1"},
+            "pr_info": {"url": "https://github.com/foo/bar/pull/2"},
+        }
+        assert self._extract(result) == "https://github.com/foo/bar/pull/1"
+
+    def test_falls_back_to_pr_info_when_pr_is_null(self) -> None:
+        """automerge_not_armed shape: pr=null (schema-forbidden non-null),
+        pr_info carries the real PR."""
+        result: dict[str, object] = {
+            "pr": None,
+            "pr_info": {"url": "https://github.com/foo/bar/pull/77"},
+        }
+        assert self._extract(result) == "https://github.com/foo/bar/pull/77"
+
+    def test_none_for_none_input(self) -> None:
+        assert self._extract(None) is None
+
+    def test_none_when_pr_info_missing(self) -> None:
+        assert self._extract({"pr": None}) is None
+
+    def test_none_when_pr_info_not_a_dict(self) -> None:
+        assert self._extract({"pr": None, "pr_info": "not-a-dict"}) is None
+
+    def test_none_when_pr_info_url_missing(self) -> None:
+        assert self._extract({"pr": None, "pr_info": {"number": 5}}) is None
+
+
 # ---------------------------------------------------------------------------
 # TestStageRegress
 # ---------------------------------------------------------------------------
