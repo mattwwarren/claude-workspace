@@ -18,6 +18,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Codex-subsystem `make_blocked()` call sites silently borrowed
+  LocalExecutor's `next_actions` label instead of the Codex-review one
+  (#1842):** `#1835` fixed this for the 4 call sites in
+  `cw.codex_review._verdict`, but 6 more sites — 2 in `executor.py`'s
+  `CodexExecutor.spawn`, 1 in `codex_background.py`, and 3 in
+  `codex_fix_loop.py` — still called raw `local_runner.make_blocked()` and
+  either explicitly passed `next_actions=_CODEX_REVIEW_BLOCKED_NEXT_ACTIONS`
+  or silently defaulted to the LocalExecutor-specific label, the same
+  N-patched-sites shape #1835 left behind. Added `make_codex_blocked()` — a
+  thin wrapper around `make_blocked()` that permanently bakes in the correct
+  `next_actions` and takes no override — and migrated all 10 Codex-subsystem
+  call sites onto it, so every future Codex call site inherits the right
+  label by construction instead of remembering to pass it. LocalExecutor/
+  aider and OpencodeExecutor call sites are unchanged.
+
 - **`/prep-pr`'s default Python quality gates didn't include `ruff format`
   (#1867):** `ECOSYSTEM_GATES["pyproject.toml"]` in
   `.claude/scripts/prep_pr_state.py` ran `ruff check`, `mypy`, and `pytest`
