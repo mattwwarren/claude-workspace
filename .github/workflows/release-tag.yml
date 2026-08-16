@@ -131,22 +131,33 @@ jobs:
       # rather than after. Gated on the guard like every other real-work
       # step: this job fires on every push to `main`, and installing a
       # toolchain on ordinary merges would burn runner minutes for nothing.
+      # Also skipped when the tag already exists (idempotent re-run) --
+      # matches "Create and push tag"'s own gate, so a re-run after a
+      # tag already shipped doesn't re-pay for the full toolchain + gates.
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
-        if: steps.guard.outputs.match == 'true'
+        if: >
+          steps.guard.outputs.match == 'true' &&
+          steps.tag.outputs.exists == 'false'
 
       # No `runner.os` conditional (unlike release.yml's verify job and
       # ci.yml): this job has no OS matrix, it is ubuntu-latest only.
       - name: Install tmux
-        if: steps.guard.outputs.match == 'true'
+        if: >
+          steps.guard.outputs.match == 'true' &&
+          steps.tag.outputs.exists == 'false'
         run: sudo apt-get update && sudo apt-get install -y tmux
 
       - name: Install dependencies
-        if: steps.guard.outputs.match == 'true'
+        if: >
+          steps.guard.outputs.match == 'true' &&
+          steps.tag.outputs.exists == 'false'
         run: uv sync --dev --extra mcp
 
       - name: Run quality gates
         id: quality-gates
-        if: steps.guard.outputs.match == 'true'
+        if: >
+          steps.guard.outputs.match == 'true' &&
+          steps.tag.outputs.exists == 'false'
         run: |
           uv run ruff check src/ tests/
           uv run ruff format --check src/ tests/
