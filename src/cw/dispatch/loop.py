@@ -473,8 +473,13 @@ def _run_stale_gate_release_guarded() -> None:
         # 2. Logging: _log.exception captures the full traceback.
         # 3. Non-critical: this is a best-effort re-validation pass (#1713);
         #    skipping a tick just delays a stale-gate release, it does not
-        #    lose the underlying pr.merged event (the consumer cursor is
-        #    only advanced on success).
+        #    lose the underlying pr.merged event -- the consumer cursor is
+        #    only advanced after the corresponding mutation batch is
+        #    durably persisted (save_dev_queue), so a mid-call failure here
+        #    leaves the cursor untouched and the next tick's retry safely
+        #    re-derives the identical release from the still-unconsumed
+        #    event (see release_stale_gated_tasks's advance_cursor
+        #    ordering).
         # 4. Paired test: tests/test_dispatch.py
         #    TestRunDispatchLoopStaleGateHook.
         _log.exception("stale-gate release failed during tick; continuing")
