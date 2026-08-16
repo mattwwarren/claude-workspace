@@ -285,7 +285,7 @@ jobs:
               echo "No open dispatch-drift issues — WOULD close 0 issues"
             else
               COUNT=$(echo "$DRIFT_ISSUES" | wc -l)
-              echo "WOULD close $COUNT open dispatch-drift issue(s): $(echo "$DRIFT_ISSUES" | sed 's/^/#/' | paste -sd' ')"
+              echo "WOULD close $COUNT open dispatch-drift issue(s): $(echo "$DRIFT_ISSUES" | sed 's/^/#/' | paste -sd' ' -)"
             fi
           else
             echo "Commit subject did NOT match release pattern — no action would be taken"
