@@ -88,7 +88,17 @@ from cw.models.events import PrState, WatchedPr
 #      input. Sibling of v27's regressed_into_stage, stamped at the same
 #      _stage_regress seam as v28's finalize_regress_branch_head but under an
 #      independent precondition, and cleared only at a REVIEW-stage spawn.
-DEV_QUEUE_SCHEMA_VERSION = 29
+# v30: added TicketTask.stale_gate_detected_at/blocked_on_pr (GitHub #1713) —
+#      detection latch + cross-reference field for
+#      cw.reconcile.tasks.release_stale_gated_tasks, which re-validates a
+#      BLOCKED_ON_USER row's gate condition (own PR merged, or the PR it is
+#      blocked behind merged) against fresh pr.merged events/hydrated
+#      pr_state, since dev-queue rows otherwise never observe that clearing.
+#      stale_gate_detected_at follows the escalation_parked_at/
+#      gate_recipe_failed_at unconditional-clear-on-transition convention;
+#      blocked_on_pr is a bare int PR number (no owner/repo qualifier — a
+#      dev-queue client is bound to exactly one repo).
+DEV_QUEUE_SCHEMA_VERSION = 30
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -486,6 +496,24 @@ class TicketTask(BaseModel):
     # through repeated review/finalize cycles.
     stage_high_water: Stage | None = None
     salvage_no_sentinel_at: datetime | None = None
+    # GitHub #1713 — durable detection latch for
+    # cw.reconcile.tasks.release_stale_gated_tasks: stamped when a
+    # BLOCKED_ON_USER row's gate condition is observed to have cleared (its
+    # own PR merged, or the PR it is blocked behind merged) but ReapPolicy is
+    # SIGNAL_ONLY, so the row is not yet auto-released. Same
+    # unconditional-clear-on-every-transition convention as
+    # escalation_parked_at/gate_recipe_failed_at above (transition_task_status
+    # clears it on any real status transition) -- a fresh parked episode
+    # always starts with a clean latch.
+    stale_gate_detected_at: datetime | None = None
+    # GitHub #1713 — Variant B's blocking PR number: bare int, no owner/repo
+    # qualifier (a dev-queue client is bound to exactly one repo; see the
+    # ticket's Self-Verified Premises). Stamped by dispatch/routing.py's Rule
+    # 5 when a `merge_gate_blocked`/`prior_pipeline_pr_open` park's
+    # blocker.details names the blocking PR. Cross-referenced by
+    # release_stale_gated_tasks against another task's hydrated pr_state
+    # within the same client to detect when that blocking PR has merged.
+    blocked_on_pr: int | None = None
 
     @field_validator("gate_recipes")
     @classmethod

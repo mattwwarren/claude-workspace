@@ -58,8 +58,9 @@ def _print_tasks_human(tasks: list[TicketTask]) -> None:
         "REASON",
         "PR",
         "ATTENTION",
+        "STALE_GATE",
     ]
-    col_widths = [12, 16, 16, 12, 8, 12, 12, 20, 10, 20, 20, 10, 18]
+    col_widths = [12, 16, 16, 12, 8, 12, 12, 20, 10, 20, 20, 10, 18, 10]
     header = "  ".join(f"{h:<{w}}" for h, w in zip(headers, col_widths, strict=True))
     click.echo(header)
     click.echo("-" * len(header))
@@ -79,6 +80,7 @@ def _print_tasks_human(tasks: list[TicketTask]) -> None:
             (t.blocked_reason or "—")[:20],
             (t.pr_url or "—")[:10],
             attention[:18],
+            ("yes" if t.stale_gate_detected_at else "—")[:10],
         ]
         click.echo("  ".join(f"{v:<{w}}" for v, w in zip(row, col_widths, strict=True)))
 

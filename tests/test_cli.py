@@ -7763,6 +7763,56 @@ class TestDevQueueTasksPrState:
         assert "ATTENTION" in result.output
         assert "changes_requested" in result.output
 
+    def test_dev_queue_tasks_human_output_shows_stale_gate_column(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """_print_tasks_human renders a STALE_GATE column sourced from
+        t.stale_gate_detected_at (GitHub #1713)."""
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1713",
+                        client="attn-client",
+                        status=QueueItemStatus.BLOCKED_ON_USER,
+                        disposition="merge_pending",
+                        stale_gate_detected_at=datetime(2026, 1, 1, tzinfo=UTC),
+                    ),
+                    TicketTask(
+                        ticket_id="GEN-1714",
+                        client="attn-client",
+                        status=QueueItemStatus.PENDING,
+                    ),
+                ]
+            )
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "tasks"])
+        assert result.exit_code == 0, result.output
+        assert "STALE_GATE" in result.output
+        output_lines = [line for line in result.output.splitlines() if line.strip()]
+        header_line, *data_lines = [
+            line for line in output_lines if not line.startswith("-")
+        ]
+        # Isolate the STALE_GATE column specifically rather than a bare
+        # substring-in-line check: every row's TicketTask field is a single
+        # whitespace-free token (ids, statuses, "—" placeholders), so
+        # splitting on whitespace and indexing by the header's column
+        # position reliably extracts just that column's value, regardless
+        # of what "—"/"yes" strings happen to appear in OTHER columns on
+        # the same row (nearly every column on a bare PENDING task renders
+        # "—" too, so a bare substring check would still pass even if the
+        # STALE_GATE column itself were broken).
+        stale_gate_index = header_line.split().index("STALE_GATE")
+        rows_by_ticket = {
+            line.split()[0]: line.split()[stale_gate_index] for line in data_lines
+        }
+        assert rows_by_ticket["GEN-1713"] == "yes"
+        assert rows_by_ticket["GEN-1714"] == "—"
+
     def test_tasks_json_and_human_surface_blocked_reason(
         self, tmp_config_dir: Path
     ) -> None:

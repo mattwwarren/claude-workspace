@@ -50,6 +50,7 @@ from cw.native_daemon import get_native_daemon_client
 from cw.pr_hydrate import hydrate_pr_states
 from cw.reconcile import (
     _CAUSE_USAGE_LIMIT,
+    release_stale_gated_tasks,
     ticket_id_for_session,
 )
 from cw.reconcile.codex_boot import reap_orphaned_codex_sessions_at_boot
@@ -436,6 +437,54 @@ def run_dispatch_loop(
         )
 
 
+def _run_pr_state_hydration_guarded(config: OrchestratorConfig) -> None:
+    """Run ``hydrate_pr_states``, swallowing any failure (non-fatal tick step).
+
+    Extracted from ``_run_dispatch_loop_body`` (PLR0915) -- also keeps its
+    sibling ``_run_stale_gate_release_guarded`` symmetric as a paired helper.
+    """
+    try:
+        hydrate_pr_states(config)
+    except Exception:  # noqa: BLE001
+        # Sanctioned broad-catch per PYTHON-PATTERNS.md (4-part):
+        # 1. hydrate_pr_states shells out to ``gh pr view`` — failure
+        #    modes include subprocess crash, JSON decode, lock I/O.
+        # 2. Logging: _log.exception captures the full traceback.
+        # 3. Non-critical: PR-state hydration is best-effort fallback
+        #    polling (#929); skipping a pass just delays state refresh.
+        # 4. Paired test: tests/test_dispatch.py
+        #    TestRunDispatchLoopHydrationHook.
+        _log.exception("pr-state hydration failed during tick; continuing")
+
+
+def _run_stale_gate_release_guarded() -> None:
+    """Run ``release_stale_gated_tasks``, swallowing any failure (GitHub #1713).
+
+    Extracted from ``_run_dispatch_loop_body`` (PLR0915) alongside its sibling
+    ``_run_pr_state_hydration_guarded``.
+    """
+    try:
+        release_stale_gated_tasks()
+    except Exception:  # noqa: BLE001
+        # Sanctioned broad-catch per PYTHON-PATTERNS.md (4-part):
+        # 1. release_stale_gated_tasks reads the events inbox and writes
+        #    dev_queue.json under dev_queue_lock — failure modes include
+        #    lock I/O and event-payload surprises.
+        # 2. Logging: _log.exception captures the full traceback.
+        # 3. Non-critical: this is a best-effort re-validation pass (#1713);
+        #    skipping a tick just delays a stale-gate release, it does not
+        #    lose the underlying pr.merged event -- the consumer cursor is
+        #    only advanced after the corresponding mutation batch is
+        #    durably persisted (save_dev_queue), so a mid-call failure here
+        #    leaves the cursor untouched and the next tick's retry safely
+        #    re-derives the identical release from the still-unconsumed
+        #    event (see release_stale_gated_tasks's advance_cursor
+        #    ordering).
+        # 4. Paired test: tests/test_dispatch.py
+        #    TestRunDispatchLoopStaleGateHook.
+        _log.exception("stale-gate release failed during tick; continuing")
+
+
 def _run_dispatch_loop_body(
     *,
     max_parallel: int | None,
@@ -520,18 +569,8 @@ def _run_dispatch_loop_body(
                 )
 
             consume_completed_sessions()
-            try:
-                hydrate_pr_states(config)
-            except Exception:  # noqa: BLE001
-                # Sanctioned broad-catch per PYTHON-PATTERNS.md (4-part):
-                # 1. hydrate_pr_states shells out to ``gh pr view`` — failure
-                #    modes include subprocess crash, JSON decode, lock I/O.
-                # 2. Logging: _log.exception captures the full traceback.
-                # 3. Non-critical: PR-state hydration is best-effort fallback
-                #    polling (#929); skipping a pass just delays state refresh.
-                # 4. Paired test: tests/test_dispatch.py
-                #    TestRunDispatchLoopHydrationHook.
-                _log.exception("pr-state hydration failed during tick; continuing")
+            _run_pr_state_hydration_guarded(config)
+            _run_stale_gate_release_guarded()
             _check_version_drift()
             result = dispatch_tick(
                 config,
