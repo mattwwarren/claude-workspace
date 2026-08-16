@@ -27,6 +27,7 @@ from cw.codex_background import (
     _resolve_codex_fix_loop_enabled,
     _run_codex_review_and_complete,
     _start_daemon_thread,
+    _sync_finding_dispositions_to_running_task,
     join_outstanding_codex_threads,
 )
 from cw.codex_review import _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS, CODEX_REVIEW_UNPARSEABLE
@@ -44,6 +45,7 @@ from cw.models import (
     Stage,
     TicketTask,
 )
+from cw.review_finding_dispositions import FindingDisposition
 from tests.conftest import _make_daemon_session
 
 if TYPE_CHECKING:
@@ -640,3 +642,83 @@ def test_post_review_comment_logs_on_nonzero_returncode(
         "T-1" in r.message and "1" in r.message and "invalid issue format" in r.message
         for r in caplog.records
     )
+
+
+# ---------------------------------------------------------------------------
+# _sync_finding_dispositions_to_running_task (#1838)
+# ---------------------------------------------------------------------------
+
+
+def _disposition(**overrides: object) -> FindingDisposition:
+    payload: dict[str, object] = {
+        "outcome": "REJECTED",
+        "rationale": "settled by the operator",
+        "recorded_at": "2026-08-16T00:00:00Z",
+    }
+    payload.update(overrides)
+    return FindingDisposition.model_validate(payload)
+
+
+class TestSyncFindingDispositionsToRunningTask:
+    """#1838 R1: the merged ledger is persisted onto the RUNNING queue row.
+
+    Structurally identical to ``_stamp_session_id_on_running_task``'s
+    lock/load/find-matching-RUNNING-row/mutate/save shape.
+    """
+
+    def _running(self, **overrides: object) -> TicketTask:
+        payload: dict[str, object] = {
+            "ticket_id": "T-1838",
+            "client": "test",
+            "stage": Stage.REVIEW,
+            "status": QueueItemStatus.RUNNING,
+        }
+        payload.update(overrides)
+        return TicketTask.model_validate(payload)
+
+    def test_merges_entries_onto_the_matching_running_row(self) -> None:
+        add_ticket(self._running())
+        _sync_finding_dispositions_to_running_task(
+            client_name="test",
+            ticket_id="T-1838",
+            dispositions={"src/cw/foo.py::bug here": _disposition()},
+        )
+        stored = load_dev_queue().tasks[0]
+        assert stored.finding_dispositions["src/cw/foo.py::bug here"].outcome == (
+            "REJECTED"
+        )
+
+    def test_merge_is_additive_and_idempotent(self) -> None:
+        add_ticket(
+            self._running(
+                finding_dispositions={"src/cw/old.py::old bug": _disposition()}
+            )
+        )
+        fresh = {"src/cw/foo.py::bug here": _disposition()}
+        _sync_finding_dispositions_to_running_task(
+            client_name="test", ticket_id="T-1838", dispositions=fresh
+        )
+        _sync_finding_dispositions_to_running_task(
+            client_name="test", ticket_id="T-1838", dispositions=fresh
+        )
+        stored = load_dev_queue().tasks[0]
+        assert set(stored.finding_dispositions) == {
+            "src/cw/old.py::old bug",
+            "src/cw/foo.py::bug here",
+        }
+
+    def test_no_matching_running_row_is_a_no_op(self) -> None:
+        add_ticket(self._running(status=QueueItemStatus.PENDING))
+        _sync_finding_dispositions_to_running_task(
+            client_name="test",
+            ticket_id="T-1838",
+            dispositions={"src/cw/foo.py::bug here": _disposition()},
+        )
+        assert load_dev_queue().tasks[0].finding_dispositions == {}
+
+    def test_empty_dispositions_is_a_no_op(self) -> None:
+        add_ticket(self._running())
+        _sync_finding_dispositions_to_running_task(
+            client_name="test", ticket_id="T-1838", dispositions={}
+        )
+        assert load_dev_queue().tasks[0].finding_dispositions == {}

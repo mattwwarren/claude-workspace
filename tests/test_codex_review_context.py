@@ -40,11 +40,17 @@ from cw.codex_review._context import (
     _load_operator_comments,
     _load_pending_operator_comment_marker,
     _load_voided_findings,
+    _render_adjudicated_findings_block,
     _select_output_instructions,
 )
 from cw.codex_runner import FakeCodexRunner
 from cw.models import HOOK_CONTEXT_RELATIVE_PATH, SessionOrigin
 from cw.review_adjudication import render_voided_findings_block
+from cw.review_finding_dispositions import (
+    FindingDisposition,
+    _disposition_key,
+    render_finding_disposition_block,
+)
 from cw.spawn import _write_hook_context
 from tests._codex_review_helpers import (
     _doc_json,
@@ -1981,3 +1987,193 @@ class TestBuildReviewerPromptDeltaKwargs:
         prompt = self._prompt()
         assert _DELTA_MODE_MARKER not in prompt
         assert "transitive_impact_evidence" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# _render_adjudicated_findings_block / prompt injection (#1838, R4a + R5)
+# ---------------------------------------------------------------------------
+
+
+def _disposition_ledger(
+    file: str = "src/cw/foo.py",
+    summary: str = "Bug here",
+    **overrides: object,
+) -> dict[str, FindingDisposition]:
+    key = _disposition_key(file, summary)
+    assert key is not None
+    payload: dict[str, object] = {
+        "outcome": "REJECTED",
+        "rationale": "intentional tradeoff, settled in an earlier round",
+        "recorded_at": "2026-08-16T00:00:00Z",
+    }
+    payload.update(overrides)
+    return {key: FindingDisposition.model_validate(payload)}
+
+
+class TestRenderAdjudicatedFindingsBlock:
+    """#1838 R5: the gated-on-non-empty render helper for the new ledger."""
+
+    def test_empty_ledger_renders_nothing(self) -> None:
+        assert _render_adjudicated_findings_block({}) is None
+
+    def test_renders_one_line_per_entry_with_file_summary_outcome_rationale(
+        self,
+    ) -> None:
+        block = _render_adjudicated_findings_block(_disposition_ledger())
+        assert block is not None
+        assert "src/cw/foo.py" in block
+        assert "bug here" in block
+        assert "REJECTED" in block
+        assert "intentional tradeoff, settled in an earlier round" in block
+        assert block.count("\n- ") == 1
+
+    def test_accepted_entries_render_too(self) -> None:
+        block = _render_adjudicated_findings_block(
+            _disposition_ledger(outcome="ACCEPTED")
+        )
+        assert block is not None
+        assert "ACCEPTED" in block
+
+
+class TestBuildReviewerPromptAdjudicatedFindings:
+    def _prompt(self, **overrides: object) -> str:
+        kwargs: dict[str, object] = {
+            "agent_spec_text": "SPEC",
+            "diff": _make_diff(),
+            "changed_files": ["src/cw/foo.py"],
+            "plan_text": None,
+            "ticket_text": None,
+            "project_rubrics": None,
+            "repo_policy_section": None,
+            "sensitive_hits": [],
+        }
+        kwargs.update(overrides)
+        return _build_reviewer_prompt("Code Quality Reviewer", **kwargs)  # type: ignore[arg-type]
+
+    def test_block_is_injected_when_the_ledger_is_non_empty(self) -> None:
+        prompt = self._prompt(adjudicated_findings=_disposition_ledger())
+        assert "## Previously Adjudicated Findings" in prompt
+        assert "do not re-raise" in prompt
+
+    def test_prompt_is_byte_identical_when_the_kwarg_is_omitted_or_empty(self) -> None:
+        baseline = self._prompt()
+        assert self._prompt(adjudicated_findings=None) == baseline
+        assert self._prompt(adjudicated_findings={}) == baseline
+        assert "## Previously Adjudicated Findings" not in baseline
+
+
+class TestPrepareReviewPassFindingDispositions:
+    """#1838: the ledger is merged, prompted, and carried on the pass inputs."""
+
+    def _repo(self, make_git_repo: Callable[[str], Path], name: str) -> Path:
+        repo = make_git_repo(name)
+        _git(repo, "checkout", "-b", "feature")
+        (repo / "mod.py").write_text("def broken():\n    pass\n", encoding="utf-8")
+        _git(repo, "add", "mod.py")
+        _git(repo, "commit", "-m", "add mod.py")
+        _write(
+            repo / ".claude" / "project-config.yaml",
+            "tracking:\n  primary:\n    system: github-issues\n",
+        )
+        return repo
+
+    def test_stored_ledger_alone_reaches_the_prompt_and_the_inputs(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = self._repo(make_git_repo, "wt-1838-stored")
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments", lambda *_a, **_kw: []
+        )
+        ledger = _disposition_ledger()
+        prepared = _prepare_review_pass(
+            _make_ticket_task(
+                ticket_id="T-1", client="test", finding_dispositions=ledger
+            ),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-1838-stored",
+        )
+
+        assert prepared.finding_dispositions == ledger
+        assert prepared.roles
+        for role in prepared.roles:
+            assert "## Previously Adjudicated Findings" in prepared.prompts_by_role[role]
+
+    def test_marker_entries_are_merged_with_the_stored_ledger(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = self._repo(make_git_repo, "wt-1838-merge")
+        stored = _disposition_ledger(file="src/cw/stored.py", summary="Stored bug")
+        fresh = _disposition_ledger(file="src/cw/fresh.py", summary="Fresh bug")
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments",
+            lambda *_a, **_kw: [
+                {
+                    "author": {"login": "op"},
+                    "body": render_finding_disposition_block(fresh),
+                }
+            ],
+        )
+        prepared = _prepare_review_pass(
+            _make_ticket_task(
+                ticket_id="T-1", client="test", finding_dispositions=stored
+            ),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-1838-merge",
+        )
+
+        assert prepared.finding_dispositions == {**stored, **fresh}
+
+    def test_no_marker_and_no_stored_ledger_leaves_the_prompt_untouched(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = self._repo(make_git_repo, "wt-1838-absent")
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments", lambda *_a, **_kw: []
+        )
+        prepared = _prepare_review_pass(
+            _task(), repo, "main", runner=FakeCodexRunner(), session_id="s-1838-absent"
+        )
+
+        assert prepared.finding_dispositions == {}
+        for role in prepared.roles:
+            assert (
+                "## Previously Adjudicated Findings"
+                not in prepared.prompts_by_role[role]
+            )
+
+    def test_parsed_marker_entries_are_persisted_onto_the_running_row(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The merged ledger survives this session: R1's durability half."""
+        repo = self._repo(make_git_repo, "wt-1838-persist")
+        fresh = _disposition_ledger()
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments",
+            lambda *_a, **_kw: [
+                {
+                    "author": {"login": "op"},
+                    "body": render_finding_disposition_block(fresh),
+                }
+            ],
+        )
+        calls: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            "cw.codex_background._sync_finding_dispositions_to_running_task",
+            lambda **kwargs: calls.append(kwargs),
+        )
+        task = _make_ticket_task(ticket_id="T-1", client="test")
+        _prepare_review_pass(
+            task, repo, "main", runner=FakeCodexRunner(), session_id="s-1838-persist"
+        )
+
+        assert calls == [
+            {
+                "client_name": "test",
+                "ticket_id": "T-1",
+                "dispositions": fresh,
+            }
+        ]

@@ -32,6 +32,7 @@ from cw.codex_review._capability import (
 from cw.events import read_events
 from cw.executor_diagnostics import diagnostics_bundle_dir
 from cw.models.enums import OrchestratorEventType
+from cw.review_finding_dispositions import FindingDisposition, _disposition_key
 from cw.review_findings import (
     AcceptedFinding,
     AgentSpecSource,
@@ -1015,6 +1016,164 @@ class TestSynthesizeCodexReviewResultVoidedSuppression:
         assert verdict.blocking is True
         assert (
             read_events(event_types=[OrchestratorEventType.REVIEW_FINDING_VOIDED]) == []
+        )
+
+
+class TestSynthesizeCodexReviewResultFindingDispositionSuppression:
+    """#1838: an operator-adjudicated finding cannot re-park a later round."""
+
+    def _doc(self, *findings: Finding) -> ReviewerFindingsDocument:
+        return _make_reviewer_doc(*findings)
+
+    def _ledger(self, finding: Finding, **overrides: object) -> dict[str, object]:
+        key = _disposition_key(finding.file, finding.summary)
+        assert key is not None
+        payload: dict[str, object] = {
+            "outcome": "REJECTED",
+            "rationale": "settled by the operator in an earlier round",
+            "recorded_at": "2026-08-16T00:00:00Z",
+        }
+        payload.update(overrides)
+        return {key: FindingDisposition.model_validate(payload)}
+
+    def test_rejected_disposition_suppresses_the_rederived_must_fix(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-synth-disposition")
+        finding = _make_finding(severity="MUST_FIX")
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[self._doc(finding)],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-disposition",
+            default_branch="main",
+            fix_loop_enabled=False,
+            finding_dispositions=self._ledger(finding),
+        )
+
+        assert result.status == "stage_complete"
+        assert verdict is not None
+        assert verdict.blocking is False
+        assert verdict.must_fix == []
+        assert verdict.accepted[0].disposition == "rejected"
+
+    def test_suppression_carries_the_visibility_signal_onto_the_comment(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """Operator-mandated (#1838 Decisions): a suppression must be visible.
+
+        The signal rides ``AcceptedFinding.disposition_detail``, which
+        ``_disposition_annotation``/``_render_findings`` already surface on the
+        posted comment — asserted end to end here, not just on the field.
+        """
+        worktree = make_git_repo("wt-synth-disposition-visible")
+        finding = _make_finding(severity="MUST_FIX")
+        _result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[self._doc(finding)],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-disposition-visible",
+            default_branch="main",
+            fix_loop_enabled=False,
+            finding_dispositions=self._ledger(finding),
+        )
+
+        assert verdict is not None
+        detail = verdict.accepted[0].disposition_detail
+        assert "suppressed by prior REJECTED adjudication" in detail
+        assert "2026-08-16T00:00:00Z" in detail
+        assert "re-adjudicate if the code at this location has changed" in detail
+        comment = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert detail in comment
+
+    def test_composes_with_voided_suppression_without_interfering(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-synth-disposition-compose")
+        diff = _make_diff(
+            "def broken():", "return 1", files={"src/cw/foo.py": [10, 11]}
+        )
+        voided = _make_finding(severity="MUST_FIX")
+        adjudicated = _make_finding(
+            severity="MUST_FIX",
+            line_start=11,
+            line_end=11,
+            summary="A separately adjudicated bug",
+            evidence="return 1",
+        )
+        _result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[self._doc(voided, adjudicated)],
+            failures=[],
+            diff=diff,
+            reviewed_sha="sha",
+            session_id="s-disposition-compose",
+            default_branch="main",
+            fix_loop_enabled=False,
+            voided_findings=[_make_voided_finding()],
+            finding_dispositions=self._ledger(adjudicated),
+        )
+
+        assert verdict is not None
+        assert verdict.blocking is False
+        assert verdict.must_fix == []
+        assert [af.disposition for af in verdict.accepted] == ["rejected", "rejected"]
+
+    def test_accepted_outcome_does_not_suppress(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-synth-disposition-accepted")
+        finding = _make_finding(severity="MUST_FIX")
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[self._doc(finding)],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-disposition-accepted",
+            default_branch="main",
+            fix_loop_enabled=False,
+            finding_dispositions=self._ledger(finding, outcome="ACCEPTED"),
+        )
+
+        assert result.status == "blocked"
+        assert verdict is not None
+        assert verdict.blocking is True
+
+    def test_no_ledger_leaves_the_blocking_path_intact(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-synth-disposition-none")
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[self._doc(_make_finding(severity="MUST_FIX"))],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-disposition-none",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+
+        assert result.status == "blocked"
+        assert verdict is not None
+        assert verdict.blocking is True
+        assert (
+            read_events(
+                event_types=[
+                    OrchestratorEventType.REVIEW_FINDING_DISPOSITION_SUPPRESSED
+                ]
+            )
+            == []
         )
 
 

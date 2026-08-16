@@ -10,6 +10,7 @@ import pytest
 
 from cw.codex_review import _prepare_review_pass, run_review
 from cw.codex_runner import FakeCodexRunner
+from cw.review_finding_dispositions import FindingDisposition, _disposition_key
 from tests._codex_review_helpers import (
     _finding_payload,
     _git,
@@ -145,6 +146,63 @@ class TestPrepareReviewPass:
             model=None,
             wall_clock_budget_seconds=None,
             session_id="sess-voided-run",
+            fix_loop_enabled=False,
+        )
+
+        assert verdict is not None
+        assert verdict.blocking is False
+        assert result.status == "stage_complete"
+        assert [af.disposition for af in verdict.accepted] == ["rejected"]
+
+    def test_run_review_threads_prepared_finding_dispositions_into_synthesis(
+        self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # #1838: same passthrough shape as the #1814 assertion above, for the
+        # finding-dispositions hop. Covers core.py's own
+        # prepared.finding_dispositions -> synthesize_codex_review_result
+        # threading; the suppression function itself is unit-tested elsewhere.
+        repo = make_git_repo("wt-prepare-dispositions-run")
+        _git(repo, "checkout", "-b", "feature")
+        (repo / "mod.py").write_text("def broken():\n", encoding="utf-8")
+        _git(repo, "add", "mod.py")
+        _git(repo, "commit", "-m", "add mod.py")
+
+        key = _disposition_key("mod.py", "Bug here")
+        assert key is not None
+        monkeypatch.setattr(
+            "cw.codex_review._context._load_finding_dispositions",
+            lambda *_a, **_kw: {
+                key: FindingDisposition(
+                    outcome="REJECTED",
+                    rationale="settled in an earlier round",
+                    recorded_at="2026-08-16T00:00:00Z",
+                )
+            },
+        )
+        prepared = _prepare_review_pass(
+            _task(),
+            repo,
+            "main",
+            runner=FakeCodexRunner(),
+            session_id="s-dispositions-run",
+        )
+        assert prepared.finding_dispositions
+        results = [_ok_result() for _ in prepared.roles]
+        results[0] = _ok_result(
+            findings=[
+                _finding_payload(
+                    severity="MUST_FIX", file="mod.py", line_start=1, line_end=1
+                )
+            ]
+        )
+        result, verdict = run_review(
+            runner=_SequencedRunner(results),
+            task=_task(),
+            worktree=repo,
+            default_branch="main",
+            model=None,
+            wall_clock_budget_seconds=None,
+            session_id="sess-dispositions-run",
             fix_loop_enabled=False,
         )
 
