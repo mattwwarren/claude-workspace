@@ -34,6 +34,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`/prep-pr`'s default Python quality gates didn't include `ruff format`
+  (#1867):** `ECOSYSTEM_GATES["pyproject.toml"]` in
+  `.claude/scripts/prep_pr_state.py` ran `ruff check`, `mypy`, and `pytest`
+  before PR creation but never checked formatting — a client repo with no
+  `## Quality Gates` override in its own `CLAUDE.md` could land a PR with
+  unformatted code that CI's separate `ruff format --check` gate would then
+  reject (the review-bingo-hub incident, #45/#48, PRs #52/#57). Added a
+  `ruff-format` `Gate` entry (`uv run ruff format --check .`, autofix `uv run
+  ruff format .`) immediately after the existing `ruff` entry, so the
+  fail-fast ruff-family checks run before `mypy`/`pytest`. Repos needing a
+  scoped or custom format command already override via the CLAUDE.md
+  `## Quality Gates` section — no change needed to that merge logic.
+
 - **Reviewer `schema_mismatch` on `no_diff_anchor: null` (#1817 regression):
   `Finding.no_diff_anchor` was added as `bool = False` without a
   `mode="before"` None-normalizer, unlike `detail`/`findings` on
