@@ -17,14 +17,17 @@ from cw.config import (
     sessions_lock,
 )
 from cw.dev_queue import load_dev_queue, save_dev_queue
-from cw.events import read_events
+from cw.events import read_events, record_event
 from cw.models import (
     ClientConfig,
     CompletionReason,
     CwState,
     DevQueueStore,
+    OrchestratorConfig,
     OrchestratorEventType,
+    PrState,
     QueueItemStatus,
+    ReapPolicy,
     ReapReason,
     Session,
     SessionOrigin,
@@ -38,10 +41,12 @@ from cw.reconcile import (
     _NEVER_CLAIMED_COMPLETION_REASON,
     complete_timed_out_merged_tasks,
     reconcile,
+    release_stale_gated_tasks,
     revert_completed_silent_tasks,
     revert_timed_out_tasks,
 )
 from tests._reconcile_helpers import (
+    _client_with_lane,
     _mk_daemon_completed_session,
     _mk_daemon_session_with_worktree,
     _mk_session,
@@ -1528,3 +1533,283 @@ def test_revert_timed_out_tasks_completes_while_holding_sessions_lock(
     reloaded = load_state()
     stamped = next(s for s in reloaded.sessions if s.id == "lockheld-to-1")
     assert stamped.reap_reason == ReapReason.COMPLETED_BACKSTOP
+
+
+# ---------------------------------------------------------------------------
+# release_stale_gated_tasks (GitHub #1713)
+#
+# Conftest inventory (binding operator resolution #3): reuses
+# tests.conftest._make_ticket_task for every TicketTask construction and
+# tests._reconcile_helpers._client_with_lane for the lane-override test. No
+# hand-rolled builders introduced.
+# ---------------------------------------------------------------------------
+
+
+def _emit_pr_merged(*, client: str, ticket_id: str, repo: str, pr_number: int) -> None:
+    """Emit a PR_MERGED event matching apply_pr_state_observation's payload
+    shape (pr_hydrate.py's ``base`` dict: {repo, pr_number, ticket_id, client})."""
+    record_event(
+        OrchestratorEventType.PR_MERGED,
+        {
+            "repo": repo,
+            "pr_number": pr_number,
+            "ticket_id": ticket_id,
+            "client": client,
+        },
+        correlation_id=ticket_id,
+    )
+
+
+def test_release_stale_gated_tasks_signal_only_stamps_and_emits(
+    tmp_config_dir: Path,
+) -> None:
+    """Variant A (merge_pending, own PR merged) under default signal_only:
+    status unchanged, stale_gate_detected_at stamped, SESSION_REAP_PROPOSED
+    emitted with reason=STALE_GATE, proposed_action=variant_a."""
+    task = _make_ticket_task(
+        ticket_id="SG-A1",
+        client="client-a",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        disposition="merge_pending",
+        pr_url="https://github.com/foo/bar/pull/42",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    save_state(CwState(sessions=[]))
+    _emit_pr_merged(client="client-a", ticket_id="SG-A1", repo="foo/bar", pr_number=42)
+
+    released = release_stale_gated_tasks()
+
+    assert released == ["SG-A1"]
+    reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-A1")
+    assert reloaded.status == QueueItemStatus.BLOCKED_ON_USER
+    assert reloaded.stale_gate_detected_at is not None
+
+    events = read_events()
+    reap_events = [
+        e
+        for e in events
+        if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+        and e.payload.get("ticket_id") == "SG-A1"
+    ]
+    assert len(reap_events) == 1
+    assert reap_events[0].payload["reason"] == ReapReason.STALE_GATE.value
+    assert reap_events[0].payload["proposed_action"] == "release_stale_gate_variant_a"
+
+
+def test_release_stale_gated_tasks_automerge_not_armed_via_pr_info_fallback(
+    tmp_config_dir: Path,
+) -> None:
+    """Variant A detection fires identically for an automerge_not_armed park
+    (disposition='blocked', blocked_reason='automerge_not_armed') whose
+    pr_url was already populated via dispatch/routing.py's pr_info fallback
+    (tested separately in test_dispatch.py)."""
+    task = _make_ticket_task(
+        ticket_id="SG-A2",
+        client="client-a",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        disposition="blocked",
+        blocked_reason="automerge_not_armed",
+        pr_url="https://github.com/foo/bar/pull/43",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    save_state(CwState(sessions=[]))
+    _emit_pr_merged(client="client-a", ticket_id="SG-A2", repo="foo/bar", pr_number=43)
+
+    released = release_stale_gated_tasks()
+
+    assert released == ["SG-A2"]
+    reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-A2")
+    assert reloaded.stale_gate_detected_at is not None
+    assert reloaded.status == QueueItemStatus.BLOCKED_ON_USER
+
+
+def test_release_stale_gated_tasks_auto_policy_completes_variant_a(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """reap_policy=auto: Variant A completes to shipped and still emits
+    SESSION_REAP_PROPOSED -- the event fires regardless of policy."""
+    task = _make_ticket_task(
+        ticket_id="SG-A3",
+        client="client-a",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        disposition="merge_pending",
+        pr_url="https://github.com/foo/bar/pull/44",
+        session_id="sess-a3",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    save_state(CwState(sessions=[]))
+    monkeypatch.setattr(
+        "cw.reconcile.tasks.load_orchestrator_config",
+        lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
+    )
+    _emit_pr_merged(client="client-a", ticket_id="SG-A3", repo="foo/bar", pr_number=44)
+
+    released = release_stale_gated_tasks()
+
+    assert released == ["SG-A3"]
+    reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-A3")
+    assert reloaded.status == QueueItemStatus.COMPLETED
+    assert reloaded.disposition == "shipped"
+    assert reloaded.session_id is None
+
+    events = read_events()
+    reap_events = [
+        e
+        for e in events
+        if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+        and e.payload.get("ticket_id") == "SG-A3"
+    ]
+    assert len(reap_events) == 1
+    assert reap_events[0].payload["proposed_action"] == "release_stale_gate_variant_a"
+
+
+def test_release_stale_gated_tasks_auto_policy_requeues_variant_b(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """reap_policy=auto: Variant B (blocked behind another ticket's PR that
+    has since merged) requeues to PENDING, clears session_id, still emits
+    SESSION_REAP_PROPOSED."""
+    blocking = _make_ticket_task(
+        ticket_id="SG-B-BLOCKER",
+        client="client-a",
+        status=QueueItemStatus.COMPLETED,
+        pr_url="https://github.com/foo/bar/pull/50",
+        pr_state=PrState(state="MERGED"),
+    )
+    blocked = _make_ticket_task(
+        ticket_id="SG-B1",
+        client="client-a",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        disposition="merge_gate_blocked",
+        blocked_reason="prior_pipeline_pr_open",
+        blocked_on_pr=50,
+        session_id="sess-b1",
+    )
+    save_dev_queue(DevQueueStore(tasks=[blocking, blocked]))
+    save_state(CwState(sessions=[]))
+    monkeypatch.setattr(
+        "cw.reconcile.tasks.load_orchestrator_config",
+        lambda: OrchestratorConfig(reap_policy=ReapPolicy.AUTO),
+    )
+
+    released = release_stale_gated_tasks()
+
+    assert released == ["SG-B1"]
+    reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-B1")
+    assert reloaded.status == QueueItemStatus.PENDING
+    assert reloaded.session_id is None
+    assert reloaded.blocked_on_pr is None  # unconditional-clear on transition
+
+    events = read_events()
+    reap_events = [
+        e
+        for e in events
+        if e.type == OrchestratorEventType.SESSION_REAP_PROPOSED
+        and e.payload.get("ticket_id") == "SG-B1"
+    ]
+    assert len(reap_events) == 1
+    assert reap_events[0].payload["proposed_action"] == "release_stale_gate_variant_b"
+
+
+def test_release_stale_gated_tasks_variant_b_no_cross_reference_is_noop(
+    tmp_config_dir: Path,
+) -> None:
+    """Variant B blocking PR absent from the queue entirely (documents the
+    residual cross-reference-only blind spot): no mutation, no false-positive
+    stamp."""
+    blocked = _make_ticket_task(
+        ticket_id="SG-B2",
+        client="client-a",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        disposition="merge_gate_blocked",
+        blocked_reason="prior_pipeline_pr_open",
+        blocked_on_pr=999,
+    )
+    save_dev_queue(DevQueueStore(tasks=[blocked]))
+    save_state(CwState(sessions=[]))
+
+    released = release_stale_gated_tasks()
+
+    assert released == []
+    reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-B2")
+    assert reloaded.status == QueueItemStatus.BLOCKED_ON_USER
+    assert reloaded.stale_gate_detected_at is None
+    assert reloaded.blocked_on_pr == 999
+
+
+def test_release_stale_gated_tasks_idempotent_cursor(
+    tmp_config_dir: Path,
+) -> None:
+    """Two consecutive calls with no new events between them: the second call
+    is a no-op (mirrors retire_merged_prs's idempotency shape)."""
+    task = _make_ticket_task(
+        ticket_id="SG-A4",
+        client="client-a",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        disposition="merge_pending",
+        pr_url="https://github.com/foo/bar/pull/45",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    save_state(CwState(sessions=[]))
+    _emit_pr_merged(client="client-a", ticket_id="SG-A4", repo="foo/bar", pr_number=45)
+
+    first = release_stale_gated_tasks()
+    second = release_stale_gated_tasks()
+
+    assert first == ["SG-A4"]
+    assert second == []
+
+
+def test_release_stale_gated_tasks_ignores_non_gate_blocked_on_user(
+    tmp_config_dir: Path,
+) -> None:
+    """A BLOCKED_ON_USER row with an unrelated disposition (signoff_gate)
+    whose PR merges must not over-fire on every pr.merged event."""
+    task = _make_ticket_task(
+        ticket_id="SG-A5",
+        client="client-a",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        disposition="signoff_gate",
+        pr_url="https://github.com/foo/bar/pull/46",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    save_state(CwState(sessions=[]))
+    _emit_pr_merged(client="client-a", ticket_id="SG-A5", repo="foo/bar", pr_number=46)
+
+    released = release_stale_gated_tasks()
+
+    assert released == []
+    reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-A5")
+    assert reloaded.stale_gate_detected_at is None
+
+
+def test_release_stale_gated_tasks_lane_reap_policy_override(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lane-level reap_policy=auto overrides a global signal_only default,
+    mirroring park_terminal_sibling_tasks's existing precedence tests."""
+    task = _make_ticket_task(
+        ticket_id="SG-A6",
+        client="client-a",
+        status=QueueItemStatus.BLOCKED_ON_USER,
+        disposition="merge_pending",
+        pr_url="https://github.com/foo/bar/pull/47",
+        lane="special",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    save_state(CwState(sessions=[]))
+    auto_lane_client = _client_with_lane("client-a", "special", ReapPolicy.AUTO)
+    monkeypatch.setattr(
+        "cw.reconcile.tasks.load_clients", lambda: {"client-a": auto_lane_client}
+    )
+    _emit_pr_merged(client="client-a", ticket_id="SG-A6", repo="foo/bar", pr_number=47)
+
+    released = release_stale_gated_tasks()
+
+    assert released == ["SG-A6"]
+    reloaded = next(t for t in load_dev_queue().tasks if t.ticket_id == "SG-A6")
+    assert reloaded.status == QueueItemStatus.COMPLETED
+    assert reloaded.disposition == "shipped"

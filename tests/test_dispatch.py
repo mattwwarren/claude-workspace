@@ -7810,6 +7810,94 @@ class TestApplyStagedDecision:
         assert task.disposition == "awaiting_operator"
         assert task.blocked_reason == "push_auth_failed"
 
+    def test_automerge_not_armed_park_stamps_pr_url_from_pr_info(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """GitHub #1713 Variant A: automerge_not_armed's sentinel carries
+        `pr: null` (schema-forbidden non-null on a blocked status) but a real,
+        already-created PR in the unmodeled `pr_info` object. Rule 5 must
+        stamp task.pr_url from that fallback so the row becomes hydratable by
+        cw.pr_hydrate._is_candidate (previously permanently skipped)."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("AMNA-1", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "pr": None,
+            "pr_info": {
+                "number": 77,
+                "url": "https://github.com/user/repo/pull/77",
+                "auto_merge": False,
+                "base": "main",
+            },
+            "blocker": {
+                "stage": "stage5_post_create",
+                "reason": "automerge_not_armed",
+                "details": "automerge-enabled check failed for PR #77",
+            },
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "blocked"
+        assert task.blocked_reason == "automerge_not_armed"
+        assert task.pr_url == "https://github.com/user/repo/pull/77"
+
+    def test_prior_pipeline_pr_open_park_stamps_blocked_on_pr(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """GitHub #1713 Variant B: merge_gate_blocked/prior_pipeline_pr_open
+        carries the blocking PR's number only inside blocker.details free
+        text (no structured field). Rule 5 must regex-extract it as an int
+        onto task.blocked_on_pr so release_stale_gated_tasks can later
+        cross-reference it."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("PPPO-1", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "merge_gate_blocked",
+            "blocker": {
+                "stage": "stage4a_merge_gate",
+                "reason": "prior_pipeline_pr_open",
+                "details": (
+                    "PR #88 (dev/other-ticket) is open and shares files with "
+                    "this branch: src/cw/foo.py"
+                ),
+            },
+        }
+        apply_staged_decision(
+            task, "merge_gate_blocked", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "merge_gate_blocked"
+        assert task.blocked_reason == "prior_pipeline_pr_open"
+        assert task.blocked_on_pr == 88
+
+    def test_prior_pipeline_pr_open_malformed_details_leaves_blocked_on_pr_none(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Fail-closed: a details string with no 'PR #<N>' match (producer
+        wording drift, or an absent details field) must not raise, and must
+        leave blocked_on_pr None rather than a wrong guess."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("PPPO-2", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "merge_gate_blocked",
+            "blocker": {
+                "stage": "stage4a_merge_gate",
+                "reason": "prior_pipeline_pr_open",
+                "details": "no PR reference in this string",
+            },
+        }
+        apply_staged_decision(
+            task, "merge_gate_blocked", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.blocked_on_pr is None
+
     def test_stage_advance_unchecked_unknown_client_stamps_disposition(
         self,
         tmp_dispatch_dirs: Path,
@@ -13018,6 +13106,48 @@ class TestRunDispatchLoopHydrationHook:
         monkeypatch.setattr("cw.dispatch.loop.hydrate_pr_states", _record)
         run_dispatch_loop(once=True, emit=None)
         assert len(calls) == 1
+
+
+class TestRunDispatchLoopStaleGateHook:
+    """release_stale_gated_tasks fires once per loop iteration, fault-tolerant
+    (GitHub #1713), same shape as TestRunDispatchLoopHydrationHook."""
+
+    def test_release_stale_gated_tasks_called_once_per_iteration(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+        calls: list[object] = []
+
+        def _record() -> list[str]:
+            calls.append(object())
+            return []
+
+        monkeypatch.setattr("cw.dispatch.loop.release_stale_gated_tasks", _record)
+        run_dispatch_loop(once=True, emit=None)
+        assert len(calls) == 1
+
+    def test_release_stale_gated_tasks_exception_does_not_crash_loop(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        monkeypatch.setattr("cw.dispatch.gating.reconcile", lambda: None)
+
+        def _boom() -> list[str]:
+            msg = "stale-gate boom"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr("cw.dispatch.loop.release_stale_gated_tasks", _boom)
+        # Broad-catch idiom: a stale-gate-release failure must never crash the
+        # tick loop -- the underlying pr.merged event is not lost, since the
+        # consumer cursor is only advanced on success.
+        run_dispatch_loop(once=True, emit=None)
 
 
 # ---------------------------------------------------------------------------

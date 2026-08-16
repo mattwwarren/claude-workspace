@@ -7763,6 +7763,42 @@ class TestDevQueueTasksPrState:
         assert "ATTENTION" in result.output
         assert "changes_requested" in result.output
 
+    def test_dev_queue_tasks_human_output_shows_stale_gate_column(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """_print_tasks_human renders a STALE_GATE column sourced from
+        t.stale_gate_detected_at (GitHub #1713)."""
+        from cw.dev_queue import save_dev_queue
+        from cw.models import DevQueueStore, QueueItemStatus, TicketTask
+
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1713",
+                        client="attn-client",
+                        status=QueueItemStatus.BLOCKED_ON_USER,
+                        disposition="merge_pending",
+                        stale_gate_detected_at=datetime(2026, 1, 1, tzinfo=UTC),
+                    ),
+                    TicketTask(
+                        ticket_id="GEN-1714",
+                        client="attn-client",
+                        status=QueueItemStatus.PENDING,
+                    ),
+                ]
+            )
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, ["dev-queue", "tasks"])
+        assert result.exit_code == 0, result.output
+        assert "STALE_GATE" in result.output
+        lines = {
+            line.split()[0]: line for line in result.output.splitlines() if line.strip()
+        }
+        assert "yes" in lines["GEN-1713"]
+        assert "—" in lines["GEN-1714"]
+
     def test_tasks_json_and_human_surface_blocked_reason(
         self, tmp_config_dir: Path
     ) -> None:
