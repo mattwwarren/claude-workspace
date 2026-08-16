@@ -15,6 +15,7 @@ convention of ``test_harden_ticket_positioning.py`` and
 ``test_auto_dev_preflight_resolutions.py``.
 """
 
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
@@ -176,9 +177,10 @@ def test_ship_it_body_uses_write_tool() -> None:
 
 
 def test_ship_it_heredoc_anti_pattern_removed() -> None:
-    """The cat <<EOF heredoc is gone, replaced by a --body-file scratch path."""
+    """The cat <<EOF heredoc (any spacing/quoting variant) is gone, replaced
+    by a --body-file scratch path."""
     content = _cmd("ship-it.md")
-    assert "cat <<EOF" not in content
+    assert re.search(r"cat\s*<<-?\s*['\"]?EOF", content) is None
     assert "--body-file .cw/pr-body.md" in content
 
 
