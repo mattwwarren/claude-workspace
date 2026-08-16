@@ -2059,7 +2059,8 @@ class TestRereviewForwardsFindingDispositions:
 
         # (1) the prepared-pass hop: the running task's ledger went in and came
         # back out on the pass inputs, and reached every reviewer prompt.
-        assert seen_tasks and seen_tasks[0].finding_dispositions == ledger
+        assert len(seen_tasks) == 1
+        assert seen_tasks[0].finding_dispositions == ledger
         assert prepared.finding_dispositions == ledger
         for role in prepared.roles:
             assert (

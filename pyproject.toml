@@ -281,6 +281,22 @@ ignore = [
 # cli/__init__.py on every ``cw`` invocation. Inline imports at function level
 # are the sanctioned mechanism, not a workaround.
 "src/cw/cli/review.py" = ["PLC0415"]
+# review_finding_dispositions must import NOTHING from cw at module scope
+# (#1838): cw.models.tasks imports FindingDisposition from it, so a module-scope
+# cw.review_debt / cw.events / cw.models.enums import there closes the cycle
+# cw.review_findings -> cw.auto_dev_result.schema -> cw.models ->
+# cw.models.tasks -> review_finding_dispositions -> cw.review_debt ->
+# cw.review_findings, which raises on a partially initialized cw.review_findings
+# in one import order. Deferring every cw import into the function bodies is the
+# sanctioned mechanism, not a workaround — see that module's "Import discipline"
+# docstring section.
+"src/cw/review_finding_dispositions.py" = ["PLC0415"]
+# codex_review/_context defers cw.codex_background
+# ._sync_finding_dispositions_to_running_task inside _prepare_review_pass
+# (#1838): codex_background imports cw.codex_fix_loop, which imports
+# cw.codex_review, so a module-level import here would close that cycle. Same
+# shape and rationale as the codex_background.py entry above.
+"src/cw/codex_review/_context.py" = ["PLC0415"]
 # Channel test files guard imports behind pytest.importorskip("starlette"/"mcp"),
 # so module-level imports legitimately follow executable code (E402).
 "tests/test_cw_pr_events_channel.py" = ["E402"]

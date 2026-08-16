@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
+import sys
 
 import pytest
 
@@ -198,7 +200,9 @@ class TestMergeFindingDispositions:
     def test_newest_recorded_at_wins_on_a_duplicate_key(self) -> None:
         old = _entry(recorded_at="2026-08-01T00:00:00Z", rationale="old")
         new = _entry(recorded_at="2026-08-15T00:00:00Z", rationale="new")
-        assert merge_finding_dispositions({"k": old}, {"k": new})["k"].rationale == "new"
+        assert (
+            merge_finding_dispositions({"k": old}, {"k": new})["k"].rationale == "new"
+        )
 
     def test_an_older_parsed_entry_does_not_overwrite_a_newer_stored_one(self) -> None:
         old = _entry(recorded_at="2026-08-01T00:00:00Z", rationale="old")
@@ -308,7 +312,9 @@ class TestSuppressAdjudicatedFindings:
             disposition_detail="voided by operator",
         )
         finding = _make_finding(severity="MUST_FIX")
-        verdict = _verdict(voided, _accepted(finding), blocking=True, must_fix=[finding])
+        verdict = _verdict(
+            voided, _accepted(finding), blocking=True, must_fix=[finding]
+        )
 
         suppressed = suppress_adjudicated_findings(
             verdict, self._ledger(finding), ticket_id=_TICKET
@@ -354,3 +360,37 @@ class TestSuppressAdjudicatedFindings:
                 _verdict(_accepted(finding)), self._ledger(finding), ticket_id=_TICKET
             )
         assert any(_TICKET in record.getMessage() for record in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Import-cycle lock (#1838)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "first",
+    [
+        "cw.review_finding_dispositions",
+        "cw.review_findings",
+        "cw.review_debt",
+        "cw.models",
+        "cw.events",
+    ],
+)
+def test_module_imports_cleanly_whichever_module_loads_first(first: str) -> None:
+    """``cw.models.tasks`` imports this module, so a module-scope ``cw`` import
+    here would close a cycle that only fails in ONE import order — invisible to
+    a test suite whose conftest always warms ``cw.models`` first.
+
+    Each interpreter below starts cold and imports one module, then the rest,
+    which is what makes the ordering genuinely exercised. Uses
+    ``sys.executable`` (not a bare ``python3``) per PYTHON-PATTERNS' compiled-
+    dependency isolation rule — ``pydantic_core`` is ABI-bound to this venv.
+    """
+    script = (
+        f"import {first}\n"
+        "import cw.review_finding_dispositions, cw.models, cw.events\n"
+        "from cw.models import TicketTask\n"
+        "assert TicketTask(ticket_id='T-1', client='c').finding_dispositions == {}\n"
+    )
+    subprocess.run([sys.executable, "-c", script], check=True)

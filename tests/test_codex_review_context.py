@@ -37,6 +37,7 @@ from cw.codex_review._context import (
     _OUTPUT_INSTRUCTIONS_CAPABLE,
     _OUTPUT_INSTRUCTIONS_INLINED_ONLY,
     _REVIEWER_ROLE_AGENT_FILES,
+    _load_finding_dispositions,
     _load_operator_comments,
     _load_pending_operator_comment_marker,
     _load_voided_findings,
@@ -2010,6 +2011,69 @@ def _disposition_ledger(
     return {key: FindingDisposition.model_validate(payload)}
 
 
+class TestLoadFindingDispositions:
+    """#1838: the disposition-marker read, degrading to {} throughout.
+
+    Same tracker gate, same fetch op, and the same never-raise contract as
+    :class:`TestLoadVoidedFindings` — a Stage-3 pass that cannot reach the
+    tracker must still review; it just cannot see an adjudication posted since
+    the last pass persisted one onto the queue row.
+    """
+
+    def _github_repo(self, tmp_path: Path) -> Path:
+        _write(
+            tmp_path / ".claude" / "project-config.yaml",
+            "tracking:\n  primary:\n    system: github-issues\n",
+        )
+        return tmp_path
+
+    def test_returns_empty_when_tracker_unresolvable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _fail_if_called(*_a: object, **_kw: object) -> None:
+            msg = "must not fetch when the tracker is unknown"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments", _fail_if_called
+        )
+        assert _load_finding_dispositions(tmp_path, "T-1") == {}
+
+    def test_returns_empty_on_fetch_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments", lambda *_a, **_kw: None
+        )
+        assert _load_finding_dispositions(self._github_repo(tmp_path), "T-1") == {}
+
+    def test_returns_empty_when_no_comment_carries_a_sentinel(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments",
+            lambda *_a, **_kw: [{"author": {"login": "a"}, "body": "just prose"}],
+        )
+        assert _load_finding_dispositions(self._github_repo(tmp_path), "T-1") == {}
+
+    def test_fetches_fresh_and_parses_the_sentinel_out_of_the_thread(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ledger = _disposition_ledger()
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments",
+            lambda *_a, **_kw: [
+                {"author": {"login": "a"}, "body": "unrelated send-back"},
+                {"author": None, "body": None},
+                {
+                    "author": {"login": "b"},
+                    "body": render_finding_disposition_block(ledger),
+                },
+            ],
+        )
+        assert _load_finding_dispositions(self._github_repo(tmp_path), "T-1") == ledger
+
+
 class TestRenderAdjudicatedFindingsBlock:
     """#1838 R5: the gated-on-non-empty render helper for the new ledger."""
 
@@ -2098,7 +2162,9 @@ class TestPrepareReviewPassFindingDispositions:
         assert prepared.finding_dispositions == ledger
         assert prepared.roles
         for role in prepared.roles:
-            assert "## Previously Adjudicated Findings" in prepared.prompts_by_role[role]
+            assert (
+                "## Previously Adjudicated Findings" in prepared.prompts_by_role[role]
+            )
 
     def test_marker_entries_are_merged_with_the_stored_ledger(
         self, make_git_repo: Callable[[str], Path], monkeypatch: pytest.MonkeyPatch

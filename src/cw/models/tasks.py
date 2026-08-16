@@ -18,6 +18,14 @@ from pydantic import BaseModel, Field, field_validator
 from cw.models.enums import QueueItemStatus, Stage
 from cw.models.events import PrState, WatchedPr
 
+# Runtime (not TYPE_CHECKING) because ``finding_dispositions``' annotation
+# resolves at class-build time under ``from __future__ import annotations``,
+# same reason ``WatchedPr`` is imported above. Safe against an import cycle
+# only because ``cw.review_finding_dispositions`` imports nothing from ``cw``
+# at module scope — see that module's "Import discipline" docstring section
+# before adding one.
+from cw.review_finding_dispositions import FindingDisposition
+
 # v3: added TicketTask.lane (GitHub #557).
 # v4: added TicketTask.stage + stage_base_ref (GitHub #612).
 # v5: added TicketTask.disposition, pr_url, completed_at (GitHub #310).
@@ -88,7 +96,15 @@ from cw.models.events import PrState, WatchedPr
 #      input. Sibling of v27's regressed_into_stage, stamped at the same
 #      _stage_regress seam as v28's finalize_regress_branch_head but under an
 #      independent precondition, and cleared only at a REVIEW-stage spawn.
-DEV_QUEUE_SCHEMA_VERSION = 29
+# v30: added TicketTask.finding_dispositions (GitHub #1838) — the durable
+#      cross-round adjudication ledger, keyed by a stringified
+#      cw.review_debt.fingerprint_v1. Stamped by
+#      cw.codex_background._sync_finding_dispositions_to_running_task once a
+#      review pass has merged the ticket thread's REVIEW-FINDING-DISPOSITIONS
+#      marker into it. Deliberately has NO clear site: it is durable memory,
+#      not a per-arrival marker like v27/v29 — forgetting a settled
+#      adjudication on requeue is the exact failure #1838 exists to remove.
+DEV_QUEUE_SCHEMA_VERSION = 30
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -486,6 +502,25 @@ class TicketTask(BaseModel):
     # through repeated review/finalize cycles.
     stage_high_water: Stage | None = None
     salvage_no_sentinel_at: datetime | None = None
+    # GitHub #1838 — cross-round adjudication memory for the codex review
+    # backend. Keys are stringified cw.review_debt.fingerprint_v1 identities
+    # (``"<file>::<normalized summary>"``, see
+    # cw.review_finding_dispositions._disposition_key); values record the
+    # operator's outcome, their rationale, and when it was recorded.
+    #
+    # Lives on the queue row rather than in ``.cw/`` or on the tracker alone
+    # because neither survives what this memory has to survive:
+    # dispatch/gating.py deletes ``.cw/context.json`` on a rescued respawn, and
+    # a live tracker fetch degrades to nothing on an unresolvable tracker or a
+    # gh failure. The tracker marker remains the operator's INPUT surface; this
+    # field is the durable record derived from it.
+    #
+    # No clear site, deliberately — the opposite convention to the per-arrival
+    # markers above (regressed_into_stage, pending_operator_comment), which are
+    # consumed once and reset. A settled adjudication is a durable fact about
+    # the ticket; clearing it on requeue would re-open every finding the
+    # operator has already closed, which IS the bug this field fixes.
+    finding_dispositions: dict[str, FindingDisposition] = Field(default_factory=dict)
 
     @field_validator("gate_recipes")
     @classmethod
