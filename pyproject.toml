@@ -216,6 +216,15 @@ ignore = [
 # reconcile/_shared.py entry above. Inline import is the sanctioned
 # mechanism, not a workaround.
 "src/cw/reconcile/tasks.py" = ["PLC0415"]
+# phantom/_mutations and stalled/_mutations defer cw.dispatch.productivity's
+# extract_claim_evidence / is_unproductive (#1750) to break the same
+# cw.dispatch ↔ cw.reconcile cycle as the tasks.py entry above: cw.dispatch's
+# package __init__ imports cw.reconcile at module top (loop.py/gating.py/
+# lanes.py), so these modules' reach into cw.dispatch.productivity must be
+# function-level even though productivity.py itself imports nothing from cw.
+# Inline import is the sanctioned mechanism, not a workaround.
+"src/cw/reconcile/phantom/_mutations.py" = ["PLC0415"]
+"src/cw/reconcile/stalled/_mutations.py" = ["PLC0415"]
 # codex_background defers cw.executor's _complete_session_via_door /
 # _post_review_comment / _resolve_codex_fix_loop_enabled and cw.dispatch.claim's
 # _revert_claimed_task_to_pending inside _run_codex_review_and_complete (#1727):

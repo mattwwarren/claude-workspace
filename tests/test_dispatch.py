@@ -14417,3 +14417,293 @@ class TestRunDispatchLoopSingletonLock:
         assert any("force" in record.message.lower() for record in caplog.records), (
             f"expected a force WARNING but got: {[r.message for r in caplog.records]!r}"
         )
+
+
+class TestUnproductiveAttemptRouting:
+    """Evidence-based attempt charging through apply_staged_decision (#1750).
+
+    The ceiling counts a claim only when it exited RUNNING having produced
+    nothing: no commits, no review findings, no consumed operator resolution.
+    These tests drive the real Rule 1-6 routing table rather than the
+    classifier directly, so they pin the *wiring*, not just the predicate.
+    """
+
+    def _make_running_task(
+        self,
+        ticket_id: str,
+        stage: Stage = Stage.FINALIZE,
+        scope_hint: str | None = None,
+        unproductive_attempts: int = 0,
+    ) -> TicketTask:
+        task = _make_ticket_task(
+            ticket_id=ticket_id,
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            stage=stage,
+            scope_hint=scope_hint,
+            unproductive_attempts=unproductive_attempts,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        return task
+
+    def _clients(self, tmp_path: Path) -> dict[str, ClientConfig]:
+        return {
+            "test-client": ClientConfig(name="test-client", workspace_path=tmp_path)
+        }
+
+    # -- Rule 5: generic block ---------------------------------------------
+
+    def test_same_stage_block_with_no_evidence_is_charged(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """The baseline unproductive claim: parked, nothing to show for it."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("UP-1", stage=Stage.IMPL)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "stage2_impl", "reason": "agent_block"},
+            "commits": [],
+            "review": {"must_fix_initial": 0, "should_fix": 0},
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.unproductive_attempts == 1
+
+    def test_same_stage_block_with_commits_is_not_charged(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Commits pushed — the claim did real work even though it parked."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("UP-2", stage=Stage.IMPL)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "stage2_impl", "reason": "agent_block"},
+            "commits": ["abc123"],
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.unproductive_attempts == 0
+
+    def test_same_stage_block_with_review_findings_is_not_charged(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """#1727's core case: a review that parked *because* it found MUST_FIXes."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("UP-3", stage=Stage.REVIEW)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {"stage": "stage3_review", "reason": "agent_block"},
+            "commits": [],
+            "review": {"must_fix_initial": 3, "should_fix": 1},
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.unproductive_attempts == 0
+
+    # -- R2: mechanically-rejected MUST_FIX is never chargeable -------------
+
+    def test_mechanically_rejected_must_fix_is_never_charged(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """R2 regression: this park is a reviewer malfunction, not a wasted claim.
+
+        Hardcoded ``unproductive=False`` — deliberately NOT evidence-derived,
+        because the payload at this park carries no commits or findings and
+        would otherwise read as unproductive.
+        """
+        from cw.codex_review import CODEX_MUST_FIX_MECHANICALLY_REJECTED
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("UP-4", stage=Stage.REVIEW)
+        last_result: dict[str, object] = {
+            "status": "blocked",
+            "blocker": {
+                "stage": "stage3_review",
+                "reason": CODEX_MUST_FIX_MECHANICALLY_REJECTED,
+            },
+        }
+        apply_staged_decision(task, "blocked", last_result, self._clients(tmp_path))
+
+        assert task.disposition == "codex_must_fix_mechanically_rejected"
+        assert task.unproductive_attempts == 0
+
+    # -- Rules 3b / 4: terminal-ish landings --------------------------------
+
+    def test_merge_pending_with_commits_is_not_charged(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("UP-5", stage=Stage.FINALIZE)
+        last_result: dict[str, object] = {
+            "status": "merge_pending",
+            "commits": ["deadbee"],
+            "pr": {"url": "https://github.com/o/r/pull/7"},
+        }
+        apply_staged_decision(
+            task, "merge_pending", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.unproductive_attempts == 0
+
+    def test_no_op_is_never_charged(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """Rule 4: pre-flight already satisfied is a genuine terminal success."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("UP-6", stage=Stage.PLAN)
+        apply_staged_decision(
+            task, "no_op", {"status": "no_op"}, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.COMPLETED
+        assert task.disposition == "no_op"
+        assert task.unproductive_attempts == 0
+
+    # -- Rule 1: scope-gated approval park ----------------------------------
+
+    def test_scope_gated_park_with_no_evidence_is_charged(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("UP-7", stage=Stage.PLAN, scope_hint="large")
+        last_result: dict[str, object] = {
+            "status": "plan_pending_approval",
+            "commits": [],
+        }
+        apply_staged_decision(
+            task, "plan_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.unproductive_attempts == 1
+
+    def test_scope_gated_park_with_evidence_is_not_charged(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("UP-8", stage=Stage.PLAN, scope_hint="large")
+        last_result: dict[str, object] = {
+            "status": "plan_pending_approval",
+            "commits": ["cafe123"],
+        }
+        apply_staged_decision(
+            task, "plan_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.unproductive_attempts == 0
+
+    # -- Rule 3: a stage advance is productive via the lifecycle hardcode ----
+
+    def test_stage_advance_is_not_charged_and_does_not_double_charge(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """A forward advance is productive by construction, charged exactly zero times.
+
+        Also pins the single-charge guard: the advance moves the task out of
+        RUNNING, so any later same-stage landing in the same routing pass
+        cannot find a second RUNNING exit to charge.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("UP-9", stage=Stage.IMPL)
+        last_result: dict[str, object] = {"status": "stage_complete", "commits": []}
+        apply_staged_decision(
+            task, "stage_complete", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage != Stage.IMPL
+        assert task.unproductive_attempts == 0
+
+    # -- end-to-end ticket regressions --------------------------------------
+
+    def test_1727_productive_sequence_never_reaches_the_ceiling(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """#1727 replay: five productive claims must charge zero.
+
+        The ticket's own evidence sequence — impl with commits, review blocked
+        with real findings, an operator regress, impl with commits again, and a
+        review blocked on a mechanically-rejected MUST_FIX. Before #1750 this
+        drove `attempts` to 5; the row must now still be far below a ceiling
+        of 10 on the counter that actually gates dispatch.
+        """
+        from cw.codex_review import CODEX_MUST_FIX_MECHANICALLY_REJECTED
+        from cw.dev_queue import _stage_regress
+        from cw.dispatch import apply_staged_decision
+
+        clients = self._clients(tmp_path)
+        task = self._make_running_task("UP-1727", stage=Stage.IMPL)
+
+        # 1. impl claim with commits -> advances to REVIEW
+        apply_staged_decision(task, "stage_complete", {"commits": ["c1"]}, clients)
+        # 2. review claim blocked with real findings
+        task.status = QueueItemStatus.RUNNING
+        apply_staged_decision(
+            task,
+            "blocked",
+            {
+                "blocker": {"stage": "stage3_review", "reason": "agent_block"},
+                "review": {"must_fix_initial": 4, "should_fix": 0},
+            },
+            clients,
+        )
+        # 3. operator regress back to IMPL
+        task.status = QueueItemStatus.RUNNING
+        _stage_regress(task, Stage.IMPL)
+        # 4. impl claim with commits again
+        task.status = QueueItemStatus.RUNNING
+        apply_staged_decision(task, "stage_complete", {"commits": ["c2"]}, clients)
+        # 5. review claim blocked on a mechanically-rejected MUST_FIX
+        task.status = QueueItemStatus.RUNNING
+        apply_staged_decision(
+            task,
+            "blocked",
+            {
+                "blocker": {
+                    "stage": "stage3_review",
+                    "reason": CODEX_MUST_FIX_MECHANICALLY_REJECTED,
+                }
+            },
+            clients,
+        )
+
+        assert task.unproductive_attempts == 0
+
+    def test_1653_crashloop_sequence_still_reaches_the_ceiling(
+        self, tmp_dispatch_dirs: Path, tmp_path: Path
+    ) -> None:
+        """#1653 replay: repeated evidence-free parks still hit the cap.
+
+        The pathology the ceiling exists to stop must be caught at exactly the
+        same rate as before — otherwise #1750 traded one silent failure for
+        another.
+        """
+        from cw.dispatch import apply_staged_decision
+
+        clients = self._clients(tmp_path)
+        task = self._make_running_task("UP-1653", stage=Stage.IMPL)
+        ceiling = 10
+
+        for _ in range(ceiling):
+            task.status = QueueItemStatus.RUNNING
+            apply_staged_decision(
+                task,
+                "blocked",
+                {"blocker": {"stage": "stage2_impl", "reason": "agent_block"}},
+                clients,
+            )
+
+        assert task.unproductive_attempts == ceiling

@@ -2911,3 +2911,42 @@ class TestRouteBlockedResultCatchAllLivenessGuard:
         else:
             assert target.disposition == "abandoned"
             assert target.last_blocked_result == sentinel.model_dump(mode="json")
+
+
+def test_validation_failed_cap_still_reads_raw_attempts_not_unproductive(
+    tmp_config_dir: Path,
+) -> None:
+    """#1750 non-interference: the #756 per-stage cap did NOT move counters.
+
+    A worker that keeps emitting an unparseable sentinel may have committed
+    real work each time, so it can read as fully productive. If this cap had
+    been moved to unproductive_attempts alongside the global ceiling, that
+    worker would retry forever. It must still trip off raw ``attempts``.
+    """
+    _write_staged_clients_yaml(tmp_config_dir, "staged-client")
+    ticket_id, session_id = "GH-1750-vfcap", "sess-1750-vfcap"
+    session = _make_daemon_session(id=session_id, worktree_path=None)
+    task = TicketTask(
+        ticket_id=ticket_id,
+        client="staged-client",
+        status=QueueItemStatus.RUNNING,
+        session_id=session_id,
+        stage=Stage.IMPL,
+        attempts=_VALIDATION_FAILED_MAX_ATTEMPTS,
+        unproductive_attempts=0,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+    sentinel = BlockedResult(
+        blocker=Blocker(
+            stage="unknown",
+            reason=BLOCKER_REASON_VALIDATION_FAILED,
+            details="test: validation failed at cap, zero unproductive attempts",
+        )
+    )
+
+    outcome = _apply_sentinel_to_task(ticket_id, session, sentinel)
+
+    assert outcome.routed is False
+    t = next(t for t in load_dev_queue().tasks if t.ticket_id == ticket_id)
+    assert t.status == QueueItemStatus.FAILED
+    assert t.disposition == "abandoned"

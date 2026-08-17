@@ -41,10 +41,6 @@ from cw.dev_queue import (
     _stage_regress,
     transition_task_status,
 )
-from cw.dispatch.regress_repeat import (
-    _consume_finalize_regress_repeat,
-    _maybe_emit_finalize_regress_repeat_signal,
-)
 
 # The REVIEW-scoped gate table (#1823 extraction). Imported at module top in
 # this direction only: review_gates reaches back into this module for
@@ -52,6 +48,11 @@ from cw.dispatch.regress_repeat import (
 # imports, so promoting either of those to a module-top import there recreates
 # a real cycle. Same shape as gating.py <-> claim.py since #1310, guarded by
 # test_dispatch_package_submodules_import_without_cycle.
+from cw.dispatch.productivity import extract_claim_evidence, is_unproductive
+from cw.dispatch.regress_repeat import (
+    _consume_finalize_regress_repeat,
+    _maybe_emit_finalize_regress_repeat_signal,
+)
 from cw.dispatch.review_gates import (
     _park_branch_staleness_gate,
     _park_finalize_hold,
@@ -380,6 +381,12 @@ def _park_must_fix_mechanically_rejected(task: TicketTask) -> None:
         QueueItemStatus.BLOCKED_ON_USER,
         disposition=REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
         blocked_reason=CODEX_MUST_FIX_MECHANICALLY_REJECTED,
+        # GitHub #1750 R2: hardcoded, NOT evidence-derived. This park means the
+        # reviewer emitted MUST_FIX findings that failed mechanical validation
+        # — a reviewer malfunction the ticket cannot be blamed for. The payload
+        # here carries no commits or countable findings, so evidence-deriving
+        # it would charge the ticket for someone else's malfunction.
+        unproductive=False,
     )
 
 
@@ -482,8 +489,15 @@ def _stage_advance_unchecked(
         )
         return
     if task.stage == stages[-1]:
+        # unproductive=False (#1750): reaching the terminal stage IS the
+        # pipeline succeeding. The non-terminal branch below needs no kwarg —
+        # _advance_task_pointer hardcodes it at the shared chokepoint.
         transition_task_status(
-            task, QueueItemStatus.COMPLETED, disposition=disposition, pr_url=pr_url
+            task,
+            QueueItemStatus.COMPLETED,
+            disposition=disposition,
+            pr_url=pr_url,
+            unproductive=False,
         )
     else:
         _advance_task_pointer(task, stages)
@@ -888,7 +902,12 @@ def _route_scope_gated_approval(
             correlation_id=task.ticket_id,
         )
         transition_task_status(
-            task, QueueItemStatus.BLOCKED_ON_USER, disposition=disposition
+            task,
+            QueueItemStatus.BLOCKED_ON_USER,
+            disposition=disposition,
+            # #1750: a scope-gated park is a legitimate stop, but whether the
+            # claim that reached it did any work is an evidence question.
+            unproductive=is_unproductive(extract_claim_evidence(last_result)),
         )
         _record_scope_routing_decision(task, last_result, _RULE_SCOPE_GATED_APPROVAL)
         _maybe_emit_finalize_regress_repeat_signal(task, is_repeat)
@@ -1057,6 +1076,12 @@ def _route_staged_decision(
     blocker = last_result.get("blocker") if isinstance(last_result, dict) else None
     blocker_reason = blocker.get("reason") if isinstance(blocker, dict) else None
     disposition = _hold_aware_disposition(status, blocker_reason)
+    # GitHub #1750: hoisted once alongside blocker/blocker_reason above and
+    # reused by every same-stage rule below, so all of them classify the same
+    # claim identically. Only the same-stage, no-advance branches consult it —
+    # advancing and regressing branches are already covered by the hardcodes
+    # at lifecycle.py's _advance_task_pointer/_stage_regress chokepoints.
+    claim_unproductive = is_unproductive(extract_claim_evidence(last_result))
     if status in SCOPE_GATED_APPROVAL_STATUSES:
         # Rule 1: scope-gated approval; small tier auto-advances, large blocks.
         # Must fire before Rule 2 (SCOPE_GATED ⊂ PAUSED_FOR_USER_INPUT).
@@ -1080,7 +1105,10 @@ def _route_staged_decision(
             correlation_id=task.ticket_id,
         )
         transition_task_status(
-            task, QueueItemStatus.BLOCKED_ON_USER, disposition=disposition
+            task,
+            QueueItemStatus.BLOCKED_ON_USER,
+            disposition=disposition,
+            unproductive=claim_unproductive,  # #1750 Rule 2
         )
     elif status in STAGE_SUCCESS_STATUSES:
         # Rule 3: shipped -- advance or complete (REVIEW-scoped signoff gate;
@@ -1109,11 +1137,20 @@ def _route_staged_decision(
             QueueItemStatus.BLOCKED_ON_USER,
             disposition=disposition,
             pr_url=pr_url,
+            unproductive=claim_unproductive,  # #1750 Rule 3b
         )
     elif status == "no_op":
         # Rule 4: pre-flight already satisfied -- terminal
-        # regardless of remaining stages
-        transition_task_status(task, QueueItemStatus.COMPLETED, disposition="no_op")
+        # regardless of remaining stages.
+        # unproductive=False hardcoded (#1750): "the work was already done" is
+        # a successful terminal outcome, and its payload legitimately carries
+        # no commits — evidence-deriving it would charge a correct no-op.
+        transition_task_status(
+            task,
+            QueueItemStatus.COMPLETED,
+            disposition="no_op",
+            unproductive=False,
+        )
     elif status in STAGE_FAILURE_STATUSES:
         # Rule 5: blocked/merge_gate_blocked/scope_exceeded/forbidden_area
         # Sub-rule 5a: "blocked" at FINALIZE with a regress-eligible blocker
@@ -1209,6 +1246,7 @@ def _route_staged_decision(
             disposition=disposition,
             pr_url=gate_pr_url,
             blocked_reason=blocker_reason,
+            unproductive=claim_unproductive,  # #1750 Rule 5
         )
         # GitHub #1713 Variant B: prior_pipeline_pr_open blocks this ticket
         # behind a DIFFERENT ticket's open PR -- this row has no PR of its
@@ -1243,6 +1281,9 @@ def _route_staged_decision(
             correlation_id=task.ticket_id,
         )
         transition_task_status(
-            task, QueueItemStatus.BLOCKED_ON_USER, disposition="abandoned"
+            task,
+            QueueItemStatus.BLOCKED_ON_USER,
+            disposition="abandoned",
+            unproductive=claim_unproductive,  # #1750 Rule 6
         )
     return True

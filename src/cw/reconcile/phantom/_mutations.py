@@ -122,6 +122,13 @@ def _apply_phantom_queue_mutations(
     actionable of the two — it names *why* the verification tail never ran,
     where "dirty" only reports that something is uncommitted.
     """
+    # Deferred, not module-top: cw.dispatch's package __init__ imports
+    # cw.reconcile (loop.py/gating.py/lanes.py), so a top-level import of any
+    # cw.dispatch submodule here is a real circular import at package-init
+    # time. Same shape as the #698 reconcile._shared -> cw.dispatch precedent
+    # and tasks.py's deferred cw.dispatch.routing import. See #1750.
+    from cw.dispatch.productivity import extract_claim_evidence, is_unproductive
+
     unresolved_spawn_ids = unresolved_spawn_ticket_ids or set()
     daemon_ticket_ids_to_revert = [
         c.ticket_id
@@ -160,8 +167,18 @@ def _apply_phantom_queue_mutations(
                 changed = True
             elif task.ticket_id in merged_crash_tids:
                 # Why: PR URL is not in hand here — not worth a second gh call.
+                # unproductive=False hardcoded (#1750): this branch fires only
+                # when the crashed session's PR is confirmed MERGED, which is
+                # definitionally the most productive outcome there is. It is
+                # deliberately not evidence-derived: there is no sentinel to
+                # extract evidence from here (that is why the comment above
+                # says the PR URL is not in hand), so the classifier would see
+                # an empty payload and wrongly charge a terminal salvage.
                 transition_task_status(
-                    task, QueueItemStatus.COMPLETED, disposition="shipped"
+                    task,
+                    QueueItemStatus.COMPLETED,
+                    disposition="shipped",
+                    unproductive=False,
                 )
                 _stamp_salvage_stage(task)
                 task.session_id = None
@@ -184,6 +201,11 @@ def _apply_phantom_queue_mutations(
                     _queue_status_for_salvaged(salvaged_result),
                     disposition=_hold_aware_disposition(salvaged_result.status, reason),
                     pr_url=_extract_pr_url(last_result),
+                    # #1750: unlike the merged-crash branch above, a genuine
+                    # validated sentinel IS in hand here, so classify it rather
+                    # than assuming. Reuses the `last_result` dump computed
+                    # above — the same schema-owned extractor routing.py uses.
+                    unproductive=is_unproductive(extract_claim_evidence(last_result)),
                 )
                 changed = True
         if changed:
