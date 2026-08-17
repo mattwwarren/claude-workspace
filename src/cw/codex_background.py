@@ -43,6 +43,7 @@ from cw.events import record_event as _record_orchestrator_event
 from cw.gh import post_issue_comment
 from cw.local_runner import UNEXPECTED_ERROR
 from cw.models import OrchestratorEventType, QueueItemStatus
+from cw.review_finding_dispositions import merge_finding_dispositions
 from cw.worktree import _git_dir
 
 if TYPE_CHECKING:
@@ -51,6 +52,7 @@ if TYPE_CHECKING:
 
     from cw.codex_runner import CodexRunner
     from cw.models import ClientConfig, OrchestratorConfig, TicketTask
+    from cw.review_finding_dispositions import FindingDisposition
 
 _log = logging.getLogger(__name__)
 
@@ -131,6 +133,56 @@ def _stamp_session_id_on_running_task(
             ):
                 stored_task.session_id = session_id
                 break
+        save_dev_queue(store)
+
+
+def _sync_finding_dispositions_to_running_task(
+    *,
+    client_name: str,
+    ticket_id: str,
+    dispositions: dict[str, FindingDisposition],
+) -> None:
+    """Merge *dispositions* into the matching RUNNING dev-queue row (#1838 R1).
+
+    Called by ``codex_review._context._merge_and_persist_finding_dispositions``
+    once a review pass has parsed the ticket thread's
+    ``REVIEW-FINDING-DISPOSITIONS`` marker, so the adjudication survives this
+    session — the record has to outlive the worktree teardown and
+    regress/redispatch cycle that a live tracker fetch cannot be relied on to
+    re-supply.
+
+    Structurally identical to :func:`_stamp_session_id_on_running_task` above:
+    same lock/load/find-matching-RUNNING-row/mutate/save shape, same
+    keyword-only signature for the same reason (three interchangeable ``str``
+    parameters), same no-op-when-nothing-matches contract. It lives here rather
+    than in ``codex_review`` so both direct dev-queue writes the codex path
+    performs sit in one module.
+
+    MERGES rather than overwrites, via the ledger's own
+    :func:`~cw.review_finding_dispositions.merge_finding_dispositions` — so a
+    second call with the same data is a no-op, and an entry the row already
+    carries is never dropped because this pass's fetch did not see it (#1838
+    R3, forward-only).
+    """
+    if not dispositions:
+        return
+    with dev_queue_lock():
+        store = load_dev_queue()
+        matched = next(
+            (
+                stored_task
+                for stored_task in store.tasks
+                if stored_task.ticket_id == ticket_id
+                and stored_task.client == client_name
+                and stored_task.status == QueueItemStatus.RUNNING
+            ),
+            None,
+        )
+        if matched is None:
+            return
+        matched.finding_dispositions = merge_finding_dispositions(
+            matched.finding_dispositions, dispositions
+        )
         save_dev_queue(store)
 
 

@@ -2137,6 +2137,13 @@ class TestApplySentinelToTaskLateRescue:
         # guard rather than exercising the #918 rescue arm's signoff re-park.
         payload = _stage_complete_payload()
         payload["stage_reached"] = "stage3_review"
+        # #1870: the shared fixture's review block defaults agents_run to 0,
+        # which is now itself a review-health gate condition at REVIEW -- and
+        # that gate outranks signoff, so leaving it would park the row
+        # BLOCKED_ON_USER/review_health_gate and stop exercising the signoff
+        # re-park this test exists for. A real REVIEW-stage stage_complete
+        # reports the reviewers that ran.
+        payload["review"] = {**payload["review"], "agents_run": 2}
         sentinel = AutoDevResult.model_validate(payload)
 
         rescued = _apply_sentinel_to_task(ticket_id, session, sentinel).rescued

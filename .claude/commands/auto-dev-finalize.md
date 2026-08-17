@@ -418,7 +418,8 @@ Parse the response. Then:
 # In the impl worktree
 git fetch origin main
 git rebase origin/main
-# If rebase fails with conflicts here → abort and emit blocker (see below)
+# If rebase fails with conflicts here → abort and attempt semantic auto-resolve (see below);
+# if that refuses or fails, emit blocker exactly as before
 git push --force-with-lease origin HEAD:<branch-name>
 ```
 
@@ -431,7 +432,96 @@ gh pr view <pr_number> --repo <owner>/<repo> --json mergeable,mergeStateStatus
 ```
 
 - **Now MERGEABLE** → log to the cycle summary: `auto-rebase succeeded, PR <N> now mergeable`. Proceed to Step 4d.
-- **Still CONFLICTING / DIRTY / BEHIND, OR rebase aborted on conflict** → emit the structured `blocked` sentinel (template below). Do **not** force, do **not** attempt a second rebase, do **not** fall through silently.
+- **Still CONFLICTING / DIRTY / BEHIND, OR rebase aborted on conflict** → run the **semantic auto-resolve attempt** below. If it refuses, or resolves but fails a gate, emit the structured `blocked` sentinel (template below). Do **not** force, do **not** attempt a second rebase, do **not** fall through silently.
+
+**Semantic auto-resolve attempt (operator direction, #1850):**
+
+**Why this exists:** a large share of the parks above are conflicts no human would think twice about — two branches appending disjoint CHANGELOG sections, two branches adding different imports to the same block, one branch inserting where the other changed nothing. `prep-pr.md` Step 1's *pre-push* refusal ("a mis-resolved merge is worse than a surfaced block") stands unchanged and is not touched by this step; what follows is the narrow, enumerated, fail-closed version of autonomous resolution that its reasoning does not rule out. The decision is made by a deterministic script, never by agent judgement — same orchestrator-run-fact-gate discipline as the UI Evidence Gate in Step 4d.
+
+1. **Restore a clean state and record the revert anchor.**
+
+   ```bash
+   git rebase --abort
+   PRE_MERGE_SHA=$(git rev-parse HEAD)
+   ```
+
+2. **Plain merge** (a genuine merge commit, not a history rewrite — matching `prep-pr.md` Step 1's own recipe):
+
+   ```bash
+   git fetch origin main
+   git merge origin/main
+   ```
+
+   - **No conflicts** → identical to the auto-rebase-succeeded branch above: push (step 6), re-verify mergeability (step 7), proceed to Step 4d.
+   - **Conflicts** → continue to step 3.
+
+3. **Capture the conflicted set:**
+
+   ```bash
+   git diff --name-only --diff-filter=U > /tmp/conflicted-files-$CW_SESSION
+   ```
+
+4. **Classify and resolve — one attempt, no loops:**
+
+   ```bash
+   RESOLVE_OUTPUT=$(uv run python .claude/scripts/classify_merge_conflict.py resolve \
+     --conflicted-files /tmp/conflicted-files-$CW_SESSION --json)
+   RESOLVE_EXIT=$?
+   ```
+
+   (Repo-relative, `uv run python`-invoked — this script ships only to *this* repo's `.claude/scripts/`, never to the global `~/.claude/scripts/`, unlike `prep_pr_finalize.py`/`prep_pr_state.py` below. Same convention as `check_impl_guard_staleness.py`/`check_plan_scope_conformance.py` elsewhere in this pipeline.)
+
+   The script resolves only three enumerated safe shapes (`one_sided_insert`, `import_union`, and a path-gated `doc_append`), atomically across every conflicted file, and writes nothing at all if any block is unsafe.
+
+   - **Exit 1 or 2 (refused)** → `git merge --abort`, then fall through to the **existing, unchanged** `merge_conflict_post_push` sentinel below, appending to `blocker.details`: `"; semantic auto-resolve attempted — refused: $RESOLVE_OUTPUT"`.
+   - **Exit 0 (resolved)** → stage the reported `resolved_files`, confirm nothing is still unmerged, and commit with a message that records what was auto-synthesized (never `--no-edit` — the default merge message is the only artifact of this event that outlives the pipeline run, since `friction_highlights` does not persist):
+
+     ```bash
+     RESOLVED_FILES=$(echo "$RESOLVE_OUTPUT" | jq -r '.resolved_files[]')
+     git add $RESOLVED_FILES
+     test -z "$(git diff --name-only --diff-filter=U)"   # defense in depth
+     CATEGORIES=$(echo "$RESOLVE_OUTPUT" | jq -r '.categories | to_entries | map("\(.key)=\(.value)") | join(", ")')
+     git commit -m "Merge origin/main (semantic auto-resolve: $CATEGORIES)" \
+       --trailer "Auto-Resolved-By: classify_merge_conflict.py (#1850)"
+     ```
+
+5. **Run the project's quality gates once — this is a hard escalation valve, not a fix loop.**
+
+   ```bash
+   ~/.claude/scripts/prep_pr_state.py detect-gates
+   ```
+
+   Run each detected gate's `command` directly via Bash: foreground, **no autofix, no fix loop, no backgrounding**, fail fast on the first failure. Do NOT reuse `/prep-pr` Step 7's fix-loop machinery.
+
+   - **Any gate fails** → revert the whole attempt and park:
+
+     ```bash
+     git reset --hard $PRE_MERGE_SHA
+     ```
+
+     Fall through to the unchanged sentinel below, appending to `blocker.details`: `"; semantic auto-resolve resolved conflicts (<categories>) but gate <name> failed: <output tail>; reverted"`. **This park is terminal for this run** — do NOT re-run the resolver, do NOT try a different resolution, do NOT re-run the gate.
+   - **All gates pass** → continue to step 6.
+
+6. **Push — plain, non-force** (a merge commit, so nothing is being rewritten):
+
+   ```bash
+   git push origin HEAD:refs/heads/<branch-name>
+   git fetch origin <branch-name>
+   test "$(git rev-parse origin/<branch-name>)" = "$(git rev-parse HEAD)"
+   ```
+
+   Check this push's output against the **full signature table under the Step 4c classifier above**, exactly as the rebase-retry push does. On a match, emit the `push_auth_failed` sentinel with `blocker.details` naming this site, e.g. `"Step 4c.5 semantic-resolve push: Permission denied (publickey)"`, and stop.
+
+7. **Re-verify mergeability once:**
+
+   ```bash
+   gh pr view <pr_number> --repo <owner>/<repo> --json mergeable,mergeStateStatus
+   ```
+
+   - **MERGEABLE** → log to the cycle summary: `semantic auto-resolve succeeded, PR <N> now mergeable (categories: <list>)`, append `"semantic_merge_conflict_auto_resolved"` to `friction_highlights`, and proceed to Step 4d.
+   - **Anything else** (defensive) → fall through to the unchanged sentinel below.
+
+**Contract notes:** this step introduces no new `blocker.reason`, no new `status`, and no schema change — a failed or refused attempt parks under the pre-existing `merge_conflict_post_push` reason with only an appended `blocker.details` clause, and `friction_highlights` is already a free-form `list[str]`. Do **not** add `merge_conflict_post_push` to `FINALIZE_REGRESS_BLOCKER_REASONS` (`src/cw/auto_dev_result/schema.py`): a conflict the resolver refused is not fixed by regressing to IMPL.
 
 **Sentinel template — `merge_conflict_post_push` blocker:**
 

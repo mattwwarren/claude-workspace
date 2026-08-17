@@ -482,6 +482,63 @@ Run `/harden-ticket` on a ticket before the first dispatch to surface
 ambiguities and unsound premises upfront. This eliminates the
 ambiguity/plan-review whack-a-mole loop that burns dispatch cycles.
 
+### Settle a review finding for good (#1838)
+
+When a codex review round raises a finding you reject, and the *next* round
+re-derives the same finding and re-parks the ticket, post a
+`REVIEW-FINDING-DISPOSITIONS` marker comment on the ticket. It is read
+mechanically on every subsequent review pass — no LLM interprets it — and is
+persisted onto the queue row, so it survives regress, redispatch, and worktree
+teardown.
+
+Each key is `"<file>::<normalized summary>"`, where the normalized summary is
+the finding's summary lowercased, whitespace-collapsed, with line/position
+references stripped and every digit run replaced by `N`
+(`cw.review_debt.fingerprint_v1`). Compute it rather than normalizing by hand
+— the review comment's `### Debt — recorded, not blocking` section prints only
+the summary half of the same fingerprint, not the `file::` prefix:
+
+```bash
+uv run python -c 'from cw.review_debt import fingerprint_v1; print("::".join(fingerprint_v1("src/cw/foo.py", "Bug at line 42")))'
+# -> src/cw/foo.py::bug
+```
+
+```markdown
+## Review Finding Dispositions
+
+<!-- REVIEW-FINDING-DISPOSITIONS
+{
+  "schema_version": 1,
+  "dispositions": {
+    "src/cw/foo.py::bug here": {
+      "outcome": "REJECTED",
+      "rationale": "intentional tradeoff, see ADR-0012",
+      "recorded_at": "2026-08-16T00:00:00Z"
+    }
+  }
+}
+REVIEW-FINDING-DISPOSITIONS -->
+```
+
+- `outcome` is `REJECTED` or `ACCEPTED`. Only `REJECTED` suppresses the
+  finding; `ACCEPTED` is recorded and shown to the reviewer but changes no gate.
+- Changed your mind? Re-post the marker with a later `recorded_at` — newest
+  wins per key. Removing the marker does **not** un-settle anything; the ledger
+  is forward-only by design.
+- A malformed block degrades to "no dispositions" and never fails the review;
+  the symptom is the finding re-appearing, which is visible and correctable.
+- Because the identity is not evidence-anchored, a suppression does not lapse
+  when the code moves. Every suppression therefore prints itself on the review
+  comment (`suppressed — rejected: finding … re-adjudicate if the code at this
+  location has changed`) and emits
+  `review.finding_disposition_suppressed`. If you see one against code that has
+  since been rewritten, re-adjudicate it.
+
+Distinct from `cw review check-voided`'s `VOIDED-REVIEW-FINDINGS` record
+(#1814), which the Claude-native session mints from your prose and which lapses
+as soon as the cited evidence changes. Use this one when you want the decision
+to *stick*.
+
 ### Spec-driven subagent escape hatch
 
 When the pipeline bounces on an intricate cross-module ticket (repeated

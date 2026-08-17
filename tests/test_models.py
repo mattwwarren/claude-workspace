@@ -35,6 +35,7 @@ from cw.models import (
     TicketTask,
     WatchedPr,
 )
+from cw.review_finding_dispositions import FindingDisposition
 
 
 class TestSessionPurpose:
@@ -719,6 +720,41 @@ class TestCostFields:
         }
 
 
+class TestTicketTaskFindingDispositions:
+    """GitHub #1838: the cross-round adjudication ledger field (schema v31)."""
+
+    def test_defaults_to_an_empty_dict(self) -> None:
+        assert TicketTask(ticket_id="T-1", client="c").finding_dispositions == {}
+
+    def test_round_trips_through_json(self) -> None:
+        task = TicketTask(
+            ticket_id="T-1",
+            client="c",
+            finding_dispositions={
+                "src/cw/foo.py::bug here": FindingDisposition(
+                    outcome="REJECTED",
+                    rationale="settled by the operator",
+                    recorded_at="2026-08-16T00:00:00Z",
+                )
+            },
+        )
+        restored = TicketTask.model_validate(task.model_dump(mode="json"))
+        entry = restored.finding_dispositions["src/cw/foo.py::bug here"]
+        assert entry.outcome == "REJECTED"
+        assert entry.rationale == "settled by the operator"
+        assert entry.recorded_at == "2026-08-16T00:00:00Z"
+
+    def test_legacy_pre_v31_row_loads_with_an_empty_ledger(self) -> None:
+        """A persisted row from before the field existed must still load."""
+        legacy = {
+            "ticket_id": "T-1",
+            "client": "c",
+            "priority": 0,
+            "status": "pending",
+        }
+        assert TicketTask.model_validate(legacy).finding_dispositions == {}
+
+
 class TestFalseParkRecoveryBackoffFields:
     """GitHub #1030: new TicketTask backoff-state fields for concierge recipe 1."""
 
@@ -952,7 +988,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 31
+        assert DEV_QUEUE_SCHEMA_VERSION == 32
 
     def test_pr_state_defaults(self) -> None:
         state = PrState()

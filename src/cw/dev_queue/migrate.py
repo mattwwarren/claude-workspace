@@ -64,7 +64,7 @@ def _fill_regress_attempts_default(task_raw: dict[str, Any]) -> None:
 
 
 def _fill_unproductive_attempts_default(task_raw: dict[str, Any]) -> None:
-    """Fill unproductive_attempts introduced in schema v31 (GitHub #1750).
+    """Fill unproductive_attempts introduced in schema v32 (GitHub #1750).
 
     Legacy rows start at 0 rather than inheriting `attempts`: back-filling the
     old claim count would immediately park every long-running in-flight ticket
@@ -234,6 +234,15 @@ def _fill_stale_gate_default(task_raw: dict[str, Any]) -> None:
         task_raw["blocked_on_pr"] = None
 
 
+def _fill_finding_dispositions_default(task_raw: dict[str, Any]) -> None:
+    """Fill finding_dispositions introduced in dev-queue schema v31
+    (GitHub #1838). Idempotent — and additive by construction: an existing
+    ledger is never reset, which is the forward-only contract the field's own
+    no-clear-site comment in models/tasks.py describes."""
+    if "finding_dispositions" not in task_raw:
+        task_raw["finding_dispositions"] = {}
+
+
 def _fill_watched_prs_default(raw: dict[str, Any]) -> None:
     """Fill the top-level watched_prs list introduced in schema v15 (#1154).
 
@@ -279,6 +288,7 @@ def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
                 _fill_finalize_regress_branch_head_default(task_raw)
                 _fill_pending_operator_comment_default(task_raw)
                 _fill_stale_gate_default(task_raw)
+                _fill_finding_dispositions_default(task_raw)
                 _fill_unproductive_attempts_default(task_raw)
     _fill_watched_prs_default(raw)
     raw["schema_version"] = DEV_QUEUE_SCHEMA_VERSION

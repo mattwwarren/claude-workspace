@@ -32,6 +32,7 @@ from cw.codex_review._capability import (
 from cw.events import read_events
 from cw.executor_diagnostics import diagnostics_bundle_dir
 from cw.models.enums import OrchestratorEventType
+from cw.review_finding_dispositions import FindingDisposition, _disposition_key
 from cw.review_findings import (
     AcceptedFinding,
     AgentSpecSource,
@@ -47,6 +48,7 @@ from tests._reconcile_helpers import (
     SCOPE_GUARD_FILES,
     SCOPE_GUARD_LINES,
     _make_stale_base_repo,
+    _scope_guard_git,
 )
 from tests.conftest import (
     _make_debt_record,
@@ -1018,6 +1020,164 @@ class TestSynthesizeCodexReviewResultVoidedSuppression:
         )
 
 
+class TestSynthesizeCodexReviewResultFindingDispositionSuppression:
+    """#1838: an operator-adjudicated finding cannot re-park a later round."""
+
+    def _doc(self, *findings: Finding) -> ReviewerFindingsDocument:
+        return _make_reviewer_doc(*findings)
+
+    def _ledger(self, finding: Finding, **overrides: object) -> dict[str, object]:
+        key = _disposition_key(finding.file, finding.summary)
+        assert key is not None
+        payload: dict[str, object] = {
+            "outcome": "REJECTED",
+            "rationale": "settled by the operator in an earlier round",
+            "recorded_at": "2026-08-16T00:00:00Z",
+        }
+        payload.update(overrides)
+        return {key: FindingDisposition.model_validate(payload)}
+
+    def test_rejected_disposition_suppresses_the_rederived_must_fix(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-synth-disposition")
+        finding = _make_finding(severity="MUST_FIX")
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[self._doc(finding)],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-disposition",
+            default_branch="main",
+            fix_loop_enabled=False,
+            finding_dispositions=self._ledger(finding),
+        )
+
+        assert result.status == "stage_complete"
+        assert verdict is not None
+        assert verdict.blocking is False
+        assert verdict.must_fix == []
+        assert verdict.accepted[0].disposition == "rejected"
+
+    def test_suppression_carries_the_visibility_signal_onto_the_comment(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        """Operator-mandated (#1838 Decisions): a suppression must be visible.
+
+        The signal rides ``AcceptedFinding.disposition_detail``, which
+        ``_disposition_annotation``/``_render_findings`` already surface on the
+        posted comment — asserted end to end here, not just on the field.
+        """
+        worktree = make_git_repo("wt-synth-disposition-visible")
+        finding = _make_finding(severity="MUST_FIX")
+        _result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[self._doc(finding)],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-disposition-visible",
+            default_branch="main",
+            fix_loop_enabled=False,
+            finding_dispositions=self._ledger(finding),
+        )
+
+        assert verdict is not None
+        detail = verdict.accepted[0].disposition_detail
+        assert "suppressed by prior REJECTED adjudication" in detail
+        assert "2026-08-16T00:00:00Z" in detail
+        assert "re-adjudicate if the code at this location has changed" in detail
+        comment = render_verdict_comment(verdict, fix_loop_enabled=False)
+        assert detail in comment
+
+    def test_composes_with_voided_suppression_without_interfering(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-synth-disposition-compose")
+        diff = _make_diff(
+            "def broken():", "return 1", files={"src/cw/foo.py": [10, 11]}
+        )
+        voided = _make_finding(severity="MUST_FIX")
+        adjudicated = _make_finding(
+            severity="MUST_FIX",
+            line_start=11,
+            line_end=11,
+            summary="A separately adjudicated bug",
+            evidence="return 1",
+        )
+        _result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[self._doc(voided, adjudicated)],
+            failures=[],
+            diff=diff,
+            reviewed_sha="sha",
+            session_id="s-disposition-compose",
+            default_branch="main",
+            fix_loop_enabled=False,
+            voided_findings=[_make_voided_finding()],
+            finding_dispositions=self._ledger(adjudicated),
+        )
+
+        assert verdict is not None
+        assert verdict.blocking is False
+        assert verdict.must_fix == []
+        assert [af.disposition for af in verdict.accepted] == ["rejected", "rejected"]
+
+    def test_accepted_outcome_does_not_suppress(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-synth-disposition-accepted")
+        finding = _make_finding(severity="MUST_FIX")
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[self._doc(finding)],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-disposition-accepted",
+            default_branch="main",
+            fix_loop_enabled=False,
+            finding_dispositions=self._ledger(finding, outcome="ACCEPTED"),
+        )
+
+        assert result.status == "blocked"
+        assert verdict is not None
+        assert verdict.blocking is True
+
+    def test_no_ledger_leaves_the_blocking_path_intact(
+        self, make_git_repo: Callable[[str], Path]
+    ) -> None:
+        worktree = make_git_repo("wt-synth-disposition-none")
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[self._doc(_make_finding(severity="MUST_FIX"))],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-disposition-none",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+
+        assert result.status == "blocked"
+        assert verdict is not None
+        assert verdict.blocking is True
+        assert (
+            read_events(
+                event_types=[
+                    OrchestratorEventType.REVIEW_FINDING_DISPOSITION_SUPPRESSED
+                ]
+            )
+            == []
+        )
+
+
 class TestRenderFindingsIsDispositionAware:
     """#1814/A1: a suppressed finding must not render as a live one.
 
@@ -1934,6 +2094,117 @@ class TestCleanReviewScopeMeasurement:
         assert result.health.lowest_agent_confidence == "HIGH"
         assert result.health.any_incomplete_risk is False
         assert result.health.recommendation == "PROCEED"
+
+
+# ---------------------------------------------------------------------------
+# #1870 — a measured-empty clean review exits empty_diff_blocked, not
+# stage_complete
+# ---------------------------------------------------------------------------
+
+
+_EMPTY_DIFF_BRANCH = "dev/1870-empty"
+
+
+def _make_empty_diff_repo(make_git_repo: Callable[..., Path], name: str) -> Path:
+    """Repo checked out on a branch carrying no commits of its own.
+
+    Deliberately a real repo rather than a stubbed ``compute_branch_diff_scope``:
+    the distinction this ticket turns on is "measured 0/0" versus "unmeasurable"
+    (``None``), and only a real measurement proves the branch reaches the former.
+    """
+    repo = make_git_repo(name)
+    _scope_guard_git(repo, "remote", "add", "origin", str(repo))
+    _scope_guard_git(repo, "fetch", "origin", "main")
+    _scope_guard_git(repo, "checkout", "-b", _EMPTY_DIFF_BRANCH)
+    return repo
+
+
+class TestEmptyDiffCleanReview:
+    def test_measured_empty_diff_blocks_instead_of_completing(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """#1870: a clean review over a branch with nothing on it is not a pass."""
+        from cw.auto_dev_result import EMPTY_DIFF_BLOCKER_REASON
+
+        worktree = _make_empty_diff_repo(make_git_repo, "wt-verdict-empty")
+        doc = _make_reviewer_doc(_make_finding(severity="SHOULD_FIX"))
+
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-empty-diff",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+
+        assert result.status == "empty_diff_blocked"
+        assert result.stage_reached == "stage3_review"
+        assert result.scope.files == 0
+        assert result.scope.lines_actual == 0
+        assert result.branch == _EMPTY_DIFF_BRANCH
+        assert result.blocker is not None
+        assert result.blocker.reason == EMPTY_DIFF_BLOCKER_REASON
+        assert result.blocker.stage == "stage3_review"
+        assert _EMPTY_DIFF_BRANCH in result.blocker.details
+        # health must not vouch for a review that covered nothing
+        assert result.health.recommendation == "EXIT_FOR_HUMAN_REVIEW"
+        # the real verdict is preserved for the caller's rendering path, and
+        # review.agents_run keeps its true value rather than being zeroed
+        assert verdict is not None
+        assert result.review == verdict.review
+        assert result.review.agents_run == 1
+
+    def test_non_empty_clean_review_is_unaffected(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """Regression guard: a branch with real churn still exits stage_complete."""
+        worktree = _make_stale_base_repo(make_git_repo, "wt-verdict-nonempty")
+        doc = _make_reviewer_doc(_make_finding(severity="SHOULD_FIX"))
+
+        result, _verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-nonempty-diff",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+
+        assert result.status == "stage_complete"
+        assert result.blocker is None
+        assert result.scope.files == SCOPE_GUARD_FILES
+
+    def test_unmeasurable_worktree_is_not_treated_as_empty(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """``None`` from compute_branch_diff_scope means "could not measure",
+        never "measured zero" -- it must keep its pre-#1870 stage_complete
+        fallback, warning included, rather than being parked."""
+        worktree = make_git_repo("wt-verdict-unmeasurable-empty")
+        doc = _make_reviewer_doc(_make_finding(severity="SHOULD_FIX"))
+
+        result, _verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-unmeasurable-empty",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+
+        assert result.status == "stage_complete"
+        assert result.scope.files == 0
+        assert result.scope.lines_actual == 0
 
 
 # ---------------------------------------------------------------------------

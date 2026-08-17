@@ -1459,6 +1459,51 @@ debt itself is already surfaced on the posted review comment.
 
 `correlation_id` is the `ticket_id`.
 
+### `review.finding_disposition_suppressed`
+
+**Emitter:** `suppress_adjudicated_findings`
+(`cw.review_finding_dispositions`), reached from
+`synthesize_codex_review_result` (`cw.codex_review._verdict`) — so both
+`run_review` and the fix loop's per-cycle `_rereview` go through it.
+**Payload:**
+```json
+{
+  "file": "<str>",
+  "summary": "<str>",
+  "outcome": "REJECTED",
+  "rationale": "<str>",
+  "recorded_at": "<str>"
+}
+```
+**Semantics:** GitHub #1838. One event per re-derived review finding suppressed
+because its `review_debt.fingerprint_v1` identity matched a `REJECTED` entry in
+the ticket's cross-round adjudication ledger
+(`TicketTask.finding_dispositions`, schema v31). The finding is stamped
+`disposition="rejected"` and leaves `must_fix`/`blocking`.
+
+Mandatory for the same reason as `review.finding_voided` above, and NOT a reuse
+of it: the two suppressions have different identities (fingerprint-keyed vs.
+evidence-anchored), different lifetimes (an adjudication does not lapse when
+the code moves; a void does), and different payloads — one event type would
+produce an audit trail that cannot say which mechanism fired. `outcome` is
+always `"REJECTED"`: an `ACCEPTED` ledger entry reaches the reviewer prompt but
+never the mechanical gate, so it emits nothing.
+
+Because the suppression does not expire, it is also surfaced on the posted
+review comment: the stamped `AcceptedFinding.disposition_detail` names the
+file, the `recorded_at` date, the operator's original rationale, and the
+re-adjudicate-if-the-code-changed caveat, which
+`_disposition_annotation`/`_render_findings` (`cw.codex_review._verdict`)
+already render inline. This event is the durable half of that record; the
+comment is the human-visible half.
+
+Deliberately **not** added to `_DEFAULT_OPERATOR_EVENT_TYPES`
+(`orchestrator_config.py`), matching both siblings above: a suppression is the
+expected steady-state outcome once an operator has settled a finding, and it is
+already visible on the review comment.
+
+`correlation_id` is the `ticket_id`.
+
 ### Operator-attention channel (RFC 0008 W3, #1002)
 
 A server-side filter (`cw.cw_operator_events`) forwards a declarative subset

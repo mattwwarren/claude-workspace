@@ -55,12 +55,14 @@ from cw.dispatch.regress_repeat import (
 )
 from cw.dispatch.review_gates import (
     _park_branch_staleness_gate,
+    _park_empty_diff_gate,
     _park_finalize_hold,
     _park_review_health_gate,
     _park_scope_hint_gate,
     _park_signoff_gate,
     _should_force_hold_finalize,
     _should_gate_for_branch_staleness,
+    _should_gate_for_empty_diff,
     _should_gate_for_review_health,
     _should_gate_for_scope_hint,
     _should_gate_for_signoff,
@@ -670,17 +672,24 @@ def _walk_stage_pointer_forward(
 
     Each rung advances through ``_advance_task_pointer`` (the shared
     ``TASK_STAGE_CHANGED`` chokepoint, dev_queue.py), so every real stage move
-    emits exactly one event. Before crossing a REVIEW rung three gates are
-    checked, in order (#1617 D1/D3):
+    emits exactly one event. Before crossing a REVIEW rung the gates are
+    checked, in order (#1617 D1/D3, extended by #1823 and #1870):
 
-      1. The scope_hint escalation gate: an operator/queue ``scope_hint`` of
-         ``"large"`` outranks both gates below and parks the task
-         ``BLOCKED_ON_USER``/``approval_gate`` -- the third park-decision site
-         this ticket closes (the Checkpoint-3a-headless-auto-continue bypass).
-      2. Otherwise the RFC 0011 A3 proactive finalize hold (#1160): the walk
+      1. The empty-diff gate (#1870): the branch has zero commits ahead of
+         ``origin/<default_branch>``, so the walk stops at REVIEW and parks the
+         task ``BLOCKED_ON_USER``/``empty_diff_gate``. Ahead of everything
+         below -- there is nothing for the other gates to reason about.
+      2. Otherwise the branch-staleness gate (#1823): the branch is behind
+         ``origin/<default_branch>`` with overlapping churn; parks
+         ``BLOCKED_ON_USER``/``branch_behind_main``.
+      3. Otherwise the scope_hint escalation gate: an operator/queue
+         ``scope_hint`` of ``"large"`` outranks both gates below and parks the
+         task ``BLOCKED_ON_USER``/``approval_gate`` -- the third park-decision
+         site #1617 closed (the Checkpoint-3a-headless-auto-continue bypass).
+      4. Otherwise the RFC 0011 A3 proactive finalize hold (#1160): the walk
          stops at REVIEW and parks the task ``BLOCKED_ON_USER``/
          ``finalize_gate_held``.
-      3. Otherwise the operator-signoff gate -- if it applies, the walk stops
+      5. Otherwise the operator-signoff gate -- if it applies, the walk stops
          at REVIEW and parks the task ``AWAITING_OPERATOR_SIGNOFF`` (signoff is
          the ship checkpoint, REVIEW->FINALIZE; RFC 0007 Phase 3, #990).
 
@@ -713,6 +722,16 @@ def _walk_stage_pointer_forward(
         # _consume_finalize_regress_repeat itself no-ops at any non-REVIEW
         # stage.
         is_repeat = _consume_finalize_regress_repeat(task, original_stage_base_ref)
+        if task.stage == Stage.REVIEW and _should_gate_for_empty_diff(task, clients):
+            # Why ahead of even the staleness gate: staleness asks whether the
+            # branch's content still matches main, which presumes there IS
+            # content. A branch with zero commits has nothing to be stale about
+            # and nothing to approve -- answering "may this ship?" at all is the
+            # bug (#1870).
+            _park_empty_diff_gate(task)
+            _record_scope_routing_decision(task, last_result, _RULE_STAGE_WALK)
+            _maybe_emit_finalize_regress_repeat_signal(task, is_repeat)
+            return "parked"
         if task.stage == Stage.REVIEW and _should_gate_for_branch_staleness(
             task, clients
         ):
@@ -859,6 +878,11 @@ def _route_scope_gated_approval(
     large-tier + degraded-health combination: a quality signal outranks an
     authorization-workflow signal, mirroring the existing finalize_hold-
     outranks-signoff precedent below.
+
+    Ahead of even that runs the #1870 empty-diff gate. This is the site the
+    incident it closes actually reached: a large-tier row whose branch held
+    zero commits parked here under the ordinary ``approval_gate`` disposition,
+    presenting an empty diff to a human as a routine scope decision.
     """
     # #1717: computed once, before any REVIEW-scoped gate check below (mirrors
     # _walk_stage_pointer_forward's identical placement). No-ops at any
@@ -866,6 +890,15 @@ def _route_scope_gated_approval(
     # No hop has run yet in this function, so task.stage_base_ref is still
     # the live, un-cleared claim-time value here.
     is_repeat = _consume_finalize_regress_repeat(task, task.stage_base_ref)
+    if task.stage == Stage.REVIEW and _should_gate_for_empty_diff(task, clients):
+        # Why first of all: this is the site the #1870 incident reached -- a
+        # zero-commit branch parked here asking an operator to approve an empty
+        # diff as if it were an ordinary large-tier decision. Returns
+        # immediately, so an empty branch never reaches tier resolution.
+        _park_empty_diff_gate(task)
+        _record_scope_routing_decision(task, last_result, _RULE_SCOPE_GATED_APPROVAL)
+        _maybe_emit_finalize_regress_repeat_signal(task, is_repeat)
+        return
     if task.stage == Stage.REVIEW and _should_gate_for_branch_staleness(task, clients):
         # Why ahead of even the review-health gate: a stale tree undermines
         # every downstream signal, including the health recommendation itself
@@ -946,11 +979,15 @@ def _route_stage_success(
 ) -> None:
     """Rule 3 body: shipped/stage_complete -- advance or complete.
 
-    Four REVIEW-scoped gates run ahead of the advance, in order: the #1702
+    Six REVIEW-scoped gates run ahead of the advance, in order: the #1870
+    empty-diff gate, then the #1823 branch-staleness gate, then the #1702
     review-health gate, then the scope_hint escalation gate, then the RFC 0011
     A3 proactive finalize hold (#1160), then the operator-signoff gate (#1617
-    D1 fixed the order of the last three). The review-health gate is first
-    because it is the only one that says the *work itself* is not vouched for;
+    D1 fixed the order of the last three). The first two are ordered by how
+    fundamentally they invalidate everything below: an empty branch makes every
+    later question vacuous, and a stale one makes every later answer describe a
+    tree that is not what would ship. The review-health gate follows because it
+    is the only remaining one that says the *work itself* is not vouched for;
     the other three are all authorization/scope workflow. Below it, the
     scope_hint gate wins outright over the remaining two -- an operator/queue
     ``scope_hint`` of ``"large"`` means "gate this," full stop -- and the hold
@@ -980,8 +1017,16 @@ def _route_stage_success(
     # _route_scope_gated_approval's identical placement). No hop has run yet
     # in this function, so task.stage_base_ref is still the live value.
     is_repeat = _consume_finalize_regress_repeat(task, task.stage_base_ref)
-    if task.stage == Stage.REVIEW and _should_gate_for_branch_staleness(task, clients):
-        # Why first: the gates below ask "may this ship?" and "is there
+    if task.stage == Stage.REVIEW and _should_gate_for_empty_diff(task, clients):
+        # Why first: every gate below reasons about a branch that has content --
+        # whether it is current, whether it was reviewed, whether it is big
+        # enough to need approval. A branch with zero commits ahead of
+        # origin/<default> answers all three vacuously (#1870).
+        _park_empty_diff_gate(task)
+    elif task.stage == Stage.REVIEW and _should_gate_for_branch_staleness(
+        task, clients
+    ):
+        # Why here: the gates below ask "may this ship?" and "is there
         # anything shippable here?" -- both about a sentinel produced against
         # this branch's tree. A tree that is behind origin/<default> with
         # overlapping churn makes those answers describe something other than

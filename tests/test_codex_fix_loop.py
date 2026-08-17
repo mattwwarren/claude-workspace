@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from cw import codex_fix_loop
 from cw.codex_fix_loop import (
     _ESCALATE_AT_CYCLE,
     _FIX_CYCLE_FLOOR_SECONDS,
@@ -40,6 +41,7 @@ from cw.codex_runner import CodexRunResult
 from cw.executor_diagnostics import diagnostics_bundle_dir
 from cw.local_runner import make_blocked
 from cw.models import Stage, TicketTask
+from cw.review_finding_dispositions import FindingDisposition, _disposition_key
 from cw.review_findings import (
     AcceptedFinding,
     ReviewVerdict,
@@ -1975,3 +1977,97 @@ class TestTerminalSnapshotMarker:
         assert cycle1.review.had_real_commit is None
         assert _load_snapshot("s-term-scope-order", 0).is_terminal_snapshot is False
         assert any("cycle1-review-verdict.json" in h for h in out.friction_highlights)
+
+
+# ---------------------------------------------------------------------------
+# _rereview forwards the adjudication ledger through BOTH of its calls (#1838)
+# ---------------------------------------------------------------------------
+
+
+class TestRereviewForwardsFindingDispositions:
+    """#1838: a mid-loop re-review benefits from prompt injection AND backstop.
+
+    ``_rereview`` makes two direct calls that must both carry the ledger: it
+    hands the running ``task`` to ``_prepare_review_pass`` (which merges
+    ``task.finding_dispositions`` with any freshly-parsed marker entries), and
+    it hands the merged result to ``synthesize_codex_review_result``. Forwarding
+    only one would let a settled finding re-park the run from the other.
+    """
+
+    def _ledger(self) -> dict[str, FindingDisposition]:
+        key = _disposition_key("new.py", "MFA")
+        assert key is not None
+        return {
+            key: FindingDisposition(
+                outcome="REJECTED",
+                rationale="settled by the operator in an earlier round",
+                recorded_at="2026-08-16T00:00:00Z",
+            )
+        }
+
+    def test_both_call_sites_receive_the_ledger(
+        self, make_git_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worktree = _worktree(make_git_repo, "wt-1838-rereview")
+        ledger = self._ledger()
+        task = _make_ticket_task(
+            ticket_id="T-1838",
+            client="test",
+            stage=Stage.REVIEW,
+            finding_dispositions=ledger,
+        )
+        seen_tasks: list[TicketTask] = []
+        seen_ledgers: list[object] = []
+
+        real_prepare = codex_fix_loop._prepare_review_pass
+
+        def _spy_prepare(*args: object, **kwargs: object) -> object:
+            seen_tasks.append(args[0])  # type: ignore[arg-type]
+            return real_prepare(*args, **kwargs)  # type: ignore[arg-type]
+
+        real_synth = codex_fix_loop.synthesize_codex_review_result
+
+        def _spy_synth(**kwargs: object) -> object:
+            seen_ledgers.append(kwargs.get("finding_dispositions"))
+            return real_synth(**kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(codex_fix_loop, "_prepare_review_pass", _spy_prepare)
+        monkeypatch.setattr(
+            codex_fix_loop, "synthesize_codex_review_result", _spy_synth
+        )
+        monkeypatch.setattr(
+            "cw.codex_review._context.fetch_issue_comments", lambda *_a, **_kw: []
+        )
+
+        # The delta is `main..HEAD`, i.e. exactly the feature commit — so the
+        # re-derived MUST_FIX's evidence is genuinely inside this pass's diff
+        # and reaches the backstop rather than being mechanically rejected.
+        base = subprocess.check_output(
+            ["git", "-C", str(worktree), "rev-parse", "HEAD~1"], text=True
+        ).strip()
+        result, verdict, prepared = codex_fix_loop._rereview(
+            runner=_FixLoopRunner([_MF_DOC]),
+            task=task,
+            worktree=worktree,
+            default_branch="main",
+            model=None,
+            remaining=None,
+            session_id="s-1838-rereview",
+            previous_reviewed_sha=base,
+            prior_open_findings=[],
+        )
+
+        # (1) the prepared-pass hop: the running task's ledger went in and came
+        # back out on the pass inputs, and reached every reviewer prompt.
+        assert len(seen_tasks) == 1
+        assert seen_tasks[0].finding_dispositions == ledger
+        assert prepared.finding_dispositions == ledger
+        for role in prepared.roles:
+            assert (
+                "## Previously Adjudicated Findings" in prepared.prompts_by_role[role]
+            )
+        # (2) the synthesis hop: the same ledger reached the mechanical backstop.
+        assert seen_ledgers == [ledger]
+        assert verdict is not None
+        assert verdict.blocking is False
+        assert result.status == "stage_complete"

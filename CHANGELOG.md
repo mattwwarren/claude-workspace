@@ -14,7 +14,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   #1727 reached 9 of 10 attempts mid-pipeline after a run of legitimate stage
   claims that each produced commits or real review findings, staying alive
   only via a temporary ceiling override. Adds `TicketTask.unproductive_attempts`
-  (dev-queue schema v31) and moves the ceiling to it at all four call sites
+  (dev-queue schema v32) and moves the ceiling to it at all four call sites
   (`dispatch/claim.py`'s two claim paths, `reconcile/concierge.py`'s recipe 1
   and recipe 2 `refused_ceiling`). `transition_task_status` gains a
   keyword-only `unproductive: bool = True` and charges the counter on a
@@ -39,6 +39,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is not yet general for that case.
 
 ### Added
+
+- **Cross-round adjudication memory for codex review (#1838):** an operator
+  adjudication settled in one review round was forgotten by the next, so
+  already-rejected findings kept coming back. Adds the durable
+  `TicketTask.finding_dispositions` ledger (dev-queue schema v31), keyed by
+  `cw.review_debt.fingerprint_v1`, fed from the ticket thread's
+  `REVIEW-FINDING-DISPOSITIONS` operator marker and applied by the codex
+  review context/verdict path so settled findings are suppressed on later
+  rounds. The field deliberately has no clear site: unlike the per-arrival
+  markers (`regressed_into_stage`, `pending_operator_comment`), a settled
+  adjudication is a durable fact about the ticket.
 
 - **Stale-gate detection for dev-queue tasks parked behind a cleared PR gate
   (#1713):** dev-queue rows blocked behind a merge/CI gate (their own PR, or
@@ -78,7 +89,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   detection) — plus supporting changes to the `cw.codex_review` package
   and `cw.models.enums`.
 
+- **`empty_diff_blocked` sentinel status for zero-commit branches
+  (#1870):** an `/auto-dev` branch that reaches IMPL/REVIEW exit — or the
+  dispatch loop's own empty-diff gate — with zero commits ahead of
+  `origin/<default_branch>` previously had no dedicated terminal status,
+  so it was liable to be mislabeled `crashed` and re-dispatched onto the
+  same empty branch. Adds the `empty_diff_blocked` status (schema v6,
+  accepted under all supported versions during rollout) plus
+  `EMPTY_DIFF_BLOCKER_REASON` (`empty_diff_no_commits`), wires it into
+  `STAGE_FAILURE_STATUSES`, `SALVAGE_TERMINAL_STATUSES`, and
+  `_TERMINAL_REJECT_STATUSES`, adds `cw.branch_ahead.commits_ahead_of_default`
+  to measure the diff, adds a dispatch-level empty-diff gate, exits
+  `empty_diff_blocked` from the clean review-synthesis path, and classifies
+  it in `wait` exit codes and the monitor. Documented across the headless
+  contract and the producer skills (`auto-dev-impl`, `auto-dev-review`,
+  `auto-dev`).
+
 ### Fixed
+
+- **`prior_attempts_summary` leaked prior-attempt failure summaries across
+  clients sharing a ticket number (#1839):** `_collect_prior_attempts_summary`
+  filtered the shared `sessions.json` by `ticket_id` alone, so two clients
+  dispatching the same ticket number (e.g. ticket 47 in both `review-bingo`
+  and `definitely-not-digimon`) had their prior-attempt failure summaries
+  cross-contaminated in the next retry's `cw-context.json`. Added a required
+  `client` kwarg and `s.client == client` to the filter, mirroring the
+  existing `(client, ticket_id)` predicate already used by
+  `concierge._find_session_for_ticket`.
 
 - **Codex-subsystem `make_blocked()` call sites silently borrowed
   LocalExecutor's `next_actions` label instead of the Codex-review one

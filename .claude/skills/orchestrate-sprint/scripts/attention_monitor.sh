@@ -60,7 +60,7 @@ import sys, json
 # blanket breadcrumbs fallback.
 _BLOCKER_REASON_PAUSED_STATUSES = {
     "blocked", "awaiting_operator_availability", "merge_gate_blocked",
-    "codex_must_fix_mechanically_rejected",
+    "codex_must_fix_mechanically_rejected", "empty_diff_blocked",
 }
 
 # finalize_regress_repeat (GitHub #1717, src/cw/dispatch/regress_repeat.py) is

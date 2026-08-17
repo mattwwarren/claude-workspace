@@ -8,8 +8,11 @@ require the ``## Files Modified`` heading the parser anchors on.
 
 from pathlib import Path
 
+from tests.test_auto_dev_preflight_resolutions import _after
+
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 COMMANDS = _REPO_ROOT / ".claude" / "commands"
+AGENTS = _REPO_ROOT / ".claude" / "agents"
 
 
 # NOTE: this is another local copy of the `_cmd(name)` helper that
@@ -18,6 +21,14 @@ COMMANDS = _REPO_ROOT / ".claude" / "commands"
 # deliberately NOT attempted here — it is tracked separately as #1787.
 def _cmd(name: str) -> str:
     return (COMMANDS / name).read_text(encoding="utf-8")
+
+
+# NOTE: mirrors the `_agent(name)` / `AGENTS` pair already duplicated locally
+# in tests/test_plan_format_only_findings.py and
+# tests/test_auto_dev_preflight_resolutions.py — no shared module, per this
+# repo's established convention (see the note on `_cmd` above).
+def _agent(name: str) -> str:
+    return (AGENTS / name).read_text(encoding="utf-8")
 
 
 def _doc(relative: str) -> str:
@@ -113,3 +124,47 @@ def test_gate_collapse_tables_mirror_the_tooling_failure_row() -> None:
         assert "without" in content
         assert "valid JSON verdict" in content
         assert "tooling failure, not drift" in content
+
+
+def test_plan_step1b_files_modified_is_complete_inventory() -> None:
+    """Step 1b's file-enumeration bullet must clarify the heading is a
+    complete inventory (test files + mechanical companions), not just the
+    source-file subset — otherwise Phase 1 tests and `__init__.py`
+    re-exports land as unmeasured `extra_files` at the Step 2.5 gate (#1881)."""
+    content = _cmd("auto-dev-plan.md")
+    window = _after(content, "one bullet per file", span=1200)
+    assert "not a source-only subset" in window
+    assert "__init__" in window
+    assert "invisible to the gate" in window
+
+
+def test_plan_reviewer_check2_requires_files_modified_reconciliation() -> None:
+    """Check 2's file-list verification must tie back to the single
+    ``## Files Modified`` heading the scope-conformance gate parses (#1881)."""
+    content = _agent("plan-reviewer.md")
+    start = content.index("### Check 2 — File Enumeration")
+    end = content.index("### Check 3")
+    window = content[start:end]
+    assert "## Files Modified" in window
+    assert "#1881" in window
+
+
+def test_plan_reviewer_check2_flags_missing_files_modified_entry() -> None:
+    """A file named only in Phase 1/Phase 2 prose but absent from
+    ``## Files Modified`` must be a Reject (MUST_FIX) — it is invisible to
+    the mechanical scope-conformance gate (#1881)."""
+    content = _agent("plan-reviewer.md")
+    start = content.index("### Check 2 — File Enumeration")
+    end = content.index("### Check 3")
+    window = content[start:end]
+    assert "missing from `## Files Modified`" in window
+    assert "#1881" in window
+
+
+def test_plan_spec_marker_not_bumped() -> None:
+    """Regression guard: this ticket is prose-only and must not bump the
+    plan-spec/plan-soundness marker versions (#1881)."""
+    content = _cmd("auto-dev-plan.md")
+    assert "plan-spec-reviewed" in content
+    assert "v2" in content
+    assert "v3" not in content

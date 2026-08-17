@@ -8,17 +8,19 @@ terminal status/disposition. The call-site wiring -- which gate runs first at
 which of the three park-decision sites -- lives in ``dispatch/routing.py``, not
 here; this module owns the gates themselves, not the routing table.
 
-Five gates, in the order ``routing.py`` evaluates them:
+Six gates, in the order ``routing.py`` evaluates them:
 
-  1. ``_should_gate_for_branch_staleness`` (#1823) -- the branch is behind
+  1. ``_should_gate_for_empty_diff`` (#1870) -- the branch has zero commits
+     ahead of ``origin/<default_branch>``; nothing exists to review or ship.
+  2. ``_should_gate_for_branch_staleness`` (#1823) -- the branch is behind
      ``origin/<default_branch>`` and the intervening main commits overlap it.
-  2. ``_should_gate_for_review_health`` (#1702) -- the review self-reported
-     ``EXIT_FOR_HUMAN_REVIEW``.
-  3. ``_should_gate_for_scope_hint`` (#1617) -- an operator/queue
+  3. ``_should_gate_for_review_health`` (#1702, extended by #1870) -- the review
+     self-reported ``EXIT_FOR_HUMAN_REVIEW``, or no reviewer agent ran at all.
+  4. ``_should_gate_for_scope_hint`` (#1617) -- an operator/queue
      ``scope_hint`` of ``"large"``.
-  4. ``_should_force_hold_finalize`` (RFC 0011 A3, #1160) -- a proactive
+  5. ``_should_force_hold_finalize`` (RFC 0011 A3, #1160) -- a proactive
      operator stop before an unattended finalize.
-  5. ``_should_gate_for_signoff`` (RFC 0007 Phase 3, #990) -- an explicit
+  6. ``_should_gate_for_signoff`` (RFC 0007 Phase 3, #990) -- an explicit
      operator signature slot.
 
 Extracted from ``dispatch/routing.py`` by #1823 (it was 1482 lines, ~48% over
@@ -41,9 +43,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal
 
 from cw.auto_dev_result import SCOPE_TIER_LARGE
+from cw.branch_ahead import commits_ahead_of_default
 from cw.config import load_effective_config
 from cw.dev_queue import (
     BRANCH_STALENESS_GATE_DISPOSITION,
+    EMPTY_DIFF_GATE_DISPOSITION,
     FINALIZE_GATE_HELD_DISPOSITION,
     REVIEW_HEALTH_GATE_DISPOSITION,
     SIGNOFF_GATE_DISPOSITION,
@@ -105,6 +109,21 @@ _REVIEW_HEALTH_GATE_REASON = "review_health_gate"
 _BRANCH_STALENESS_REASON = "branch_behind_main"
 
 
+# paused_status written to SESSION_NEEDS_ATTENTION when the #1870 empty-diff
+# gate parks a REVIEW-stage ticket whose branch measures zero commits ahead of
+# origin/<default_branch>. Shares its literal string value with
+# dev_queue.lifecycle.EMPTY_DIFF_GATE_DISPOSITION (task.disposition) on the
+# _BRANCH_STALENESS_REASON precedent above -- still two constants in two
+# namespaces, do not collapse them.
+#
+# Gate-suffixed, deliberately NOT the status-suffixed "empty_diff_blocked"
+# Literal this gate backstops: that value is a STAGE_FAILURE_STATUSES member and
+# therefore a BREADCRUMB_ELIGIBLE_PAUSED_STATUSES member by derivation, while
+# every gate-class park here hardcodes breadcrumbs="" and must stay excluded
+# from that set (#1729). One literal for both would put the two in conflict.
+_EMPTY_DIFF_GATE_REASON = "empty_diff_gate"
+
+
 # The single Health.recommendation value that means "the producer does not
 # vouch for this work". Pinned as a constant rather than an inline literal
 # because it is compared against a raw sentinel dict (post-model_dump), where
@@ -131,6 +150,32 @@ def _resolve_health_recommendation(last_result: dict[str, object] | None) -> str
     return recommendation if isinstance(recommendation, str) else None
 
 
+def _resolve_review_agents_run(last_result: dict[str, object] | None) -> int | None:
+    """Pull ``review.agents_run`` off a raw sentinel dict (#1870).
+
+    Same defensive isinstance-guard shape as
+    :func:`_resolve_health_recommendation`, with one deliberate asymmetry: a
+    *present* ``review`` block with no ``agents_run`` key resolves to ``0``, not
+    ``None``. That is the schema's own default for the field (``Review.
+    agents_run``, added at v5), so a pre-v5 payload genuinely means "no reviewer
+    participation was reported" and the conservative reading is to park.
+
+    An absent or non-dict ``review`` block, by contrast, resolves to ``None`` --
+    "unmeasurable". That case is not a pre-v5 producer; it is a hand-built or
+    partial routing dict that never carried review data at all, and treating it
+    as zero would park every pre-existing dispatch path that routes on status
+    alone.
+    """
+    review_val = last_result.get("review") if last_result is not None else None
+    if not isinstance(review_val, dict):
+        return None
+    agents_run = review_val.get("agents_run", 0)
+    # bool is an int subclass; exclude it so a stray `true` is not read as 1.
+    if isinstance(agents_run, bool) or not isinstance(agents_run, int):
+        return None
+    return agents_run
+
+
 def _should_gate_for_review_health(last_result: dict[str, object] | None) -> bool:
     """True iff *last_result* reports degraded review health (#1702).
 
@@ -152,9 +197,28 @@ def _should_gate_for_review_health(last_result: dict[str, object] | None) -> boo
     Anything other than the degraded literal -- ``"PROCEED"``, a missing or
     malformed ``health`` block, a non-str value -- is "not degraded", so this
     is a pure boolean gate with no effect on any pre-existing routing path.
+
+    **Second disjunct (#1870): ``review.agents_run == 0``.** A review pass that
+    ran zero reviewer agents has not reviewed anything, whatever its
+    ``recommendation`` says -- and the incident this ticket closes rode exactly
+    that shape (``PROCEED`` + ``agents_run: 0``) past this gate to the Stage 4
+    approval prompt. ``gate_recipes.auto_approve_clean_review`` (#1194, contract
+    Note A9) already treated ``agents_run > 0`` as part of a clean review, but
+    that recipe is opt-in and default-OFF; this *mandatory* gate had no such
+    check. Sharing ``review_health_gate``'s disposition/paused_status
+    deliberately: both mean "the review did not vouch for this", which is one
+    operator-facing class, not two.
+
+    Safe precisely because this function is call-site-scoped to
+    ``Stage.REVIEW``. At any earlier stage a sentinel legitimately reports zero
+    reviewer agents (none has run yet), so a stage-agnostic version of this
+    disjunct would park every IMPL completion in the pipeline.
     """
     recommendation = _resolve_health_recommendation(last_result)
-    return recommendation == _DEGRADED_HEALTH_RECOMMENDATION
+    return (
+        recommendation == _DEGRADED_HEALTH_RECOMMENDATION
+        or _resolve_review_agents_run(last_result) == 0
+    )
 
 
 def _should_gate_for_scope_hint(
@@ -302,6 +366,40 @@ def _should_gate_for_branch_staleness(
     return has_overlapping_branch_staleness(
         task.worktree_path, client_cfg.default_branch
     )
+
+
+def _should_gate_for_empty_diff(
+    task: TicketTask, clients: dict[str, ClientConfig]
+) -> bool:
+    """True iff *task*'s branch carries no commits at all (#1870).
+
+    The narrowest possible claim: ``origin/<default_branch>..HEAD`` measures
+    exactly zero. Not "small", not "suspicious" -- empty. A branch in that state
+    has nothing for a reviewer to have reviewed and nothing for a PR to carry,
+    so letting it reach the Stage 4 approval prompt asks an operator to approve
+    an empty diff dressed as an ordinary scope-tier decision, which is the
+    incident this gate closes.
+
+    Git-measured, deliberately independent of anything the producer self-reports
+    -- the observed branch reached REVIEW *through* IMPL's own empty-diff gate
+    (auto-dev-impl.md Step 2.5), via a stage-pointer walk / resume path that
+    advanced ``task.stage`` without re-running it against the final branch
+    state. Only a check dispatch performs itself can catch that class.
+
+    Callers MUST scope this to ``task.stage == Stage.REVIEW``, mirroring all
+    five sibling gates: an IMPL-stage task may legitimately have nothing pushed
+    yet, and gating there would park work that is simply not finished.
+
+    Fails open twice over -- on an unresolvable client (no ``ClientConfig``
+    means no authoritative ``default_branch``, and guessing ``"main"`` would
+    park rows on any client that does not use it, exactly as
+    ``_should_gate_for_branch_staleness`` reasons) and on an unmeasurable
+    worktree (``commits_ahead_of_default`` returns ``None``, never ``0``).
+    """
+    client_cfg = clients.get(task.client)
+    if client_cfg is None:
+        return False
+    return commits_ahead_of_default(task.worktree_path, client_cfg.default_branch) == 0
 
 
 def _park_finalize_hold(task: TicketTask) -> None:
@@ -511,4 +609,45 @@ def _park_branch_staleness_gate(task: TicketTask) -> None:
         task,
         QueueItemStatus.BLOCKED_ON_USER,
         disposition=BRANCH_STALENESS_GATE_DISPOSITION,
+    )
+
+
+def _park_empty_diff_gate(task: TicketTask) -> None:
+    """Park *task* BLOCKED_ON_USER for a branch with no commits (#1870).
+
+    Shared by all three REVIEW-scoped park-decision sites in ``routing.py``.
+    Field-for-field mirror of ``_park_branch_staleness_gate`` above, including
+    its emit-before-transition ordering.
+
+    The divergent ``task.disposition`` is load-bearing for the same reason it is
+    on the staleness gate: both release paths key off something this check never
+    touches -- ``cw dev-queue approve`` reads ``session.last_result.status``
+    (still ``review_pending_approval`` here) and the RFC 0009
+    ``auto_approve_clean_review`` recipe reads that same sentinel's clean-review
+    fields -- so without a disposition for those two to exclude on, an empty
+    branch would be released by either and ship nothing at all.
+
+    ``breadcrumbs`` is hardcoded ``""``, following the same #1729 convention
+    every gate-class park here uses; the recovery is to push real commits and
+    ``cw dev-queue requeue``, or to close the ticket.
+    """
+    record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {
+            "session_id": task.session_id or "",
+            "session_name": "",
+            "client": task.client,
+            "ticket_id": task.ticket_id,
+            "claude_session_id": None,
+            "paused_status": _EMPTY_DIFF_GATE_REASON,
+            "breadcrumbs": "",
+            "crashed": False,
+            "lane": task.lane,
+        },
+        correlation_id=task.ticket_id,
+    )
+    transition_task_status(
+        task,
+        QueueItemStatus.BLOCKED_ON_USER,
+        disposition=EMPTY_DIFF_GATE_DISPOSITION,
     )

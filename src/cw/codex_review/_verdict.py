@@ -12,7 +12,13 @@ import logging
 import subprocess
 from typing import TYPE_CHECKING
 
-from cw.auto_dev_result import AutoDevResult, Health, Scope
+from cw.auto_dev_result import (
+    EMPTY_DIFF_BLOCKER_REASON,
+    AutoDevResult,
+    Blocker,
+    Health,
+    Scope,
+)
 from cw.codex_review._const import (
     _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
     _TRANSIENT_FAILURE_REASONS,
@@ -25,6 +31,7 @@ from cw.codex_review._const import (
 from cw.executor_diagnostics import append_diagnostics_pointer
 from cw.local_runner import _SCHEMA_VERSION, make_blocked, resolve_tier
 from cw.review_adjudication import apply_voided_suppression
+from cw.review_finding_dispositions import suppress_adjudicated_findings
 from cw.review_findings import consolidate_verdict
 from cw.worktree import compute_branch_diff_scope
 
@@ -35,6 +42,7 @@ if TYPE_CHECKING:
     from cw.codex_review._capability import _CodexFilesystemCapability
     from cw.models import TicketTask
     from cw.review_adjudication import VoidedFinding
+    from cw.review_finding_dispositions import FindingDisposition
     from cw.review_findings import (
         AcceptedFinding,
         AgentSpecStatus,
@@ -242,6 +250,7 @@ def synthesize_codex_review_result(
     capability: _CodexFilesystemCapability | None = None,
     agent_spec_status: list[AgentSpecStatus] | None = None,
     voided_findings: list[VoidedFinding] | None = None,
+    finding_dispositions: dict[str, FindingDisposition] | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Map consolidated review documents to a typed AutoDevResult.
 
@@ -268,6 +277,13 @@ def synthesize_codex_review_result(
       review finding): a capacity blip hitting one role while others still
       produced documents must not silently fall back to non-retry-eligible
       just because the roster wasn't a total wipeout.
+    - documents complete and non-blocking, but the branch *measures* an empty
+      diff against ``origin/<default_branch>`` (0 files / 0 lines) →
+      ``empty_diff_blocked`` + ``empty_diff_no_commits`` (#1870). Ordered last
+      among the non-clean branches because it is the only one that is not about
+      the review at all: the reviewers did their job, there was simply nothing
+      under them. An *unmeasurable* worktree (``compute_branch_diff_scope``
+      returns ``None``) is explicitly NOT this case and still falls through.
     - otherwise (documents complete, no MUST_FIX)  → stage_complete
 
     Returns ``(result, verdict)``; ``verdict`` is ``None`` only on the zero-
@@ -302,6 +318,15 @@ def synthesize_codex_review_result(
     and the fix loop's ``_rereview`` — reach the blocking check through this
     function, and a suppression applied at only one would let the same voided
     finding re-park the run from the other.
+
+    ``finding_dispositions`` (#1838) is the cross-round adjudication ledger,
+    and is applied the same way and in the same place as ``voided_findings``
+    directly above — a matching REJECTED entry is stamped
+    ``disposition="rejected"`` before the disposition table is consulted. It is
+    a SECOND suppression mechanism, not a replacement: a void is
+    evidence-anchored and lapses when the code moves, an adjudication is
+    fingerprint-keyed and does not. Applied here for the identical reason —
+    both call sites reach the blocking check through this function.
 
     ``fix_loop_enabled`` (#1705) is the caller's own already-known fix-loop
     state, threaded only as far as :func:`render_verdict_comment` on the
@@ -340,6 +365,13 @@ def synthesize_codex_review_result(
     # outcome is already stamped on `verdict.accepted`.
     verdict, _voided_adjudications = apply_voided_suppression(
         verdict, voided_findings or [], ticket_id=task.ticket_id
+    )
+    # #1838: the second suppression seam, applied in the same window and for
+    # the same reason. Ordered AFTER the void pass deliberately — it recomputes
+    # must_fix from the stamped dispositions, so it composes with whatever the
+    # void pass already suppressed rather than resurrecting it.
+    verdict = suppress_adjudicated_findings(
+        verdict, finding_dispositions or {}, ticket_id=task.ticket_id
     )
     if verdict.blocking:
         blocked = make_codex_blocked(
@@ -384,6 +416,59 @@ def synthesize_codex_review_result(
             worktree,
             default_branch,
         )
+    # #1870: a *measured* 0/0 is not a clean pass -- there is no diff to have
+    # reviewed and nothing for FINALIZE to open a PR over. Deliberately keyed on
+    # the measurement already taken above rather than a second
+    # `commits_ahead_of_default` subprocess: same practical classification, no
+    # new git call on the common (non-empty) path. The `measured is not None`
+    # guard is load-bearing -- an *unmeasurable* worktree also reports 0/0 into
+    # the scope block below, and conflating the two would park every clean
+    # review whose git state could not be read (the warning above is exactly
+    # that case, and it keeps its pre-#1870 stage_complete fallback).
+    if (
+        measured is not None
+        and measured["files"] == 0
+        and measured["lines_actual"] == 0
+    ):
+        empty = AutoDevResult(
+            schema_version=_SCHEMA_VERSION,
+            ticket_id=task.ticket_id,
+            status="empty_diff_blocked",
+            stage_reached=STAGE3_REVIEW,
+            scope=Scope(
+                tier=resolve_tier(task.scope_hint),
+                files=0,
+                lines_estimate=0,
+                lines_actual=0,
+                forbidden_touched=False,
+            ),
+            plan_source="none",
+            branch=branch,
+            fork_point_sha=None,
+            commits=[],
+            # The real verdict rides along unchanged: agents_run and the finding
+            # counts describe reviewers that genuinely ran, and zeroing them
+            # would misreport the review as never having happened.
+            review=verdict.review,
+            # Not _derive_health(documents): those documents reviewed nothing, so
+            # a PROCEED derived from them would vouch for an empty branch.
+            health=Health(
+                lowest_agent_confidence="MEDIUM",
+                any_incomplete_risk=True,
+                recommendation="EXIT_FOR_HUMAN_REVIEW",
+            ),
+            blocker=Blocker(
+                stage=STAGE3_REVIEW,
+                reason=EMPTY_DIFF_BLOCKER_REASON,
+                details=(
+                    f"Branch {branch} measures an empty diff against "
+                    f"origin/{default_branch} (0 files, 0 lines) -- "
+                    "nothing to review."
+                ),
+            ),
+            worktree_path=str(worktree),
+        )
+        return empty, verdict
     result = AutoDevResult(
         schema_version=_SCHEMA_VERSION,
         ticket_id=task.ticket_id,

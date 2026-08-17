@@ -821,6 +821,11 @@ def _rereview(
         # cycle 0 — an operator can void a finding mid-loop, and a fix cycle
         # can rewrite the code out from under a void's content anchor.
         voided_findings=prepared.voided_findings,
+        # #1838: the ledger `_prepare_review_pass` merged for THIS cycle — the
+        # running task's durable record plus any marker the operator posted
+        # mid-loop. Re-merged every cycle for the same reason the voids are
+        # re-fetched: an operator can settle a finding while the loop runs.
+        finding_dispositions=prepared.finding_dispositions,
     )
     if verdict is not None:
         verdict = verdict.model_copy(

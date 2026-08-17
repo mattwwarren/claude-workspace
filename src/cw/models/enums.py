@@ -360,6 +360,21 @@ class OrchestratorEventType(StrEnum):
     # REVIEW_FINDING_VOIDED above: the refusal is a mechanical decision nobody
     # asked to see, and this event is the only durable record it happened.
     REVIEW_TREADMILL_DETECTED = "review.treadmill_detected"
+    # GitHub #1838 -- one re-derived review finding was suppressed because a
+    # prior round's operator adjudication had already REJECTED it. Namespaced
+    # by its owning module (review_finding_dispositions.py), same convention as
+    # REVIEW_FINDING_VOIDED / REVIEW_TREADMILL_DETECTED above.
+    # Mandatory, not optional, and for the identical reason REVIEW_FINDING_VOIDED
+    # is: this is the second mechanism by which a finding stops blocking with
+    # nothing in the current pass deciding so, and the event is its only durable
+    # local record. `suppress_adjudicated_findings` emits it inline -- suppressing
+    # and recording the suppression are not separable steps (see ADR-0015).
+    # Distinct from REVIEW_FINDING_VOIDED rather than a reuse of it: the two
+    # suppressions have different identities (evidence-anchored vs.
+    # fingerprint_v1), different lifetimes (lapses on code motion vs. does not),
+    # and different payloads, so one event type would make an audit trail that
+    # cannot say which mechanism fired.
+    REVIEW_FINDING_DISPOSITION_SUPPRESSED = "review.finding_disposition_suppressed"
 
 
 class DispatchSkipReason(StrEnum):

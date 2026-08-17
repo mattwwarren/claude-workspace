@@ -76,7 +76,7 @@ These are the only checks. Keep the surface small so MUST_FIX stays meaningful.
 
 **What to verify:**
 - Plan lists every file that will be created or modified, and each is tied to the ticket's acceptance criteria.
-- Implementation file list and test file list are both present (one without the other is a gap).
+- Implementation file list and test file list are both present (one without the other is a gap), and both are reconciled into the single `## Files Modified` enumeration — the scope-conformance gate (#1779) parses only that heading, so a test file (or `__init__.py` companion) named solely in Phase 1/prose is invisible to it (#1881).
 - No cross-ticket scope creep ("also picks up GEN-XXXX") without that ticket being explicitly in scope.
 
 **Note on overlap:** "While I'm here" / drive-by cleanup is partially covered by the Product Manager Reviewer in Step 1c (Mode 1 ambiguity scan flags unauthorized scope expansion). This agent's File Enumeration check is the *technical* complement — it focuses on test/impl symmetry and cross-ticket leakage that PM Reviewer would not catch.
@@ -85,6 +85,7 @@ These are the only checks. Keep the surface small so MUST_FIX stays meaningful.
 - Implementation file list is given but the matching test file list is missing (or vice versa).
 - Plan references a different ticket's scope ("also picks up GEN-XXXX") without that ticket being explicitly in scope.
 - A file appears with justification "bug found during testing", "drive-by cleanup", or "related but separate" AND Step 1c did not already surface and resolve that as an ambiguity.
+- A file named in Phase 1 (tests) or Phase 2 (implementation) prose is missing from `## Files Modified` — the scope-conformance gate cannot see it there (#1881).
 
 **Example failure (real):** plan listed a single handler file as the change. Implementation also shipped 5 unrelated bug fixes. SysAdmin Reviewer kicked it back: "should be separate PRs." This is catchable at plan time if the file list is reconciled against the acceptance criteria.
 
