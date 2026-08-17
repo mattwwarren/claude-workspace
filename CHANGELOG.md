@@ -40,6 +40,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`SESSION_NEEDS_ATTENTION` now re-fires on a debounced cadence for
+  sessions latched at the top staleness bucket (#1858):** a session
+  saturated at `STALE_45M` previously fired the operator distress signal
+  exactly once at the bucket crossing and then went quiet forever, so a
+  session stuck there for hours produced no further signal. The liveness
+  detect pass gains a second candidate kind — a level-detector for a
+  session still latched at `STALE_45M` whose renotify debounce window has
+  elapsed — alongside the existing edge-detector for bucket crossings.
+  Distress is re-evaluated fresh on every renotify check rather than
+  latched from the initial fire, and `Session.liveness_attention_next_eligible_at`
+  (schema v18, with the new `OrchestratorConfig.liveness_attention_renotify_interval_minutes`
+  knob, default 60) is cleared on recovery below `STALE_45M`. Every re-fire
+  carries a fresh `renotify_marker` in its `SESSION_NEEDS_ATTENTION` payload,
+  fed through a `_terminal_dedup_key` widened to a renotify-marker-aware
+  4-tuple, so `cw event tail --dedup-terminal` shows each re-fire as a
+  distinct row instead of collapsing it with the original.
+
 - **Cross-round adjudication memory for codex review (#1838):** an operator
   adjudication settled in one review round was forgotten by the next, so
   already-rejected findings kept coming back. Adds the durable
