@@ -397,7 +397,7 @@ directly (see §6 in [`session-disposition.md`](session-disposition.md)).
 | `forbidden_area` | Forbidden-area rejection; update constraints or reroute. |
 | `blocked` | Triage `blocker.reason`. Check `blocker.retry_eligible` and `blocker.recovery_hint`. `blocker.reason: "plan_unreviewable"` / `"plan_unsound"` mean plan review needs human judgment — if the pipeline bounces repeatedly on an intricate ticket, use the **spec-driven subagent escape hatch** (§7) rather than retrying. A `blocked` at FINALIZE with `blocker.reason: "agent_block"` self-heals: dispatch auto-regresses the ticket to IMPL (up to 2 regressions, #770) — no operator action. |
 | `merge_gate_blocked` | A prior pipeline PR is still open. Merge or close it, then re-dispatch. |
-| `stale_dispatch` | **This** ticket already has an open, unmerged PR from an earlier dispatch (#1862) — distinct from `merge_gate_blocked`, which is about a *different* ticket's PR. The session found it and refused rather than re-implementing work already in review; `blocker.details` names the PR. Land or close that PR, then `cw dev-queue unblock <T> -c <client>`. Re-dispatching first just reproduces the refusal. |
+| `stale_dispatch` | **This** ticket already has an open, unmerged PR from an earlier dispatch (#1862) — distinct from `merge_gate_blocked`, which is about a *different* ticket's PR. The session found it and refused rather than re-implementing work already in review; `blocker.details` names the PR. Land or close that PR, then `cw dev-queue requeue <T> -c <client>`. Re-dispatching first just reproduces the refusal. |
 
 Not a sentinel status but seen in the same `disposition` field:
 `stale_dispatch_gate` — the same condition caught *before* any session was

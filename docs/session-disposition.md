@@ -135,7 +135,7 @@ trusting `is_terminal_snapshot=true` on an old file at face value.
 | `scope_exceeded` | Scope rejection; close or relax constraint. |
 | `forbidden_area` | Forbidden-area rejection; update constraints or reroute. |
 | `blocked` | Triage `blocker.reason`, `blocker.retry_eligible`, `blocker.recovery_hint`. At FINALIZE, `blocker.reason: "agent_block"` auto-regresses the ticket to IMPL for self-heal (up to 2 times, #770). |
-| `stale_dispatch` | This ticket already has an open, unmerged PR from an earlier dispatch — the session found it and refused rather than duplicating work already in review (#1862). `blocker.details` names the PR. Land or close that PR, then `cw dev-queue unblock`. Do **not** re-dispatch first: you will just get the same refusal. |
+| `stale_dispatch` | This ticket already has an open, unmerged PR from an earlier dispatch — the session found it and refused rather than duplicating work already in review (#1862). `blocker.details` names the PR. Land or close that PR, then `cw dev-queue requeue <T> -c <client>`. Do **not** re-dispatch first: you will just get the same refusal. |
 
 `stale_dispatch_gate` is not a sentinel status but appears in the same
 disposition field: it is the *code-side* twin of `stale_dispatch`, stamped

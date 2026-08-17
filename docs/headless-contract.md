@@ -716,8 +716,12 @@ dispatch, which is the status quo this gate improves on.
 precedence chain, like `attempt_cap_blocked`) and a `session.needs_attention`
 event with `paused_status=stale_dispatch_gate`.
 
-**Resolution:** land or close the PR, then `cw dev-queue unblock <ticket>`.
-Deliberately NOT auto-released when the PR merges — that extension of the
+**Resolution:** land or close the PR, then `cw dev-queue requeue <ticket> -c
+<client>`. (Not `cw dev-queue unblock` — that command's `SALVAGE_PARKED`
+precondition is never satisfied by either `stale_dispatch` park, gate-side or
+agent-emitted; `requeue` is the general-purpose `BLOCKED_ON_USER` release
+path every sibling gate disposition already documents.) Deliberately NOT
+auto-released when the PR merges — that extension of the
 `#1713` Variant B machinery is tracked separately in #1902. `stale_dispatch`
 and `stale_dispatch_gate` are also deliberately not `HOLD_DISPOSITIONS`
 members: an open PR clears by landing or closing it, not by an operator saying
