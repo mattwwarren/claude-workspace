@@ -11919,7 +11919,7 @@ class TestPersistCarriedContext:
             last_result,
             "plan_pending_approval",
             None,
-            True,
+            claim_unproductive=True,
         )
 
         assert len(calls) == 1

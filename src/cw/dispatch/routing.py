@@ -819,6 +819,7 @@ def _route_scope_gated_approval(
     last_result: dict[str, object] | None,
     disposition: str | None,
     pr_url: str | None,
+    *,
     claim_unproductive: bool,
 ) -> None:
     """Rule 1 body: scope-gated approval -- small tier auto-advances, large blocks.
@@ -1089,7 +1090,12 @@ def _route_staged_decision(
         # Rule 1: scope-gated approval; small tier auto-advances, large blocks.
         # Must fire before Rule 2 (SCOPE_GATED ⊂ PAUSED_FOR_USER_INPUT).
         _route_scope_gated_approval(
-            task, clients, last_result, disposition, pr_url, claim_unproductive
+            task,
+            clients,
+            last_result,
+            disposition,
+            pr_url,
+            claim_unproductive=claim_unproductive,
         )
     elif status in PAUSED_FOR_USER_INPUT_STATUSES:
         # Rule 2: pure pause (v4 statuses: ambiguities_pending_resolution,
