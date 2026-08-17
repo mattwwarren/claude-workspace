@@ -124,6 +124,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`cw queue peek`'s STOP/WAIT/PEEK ladder read raw `attempts`, disagreeing
+  with the dispatch admission gate's #1750 signal (#1768):** #1750 moved the
+  admission gate's ceiling check to `TicketTask.unproductive_attempts`
+  (charged only on a claim that exits RUNNING with no evidence of progress),
+  but `queue_peek.py` was deliberately left on raw `attempts` at the time —
+  so a ticket at 12 raw attempts with 0 unproductive attempts (the #1727
+  all-productive shape) was admission-gate-healthy yet advised **STOP —
+  systemic** by `cw queue peek`, exactly when an operator is deciding
+  whether to kill a session. `_score_session`'s STOP-by-attempt-count branch,
+  `recommend()`, and `format_row()` now read `unproductive_attempts` instead
+  (renamed `STOP_ATTEMPTS_MIN` to `STOP_UNPRODUCTIVE_ATTEMPTS_MIN`, same
+  threshold of 3); raw `attempts` remains on the row as display-only data.
+
+- **`cw review adjudicate --deferred-findings-out` overwrote the prior
+  round's record instead of merging into it (#1840):** every call rendered
+  only its own round's applied adjudications and atomically full-replaced
+  the target file, so a second call in one Stage 3 pass silently dropped
+  the first call's entries. `review_adjudication.py` gains stamped
+  `round`/`recorded_at` fields (both optional, so a legacy pre-#1840 entry
+  parses identically to an unstamped one), a merge that dedupes new
+  entries only against prior entries by a wider fingerprint (never against
+  each other within the same round, which previously collapsed two
+  distinct findings with the same templated text into one and silently
+  dropped one from the audit trail), and a `parse_deferred_findings_md`
+  that fails closed on its own durable output rather than swallowing a
+  parse error. `cli/review.py` now reads and merges prior content before
+  re-rendering. The reject-entry placeholder severity constant was also
+  promoted to the public `REJECTED_ENTRY_SEVERITY` so `cli/review.py`
+  stops reaching across the module's private-by-convention boundary.
+
 - **`prior_attempts_summary` leaked prior-attempt failure summaries across
   clients sharing a ticket number (#1839):** `_collect_prior_attempts_summary`
   filtered the shared `sessions.json` by `ticket_id` alone, so two clients

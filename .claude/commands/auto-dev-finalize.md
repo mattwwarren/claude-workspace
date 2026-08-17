@@ -637,6 +637,8 @@ After `/prep-pr` returns with a PR number:
    DEFERRED-REVIEW-FINDINGS -->
    ```
 
+   The example above shows the bare (unstamped) shape — still valid, and exactly what a `.cw/deferred-findings.md` written before #1840 looks like. A round-stamped entry additionally carries `[round <N>, <recorded_at>] ` in front of its `Rejected` bullet and trailing `round:` / `recorded_at:` lines inside its sentinel-block entry, recording which adjudication round settled it. Copy whatever the file holds verbatim either way — the stamps are inside the block, so the sentinels Step H3 greps are unaffected. Because Stage 3 now merges rather than overwrites that file, one PR body can legitimately carry both a REJECT and a later DEFER of the same finding; the round stamps are what make that read as history rather than as a contradiction.
+
    One block per PR; list every deferred finding inside the single `DEFERRED-REVIEW-FINDINGS` comment (open/close sentinels exact — Step H3 greps them verbatim). Omit the section when `.cw/deferred-findings.md` is absent or empty. For pipeline exits that never create a PR (large-scope `review_pending_approval`, or a BLOCK) there is no body to write — rejections/deferrals stay in `friction_highlights` and surface in the structured output instead.
 
 3. **Enable auto-merge:** `gh pr merge <pr-number> --auto --squash`. Auto-merge may be enabled on a draft PR — it won't trigger until the PR is marked ready (`/review-monitor` does this when the stack parent merges) AND CI passes. Enable unconditionally, EXCEPT when the UI Evidence Gate above resolved to "Hold" (interactive) or fired in headless: then skip this step and set `pr.auto_merge` to `false`.

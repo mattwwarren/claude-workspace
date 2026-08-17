@@ -16,11 +16,14 @@ from cw.auto_dev_result import Review
 from cw.events import read_events
 from cw.models.enums import OrchestratorEventType
 from cw.review_adjudication import (
+    REJECTED_ENTRY_SEVERITY,
     Adjudication,
     VoidedFinding,
     apply_adjudication,
     apply_voided_suppression,
     find_voided_matches,
+    merge_deferred_adjudications,
+    parse_deferred_findings_md,
     parse_voided_findings_block,
     render_deferred_findings_md,
     render_voided_findings_block,
@@ -523,6 +526,25 @@ class TestRenderDeferredFindingsMd:
     def test_render_deferred_findings_md_matches_documented_shape(self) -> None:
         rendered = render_deferred_findings_md([_rejected_adj(), _deferred_adj()])
         assert rendered == _RENDERED_BOTH
+
+    def test_stamped_entries_carry_round_and_date_context(self) -> None:
+        """#1840: an entry the CLI stamped renders its round/date context."""
+        rendered = render_deferred_findings_md(
+            [_stamped(_rejected_adj()), _stamped(_deferred_adj())]
+        )
+        assert rendered == _RENDERED_STAMPED
+
+    def test_stamped_and_legacy_entries_render_independently(self) -> None:
+        """#1840: one entry's stamp never leaks onto an unstamped sibling."""
+        rendered = render_deferred_findings_md(
+            [_rejected_adj(), _stamped(_deferred_adj(), 4)]
+        )
+        assert (
+            '- src/cw/foo.py — "Bug here" — deliberate tradeoff, documented inline'
+            in rendered
+        )
+        assert "[round" not in rendered
+        assert f"  round: 4\n  recorded_at: {_STAMP_DATE}" in rendered
 
     def test_rejected_section_omitted_when_no_rejections(self) -> None:
         rendered = render_deferred_findings_md([_deferred_adj()])
@@ -1205,3 +1227,281 @@ class TestVoidedAndOrdinaryAdjudicationsCompose:
         assert stamped.blocking is False
         assert stamped.must_fix == []
         assert stamped.unmatched_adjudication_count == 0
+
+
+#: Fixed clock text for round/date stamping assertions (#1840).
+_STAMP_DATE = "2026-08-17T12:00:00Z"
+
+# Split only to stay under the 88-column ruff limit; one line in the artifact.
+_STAMPED_REJECTED_ROW = (
+    f'- [round 1, {_STAMP_DATE}] src/cw/foo.py — "Bug here" — '
+    "deliberate tradeoff, documented inline"
+)
+
+_RENDERED_STAMPED = f"""# Deferred Review Findings
+{_MD_PROVENANCE_COMMENT}
+
+## Review adjudication
+
+Rejected (intentional / documented tradeoff):
+{_STAMPED_REJECTED_ROW}
+
+<!-- DEFERRED-REVIEW-FINDINGS
+- severity: SHOULD_FIX
+  summary: "Slow loop"
+  file: src/cw/bar.py
+  rationale: "handle when scale demands"
+  round: 1
+  recorded_at: {_STAMP_DATE}
+DEFERRED-REVIEW-FINDINGS -->
+"""
+
+_RENDERED_LEGACY_ONLY_REJECTED = f"""# Deferred Review Findings
+{_MD_PROVENANCE_COMMENT}
+
+## Review adjudication
+
+Rejected (intentional / documented tradeoff):
+- src/cw/foo.py — "Bug here" — deliberate tradeoff, documented inline
+"""
+
+_RENDERED_LEGACY_ONLY_DEFERRED = f"""# Deferred Review Findings
+{_MD_PROVENANCE_COMMENT}
+
+## Review adjudication
+
+<!-- DEFERRED-REVIEW-FINDINGS
+- severity: SHOULD_FIX
+  summary: "Slow loop"
+  file: src/cw/bar.py
+  rationale: "handle when scale demands"
+DEFERRED-REVIEW-FINDINGS -->
+"""
+
+# One legacy (unstamped) rejected line and one round-stamped one, same file.
+_RENDERED_MIXED_REJECTED = f"""# Deferred Review Findings
+{_MD_PROVENANCE_COMMENT}
+
+## Review adjudication
+
+Rejected (intentional / documented tradeoff):
+- src/cw/foo.py — "Bug here" — deliberate tradeoff, documented inline
+- [round 2, {_STAMP_DATE}] src/cw/baz.py — "Other bug" — second-round call
+"""
+
+# A deferred entry carrying `round:` but no `recorded_at:` — matches neither
+# the stamped shape (both lines required) nor the legacy shape (neither line).
+_RENDERED_PARTIAL_STAMP = f"""# Deferred Review Findings
+{_MD_PROVENANCE_COMMENT}
+
+## Review adjudication
+
+<!-- DEFERRED-REVIEW-FINDINGS
+- severity: SHOULD_FIX
+  summary: "Slow loop"
+  file: src/cw/bar.py
+  rationale: "handle when scale demands"
+  round: 1
+DEFERRED-REVIEW-FINDINGS -->
+"""
+
+
+def _stamped(entry: Adjudication, round_number: int = 1) -> Adjudication:
+    """*entry* carrying the round/date context the CLI write path stamps on."""
+    return entry.model_copy(update={"round": round_number, "recorded_at": _STAMP_DATE})
+
+
+def _parsed_shape(entry: Adjudication) -> Adjudication:
+    """*entry* reduced to the fields the rendered artifact actually preserves.
+
+    The artifact records file/summary/rationale (plus severity for a deferred
+    entry) and nothing else, so this is what a render → parse round-trip
+    returns. Merge-level tests compare in this space so they exercise the same
+    field values the CLI write path really merges.
+    """
+    update: dict[str, object] = {
+        "line_start": None,
+        "line_end": None,
+        "evidence": "",
+    }
+    if entry.outcome == "reject":
+        update["severity"] = REJECTED_ENTRY_SEVERITY
+    return entry.model_copy(update=update)
+
+
+class TestParseDeferredFindingsMd:
+    """#1840: the artifact is read back so repeated calls can merge into it."""
+
+    def test_round_trips_a_stamped_block_byte_for_byte(self) -> None:
+        entries = parse_deferred_findings_md(_RENDERED_STAMPED)
+
+        assert [e.outcome for e in entries] == ["reject", "defer"]
+        assert entries[0].file == "src/cw/foo.py"
+        assert entries[0].summary == "Bug here"
+        assert entries[0].rationale == "deliberate tradeoff, documented inline"
+        assert entries[0].round == 1
+        assert entries[0].recorded_at == _STAMP_DATE
+        assert entries[1].severity == "SHOULD_FIX"
+        assert entries[1].round == 1
+        assert entries[1].recorded_at == _STAMP_DATE
+        assert render_deferred_findings_md(entries) == _RENDERED_STAMPED
+
+    def test_rejected_only_block_parses(self) -> None:
+        entries = parse_deferred_findings_md(_RENDERED_LEGACY_ONLY_REJECTED)
+
+        assert len(entries) == 1
+        assert entries[0].outcome == "reject"
+        assert render_deferred_findings_md(entries) == _RENDERED_LEGACY_ONLY_REJECTED
+
+    def test_deferred_only_block_parses(self) -> None:
+        entries = parse_deferred_findings_md(_RENDERED_LEGACY_ONLY_DEFERRED)
+
+        assert len(entries) == 1
+        assert entries[0].outcome == "defer"
+        assert render_deferred_findings_md(entries) == _RENDERED_LEGACY_ONLY_DEFERRED
+
+    @pytest.mark.parametrize("text", ["", "   ", "\n\n  \n"])
+    def test_empty_or_whitespace_text_yields_no_entries(self, text: str) -> None:
+        assert parse_deferred_findings_md(text) == []
+
+    def test_missing_title_raises(self) -> None:
+        with pytest.raises(ValueError, match="Deferred Review Findings"):
+            parse_deferred_findings_md("## Some other document\n\n- a bullet\n")
+
+    def test_malformed_deferred_entry_raises(self) -> None:
+        text = _RENDERED_LEGACY_ONLY_DEFERRED.replace(
+            '  rationale: "handle when scale demands"\n', ""
+        )
+        with pytest.raises(ValueError, match="deferred-findings entry"):
+            parse_deferred_findings_md(text)
+
+    def test_foreign_markdown_raises(self) -> None:
+        with pytest.raises(ValueError, match="Deferred Review Findings"):
+            parse_deferred_findings_md('{"verdict": {"blocking": true}}')
+
+    def test_malformed_rejected_line_raises_naming_the_line(self) -> None:
+        text = _RENDERED_LEGACY_ONLY_REJECTED.replace(
+            '- src/cw/foo.py — "Bug here" — deliberate tradeoff, documented inline',
+            "- src/cw/foo.py has no delimiters at all",
+        )
+        with pytest.raises(ValueError, match="has no delimiters at all"):
+            parse_deferred_findings_md(text)
+
+    def test_legacy_shape_parses_as_unstamped_entries(self) -> None:
+        entries = parse_deferred_findings_md(_RENDERED_LEGACY_ONLY_DEFERRED)
+
+        assert entries[0].round is None
+        assert entries[0].recorded_at == ""
+
+    def test_legacy_rejected_line_uses_the_placeholder_severity(self) -> None:
+        entries = parse_deferred_findings_md(_RENDERED_LEGACY_ONLY_REJECTED)
+
+        assert entries[0].severity == REJECTED_ENTRY_SEVERITY
+        assert entries[0].round is None
+        assert entries[0].recorded_at == ""
+
+    def test_partial_round_date_pair_raises(self) -> None:
+        with pytest.raises(ValueError, match="deferred-findings entry"):
+            parse_deferred_findings_md(_RENDERED_PARTIAL_STAMP)
+
+    def test_legacy_and_stamped_rejected_lines_parse_together(self) -> None:
+        entries = parse_deferred_findings_md(_RENDERED_MIXED_REJECTED)
+
+        assert len(entries) == 2
+        assert entries[0].round is None
+        assert entries[0].recorded_at == ""
+        assert entries[1].round == 2
+        assert entries[1].recorded_at == _STAMP_DATE
+        assert render_deferred_findings_md(entries) == _RENDERED_MIXED_REJECTED
+
+
+class TestMergeDeferredAdjudications:
+    """#1840: repeated adjudicate calls accumulate instead of clobbering."""
+
+    def test_disjoint_entries_all_survive_prior_first(self) -> None:
+        prior = [_stamped(_rejected_adj(), 1)]
+        new = [_stamped(_deferred_adj(), 2)]
+
+        merged = merge_deferred_adjudications(prior, new)
+
+        assert merged == [prior[0], new[0]]
+
+    def test_exact_duplicate_keeps_the_prior_entry_stamp(self) -> None:
+        prior = [_stamped(_rejected_adj(), 1)]
+        new = [_stamped(_rejected_adj(), 2)]
+
+        merged = merge_deferred_adjudications(prior, new)
+
+        assert len(merged) == 1
+        assert merged[0].round == 1
+        assert merged[0].recorded_at == _STAMP_DATE
+
+    def test_empty_prior_returns_new_unchanged(self) -> None:
+        new = [_stamped(_rejected_adj(), 1), _stamped(_deferred_adj(), 1)]
+
+        assert merge_deferred_adjudications([], new) == new
+
+    def test_legacy_entry_survives_a_render_round_trip_unchanged(self) -> None:
+        legacy = _parsed_shape(_deferred_adj())
+        new = _stamped(_parsed_shape(_rejected_adj()), 1)
+
+        rendered = render_deferred_findings_md(
+            merge_deferred_adjudications([legacy], [new])
+        )
+
+        assert '  rationale: "handle when scale demands"\nDEFERRED' in rendered
+        assert "  round:" not in rendered
+        assert _STAMPED_REJECTED_ROW in rendered
+        assert parse_deferred_findings_md(rendered) == [new, legacy]
+
+    def test_re_adjudicated_legacy_entry_is_not_restamped(self) -> None:
+        legacy = _parsed_shape(_deferred_adj())
+        new = _stamped(_parsed_shape(_deferred_adj()), 3)
+
+        merged = merge_deferred_adjudications([legacy], [new])
+
+        assert len(merged) == 1
+        assert merged[0].round is None
+        assert merged[0].recorded_at == ""
+
+    def test_merge_deferred_adjudications_accumulates_on_outcome_flip(self) -> None:
+        """An earlier REJECT and a later DEFER of one finding are two records."""
+        rejected = _rejected_adj()
+        flipped = rejected.model_copy(
+            update={"outcome": "defer", "rationale": "handle when scale demands"}
+        )
+
+        merged = merge_deferred_adjudications(
+            [_stamped(rejected, 1)], [_stamped(flipped, 2)]
+        )
+
+        assert len(merged) == 2
+        assert [e.outcome for e in merged] == ["reject", "defer"]
+
+    def test_distinct_same_round_entries_never_dedupe_against_each_other(
+        self,
+    ) -> None:
+        """#1840: two distinct findings sharing text but not location both survive.
+
+        Reproduces the fingerprint-collision five reviewers flagged: two
+        genuinely different findings applied in the SAME call, sharing
+        identical severity/file/summary/outcome/rationale but differing only
+        by their original line (already stripped by the CLI's artifact-shape
+        projection before this runs, per ``_artifact_entry``). Neither is in
+        ``prior`` -- both must survive, not silently collapse to one.
+        """
+        one = _deferred_adj().model_copy(update={"line_start": None, "line_end": None})
+        other = one.model_copy()  # genuinely distinct finding; identical fingerprint
+
+        merged = merge_deferred_adjudications([], [one, other])
+
+        assert merged == [one, other]
+
+    def test_new_entries_still_dedupe_against_a_matching_prior_entry(self) -> None:
+        """#1840: the fix must not weaken cross-round dedup -- only intra-*new*."""
+        prior_entry = _stamped(_deferred_adj(), 1)
+        same_content_new = _stamped(_deferred_adj(), 2)
+
+        merged = merge_deferred_adjudications([prior_entry], [same_content_new])
+
+        assert merged == [prior_entry]
