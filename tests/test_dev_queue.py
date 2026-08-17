@@ -8843,7 +8843,9 @@ class TestStaleDispatchDispositions:
         from cw.dev_queue import STALE_DISPATCH_GATE_DISPOSITION
         from cw.dispatch import BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
 
-        assert STALE_DISPATCH_GATE_DISPOSITION not in BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+        assert (
+            STALE_DISPATCH_GATE_DISPOSITION not in BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+        )
 
     def test_pre_dispatch_stale_pr_reason_value(self) -> None:
         from cw.dev_queue.lifecycle import _PRE_DISPATCH_STALE_PR_REASON

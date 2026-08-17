@@ -20,7 +20,6 @@ import pytest
 from cw.dispatch.pr_gate import _OPEN_PR_PROBE_TTL_SECONDS, resolve_stale_pr_ticket_ids
 from cw.dispatch_state import OpenPrProbeCache, save_open_pr_probe_entry
 from cw.models import ClientConfig, DevQueueStore, QueueItemStatus, Stage
-
 from tests.conftest import _make_ticket_task
 
 if TYPE_CHECKING:
@@ -129,9 +128,7 @@ class TestResolveStalePrTicketIds:
         stub = _stub_probe(monkeypatch, (True, True))
         store = DevQueueStore(
             tasks=[
-                _make_ticket_task(
-                    ticket_id="GEN-42", client=_CLIENT, stage=Stage.PLAN
-                )
+                _make_ticket_task(ticket_id="GEN-42", client=_CLIENT, stage=Stage.PLAN)
             ]
         )
 
@@ -150,9 +147,7 @@ class TestResolveStalePrTicketIds:
         """Stage-scoped: REVIEW/FINALIZE legitimately have an open PR (#1862)."""
         stub = _stub_probe(monkeypatch, (True, True))
         store = DevQueueStore(
-            tasks=[
-                _make_ticket_task(ticket_id="GEN-late", client=_CLIENT, stage=stage)
-            ]
+            tasks=[_make_ticket_task(ticket_id="GEN-late", client=_CLIENT, stage=stage)]
         )
 
         assert resolve_stale_pr_ticket_ids(pr_gate_client, store) == frozenset()
@@ -215,7 +210,9 @@ class TestResolveStalePrTicketIds:
         _stub_probe(monkeypatch, (False, True))
         store = DevQueueStore(
             tasks=[
-                _make_ticket_task(ticket_id="GEN-clean", client=_CLIENT, stage=Stage.PLAN)
+                _make_ticket_task(
+                    ticket_id="GEN-clean", client=_CLIENT, stage=Stage.PLAN
+                )
             ]
         )
 
@@ -239,7 +236,9 @@ class TestResolveStalePrTicketIds:
         _stub_probe(monkeypatch, probe_result)
         store = DevQueueStore(
             tasks=[
-                _make_ticket_task(ticket_id="GEN-flaky", client=_CLIENT, stage=Stage.PLAN)
+                _make_ticket_task(
+                    ticket_id="GEN-flaky", client=_CLIENT, stage=Stage.PLAN
+                )
             ]
         )
 
@@ -255,7 +254,9 @@ class TestResolveStalePrTicketIds:
         stub = _stub_probe(monkeypatch, (None, True))
         store = DevQueueStore(
             tasks=[
-                _make_ticket_task(ticket_id="GEN-retry", client=_CLIENT, stage=Stage.PLAN)
+                _make_ticket_task(
+                    ticket_id="GEN-retry", client=_CLIENT, stage=Stage.PLAN
+                )
             ]
         )
 

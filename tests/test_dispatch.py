@@ -10707,6 +10707,7 @@ class TestApplyStagedDecision:
             OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
             STAGE_FAILURE_STATUSES,
         )
+        from cw.dev_queue import STALE_DISPATCH_GATE_DISPOSITION
         from cw.dispatch import (
             _APPROVAL_GATE_REASON,
             _AWAITING_OPERATOR_REASON,
@@ -10726,6 +10727,11 @@ class TestApplyStagedDecision:
             # mechanical gate's own paused_status ("empty_diff_gate"), which
             # stays excluded with every other gate-class park below.
             "empty_diff_blocked",
+            # #1862: same derivation, same distinction -- the agent-emitted
+            # "stale_dispatch" status carries a blocker.reason, while the
+            # pre-dispatch gate's own paused_status ("stale_dispatch_gate")
+            # stays excluded with every other gate-class park below.
+            "stale_dispatch",
             "awaiting_operator_availability",
             must_fix_mechanically_rejected,
         } == BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
@@ -10754,6 +10760,10 @@ class TestApplyStagedDecision:
                 _FINALIZE_HOLD_REASON,
                 _SIGNOFF_GATE_REASON,
                 _APPROVAL_GATE_REASON,
+                # #1862: same rule, applied to the pre-dispatch open-PR gate.
+                # _park_stale_pr_task (claim.py) hardcodes breadcrumbs="" --
+                # no session ever ran -- so its paused_status must stay out.
+                STALE_DISPATCH_GATE_DISPOSITION,
             }
             & BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
         )
@@ -15171,7 +15181,9 @@ class TestClaimNextPendingStalePr:
         """Patch the lanes-level gate resolver; return the call log."""
         calls: list[str] = []
 
-        def _fake(client: ClientConfig, snapshot: DevQueueStore, **_: object) -> frozenset[str]:
+        def _fake(
+            client: ClientConfig, snapshot: DevQueueStore, **_: object
+        ) -> frozenset[str]:
             calls.append(client.name)
             return frozenset(ticket_ids)
 
@@ -15202,9 +15214,7 @@ class TestClaimNextPendingStalePr:
         daemon = FakeNativeDaemonClient()
         dispatch_tick(self._config(), native_daemon=daemon)
 
-        parked = next(
-            t for t in load_dev_queue().tasks if t.ticket_id == "GEN-1862"
-        )
+        parked = next(t for t in load_dev_queue().tasks if t.ticket_id == "GEN-1862")
         assert parked.status == QueueItemStatus.BLOCKED_ON_USER
         assert parked.disposition == "stale_dispatch_gate"
         assert parked.blocked_reason == "pr_already_open_pre_dispatch"
@@ -15317,9 +15327,7 @@ class TestClaimNextPendingStalePr:
             )
         )
         save_plan(
-            DispatchPlan(
-                tasks=[TicketTask(ticket_id="GEN-pri", client="test-client")]
-            )
+            DispatchPlan(tasks=[TicketTask(ticket_id="GEN-pri", client="test-client")])
         )
 
         dispatch_tick(
@@ -15365,9 +15373,7 @@ class TestClaimNextPendingStalePr:
         assert tick_events[0].payload["client"] == "test-client"
 
         attention = [
-            e
-            for e in events
-            if e.payload.get("paused_status") == "stale_dispatch_gate"
+            e for e in events if e.payload.get("paused_status") == "stale_dispatch_gate"
         ]
         assert len(attention) == 1
         assert attention[0].payload["ticket_id"] == "GEN-events"
