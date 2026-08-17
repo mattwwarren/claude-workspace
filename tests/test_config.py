@@ -1238,6 +1238,36 @@ class TestMigrateCwState:
         assert session["consecutive_sentinel_mismatch_vetoes"] == 0
         assert migrated["schema_version"] == CW_STATE_SCHEMA_VERSION
 
+    def test_v17_to_v18_fills_liveness_attention_next_eligible_at_default(
+        self,
+    ) -> None:
+        """migrate_cw_state fills liveness_attention_next_eligible_at=None on
+        v17 sessions that lack the key (#1858)."""
+        raw = {
+            "schema_version": 17,
+            "sessions": [
+                {
+                    "id": "s1",
+                    "parent_session_id": None,
+                    "worker_session_ids": [],
+                    "last_result": None,
+                    "cost_usd": None,
+                    "cost_breakdown": None,
+                    "lane": None,
+                    "stage": None,
+                    "consecutive_salvage_skips": 0,
+                    "liveness_bucket": "live",
+                    "consecutive_park_vetoes": 0,
+                    "last_result_source": None,
+                    "consecutive_sentinel_mismatch_vetoes": 0,
+                }
+            ],
+        }
+        migrated = migrate_cw_state(raw)
+        session = migrated["sessions"][0]
+        assert session["liveness_attention_next_eligible_at"] is None
+        assert migrated["schema_version"] == CW_STATE_SCHEMA_VERSION
+
     def test_v17_consecutive_sentinel_mismatch_vetoes_preserved_idempotently(
         self,
     ) -> None:
