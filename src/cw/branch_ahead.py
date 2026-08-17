@@ -21,13 +21,17 @@ Two hard contracts, both inherited from ``dispatch/branch_freshness``:
 **Why a top-level module rather than one under ``cw.dispatch``.**
 ``branch_freshness`` is the near-exact structural sibling and would be the
 natural home, but it lives inside the ``dispatch`` package, and
-``dispatch/routing.py`` imports ``cw.codex_review`` at module top. Since
-``codex_review._verdict`` needs this same measurement, putting it under
-``cw.dispatch.*`` would create a genuine ``codex_review`` -> ``dispatch`` ->
-``codex_review`` import cycle. ``cw.worktree`` — whose ``_run_git`` this reuses,
-the same cross-module reuse ``branch_freshness`` already established — is
-likewise unavailable as a home: it is already over CLAUDE.md's ~1000-line
-module ceiling.
+``dispatch/routing.py`` imports ``cw.codex_review`` at module top. Putting this
+module under ``cw.dispatch.*`` would foreclose ``cw.codex_review`` ever
+importing it directly: a ``codex_review`` -> ``dispatch`` -> ``codex_review``
+cycle. In practice, ``codex_review._verdict``'s own empty-diff check reuses the
+pre-existing ``cw.worktree.compute_branch_diff_scope`` instead (a diff-stat
+measurement it already had to hand — see Adopted Assumption #4 in the ticket's
+plan), so today's only consumer is ``cw.dispatch.review_gates``. The top-level
+placement still keeps the door open without the cycle risk. ``cw.worktree`` —
+whose ``_run_git`` this reuses, the same cross-module reuse ``branch_freshness``
+already established — is likewise unavailable as a home: it is already over
+CLAUDE.md's ~1000-line module ceiling.
 """
 
 from __future__ import annotations
@@ -50,8 +54,13 @@ def commits_ahead_of_default(
     taken at all. Callers MUST distinguish the last from the first.
 
     Mirrors ``branch_freshness._is_behind_default``'s probe shape with the
-    range reversed and the raw count returned rather than a bool, so both the
-    dispatch gate and the review-synthesis path can tell the three cases apart.
+    range reversed and the raw count returned rather than a bool, so a caller
+    can tell "measured empty" apart from "unmeasurable". Note this is a
+    commit-count measurement, distinct from ``compute_branch_diff_scope``'s
+    diff-stat measurement that ``codex_review._verdict`` uses for the same
+    concept — the two can disagree on a content-empty commit (e.g. an
+    ``--allow-empty`` commit: this returns a positive count, diff-stat reports
+    0/0).
     """
     if worktree_path is None or not worktree_path.exists():
         return None
