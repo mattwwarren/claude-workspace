@@ -3365,7 +3365,12 @@ class TestStaleDispatchStatus:
         A non-null `pr` would claim *this* run created it (#1862).
         """
         p = _stale_dispatch_payload()
-        p["pr"] = {"number": 1899, "url": "https://example.test/pr/1899"}
+        p["pr"] = {
+            "number": 1899,
+            "url": "https://github.com/foo/bar/pull/1899",
+            "auto_merge": True,
+            "base": "main",
+        }
         with pytest.raises(ValidationError, match="pr must be null"):
             AutoDevResult.model_validate(p)
 

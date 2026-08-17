@@ -87,6 +87,12 @@ _WAIT_STATUS_EXIT: dict[str, int] = {
     # so it maps to BLOCKED (matching the dispatch gate's BLOCKED_ON_USER park)
     # rather than FAILED — nothing errored, there is simply nothing there.
     "empty_diff_blocked": _WAIT_EXIT_BLOCKED,
+    # #1862: this ticket already has an open, unmerged PR from an earlier
+    # dispatch. A human has to land or close it before the ticket can move,
+    # so it maps to BLOCKED (matching the dispatch gate's BLOCKED_ON_USER
+    # park) rather than FAILED — nothing errored, the work is already in
+    # review.
+    "stale_dispatch": _WAIT_EXIT_BLOCKED,
 }
 
 
