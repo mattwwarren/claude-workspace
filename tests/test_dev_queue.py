@@ -3529,6 +3529,31 @@ class TestMigrateDevQueue:
         assert migrated["tasks"][0]["blocked_on_pr"] is None
         assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 31
 
+    def test_v31_migration_fills_both_v30_and_v31_fields_in_one_pass(self) -> None:
+        """A single pre-v30 row gains BOTH #1713's and #1838's fields.
+
+        The two fillers were authored on branches that never saw each other
+        (both originally claimed v30), so this asserts the merged
+        migrate_dev_queue runs both — a filler dropped while resolving that
+        conflict would leave one key absent and fail here.
+        """
+        raw: dict[str, object] = {
+            "schema_version": 29,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-1713-1838",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["stale_gate_detected_at"] is None
+        assert migrated["tasks"][0]["blocked_on_pr"] is None
+        assert migrated["tasks"][0]["finding_dispositions"] == {}
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 31
+
     def test_migrate_dev_queue_fills_watched_prs_default(self) -> None:
         """migrate_dev_queue fills watched_prs=[] on a store missing the key (v15)."""
         raw: dict[str, object] = {"schema_version": 14, "tasks": []}
