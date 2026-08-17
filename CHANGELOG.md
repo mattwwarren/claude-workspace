@@ -64,6 +64,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`prior_attempts_summary` leaked prior-attempt failure summaries across
+  clients sharing a ticket number (#1839):** `_collect_prior_attempts_summary`
+  filtered the shared `sessions.json` by `ticket_id` alone, so two clients
+  dispatching the same ticket number (e.g. ticket 47 in both `review-bingo`
+  and `definitely-not-digimon`) had their prior-attempt failure summaries
+  cross-contaminated in the next retry's `cw-context.json`. Added a required
+  `client` kwarg and `s.client == client` to the filter, mirroring the
+  existing `(client, ticket_id)` predicate already used by
+  `concierge._find_session_for_ticket`.
+
 - **Codex-subsystem `make_blocked()` call sites silently borrowed
   LocalExecutor's `next_actions` label instead of the Codex-review one
   (#1842):** `#1835` fixed this for the 4 call sites in
