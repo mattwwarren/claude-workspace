@@ -41,7 +41,7 @@ from cw.atomic import atomic_write_text
 from cw.cli._base import handle_errors, main
 from cw.exceptions import CwError
 from cw.review_adjudication import (
-    _REJECTED_ENTRY_SEVERITY,
+    REJECTED_ENTRY_SEVERITY,
     Adjudication,
     VoidedFinding,
     apply_adjudication,
@@ -411,7 +411,7 @@ def _artifact_entry(entry: Adjudication, next_round: int, now: str) -> Adjudicat
         "evidence": "",
     }
     if entry.outcome == "reject":
-        update["severity"] = _REJECTED_ENTRY_SEVERITY
+        update["severity"] = REJECTED_ENTRY_SEVERITY
     if entry.round is None:
         update["round"] = next_round
     if not entry.recorded_at.strip():

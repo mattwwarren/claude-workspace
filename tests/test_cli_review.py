@@ -17,6 +17,7 @@ from cw.models.enums import OrchestratorEventType
 from cw.review_adjudication import (
     Adjudication,
     VoidedFinding,
+    parse_deferred_findings_md,
     parse_voided_findings_block,
     render_deferred_findings_md,
     render_voided_findings_block,
@@ -1082,6 +1083,78 @@ class TestReviewAdjudicateCommand:
         assert "  round: 3\n" in written
         assert "  round: 4\n" in written
         assert "recorded before round stamping existed" in written
+
+    def test_deferred_findings_out_preserves_distinct_findings_sharing_text(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """#1840: two distinct same-round findings must not fingerprint-collide.
+
+        Two accepted findings at different lines, deferred with identical
+        severity/summary/rationale text (a realistic shape for templated
+        review output) -- the CLI's artifact-shape projection strips line
+        anchors before merge, so both must still survive as two entries, not
+        collapse into one via the dedup fingerprint.
+        """
+        out = tmp_path / "deferred-findings.md"
+
+        self._adjudicate(
+            runner,
+            out,
+            {
+                "verdict": _verdict_payload(
+                    _accepted_payload(line_start=10, line_end=10),
+                    _accepted_payload(line_start=20, line_end=20),
+                ),
+                "adjudications": [
+                    _defer_entry(line_start=10, line_end=10),
+                    _defer_entry(line_start=20, line_end=20),
+                ],
+            },
+        )
+
+        entries = parse_deferred_findings_md(out.read_text(encoding="utf-8"))
+        assert len(entries) == 2
+
+    def test_deferred_findings_out_outcome_flip_across_calls_via_cli(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """#1840: REJECT in round 1, DEFER in round 2 for the same finding
+        accumulates as two entries end-to-end through the CLI, not just at
+        the ``merge_deferred_adjudications`` unit level.
+        """
+        out = tmp_path / "deferred-findings.md"
+        accepted = _accepted_payload(line_start=2, line_end=2)
+
+        self._adjudicate(
+            runner,
+            out,
+            {
+                "verdict": _verdict_payload(accepted),
+                "adjudications": [
+                    _defer_entry(
+                        outcome="reject", rationale="deliberate tradeoff, documented"
+                    )
+                ],
+            },
+        )
+        self._adjudicate(
+            runner,
+            out,
+            {
+                "verdict": _verdict_payload(accepted),
+                "adjudications": [
+                    _defer_entry(outcome="defer", rationale="handle when scale demands")
+                ],
+            },
+        )
+
+        written = out.read_text(encoding="utf-8")
+        assert "Rejected (intentional / documented tradeoff):" in written
+        assert "deliberate tradeoff, documented" in written
+        assert "handle when scale demands" in written
+
+        entries = parse_deferred_findings_md(written)
+        assert [e.outcome for e in entries] == ["reject", "defer"]
 
     def test_malformed_payload_prints_field_path_errors(
         self, runner: CliRunner

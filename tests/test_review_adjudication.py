@@ -16,7 +16,7 @@ from cw.auto_dev_result import Review
 from cw.events import read_events
 from cw.models.enums import OrchestratorEventType
 from cw.review_adjudication import (
-    _REJECTED_ENTRY_SEVERITY,
+    REJECTED_ENTRY_SEVERITY,
     Adjudication,
     VoidedFinding,
     apply_adjudication,
@@ -1325,7 +1325,7 @@ def _parsed_shape(entry: Adjudication) -> Adjudication:
         "evidence": "",
     }
     if entry.outcome == "reject":
-        update["severity"] = _REJECTED_ENTRY_SEVERITY
+        update["severity"] = REJECTED_ENTRY_SEVERITY
     return entry.model_copy(update=update)
 
 
@@ -1396,7 +1396,7 @@ class TestParseDeferredFindingsMd:
     def test_legacy_rejected_line_uses_the_placeholder_severity(self) -> None:
         entries = parse_deferred_findings_md(_RENDERED_LEGACY_ONLY_REJECTED)
 
-        assert entries[0].severity == _REJECTED_ENTRY_SEVERITY
+        assert entries[0].severity == REJECTED_ENTRY_SEVERITY
         assert entries[0].round is None
         assert entries[0].recorded_at == ""
 
@@ -1477,3 +1477,31 @@ class TestMergeDeferredAdjudications:
 
         assert len(merged) == 2
         assert [e.outcome for e in merged] == ["reject", "defer"]
+
+    def test_distinct_same_round_entries_never_dedupe_against_each_other(
+        self,
+    ) -> None:
+        """#1840: two distinct findings sharing text but not location both survive.
+
+        Reproduces the fingerprint-collision five reviewers flagged: two
+        genuinely different findings applied in the SAME call, sharing
+        identical severity/file/summary/outcome/rationale but differing only
+        by their original line (already stripped by the CLI's artifact-shape
+        projection before this runs, per ``_artifact_entry``). Neither is in
+        ``prior`` -- both must survive, not silently collapse to one.
+        """
+        one = _deferred_adj().model_copy(update={"line_start": None, "line_end": None})
+        other = one.model_copy()  # genuinely distinct finding; identical fingerprint
+
+        merged = merge_deferred_adjudications([], [one, other])
+
+        assert merged == [one, other]
+
+    def test_new_entries_still_dedupe_against_a_matching_prior_entry(self) -> None:
+        """#1840: the fix must not weaken cross-round dedup -- only intra-*new*."""
+        prior_entry = _stamped(_deferred_adj(), 1)
+        same_content_new = _stamped(_deferred_adj(), 2)
+
+        merged = merge_deferred_adjudications([prior_entry], [same_content_new])
+
+        assert merged == [prior_entry]

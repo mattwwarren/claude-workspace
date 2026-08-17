@@ -47,6 +47,7 @@ Public surface: :class:`Adjudication`, :data:`AdjudicationOutcome`,
 :func:`apply_adjudication`, :func:`matched_adjudications`,
 :func:`verify_fixed_dispositions`, :func:`render_deferred_findings_md`,
 :func:`parse_deferred_findings_md`, :func:`merge_deferred_adjudications`,
+:data:`REJECTED_ENTRY_SEVERITY`,
 :class:`VoidedFinding`, :func:`find_voided_matches`,
 :func:`apply_voided_suppression`, :func:`render_voided_findings_block`,
 :func:`parse_voided_findings_block`.
@@ -116,7 +117,7 @@ _DEFERRED_SENTINEL = "DEFERRED-REVIEW-FINDINGS"
 #: :func:`merge_deferred_adjudications`'s callers normalize both sides of the
 #: merge onto it), and ``SHOULD_FIX`` cannot escalate a gate the way a
 #: speculative ``MUST_FIX`` could if one ever did read it.
-_REJECTED_ENTRY_SEVERITY: Severity = "SHOULD_FIX"
+REJECTED_ENTRY_SEVERITY: Severity = "SHOULD_FIX"
 
 #: The lines the artifact carries that are structure, not entries. Recognized
 #: explicitly so :func:`parse_deferred_findings_md` can fail closed on
@@ -955,7 +956,7 @@ def _adjudication_from_rejected_line(line: str) -> Adjudication:
         raise ValueError(msg)
     raw_round = match.group("round")
     return Adjudication(
-        severity=_REJECTED_ENTRY_SEVERITY,
+        severity=REJECTED_ENTRY_SEVERITY,
         file=match.group("file"),
         summary=match.group("summary"),
         outcome="reject",
@@ -1031,7 +1032,7 @@ def parse_deferred_findings_md(text: str) -> list[Adjudication]:
     nothing to merge" and returns ``[]``. (An absent file is the caller's
     business; there is no path to read.)
 
-    Rejected entries come back with :data:`_REJECTED_ENTRY_SEVERITY` and no
+    Rejected entries come back with :data:`REJECTED_ENTRY_SEVERITY` and no
     line anchor or evidence: the rendered shape never recorded those, so a
     round-trip is lossy in exactly the fields the artifact does not carry.
     Entries are returned rejected-first, then deferred — the same order
@@ -1098,21 +1099,33 @@ def _deferred_merge_fingerprint(
 def merge_deferred_adjudications(
     prior: list[Adjudication], new: list[Adjudication]
 ) -> list[Adjudication]:
-    """*prior* then *new*, one entry per content fingerprint (#1840).
+    """*prior* then *new*, deduped against *prior* by content fingerprint (#1840).
 
-    First-seen-wins, so a *prior* entry always keeps its dedup slot against a
-    same-content entry from *new*: an already-recorded decision keeps its
-    original round/date context (or its absence, for a legacy entry) rather
-    than being re-stamped with today's. ``round``/``recorded_at`` are excluded
-    from the fingerprint precisely so a re-adjudication of the same content
-    collapses instead of accumulating one copy per round.
+    A *new* entry is dropped only when it fingerprint-matches something
+    already in *prior* — the "identical re-adjudication collapses" case. An
+    already-recorded decision keeps its original round/date context (or its
+    absence, for a legacy entry) rather than being re-stamped with today's.
+    ``round``/``recorded_at`` are excluded from the fingerprint precisely so
+    a re-adjudication of the same content across rounds collapses.
+
+    *new* entries are never deduped against each other. The CLI's
+    artifact-shape projection (:func:`Adjudication.round`'s stamping call
+    site) nulls ``line_start``/``line_end``/``evidence`` before this runs —
+    fields ``prior`` can never carry either, since the rendered artifact
+    never records them — so the fingerprint has to live in that reduced
+    field space to let a genuine cross-round re-adjudication match at all.
+    But within one round, every entry in *new* comes from a distinct
+    ``AcceptedFinding`` at a distinct location; two of them sharing that
+    reduced fingerprint (e.g. identical templated summary/rationale text at
+    different lines) are two different findings, not a duplicate.
+    Fingerprint-deduping *new* against itself would silently drop one of
+    them from the audit trail — exactly the failure #1840 exists to
+    eliminate, reintroduced one layer down.
     """
-    seen: set[tuple[str, str, int, int, str, str, str, str]] = set()
-    merged: list[Adjudication] = []
-    for entry in [*prior, *new]:
-        key = _deferred_merge_fingerprint(entry)
-        if key in seen:
+    seen = {_deferred_merge_fingerprint(entry) for entry in prior}
+    merged = list(prior)
+    for entry in new:
+        if _deferred_merge_fingerprint(entry) in seen:
             continue
-        seen.add(key)
         merged.append(entry)
     return merged
