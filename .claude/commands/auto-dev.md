@@ -956,6 +956,7 @@ Applies to: `no_op`, `plan_pending_approval`, `ambiguities_pending_resolution`, 
 | `scope_exceeded` | `--scope-limit small` rejected a Large ticket before impl started |
 | `forbidden_area` | `--forbidden` constraint matched a planned file; ticket rejected before impl started |
 | `blocked` | Unrecoverable error mid-pipeline; see `blocker` field for details |
+| `empty_diff_blocked` | Branch pushed but measures zero commits ahead of `origin/<default_branch>` — nothing to review or ship; dispatch's #1870 gate or the review-stage synthesis itself detected this and parked for human triage rather than presenting a normal scope-approval decision. `branch` is non-null; `next_actions` is empty; `blocker.reason` is typically `empty_diff_no_commits` |
 
 ### `blocker.reason` Values
 
@@ -996,6 +997,7 @@ Optional keys (some `reason` values require them):
 - `review_pending_approval` → `"stage3_review"`
 - `merge_gate_blocked` → `"stage4a_merge_gate"`
 - `scope_exceeded` / `forbidden_area` → whichever stage detected the violation (`"stage1_plan"` at planning, or the impl stage if later); mirror in `blocker.stage`
+- `empty_diff_blocked` → `"stage2_impl"` or `"stage3_review"` — whichever stage measured the empty branch; both are legal. Mirror it in `blocker.stage`
 - `blocked` with `blocker.reason: "plan_unreviewable"` or `"plan_unsound"` → `"stage1_plan"`
 - `blocked` (other reasons) → whichever stage produced the BLOCK; mirror this in `blocker.stage`.
 

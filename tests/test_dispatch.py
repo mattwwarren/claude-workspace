@@ -10628,6 +10628,11 @@ class TestApplyStagedDecision:
         assert {
             "blocked",
             "merge_gate_blocked",
+            # #1870: a STAGE_FAILURE_STATUSES member the schema lets carry a
+            # blocker, so it joins by derivation -- distinct from the
+            # mechanical gate's own paused_status ("empty_diff_gate"), which
+            # stays excluded with every other gate-class park below.
+            "empty_diff_blocked",
             "awaiting_operator_availability",
             must_fix_mechanically_rejected,
         } == BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
@@ -11331,6 +11336,428 @@ class TestBranchStalenessGate:
 
         task = self._make_running_task("BSG-7", stage=Stage.REVIEW)
         assert _should_gate_for_branch_staleness(task, {}) is False
+
+
+# ---------------------------------------------------------------------------
+# TestEmptyDiffGate (#1870)
+# ---------------------------------------------------------------------------
+
+
+class TestEmptyDiffGate:
+    """GitHub #1870: the sixth REVIEW-scoped gate, evaluated first.
+
+    A branch measuring zero commits ahead of ``origin/<default_branch>`` has
+    nothing to review or ship, so it must never reach the Stage 4 approval
+    prompt where an operator would be asked to approve an empty diff as if it
+    were an ordinary large-scope decision.
+
+    The git-level measurement is covered against real repos in
+    ``tests/test_branch_ahead.py``; these tests pin the *routing* behavior and
+    stub ``commits_ahead_of_default`` at its consumption point in
+    ``cw.dispatch.review_gates``.
+    """
+
+    def _make_running_task(
+        self,
+        ticket_id: str,
+        stage: Stage = Stage.REVIEW,
+        scope_hint: str | None = None,
+    ) -> TicketTask:
+        task = _make_ticket_task(
+            ticket_id=ticket_id,
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            stage=stage,
+            scope_hint=scope_hint,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        return task
+
+    def _clients(self, tmp_path: Path) -> dict[str, ClientConfig]:
+        return {
+            "test-client": ClientConfig(name="test-client", workspace_path=tmp_path)
+        }
+
+    def _set_ahead(self, monkeypatch: pytest.MonkeyPatch, *, ahead: int | None) -> None:
+        """Stub the git-level commits-ahead probe at its consumption point.
+
+        ``review_gates`` imports ``commits_ahead_of_default`` at module top, so
+        the binding that must be patched is the one in
+        ``cw.dispatch.review_gates`` -- not the defining module.
+        """
+        from cw.dispatch import review_gates as rg_mod
+
+        monkeypatch.setattr(rg_mod, "commits_ahead_of_default", lambda _p, _b: ahead)
+
+    def _set_staleness(self, monkeypatch: pytest.MonkeyPatch, *, stale: bool) -> None:
+        from cw.dispatch import review_gates as rg_mod
+
+        monkeypatch.setattr(
+            rg_mod, "has_overlapping_branch_staleness", lambda _p, _b: stale
+        )
+
+    # -- predicate --------------------------------------------------------
+
+    def test_zero_commits_ahead_gates(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.dispatch.review_gates import _should_gate_for_empty_diff
+
+        self._set_ahead(monkeypatch, ahead=0)
+        task = self._make_running_task("EDG-P1", stage=Stage.REVIEW)
+
+        assert _should_gate_for_empty_diff(task, self._clients(tmp_path)) is True
+
+    def test_positive_commit_count_does_not_gate(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from cw.dispatch.review_gates import _should_gate_for_empty_diff
+
+        self._set_ahead(monkeypatch, ahead=3)
+        task = self._make_running_task("EDG-P2", stage=Stage.REVIEW)
+
+        assert _should_gate_for_empty_diff(task, self._clients(tmp_path)) is False
+
+    def test_unmeasurable_count_does_not_gate(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``None`` is "unmeasurable", never "empty" -- the fail-open contract."""
+        from cw.dispatch.review_gates import _should_gate_for_empty_diff
+
+        self._set_ahead(monkeypatch, ahead=None)
+        task = self._make_running_task("EDG-P3", stage=Stage.REVIEW)
+
+        assert _should_gate_for_empty_diff(task, self._clients(tmp_path)) is False
+
+    def test_unknown_client_fails_open(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No ClientConfig means no authoritative default_branch to measure
+        against -- guessing "main" would park rows on every other client."""
+        from cw.dispatch.review_gates import _should_gate_for_empty_diff
+
+        self._set_ahead(monkeypatch, ahead=0)
+        task = self._make_running_task("EDG-P4", stage=Stage.REVIEW)
+
+        assert _should_gate_for_empty_diff(task, {}) is False
+
+    # -- park helper ------------------------------------------------------
+
+    def test_park_stamps_status_disposition_and_event(
+        self,
+        tmp_dispatch_dirs: Path,
+        capture_events: Callable[..., list[CapturedEvent]],
+    ) -> None:
+        from cw.dev_queue import EMPTY_DIFF_GATE_DISPOSITION
+        from cw.dispatch.review_gates import _park_empty_diff_gate
+
+        attention = capture_events(
+            "cw.dispatch.review_gates", OrchestratorEventType.SESSION_NEEDS_ATTENTION
+        )
+        task = self._make_running_task("EDG-K1", stage=Stage.REVIEW)
+        task.session_id = "sess-edg-k1"
+
+        _park_empty_diff_gate(task)
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == EMPTY_DIFF_GATE_DISPOSITION
+        assert task.disposition == "empty_diff_gate"
+
+        assert len(attention) == 1
+        _event_type, payload, correlation_id = attention[0]
+        assert payload["paused_status"] == "empty_diff_gate"
+        # gate-class park: breadcrumbs stays "" per the #1729 convention
+        assert payload["breadcrumbs"] == ""
+        assert payload["ticket_id"] == "EDG-K1"
+        assert correlation_id == "EDG-K1"
+
+    def test_gate_disposition_excluded_from_hold_dispositions(self) -> None:
+        """An empty-diff park clears by pushing real commits (or closing the
+        ticket), not by an operator saying "proceed anyway" -- and membership
+        would make it eligible for concierge's false-park auto-requeue, which
+        would spin an empty branch straight back through the pipeline."""
+        from cw.dev_queue import EMPTY_DIFF_GATE_DISPOSITION, HOLD_DISPOSITIONS
+
+        assert EMPTY_DIFF_GATE_DISPOSITION not in HOLD_DISPOSITIONS
+
+    def test_gate_reason_is_distinct_from_the_status_literal(self) -> None:
+        """The mechanical gate's paused_status and the producer-reported status
+        deliberately do NOT share a literal, or the gate-class park would
+        collide with BREADCRUMB_ELIGIBLE_PAUSED_STATUSES (#1870)."""
+        from cw.dispatch import BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+        from cw.dispatch.review_gates import _EMPTY_DIFF_GATE_REASON
+
+        assert _EMPTY_DIFF_GATE_REASON == "empty_diff_gate"
+        assert _EMPTY_DIFF_GATE_REASON != "empty_diff_blocked"
+        assert _EMPTY_DIFF_GATE_REASON not in BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+        assert "empty_diff_blocked" in BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+
+    # -- routing / ordering ----------------------------------------------
+
+    def test_scope_gated_approval_site_parks_ahead_of_staleness(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Rule 1 (#1870 incident shape): the row parked at the approval gate
+        asking a human to approve an empty diff. The empty-diff gate outranks
+        the staleness gate -- both fire, empty-diff wins."""
+        from cw.dev_queue import EMPTY_DIFF_GATE_DISPOSITION
+        from cw.dispatch import apply_staged_decision
+
+        self._set_ahead(monkeypatch, ahead=0)
+        self._set_staleness(monkeypatch, stale=True)
+
+        task = self._make_running_task("EDG-R1", stage=Stage.REVIEW)
+        last_result: dict[str, object] = {
+            "status": "review_pending_approval",
+            "scope": {"tier": "large"},
+        }
+        apply_staged_decision(
+            task, "review_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == EMPTY_DIFF_GATE_DISPOSITION
+        assert task.disposition != "branch_behind_main"
+        assert task.disposition != "review_pending_approval"
+        assert task.stage == Stage.REVIEW
+
+    def test_stage_success_site_parks_ahead_of_staleness(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Rule 3's chain: empty-diff is the first elif rung."""
+        from cw.dev_queue import EMPTY_DIFF_GATE_DISPOSITION
+        from cw.dispatch import apply_staged_decision
+
+        self._set_ahead(monkeypatch, ahead=0)
+        self._set_staleness(monkeypatch, stale=True)
+
+        task = self._make_running_task("EDG-R2", stage=Stage.REVIEW)
+        apply_staged_decision(
+            task,
+            "stage_complete",
+            {"status": "stage_complete"},
+            self._clients(tmp_path),
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == EMPTY_DIFF_GATE_DISPOSITION
+        assert task.disposition != "branch_behind_main"
+        assert task.stage == Stage.REVIEW
+
+    def test_stage_walk_site_parks_ahead_of_staleness(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The multi-hop stage walk stops at its REVIEW rung on empty-diff."""
+        from cw.dev_queue import EMPTY_DIFF_GATE_DISPOSITION
+        from cw.dispatch import apply_staged_decision
+
+        self._set_ahead(monkeypatch, ahead=0)
+        self._set_staleness(monkeypatch, stale=True)
+
+        task = self._make_running_task("EDG-R3", stage=Stage.IMPL)
+        task.session_id = "sess-edg-r3"
+        apply_staged_decision(
+            task,
+            "blocked",
+            {"status": "blocked", "stage_reached": "stage4b_pr_create"},
+            self._clients(tmp_path),
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == EMPTY_DIFF_GATE_DISPOSITION
+        assert task.stage == Stage.REVIEW
+
+    def test_impl_stage_empty_diff_is_not_gated(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """REVIEW-scoped, mirroring all five sibling gates: an IMPL completion
+        whose branch is not yet pushed must not be parked here."""
+        from cw.dispatch import apply_staged_decision
+
+        self._set_ahead(monkeypatch, ahead=0)
+
+        task = self._make_running_task("EDG-R4", stage=Stage.IMPL)
+        apply_staged_decision(
+            task,
+            "stage_complete",
+            {"status": "stage_complete"},
+            self._clients(tmp_path),
+        )
+
+        assert task.disposition != "empty_diff_gate"
+        assert task.stage == Stage.REVIEW  # advanced IMPL->REVIEW unattended
+
+    def test_non_empty_branch_still_advances(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression guard: an ordinary branch is untouched by this gate."""
+        from cw.dispatch import apply_staged_decision
+
+        self._set_ahead(monkeypatch, ahead=7)
+        self._set_staleness(monkeypatch, stale=False)
+
+        task = self._make_running_task("EDG-R5", stage=Stage.REVIEW)
+        last_result: dict[str, object] = {
+            "status": "review_pending_approval",
+            "scope": {"tier": "small"},
+            "review": {"agents_run": 2},
+        }
+        apply_staged_decision(
+            task, "review_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.disposition != "empty_diff_gate"
+        assert task.stage == Stage.FINALIZE
+
+
+# ---------------------------------------------------------------------------
+# TestReviewHealthAgentsRunGate (#1870)
+# ---------------------------------------------------------------------------
+
+
+class TestReviewHealthAgentsRunGate:
+    """#1870: ``review.agents_run == 0`` gates at the *mandatory* review-health
+    gate, not only inside the opt-in ``auto_approve_clean_review`` recipe.
+
+    The observed incident sailed a ``recommendation="PROCEED"`` sentinel with
+    zero reviewer agents straight past ``_should_gate_for_review_health``.
+    """
+
+    def _clients(self, tmp_path: Path) -> dict[str, ClientConfig]:
+        return {
+            "test-client": ClientConfig(name="test-client", workspace_path=tmp_path)
+        }
+
+    def _make_running_task(self, ticket_id: str) -> TicketTask:
+        task = _make_ticket_task(
+            ticket_id=ticket_id,
+            client="test-client",
+            status=QueueItemStatus.RUNNING,
+            stage=Stage.REVIEW,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        return task
+
+    def test_zero_agents_run_gates_despite_proceed(self) -> None:
+        from cw.dispatch.review_gates import _should_gate_for_review_health
+
+        last_result: dict[str, object] = {
+            "health": {"recommendation": "PROCEED", "any_incomplete_risk": False},
+            "review": {"must_fix_initial": 0, "should_fix": 0, "agents_run": 0},
+        }
+
+        assert _should_gate_for_review_health(last_result) is True
+
+    def test_missing_agents_run_key_gates(self) -> None:
+        """A pre-v5 payload's review block omits agents_run; the schema default
+        is 0, so it is treated as "no reviewer ran" -- park, don't ship."""
+        from cw.dispatch.review_gates import _should_gate_for_review_health
+
+        last_result: dict[str, object] = {
+            "health": {"recommendation": "PROCEED", "any_incomplete_risk": False},
+            "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+        }
+
+        assert _should_gate_for_review_health(last_result) is True
+
+    def test_positive_agents_run_with_proceed_does_not_gate(self) -> None:
+        from cw.dispatch.review_gates import _should_gate_for_review_health
+
+        last_result: dict[str, object] = {
+            "health": {"recommendation": "PROCEED", "any_incomplete_risk": False},
+            "review": {"agents_run": 2},
+        }
+
+        assert _should_gate_for_review_health(last_result) is False
+
+    def test_absent_review_block_fails_open(self) -> None:
+        """No review block at all is "unmeasurable", not "zero" -- the same
+        fail-open shape ``_resolve_health_recommendation`` already uses. Every
+        pre-existing routing path that passes a bare status dict must keep
+        advancing exactly as before."""
+        from cw.dispatch.review_gates import _should_gate_for_review_health
+
+        assert _should_gate_for_review_health({"status": "stage_complete"}) is False
+        assert _should_gate_for_review_health(None) is False
+        assert _should_gate_for_review_health({"review": "nonsense"}) is False
+
+    def test_non_int_agents_run_fails_open(self) -> None:
+        """A malformed agents_run is unmeasurable, not zero. ``False`` is
+        called out explicitly: bool is an int subclass, so an unguarded
+        isinstance check would read it as 0 and park the row."""
+        from cw.dispatch.review_gates import (
+            _resolve_review_agents_run,
+            _should_gate_for_review_health,
+        )
+
+        for bad in ("0", None, False, 1.5):
+            last_result: dict[str, object] = {
+                "health": {"recommendation": "PROCEED"},
+                "review": {"agents_run": bad},
+            }
+            assert _resolve_review_agents_run(last_result) is None
+            assert _should_gate_for_review_health(last_result) is False
+
+    def test_degraded_recommendation_still_gates_with_agents(self) -> None:
+        """The pre-existing #1702 arm is untouched by the new disjunct."""
+        from cw.dispatch.review_gates import _should_gate_for_review_health
+
+        last_result: dict[str, object] = {
+            "health": {"recommendation": "EXIT_FOR_HUMAN_REVIEW"},
+            "review": {"agents_run": 3},
+        }
+
+        assert _should_gate_for_review_health(last_result) is True
+
+    def test_zero_agents_run_parks_through_routing(
+        self,
+        tmp_dispatch_dirs: Path,
+        tmp_path: Path,
+    ) -> None:
+        """End-to-end at Rule 1: the incident's exact sentinel shape."""
+        from cw.dispatch import apply_staged_decision
+
+        task = self._make_running_task("RHA-1")
+        last_result: dict[str, object] = {
+            "status": "review_pending_approval",
+            "scope": {"tier": "small"},
+            "health": {"recommendation": "PROCEED"},
+            "review": {"agents_run": 0},
+        }
+        apply_staged_decision(
+            task, "review_pending_approval", last_result, self._clients(tmp_path)
+        )
+
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "review_health_gate"
+        assert task.stage == Stage.REVIEW
 
 
 # ---------------------------------------------------------------------------

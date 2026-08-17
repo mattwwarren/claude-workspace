@@ -83,6 +83,10 @@ _WAIT_STATUS_EXIT: dict[str, int] = {
     "merge_pending": _WAIT_EXIT_BLOCKED,
     "scope_exceeded": _WAIT_EXIT_FAILED,
     "forbidden_area": _WAIT_EXIT_FAILED,
+    # #1870: an empty branch needs a human to push commits or close the ticket,
+    # so it maps to BLOCKED (matching the dispatch gate's BLOCKED_ON_USER park)
+    # rather than FAILED — nothing errored, there is simply nothing there.
+    "empty_diff_blocked": _WAIT_EXIT_BLOCKED,
 }
 
 

@@ -48,6 +48,7 @@ from tests._reconcile_helpers import (
     SCOPE_GUARD_FILES,
     SCOPE_GUARD_LINES,
     _make_stale_base_repo,
+    _scope_guard_git,
 )
 from tests.conftest import (
     _make_debt_record,
@@ -2093,6 +2094,117 @@ class TestCleanReviewScopeMeasurement:
         assert result.health.lowest_agent_confidence == "HIGH"
         assert result.health.any_incomplete_risk is False
         assert result.health.recommendation == "PROCEED"
+
+
+# ---------------------------------------------------------------------------
+# #1870 — a measured-empty clean review exits empty_diff_blocked, not
+# stage_complete
+# ---------------------------------------------------------------------------
+
+
+_EMPTY_DIFF_BRANCH = "dev/1870-empty"
+
+
+def _make_empty_diff_repo(make_git_repo: Callable[..., Path], name: str) -> Path:
+    """Repo checked out on a branch carrying no commits of its own.
+
+    Deliberately a real repo rather than a stubbed ``compute_branch_diff_scope``:
+    the distinction this ticket turns on is "measured 0/0" versus "unmeasurable"
+    (``None``), and only a real measurement proves the branch reaches the former.
+    """
+    repo = make_git_repo(name)
+    _scope_guard_git(repo, "remote", "add", "origin", str(repo))
+    _scope_guard_git(repo, "fetch", "origin", "main")
+    _scope_guard_git(repo, "checkout", "-b", _EMPTY_DIFF_BRANCH)
+    return repo
+
+
+class TestEmptyDiffCleanReview:
+    def test_measured_empty_diff_blocks_instead_of_completing(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """#1870: a clean review over a branch with nothing on it is not a pass."""
+        from cw.auto_dev_result import EMPTY_DIFF_BLOCKER_REASON
+
+        worktree = _make_empty_diff_repo(make_git_repo, "wt-verdict-empty")
+        doc = _make_reviewer_doc(_make_finding(severity="SHOULD_FIX"))
+
+        result, verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-empty-diff",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+
+        assert result.status == "empty_diff_blocked"
+        assert result.stage_reached == "stage3_review"
+        assert result.scope.files == 0
+        assert result.scope.lines_actual == 0
+        assert result.branch == _EMPTY_DIFF_BRANCH
+        assert result.blocker is not None
+        assert result.blocker.reason == EMPTY_DIFF_BLOCKER_REASON
+        assert result.blocker.stage == "stage3_review"
+        assert _EMPTY_DIFF_BRANCH in result.blocker.details
+        # health must not vouch for a review that covered nothing
+        assert result.health.recommendation == "EXIT_FOR_HUMAN_REVIEW"
+        # the real verdict is preserved for the caller's rendering path, and
+        # review.agents_run keeps its true value rather than being zeroed
+        assert verdict is not None
+        assert result.review == verdict.review
+        assert result.review.agents_run == 1
+
+    def test_non_empty_clean_review_is_unaffected(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """Regression guard: a branch with real churn still exits stage_complete."""
+        worktree = _make_stale_base_repo(make_git_repo, "wt-verdict-nonempty")
+        doc = _make_reviewer_doc(_make_finding(severity="SHOULD_FIX"))
+
+        result, _verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-nonempty-diff",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+
+        assert result.status == "stage_complete"
+        assert result.blocker is None
+        assert result.scope.files == SCOPE_GUARD_FILES
+
+    def test_unmeasurable_worktree_is_not_treated_as_empty(
+        self, make_git_repo: Callable[..., Path]
+    ) -> None:
+        """``None`` from compute_branch_diff_scope means "could not measure",
+        never "measured zero" -- it must keep its pre-#1870 stage_complete
+        fallback, warning included, rather than being parked."""
+        worktree = make_git_repo("wt-verdict-unmeasurable-empty")
+        doc = _make_reviewer_doc(_make_finding(severity="SHOULD_FIX"))
+
+        result, _verdict = synthesize_codex_review_result(
+            task=_task(),
+            worktree=worktree,
+            documents=[doc],
+            failures=[],
+            diff=_make_diff(),
+            reviewed_sha="sha",
+            session_id="s-unmeasurable-empty",
+            default_branch="main",
+            fix_loop_enabled=False,
+        )
+
+        assert result.status == "stage_complete"
+        assert result.scope.files == 0
+        assert result.scope.lines_actual == 0
 
 
 # ---------------------------------------------------------------------------
