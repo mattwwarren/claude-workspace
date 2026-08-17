@@ -3365,7 +3365,7 @@ class TestPriorAttemptsSummary:
         with unittest.mock.patch(
             "cw.spawn.load_state", side_effect=OSError("disk full")
         ):
-            result = _collect_prior_attempts_summary("838-H")
+            result = _collect_prior_attempts_summary("838-H", client="test-client")
 
         assert result == []
 
@@ -3416,3 +3416,236 @@ class TestPriorAttemptsSummary:
         summaries = context["world_state_snapshot"]["prior_attempts_summary"]
         assert len(summaries) == 1
         assert len(summaries[0]["blocker_details"]) == 500
+
+    def test_cross_client_same_ticket_number_not_leaked(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """#1839: two clients dispatching the same ticket number must not
+
+        cross-contaminate prior_attempts_summary. Seeds a TIMED_OUT session
+        for "definitely-not-digimon"/47 (foreign-codebase marker
+        "ArcSkeleton") and one for "review-bingo"/47 (distinct marker), then
+        dispatches review-bingo/47 and asserts only review-bingo's own prior
+        attempt appears -- not just a count of 1, but the *right* entry.
+        """
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path, name="review-bingo")
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-1839-review-bingo")
+
+        _seed_completed_session(
+            tmp_path,
+            tmp_config_dir,
+            ticket_id="47",
+            client="definitely-not-digimon",
+            status=SessionStatus.TIMED_OUT,
+            last_result={
+                "status": "blocked",
+                "stage_reached": "stage2_impl",
+                "blocker": {
+                    "stage": "s2",
+                    "reason": "impl_failed",
+                    "details": "ArcSkeleton",
+                },
+                "friction_highlights": [],
+            },
+        )
+        _seed_completed_session(
+            tmp_path,
+            tmp_config_dir,
+            ticket_id="47",
+            client="review-bingo",
+            status=SessionStatus.TIMED_OUT,
+            last_result={
+                "status": "blocked",
+                "stage_reached": "stage2_impl",
+                "blocker": {
+                    "stage": "s2",
+                    "reason": "impl_failed",
+                    "details": "bingo card render mismatch",
+                },
+                "friction_highlights": [],
+            },
+        )
+        task = _make_pending_task(ticket_id="47", client="review-bingo", attempts=1)
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev 47 --headless",
+            label="auto-dev/47",
+            native_daemon=daemon,
+            ticket_id="47",
+            headless=True,
+            task=task,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        summaries = context["world_state_snapshot"]["prior_attempts_summary"]
+        assert len(summaries) == 1
+        assert summaries[0]["blocker_details"] == "bingo card render mismatch"
+        assert all(s["blocker_details"] != "ArcSkeleton" for s in summaries)
+
+    def test_cross_client_same_ticket_number_not_leaked_symmetric(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """#1839 symmetric case: dispatching the *other* client on the same
+
+        ticket number must see only its own prior attempt. Guards against an
+        off-by-one/inverted-condition fix that happens to pass the
+        review-bingo-direction test by accident.
+        """
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path, name="definitely-not-digimon")
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-1839-digimon")
+
+        _seed_completed_session(
+            tmp_path,
+            tmp_config_dir,
+            ticket_id="47",
+            client="definitely-not-digimon",
+            status=SessionStatus.TIMED_OUT,
+            last_result={
+                "status": "blocked",
+                "stage_reached": "stage2_impl",
+                "blocker": {
+                    "stage": "s2",
+                    "reason": "impl_failed",
+                    "details": "ArcSkeleton",
+                },
+                "friction_highlights": [],
+            },
+        )
+        _seed_completed_session(
+            tmp_path,
+            tmp_config_dir,
+            ticket_id="47",
+            client="review-bingo",
+            status=SessionStatus.TIMED_OUT,
+            last_result={
+                "status": "blocked",
+                "stage_reached": "stage2_impl",
+                "blocker": {
+                    "stage": "s2",
+                    "reason": "impl_failed",
+                    "details": "bingo card render mismatch",
+                },
+                "friction_highlights": [],
+            },
+        )
+        task = _make_pending_task(
+            ticket_id="47", client="definitely-not-digimon", attempts=1
+        )
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev 47 --headless",
+            label="auto-dev/47",
+            native_daemon=daemon,
+            ticket_id="47",
+            headless=True,
+            task=task,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        summaries = context["world_state_snapshot"]["prior_attempts_summary"]
+        assert len(summaries) == 1
+        assert summaries[0]["blocker_details"] == "ArcSkeleton"
+        assert all(
+            s["blocker_details"] != "bingo card render mismatch" for s in summaries
+        )
+
+    def test_cross_client_filter_composes_with_chronological_sort(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        make_git_repo: Callable[[str], Path],
+    ) -> None:
+        """#1839: client filter composes correctly with the existing
+
+        completed_at sort, not just with a single-entry case. Seeds 2
+        review-bingo sessions (T0, T2) and 1 other-client session for the
+        same ticket number interleaved between them (T1); asserts the
+        returned list has length 2 (not 3), both entries belong to
+        review-bingo, and they remain sorted ascending.
+        """
+        from cw.spawn import spawn_create_impl
+
+        client = _make_client(tmp_path, name="review-bingo")
+        daemon = FakeNativeDaemonClient()
+        worktree = make_git_repo("wt-1839-sorted-filtered")
+
+        t0 = datetime(2026, 1, 1, 10, 0, 0, tzinfo=UTC)
+        t1 = datetime(2026, 1, 1, 11, 0, 0, tzinfo=UTC)
+        t2 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+
+        _seed_completed_session(
+            tmp_path,
+            tmp_config_dir,
+            ticket_id="47",
+            client="review-bingo",
+            status=SessionStatus.TIMED_OUT,
+            last_result={
+                "status": "blocked",
+                "stage_reached": "stage1_plan",
+                "blocker": {"stage": "s1", "reason": "rb-first", "details": ""},
+                "friction_highlights": [],
+            },
+            completed_at=t0,
+        )
+        _seed_completed_session(
+            tmp_path,
+            tmp_config_dir,
+            ticket_id="47",
+            client="other-client",
+            status=SessionStatus.TIMED_OUT,
+            last_result={
+                "status": "blocked",
+                "stage_reached": "stage2_impl",
+                "blocker": {"stage": "s2", "reason": "other-attempt", "details": ""},
+                "friction_highlights": [],
+            },
+            completed_at=t1,
+        )
+        _seed_completed_session(
+            tmp_path,
+            tmp_config_dir,
+            ticket_id="47",
+            client="review-bingo",
+            status=SessionStatus.TIMED_OUT,
+            last_result={
+                "status": "blocked",
+                "stage_reached": "stage3_review",
+                "blocker": {"stage": "s3", "reason": "rb-second", "details": ""},
+                "friction_highlights": [],
+            },
+            completed_at=t2,
+        )
+        task = _make_pending_task(ticket_id="47", client="review-bingo", attempts=2)
+
+        spawn_create_impl(
+            client=client,
+            worktree=worktree,
+            prompt="/auto-dev 47 --headless",
+            label="auto-dev/47",
+            native_daemon=daemon,
+            ticket_id="47",
+            headless=True,
+            task=task,
+        )
+
+        context = json.loads((worktree / ".claude" / "cw-context.json").read_text())
+        summaries = context["world_state_snapshot"]["prior_attempts_summary"]
+        assert len(summaries) == 2
+        assert summaries[0]["blocker_reason"] == "rb-first"
+        assert summaries[1]["blocker_reason"] == "rb-second"
