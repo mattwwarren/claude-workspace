@@ -564,9 +564,9 @@ def test_deferred_claim_independently_reproposable_next_scan() -> None:
     )
     assert (
         "A stub that survives past its immediately-next scan without being "
-        "resolved is a defect in this mechanism, not an accepted steady state."
-        in window
+        "resolved is a defect in this mechanism, not an accepted steady state" in window
     )
+    assert "the pre-branch stub check below hard-blocks the round" in window
 
 
 def test_pm_settled_items_deferred_carveout_stated() -> None:
