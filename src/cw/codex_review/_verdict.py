@@ -31,6 +31,7 @@ from cw.codex_review._const import (
 from cw.executor_diagnostics import append_diagnostics_pointer
 from cw.local_runner import _SCHEMA_VERSION, make_blocked, resolve_tier
 from cw.review_adjudication import apply_voided_suppression
+from cw.review_finding_dispositions import suppress_adjudicated_findings
 from cw.review_findings import consolidate_verdict
 from cw.worktree import compute_branch_diff_scope
 
@@ -41,6 +42,7 @@ if TYPE_CHECKING:
     from cw.codex_review._capability import _CodexFilesystemCapability
     from cw.models import TicketTask
     from cw.review_adjudication import VoidedFinding
+    from cw.review_finding_dispositions import FindingDisposition
     from cw.review_findings import (
         AcceptedFinding,
         AgentSpecStatus,
@@ -248,6 +250,7 @@ def synthesize_codex_review_result(
     capability: _CodexFilesystemCapability | None = None,
     agent_spec_status: list[AgentSpecStatus] | None = None,
     voided_findings: list[VoidedFinding] | None = None,
+    finding_dispositions: dict[str, FindingDisposition] | None = None,
 ) -> tuple[AutoDevResult, ReviewVerdict | None]:
     """Map consolidated review documents to a typed AutoDevResult.
 
@@ -316,6 +319,15 @@ def synthesize_codex_review_result(
     function, and a suppression applied at only one would let the same voided
     finding re-park the run from the other.
 
+    ``finding_dispositions`` (#1838) is the cross-round adjudication ledger,
+    and is applied the same way and in the same place as ``voided_findings``
+    directly above — a matching REJECTED entry is stamped
+    ``disposition="rejected"`` before the disposition table is consulted. It is
+    a SECOND suppression mechanism, not a replacement: a void is
+    evidence-anchored and lapses when the code moves, an adjudication is
+    fingerprint-keyed and does not. Applied here for the identical reason —
+    both call sites reach the blocking check through this function.
+
     ``fix_loop_enabled`` (#1705) is the caller's own already-known fix-loop
     state, threaded only as far as :func:`render_verdict_comment` on the
     blocking branch — it discriminates a fix-loop-disabled single pass from a
@@ -353,6 +365,13 @@ def synthesize_codex_review_result(
     # outcome is already stamped on `verdict.accepted`.
     verdict, _voided_adjudications = apply_voided_suppression(
         verdict, voided_findings or [], ticket_id=task.ticket_id
+    )
+    # #1838: the second suppression seam, applied in the same window and for
+    # the same reason. Ordered AFTER the void pass deliberately — it recomputes
+    # must_fix from the stamped dispositions, so it composes with whatever the
+    # void pass already suppressed rather than resurrecting it.
+    verdict = suppress_adjudicated_findings(
+        verdict, finding_dispositions or {}, ticket_id=task.ticket_id
     )
     if verdict.blocking:
         blocked = make_codex_blocked(

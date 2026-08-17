@@ -46,7 +46,10 @@ def run_review(
     :func:`render_verdict_comment` on the blocking branch.
 
     The prepared pass's ``voided_findings`` (#1814) are forwarded to the same
-    function, which applies them before deciding whether the pass blocks.
+    function, which applies them before deciding whether the pass blocks. Its
+    ``finding_dispositions`` (#1838) ride the same hop, for the same reason —
+    the prepared pass already merged the durable queue-row ledger with the
+    ticket thread's marker, so this only has to thread the result.
     """
     prepared = _prepare_review_pass(
         task, worktree, default_branch, runner=runner, session_id=session_id
@@ -74,4 +77,5 @@ def run_review(
         capability=prepared.capability,
         agent_spec_status=prepared.agent_spec_status,
         voided_findings=prepared.voided_findings,
+        finding_dispositions=prepared.finding_dispositions,
     )

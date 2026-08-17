@@ -50,6 +50,11 @@ from cw.gh import FETCH_COMMENTS_TIMEOUT, fetch_issue_comments
 from cw.local_runner import resolve_tier
 from cw.models import CONTEXT_JSON_RELATIVE_PATH, HOOK_CONTEXT_RELATIVE_PATH
 from cw.review_adjudication import parse_voided_findings_block
+from cw.review_finding_dispositions import (
+    merge_finding_dispositions,
+    parse_finding_disposition_block,
+    split_disposition_key,
+)
 from cw.review_findings import AgentSpecStatus, ReviewerFindingsDocument
 from cw.tracker import TRACKER_GITHUB_ISSUES, resolve_tracker
 
@@ -60,6 +65,7 @@ if TYPE_CHECKING:
     from cw.codex_runner import CodexRunner
     from cw.models import TicketTask
     from cw.review_adjudication import VoidedFinding
+    from cw.review_finding_dispositions import FindingDisposition
     from cw.review_findings import AgentSpecSource, CapturedDiff, Finding
 
 _log = logging.getLogger(__name__)
@@ -188,6 +194,11 @@ _OUTPUT_SPEC_PRECEDENCE = (
 # The delta-mode-only marker, named for the same reason the two capability
 # markers above are: the prompt text and its regression test cannot drift.
 _DELTA_MODE_MARKER = "the diff above is a DELTA, not the full pull request"
+
+# #1838: the cross-round adjudication block's header, named for the same reason
+# the markers above are — the prompt text and its regression tests share one
+# literal so they cannot drift apart.
+_ADJUDICATED_HEADER = "## Previously Adjudicated Findings"
 
 _DELTA_MODE_INSTRUCTIONS = (
     "## Delta Review (#1837)\n"
@@ -666,6 +677,41 @@ def _load_voided_findings(
     return parse_voided_findings_block(bodies)
 
 
+def _load_finding_dispositions(
+    worktree: Path,
+    ticket_id: str,
+    *,
+    comments: list[dict[str, object]] | None | _CommentsNotProvided = (
+        _COMMENTS_NOT_PROVIDED
+    ),
+) -> dict[str, FindingDisposition]:
+    """Parse the operator's cross-round finding adjudications off the ticket.
+
+    Sibling of :func:`_load_voided_findings` in every respect that matters —
+    same tracker gate, same shared-fetch parameter, same degrade-to-empty-and-
+    never-raise contract — but reading the ``REVIEW-FINDING-DISPOSITIONS``
+    marker (#1838) rather than ``VOIDED-REVIEW-FINDINGS`` (#1814).
+
+    Kept a separate loader rather than folded into the voided one because the
+    two records are separate contracts with separate identities and lifetimes:
+    a void lapses when the code moves, an adjudication does not. Merging the
+    reads would couple two grammars that must be free to diverge.
+
+    Returns only what the CURRENT comment thread carries. The durable half of
+    the ledger lives on ``TicketTask.finding_dispositions``, and
+    :func:`_prepare_review_pass` merges the two — so a degraded fetch costs the
+    pass nothing it already knew.
+    """
+    if isinstance(comments, _CommentsNotProvided):
+        comments = _fetch_ticket_comments(worktree, ticket_id)
+    if not comments:
+        return {}
+    bodies = [
+        body for comment in comments if isinstance(body := comment.get("body"), str)
+    ]
+    return parse_finding_disposition_block(bodies)
+
+
 def _load_pending_operator_comment_marker(worktree: Path) -> bool:
     """Read ``queue_metadata.pending_operator_comment`` from the hook context.
 
@@ -902,6 +948,50 @@ def _render_prior_open_findings(findings: list[Finding]) -> str:
     return "\n".join(lines)
 
 
+def _render_adjudicated_findings_block(
+    ledger: dict[str, FindingDisposition],
+) -> str | None:
+    """Render the cross-round "do not re-raise" block (#1838, R4a + R5).
+
+    ``None`` for an empty ledger, following the gated-on-non-empty convention
+    :func:`_render_lint_grounding_block` and :func:`_render_sensitive_block`
+    already use — so a pass with no adjudication history produces a
+    byte-identical prompt to the pre-#1838 one.
+
+    Distinct from :func:`_render_prior_open_findings`, its nearest sibling, on
+    exactly the axis that matters: that block is *informational* ("re-report
+    any that are still present"), because those findings are unresolved. This
+    one is *binding*, because an operator already decided them. Collapsing the
+    two would tell a reviewer to re-report a settled finding, which is the bug
+    this ticket exists to fix.
+
+    Both outcomes render: an ``ACCEPTED`` entry tells the reviewer the finding
+    was upheld and needs no restating, which is as useful as knowing one was
+    rejected. Only ``REJECTED`` reaches the mechanical backstop in
+    ``review_finding_dispositions.suppress_adjudicated_findings``.
+    """
+    if not ledger:
+        return None
+    lines = [
+        _ADJUDICATED_HEADER,
+        "An operator already adjudicated each finding below on an earlier "
+        "review round, and that decision is BINDING. Do not re-raise one "
+        "unless the code at that location has changed since the recorded "
+        "date -- re-reporting a settled finding is noise, not a finding. If "
+        "you believe a rejection is now wrong, say so in the finding's "
+        "`consequence` field rather than re-filing it as MUST_FIX.",
+    ]
+    for key, entry in sorted(ledger.items()):
+        file, summary = split_disposition_key(key)
+        rationale = f" ({entry.rationale})" if entry.rationale else ""
+        lines.append(
+            f"- **{file}** — {summary} — previously adjudicated: "
+            f"{entry.outcome}, do not re-raise unless the code at this "
+            f"location changed{rationale}"
+        )
+    return "\n".join(lines)
+
+
 def _build_reviewer_prompt(
     role: str,
     *,
@@ -919,6 +1009,7 @@ def _build_reviewer_prompt(
     pending_operator_comment: bool = False,
     prior_open_findings: list[Finding] | None = None,
     delta_mode: bool = False,
+    adjudicated_findings: dict[str, FindingDisposition] | None = None,
 ) -> str:
     """Materialize one reviewer's full prompt, inlining every needed section.
 
@@ -945,6 +1036,11 @@ def _build_reviewer_prompt(
     pair: the MUST_FIX findings still open from earlier cycles, and the flag
     saying the inlined diff is a delta rather than the whole pull request.
     Both default off, so cycle 0's prompt is byte-identical to before.
+
+    *adjudicated_findings* (#1838) is the cross-round adjudication ledger — the
+    findings an operator already settled, which the reviewer is told outright
+    not to re-raise. Same safe-default convention as every kwarg above: ``None``
+    (or an empty ledger) leaves the prompt byte-identical to the pre-#1838 one.
     """
     parts = [
         f"# Reviewer Role: {role}",
@@ -979,6 +1075,8 @@ def _build_reviewer_prompt(
         parts.append(f"## Repo Lint Configuration\n{lint_grounding}")
     if sensitive_hits:
         parts.append(_render_sensitive_block(sensitive_hits))
+    if adjudicated_findings:
+        parts.append(_render_adjudicated_findings_block(adjudicated_findings) or "")
     if prior_open_findings:
         parts.append(_render_prior_open_findings(prior_open_findings))
     parts.append("## Changed Files\n" + "\n".join(changed_files))
@@ -1030,6 +1128,15 @@ class _ReviewPassInputs(NamedTuple):
     here anyway so the fetch happens once per pass, at the one place both
     ``run_review`` and the fix loop's per-cycle re-review already share.
 
+    ``finding_dispositions`` (#1838) is the cross-round adjudication ledger:
+    the durable ``TicketTask.finding_dispositions`` merged with whatever the
+    live comment thread's ``REVIEW-FINDING-DISPOSITIONS`` marker adds. Unlike
+    ``voided_findings`` it reaches BOTH ends — the reviewer prompt (so the
+    model is told not to re-raise) and post-synthesis suppression (so it does
+    not matter if the model ignores that). Merged here, at the one place
+    ``run_review`` and the fix loop's per-cycle re-review already share, so
+    both paths see the same ledger.
+
     ``delta_diff``/``delta_changed_files`` (#1837) are the fix-loop re-review
     pair: the diff between the previous reviewed head and this one, and its
     changed-path set. Both are ``None`` on cycle 0, which reviews the whole
@@ -1048,8 +1155,49 @@ class _ReviewPassInputs(NamedTuple):
     capability: _CodexFilesystemCapability
     agent_spec_status: list[AgentSpecStatus]
     voided_findings: list[VoidedFinding]
+    finding_dispositions: dict[str, FindingDisposition]
     delta_diff: CapturedDiff | None = None
     delta_changed_files: frozenset[str] | None = None
+
+
+def _merge_and_persist_finding_dispositions(
+    task: TicketTask,
+    worktree: Path,
+    *,
+    comments: list[dict[str, object]] | None | _CommentsNotProvided = (
+        _COMMENTS_NOT_PROVIDED
+    ),
+) -> dict[str, FindingDisposition]:
+    """Fold this pass's marker entries into *task*'s ledger, and persist them.
+
+    Two records, one answer (#1838). The tracker marker is the operator's INPUT
+    surface — hand-authored, live-fetched, and lost the moment a fetch degrades.
+    ``TicketTask.finding_dispositions`` is the durable record derived from it,
+    which survives the worktree teardown and regress/redispatch cycle a review
+    memory has to outlive. This merges the two and writes the delta back so the
+    NEXT round starts from what this one learned, even if the comment thread is
+    unreachable then.
+
+    The persistence write is skipped entirely when the thread carried no marker:
+    there is nothing new to record, and every review pass paying for a
+    dev-queue lock + read + write to store what is already stored would be a
+    real cost for no benefit.
+    """
+    parsed = _load_finding_dispositions(worktree, task.ticket_id, comments=comments)
+    merged = merge_finding_dispositions(task.finding_dispositions, parsed)
+    if parsed:
+        # Deferred import: cw.codex_background imports cw.codex_fix_loop, which
+        # imports this package — a module-level import here would close that
+        # cycle. Same shape as codex_background's own deferred cw.executor
+        # import (#1727). Sanctioned via pyproject's PLC0415 per-file ignore.
+        from cw.codex_background import _sync_finding_dispositions_to_running_task
+
+        _sync_finding_dispositions_to_running_task(
+            client_name=task.client,
+            ticket_id=task.ticket_id,
+            dispositions=parsed,
+        )
+    return merged
 
 
 def _prepare_review_pass(
@@ -1123,6 +1271,9 @@ def _prepare_review_pass(
     voided_findings = _load_voided_findings(
         worktree, task.ticket_id, comments=fetched_comments
     )
+    finding_dispositions = _merge_and_persist_finding_dispositions(
+        task, worktree, comments=fetched_comments
+    )
     ruff_lint_config = _load_ruff_lint_config(worktree)
     quality_gates_text = _load_claude_md_quality_gates(worktree)
     lint_grounding = _render_lint_grounding_block(
@@ -1162,6 +1313,7 @@ def _prepare_review_pass(
             pending_operator_comment=pending_operator_comment,
             prior_open_findings=prior_open_findings,
             delta_mode=delta_from_sha is not None,
+            adjudicated_findings=finding_dispositions,
         )
         for role in roles
     }
@@ -1173,6 +1325,7 @@ def _prepare_review_pass(
         capability=capability,
         agent_spec_status=[resolutions[role].status for role in roles],
         voided_findings=voided_findings,
+        finding_dispositions=finding_dispositions,
         delta_diff=delta_diff,
         delta_changed_files=delta_changed_files,
     )
