@@ -2004,7 +2004,7 @@ def test_cli_event_tail_follow_dedup_terminal(
     assert result.output.count("session.timed_out") == 1
 
 
-def test_cli_event_tail_dedup_terminal_legacy_producer_unaffected_by_renotify_marker_key(
+def test_cli_event_tail_dedup_terminal_legacy_producer_ignores_renotify_marker(
     tmp_events_dir: Path,
 ) -> None:
     """Widening _terminal_dedup_key to a 4-tuple doesn't change a legacy
