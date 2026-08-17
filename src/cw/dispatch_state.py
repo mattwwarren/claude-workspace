@@ -3,9 +3,10 @@
 The ``dispatch_state.json`` sidecar holds transient dispatch-loop coordination
 state — usage-limit backoff expiry, the fleet-wide gh-availability probe cache
 (RFC 0011 A5), the per-client main-checkout-drift attention latches (#1258),
-and a per-(client, ticket) marker recording an in-flight blocking review, so
+a per-(client, ticket) marker recording an in-flight blocking review, so
 ``cw dev-queue status``/``cw doctor`` can distinguish a dead dispatch loop from
-one legitimately busy (#1742).
+one legitimately busy (#1742), and the per-(client, ticket) open-PR probe cache
+backing the pre-dispatch stale-dispatch gate (#1862).
 Extracted from ``cw.config``; depends on ``cw.config`` for the state-dir
 accessors and the #1017 write guard, one-directional (``cw.config`` never
 imports this module).
@@ -91,11 +92,47 @@ class ExecutorBlockedMarker(NamedTuple):
     session_id: str
 
 
+class OpenPrProbeCache(NamedTuple):
+    """One per-(client, ticket) TTL-cached open-PR probe result (#1862).
+
+    Persisted in DISPATCH_STATE_FILE under the ``"open_pr_probe"`` key, one
+    entry per ``f"{client}/{ticket_id}"``. A NamedTuple, not a pydantic
+    BaseModel, for the same reason as :class:`AvailabilityProbeCache`:
+    transient, TTL-bounded runtime state with no durability or migration
+    contract -- the dispatch loop re-probes on every TTL expiry, so a shape
+    drift self-heals within one TTL window.
+
+    Per-ticket (like :class:`ExecutorBlockedMarker`) rather than fleet-wide
+    (like :class:`AvailabilityProbeCache`): the question it answers -- "does
+    *this* ticket's branch already have an open PR" -- is per-ticket by
+    construction.
+
+    Only *reliable* verdicts are cached. A transient ``gh`` failure or an
+    absent ``gh`` binary is never written here, so an unreliable reading can
+    never latch into a persisted false negative -- see
+    ``cw.dispatch.pr_gate.resolve_stale_pr_ticket_ids``.
+    """
+
+    probed_at: datetime
+    has_open_pr: bool
+
+
 def _executor_blocked_key(client: str, ticket_id: str) -> str:
     """Composite sidecar key for one (client, ticket) marker.
 
     Mirrors the ``f"{client}/{lane}"`` composite-key convention already used
     for ``ClientConcurrencyOverride.lanes``.
+    """
+    return f"{client}/{ticket_id}"
+
+
+def _open_pr_probe_key(client: str, ticket_id: str) -> str:
+    """Composite sidecar key for one (client, ticket) open-PR probe entry.
+
+    Same ``f"{client}/{ticket_id}"`` shape as :func:`_executor_blocked_key`,
+    kept as its own function rather than shared: the two sidecar keys index
+    independent dicts and are free to diverge without one silently reshaping
+    the other's on-disk layout.
     """
     return f"{client}/{ticket_id}"
 
@@ -506,5 +543,94 @@ def clear_all_executor_blocked_markers() -> None:
     except OSError:
         logger.warning(
             "dispatch_state: failed to clear executor_blocked markers at boot",
+            exc_info=True,
+        )
+
+
+def _parse_open_pr_probe_entry(entry: object) -> OpenPrProbeCache | None:
+    """Validate one raw ``"open_pr_probe"`` entry, or None when malformed.
+
+    Per-entry rather than all-or-nothing, on the same reasoning as
+    :func:`_parse_executor_blocked_entry`: many tickets share this key, so one
+    bad entry must not blind the reader to every valid sibling beside it (which
+    would silently re-probe the whole queue on every tick).
+    """
+    if not isinstance(entry, dict):
+        return None
+    probed_at = entry.get("probed_at")
+    has_open_pr = entry.get("has_open_pr")
+    if not isinstance(probed_at, str) or not isinstance(has_open_pr, bool):
+        return None
+    try:
+        parsed_probed_at = datetime.fromisoformat(probed_at)
+    except ValueError:
+        return None
+    return OpenPrProbeCache(probed_at=parsed_probed_at, has_open_pr=has_open_pr)
+
+
+def load_open_pr_probe_cache() -> dict[str, OpenPrProbeCache]:
+    """Load every per-ticket open-PR probe entry (#1862).
+
+    Returns ``{}`` when the file is absent, unreadable, malformed, or missing
+    the ``"open_pr_probe"`` key. Individual malformed entries are dropped
+    rather than raised on or poisoning their well-formed siblings.
+
+    TTL expiry is deliberately NOT applied here (unlike
+    :func:`load_usage_limited_until`, which drops a lapsed deadline): the TTL
+    window is a caller-side tuning knob, and the caller
+    (``cw.dispatch.pr_gate``) accepts a ``ttl_seconds`` override, so this
+    reader stays a plain deserializer.
+    """
+    path = DISPATCH_STATE_FILE
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    entries = raw.get("open_pr_probe")
+    if not isinstance(entries, dict):
+        return {}
+    cache: dict[str, OpenPrProbeCache] = {}
+    for key, entry in entries.items():
+        parsed = _parse_open_pr_probe_entry(entry)
+        if parsed is not None:
+            cache[key] = parsed
+    return cache
+
+
+def save_open_pr_probe_entry(
+    client: str, ticket_id: str, entry: OpenPrProbeCache
+) -> None:
+    """Record one per-ticket open-PR probe result (#1862).
+
+    Read-merge-writes the shared sidecar so the other keys are preserved rather
+    than clobbered (#1157), and merges into the existing ``"open_pr_probe"``
+    dict so concurrently-probed tickets keep their own entries. Silently
+    swallows write errors -- a failed persist just means the next tick re-probes
+    this one ticket (acceptable degradation: one extra ``gh pr list``, never a
+    wrong gating decision).
+    """
+    try:
+        refuse_real_state_write(DISPATCH_STATE_FILE)
+        DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with dispatch_state_lock():
+            payload = _load_dispatch_state_raw()
+            entries = payload.get("open_pr_probe")
+            if not isinstance(entries, dict):
+                entries = {}
+            entries[_open_pr_probe_key(client, ticket_id)] = {
+                "probed_at": entry.probed_at.isoformat(),
+                "has_open_pr": entry.has_open_pr,
+            }
+            payload["open_pr_probe"] = entries
+            atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
+    except OSError:
+        logger.warning(
+            "dispatch_state: failed to persist open_pr_probe entry (%s/%s)",
+            client,
+            ticket_id,
             exc_info=True,
         )
