@@ -26,8 +26,13 @@ Two hard contracts, both inherited from the sibling gate modules:
   ``_resolve_availability`` preflight probe already establishes.
 
 The per-ticket probe is TTL-cached in ``dispatch_state.json`` (see
-:class:`~cw.dispatch_state.OpenPrProbeCache`) so a 30-second tick cadence does
-not shell out to ``gh pr list`` once per PENDING ticket per tick.
+:class:`~cw.dispatch_state.OpenPrProbeCache`), so in **steady state** a
+30-second tick cadence does not re-shell ``gh pr list`` once per PENDING
+ticket per tick. That guarantee is steady-state only: on a cold cache (first
+tick after deploy, TTL expiry burst, or a large PLAN/IMPL PENDING backlog),
+``resolve_stale_pr_ticket_ids`` bounds its own worst-case cost per call via
+``_MAX_PROBES_PER_TICK`` below rather than probing an unbounded backlog
+serially in one call.
 """
 
 from __future__ import annotations
@@ -39,7 +44,7 @@ from typing import TYPE_CHECKING
 from cw.dispatch_state import (
     OpenPrProbeCache,
     load_open_pr_probe_cache,
-    save_open_pr_probe_entry,
+    save_open_pr_probe_entries,
 )
 from cw.gh import pr_exists_for_branch
 from cw.models import QueueItemStatus, Stage
@@ -58,6 +63,20 @@ _log = logging.getLogger("cw.dispatch")
 # safe to adjust without a schema change, since a shape/value drift self-heals
 # within one TTL window (see OpenPrProbeCache's docstring).
 _OPEN_PR_PROBE_TTL_SECONDS = 300
+
+# Cap on fresh `gh pr list` probes (cache misses/expiries) per
+# resolve_stale_pr_ticket_ids call (#1862 perf follow-up). Cache hits are
+# unbounded -- they cost no subprocess call -- only new probes are capped.
+# A cold cache with more candidates than this is probed incrementally across
+# ticks rather than serially in one call: each capped-out candidate is simply
+# left unprobed this call (never added to the stale set, so it claims
+# normally this tick) and is picked up on a later tick once earlier
+# candidates' entries land in the TTL cache. Internal tuning constant, no
+# external contract -- 20 * up to 10s (_PR_EXISTS_TIMEOUT) bounds one call to
+# a few minutes worst case, well inside the 30s tick cadence's tolerance for
+# an occasional slow tick without stalling the sequential per-client loop for
+# the many minutes an unbounded backlog could cost.
+_MAX_PROBES_PER_TICK = 20
 
 # The stages at which an open PR on this ticket's own branch means the dispatch
 # is stale. REVIEW and FINALIZE are deliberately excluded: a ticket at those
@@ -133,6 +152,9 @@ def resolve_stale_pr_ticket_ids(
     resolved_now = now if now is not None else datetime.now(UTC)
     cache = load_open_pr_probe_cache()
     stale: set[str] = set()
+    newly_probed: dict[str, OpenPrProbeCache] = {}
+    probes_used = 0
+    skipped_cap = 0
     for task in candidates:
         key = f"{client.name}/{task.ticket_id}"
         cached = cache.get(key)
@@ -143,18 +165,32 @@ def resolve_stale_pr_ticket_ids(
             if cached.has_open_pr:
                 stale.add(task.ticket_id)
             continue
+        if probes_used >= _MAX_PROBES_PER_TICK:
+            # Cap reached: leave this candidate unprobed rather than serially
+            # fanning out an unbounded number of gh subprocess calls. It
+            # claims normally this tick and is reconsidered next tick.
+            skipped_cap += 1
+            continue
+        probes_used += 1
         probed = _probe_open_pr(client, task.ticket_id)
         if probed is None:
             # Unreliable reading: fail open and do NOT cache it, so the next
             # tick re-probes instead of inheriting a persisted false negative.
             continue
-        save_open_pr_probe_entry(
-            client.name,
-            task.ticket_id,
-            OpenPrProbeCache(probed_at=resolved_now, has_open_pr=probed),
+        newly_probed[task.ticket_id] = OpenPrProbeCache(
+            probed_at=resolved_now, has_open_pr=probed
         )
         if probed:
             stale.add(task.ticket_id)
+    save_open_pr_probe_entries(client.name, newly_probed)
+    if skipped_cap:
+        _log.info(
+            "dispatch: open-PR gate hit its per-tick probe cap (%d) for %s; "
+            "%d candidate(s) left unprobed this tick, reconsidered next tick",
+            _MAX_PROBES_PER_TICK,
+            client.name,
+            skipped_cap,
+        )
     if stale:
         _log.info(
             "dispatch: open-PR gate holds %s task(s) for %s: %s",

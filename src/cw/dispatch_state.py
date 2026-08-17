@@ -601,18 +601,19 @@ def load_open_pr_probe_cache() -> dict[str, OpenPrProbeCache]:
     return cache
 
 
-def save_open_pr_probe_entry(
-    client: str, ticket_id: str, entry: OpenPrProbeCache
-) -> None:
-    """Record one per-ticket open-PR probe result (#1862).
+def _write_open_pr_probe_entries(keyed_entries: dict[str, OpenPrProbeCache]) -> None:
+    """Read-merge-write one or more ``"open_pr_probe"`` entries in a single lock.
 
-    Read-merge-writes the shared sidecar so the other keys are preserved rather
-    than clobbered (#1157), and merges into the existing ``"open_pr_probe"``
-    dict so concurrently-probed tickets keep their own entries. Silently
-    swallows write errors -- a failed persist just means the next tick re-probes
-    this one ticket (acceptable degradation: one extra ``gh pr list``, never a
-    wrong gating decision).
+    Shared by :func:`save_open_pr_probe_entry` (one entry) and
+    :func:`save_open_pr_probe_entries` (a batch) so a caller probing several
+    tickets in one pass pays one lock-acquire + full-file read + full-file
+    write instead of one per ticket (#1862 perf follow-up). Silently swallows
+    write errors -- a failed persist just means the next tick re-probes these
+    tickets (acceptable degradation: extra ``gh pr list`` calls, never a wrong
+    gating decision).
     """
+    if not keyed_entries:
+        return
     try:
         refuse_real_state_write(DISPATCH_STATE_FILE)
         DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -621,16 +622,50 @@ def save_open_pr_probe_entry(
             entries = payload.get("open_pr_probe")
             if not isinstance(entries, dict):
                 entries = {}
-            entries[_open_pr_probe_key(client, ticket_id)] = {
-                "probed_at": entry.probed_at.isoformat(),
-                "has_open_pr": entry.has_open_pr,
-            }
+            for key, entry in keyed_entries.items():
+                entries[key] = {
+                    "probed_at": entry.probed_at.isoformat(),
+                    "has_open_pr": entry.has_open_pr,
+                }
             payload["open_pr_probe"] = entries
             atomic_write_text(DISPATCH_STATE_FILE, json.dumps(payload))
     except OSError:
         logger.warning(
-            "dispatch_state: failed to persist open_pr_probe entry (%s/%s)",
-            client,
-            ticket_id,
+            "dispatch_state: failed to persist %d open_pr_probe entry/entries (%s)",
+            len(keyed_entries),
+            sorted(keyed_entries),
             exc_info=True,
         )
+
+
+def save_open_pr_probe_entry(
+    client: str, ticket_id: str, entry: OpenPrProbeCache
+) -> None:
+    """Record one per-ticket open-PR probe result (#1862).
+
+    Read-merge-writes the shared sidecar so the other keys are preserved rather
+    than clobbered (#1157), and merges into the existing ``"open_pr_probe"``
+    dict so concurrently-probed tickets keep their own entries.
+    """
+    _write_open_pr_probe_entries({_open_pr_probe_key(client, ticket_id): entry})
+
+
+def save_open_pr_probe_entries(
+    client: str, entries_by_ticket_id: dict[str, OpenPrProbeCache]
+) -> None:
+    """Record several per-ticket open-PR probe results for *client* in one write.
+
+    Batched sibling of :func:`save_open_pr_probe_entry` (#1862 perf follow-up):
+    a single tick can newly-probe many candidates, and persisting each with its
+    own lock-acquire + full-file read + full-file write scales lock contention
+    and I/O linearly with backlog size for no benefit -- the whole point of the
+    read-merge-write pattern is that one lock window can absorb any number of
+    key changes. No-op when *entries_by_ticket_id* is empty (never acquires the
+    lock for a call with nothing to persist).
+    """
+    _write_open_pr_probe_entries(
+        {
+            _open_pr_probe_key(client, ticket_id): entry
+            for ticket_id, entry in entries_by_ticket_id.items()
+        }
+    )
