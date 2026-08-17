@@ -106,20 +106,24 @@ _ROSTER_POLL_TIMEOUT_SECS: float = 10.0
 _SPAWN_FAIL_REASON_UNREGISTERED = "spawn_unregistered"
 
 
-def _collect_prior_attempts_summary(ticket_id: str) -> list[dict[str, object]]:
+def _collect_prior_attempts_summary(
+    ticket_id: str, *, client: str
+) -> list[dict[str, object]]:
     """Return compact failure summaries for prior sessions on *ticket_id*.
 
     Called only when task.attempts > 0. Scans persisted state for TIMED_OUT or
-    COMPLETED sessions whose name encodes *ticket_id*, builds one entry per
-    session from last_result, sorts by completed_at ascending, and returns the
-    list. Returns [] on any exception so a state-read failure never blocks spawn.
+    COMPLETED sessions belonging to *client* whose name encodes *ticket_id*,
+    builds one entry per session from last_result, sorts by completed_at
+    ascending, and returns the list. Returns [] on any exception so a
+    state-read failure never blocks spawn.
     """
     try:
         state = load_state()
         matching = [
             s
             for s in state.sessions
-            if s.status in TERMINAL_SESSION_STATUSES
+            if s.client == client
+            and s.status in TERMINAL_SESSION_STATUSES
             and ticket_id_for_session(s.name) == ticket_id
         ]
         matching.sort(key=lambda s: s.completed_at or s.started_at)
@@ -152,9 +156,10 @@ def _collect_prior_attempts_summary(ticket_id: str) -> list[dict[str, object]]:
             )
     except Exception:  # noqa: BLE001 — safety net; spawn must not fail on retry-hints read
         _log.warning(
-            "prior_attempts_summary: failed to collect for ticket=%r; "
+            "prior_attempts_summary: failed to collect for ticket=%r client=%r; "
             "falling back to []",
             ticket_id,
+            client,
             exc_info=True,
         )
         return []
@@ -473,7 +478,7 @@ def _write_hook_context(
                     "origin_main_sha_at_spawn": origin_sha,
                     "origin_main_branch": default_branch,
                     "prior_attempts_summary": (
-                        _collect_prior_attempts_summary(ticket_id)
+                        _collect_prior_attempts_summary(ticket_id, client=client)
                         if ticket_id is not None and task.attempts > 0
                         else []
                     ),
