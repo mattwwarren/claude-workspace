@@ -32,7 +32,7 @@ _log = logging.getLogger("cw.auto_dev_result")
 # Accepted sentinel schema versions. Single source of truth: parse.py derives
 # SUPPORTED_SCHEMA_VERSIONS (its pre-Pydantic gate) from this Literal via
 # get_args, so a version bump edits exactly one place (#1535 drift class).
-SchemaVersion = Literal[1, 2, 3, 4, 5]
+SchemaVersion = Literal[1, 2, 3, 4, 5, 6]
 
 Status = Literal[
     "shipped",
@@ -53,6 +53,13 @@ Status = Literal[
     "no_op",
     "ambiguities_pending_resolution",
     "premises_pending_verification",
+    # #1870: the branch has zero commits ahead of origin/<default_branch> at
+    # IMPL/REVIEW exit, or as measured by the dispatch-level empty-diff gate --
+    # never a clean pass. Post-branch (unlike scope_exceeded/forbidden_area), so
+    # it carries a non-null branch and may carry a blocker. Accepted under all
+    # supported schema versions (same rollout exception as _V4_STATUSES) until
+    # the producer skills bump their emitted schema_version to 6.
+    "empty_diff_blocked",
 ]
 # Statuses introduced after v1. Emitting one under schema_version=1 is a
 # producer bug — it would silently degrade for downstream tools that key off
@@ -80,8 +87,19 @@ PAUSED_FOR_USER_INPUT_STATUSES: frozenset[str] = (
 )
 STAGE_SUCCESS_STATUSES: frozenset[str] = frozenset({"shipped", "stage_complete"})
 STAGE_FAILURE_STATUSES: frozenset[str] = frozenset(
-    {"blocked", "merge_gate_blocked", "scope_exceeded", "forbidden_area"}
+    {
+        "blocked",
+        "merge_gate_blocked",
+        "scope_exceeded",
+        "forbidden_area",
+        "empty_diff_blocked",
+    }
 )
+# blocker.reason (open enum, §4.2) paired with the empty_diff_blocked status
+# above. Named rather than inlined because two producers write it -- the
+# codex-review synthesis path and the auto-dev-review producer skill -- and a
+# typo in either would be invisible to the closed-enum status check. See #1870.
+EMPTY_DIFF_BLOCKER_REASON: Literal["empty_diff_no_commits"] = "empty_diff_no_commits"
 # Blocker reasons at Stage.FINALIZE eligible for automatic regress to IMPL.
 # "agent_block" covers prep-pr gate failures (diff-cover, etc.) that a fresh
 # impl session can fix by adding missing tests. Reasons absent here (e.g.
@@ -124,6 +142,11 @@ SALVAGE_TERMINAL_STATUSES: frozenset[str] = (
             "merge_pending",
             "scope_exceeded",
             "forbidden_area",
+            # #1870. Explicit member: this set is hand-maintained and does NOT
+            # derive from STAGE_FAILURE_STATUSES, so a crashed worker whose last
+            # sentinel reported an empty diff would otherwise be mislabeled
+            # crashed and re-dispatched onto the same empty branch.
+            "empty_diff_blocked",
         }
     )
     | PAUSED_FOR_USER_INPUT_STATUSES
@@ -422,7 +445,7 @@ class Blocker(BaseModel):
 
 
 _TERMINAL_REJECT_STATUSES: frozenset[Status] = frozenset(
-    {"scope_exceeded", "forbidden_area", "blocked"},
+    {"scope_exceeded", "forbidden_area", "blocked", "empty_diff_blocked"},
 )
 _PRE_BRANCH_STATUSES: frozenset[Status] = frozenset(
     {
@@ -674,10 +697,18 @@ class AutoDevResult(BaseModel):
         # Exception (issue #777): merge_gate_blocked may optionally carry a
         # non-null blocker to surface prior_pipeline_pr_open reason — backward
         # compat preserved since blocker=null is still accepted for this status.
+        # Exception (#1870): empty_diff_blocked may carry one on the same terms
+        # (EMPTY_DIFF_BLOCKER_REASON names which branch measured empty against
+        # which base) — unlike scope_exceeded/forbidden_area it is post-branch,
+        # so there is a real measurement to report.
         if self.status == "blocked" and self.blocker is None:
             msg = "blocker must be non-null when status is 'blocked'"
             raise ValueError(msg)
-        blocker_allowed = self.status in {"blocked", "merge_gate_blocked"}
+        blocker_allowed = self.status in {
+            "blocked",
+            "merge_gate_blocked",
+            "empty_diff_blocked",
+        }
         if not blocker_allowed and self.blocker is not None:
             msg = f"blocker must be null when status is {self.status!r}"
             raise ValueError(msg)

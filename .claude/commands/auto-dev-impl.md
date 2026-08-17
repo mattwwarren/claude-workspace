@@ -257,6 +257,8 @@ All gates below run inside `$TMPWT`. Do NOT run gates from the cw session worktr
    ```
    Empty diff → `impl_failed`. The agent claimed work; no work exists.
 
+   > **Not the only line of defence (#1870).** Dispatch independently re-verifies this with its own git measurement at the REVIEW→FINALIZE checkpoint (`dispatch/review_gates.py::_should_gate_for_empty_diff`), because a stage-pointer walk, resume, or requeue can advance `task.stage` past IMPL without this gate re-running against the final branch state — which is exactly how an empty branch once reached a human approval prompt. Nothing changes here; this gate stays the first and cheapest catch.
+
 2. **File set is within the plan's enumeration** (mechanical, not prose — #1779):
    ```bash
    git -C "$TMPWT" diff --name-only "$FORK_POINT" | sort > /tmp/touched_files-$CW_SESSION

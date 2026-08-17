@@ -144,6 +144,29 @@ REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION = (
 # gate outright.
 BRANCH_STALENESS_GATE_DISPOSITION = "branch_behind_main"
 
+# Disposition stamped when dispatch's REVIEW-stage routing refuses to advance a
+# ticket whose branch measures zero commits ahead of origin/<default_branch>
+# (#1870) -- there is no diff to review and nothing to ship, so the Stage 4
+# approval prompt would be asking an operator to authorize nothing.
+#
+# Shares its literal string value with dispatch.review_gates.
+# _EMPTY_DIFF_GATE_REASON (a SESSION_NEEDS_ATTENTION paused_status) on the same
+# precedent as BRANCH_STALENESS_GATE_DISPOSITION above -- still two constants in
+# two namespaces, do not collapse them. Both are deliberately distinct from the
+# producer-reported "empty_diff_blocked" *status* literal: collapsing the gate's
+# paused_status onto the status would put a gate-class park (which hardcodes
+# breadcrumbs="") into BREADCRUMB_ELIGIBLE_PAUSED_STATUSES, contradicting the
+# #1729 convention that set is pinned against.
+#
+# Same set-membership treatment as the three dispositions above, for the same
+# reason. Deliberately NOT a HOLD_DISPOSITIONS member: an empty branch clears by
+# pushing real commits (or closing the ticket), not by an operator saying
+# "proceed anyway", and membership would also silently make it eligible for
+# concierge's false-park auto-requeue recipe (same _REAP_ELIGIBLE_DISPOSITIONS_
+# BASE lineage), which would spin an empty branch straight back through the
+# pipeline and defeat the gate outright.
+EMPTY_DIFF_GATE_DISPOSITION = "empty_diff_gate"
+
 # Textually identical to cw.reconcile._shared._NEEDS_SALVAGE_REASON
 # ("needs_salvage") but a SEPARATE constant, not an import of it: _shared
 # imports FROM cw.dev_queue (dev_queue -> reconcile is the only cycle-safe

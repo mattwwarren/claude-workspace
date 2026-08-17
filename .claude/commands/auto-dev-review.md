@@ -446,6 +446,8 @@ After all Stage 3 steps complete successfully in headless mode (review clean or 
 
 **`review.agents_run` must be set to the `agents_run` int from the frozen (Step 3a) `cw review consolidate` `.review` block** (see Checkpoint 3a) — not the template's placeholder `0`, not a manually tracked dispatch count (R3). Likewise `review.must_fix_initial` and `review.should_fix` come from that same frozen block, never recomputed at emission time.
 
+**A Stage 3 pass whose diff against the base measures empty must exit `empty_diff_blocked` (#1870).** Measure it — `git diff --numstat "$(git merge-base origin/<default-branch> HEAD)"..HEAD` — and if the result is 0 files / 0 lines, emit `status: "empty_diff_blocked"` with `blocker.reason: "empty_diff_no_commits"`, NOT `review_pending_approval` and NOT `stage_complete`. This holds independently of whether reviewers ran and of what they concluded: a clean verdict over an empty branch reviewed nothing. It mirrors the mechanical check `codex_review/_verdict.py` performs for the codex-review executor, giving the Claude-native headless path parity. A measurement that *cannot be taken* (no `origin/<default-branch>` ref, git unavailable) is NOT this case — fall through to the ordinary exit rather than reporting an empty diff you did not observe. Dispatch re-verifies the same condition with its own git measurement at the REVIEW→FINALIZE checkpoint, so an omission here is caught rather than shipped, but it is caught with less context than you have now. **Caveat:** dispatch's backstop (`commits_ahead_of_default`, a commit-count measurement) is not identical to this diff-stat measurement — a content-empty commit (e.g. `git commit --allow-empty`) measures 0 files/0 lines here but a positive commit count there, so it is caught by this check but not by dispatch's. Don't rely on the dispatch backstop to cover a producer-side omission of *this specific* check.
+
 **`review.deferred` is NOT one of the frozen three (#1805).** `must_fix_initial`/`should_fix`/`agents_run` are a cycle-0 baseline that must not move; `deferred` is by definition zero until adjudication and non-zero after. Source it from the `cw review adjudicate` output (Checkpoint 3a), which recomputes it while preserving the frozen three verbatim.
 
 **Only emit this sentinel when invoked as a standalone `/auto-dev-review <ticket-id> --headless` command. Do NOT emit when running as part of the interactive monolith chain (`auto-dev.md` owns the sentinel in that context).**
@@ -459,7 +461,7 @@ printf '%s' "$SENTINEL_JSON" | cw result validate -
 {
   "schema_version": 5,
   "ticket_id": "<ticket-id>",
-  "status": "<review_pending_approval | blocked>",
+  "status": "<review_pending_approval | blocked | empty_diff_blocked>",
   "stage_reached": "stage3_review",
   "scope": {"tier": "<small|large>", "files": 0, "lines_estimate": 0, "lines_actual": 0, "forbidden_touched": false},
   "plan_source": "<github_issue_existing | generated | free_text | none>",

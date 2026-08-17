@@ -14,6 +14,7 @@ from cw.auto_dev_result import (
     _PREMISE_GLITCH_PLACEHOLDER_CLAIM,
     BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN,
     BLOCKER_REASON_VALIDATION_FAILED,
+    EMPTY_DIFF_BLOCKER_REASON,
     FINALIZE_REGRESS_BLOCKER_REASONS,
     OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
     PAUSED_FOR_USER_INPUT_STATUSES,
@@ -3154,6 +3155,134 @@ class TestMergeGateBlockedWithBlocker:
 
 
 # ---------------------------------------------------------------------------
+# Issue #1870 — empty_diff_blocked: the branch exists but measures zero commits
+# ahead of origin/<default_branch>, so there is nothing to review or ship.
+# Post-branch (unlike scope_exceeded/forbidden_area), so it may carry a
+# blocker and a non-null branch.
+# ---------------------------------------------------------------------------
+
+
+def _empty_diff_payload() -> dict[str, Any]:
+    """Minimal valid empty_diff_blocked payload (#1870)."""
+    return {
+        "schema_version": 5,
+        "ticket_id": "GEN-1870",
+        "status": "empty_diff_blocked",
+        "stage_reached": "stage3_review",
+        "scope": {
+            "tier": "small",
+            "files": 0,
+            "lines_estimate": 0,
+            "lines_actual": 0,
+            "forbidden_touched": False,
+        },
+        "plan_source": "none",
+        "branch": "dev/1870",
+        "worktree_path": "/tmp/wt/gen-1870",
+        "fork_point_sha": None,
+        "commits": [],
+        "pr": None,
+        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": "MEDIUM",
+            "any_incomplete_risk": True,
+            "shortcuts": [],
+            "recommendation": "EXIT_FOR_HUMAN_REVIEW",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        },
+        "friction_highlights": [],
+        "blocker": None,
+        "next_actions": [],
+    }
+
+
+class TestEmptyDiffBlockedStatus:
+    """#1870: the new closed-enum Status value and its invariants."""
+
+    def test_null_blocker_parses(self) -> None:
+        p = _empty_diff_payload()
+        result = AutoDevResult.model_validate(p)
+        assert result.status == "empty_diff_blocked"
+        assert result.blocker is None
+
+    def test_populated_blocker_parses(self) -> None:
+        p = _empty_diff_payload()
+        p["blocker"] = {
+            "stage": "stage3_review",
+            "reason": EMPTY_DIFF_BLOCKER_REASON,
+            "details": "Branch dev/1870 measures an empty diff against origin/main.",
+        }
+        result = AutoDevResult.model_validate(p)
+        assert result.blocker is not None
+        assert result.blocker.reason == EMPTY_DIFF_BLOCKER_REASON
+
+    def test_unrelated_blocker_reason_still_parses(self) -> None:
+        """blocker.reason stays an open enum for this status (§4.2)."""
+        p = _empty_diff_payload()
+        p["blocker"] = {
+            "stage": "stage2_impl",
+            "reason": "some_future_reason",
+            "details": "",
+        }
+        result = AutoDevResult.model_validate(p)
+        assert result.blocker is not None
+        assert result.blocker.reason == "some_future_reason"
+
+    def test_non_empty_next_actions_rejected(self) -> None:
+        """Terminal-reject membership: nothing for a consumer to act on."""
+        p = _empty_diff_payload()
+        p["next_actions"] = ["user_approve_review"]
+        with pytest.raises(ValidationError, match="terminal-reject"):
+            AutoDevResult.model_validate(p)
+
+    def test_non_null_branch_accepted(self) -> None:
+        """Inverse of test_pre_branch_status_rejects_branch: NOT a pre-branch
+        status. The branch was pushed; it is its *content* that is empty, so the
+        operator needs the branch name to triage (#1870)."""
+        from cw.auto_dev_result import _PRE_BRANCH_STATUSES
+
+        assert "empty_diff_blocked" not in _PRE_BRANCH_STATUSES
+        result = AutoDevResult.model_validate(_empty_diff_payload())
+        assert result.branch == "dev/1870"
+
+    def test_post_impl_requires_scope_tier(self) -> None:
+        p = _empty_diff_payload()
+        p["scope"]["tier"] = None
+        with pytest.raises(ValidationError, match=r"scope\.tier must be non-null"):
+            AutoDevResult.model_validate(p)
+
+    def test_post_impl_requires_lowest_agent_confidence(self) -> None:
+        p = _empty_diff_payload()
+        p["health"]["lowest_agent_confidence"] = None
+        with pytest.raises(
+            ValidationError, match="lowest_agent_confidence must be non-null"
+        ):
+            AutoDevResult.model_validate(p)
+
+    def test_stage2_impl_is_also_legal(self) -> None:
+        """Both IMPL and REVIEW may detect an empty diff (adopted assumption 2)."""
+        p = _empty_diff_payload()
+        p["stage_reached"] = "stage2_impl"
+        result = AutoDevResult.model_validate(p)
+        assert result.stage_reached == "stage2_impl"
+
+    def test_parses_through_parse_stdout(self) -> None:
+        result = parse_stdout(_wrap_sentinel(_empty_diff_payload()))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "empty_diff_blocked"
+
+    def test_is_a_salvage_terminal_status(self) -> None:
+        """SALVAGE_TERMINAL_STATUSES is hand-maintained, NOT derived from
+        STAGE_FAILURE_STATUSES — membership has to be asserted explicitly or a
+        crashed worker's empty-diff sentinel gets re-dispatched (#1870)."""
+        assert "empty_diff_blocked" in SALVAGE_TERMINAL_STATUSES
+
+    def test_blocker_reason_constant_value(self) -> None:
+        assert EMPTY_DIFF_BLOCKER_REASON == "empty_diff_no_commits"
+
+
+# ---------------------------------------------------------------------------
 # Issue #430 — Case 4: scope_exceeded / forbidden_area emitted at/after
 # stage2_impl carry non-null branch and/or lines_actual. Extend the no_op
 # stray-branch/lines coerce to scope_exceeded and forbidden_area.
@@ -3403,7 +3532,15 @@ class TestB2StatusSets:
     def test_stage_failure_statuses(self) -> None:
         assert (
             frozenset(
-                {"blocked", "merge_gate_blocked", "scope_exceeded", "forbidden_area"}
+                {
+                    "blocked",
+                    "merge_gate_blocked",
+                    "scope_exceeded",
+                    "forbidden_area",
+                    # #1870: a branch measured with zero commits ahead of
+                    # origin/<default_branch> is a stage failure, not a pause.
+                    "empty_diff_blocked",
+                }
             )
             == STAGE_FAILURE_STATUSES
         )
