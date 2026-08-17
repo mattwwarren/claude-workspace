@@ -29,7 +29,8 @@ from cw.models.session import Session
 # v15: added Session.consecutive_park_vetoes (#1445).
 # v16: added Session.last_result_source (RFC 0012 S2, #1456).
 # v17: added Session.consecutive_sentinel_mismatch_vetoes (#1449).
-CW_STATE_SCHEMA_VERSION = 17
+# v18: added Session.liveness_attention_next_eligible_at (#1858).
+CW_STATE_SCHEMA_VERSION = 18
 
 
 class CwState(BaseModel):
