@@ -8,6 +8,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Cross-round adjudication memory for codex review (#1838):** an operator
+  adjudication settled in one review round was forgotten by the next, so
+  already-rejected findings kept coming back. Adds the durable
+  `TicketTask.finding_dispositions` ledger (dev-queue schema v31), keyed by
+  `cw.review_debt.fingerprint_v1`, fed from the ticket thread's
+  `REVIEW-FINDING-DISPOSITIONS` operator marker and applied by the codex
+  review context/verdict path so settled findings are suppressed on later
+  rounds. The field deliberately has no clear site: unlike the per-arrival
+  markers (`regressed_into_stage`, `pending_operator_comment`), a settled
+  adjudication is a durable fact about the ticket.
+
 - **Stale-gate detection for dev-queue tasks parked behind a cleared PR gate
   (#1713):** dev-queue rows blocked behind a merge/CI gate (their own PR, or
   a different ticket's PR ahead of them in the pipeline) never observed that
