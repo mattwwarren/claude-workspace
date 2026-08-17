@@ -8,7 +8,9 @@ For each RUNNING task in the dev-queue (one client or all), look up:
 - idle gap (last assistant message)
 - last AUTO_DEV_RESULT sentinel status and stage
 - PR number and state (via ``gh pr view``)
-- attempt counter
+- attempt counters: raw ``attempts`` (display only) and ``unproductive_attempts``
+  (the STOP-by-attempt-count branch's actual signal, mirroring the dispatch
+  admission gate's #1750 counter)
 
 Then compute a WAIT / PEEK / STOP recommendation per row so the operator can
 decide whether to keep a session alive or close it via ``cw spawn close``.
@@ -62,7 +64,9 @@ STOP_CEILING_MIN: int = 60  # ceiling named in the STOP-by-age message; the
 IDLE_PEEK_MIN: int = 7  # idle this long with no PR → check for stall
 IDLE_STALL_MIN: int = 15  # idle this long → likely stuck
 IDLE_POST_PR_MIN: int = 5  # idle this long after PR shipped → stuck in stage5
-STOP_ATTEMPTS_MIN: int = 3  # at or above this attempt count → systemic failure
+STOP_UNPRODUCTIVE_ATTEMPTS_MIN: int = 3  # at or above this unproductive-attempt
+# count → systemic failure (mirrors the admission gate's signal, GitHub
+# #1750/#1768)
 
 _STAGE_ORDER: tuple[Stage, ...] = (
     Stage.HARDEN,
@@ -536,7 +540,7 @@ def _score_session(
     idle_min: float | None,
     pr_state: str | None,
     sentinel_status: str | None,
-    attempts: int,
+    unproductive_attempts: int,
     stage_high_water: Stage | None = None,
     usage_limit_detected: bool = False,
 ) -> tuple[str, str]:
@@ -560,14 +564,19 @@ def _score_session(
                 "timeout — stop or hand off"
             )
         return ("STOP", reason)
-    if attempts >= STOP_ATTEMPTS_MIN and not _reached_deep_stage(stage_high_water):
+    if unproductive_attempts >= STOP_UNPRODUCTIVE_ATTEMPTS_MIN and not (
+        _reached_deep_stage(stage_high_water)
+    ):
         if usage_limit_detected:
             return (
                 "PEEK",
-                f"attempt {attempts} but usage-limit outage detected in "
-                "transcript — verify before stopping",
+                f"unproductive attempt {unproductive_attempts} but usage-limit "
+                "outage detected in transcript — verify before stopping",
             )
-        return ("STOP", f"attempt {attempts} — systemic, not transient")
+        return (
+            "STOP",
+            f"unproductive attempt {unproductive_attempts} — systemic, not transient",
+        )
     return _stall_check(age_min, idle_min, pr_state)
 
 
@@ -576,11 +585,16 @@ def recommend(
     idle_min: float | None,
     pr_state: str | None,
     sentinel_status: str | None,
-    attempts: int,
+    unproductive_attempts: int,
     stage_high_water: Stage | None = None,
     usage_limit_detected: bool = False,
 ) -> tuple[str, str]:
-    """Return (recommendation, reasoning) from the peek-stop ladder."""
+    """Return (recommendation, reasoning) from the peek-stop ladder.
+
+    ``unproductive_attempts`` — not raw ``attempts`` — drives the
+    STOP-by-attempt-count branch, mirroring the dispatch admission gate's
+    #1750 signal (GitHub #1768).
+    """
     if age_min is None:
         return ("PEEK", "no transcript timestamps — verify session is alive")
     return _score_session(
@@ -588,7 +602,7 @@ def recommend(
         idle_min=idle_min,
         pr_state=pr_state,
         sentinel_status=sentinel_status,
-        attempts=attempts,
+        unproductive_attempts=unproductive_attempts,
         stage_high_water=stage_high_water,
         usage_limit_detected=usage_limit_detected,
     )
@@ -609,6 +623,7 @@ def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[st
             "session": (t.session_id or "-")[:12],
             "client": t.client,
             "attempts": t.attempts,
+            "unproductive_attempts": t.unproductive_attempts,
             "age_min": None,
             "idle_min": None,
             "stage": None,
@@ -643,7 +658,7 @@ def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[st
         idle_min=idle,
         pr_state=pr_state,
         sentinel_status=info.get("last_sentinel_status"),
-        attempts=t.attempts,
+        unproductive_attempts=t.unproductive_attempts,
         stage_high_water=t.stage_high_water,
         usage_limit_detected=info.get("usage_limit_detected", False),
     )
@@ -652,6 +667,7 @@ def format_row(t: TicketTask, info: dict[str, Any], now: dt.datetime) -> dict[st
         "session": (t.session_id or "-")[:12],
         "client": t.client,
         "attempts": t.attempts,
+        "unproductive_attempts": t.unproductive_attempts,
         "age_min": round(age, 1) if age is not None else None,
         "idle_min": round(idle, 1) if idle is not None else None,
         "stage": info.get("last_sentinel_stage"),
