@@ -3555,6 +3555,32 @@ class TestMigrateDevQueue:
         assert migrated["tasks"][0]["finding_dispositions"] == {}
         assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 32
 
+    def test_v32_migration_fills_both_v31_and_v32_fields_in_one_pass(self) -> None:
+        """A single pre-v31 row gains BOTH #1838's and #1750's fields.
+
+        Same shape as the v30/v31 collision above, one version later: #1838's
+        ``finding_dispositions`` (v31) and #1750's ``unproductive_attempts``
+        (v32) were authored on branches that never saw each other and both
+        originally claimed v31. Resolving that collision meant merging two
+        independently-authored fillers into one dispatch loop; a filler dropped
+        in the process would leave one key absent and fail here.
+        """
+        raw: dict[str, object] = {
+            "schema_version": 30,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-1838-1750",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["finding_dispositions"] == {}
+        assert migrated["tasks"][0]["unproductive_attempts"] == 0
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 32
+
     def test_migrate_dev_queue_fills_watched_prs_default(self) -> None:
         """migrate_dev_queue fills watched_prs=[] on a store missing the key (v15)."""
         raw: dict[str, object] = {"schema_version": 14, "tasks": []}
