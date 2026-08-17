@@ -12,6 +12,7 @@ GROUPS: list[tuple[str, list[str]]] = [
         [
             "check_impl_guard_staleness",
             "check_plan_scope_conformance",
+            "classify_merge_conflict",
             "post_review",
             "prep_pr_finalize",
             "prep_pr_state",
