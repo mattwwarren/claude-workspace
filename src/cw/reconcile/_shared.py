@@ -681,6 +681,13 @@ _SALVAGE_TERMINAL_STATUSES: frozenset[str] = SALVAGE_TERMINAL_STATUSES
 
 # Constants for _apply_sentinel_to_task (moved from cli.py; shared by both
 # signal_stop and the ROUTE_EMITTED_SENTINEL reconcile path). See GitHub #578.
+# Deliberately compared against raw ``target.attempts``, NOT the newer
+# ``unproductive_attempts`` counter (GitHub #1750). This is a per-stage cap on
+# repeated *sentinel validation failures*: a worker that keeps emitting an
+# unparseable sentinel may well have committed real work each time, so it
+# would read as productive and never trip a ceiling keyed on productivity.
+# #1750 moved only the GLOBAL ceiling (dispatch/claim.py, concierge.py) to the
+# new counter; this cap stays on the total claim count by design. See #756.
 _VALIDATION_FAILED_MAX_ATTEMPTS = 3
 _DETERMINISTIC_PARSE_FAILURES: frozenset[str] = frozenset(
     {BLOCKER_REASON_SCHEMA_VERSION_UNSUPPORTED}

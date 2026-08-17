@@ -154,3 +154,53 @@ def test_act_with_no_candidates_is_a_noop(
 
     assert sess.status is SessionStatus.ACTIVE
     assert stop_recorder.stopped == []
+
+
+def test_foreign_result_completion_uses_evidence_not_same_stage_predicate(
+    tmp_config_dir: Path, tmp_path: Path, stop_recorder: _StopRecorder
+) -> None:
+    """#1750: a foreign result carrying commits is productive, so it is not charged.
+
+    Direct regression for the round-1 review finding that this site used a
+    "same stage?" predicate instead of asking whether the claim produced
+    anything. The shipped salvage payload carries commits, so the real
+    classifier must decline the charge regardless of stage movement.
+    """
+    state = _foreign_result_session(tmp_path, _shipped_salvage_payload())
+    store = load_dev_queue()
+    store.tasks.append(
+        TicketTask(
+            ticket_id="salv-1", client="client-a", status=QueueItemStatus.RUNNING
+        )
+    )
+    save_dev_queue(store)
+    candidates = _detect_stalled_candidates(state, task_by_ticket={})
+
+    _act_on_stalled_candidates(state, candidates, now=_NOW)
+
+    task = load_dev_queue().tasks[0]
+    assert task.status is not QueueItemStatus.RUNNING
+    assert task.unproductive_attempts == 0
+
+
+def test_foreign_result_with_no_evidence_is_charged(
+    tmp_config_dir: Path, tmp_path: Path, stop_recorder: _StopRecorder
+) -> None:
+    """#1750: the same site DOES charge when the sentinel shows no work done."""
+    payload = _shipped_salvage_payload()
+    payload["commits"] = []
+    payload["review"] = {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0}
+    state = _foreign_result_session(tmp_path, payload)
+    store = load_dev_queue()
+    store.tasks.append(
+        TicketTask(
+            ticket_id="salv-1", client="client-a", status=QueueItemStatus.RUNNING
+        )
+    )
+    save_dev_queue(store)
+    candidates = _detect_stalled_candidates(state, task_by_ticket={})
+
+    _act_on_stalled_candidates(state, candidates, now=_NOW)
+
+    task = load_dev_queue().tasks[0]
+    assert task.unproductive_attempts == 1
