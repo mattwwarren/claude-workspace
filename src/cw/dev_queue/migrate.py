@@ -69,7 +69,13 @@ def _fill_unproductive_attempts_default(task_raw: dict[str, Any]) -> None:
     Legacy rows start at 0 rather than inheriting `attempts`: back-filling the
     old claim count would immediately park every long-running in-flight ticket
     at the ceiling on the first tick after upgrade — the exact false park
-    #1750 exists to remove. Idempotent."""
+    #1750 exists to remove. Idempotent.
+
+    Known, accepted tradeoff (no audit trail emitted here): a ticket that was
+    already crashlooping pre-upgrade also gets its counter reset, so it gets a
+    bounded extra budget of automated attempts post-migration before the
+    ceiling catches it again — silent, one-time, and self-limiting (the
+    ceiling still applies going forward)."""
     if "unproductive_attempts" not in task_raw:
         task_raw["unproductive_attempts"] = 0
 

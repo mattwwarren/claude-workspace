@@ -442,10 +442,13 @@ def _revert_claimed_task_to_pending(
 
     # Why: task.attempts is NOT decremented here. The increment-at-claim
     # contract is intentional — usage_limit deaths and spawn errors consume
-    # real dispatch budget and must count toward the global_attempt_ceiling
-    # (#786). Decrementing would let churn bypass the backstop. The corollary
-    # (#756 stalled-stage cap) uses the same task.attempts field; both caps
-    # are outer backstops sharing one counter, not parallel counters.
+    # real dispatch budget and must count toward task.attempts (#786). This
+    # revert leaves task.status RUNNING -> PENDING, which also charges
+    # task.unproductive_attempts by default (#1750) since a spawn that never
+    # succeeded produced no evidence of progress. The global_attempt_ceiling
+    # (this module) reads unproductive_attempts; the corollary #756
+    # stalled-stage cap deliberately still reads raw task.attempts — as of
+    # #1750 these are two separate counters, not one shared counter.
     """
     with dev_queue_lock():
         store = load_dev_queue()

@@ -11914,7 +11914,12 @@ class TestPersistCarriedContext:
             },
         }
         _route_scope_gated_approval(
-            task, self._clients(tmp_path), last_result, "plan_pending_approval", None
+            task,
+            self._clients(tmp_path),
+            last_result,
+            "plan_pending_approval",
+            None,
+            True,
         )
 
         assert len(calls) == 1
@@ -14634,11 +14639,15 @@ class TestUnproductiveAttemptRouting:
     ) -> None:
         """#1727 replay: five productive claims must charge zero.
 
-        The ticket's own evidence sequence — impl with commits, review blocked
-        with real findings, an operator regress, impl with commits again, and a
-        review blocked on a mechanically-rejected MUST_FIX. Before #1750 this
-        drove `attempts` to 5; the row must now still be far below a ceiling
-        of 10 on the counter that actually gates dispatch.
+        Covers the IMPL/REVIEW tail of the ticket's evidence sequence only —
+        impl with commits, review blocked with real findings, an operator
+        regress, impl with commits again, and a review blocked on a
+        mechanically-rejected MUST_FIX. The fixture starts at Stage.IMPL, so
+        it does NOT replay #1727's plan-stage clarification round-trips (the
+        productive-vs-unproductive gap for those is tracked separately by
+        #1896, which wires the dormant `resolution_consumed` producer). Before
+        #1750 this tail alone drove `attempts` to 5; the row must now still be
+        far below a ceiling of 10 on the counter that actually gates dispatch.
         """
         from cw.codex_review import CODEX_MUST_FIX_MECHANICALLY_REJECTED
         from cw.dev_queue import _stage_regress

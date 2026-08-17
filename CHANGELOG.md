@@ -11,26 +11,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **The global dispatch attempt ceiling now counts unproductive claims, not
   every claim (#1750):** the ceiling compared raw `task.attempts`, so a ticket
   making genuine forward progress burned the same budget as a crashloop —
-  #1727 parked at `attempt_cap_blocked` mid-pipeline after five legitimate
-  stage claims that each produced commits or real review findings. Adds
-  `TicketTask.unproductive_attempts` (dev-queue schema v31) and moves the
-  ceiling to it at all four call sites (`dispatch/claim.py`'s two claim paths,
-  `reconcile/concierge.py`'s recipe 1 and recipe 2 `refused_ceiling`).
-  `transition_task_status` gains a keyword-only `unproductive: bool = True`
-  and charges the counter on a genuine RUNNING exit only; the default means
-  every crash/phantom/stalled/wedge revert still counts with no code change.
-  A claim is productive when it pushed commits, surfaced real review findings,
-  or consumed an operator resolution — classified by the new schema-owned
-  `cw.dispatch.productivity` module, which both the routing and reconcile
-  paths share. Stage advances and regresses are productive by construction via
-  hardcodes at `_advance_task_pointer`/`_stage_regress`, as are `no_op`
-  completions, terminal-stage completions, merged-PR crash salvages, and the
-  mechanically-rejected-MUST_FIX park (a reviewer malfunction the ticket is
-  not charged for). Every charge decision is recorded on the existing
-  `task.transition` event via new `unproductive_attempts` and
-  `unproductive_charge` payload keys. The #756 per-stage `validation_failed`
-  cap deliberately still reads raw `attempts`. The #1653 crashloop the ceiling
-  exists to stop is still caught at exactly the same rate.
+  #1727 reached 9 of 10 attempts mid-pipeline after a run of legitimate stage
+  claims that each produced commits or real review findings, staying alive
+  only via a temporary ceiling override. Adds `TicketTask.unproductive_attempts`
+  (dev-queue schema v31) and moves the ceiling to it at all four call sites
+  (`dispatch/claim.py`'s two claim paths, `reconcile/concierge.py`'s recipe 1
+  and recipe 2 `refused_ceiling`). `transition_task_status` gains a
+  keyword-only `unproductive: bool = True` and charges the counter on a
+  genuine RUNNING exit only; the default means every crash/phantom/stalled/
+  wedge revert still counts with no code change. A claim is productive when it
+  pushed commits or surfaced real review findings — classified by the new
+  schema-owned `cw.dispatch.productivity` module, which both the routing and
+  reconcile paths share. Stage advances and regresses are productive by
+  construction via hardcodes at `_advance_task_pointer`/`_stage_regress`, as
+  are `no_op` completions, terminal-stage completions, merged-PR crash
+  salvages, and the mechanically-rejected-MUST_FIX park (a reviewer
+  malfunction the ticket is not charged for). Every charge decision is
+  recorded on the existing `task.transition` event via new
+  `unproductive_attempts` and `unproductive_charge` payload keys. The #756
+  per-stage `validation_failed` cap deliberately still reads raw `attempts`.
+  The #1653 crashloop the ceiling exists to stop is still caught at exactly
+  the same rate. The "consumed an operator resolution" productivity signal is
+  wired in the schema (`ClaimEvidence.resolution_consumed`) but its producer
+  (sentinel emission of `resolution_consumed`/`resolution_evidence`) is not —
+  a plan-stage clarification round-trip is still charged as unproductive until
+  the producer ships in the #1896 fast-follow, so the N-round-trip guarantee
+  is not yet general for that case.
 
 ### Added
 

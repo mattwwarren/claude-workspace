@@ -819,6 +819,7 @@ def _route_scope_gated_approval(
     last_result: dict[str, object] | None,
     disposition: str | None,
     pr_url: str | None,
+    claim_unproductive: bool,
 ) -> None:
     """Rule 1 body: scope-gated approval -- small tier auto-advances, large blocks.
 
@@ -906,8 +907,10 @@ def _route_scope_gated_approval(
             QueueItemStatus.BLOCKED_ON_USER,
             disposition=disposition,
             # #1750: a scope-gated park is a legitimate stop, but whether the
-            # claim that reached it did any work is an evidence question.
-            unproductive=is_unproductive(extract_claim_evidence(last_result)),
+            # claim that reached it did any work is an evidence question --
+            # reuse the caller's hoisted classification rather than
+            # recomputing it here (both must agree on the same claim).
+            unproductive=claim_unproductive,
         )
         _record_scope_routing_decision(task, last_result, _RULE_SCOPE_GATED_APPROVAL)
         _maybe_emit_finalize_regress_repeat_signal(task, is_repeat)
@@ -1085,7 +1088,9 @@ def _route_staged_decision(
     if status in SCOPE_GATED_APPROVAL_STATUSES:
         # Rule 1: scope-gated approval; small tier auto-advances, large blocks.
         # Must fire before Rule 2 (SCOPE_GATED ⊂ PAUSED_FOR_USER_INPUT).
-        _route_scope_gated_approval(task, clients, last_result, disposition, pr_url)
+        _route_scope_gated_approval(
+            task, clients, last_result, disposition, pr_url, claim_unproductive
+        )
     elif status in PAUSED_FOR_USER_INPUT_STATUSES:
         # Rule 2: pure pause (v4 statuses: ambiguities_pending_resolution,
         # premises_pending_verification). Scope-gated statuses caught by Rule 1.
