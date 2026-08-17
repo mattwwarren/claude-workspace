@@ -176,6 +176,30 @@ def test_extra_files_equal_to_allowed_extra_does_not_trigger() -> None:
     assert verdict["triggered"] is False
 
 
+def test_no_drift_when_test_files_and_init_companions_are_enumerated() -> None:
+    """Regression guard for #1713 / #1881: once a plan's ``## Files Modified``
+    heading enumerates its Phase 1 test files and mechanical ``__init__.py``
+    re-export companions (not just the source-only subset), the gate logic
+    already produces the correct non-blocking result. This is a
+    documentation/regression test — it proves no `check_plan_scope_conformance.py`
+    behavior change is needed, only the plan-authoring convention in Phase 2."""
+    src_files = _paths("impl", 10)
+    init_companions = [
+        "src/cw/dev_queue/__init__.py",
+        "src/cw/reconcile/__init__.py",
+    ]
+    test_files = [f"tests/test_impl_{i}.py" for i in range(6)]
+    planned = [*src_files, *init_companions, *test_files]
+    delivered = list(planned)
+
+    verdict = _check(planned, delivered)
+
+    assert verdict["plan_file_count"] == 18
+    assert verdict["delivered_file_count"] == 18
+    assert verdict["triggered"] is False
+    assert verdict["extra_files"] == []
+
+
 def test_extra_files_one_over_allowed_extra_triggers() -> None:
     """Boundary: len(extra_files) == allowed_extra + 1 must trigger.
 
