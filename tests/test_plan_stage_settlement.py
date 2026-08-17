@@ -21,6 +21,7 @@ in the mechanism redacts, truncates, or pre-verifies any ticket-comment text:
 the reviewer always receives the complete live-fetched stream.
 """
 
+import re
 from pathlib import Path
 
 from tests.test_ambiguity_scan_adopted_assumptions import (
@@ -394,12 +395,45 @@ def test_unmappable_operator_reply_stays_open() -> None:
     )
 
 
+def test_alt_x_must_be_one_of_the_plans_own_lettered_alternatives() -> None:
+    """`ALT-<x>` can only reference a letter the PLAN itself enumerated.
+
+    Without this constraint an operator naming an alternative letter the
+    plan never enumerated for that item would have no defined behavior. It
+    is wired into the same catch-all sentence that sends anything "outside
+    the closed set" to unmappable (R2), so an unenumerated letter reopens
+    the item rather than settling it under a label the plan never offered.
+    """
+    block = _step1c0_block()
+    assert (
+        "where `<x>` MUST be one of that item's own lettered alternatives "
+        "from step 2" in block
+    )
+    window = _after(block, "where `<x>` MUST be one of that item's own", span=700)
+    assert "outside the closed set" in window
+    assert "is **unmappable**" in window
+
+
 def test_four_historical_rounds_structurally_impossible() -> None:
-    """One assertion per historical exploit shape this contract closes."""
+    """One assertion per historical exploit shape this contract closes.
+
+    (1) and (3) are whole-file phrase-absence checks against the *historical*
+    wording only — a differently-worded reintroduction of either exploit
+    would not trip them. (5) and (6) below are the genuine structural proof:
+    (5) mechanically validates every marker example against the closed
+    grammar (nothing but the enumerated forms can appear there, regardless of
+    wording), and (6) is an enumerative scan (mirroring (2)'s style) for any
+    carve-out language granting the marker additional content, wherever in
+    the file such a sentence might be planted.
+    """
     content = _cmd("auto-dev-plan.md")
     block = _step1c0_block()
 
-    # (1) No "trust the whole comment body" shape anywhere in Step 1c.0.
+    # (1) No "trust the whole comment body" shape anywhere in the file (not
+    #     just Step 1c.0 — the exploit could be planted at any anchor).
+    assert "trust the whole comment body" not in content
+    assert "whole comment body" not in content
+    # also keep the narrower block-scoped check for backward compatibility
     assert "trust the whole comment body" not in block
     assert "whole comment body" not in block
 
@@ -429,6 +463,46 @@ def test_four_historical_rounds_structurally_impossible() -> None:
         "The grammar has no optional position, no label position, and no "
         "trailing-text position." in content
     )
+
+    # (5) Positive/enumerative structural proof of R1's closure: every
+    #     literal `plan-stage-settled` marker example in the file matches the
+    #     closed grammar exactly. This proves the grammar is closed for any
+    #     marker actually shown, independent of what wording surrounds it.
+    marker_examples = [
+        m
+        for m in re.findall(r"<!-- plan-stage-settled: (.+?) -->", content)
+        if m != "..."  # generic-reference ellipsis, not a claimed example
+    ]
+    assert len(marker_examples) >= 3, (
+        "expected at least the three grammar examples in the Persisted form code block"
+    )
+    closed_grammar = re.compile(
+        r"^A\d+: (ADOPTED|ALT-[a-z])$|^P\d+: (CONFIRMED|REFUTED|DEFERRED)$"
+    )
+    for example in marker_examples:
+        assert closed_grammar.match(example), (
+            f"marker example {example!r} does not match the closed grammar"
+        )
+
+    # (6) Enumerative scan (mirrors (2)'s style) for carve-out language near
+    #     any marker/settlement mention, anywhere in the file — this is what
+    #     would catch a reworded reintroduction of round 1's exploit (e.g. a
+    #     sentence granting the marker line "alongside" content for
+    #     "context" or "convenience", planted at any anchor in the file).
+    carve_out_cues = (
+        "alongside the token",
+        "in addition to the token",
+        "for context",
+        "for convenience",
+        "for readability",
+        "as well as the token",
+    )
+    lower_content = content.lower()
+    for cue in carve_out_cues:
+        assert cue not in lower_content, (
+            f"found carve-out language {cue!r} — the marker line must never "
+            "carry anything beyond the closed grammar (R1)"
+        )
 
 
 # ---------------------------------------------------------------------------
