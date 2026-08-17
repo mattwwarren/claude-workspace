@@ -15406,6 +15406,89 @@ class TestClaimNextPendingStalePr:
 
         assert calls == ["test-client"]
 
+    def test_gate_skipped_when_client_has_no_capacity(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A client with zero available slots this tick never pays the gate's
+        cost (#1862 perf follow-up): the resolver must not even be called.
+
+        Mirrors ``test_skip_reason_cap_full_when_running_at_cap``'s shape --
+        an ACTIVE DAEMON session already occupies the sole cap=1 slot.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        calls = self._stub_gate(monkeypatch, "GEN-nocap")
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    _make_ticket_task(
+                        ticket_id="GEN-nocap",
+                        client="test-client",
+                        status=QueueItemStatus.PENDING,
+                        stage=Stage.PLAN,
+                    )
+                ]
+            )
+        )
+        sess = Session(
+            id="running-sess",
+            name="test-client/auto-dev/OTHER-1",
+            client="test-client",
+            purpose=SessionPurpose.IMPL,
+            origin=SessionOrigin.DAEMON,
+            status=SessionStatus.ACTIVE,
+            workspace_path=sample_client_config.workspace_path,
+        )
+        save_state(CwState(sessions=[sess]))
+
+        dispatch_tick(simple_config, native_daemon=FakeNativeDaemonClient())
+
+        assert calls == []
+        untouched = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == "GEN-nocap"
+        )
+        assert untouched.status == QueueItemStatus.PENDING
+
+    def test_gate_disabled_by_config_toggle(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """OrchestratorConfig.pr_gate_enabled=False is the fleet-wide escape
+        hatch (#1862), mirroring ssh_key_gate_enabled: the resolver is never
+        called and a stale-PR task claims normally."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        calls = self._stub_gate(monkeypatch, "GEN-toggle-off")
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    _make_ticket_task(
+                        ticket_id="GEN-toggle-off",
+                        client="test-client",
+                        status=QueueItemStatus.PENDING,
+                        stage=Stage.PLAN,
+                    )
+                ]
+            )
+        )
+        config = OrchestratorConfig(
+            tick_interval_seconds=30,
+            per_client_max_parallel={"test-client": 1},
+            pr_gate_enabled=False,
+        )
+
+        dispatch_tick(config, native_daemon=FakeNativeDaemonClient())
+
+        assert calls == []
+        claimed = next(
+            t for t in load_dev_queue().tasks if t.ticket_id == "GEN-toggle-off"
+        )
+        assert claimed.status == QueueItemStatus.RUNNING
+
 
 # ---------------------------------------------------------------------------
 # TestStaleDispatchSentinelRouting (#1862)

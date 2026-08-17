@@ -17,8 +17,16 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cw.dispatch.pr_gate import _OPEN_PR_PROBE_TTL_SECONDS, resolve_stale_pr_ticket_ids
-from cw.dispatch_state import OpenPrProbeCache, save_open_pr_probe_entry
+from cw.dispatch.pr_gate import (
+    _MAX_PROBES_PER_TICK,
+    _OPEN_PR_PROBE_TTL_SECONDS,
+    resolve_stale_pr_ticket_ids,
+)
+from cw.dispatch_state import (
+    OpenPrProbeCache,
+    load_open_pr_probe_cache,
+    save_open_pr_probe_entry,
+)
 from cw.models import ClientConfig, DevQueueStore, QueueItemStatus, Stage
 from tests.conftest import _make_ticket_task
 
@@ -372,3 +380,84 @@ class TestOpenPrProbeCacheReuse:
 
         assert gated == frozenset({"GEN-cache"})
         assert stub.calls == ["dev/GEN-cache"]
+
+
+class TestPerTickProbeCap:
+    """The #1862 perf follow-up: fresh probes are capped per call.
+
+    A cold cache with more candidates than the cap is probed incrementally
+    across ticks rather than fanning out an unbounded number of serial ``gh``
+    subprocess calls in one call.
+    """
+
+    def _store(self, count: int) -> DevQueueStore:
+        return DevQueueStore(
+            tasks=[
+                _make_ticket_task(
+                    ticket_id=f"GEN-cap-{i}", client=_CLIENT, stage=Stage.PLAN
+                )
+                for i in range(count)
+            ]
+        )
+
+    def test_probes_are_capped_at_max_per_tick(
+        self,
+        tmp_config_dir: Path,
+        pr_gate_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        stub = _stub_probe(monkeypatch, (True, True))
+        store = self._store(_MAX_PROBES_PER_TICK + 5)
+
+        gated = resolve_stale_pr_ticket_ids(pr_gate_client, store)
+
+        assert len(stub.calls) == _MAX_PROBES_PER_TICK
+        assert len(gated) == _MAX_PROBES_PER_TICK
+
+    def test_capped_out_candidates_are_uncached_and_reprobed_next_call(
+        self,
+        tmp_config_dir: Path,
+        pr_gate_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A candidate left unprobed by the cap gets no cache entry, so a
+        later call (once earlier candidates are cache-warm) reaches it."""
+        stub = _stub_probe(monkeypatch, (True, True))
+        store = self._store(_MAX_PROBES_PER_TICK + 1)
+        overflow_ticket_id = f"GEN-cap-{_MAX_PROBES_PER_TICK}"
+
+        resolve_stale_pr_ticket_ids(pr_gate_client, store)
+
+        assert overflow_ticket_id not in load_open_pr_probe_cache()
+        assert len(stub.calls) == _MAX_PROBES_PER_TICK
+
+        stub.calls.clear()
+        resolve_stale_pr_ticket_ids(pr_gate_client, store)
+
+        # The first _MAX_PROBES_PER_TICK candidates are now cache-warm (no
+        # re-probe); only the previously-capped-out candidate is fresh.
+        assert stub.calls == [f"dev/{overflow_ticket_id}"]
+
+    def test_cache_hits_do_not_count_against_the_cap(
+        self,
+        tmp_config_dir: Path,
+        pr_gate_client: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Only fresh probes are capped -- an all-cache-hit call of any size
+        makes zero gh calls and gates every stale candidate."""
+        now = datetime.now(UTC)
+        count = _MAX_PROBES_PER_TICK + 5
+        for i in range(count):
+            save_open_pr_probe_entry(
+                _CLIENT,
+                f"GEN-cap-{i}",
+                OpenPrProbeCache(probed_at=now, has_open_pr=True),
+            )
+        stub = _stub_probe(monkeypatch, (True, True))
+        store = self._store(count)
+
+        gated = resolve_stale_pr_ticket_ids(pr_gate_client, store, now=now)
+
+        assert stub.calls == []
+        assert len(gated) == count

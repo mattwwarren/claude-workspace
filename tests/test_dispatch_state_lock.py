@@ -33,6 +33,7 @@ from cw.dispatch_state import (
     save_availability_probe_cache,
     save_executor_blocked_marker,
     save_main_drift_latches,
+    save_open_pr_probe_entries,
     save_open_pr_probe_entry,
     save_usage_limited_until,
 )
@@ -398,3 +399,72 @@ class TestOpenPrProbeCacheSidecar:
         )
 
         assert load_open_pr_probe_cache() == {}
+
+
+class TestOpenPrProbeEntriesBatch:
+    """The #1862 perf follow-up: batched multi-entry writer.
+
+    ``save_open_pr_probe_entries`` and ``save_open_pr_probe_entry`` share the
+    same underlying read-merge-write helper -- these tests pin the batch
+    entry point's own contract (one lock window for N entries, no-op on
+    empty, preserves sibling keys).
+    """
+
+    def test_round_trip_multiple_entries_in_one_call(
+        self, tmp_config_dir: Path
+    ) -> None:
+        now = datetime.now(UTC)
+        save_open_pr_probe_entries(
+            "acme",
+            {
+                "1862": OpenPrProbeCache(probed_at=now, has_open_pr=True),
+                "1863": OpenPrProbeCache(probed_at=now, has_open_pr=False),
+            },
+        )
+
+        cache = load_open_pr_probe_cache()
+
+        assert set(cache) == {"acme/1862", "acme/1863"}
+        assert cache["acme/1862"].has_open_pr is True
+        assert cache["acme/1863"].has_open_pr is False
+
+    def test_empty_dict_is_a_noop_and_acquires_no_lock(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """An empty batch must not create the sidecar file at all."""
+        import cw.dispatch_state
+
+        save_open_pr_probe_entries("acme", {})
+
+        assert not cw.dispatch_state.DISPATCH_STATE_FILE.exists()
+
+    def test_batch_write_preserves_sibling_keys(self, tmp_config_dir: Path) -> None:
+        """Read-merge-write, per the #1157 shared-sidecar contract."""
+        future = datetime.now(UTC) + timedelta(hours=1)
+        save_usage_limited_until(future)
+
+        save_open_pr_probe_entries(
+            "acme",
+            {"1862": OpenPrProbeCache(datetime.now(UTC), has_open_pr=True)},
+        )
+
+        loaded_limit = load_usage_limited_until()
+        assert loaded_limit is not None
+        assert abs((loaded_limit - future).total_seconds()) < 1
+        assert "acme/1862" in load_open_pr_probe_cache()
+
+    def test_single_entry_helper_and_batch_helper_agree(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """save_open_pr_probe_entry and save_open_pr_probe_entries write the
+        identical on-disk shape (they share one implementation)."""
+        now = datetime.now(UTC)
+        save_open_pr_probe_entry(
+            "acme", "single", OpenPrProbeCache(probed_at=now, has_open_pr=True)
+        )
+        save_open_pr_probe_entries(
+            "acme", {"batch": OpenPrProbeCache(probed_at=now, has_open_pr=True)}
+        )
+
+        cache = load_open_pr_probe_cache()
+        assert set(cache) == {"acme/single", "acme/batch"}
