@@ -66,6 +66,13 @@ def _apply_foreign_result_queue_mutation(
     Mirrors ``concierge._route_park_marker_poison_task``'s foreign-result arm;
     does NOT clear ``task.session_id`` (kept for operator traceability).
     """
+    # Deferred, not module-top: cw.dispatch's package __init__ imports
+    # cw.reconcile (loop.py/gating.py/lanes.py), so a top-level import of any
+    # cw.dispatch submodule here is a real circular import at package-init
+    # time. Same shape as the #698 reconcile._shared -> cw.dispatch precedent
+    # and tasks.py's deferred cw.dispatch.routing import. See #1750.
+    from cw.dispatch.productivity import extract_claim_evidence, is_unproductive
+
     dumped = validated.model_dump(mode="json")
     blocker_reason = _result_blocker_reason(validated)
     transition_task_status(
@@ -73,6 +80,11 @@ def _apply_foreign_result_queue_mutation(
         _foreign_result_target_queue_status(validated),
         disposition=_hold_aware_disposition(validated.status, blocker_reason),
         pr_url=_extract_pr_url(dumped),
+        # #1750: classify off the real sentinel, reusing the `dumped` payload
+        # computed above. A BlockedResult carries no commits/review keys, so
+        # extract_claim_evidence naturally reads it as zero evidence via its
+        # plain .get() defaults — no separate branch needed for that union arm.
+        unproductive=is_unproductive(extract_claim_evidence(dumped)),
     )
 
 
