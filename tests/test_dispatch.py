@@ -11378,9 +11378,7 @@ class TestEmptyDiffGate:
             "test-client": ClientConfig(name="test-client", workspace_path=tmp_path)
         }
 
-    def _set_ahead(
-        self, monkeypatch: pytest.MonkeyPatch, *, ahead: int | None
-    ) -> None:
+    def _set_ahead(self, monkeypatch: pytest.MonkeyPatch, *, ahead: int | None) -> None:
         """Stub the git-level commits-ahead probe at its consumption point.
 
         ``review_gates`` imports ``commits_ahead_of_default`` at module top, so
@@ -11709,6 +11707,23 @@ class TestReviewHealthAgentsRunGate:
         assert _should_gate_for_review_health({"status": "stage_complete"}) is False
         assert _should_gate_for_review_health(None) is False
         assert _should_gate_for_review_health({"review": "nonsense"}) is False
+
+    def test_non_int_agents_run_fails_open(self) -> None:
+        """A malformed agents_run is unmeasurable, not zero. ``False`` is
+        called out explicitly: bool is an int subclass, so an unguarded
+        isinstance check would read it as 0 and park the row."""
+        from cw.dispatch.review_gates import (
+            _resolve_review_agents_run,
+            _should_gate_for_review_health,
+        )
+
+        for bad in ("0", None, False, 1.5):
+            last_result: dict[str, object] = {
+                "health": {"recommendation": "PROCEED"},
+                "review": {"agents_run": bad},
+            }
+            assert _resolve_review_agents_run(last_result) is None
+            assert _should_gate_for_review_health(last_result) is False
 
     def test_degraded_recommendation_still_gates_with_agents(self) -> None:
         """The pre-existing #1702 arm is untouched by the new disjunct."""

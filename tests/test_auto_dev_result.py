@@ -3249,7 +3249,7 @@ class TestEmptyDiffBlockedStatus:
     def test_post_impl_requires_scope_tier(self) -> None:
         p = _empty_diff_payload()
         p["scope"]["tier"] = None
-        with pytest.raises(ValidationError, match="scope.tier must be non-null"):
+        with pytest.raises(ValidationError, match=r"scope\.tier must be non-null"):
             AutoDevResult.model_validate(p)
 
     def test_post_impl_requires_lowest_agent_confidence(self) -> None:
