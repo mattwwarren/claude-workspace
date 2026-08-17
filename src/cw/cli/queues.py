@@ -201,7 +201,7 @@ _TERMINAL_EVENT_TYPES: frozenset[OrchestratorEventType] = frozenset(
 
 def _terminal_dedup_key(
     ev: OrchestratorEvent,
-) -> tuple[str, str | None, str | None] | None:
+) -> tuple[str, str | None, str | None, str | None] | None:
     """Return dedup key for terminal events, or None if not a terminal event."""
     if ev.type not in _TERMINAL_EVENT_TYPES:
         return None
@@ -209,12 +209,15 @@ def _terminal_dedup_key(
         str(ev.type),
         ev.payload.get("session_id"),
         ev.payload.get("paused_status"),
+        ev.payload.get("renotify_marker"),
     )
 
 
 def _dedup_terminal(events: list[OrchestratorEvent]) -> list[OrchestratorEvent]:
-    """Filter repeated terminal events with same (type, session, paused_status) key."""
-    seen: set[tuple[str, str | None, str | None]] = set()
+    """Filter repeated terminal events with same (type, session, paused_status,
+    renotify_marker) key.
+    """
+    seen: set[tuple[str, str | None, str | None, str | None]] = set()
     result: list[OrchestratorEvent] = []
     for ev in events:
         key = _terminal_dedup_key(ev)
@@ -271,7 +274,7 @@ def _follow_loop(
     dedup_terminal: bool = False,
 ) -> None:
     """Stream events from the inbox until SIGINT or broken pipe."""
-    seen_terminal: set[tuple[str, str | None, str | None]] = set()
+    seen_terminal: set[tuple[str, str | None, str | None, str | None]] = set()
     try:
         for ev in tail_events_follow(
             since_cursor=since_cursor,

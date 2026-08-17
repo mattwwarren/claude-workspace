@@ -2004,6 +2004,65 @@ def test_cli_event_tail_follow_dedup_terminal(
     assert result.output.count("session.timed_out") == 1
 
 
+def test_cli_event_tail_dedup_terminal_legacy_producer_ignores_renotify_marker(
+    tmp_events_dir: Path,
+) -> None:
+    """Widening _terminal_dedup_key to a 4-tuple doesn't change a legacy
+    producer's dedup collapse (#1858) -- a payload with no renotify_marker
+    key reads None uniformly via .get(), so all three occurrences still
+    share one dedup key."""
+    for _ in range(3):
+        events_record_event(
+            OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            {
+                "session_id": "lane:test-client/default@2026-08-01T12:00:00+00:00",
+                "paused_status": "lane_circuit_paused",
+            },
+            correlation_id="T-1",
+        )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--dedup-terminal"])
+    assert result.exit_code == 0, result.output
+    assert result.output.count("session.needs_attention") == 1
+
+
+def test_cli_event_tail_follow_dedup_terminal_renotify_marker_survives(
+    tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--follow --dedup-terminal: two liveness renotify fires with the same
+    session_id/paused_status but distinct renotify_marker values both
+    survive as separate rows (#1858)."""
+    events_record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {
+            "session_id": "s1",
+            "paused_status": "session_unresponsive",
+            "renotify_marker": "2026-08-01T12:00:00+00:00",
+        },
+        correlation_id="T-1",
+    )
+    events_record_event(
+        OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+        {
+            "session_id": "s1",
+            "paused_status": "session_unresponsive",
+            "renotify_marker": "2026-08-01T13:00:00+00:00",
+        },
+        correlation_id="T-1",
+    )
+
+    def raise_immediately(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("time.sleep", raise_immediately)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["event", "tail", "--follow", "--dedup-terminal"])
+    assert result.exit_code == 130
+    assert result.output.count("session.needs_attention") == 2
+
+
 def test_cli_event_tail_follow_client_filter(
     tmp_events_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

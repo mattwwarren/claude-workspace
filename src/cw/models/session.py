@@ -138,6 +138,13 @@ class Session(BaseModel):
     # per-stage floor; the owning TicketTask.stage is (see
     # cw.reconcile.liveness._detect_liveness_candidates). See GitHub #1001.
     liveness_bucket: LivenessBucket = LivenessBucket.LIVE
+    # RFC 0008 W2 re-fire cadence (#1858) — debounce stamp for the recurring
+    # SESSION_NEEDS_ATTENTION re-fire while a session stays latched at
+    # STALE_45M. None until the first distress fire; re-armed to
+    # now + config.liveness_attention_renotify_interval_minutes on every
+    # subsequent fire (initial crossing AND steady-state renotify). Cleared
+    # when the session's bucket recovers below STALE_45M. Schema v18.
+    liveness_attention_next_eligible_at: datetime | None = None
     # RFC 0012 S2 — provenance of last_result: which mechanism wrote it
     # (cw result emit, the Stop hook harvest, an executor's direct write, git
     # synthesis, or transcript salvage). Stamped by the emit_result_locked

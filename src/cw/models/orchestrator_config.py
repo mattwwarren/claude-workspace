@@ -514,6 +514,13 @@ class OrchestratorConfig(BaseModel):
     liveness_first_bucket_by_stage: dict[Stage, int] = Field(
         default_factory=lambda: {Stage.IMPL: 35}
     )
+    # RFC 0008 W2 re-fire cadence (#1858) — fixed interval (minutes) on which
+    # the top-bucket operator distress signal (SESSION_NEEDS_ATTENTION) re-fires
+    # while a session stays latched at STALE_45M with no bucket crossing.
+    # Mirrors lane_starved_notify_interval_minutes's fixed-interval shape
+    # (#1630) rather than an exponential backoff -- the operator wants "page me
+    # again in N minutes while this is still stuck," not a growing delay.
+    liveness_attention_renotify_interval_minutes: int = 60
     # RFC 0008 W3 (#1002) — declarative operator-attention forward-set for the
     # cw-operator SSE channel bridge (cw.cw_operator_events). No coercion
     # validator (fail-loud, mirrors default_signoff's asymmetry with

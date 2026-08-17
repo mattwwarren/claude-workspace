@@ -126,10 +126,10 @@ def _stale_transcript(home: Path, worktree: Path, *, stale_minutes: float) -> No
     os.utime(str(transcript), (ts, ts))
 
 
-def _run_liveness(state: CwState) -> None:
+def _run_liveness(state: CwState, *, now: datetime = _NOW) -> None:
     record_session_liveness_changes(
         state,
-        now=_NOW,
+        now=now,
         native_live={"fake-short-id"},
         config=OrchestratorConfig(),
         task_by_ticket={},
@@ -209,3 +209,103 @@ def test_no_distress_below_top_bucket(
     assert sess.liveness_bucket is LivenessBucket.STALE_30M
     assert _distress_events() == []
     assert push_calls == []
+
+
+# ---------------------------------------------------------------------------
+# 4. Liveness re-fire cadence (#1858)
+# ---------------------------------------------------------------------------
+
+
+def test_distress_renotifies_after_debounce_interval_elapses(
+    tmp_config_dir: Path, tmp_path: Path, home: Path, push_calls: list[tuple[str, str]]
+) -> None:
+    sess = _mk_headless_daemon_session("T-1", tmp_path / "wt", _STARTED_AT)
+    _stale_transcript(home, tmp_path / "wt", stale_minutes=46)
+    state = CwState(sessions=[sess])
+
+    _run_liveness(state, now=_NOW)
+    _run_liveness(state, now=_NOW + timedelta(minutes=61))
+
+    assert len(_distress_events()) == 2
+    assert len(push_calls) == 2
+
+
+def test_distress_does_not_renotify_partway_through_interval(
+    tmp_config_dir: Path, tmp_path: Path, home: Path, push_calls: list[tuple[str, str]]
+) -> None:
+    sess = _mk_headless_daemon_session("T-1", tmp_path / "wt", _STARTED_AT)
+    _stale_transcript(home, tmp_path / "wt", stale_minutes=46)
+    state = CwState(sessions=[sess])
+
+    _run_liveness(state, now=_NOW)
+    _run_liveness(state, now=_NOW + timedelta(minutes=30))
+
+    assert len(_distress_events()) == 1
+    assert len(push_calls) == 1
+
+
+def test_renotify_marker_present_and_distinct_across_fires(
+    tmp_config_dir: Path, tmp_path: Path, home: Path, push_calls: list[tuple[str, str]]
+) -> None:
+    sess = _mk_headless_daemon_session("T-1", tmp_path / "wt", _STARTED_AT)
+    _stale_transcript(home, tmp_path / "wt", stale_minutes=46)
+    state = CwState(sessions=[sess])
+
+    _run_liveness(state, now=_NOW)
+    _run_liveness(state, now=_NOW + timedelta(minutes=61))
+
+    events = _distress_events()
+    assert len(events) == 2
+    markers = [e["renotify_marker"] for e in events]
+    assert all(m is not None for m in markers)
+    for marker in markers:
+        assert isinstance(marker, str)
+        datetime.fromisoformat(marker)
+    assert markers[0] != markers[1]
+
+
+def test_renotify_suppressed_once_terminal_sentinel_lands(
+    tmp_config_dir: Path, tmp_path: Path, home: Path, push_calls: list[tuple[str, str]]
+) -> None:
+    sess = _mk_headless_daemon_session("T-1", tmp_path / "wt", _STARTED_AT)
+    _stale_transcript(home, tmp_path / "wt", stale_minutes=46)
+    state = CwState(sessions=[sess])
+
+    _run_liveness(state, now=_NOW)
+    sess.last_result = _shipped_salvage_payload()
+
+    _run_liveness(state, now=_NOW + timedelta(minutes=61))
+
+    assert len(_distress_events()) == 1
+
+
+def test_liveness_attention_next_eligible_at_cleared_on_recovery(
+    tmp_config_dir: Path, tmp_path: Path, home: Path, push_calls: list[tuple[str, str]]
+) -> None:
+    sess = _mk_headless_daemon_session("T-1", tmp_path / "wt", _STARTED_AT)
+    sess.liveness_bucket = LivenessBucket.STALE_45M
+    sess.liveness_attention_next_eligible_at = _NOW + timedelta(minutes=60)
+    _stale_transcript(home, tmp_path / "wt", stale_minutes=1)
+    state = CwState(sessions=[sess])
+
+    _run_liveness(state)
+
+    assert sess.liveness_bucket is LivenessBucket.LIVE
+    assert sess.liveness_attention_next_eligible_at is None
+
+
+def test_liveness_renotify_survives_dedup_terminal(
+    tmp_config_dir: Path, tmp_path: Path, home: Path, push_calls: list[tuple[str, str]]
+) -> None:
+    from cw.cli.queues import _dedup_terminal
+
+    sess = _mk_headless_daemon_session("T-1", tmp_path / "wt", _STARTED_AT)
+    _stale_transcript(home, tmp_path / "wt", stale_minutes=46)
+    state = CwState(sessions=[sess])
+
+    _run_liveness(state, now=_NOW)
+    _run_liveness(state, now=_NOW + timedelta(minutes=61))
+
+    events = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
+    assert len(events) == 2
+    assert len(_dedup_terminal(events)) == 2
