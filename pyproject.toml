@@ -251,6 +251,15 @@ ignore = [
 # shape and rationale to the claim.py entry above. Inline import is the
 # sanctioned mechanism, not a workaround.
 "src/cw/dispatch/review_gates.py" = ["PLC0415"]
+# routing/stage_walk defers cw.dispatch.routing's _record_scope_routing_decision
+# and _RULE_STAGE_WALK (inside _walk_stage_pointer_forward) to break the
+# routing/__init__ ↔ routing.stage_walk circular dependency (#1728): the package
+# __init__ imports this submodule at module top, and _record_scope_routing_
+# decision must stay defined in __init__ so tests/test_dispatch.py's dotted-path
+# monkeypatch of cw.dispatch.routing.record_event still reaches the real call
+# site. Identical shape and rationale to the review_gates.py entry above. Inline
+# import is the sanctioned mechanism, not a workaround.
+"src/cw/dispatch/routing/stage_walk.py" = ["PLC0415"]
 # loop_health defers the cw.doctor.wedge._collapse_blocked_on_user_tasks import
 # inside _reap_session_by_selector to break the wedge ↔ loop_health circular
 # dependency (#1314): wedge imports _gh_pr_states/_reap_session_by_selector from
