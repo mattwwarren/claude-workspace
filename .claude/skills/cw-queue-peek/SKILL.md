@@ -102,7 +102,10 @@ The command's recommendation is computed from this ladder. Higher rules win:
    - `idle_min > 15` → **PEEK** (CI may be hung; check `gh pr checks <n>`)
 3. **Approaching timeout**: `age_min > 55` → **STOP** (60-min hard ceiling
    imminent — close cleanly or accept the auto-timeout).
-4. **Retry loop**: `attempts ≥ 3` → **STOP** (systemic, not transient).
+4. **Retry loop**: `unproductive_attempts ≥ 3` → **STOP** (systemic, not
+   transient). Reads `unproductive_attempts`, not raw `attempts` — mirroring
+   the dispatch admission gate's #1750 signal, since raw claim count no
+   longer implies failure (#1727/#1768).
 5. **Long stall without PR**: `idle_min > 15` and no PR → **STOP-OR-PEEK**
    (manually inspect before stopping — could be tool denial or model-side
    hang).

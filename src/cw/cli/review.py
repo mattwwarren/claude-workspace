@@ -41,11 +41,14 @@ from cw.atomic import atomic_write_text
 from cw.cli._base import handle_errors, main
 from cw.exceptions import CwError
 from cw.review_adjudication import (
+    REJECTED_ENTRY_SEVERITY,
     Adjudication,
     VoidedFinding,
     apply_adjudication,
     apply_voided_suppression,
     matched_adjudications,
+    merge_deferred_adjudications,
+    parse_deferred_findings_md,
     parse_voided_findings_block,
     render_deferred_findings_md,
     render_voided_findings_block,
@@ -309,8 +312,14 @@ def review_consolidate(
     type=click.Path(path_type=Path),
     help=(
         "Also render the rejected/deferred adjudications to this path "
-        "(the .cw/deferred-findings.md artifact Stage 4 Step 4d consumes). "
-        "Nothing is written when every finding was fixed."
+        "(the .cw/deferred-findings.md artifact Stage 4 Step 4d "
+        "consumes), merging them with any prior content already at "
+        "this path rather than overwriting it. Each newly-applied "
+        "entry is stamped with a round number and a recorded_at "
+        "timestamp; a pre-#1840 legacy-shaped file (no round/date "
+        "stamps) is read and merged without error. Nothing is "
+        "written when there is nothing to record — every finding "
+        "was fixed and no prior content exists to preserve."
     ),
 )
 @handle_errors
@@ -330,22 +339,99 @@ def review_adjudicate(path: str, deferred_findings_out: Path | None) -> None:
     and is excluded from the rendered `--deferred-findings-out` artifact (an
     entry nobody's disposition reflects must not appear there as if it did).
 
+    When --deferred-findings-out is given, any prior content already at
+    that path is read back and merged with this round's rejected/deferred
+    entries rather than overwritten. Entries dedupe by content fingerprint
+    (severity, file, line_start, line_end, evidence, summary, outcome,
+    rationale) — excluding `round`/`recorded_at` — so an identical
+    re-adjudication collapses to one entry while a genuine outcome flip
+    (e.g. REJECT then later DEFER for the same finding) accumulates as
+    two. Only entries newly applied by this call are stamped with a
+    `round` number and a `recorded_at` timestamp; entries already present
+    in the prior file — including ones written before this stamping
+    existed — are carried through unchanged. Content matching neither the
+    current nor the pre-#1840 shape is a hard failure (CwError); an
+    absent or empty prior file is simply "nothing to merge".
+
     On success: exits 0, prints the stamped ReviewVerdict as JSON to stdout.
-    On failure: exits 1, prints 'field.path: message' lines to stderr.
+    On failure: exits 1, prints 'field.path: message' lines to stderr —
+    except a malformed --deferred-findings-out prior file, which exits 1
+    with a plain CwError message instead of the field.path format.
     """
     parsed = _parse_payload_or_exit(path, _AdjudicateInput)
     verdict = apply_adjudication(parsed.verdict, parsed.adjudications)
 
     if deferred_findings_out is not None:
         applied = matched_adjudications(parsed.verdict.accepted, parsed.adjudications)
-        rendered = render_deferred_findings_md(applied)
-        # "" means every finding was fixed — the documented rule is to omit
-        # the file entirely rather than leave an empty artifact behind.
-        if rendered:
-            deferred_findings_out.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_text(deferred_findings_out, rendered)
+        _write_deferred_findings(deferred_findings_out, applied)
 
     click.echo(verdict.model_dump_json(indent=2))
+
+
+def _read_prior_deferred(path: Path) -> list[Adjudication]:
+    """The entries already recorded at *path*, or ``[]`` when there are none.
+
+    A parse failure is fatal rather than a silent restart from empty: the
+    alternative is overwriting durable prior records with this round's alone,
+    which is #1840's own bug wearing a different hat.
+    """
+    if not path.exists():
+        return []
+    try:
+        return parse_deferred_findings_md(path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        msg = (
+            f"Could not parse the existing --deferred-findings-out file at "
+            f"{path}: {exc}. Refusing to overwrite it — inspect or remove it "
+            "by hand, then re-run."
+        )
+        raise CwError(msg) from exc
+
+
+def _artifact_entry(entry: Adjudication, next_round: int, now: str) -> Adjudication:
+    """*entry* stamped with this round's context, in the artifact's field space.
+
+    Two things happen here, both required for the merge to behave:
+
+    - **Stamping.** ``round``/``recorded_at`` are filled in exactly the way
+      :func:`_stamp_voided_at` fills ``voided_at``: the coordinating session
+      supplies the judgment, the CLI supplies the clock, and a value already
+      present is never overwritten.
+    - **Projection.** ``line_start``/``line_end``/``evidence`` (and, for a
+      rejected entry, ``severity``) are reduced to what the rendered artifact
+      actually records. The artifact has never carried them, so an entry read
+      back from a prior round cannot have them either; leaving them on this
+      round's entries would make an identical re-adjudication miss its own
+      prior record and duplicate it. Nothing observable is lost — every
+      dropped field is one :func:`render_deferred_findings_md` never writes.
+    """
+    update: dict[str, object] = {
+        "line_start": None,
+        "line_end": None,
+        "evidence": "",
+    }
+    if entry.outcome == "reject":
+        update["severity"] = REJECTED_ENTRY_SEVERITY
+    if entry.round is None:
+        update["round"] = next_round
+    if not entry.recorded_at.strip():
+        update["recorded_at"] = now
+    return entry.model_copy(update=update)
+
+
+def _write_deferred_findings(path: Path, applied: list[Adjudication]) -> None:
+    """Merge *applied* into the artifact at *path* and re-render it (#1840)."""
+    prior = _read_prior_deferred(path)
+    next_round = max((e.round for e in prior if e.round is not None), default=0) + 1
+    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    stamped = [_artifact_entry(entry, next_round, now) for entry in applied]
+    rendered = render_deferred_findings_md(merge_deferred_adjudications(prior, stamped))
+    # "" means there is nothing to record at all — every finding was fixed and
+    # no prior content exists to preserve. The documented rule is to omit the
+    # file entirely rather than leave an empty artifact behind.
+    if rendered:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(path, rendered)
 
 
 def _stamp_voided_at(entry: VoidedFinding) -> VoidedFinding:

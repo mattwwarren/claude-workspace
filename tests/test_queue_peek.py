@@ -72,6 +72,7 @@ def _make_ticket_task(
     session_id: str | None = "abc12345",
     client: str = "test",
     attempts: int = 1,
+    unproductive_attempts: int = 1,
     worktree_path: Path | None = None,
     stage_high_water: Stage | None = None,
     stage: Stage = DEFAULT_STAGE,
@@ -82,6 +83,7 @@ def _make_ticket_task(
         status=QueueItemStatus.RUNNING,
         session_id=session_id,
         attempts=attempts,
+        unproductive_attempts=unproductive_attempts,
         worktree_path=worktree_path,
         stage_high_water=stage_high_water,
         stage=stage,
@@ -721,7 +723,7 @@ class TestRecommend:
             idle_min=queue_peek.IDLE_POST_PR_MIN + 1.0,
             pr_state="MERGED",
             sentinel_status=None,
-            attempts=1,
+            unproductive_attempts=1,
         )
         assert rec == "STOP"
         assert "merged" in reason.lower()
@@ -733,7 +735,7 @@ class TestRecommend:
             idle_min=0.0,
             pr_state="MERGED",
             sentinel_status=None,
-            attempts=1,
+            unproductive_attempts=1,
         )
         # idle_min = 0.0, not > IDLE_POST_PR_MIN, so doesn't STOP — falls to stall check
         assert rec == "WAIT"
@@ -744,7 +746,7 @@ class TestRecommend:
             idle_min=2.0,
             pr_state="OPEN",
             sentinel_status="shipped",
-            attempts=1,
+            unproductive_attempts=1,
         )
         assert rec == "WAIT"
         assert "CI" in reason
@@ -755,7 +757,7 @@ class TestRecommend:
             idle_min=queue_peek.IDLE_STALL_MIN + 1.0,
             pr_state="OPEN",
             sentinel_status="shipped",
-            attempts=1,
+            unproductive_attempts=1,
         )
         assert rec == "PEEK"
         assert "CI" in reason
@@ -766,7 +768,7 @@ class TestRecommend:
             idle_min=0.0,
             pr_state=None,
             sentinel_status=None,
-            attempts=1,
+            unproductive_attempts=1,
         )
         assert rec == "STOP"
         assert "timeout" in reason
@@ -778,7 +780,7 @@ class TestRecommend:
             idle_min=0.0,
             pr_state=None,
             sentinel_status=None,
-            attempts=1,
+            unproductive_attempts=1,
         )
         assert rec == "STOP"
         assert "exceeded" in reason
@@ -790,7 +792,7 @@ class TestRecommend:
             idle_min=0.0,
             pr_state=None,
             sentinel_status=None,
-            attempts=1,
+            unproductive_attempts=1,
         )
         assert rec == "STOP"
         assert "exceeded" in reason
@@ -801,7 +803,7 @@ class TestRecommend:
             idle_min=0.0,
             pr_state=None,
             sentinel_status=None,
-            attempts=1,
+            unproductive_attempts=1,
         )
         assert rec == "STOP"
         assert "approaches" in reason
@@ -812,17 +814,32 @@ class TestRecommend:
             idle_min=128.7,
             pr_state=None,
             sentinel_status=None,
-            attempts=1,
+            unproductive_attempts=1,
         )
         assert rec == "STOP"
 
-    def test_high_attempts_returns_stop(self) -> None:
+    def test_high_raw_attempts_low_unproductive_attempts_does_not_stop(self) -> None:
+        """#1727 shape: a ticket can accumulate many raw claims (attempts)
+        while making real progress on each one — the ladder's STOP-by-
+        attempt-count branch must key off unproductive_attempts, not raw
+        attempts, so an all-productive run is never advised STOP here."""
         rec, reason = queue_peek.recommend(
             age_min=10.0,
             idle_min=0.0,
             pr_state=None,
             sentinel_status=None,
-            attempts=queue_peek.STOP_ATTEMPTS_MIN,
+            unproductive_attempts=0,
+        )
+        assert rec != "STOP"
+        assert "systemic" not in reason
+
+    def test_high_unproductive_attempts_returns_stop(self) -> None:
+        rec, reason = queue_peek.recommend(
+            age_min=10.0,
+            idle_min=0.0,
+            pr_state=None,
+            sentinel_status=None,
+            unproductive_attempts=queue_peek.STOP_UNPRODUCTIVE_ATTEMPTS_MIN,
         )
         assert rec == "STOP"
         assert "systemic" in reason
@@ -833,7 +850,7 @@ class TestRecommend:
             idle_min=queue_peek.IDLE_STALL_MIN + 1.0,
             pr_state=None,
             sentinel_status=None,
-            attempts=1,
+            unproductive_attempts=1,
         )
         assert rec == "STOP-OR-PEEK"
 
@@ -843,7 +860,7 @@ class TestRecommend:
             idle_min=queue_peek.IDLE_PEEK_MIN + 1.0,
             pr_state=None,
             sentinel_status=None,
-            attempts=1,
+            unproductive_attempts=1,
         )
         assert rec == "PEEK"
 
@@ -853,7 +870,7 @@ class TestRecommend:
             idle_min=0.0,
             pr_state=None,
             sentinel_status=None,
-            attempts=1,
+            unproductive_attempts=1,
         )
         assert rec == "PEEK"
 
@@ -863,7 +880,7 @@ class TestRecommend:
             idle_min=0.0,
             pr_state=None,
             sentinel_status=None,
-            attempts=1,
+            unproductive_attempts=1,
         )
         assert rec == "WAIT"
 
@@ -873,7 +890,7 @@ class TestRecommend:
             idle_min=None,
             pr_state=None,
             sentinel_status=None,
-            attempts=1,
+            unproductive_attempts=1,
         )
         assert rec == "WAIT"
         assert "early" in reason
@@ -884,21 +901,22 @@ class TestRecommend:
             idle_min=0.0,
             pr_state=None,
             sentinel_status=None,
-            attempts=queue_peek.STOP_ATTEMPTS_MIN,
+            unproductive_attempts=queue_peek.STOP_UNPRODUCTIVE_ATTEMPTS_MIN,
             usage_limit_detected=True,
         )
         assert rec != "STOP"
         assert "usage-limit" in reason
 
     def test_high_attempts_without_usage_limit_signal_still_stops(self) -> None:
-        """Regression guard for test_high_attempts_returns_stop: omitting/False
-        usage_limit_detected preserves the existing STOP behavior."""
+        """Regression guard for test_high_unproductive_attempts_returns_stop:
+        omitting/False usage_limit_detected preserves the existing STOP
+        behavior."""
         rec, reason = queue_peek.recommend(
             age_min=10.0,
             idle_min=0.0,
             pr_state=None,
             sentinel_status=None,
-            attempts=queue_peek.STOP_ATTEMPTS_MIN,
+            unproductive_attempts=queue_peek.STOP_UNPRODUCTIVE_ATTEMPTS_MIN,
             usage_limit_detected=False,
         )
         assert rec == "STOP"
@@ -954,7 +972,7 @@ class TestScoreSessionStageHighWater:
             idle_min=0.0,
             pr_state=None,
             sentinel_status=None,
-            attempts=queue_peek.STOP_ATTEMPTS_MIN,
+            unproductive_attempts=queue_peek.STOP_UNPRODUCTIVE_ATTEMPTS_MIN,
             stage_high_water=Stage.REVIEW,
         )
         assert rec != "STOP"
@@ -966,7 +984,7 @@ class TestScoreSessionStageHighWater:
             idle_min=0.0,
             pr_state=None,
             sentinel_status=None,
-            attempts=queue_peek.STOP_ATTEMPTS_MIN,
+            unproductive_attempts=queue_peek.STOP_UNPRODUCTIVE_ATTEMPTS_MIN,
             stage_high_water=Stage.IMPL,
         )
         assert rec == "STOP"
@@ -978,7 +996,7 @@ class TestScoreSessionStageHighWater:
             idle_min=0.0,
             pr_state=None,
             sentinel_status=None,
-            attempts=queue_peek.STOP_ATTEMPTS_MIN,
+            unproductive_attempts=queue_peek.STOP_UNPRODUCTIVE_ATTEMPTS_MIN,
             stage_high_water=None,
         )
         assert rec == "STOP"
@@ -990,7 +1008,7 @@ class TestScoreSessionStageHighWater:
             idle_min=queue_peek.IDLE_POST_PR_MIN + 1.0,
             pr_state="MERGED",
             sentinel_status=None,
-            attempts=1,
+            unproductive_attempts=1,
             stage_high_water=Stage.FINALIZE,
         )
         assert rec == "STOP"
@@ -1002,7 +1020,7 @@ class TestScoreSessionStageHighWater:
             idle_min=0.0,
             pr_state=None,
             sentinel_status=None,
-            attempts=1,
+            unproductive_attempts=1,
             stage_high_water=Stage.FINALIZE,
         )
         assert rec == "STOP"
@@ -1014,7 +1032,7 @@ class TestScoreSessionStageHighWater:
             idle_min=queue_peek.IDLE_STALL_MIN + 1.0,
             pr_state=None,
             sentinel_status=None,
-            attempts=queue_peek.STOP_ATTEMPTS_MIN,
+            unproductive_attempts=queue_peek.STOP_UNPRODUCTIVE_ATTEMPTS_MIN,
             stage_high_water=Stage.REVIEW,
         )
         assert rec == "STOP-OR-PEEK"
@@ -1027,7 +1045,7 @@ class TestScoreSessionStageHighWater:
             idle_min=0.0,
             pr_state=None,
             sentinel_status=None,
-            attempts=queue_peek.STOP_ATTEMPTS_MIN,
+            unproductive_attempts=queue_peek.STOP_UNPRODUCTIVE_ATTEMPTS_MIN,
             stage_high_water=Stage.IMPL,
             usage_limit_detected=True,
         )
@@ -1371,6 +1389,7 @@ class TestFormatRow:
             "session",
             "client",
             "attempts",
+            "unproductive_attempts",
             "age_min",
             "idle_min",
             "stage",
@@ -1385,6 +1404,24 @@ class TestFormatRow:
             "pipeline_stage",
         }
         assert required_keys == set(row.keys())
+
+    def test_attempts_and_unproductive_attempts_are_independently_visible(
+        self,
+    ) -> None:
+        """attempts (raw claim count) and unproductive_attempts (the STOP
+        ladder's signal) are both surfaced on the row, and can diverge."""
+        task = _make_ticket_task(attempts=9, unproductive_attempts=2)
+        info: dict[str, Any] = {
+            "first_user_ts": "2026-06-20T11:50:00+00:00",
+            "last_asst_ts": "2026-06-20T11:55:00+00:00",
+            "last_sentinel_status": None,
+            "last_sentinel_stage": None,
+            "last_pr_number": None,
+            "signal_source": "transcript",
+        }
+        row = queue_peek.format_row(task, info, _NOW)
+        assert row["attempts"] == 9
+        assert row["unproductive_attempts"] == 2
 
     def test_session_truncated_to_12_chars(self) -> None:
         task = _make_ticket_task(session_id="abcdef1234567890")
@@ -1705,6 +1742,37 @@ class TestBuildPeekRows:
         ):
             rows = queue_peek.build_peek_rows(None, _NOW)
         assert rows[0]["recommend"] not in {"STOP", "STOP-OR-PEEK"}
+
+    def test_high_raw_attempts_low_unproductive_attempts_not_stopped(
+        self, tmp_path: Path
+    ) -> None:
+        """The actual regression surface: format_row must wire t.attempts
+        through to recommend()'s unproductive_attempts parameter using
+        t.unproductive_attempts, not the raw claim counter — a healthy,
+        all-productive #1727-shaped ticket (many raw attempts, zero
+        unproductive ones) must not be recommended STOP end-to-end."""
+        task = _make_ticket_task("T-1", attempts=12, unproductive_attempts=0)
+        transcript_path = tmp_path / "session.jsonl"
+        transcript_path.write_text(
+            json.dumps(
+                {
+                    "type": "user",
+                    "timestamp": "2026-06-20T11:50:00Z",  # 10 min before _NOW — healthy
+                    "message": {"content": "start"},
+                }
+            )
+            + "\n"
+        )
+        with (
+            patch("cw.queue_peek.load_running_tasks", return_value=[task]),
+            patch(
+                "cw.queue_peek.find_transcript_for_ticket",
+                return_value=transcript_path,
+            ),
+            patch("cw.queue_peek.gh_pr_state", return_value="UNKNOWN"),
+        ):
+            rows = queue_peek.build_peek_rows(None, _NOW)
+        assert rows[0]["recommend"] != "STOP"
 
 
 # ---------------------------------------------------------------------------

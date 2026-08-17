@@ -213,7 +213,9 @@ The **action list** (bucket 1) — not "MUST_FIX only" — drives Step 3b. An ac
    ```bash
    printf '%s' "$ADJUDICATE_INPUT" | cw review adjudicate --deferred-findings-out .cw/deferred-findings.md -
    ```
-   This writes `.cw/deferred-findings.md` in the shape below (creating `.cw/` if absent, writing nothing when every finding was fixed) — do NOT also hand-author it.
+   This writes `.cw/deferred-findings.md` in the shape below (creating `.cw/` if absent, writing nothing when there is nothing to record) — do NOT also hand-author it.
+
+   **The write MERGES, it does not overwrite (#1840).** Calling `adjudicate --deferred-findings-out` a second time in one Stage 3 pass (a re-adjudication after a fix cycle, say) keeps every entry the earlier call recorded. Entries dedupe on content, so an identical re-adjudication collapses to one entry, while a genuine outcome flip — REJECT on an earlier round, DEFER on a later one — accumulates as two entries that read as history. Each entry the call newly applies is stamped with a round number and a `recorded_at` timestamp; entries already in the file are carried through untouched, never re-stamped.
 3. **Use the printed `ReviewVerdict` as this round's saved record from here on**, not the raw `cw review consolidate` output. It carries the real `disposition` per finding plus recomputed `blocking`/`must_fix`/`review.deferred`.
 4. **If the printed verdict's `unmatched_adjudication_count` is > 0, append `"adjudication_unmatched_count: <N>"` to `friction_highlights`.** A non-zero count means an adjudication entry matched no accepted finding (stale anchor, ambiguous same-location collision, duplicate entry) — the command does not fail on it, so this is the only thing that makes it visible at the approval gate.
 5. **Persist any newly-voided findings to the ticket (#1814) — UNCONDITIONAL.** If `NEW_VOIDED_FINDINGS` (step 4c) is non-empty, re-run `cw review check-voided` with it folded in and render the record out:
@@ -243,7 +245,11 @@ Rejected (intentional / documented tradeoff):
 DEFERRED-REVIEW-FINDINGS -->
 ```
 
-The `Rejected` section is omitted when there are no rejections, the `DEFERRED-REVIEW-FINDINGS` block when there are no deferrals, and the file is not written at all when every finding was fixed — all three handled by the command, not by you.
+A round-stamped entry additionally carries `[round <N>, <recorded_at>] ` in front of its `Rejected` bullet, and trailing `round:` / `recorded_at:` lines inside its `DEFERRED-REVIEW-FINDINGS` entry. Both are omitted for an unstamped entry, so the bare shape above stays exactly what a pre-#1840 file looks like.
+
+The `Rejected` section is omitted when there are no rejections, the `DEFERRED-REVIEW-FINDINGS` block when there are no deferrals, and the file is not written at all when every finding was fixed and there is no prior content to preserve — all three handled by the command, not by you.
+
+**A `.cw/deferred-findings.md` left over from before #1840** (no round/date stamps anywhere) is read and merged like any other prior content — it is not an error, and its entries are never back-filled with a synthetic round. The command hard-errors (exit 1, plain message) only on content matching *neither* the current nor the pre-#1840 shape — foreign text, a truncated block, a half-written round/date pair. That is a refusal to overwrite records it cannot read, not a transient failure: inspect or remove the file by hand, then re-run.
 
 **Headless:** adjudication is autonomous — **no AskUserQuestion.** The session adjudicates deterministically, records rationale for every REJECT/DEFER in `.cw/deferred-findings.md`, and proceeds. Interactive mode MAY surface the adjudication for confirmation but defaults to the same dispositions.
 
