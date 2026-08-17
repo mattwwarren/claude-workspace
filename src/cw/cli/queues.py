@@ -214,7 +214,9 @@ def _terminal_dedup_key(
 
 
 def _dedup_terminal(events: list[OrchestratorEvent]) -> list[OrchestratorEvent]:
-    """Filter repeated terminal events with same (type, session, paused_status) key."""
+    """Filter repeated terminal events with same (type, session, paused_status,
+    renotify_marker) key.
+    """
     seen: set[tuple[str, str | None, str | None, str | None]] = set()
     result: list[OrchestratorEvent] = []
     for ev in events:

@@ -126,10 +126,10 @@ def _stale_transcript(home: Path, worktree: Path, *, stale_minutes: float) -> No
     os.utime(str(transcript), (ts, ts))
 
 
-def _run_liveness(state: CwState) -> None:
+def _run_liveness(state: CwState, *, now: datetime = _NOW) -> None:
     record_session_liveness_changes(
         state,
-        now=_NOW,
+        now=now,
         native_live={"fake-short-id"},
         config=OrchestratorConfig(),
         task_by_ticket={},
@@ -223,20 +223,8 @@ def test_distress_renotifies_after_debounce_interval_elapses(
     _stale_transcript(home, tmp_path / "wt", stale_minutes=46)
     state = CwState(sessions=[sess])
 
-    record_session_liveness_changes(
-        state,
-        now=_NOW,
-        native_live={"fake-short-id"},
-        config=OrchestratorConfig(),
-        task_by_ticket={},
-    )
-    record_session_liveness_changes(
-        state,
-        now=_NOW + timedelta(minutes=61),
-        native_live={"fake-short-id"},
-        config=OrchestratorConfig(),
-        task_by_ticket={},
-    )
+    _run_liveness(state, now=_NOW)
+    _run_liveness(state, now=_NOW + timedelta(minutes=61))
 
     assert len(_distress_events()) == 2
     assert len(push_calls) == 2
@@ -249,20 +237,8 @@ def test_distress_does_not_renotify_partway_through_interval(
     _stale_transcript(home, tmp_path / "wt", stale_minutes=46)
     state = CwState(sessions=[sess])
 
-    record_session_liveness_changes(
-        state,
-        now=_NOW,
-        native_live={"fake-short-id"},
-        config=OrchestratorConfig(),
-        task_by_ticket={},
-    )
-    record_session_liveness_changes(
-        state,
-        now=_NOW + timedelta(minutes=30),
-        native_live={"fake-short-id"},
-        config=OrchestratorConfig(),
-        task_by_ticket={},
-    )
+    _run_liveness(state, now=_NOW)
+    _run_liveness(state, now=_NOW + timedelta(minutes=30))
 
     assert len(_distress_events()) == 1
     assert len(push_calls) == 1
@@ -275,20 +251,8 @@ def test_renotify_marker_present_and_distinct_across_fires(
     _stale_transcript(home, tmp_path / "wt", stale_minutes=46)
     state = CwState(sessions=[sess])
 
-    record_session_liveness_changes(
-        state,
-        now=_NOW,
-        native_live={"fake-short-id"},
-        config=OrchestratorConfig(),
-        task_by_ticket={},
-    )
-    record_session_liveness_changes(
-        state,
-        now=_NOW + timedelta(minutes=61),
-        native_live={"fake-short-id"},
-        config=OrchestratorConfig(),
-        task_by_ticket={},
-    )
+    _run_liveness(state, now=_NOW)
+    _run_liveness(state, now=_NOW + timedelta(minutes=61))
 
     events = _distress_events()
     assert len(events) == 2
@@ -307,22 +271,10 @@ def test_renotify_suppressed_once_terminal_sentinel_lands(
     _stale_transcript(home, tmp_path / "wt", stale_minutes=46)
     state = CwState(sessions=[sess])
 
-    record_session_liveness_changes(
-        state,
-        now=_NOW,
-        native_live={"fake-short-id"},
-        config=OrchestratorConfig(),
-        task_by_ticket={},
-    )
+    _run_liveness(state, now=_NOW)
     sess.last_result = _shipped_salvage_payload()
 
-    record_session_liveness_changes(
-        state,
-        now=_NOW + timedelta(minutes=61),
-        native_live={"fake-short-id"},
-        config=OrchestratorConfig(),
-        task_by_ticket={},
-    )
+    _run_liveness(state, now=_NOW + timedelta(minutes=61))
 
     assert len(_distress_events()) == 1
 
@@ -351,20 +303,8 @@ def test_liveness_renotify_survives_dedup_terminal(
     _stale_transcript(home, tmp_path / "wt", stale_minutes=46)
     state = CwState(sessions=[sess])
 
-    record_session_liveness_changes(
-        state,
-        now=_NOW,
-        native_live={"fake-short-id"},
-        config=OrchestratorConfig(),
-        task_by_ticket={},
-    )
-    record_session_liveness_changes(
-        state,
-        now=_NOW + timedelta(minutes=61),
-        native_live={"fake-short-id"},
-        config=OrchestratorConfig(),
-        task_by_ticket={},
-    )
+    _run_liveness(state, now=_NOW)
+    _run_liveness(state, now=_NOW + timedelta(minutes=61))
 
     events = read_events(event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION])
     assert len(events) == 2
