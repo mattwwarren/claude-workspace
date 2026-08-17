@@ -188,10 +188,18 @@ def _claim_next_pending(
     parameter is intentionally a *preference*, not a filter — see the
     fallback after the priority loop).
 
-    Global attempt ceiling: if task.attempts >= config.global_attempt_ceiling,
-    the task is parked BLOCKED_ON_USER instead of claimed. A dispatch.tick
-    event with skip_reason=ATTEMPT_CAP_BLOCKED is emitted per parked task for
+    Global attempt ceiling: if
+    task.unproductive_attempts >= config.global_attempt_ceiling, the task is
+    parked BLOCKED_ON_USER instead of claimed. A dispatch.tick event with
+    skip_reason=ATTEMPT_CAP_BLOCKED is emitted per parked task for
     observability. See GitHub #786.
+
+    The ceiling reads ``unproductive_attempts``, NOT raw ``attempts`` (GitHub
+    #1750): every claim still increments ``attempts`` below, but only claims
+    that exited RUNNING without evidence of progress are charged against the
+    ceiling. A ticket doing real work across many stages (#1727) therefore no
+    longer parks itself, while a crashloop that produces nothing (#1653) still
+    reaches the cap at exactly the same rate as before.
 
     *usage_limited_until*: when set and still in the future, returns
     ``(None, False)`` immediately without claiming anything (#1346
@@ -235,7 +243,7 @@ def _claim_next_pending(
                         if in_backoff:
                             spawn_backoff_skipped = True
                             break
-                        if task.attempts >= config.global_attempt_ceiling:
+                        if task.unproductive_attempts >= config.global_attempt_ceiling:
                             transition_task_status(
                                 task,
                                 QueueItemStatus.BLOCKED_ON_USER,
@@ -263,7 +271,7 @@ def _claim_next_pending(
             if task.next_eligible_at is not None and now < task.next_eligible_at:
                 spawn_backoff_skipped = True
                 continue
-            if task.attempts >= config.global_attempt_ceiling:
+            if task.unproductive_attempts >= config.global_attempt_ceiling:
                 transition_task_status(
                     task,
                     QueueItemStatus.BLOCKED_ON_USER,

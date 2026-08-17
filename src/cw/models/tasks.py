@@ -98,7 +98,17 @@ from cw.models.events import PrState, WatchedPr
 #      gate_recipe_failed_at unconditional-clear-on-transition convention;
 #      blocked_on_pr is a bare int PR number (no owner/repo qualifier — a
 #      dev-queue client is bound to exactly one repo).
-DEV_QUEUE_SCHEMA_VERSION = 30
+# v31: added TicketTask.unproductive_attempts (GitHub #1750) — a second,
+#      narrower attempt counter beside the raw `attempts` claim counter. Only
+#      claims that exit RUNNING with no evidence of progress (no commits, no
+#      review findings, no consumed operator resolution) are charged; the
+#      global dispatch attempt ceiling reads this counter instead of
+#      `attempts`, so a ticket making real forward progress can no longer be
+#      parked at `attempt_cap_blocked` for being busy (#1727) while the
+#      crashloop the ceiling exists to catch (#1653) is still bounded.
+#      Incremented at exactly one seam (transition_task_status), mirroring
+#      regress_attempts's v6 single-seam precedent.
+DEV_QUEUE_SCHEMA_VERSION = 31
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -196,6 +206,15 @@ class TicketTask(BaseModel):
     # Incremented each time the task is claimed by _claim_next_pending. Used to
     # apply a hard cap on validation_failed retries (see issue #251).
     attempts: int = 0
+    # Subset of `attempts`: claims that exited RUNNING having produced no
+    # evidence of progress. This — not raw `attempts` — is what the global
+    # attempt ceiling compares against (dispatch/claim.py, reconcile/
+    # concierge.py). Charged at the single transition_task_status seam, which
+    # defaults to charging: a caller must pass unproductive=False to decline,
+    # so a crash/phantom/wedge revert with no sentinel counts by construction.
+    # Deliberately NOT read by the #756 per-stage validation_failed cap in
+    # reconcile/_shared.py, which stays on raw `attempts`. See GitHub #1750.
+    unproductive_attempts: int = 0
     # Number of times the task has been auto-regressed from FINALIZE back to
     # IMPL for self-heal (e.g. diff-cover gate failures). Bounded by
     # FINALIZE_REGRESS_CAP in auto_dev_result.py. See GitHub #770.

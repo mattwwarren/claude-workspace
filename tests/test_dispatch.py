@@ -3059,6 +3059,10 @@ class TestGlobalAttemptCeiling:
             client="test-client",
             status=QueueItemStatus.PENDING,
             attempts=3,
+            # #1750: the ceiling reads unproductive_attempts, so THIS is what
+            # puts the row at the cap; attempts stays set to assert it is not
+            # incremented by the park.
+            unproductive_attempts=3,
         )
         store = DevQueueStore(tasks=[task])
         save_dev_queue(store)
@@ -3075,6 +3079,92 @@ class TestGlobalAttemptCeiling:
         # daemon was never invoked
         assert daemon.spawn_calls == []
 
+    def test_ceiling_reads_unproductive_attempts_not_raw_attempts(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """#1750/#1727: a busy-but-productive ticket must not park itself.
+
+        The #1727 shape: many legitimate stage claims drove ``attempts`` to the
+        brink of the ceiling while every one of them produced real work. Before
+        #1750 this parked at ``attempt_cap_blocked`` mid-pipeline; now only
+        ``unproductive_attempts`` counts, so the row stays claimable.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(
+            ticket_id="GEN-1750-productive",
+            client="test-client",
+            status=QueueItemStatus.PENDING,
+            attempts=9,
+            unproductive_attempts=2,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(self._ceiling_config(ceiling=10), native_daemon=daemon)
+
+        queue = load_dev_queue()
+        claimed = next(t for t in queue.tasks if t.ticket_id == "GEN-1750-productive")
+        assert claimed.status == QueueItemStatus.RUNNING
+        assert claimed.disposition != "attempt_cap_blocked"
+        assert claimed.attempts == 10
+
+    def test_ceiling_still_trips_when_unproductive_attempts_reaches_cap(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """#1750/#1653: the crashloop guard still fires at exactly the same rate.
+
+        Low raw ``attempts`` but an at-cap unproductive count is the dead-session
+        crashloop the ceiling exists to stop. It must still park.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(
+            ticket_id="GEN-1750-crashloop",
+            client="test-client",
+            status=QueueItemStatus.PENDING,
+            attempts=3,
+            unproductive_attempts=10,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(self._ceiling_config(ceiling=10), native_daemon=daemon)
+
+        queue = load_dev_queue()
+        parked = next(t for t in queue.tasks if t.ticket_id == "GEN-1750-crashloop")
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.disposition == "attempt_cap_blocked"
+        assert daemon.spawn_calls == []
+
+    def test_attempts_still_increments_on_every_claim(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """#1750 is additive: the raw claim counter is unchanged by the split."""
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(
+            ticket_id="GEN-1750-additive",
+            client="test-client",
+            status=QueueItemStatus.PENDING,
+            attempts=0,
+            unproductive_attempts=0,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        dispatch_tick(
+            self._ceiling_config(ceiling=10), native_daemon=FakeNativeDaemonClient()
+        )
+
+        queue = load_dev_queue()
+        claimed = next(t for t in queue.tasks if t.ticket_id == "GEN-1750-additive")
+        assert claimed.attempts == 1
+        # The claim itself charges nothing — only the RUNNING *exit* can.
+        assert claimed.unproductive_attempts == 0
+
     def test_at_ceiling_emits_attempt_cap_blocked_event(
         self,
         tmp_dispatch_dirs: Path,
@@ -3087,6 +3177,7 @@ class TestGlobalAttemptCeiling:
             client="test-client",
             status=QueueItemStatus.PENDING,
             attempts=3,
+            unproductive_attempts=3,  # #1750: the counter the ceiling reads
         )
         store = DevQueueStore(tasks=[task])
         save_dev_queue(store)
@@ -3129,6 +3220,7 @@ class TestGlobalAttemptCeiling:
             client="test-client",
             status=QueueItemStatus.PENDING,
             attempts=3,
+            unproductive_attempts=3,  # #1750: the counter the ceiling reads
         )
         store = DevQueueStore(tasks=[task])
         save_dev_queue(store)
@@ -3178,6 +3270,7 @@ class TestGlobalAttemptCeiling:
             client="test-client",
             status=QueueItemStatus.PENDING,
             attempts=3,
+            unproductive_attempts=3,  # #1750: the counter the ceiling reads
             created_at=datetime.fromisoformat("2026-07-07T00:00:00+00:00"),
         )
         younger_claimable = TicketTask(

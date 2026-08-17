@@ -429,7 +429,11 @@ def _detect_false_park_candidates(
                     "session_id": session.id if session else None,
                 },
                 session_id=session.id if session else None,
-                refused_ceiling=task.attempts >= config.global_attempt_ceiling,
+                # GitHub #1750: mirrors the dispatch claim path's ceiling —
+                # both must read the same counter or the concierge would
+                # refuse a requeue the claim path would have allowed.
+                refused_ceiling=task.unproductive_attempts
+                >= config.global_attempt_ceiling,
                 dead_on_arrival=_compute_dead_on_arrival(
                     session, now, transcript_age_seconds=transcript_age_seconds
                 ),
@@ -612,7 +616,11 @@ def _detect_park_marker_poison_candidates(
                     "session_id": session.id,
                 },
                 session_id=session.id,
-                refused_ceiling=task.attempts >= config.global_attempt_ceiling,
+                # GitHub #1750: mirrors the dispatch claim path's ceiling —
+                # both must read the same counter or the concierge would
+                # refuse a requeue the claim path would have allowed.
+                refused_ceiling=task.unproductive_attempts
+                >= config.global_attempt_ceiling,
             )
         )
     return candidates

@@ -34,6 +34,7 @@ from cw.dev_queue import (
     transition_task_status,
     wait_for_terminal,
 )
+from cw.dev_queue.lifecycle import _advance_task_pointer, _stage_regress
 from cw.dispatch import (
     FRESHNESS_MAIN_BEHIND,
     FRESHNESS_MAIN_DETACHED,
@@ -2707,7 +2708,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["pr_state"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 30
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 31
 
     def test_v8_pr_state_preserved_idempotently(self) -> None:
         """Existing pr_state survives a second migration pass (idempotent)."""
@@ -2751,7 +2752,7 @@ class TestMigrateDevQueue:
         """migrate_dev_queue bumps schema_version to current regardless of input."""
         raw: dict[str, object] = {"schema_version": 1, "tasks": []}
         migrated = migrate_dev_queue(raw)
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 30
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 31
 
     def test_v9_signoff_preserved_idempotently(self) -> None:
         """Existing signoff value survives a second migration pass."""
@@ -2786,7 +2787,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["escalation_parked_at"] is None
         assert migrated["tasks"][0]["escalation_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 30
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 31
 
     def test_v10_escalation_fields_preserved_idempotently(self) -> None:
         """Existing escalation timestamps survive a second migration pass."""
@@ -2829,7 +2830,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["false_park_recovery_count"] == 0
         assert migrated["tasks"][0]["false_park_recovery_next_eligible_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 30
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 31
 
     def test_v11_false_park_recovery_backoff_preserved_idempotently(self) -> None:
         """Existing false-park-recovery backoff state survives a second
@@ -2871,7 +2872,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["gate_recipe_failed_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 30
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 31
 
     def test_v12_gate_recipe_failed_at_preserved_idempotently(self) -> None:
         """Existing gate_recipe_failed_at timestamp survives a second
@@ -2909,7 +2910,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["escalate_merge_block_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 30
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 31
 
     def test_v14_escalate_merge_block_fired_at_preserved_idempotently(self) -> None:
         """Existing escalate_merge_block_fired_at survives a second migration."""
@@ -2946,7 +2947,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["request_reviewer_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 30
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 31
 
     def test_v16_request_reviewer_fired_at_preserved_idempotently(self) -> None:
         """Existing request_reviewer_fired_at survives a second migration."""
@@ -2983,7 +2984,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["auto_fix_ci_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 30
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 31
 
     def test_v17_auto_fix_ci_fired_at_preserved_idempotently(self) -> None:
         """Existing auto_fix_ci_fired_at survives a second migration."""
@@ -3020,7 +3021,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["address_review_fired_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 30
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 31
 
     def test_v18_address_review_fired_at_preserved_idempotently(self) -> None:
         """Existing address_review_fired_at survives a second migration."""
@@ -3057,7 +3058,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["last_blocked_result"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 30
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 31
 
     def test_v19_last_blocked_result_preserved_idempotently(self) -> None:
         """Existing last_blocked_result survives a second migration."""
@@ -3098,7 +3099,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["cross_repo_override"] is False
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 30
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 31
 
     def test_v20_cross_repo_override_preserved_idempotently(self) -> None:
         """Existing cross_repo_override survives a second migration."""
@@ -3136,7 +3137,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["stage_high_water"] == "impl"
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 30
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 31
 
     def test_migrate_dev_queue_fills_stage_high_water_default_when_stage_also_missing(
         self,
@@ -3158,7 +3159,7 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["stage"] == DEFAULT_STAGE.value == "plan"
         assert migrated["tasks"][0]["stage_high_water"] == DEFAULT_STAGE.value == "plan"
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 30
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 31
 
     def test_v21_stage_high_water_preserved_idempotently(self) -> None:
         """Existing stage_high_water survives a second migration pass unchanged,
@@ -3198,7 +3199,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["blocked_reason"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 30
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 31
 
     def test_migrate_dev_queue_fills_hold_finalize_default(self) -> None:
         """migrate_dev_queue fills hold_finalize=None on tasks missing the key
@@ -3216,7 +3217,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["hold_finalize"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 30
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 31
 
     def test_v23_hold_finalize_preserved_idempotently(self) -> None:
         """An existing hold_finalize value survives a second migration pass."""
@@ -3254,7 +3255,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["attention_digest_buffered_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 30
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 31
 
     def test_v24_attention_digest_buffered_at_preserved_idempotently(
         self,
@@ -3296,7 +3297,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["salvage_no_sentinel_at"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 30
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 31
 
     def test_v25_salvage_no_sentinel_at_preserved_idempotently(self) -> None:
         """An existing salvage_no_sentinel_at value survives a second
@@ -3335,7 +3336,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["regressed_into_stage"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 30
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 31
 
     def test_v27_regressed_into_stage_preserved_idempotently(self) -> None:
         """An already-stamped regressed_into_stage survives a second migration
@@ -3374,7 +3375,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["finalize_regress_branch_head"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 30
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 31
 
     def test_v28_finalize_regress_branch_head_preserved_idempotently(self) -> None:
         """An already-stamped finalize_regress_branch_head survives a second
@@ -3411,7 +3412,7 @@ class TestMigrateDevQueue:
         }
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["pending_operator_comment"] is False
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 30
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 31
 
     def test_v29_pending_operator_comment_preserved_idempotently(self) -> None:
         """An already-raised pending_operator_comment survives a second
@@ -3484,14 +3485,14 @@ class TestMigrateDevQueue:
         migrated = migrate_dev_queue(raw)
         assert migrated["tasks"][0]["stale_gate_detected_at"] is None
         assert migrated["tasks"][0]["blocked_on_pr"] is None
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 30
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 31
 
     def test_migrate_dev_queue_fills_watched_prs_default(self) -> None:
         """migrate_dev_queue fills watched_prs=[] on a store missing the key (v15)."""
         raw: dict[str, object] = {"schema_version": 14, "tasks": []}
         migrated = migrate_dev_queue(raw)
         assert migrated["watched_prs"] == []
-        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 30
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION == 31
 
     def test_migrate_dev_queue_preserves_existing_watched_prs(self) -> None:
         """An existing watched_prs list survives migration untouched (idempotent)."""
@@ -9280,3 +9281,213 @@ class TestLaneStatsUnaffectedByWatchedPr:
         )
         after = _lane_stats_for_client(client, load_dev_queue())
         assert before == after
+
+
+# ---------------------------------------------------------------------------
+# TestUnproductiveAttempts (GitHub #1750)
+# ---------------------------------------------------------------------------
+
+
+class TestUnproductiveAttempts:
+    """The second, narrower attempt counter and its single increment seam.
+
+    ``task.attempts`` counts every claim (and still gates the #756 per-stage
+    validation_failed cap); ``task.unproductive_attempts`` counts only claims
+    that exited RUNNING with no evidence of progress, and is what the global
+    dispatch ceiling reads. See GitHub #1750 / #1727 / #1653.
+    """
+
+    def test_field_defaults_to_zero(self) -> None:
+        task = TicketTask(ticket_id="GEN-1", client="acme")
+        assert task.unproductive_attempts == 0
+
+    def test_schema_version_bumped_to_31(self) -> None:
+        assert DEV_QUEUE_SCHEMA_VERSION == 31
+
+    def test_migrate_fills_unproductive_attempts_default(self) -> None:
+        """migrate_dev_queue fills unproductive_attempts=0 on legacy rows (v31)."""
+        raw: dict[str, object] = {
+            "schema_version": 30,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-40",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["unproductive_attempts"] == 0
+        assert migrated["schema_version"] == DEV_QUEUE_SCHEMA_VERSION
+
+    def test_migrate_preserves_existing_unproductive_attempts(self) -> None:
+        """A non-zero counter survives a second migration pass (idempotent)."""
+        raw: dict[str, object] = {
+            "schema_version": 31,
+            "tasks": [
+                {
+                    "ticket_id": "GEN-41",
+                    "client": "test-client",
+                    "priority": 0,
+                    "status": "pending",
+                    "unproductive_attempts": 4,
+                }
+            ],
+        }
+        migrated = migrate_dev_queue(raw)
+        assert migrated["tasks"][0]["unproductive_attempts"] == 4
+
+    # -- the transition_task_status increment seam --------------------------
+
+    def test_running_exit_charges_by_default(self) -> None:
+        """The ~30 non-sentinel RUNNING-exit call sites charge with no change."""
+        task = TicketTask(
+            ticket_id="GEN-2", client="acme", status=QueueItemStatus.RUNNING
+        )
+        transition_task_status(task, QueueItemStatus.PENDING)
+        assert task.unproductive_attempts == 1
+
+    def test_running_exit_does_not_charge_when_productive(self) -> None:
+        task = TicketTask(
+            ticket_id="GEN-3", client="acme", status=QueueItemStatus.RUNNING
+        )
+        transition_task_status(task, QueueItemStatus.PENDING, unproductive=False)
+        assert task.unproductive_attempts == 0
+
+    def test_non_running_exit_never_charges(self) -> None:
+        """Only a RUNNING exit can charge — a park→park move must not."""
+        task = TicketTask(
+            ticket_id="GEN-4", client="acme", status=QueueItemStatus.BLOCKED_ON_USER
+        )
+        transition_task_status(task, QueueItemStatus.PENDING)
+        assert task.unproductive_attempts == 0
+
+    def test_running_to_running_never_charges(self) -> None:
+        """new_status == RUNNING is not an exit, so no charge."""
+        task = TicketTask(
+            ticket_id="GEN-5", client="acme", status=QueueItemStatus.RUNNING
+        )
+        transition_task_status(task, QueueItemStatus.RUNNING)
+        assert task.unproductive_attempts == 0
+
+    def test_charge_accumulates_across_exits(self) -> None:
+        task = TicketTask(
+            ticket_id="GEN-6", client="acme", status=QueueItemStatus.RUNNING
+        )
+        for _ in range(3):
+            transition_task_status(task, QueueItemStatus.PENDING)
+            task.status = QueueItemStatus.RUNNING
+        assert task.unproductive_attempts == 3
+
+    def test_attempts_is_untouched_by_the_seam(self) -> None:
+        """The new counter is additive — raw attempts stays the claim counter."""
+        task = TicketTask(
+            ticket_id="GEN-7",
+            client="acme",
+            status=QueueItemStatus.RUNNING,
+            attempts=5,
+        )
+        transition_task_status(task, QueueItemStatus.PENDING)
+        assert task.attempts == 5
+
+    # -- durable audit record on the existing TASK_TRANSITION event ----------
+
+    def test_transition_event_carries_charge_keys(
+        self, capture_events: Callable[..., list[CapturedEvent]]
+    ) -> None:
+        """Every charge leaves a durable audit record on the existing event."""
+        events = capture_events(
+            "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_TRANSITION
+        )
+        task = TicketTask(
+            ticket_id="GEN-8", client="acme", status=QueueItemStatus.RUNNING
+        )
+        transition_task_status(task, QueueItemStatus.PENDING)
+        assert len(events) == 1
+        _, payload, _ = events[0]
+        assert payload["unproductive_attempts"] == 1
+        assert payload["unproductive_charge"] is True
+
+    def test_transition_event_records_a_declined_charge(
+        self, capture_events: Callable[..., list[CapturedEvent]]
+    ) -> None:
+        events = capture_events(
+            "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_TRANSITION
+        )
+        task = TicketTask(
+            ticket_id="GEN-9", client="acme", status=QueueItemStatus.RUNNING
+        )
+        transition_task_status(task, QueueItemStatus.COMPLETED, unproductive=False)
+        assert len(events) == 1
+        _, payload, _ = events[0]
+        assert payload["unproductive_attempts"] == 0
+        assert payload["unproductive_charge"] is False
+
+    def test_transition_event_charge_is_none_off_a_non_running_exit(
+        self, capture_events: Callable[..., list[CapturedEvent]]
+    ) -> None:
+        """None distinguishes "guard never fired" from "declined to charge"."""
+        events = capture_events(
+            "cw.dev_queue.lifecycle", OrchestratorEventType.TASK_TRANSITION
+        )
+        task = TicketTask(
+            ticket_id="GEN-10",
+            client="acme",
+            status=QueueItemStatus.BLOCKED_ON_USER,
+            unproductive_attempts=2,
+        )
+        transition_task_status(task, QueueItemStatus.PENDING)
+        assert len(events) == 1
+        _, payload, _ = events[0]
+        assert payload["unproductive_attempts"] == 2
+        assert payload["unproductive_charge"] is None
+
+    # -- the two stage-mutation chokepoints ---------------------------------
+
+    def test_advance_task_pointer_never_charges(self) -> None:
+        """A forward stage advance is productive by construction."""
+        task = TicketTask(
+            ticket_id="GEN-11",
+            client="acme",
+            status=QueueItemStatus.RUNNING,
+            stage=Stage.PLAN,
+        )
+        _advance_task_pointer(task, [Stage.PLAN, Stage.IMPL, Stage.REVIEW])
+        assert task.unproductive_attempts == 0
+        assert task.stage == Stage.IMPL
+
+    def test_advance_task_pointer_preserves_a_nonzero_counter(self) -> None:
+        task = TicketTask(
+            ticket_id="GEN-12",
+            client="acme",
+            status=QueueItemStatus.RUNNING,
+            stage=Stage.PLAN,
+            unproductive_attempts=3,
+        )
+        _advance_task_pointer(task, [Stage.PLAN, Stage.IMPL, Stage.REVIEW])
+        assert task.unproductive_attempts == 3
+
+    def test_stage_regress_never_charges(self) -> None:
+        """A deliberate backward move is a stage change, not a wasted claim."""
+        task = TicketTask(
+            ticket_id="GEN-13",
+            client="acme",
+            status=QueueItemStatus.RUNNING,
+            stage=Stage.FINALIZE,
+        )
+        _stage_regress(task, Stage.IMPL)
+        assert task.unproductive_attempts == 0
+        assert task.stage == Stage.IMPL
+
+    def test_stage_regress_preserves_a_nonzero_counter(self) -> None:
+        task = TicketTask(
+            ticket_id="GEN-14",
+            client="acme",
+            status=QueueItemStatus.RUNNING,
+            stage=Stage.FINALIZE,
+            unproductive_attempts=2,
+        )
+        _stage_regress(task, Stage.IMPL)
+        assert task.unproductive_attempts == 2
+        assert task.regress_attempts == 1

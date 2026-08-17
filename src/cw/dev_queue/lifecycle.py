@@ -249,6 +249,7 @@ def transition_task_status(
     disposition: str | None = None,
     pr_url: str | None = None,
     blocked_reason: str | None = None,
+    unproductive: bool = True,
 ) -> None:
     """Single authority for TicketTask status transitions. Mutates in place.
 
@@ -260,9 +261,30 @@ def transition_task_status(
     Emits a ``task.transition`` orchestrator event on a real status change (RFC
     0008 W1, closes #978); the emit is suppressed when new_status == old_status
     so a re-assert of the same status stays silent.
+
+    *unproductive* (GitHub #1750): whether this RUNNING exit produced no
+    evidence of progress, and so should be charged against
+    ``task.unproductive_attempts`` — the counter the global attempt ceiling
+    reads. Defaults to ``True`` deliberately: the ~30 non-sentinel RUNNING-exit
+    call sites across the codebase (crash/phantom/stalled/wedge/spawn-error
+    reverts) are unproductive by construction and need no change, so only a
+    caller holding positive evidence of progress passes ``unproductive=False``.
+    The charge is gated on a genuine RUNNING *exit*, so a park→park move or a
+    RUNNING→RUNNING re-assert never charges, and a caller that routes the same
+    claim through two transitions cannot double-charge it. Callers that pass
+    ``False`` are, in the same shape as disposition/pr_url/blocked_reason,
+    supplying a fact this seam then stamps centrally.
     """
     old_status = task.status
     task.status = new_status
+    # GitHub #1750: the single increment seam for the unproductive counter,
+    # mirroring regress_attempts's v6 single-seam precedent. Computed before
+    # the disposition branches below so the audit payload can report it.
+    running_exit = (
+        old_status == QueueItemStatus.RUNNING and new_status != QueueItemStatus.RUNNING
+    )
+    if running_exit and unproductive:
+        task.unproductive_attempts += 1
     if new_status in _TERMINAL_DISPOSITION_STATUSES:
         task.disposition = disposition
         task.pr_url = pr_url
@@ -341,6 +363,17 @@ def transition_task_status(
                 "session_id": task.session_id,
                 "pr_url": task.pr_url,
                 "blocked_reason": task.blocked_reason,
+                # GitHub #1750: durable audit record for the attempt charge.
+                # `unproductive_attempts` is the running total *after* this
+                # transition; `unproductive_charge` is what THIS transition
+                # did — True (charged), False (declined, caller had evidence),
+                # or None (not a RUNNING exit, so the guard never fired). The
+                # three-way split matters: None and False both leave the total
+                # unchanged, but only False means a caller actively vouched
+                # for progress, which is the fact an operator reconstructing a
+                # park decision needs.
+                "unproductive_attempts": task.unproductive_attempts,
+                "unproductive_charge": unproductive if running_exit else None,
             },
             correlation_id=task.ticket_id,
         )
@@ -594,7 +627,13 @@ def _advance_task_pointer(task: TicketTask, stages: list[Stage]) -> None:
     idx = stages.index(task.stage)
     task.stage = stages[idx + 1]
     _raise_stage_high_water(task, stages, task.stage)
-    transition_task_status(task, QueueItemStatus.PENDING)
+    # unproductive=False (GitHub #1750): this is the shared chokepoint for
+    # EVERY forward advance (approval.py's approve path, routing.py's Rule 3
+    # and stage-pointer walk), and a claim that moved the pipeline forward a
+    # stage is productive by definition. Hardcoding it here rather than
+    # threading a stage_changed flag through every caller means no caller
+    # needs to know the counter exists.
+    transition_task_status(task, QueueItemStatus.PENDING, unproductive=False)
     task.session_id = None  # R6: clear session_id on advance
     task.stage_base_ref = None  # cleared so next spawn stamps fresh ref
     _emit_stage_change(task, old_stage, task.stage, "advance")
@@ -647,7 +686,13 @@ def _stage_regress(task: TicketTask, target_stage: Stage) -> None:
     task.pending_operator_comment = True
     if old_stage == Stage.FINALIZE:
         task.finalize_regress_branch_head = task.stage_base_ref
-    transition_task_status(task, QueueItemStatus.PENDING)
+    # unproductive=False (GitHub #1750): the shared chokepoint for every
+    # regress (operator `--regress` via requeue.py, routing.py's Rule 5a
+    # FINALIZE self-heal). A deliberate backward move is a pipeline-stage
+    # change, not a wasted claim — and regress_attempts already bounds it via
+    # its own independent cap, so charging the global ceiling here would
+    # double-bound the same event.
+    transition_task_status(task, QueueItemStatus.PENDING, unproductive=False)
     task.session_id = None
     task.stage_base_ref = None
     _emit_stage_change(task, old_stage, target_stage, "regress")

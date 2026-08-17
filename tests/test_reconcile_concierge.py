@@ -355,7 +355,12 @@ class TestRecipeFalseParkRequeue:
 
     def test_ceiling_refusal_leaves_row_parked(self, tmp_config_dir: Path) -> None:
         """A1/A2: at the global attempt ceiling, the row is refused, not requeued."""
-        task = _make_task(disposition="stalled_retry_cap_parked", attempts=10)
+        # #1750: refused_ceiling reads unproductive_attempts, not attempts.
+        task = _make_task(
+            disposition="stalled_retry_cap_parked",
+            attempts=10,
+            unproductive_attempts=10,
+        )
         save_dev_queue(DevQueueStore(tasks=[task]))
         save_state(CwState(sessions=[]))
 
@@ -366,6 +371,28 @@ class TestRecipeFalseParkRequeue:
         store = load_dev_queue()
         assert store.tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
         assert store.tasks[0].disposition == "stalled_retry_cap_parked"
+
+    def test_refused_ceiling_reads_unproductive_attempts_not_attempts(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """#1750 recipe 1: a productive row at high raw attempts is NOT refused.
+
+        The concierge must agree with the dispatch claim path about which
+        counter the ceiling reads, or it would refuse a requeue that
+        _claim_next_pending would happily have allowed.
+        """
+        task = _make_task(
+            disposition="stalled_retry_cap_parked", attempts=10, unproductive_attempts=1
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[]))
+
+        cfg = _config(global_attempt_ceiling=10)
+        recovered = run_concierge_recoveries(now=_NOW, native_live=set(), config=cfg)
+
+        assert recovered == ["GEN-1"]
+        store = load_dev_queue()
+        assert store.tasks[0].status == QueueItemStatus.PENDING
 
     def test_still_live_session_is_skipped(self, tmp_config_dir: Path) -> None:
         """A row whose session's surface_ref IS in native_live is not touched."""
@@ -857,6 +884,7 @@ class TestHookContextConflictRefusal:
         task = _make_task(
             disposition=ReapReason.PHANTOM_SURFACE.value,
             attempts=10,
+            unproductive_attempts=10,  # #1750: the counter refused_ceiling reads
             hook_context_conflict_session_id="sess-1",
         )
         session = _make_session(session_id="sess-1", surface_ref="surf-dead")
@@ -1066,7 +1094,8 @@ class TestRecipeParkMarkerPoisonClear:
     ) -> None:
         """A2: recipe 2 also gates on attempts < global_attempt_ceiling."""
         self._stale_45m(monkeypatch)
-        task = _make_task(disposition=None, attempts=10)
+        # #1750: refused_ceiling reads unproductive_attempts, not attempts.
+        task = _make_task(disposition=None, attempts=10, unproductive_attempts=10)
         session = _make_session(
             last_result={"paused_status": "silently_idle"},
             consecutive_salvage_skips=1,
@@ -1082,6 +1111,26 @@ class TestRecipeParkMarkerPoisonClear:
         assert recovered == []
         store = load_dev_queue()
         assert store.tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_ceiling_gate_a2_reads_unproductive_attempts_not_attempts(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#1750 recipe 2: high raw attempts alone no longer gates the recipe."""
+        self._stale_45m(monkeypatch)
+        task = _make_task(disposition=None, attempts=10, unproductive_attempts=1)
+        session = _make_session(
+            last_result={"paused_status": "silently_idle"},
+            consecutive_salvage_skips=1,
+            surface_ref="surf-dead",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[session]))
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config(global_attempt_ceiling=10)
+        )
+
+        assert recovered == ["GEN-1"]
 
     def test_salvages_terminal_sentinel_instead_of_crashing_blocked_on_user_status(
         self,

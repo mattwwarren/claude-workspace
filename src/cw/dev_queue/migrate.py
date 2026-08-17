@@ -63,6 +63,17 @@ def _fill_regress_attempts_default(task_raw: dict[str, Any]) -> None:
         task_raw["regress_attempts"] = 0
 
 
+def _fill_unproductive_attempts_default(task_raw: dict[str, Any]) -> None:
+    """Fill unproductive_attempts introduced in schema v31 (GitHub #1750).
+
+    Legacy rows start at 0 rather than inheriting `attempts`: back-filling the
+    old claim count would immediately park every long-running in-flight ticket
+    at the ceiling on the first tick after upgrade — the exact false park
+    #1750 exists to remove. Idempotent."""
+    if "unproductive_attempts" not in task_raw:
+        task_raw["unproductive_attempts"] = 0
+
+
 def _fill_spawn_error_backoff_default(task_raw: dict[str, Any]) -> None:
     """Fill spawn_error_count/next_eligible_at introduced in schema v7 (GitHub #868).
 
@@ -262,6 +273,7 @@ def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
                 _fill_finalize_regress_branch_head_default(task_raw)
                 _fill_pending_operator_comment_default(task_raw)
                 _fill_stale_gate_default(task_raw)
+                _fill_unproductive_attempts_default(task_raw)
     _fill_watched_prs_default(raw)
     raw["schema_version"] = DEV_QUEUE_SCHEMA_VERSION
     return raw
