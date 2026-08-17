@@ -292,6 +292,20 @@ def test_is_doc_path_excludes_non_docs_markdown() -> None:
     assert not _mod.is_doc_path("CLAUDE.md")
 
 
+def test_is_doc_path_docs_check_is_root_anchored() -> None:
+    """The general invariant, not just the reported counterexample: `docs`
+    must be the FIRST path component, not merely present anywhere in the
+    tree. A `docs`-named directory nested elsewhere (this repo genuinely has
+    one at .claude/docs/coding/, holding reviewer-agent-consumed prose) is
+    NOT the project's documentation tree."""
+    assert not _mod.is_doc_path(".claude/docs/coding/output-formats.md")
+    assert not _mod.is_doc_path("src/pkg/docs/notes.md")
+    assert not _mod.is_doc_path("a/b/docs/c/d.md")
+    # Root-anchored docs/ still resolves at any depth beneath it.
+    assert _mod.is_doc_path("docs/a.md")
+    assert _mod.is_doc_path("docs/guide/nested/thing.md")
+
+
 def test_import_union_recognizes_non_python_import_forms() -> None:
     ours = ["import type { A } from 'a';"]
     theirs = ["import { B } from 'b';"]

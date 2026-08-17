@@ -29,12 +29,14 @@ Safe categories (evaluated in this order, per block):
         (Python `import`/`from ... import`, JS/TS `import ...`). Resolution:
         the union of unique lines in first-seen order (ours, then theirs).
     doc_append — the file path is on the documentation allowlist (see
-        `is_doc_path`: CHANGELOG-named files or anything under `docs/`, never
-        a bare `.md` suffix elsewhere) and both sides are non-empty.
-        Resolution: our block followed by their block. Gated by PATH, never
-        by content shape: a CHANGELOG-shaped disjoint append inside a source
-        file — or inside this repo's own orchestration prose, e.g.
-        `.claude/commands/*.md` — is `unsafe`.
+        `is_doc_path`: CHANGELOG-named files or anything under the
+        repo-root `docs/` directory — root-anchored, never a bare `.md`
+        suffix or a `docs`-named directory nested elsewhere in the tree) and
+        both sides are non-empty. Resolution: our block followed by their
+        block. Gated by PATH, never by content shape: a CHANGELOG-shaped
+        disjoint append inside a source file — or inside this repo's own
+        orchestration prose, e.g. `.claude/commands/*.md` or
+        `.claude/docs/coding/*.md` — is `unsafe`.
 
 Anything else — overlapping edits, mixed content, malformed or diff3-style
 markers, a listed file with no markers at all — is `unsafe`.
@@ -129,21 +131,28 @@ def is_doc_path(path: str) -> bool:
     """Return True if *path* is on the documentation allowlist.
 
     The allowlist is deliberately narrow and purely path-based: a CHANGELOG by
-    any extension, or anything under a ``docs/`` directory — matching the
-    binding operator directive verbatim ("`doc_append` stays path-gated to the
-    docs/CHANGELOG allowlist"). A bare ``.md`` suffix elsewhere in the tree is
-    NOT doc-safe: this repo's own orchestration prose that autonomous agents
-    execute (``.claude/commands/*.md``, ``.claude/skills/**/*.md``,
-    ``CLAUDE.md``) lives at a ``.md`` suffix without living under ``docs/``,
-    and a conflicting edit there is a semantic collision, not a
-    disjoint-append shape, even though it looks path-eligible by extension
-    alone. Content shape never promotes a source file into this category —
-    that is the whole point of `doc_append` being path-gated.
+    any extension, or anything under the **repo-root** ``docs/`` directory —
+    matching the binding operator directive verbatim ("`doc_append` stays
+    path-gated to the docs/CHANGELOG allowlist"). The invariant is root
+    anchoring, not "a `docs` path segment anywhere": conflicted-file paths
+    arrive repo-relative (from `git diff --name-only`), so `docs` must be the
+    *first* path component, never merely present at any depth. A directory
+    literally named `docs` nested elsewhere (e.g. this repo's own
+    `.claude/docs/coding/`) is NOT the project's documentation tree and is NOT
+    doc-safe — nor is a bare ``.md`` suffix anywhere in the tree. This repo's
+    own orchestration prose that autonomous agents execute
+    (``.claude/commands/*.md``, ``.claude/skills/**/*.md``,
+    ``.claude/docs/coding/*.md``, ``CLAUDE.md``) must never qualify: a
+    conflicting edit there is a semantic collision, not a disjoint-append
+    shape, even though it can look path-eligible by suffix or by an
+    unanchored substring/segment match. Content shape never promotes a source
+    file into this category — that is the whole point of `doc_append` being
+    path-gated.
     """
     parsed = Path(path)
     if parsed.name.upper().startswith(_CHANGELOG_PREFIX):
         return True
-    return _DOC_DIR in parsed.parts[:-1]
+    return bool(parsed.parts) and parsed.parts[0] == _DOC_DIR
 
 
 def _scan_side(
