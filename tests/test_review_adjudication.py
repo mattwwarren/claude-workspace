@@ -1308,9 +1308,7 @@ DEFERRED-REVIEW-FINDINGS -->
 
 def _stamped(entry: Adjudication, round_number: int = 1) -> Adjudication:
     """*entry* carrying the round/date context the CLI write path stamps on."""
-    return entry.model_copy(
-        update={"round": round_number, "recorded_at": _STAMP_DATE}
-    )
+    return entry.model_copy(update={"round": round_number, "recorded_at": _STAMP_DATE})
 
 
 def _parsed_shape(entry: Adjudication) -> Adjudication:

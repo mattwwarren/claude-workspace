@@ -974,6 +974,33 @@ class TestReviewAdjudicateCommand:
         assert written.count("first round call") == 1
         assert "  round: 2\n" not in written
 
+    def test_deferred_findings_out_stamps_and_dedupes_a_rejected_entry(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """#1840: a rejected bullet gets the round prefix and still dedupes.
+
+        The rendered bullet records no severity, so a rejected entry is the
+        one shape whose merge identity has to be normalized on both sides --
+        without that, re-running the same call would append a second copy.
+        """
+        out = tmp_path / "deferred-findings.md"
+        payload = {
+            "verdict": _verdict_payload(_accepted_payload(line_start=2, line_end=2)),
+            "adjudications": [
+                _defer_entry(
+                    outcome="reject", rationale="deliberate tradeoff, documented"
+                )
+            ],
+        }
+        self._adjudicate(runner, out, payload)
+        self._adjudicate(runner, out, payload)
+
+        written = out.read_text(encoding="utf-8")
+        assert "Rejected (intentional / documented tradeoff):" in written
+        assert "- [round 1, " in written
+        assert written.count("deliberate tradeoff, documented") == 1
+        assert "[round 2, " not in written
+
     def test_deferred_findings_out_hard_errors_on_malformed_existing_file(
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
