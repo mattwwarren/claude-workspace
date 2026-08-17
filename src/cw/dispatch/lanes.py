@@ -403,6 +403,33 @@ def _lane_slot_breakdown(
     )
 
 
+def _resolve_stale_pr_ticket_ids_if_gated(
+    client: ClientConfig,
+    queue_snapshot: DevQueueStore,
+    *,
+    config: OrchestratorConfig,
+    available_client_slots: int,
+) -> frozenset[str]:
+    """The #1862 pre-dispatch open-PR gate's resolve call, guarded (perf follow-up).
+
+    Extracted from :func:`_dispatch_client_lanes` to keep that function inside
+    its PLR branch/statement budget (mirrors the extraction rationale
+    ``_lane_slot_breakdown`` above already states).
+
+    Skipped when this client has no capacity to claim anything this tick
+    (``available_client_slots <= 0``, mirroring the per-lane loop's own early
+    exit) -- probing is pure cost with no possible effect on a tick that
+    cannot claim regardless, and skipping it here means a client that is
+    already fully saturated never pays the gate's gh-subprocess fan-out. Also
+    skipped fleet-wide when the operator has disabled the gate via
+    ``OrchestratorConfig.pr_gate_enabled`` (the escape hatch mirroring
+    ``ssh_key_gate_enabled``).
+    """
+    if not config.pr_gate_enabled or available_client_slots <= 0:
+        return frozenset()
+    return resolve_stale_pr_ticket_ids(client, queue_snapshot)
+
+
 def _dispatch_client_lanes(
     client: ClientConfig,
     effective_lanes: list[LaneConfig],
@@ -478,8 +505,14 @@ def _dispatch_client_lanes(
     # `queue_snapshot` it scans was already loaded lock-free by dispatch_tick
     # (ADR-0005: a stale read is acceptable for read-only callers); a row that
     # changed since then is re-checked by stage under the lock inside
-    # _claim_next_pending, so a stale snapshot cannot park a healthy task.
-    stale_pr_ticket_ids = resolve_stale_pr_ticket_ids(client, queue_snapshot)
+    # _claim_next_pending, so a stale snapshot cannot park a healthy task. See
+    # _resolve_stale_pr_ticket_ids_if_gated for the capacity/toggle guard.
+    stale_pr_ticket_ids = _resolve_stale_pr_ticket_ids_if_gated(
+        client,
+        queue_snapshot,
+        config=config,
+        available_client_slots=available_client_slots,
+    )
 
     for lane_cfg in effective_lanes:
         if available_client_slots <= 0:
