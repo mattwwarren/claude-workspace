@@ -419,12 +419,16 @@ def test_four_historical_rounds_structurally_impossible() -> None:
 
     (1) and (3) are whole-file phrase-absence checks against the *historical*
     wording only — a differently-worded reintroduction of either exploit
-    would not trip them. (5) and (6) below are the genuine structural proof:
-    (5) mechanically validates every marker example against the closed
-    grammar (nothing but the enumerated forms can appear there, regardless of
-    wording), and (6) is an enumerative scan (mirroring (2)'s style) for any
-    carve-out language granting the marker additional content, wherever in
-    the file such a sentence might be planted.
+    would not trip them. Of (5) and (6) below, only (5) is genuinely
+    structural: it mechanically validates every marker example against the
+    closed grammar, so nothing but the enumerated forms can appear there,
+    regardless of wording. (6) is an enumerative denylist scan (mirroring
+    (2)'s style) for a handful of known carve-out phrasings — incremental
+    defense-in-depth, not exhaustive coverage; a carve-out sentence worded
+    differently from every listed cue can still slip past it. Free-text
+    prose has no test that can prove its own absence exhaustively — that is
+    an inherent limit of this repo's grep-the-instructions test convention,
+    not something this test can close on its own.
     """
     content = _cmd("auto-dev-plan.md")
     block = _step1c0_block()
@@ -484,11 +488,12 @@ def test_four_historical_rounds_structurally_impossible() -> None:
             f"marker example {example!r} does not match the closed grammar"
         )
 
-    # (6) Enumerative scan (mirrors (2)'s style) for carve-out language near
-    #     any marker/settlement mention, anywhere in the file — this is what
-    #     would catch a reworded reintroduction of round 1's exploit (e.g. a
-    #     sentence granting the marker line "alongside" content for
-    #     "context" or "convenience", planted at any anchor in the file).
+    # (6) Enumerative denylist scan (mirrors (2)'s style) for a handful of
+    #     known carve-out phrasings, anywhere in the file — catches the exact
+    #     round-1 reworded exploit this suite was mutation-tested against,
+    #     but is NOT exhaustive: a carve-out sentence worded differently from
+    #     every cue below is not guaranteed to be caught. Defense-in-depth
+    #     alongside (5), not a standalone structural proof.
     carve_out_cues = (
         "alongside the token",
         "in addition to the token",
@@ -568,6 +573,7 @@ def test_unconverged_row_names_round_cap_and_stage() -> None:
     assert ROUND_MARKER in row
     assert '`blocker.stage` is `"stage1_plan"`' in row
     assert "#1683" in row
+    assert "the round count at exhaustion" in row
 
 
 def test_stub_unresolved_row_names_pending_stub_and_stage() -> None:
