@@ -12,8 +12,20 @@ unchanged.
 #1823 continued the split with two more submodules, re-exported the same way:
 ``review_gates`` (the REVIEW-scoped gate predicate/park pairs, extracted out of
 ``routing`` -- five at the time, six since #1870) and ``branch_freshness``
-(ticket-branch staleness against ``origin/<default_branch>``). A fuller
-``routing`` split remains #1728's job.
+(ticket-branch staleness against ``origin/<default_branch>``).
+
+#1728 finished the job: ``routing`` is itself a package now, with four
+concern submodules -- ``scope_tier`` (effective scope-tier resolution and
+carried-context persistence), ``stage_walk`` (``stage_reached`` classification
+and the forward stage-pointer walk), ``pr_refs`` (the #1713 blocker-``details``
+PR cross-references), and ``cost`` (per-session cost accumulation). Its
+``__init__`` is deliberately NOT a pure re-export shim: the Rule 1-6 decision
+table stays defined there because ``tests/test_dispatch.py`` monkeypatches
+``cw.dispatch.routing.record_event``/``._stage_regress``/
+``._stage_advance_unchecked`` by dotted path, and a function resolves its free
+names against the module it was defined in. See that package's docstring. The
+``from cw.dispatch.routing import (...)`` block below is unaffected -- every
+name is still a package-level attribute.
 """
 
 from __future__ import annotations

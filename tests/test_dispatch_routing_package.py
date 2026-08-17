@@ -66,7 +66,7 @@ _MONKEYPATCH_COUPLED = (
 
 def test_stage_walk_submodule_owns_the_walk() -> None:
     """Stage classification and the forward pointer walk live in ``stage_walk``."""
-    import cw.dispatch.routing.stage_walk as stage_walk
+    from cw.dispatch.routing import stage_walk
 
     assert hasattr(stage_walk, "_resolve_stage_walk")
     assert hasattr(stage_walk, "_walk_stage_pointer_forward")
@@ -75,7 +75,7 @@ def test_stage_walk_submodule_owns_the_walk() -> None:
 
 def test_scope_tier_submodule_owns_tier_resolution() -> None:
     """Scope-tier resolution and carried-context persistence live in ``scope_tier``."""
-    import cw.dispatch.routing.scope_tier as scope_tier
+    from cw.dispatch.routing import scope_tier
 
     assert hasattr(scope_tier, "_resolve_scope_tier")
     assert hasattr(scope_tier, "_extract_scope_tier")
@@ -84,7 +84,7 @@ def test_scope_tier_submodule_owns_tier_resolution() -> None:
 
 def test_pr_refs_submodule_owns_blocked_pr_extraction() -> None:
     """Blocker PR cross-reference extraction lives in ``pr_refs``."""
-    import cw.dispatch.routing.pr_refs as pr_refs
+    from cw.dispatch.routing import pr_refs
 
     assert hasattr(pr_refs, "_extract_blocked_on_pr")
     assert hasattr(pr_refs, "_AUTOMERGE_NOT_ARMED_REASON")
@@ -93,14 +93,14 @@ def test_pr_refs_submodule_owns_blocked_pr_extraction() -> None:
 
 def test_cost_submodule_owns_accumulate_task_cost() -> None:
     """Per-session cost accumulation lives in ``cost``."""
-    import cw.dispatch.routing.cost as cost
+    from cw.dispatch.routing import cost
 
     assert hasattr(cost, "_accumulate_task_cost")
 
 
 def test_routing_package_reexports_full_historical_surface() -> None:
     """Every name ``dispatch/__init__.py`` imports from routing stays reachable."""
-    import cw.dispatch.routing as routing
+    from cw.dispatch import routing
 
     missing = [name for name in _HISTORICAL_SURFACE if not hasattr(routing, name)]
     assert not missing, f"routing lost re-exports: {missing}"
@@ -113,7 +113,7 @@ def test_decision_table_core_stays_in_routing_module_object() -> None:
     submodule would satisfy the latter while breaking every dotted-path
     monkeypatch in ``tests/test_dispatch.py``.
     """
-    import cw.dispatch.routing as routing
+    from cw.dispatch import routing
 
     for name in _MONKEYPATCH_COUPLED:
         fn = getattr(routing, name)
