@@ -224,8 +224,7 @@ def _detect_liveness_candidates(
             # needing a separate rearm.
             continue
         next_renotify_eligible_at = (
-            now
-            + timedelta(minutes=config.liveness_attention_renotify_interval_minutes)
+            now + timedelta(minutes=config.liveness_attention_renotify_interval_minutes)
             if distress
             else None
         )
