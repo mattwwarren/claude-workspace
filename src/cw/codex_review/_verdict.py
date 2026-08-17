@@ -12,7 +12,13 @@ import logging
 import subprocess
 from typing import TYPE_CHECKING
 
-from cw.auto_dev_result import AutoDevResult, Health, Scope
+from cw.auto_dev_result import (
+    EMPTY_DIFF_BLOCKER_REASON,
+    AutoDevResult,
+    Blocker,
+    Health,
+    Scope,
+)
 from cw.codex_review._const import (
     _CODEX_REVIEW_BLOCKED_NEXT_ACTIONS,
     _TRANSIENT_FAILURE_REASONS,
@@ -268,6 +274,13 @@ def synthesize_codex_review_result(
       review finding): a capacity blip hitting one role while others still
       produced documents must not silently fall back to non-retry-eligible
       just because the roster wasn't a total wipeout.
+    - documents complete and non-blocking, but the branch *measures* an empty
+      diff against ``origin/<default_branch>`` (0 files / 0 lines) →
+      ``empty_diff_blocked`` + ``empty_diff_no_commits`` (#1870). Ordered last
+      among the non-clean branches because it is the only one that is not about
+      the review at all: the reviewers did their job, there was simply nothing
+      under them. An *unmeasurable* worktree (``compute_branch_diff_scope``
+      returns ``None``) is explicitly NOT this case and still falls through.
     - otherwise (documents complete, no MUST_FIX)  → stage_complete
 
     Returns ``(result, verdict)``; ``verdict`` is ``None`` only on the zero-
@@ -384,6 +397,59 @@ def synthesize_codex_review_result(
             worktree,
             default_branch,
         )
+    # #1870: a *measured* 0/0 is not a clean pass -- there is no diff to have
+    # reviewed and nothing for FINALIZE to open a PR over. Deliberately keyed on
+    # the measurement already taken above rather than a second
+    # `commits_ahead_of_default` subprocess: same practical classification, no
+    # new git call on the common (non-empty) path. The `measured is not None`
+    # guard is load-bearing -- an *unmeasurable* worktree also reports 0/0 into
+    # the scope block below, and conflating the two would park every clean
+    # review whose git state could not be read (the warning above is exactly
+    # that case, and it keeps its pre-#1870 stage_complete fallback).
+    if (
+        measured is not None
+        and measured["files"] == 0
+        and measured["lines_actual"] == 0
+    ):
+        empty = AutoDevResult(
+            schema_version=_SCHEMA_VERSION,
+            ticket_id=task.ticket_id,
+            status="empty_diff_blocked",
+            stage_reached=STAGE3_REVIEW,
+            scope=Scope(
+                tier=resolve_tier(task.scope_hint),
+                files=0,
+                lines_estimate=0,
+                lines_actual=0,
+                forbidden_touched=False,
+            ),
+            plan_source="none",
+            branch=branch,
+            fork_point_sha=None,
+            commits=[],
+            # The real verdict rides along unchanged: agents_run and the finding
+            # counts describe reviewers that genuinely ran, and zeroing them
+            # would misreport the review as never having happened.
+            review=verdict.review,
+            # Not _derive_health(documents): those documents reviewed nothing, so
+            # a PROCEED derived from them would vouch for an empty branch.
+            health=Health(
+                lowest_agent_confidence="MEDIUM",
+                any_incomplete_risk=True,
+                recommendation="EXIT_FOR_HUMAN_REVIEW",
+            ),
+            blocker=Blocker(
+                stage=STAGE3_REVIEW,
+                reason=EMPTY_DIFF_BLOCKER_REASON,
+                details=(
+                    f"Branch {branch} measures an empty diff against "
+                    f"origin/{default_branch} (0 files, 0 lines) -- "
+                    "nothing to review."
+                ),
+            ),
+            worktree_path=str(worktree),
+        )
+        return empty, verdict
     result = AutoDevResult(
         schema_version=_SCHEMA_VERSION,
         ticket_id=task.ticket_id,
