@@ -15,8 +15,10 @@ from cw.dev_queue import load_dev_queue
 from cw.events import read_events
 from cw.models.enums import OrchestratorEventType
 from cw.review_adjudication import (
+    Adjudication,
     VoidedFinding,
     parse_voided_findings_block,
+    render_deferred_findings_md,
     render_voided_findings_block,
 )
 from cw.review_findings import ReviewerRunFailure
@@ -614,6 +616,48 @@ def _accepted_payload(**overrides: object) -> dict[str, Any]:
     return payload
 
 
+def _defer_entry(**overrides: Any) -> dict[str, Any]:
+    """A raw adjudication dict lined up with ``_accepted_payload``'s defaults."""
+    entry: dict[str, Any] = {
+        "severity": "MUST_FIX",
+        "file": "src/cw/foo.py",
+        "line_start": 2,
+        "line_end": 2,
+        "evidence": "def broken():",
+        "summary": "Bug here",
+        "outcome": "defer",
+        "rationale": "first round call",
+    }
+    entry.update(overrides)
+    return entry
+
+
+def _legacy_deferred_file(*, extra: list[Adjudication] | None = None) -> str:
+    """A ``.cw/deferred-findings.md`` in the pre-#1840 (unstamped) shape.
+
+    Rendered rather than hand-written so the seeded fixture cannot drift from
+    the artifact shape the command itself produces.
+    """
+    entries = [
+        Adjudication(
+            severity="SHOULD_FIX",
+            file="src/cw/legacy.py",
+            summary="Old rejection",
+            outcome="reject",
+            rationale="settled before round stamping existed",
+        ),
+        Adjudication(
+            severity="SHOULD_FIX",
+            file="src/cw/legacy.py",
+            summary="Old deferral",
+            outcome="defer",
+            rationale="recorded before round stamping existed",
+        ),
+        *(extra or []),
+    ]
+    return render_deferred_findings_md(entries)
+
+
 class TestReviewAdjudicateCommand:
     """#1805: ``cw review adjudicate`` stamps real adjudication outcomes."""
 
@@ -834,6 +878,183 @@ class TestReviewAdjudicateCommand:
         )
         assert result.exit_code == 0, result.output
         assert not out.exists()
+
+    def _adjudicate(
+        self, runner: CliRunner, out: Path, payload: dict[str, Any]
+    ) -> None:
+        result = runner.invoke(
+            main,
+            ["review", "adjudicate", "-", "--deferred-findings-out", str(out)],
+            input=json.dumps(payload),
+        )
+        assert result.exit_code == 0, result.output
+
+    def test_deferred_findings_out_first_call_with_no_prior_file_still_succeeds(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """#1840: an absent prior file is "nothing to merge", not an error."""
+        out = tmp_path / "deferred-findings.md"
+        assert not out.exists()
+
+        self._adjudicate(
+            runner,
+            out,
+            {
+                "verdict": _verdict_payload(
+                    _accepted_payload(line_start=2, line_end=2)
+                ),
+                "adjudications": [_defer_entry()],
+            },
+        )
+
+        written = out.read_text(encoding="utf-8")
+        assert "first round call" in written
+        assert "  round: 1\n" in written
+
+    def test_deferred_findings_out_appends_across_calls(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """#1840: the second call must not clobber the first call's record."""
+        out = tmp_path / "deferred-findings.md"
+        self._adjudicate(
+            runner,
+            out,
+            {
+                "verdict": _verdict_payload(
+                    _accepted_payload(line_start=2, line_end=2)
+                ),
+                "adjudications": [_defer_entry()],
+            },
+        )
+        self._adjudicate(
+            runner,
+            out,
+            {
+                "verdict": _verdict_payload(
+                    _accepted_payload(
+                        file="src/cw/bar.py",
+                        line_start=5,
+                        line_end=5,
+                        summary="Slow loop",
+                        evidence="slow = True",
+                    )
+                ),
+                "adjudications": [
+                    _defer_entry(
+                        file="src/cw/bar.py",
+                        line_start=5,
+                        line_end=5,
+                        summary="Slow loop",
+                        evidence="slow = True",
+                        rationale="second round call",
+                    )
+                ],
+            },
+        )
+
+        written = out.read_text(encoding="utf-8")
+        assert "first round call" in written
+        assert "second round call" in written
+        assert "  round: 1\n" in written
+        assert "  round: 2\n" in written
+
+    def test_deferred_findings_out_second_call_does_not_duplicate_identical_round(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """#1840: an identical re-adjudication collapses to one entry."""
+        out = tmp_path / "deferred-findings.md"
+        payload = {
+            "verdict": _verdict_payload(_accepted_payload(line_start=2, line_end=2)),
+            "adjudications": [_defer_entry()],
+        }
+        self._adjudicate(runner, out, payload)
+        self._adjudicate(runner, out, payload)
+
+        written = out.read_text(encoding="utf-8")
+        assert written.count("first round call") == 1
+        assert "  round: 2\n" not in written
+
+    def test_deferred_findings_out_hard_errors_on_malformed_existing_file(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """#1840: content matching neither shape must never be overwritten."""
+        out = tmp_path / "deferred-findings.md"
+        out.write_text("just some notes I left here\n", encoding="utf-8")
+
+        result = runner.invoke(
+            main,
+            ["review", "adjudicate", "-", "--deferred-findings-out", str(out)],
+            input=json.dumps(
+                {
+                    "verdict": _verdict_payload(
+                        _accepted_payload(line_start=2, line_end=2)
+                    ),
+                    "adjudications": [_defer_entry()],
+                }
+            ),
+        )
+
+        assert result.exit_code == 1
+        assert "Could not parse" in result.output
+        assert out.read_text(encoding="utf-8") == "just some notes I left here\n"
+
+    def test_deferred_findings_out_reads_pre_1840_legacy_file_without_erroring(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """#1840: a legacy-shaped artifact is merged, not rejected."""
+        out = tmp_path / "deferred-findings.md"
+        out.write_text(_legacy_deferred_file(), encoding="utf-8")
+
+        self._adjudicate(
+            runner,
+            out,
+            {
+                "verdict": _verdict_payload(
+                    _accepted_payload(line_start=2, line_end=2)
+                ),
+                "adjudications": [_defer_entry()],
+            },
+        )
+
+        written = out.read_text(encoding="utf-8")
+        assert "settled before round stamping existed" in written
+        assert "recorded before round stamping existed" in written
+        # The legacy entry contributes no round signal, so the new entry is
+        # round 1 -- not round 2 from treating a legacy entry as round 0.
+        assert "  round: 1\n" in written
+        assert "  round: 2\n" not in written
+
+    def test_deferred_findings_out_legacy_entry_does_not_affect_round_number(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """#1840: next_round comes from the stamped prior entries only."""
+        out = tmp_path / "deferred-findings.md"
+        stamped = Adjudication(
+            severity="SHOULD_FIX",
+            file="src/cw/older.py",
+            summary="Third-round deferral",
+            outcome="defer",
+            rationale="deferred on the third round",
+            round=3,
+            recorded_at="2026-08-16T09:00:00Z",
+        )
+        out.write_text(_legacy_deferred_file(extra=[stamped]), encoding="utf-8")
+
+        self._adjudicate(
+            runner,
+            out,
+            {
+                "verdict": _verdict_payload(
+                    _accepted_payload(line_start=2, line_end=2)
+                ),
+                "adjudications": [_defer_entry()],
+            },
+        )
+
+        written = out.read_text(encoding="utf-8")
+        assert "  round: 3\n" in written
+        assert "  round: 4\n" in written
+        assert "recorded before round stamping existed" in written
 
     def test_malformed_payload_prints_field_path_errors(
         self, runner: CliRunner
