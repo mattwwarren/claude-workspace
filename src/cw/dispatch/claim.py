@@ -188,10 +188,18 @@ def _claim_next_pending(
     parameter is intentionally a *preference*, not a filter — see the
     fallback after the priority loop).
 
-    Global attempt ceiling: if task.attempts >= config.global_attempt_ceiling,
-    the task is parked BLOCKED_ON_USER instead of claimed. A dispatch.tick
-    event with skip_reason=ATTEMPT_CAP_BLOCKED is emitted per parked task for
+    Global attempt ceiling: if
+    task.unproductive_attempts >= config.global_attempt_ceiling, the task is
+    parked BLOCKED_ON_USER instead of claimed. A dispatch.tick event with
+    skip_reason=ATTEMPT_CAP_BLOCKED is emitted per parked task for
     observability. See GitHub #786.
+
+    The ceiling reads ``unproductive_attempts``, NOT raw ``attempts`` (GitHub
+    #1750): every claim still increments ``attempts`` below, but only claims
+    that exited RUNNING without evidence of progress are charged against the
+    ceiling. A ticket doing real work across many stages (#1727) therefore no
+    longer parks itself, while a crashloop that produces nothing (#1653) still
+    reaches the cap at exactly the same rate as before.
 
     *usage_limited_until*: when set and still in the future, returns
     ``(None, False)`` immediately without claiming anything (#1346
@@ -235,7 +243,7 @@ def _claim_next_pending(
                         if in_backoff:
                             spawn_backoff_skipped = True
                             break
-                        if task.attempts >= config.global_attempt_ceiling:
+                        if task.unproductive_attempts >= config.global_attempt_ceiling:
                             transition_task_status(
                                 task,
                                 QueueItemStatus.BLOCKED_ON_USER,
@@ -263,7 +271,7 @@ def _claim_next_pending(
             if task.next_eligible_at is not None and now < task.next_eligible_at:
                 spawn_backoff_skipped = True
                 continue
-            if task.attempts >= config.global_attempt_ceiling:
+            if task.unproductive_attempts >= config.global_attempt_ceiling:
                 transition_task_status(
                     task,
                     QueueItemStatus.BLOCKED_ON_USER,
@@ -434,10 +442,13 @@ def _revert_claimed_task_to_pending(
 
     # Why: task.attempts is NOT decremented here. The increment-at-claim
     # contract is intentional — usage_limit deaths and spawn errors consume
-    # real dispatch budget and must count toward the global_attempt_ceiling
-    # (#786). Decrementing would let churn bypass the backstop. The corollary
-    # (#756 stalled-stage cap) uses the same task.attempts field; both caps
-    # are outer backstops sharing one counter, not parallel counters.
+    # real dispatch budget and must count toward task.attempts (#786). This
+    # revert leaves task.status RUNNING -> PENDING, which also charges
+    # task.unproductive_attempts by default (#1750) since a spawn that never
+    # succeeded produced no evidence of progress. The global_attempt_ceiling
+    # (this module) reads unproductive_attempts; the corollary #756
+    # stalled-stage cap deliberately still reads raw task.attempts — as of
+    # #1750 these are two separate counters, not one shared counter.
     """
     with dev_queue_lock():
         store = load_dev_queue()

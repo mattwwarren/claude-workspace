@@ -6,7 +6,56 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The global dispatch attempt ceiling now counts unproductive claims, not
+  every claim (#1750):** the ceiling compared raw `task.attempts`, so a ticket
+  making genuine forward progress burned the same budget as a crashloop —
+  #1727 reached 9 of 10 attempts mid-pipeline after a run of legitimate stage
+  claims that each produced commits or real review findings, staying alive
+  only via a temporary ceiling override. Adds `TicketTask.unproductive_attempts`
+  (dev-queue schema v32) and moves the ceiling to it at all four call sites
+  (`dispatch/claim.py`'s two claim paths, `reconcile/concierge.py`'s recipe 1
+  and recipe 2 `refused_ceiling`). `transition_task_status` gains a
+  keyword-only `unproductive: bool = True` and charges the counter on a
+  genuine RUNNING exit only; the default means every crash/phantom/stalled/
+  wedge revert still counts with no code change. A claim is productive when it
+  pushed commits or surfaced real review findings — classified by the new
+  schema-owned `cw.dispatch.productivity` module, which both the routing and
+  reconcile paths share. Stage advances and regresses are productive by
+  construction via hardcodes at `_advance_task_pointer`/`_stage_regress`, as
+  are `no_op` completions, terminal-stage completions, merged-PR crash
+  salvages, and the mechanically-rejected-MUST_FIX park (a reviewer
+  malfunction the ticket is not charged for). Every charge decision is
+  recorded on the existing `task.transition` event via new
+  `unproductive_attempts` and `unproductive_charge` payload keys. The #756
+  per-stage `validation_failed` cap deliberately still reads raw `attempts`.
+  The #1653 crashloop the ceiling exists to stop is still caught at exactly
+  the same rate. The "consumed an operator resolution" productivity signal is
+  wired in the schema (`ClaimEvidence.resolution_consumed`) but its producer
+  (sentinel emission of `resolution_consumed`/`resolution_evidence`) is not —
+  a plan-stage clarification round-trip is still charged as unproductive until
+  the producer ships in the #1896 fast-follow, so the N-round-trip guarantee
+  is not yet general for that case.
+
 ### Added
+
+- **`SESSION_NEEDS_ATTENTION` now re-fires on a debounced cadence for
+  sessions latched at the top staleness bucket (#1858):** a session
+  saturated at `STALE_45M` previously fired the operator distress signal
+  exactly once at the bucket crossing and then went quiet forever, so a
+  session stuck there for hours produced no further signal. The liveness
+  detect pass gains a second candidate kind — a level-detector for a
+  session still latched at `STALE_45M` whose renotify debounce window has
+  elapsed — alongside the existing edge-detector for bucket crossings.
+  Distress is re-evaluated fresh on every renotify check rather than
+  latched from the initial fire, and `Session.liveness_attention_next_eligible_at`
+  (schema v18, with the new `OrchestratorConfig.liveness_attention_renotify_interval_minutes`
+  knob, default 60) is cleared on recovery below `STALE_45M`. Every re-fire
+  carries a fresh `renotify_marker` in its `SESSION_NEEDS_ATTENTION` payload,
+  fed through a `_terminal_dedup_key` widened to a renotify-marker-aware
+  4-tuple, so `cw event tail --dedup-terminal` shows each re-fire as a
+  distinct row instead of collapsing it with the original.
 
 - **Cross-round adjudication memory for codex review (#1838):** an operator
   adjudication settled in one review round was forgotten by the next, so

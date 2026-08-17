@@ -446,6 +446,12 @@ liveness_buckets_minutes: [15, 30, 45]
 liveness_first_bucket_by_stage:
   impl: 35
 
+# Re-fire interval (minutes) for session.needs_attention while a session
+# stays latched at the top liveness bucket (stale_45m) with no bucket
+# crossing (#1858). Without this, the one-shot crossing signal above is the
+# only alert a saturated session ever gets, even if it stays flat for hours.
+liveness_attention_renotify_interval_minutes: 60
+
 # session.needs_attention escalation latch: consecutive per-client
 # freshness-gate blocks (RFC 0007 W2) at which a needs_attention event fires
 # exactly once.

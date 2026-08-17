@@ -20,6 +20,7 @@ educated; nothing is killed.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from cw.config import save_state
@@ -83,6 +84,10 @@ class LivenessCandidate:
     # SESSION_NEEDS_ATTENTION + push in the act phase; never a disposition.
     distress: bool = False
     elapsed_seconds: float = 0.0
+    # RFC 0008 W2 re-fire cadence (#1858). Set only when distress is True; the
+    # future timestamp both stamped onto Session.liveness_attention_next_eligible_at
+    # and surfaced as the SESSION_NEEDS_ATTENTION payload's renotify_marker.
+    next_renotify_eligible_at: datetime | None = None
 
 
 def _classify_liveness_bucket(
@@ -150,9 +155,12 @@ def _detect_liveness_candidates(
 ) -> list[LivenessCandidate]:
     """Pure classification phase for the liveness-bucket sweep.
 
-    Returns a list of :class:`LivenessCandidate` objects, one per session
+    Returns a list of :class:`LivenessCandidate` objects: one per session
     whose newly-classified bucket differs from its persisted
-    ``liveness_bucket``. Makes zero writes to state, queue, or event bus.
+    ``liveness_bucket`` (a bucket crossing), plus one per session that stays
+    latched at ``STALE_45M`` with no crossing but whose renotify debounce
+    window has elapsed (a level-detect renotify, #1858). Makes zero writes
+    to state, queue, or event bus.
 
     Gating (RFC 0008 W2 round-1, R2): DAEMON origin + status in
     ``_LIVE_STATUSES`` + ``surface_ref`` present in *native_live* — the same
@@ -181,16 +189,44 @@ def _detect_liveness_candidates(
         new_bucket = _classify_liveness_bucket(
             stale_minutes, stage=stage, config=config
         )
-        if new_bucket == session.liveness_bucket:
+        # is_renotify: level-detect for a session still latched at the top
+        # bucket whose renotify debounce window has elapsed (#1858). Mutually
+        # exclusive with is_crossing by construction, so a session recovering
+        # out of STALE_45M this same tick is always classified as a crossing,
+        # never double-counted as a renotify.
+        is_crossing = new_bucket != session.liveness_bucket
+        is_renotify = (
+            not is_crossing
+            and new_bucket is LivenessBucket.STALE_45M
+            and (
+                session.liveness_attention_next_eligible_at is None
+                or now >= session.liveness_attention_next_eligible_at
+            )
+        )
+        if not is_crossing and not is_renotify:
             continue
-        # Distress evaluation (signal-only): only a crossing INTO the top
+        # Distress evaluation (signal-only): only entering/staying at the top
         # bucket qualifies, and only when the quietness is not explained by an
         # already-emitted sentinel or a pending subagent at the transcript
-        # tail. All reads — detect-phase purity preserved (ADR-0006 inv. 1).
+        # tail. Re-evaluated fresh on every renotify check, not latched from
+        # the initial fire. All reads — detect-phase purity preserved
+        # (ADR-0006 inv. 1).
         distress = (
             new_bucket is LivenessBucket.STALE_45M
             and not _has_terminal_sentinel(session)
             and not _awaiting_subagent(session, now)
+        )
+        if is_renotify and not distress:
+            # Debounce window elapsed but no longer distress-eligible this
+            # tick (e.g. a terminal sentinel landed since the last check). No
+            # candidate, no mutation -- next_eligible_at is left as-is so
+            # this is re-checked (cheaply) on every subsequent tick without
+            # needing a separate rearm.
+            continue
+        next_renotify_eligible_at = (
+            now + timedelta(minutes=config.liveness_attention_renotify_interval_minutes)
+            if distress
+            else None
         )
         candidates.append(
             LivenessCandidate(
@@ -203,6 +239,7 @@ def _detect_liveness_candidates(
                 stale_minutes=stale_minutes,
                 distress=distress,
                 elapsed_seconds=(now - session.started_at).total_seconds(),
+                next_renotify_eligible_at=next_renotify_eligible_at,
             )
         )
     return candidates
@@ -212,13 +249,14 @@ def _act_on_liveness_candidates(
     state: CwState,
     candidates: list[LivenessCandidate],
 ) -> None:
-    """Act phase: latch each candidate's new bucket and emit its event.
+    """Act phase: latch each crossing candidate's new bucket and emit its
+    events.
 
-    Unconditional — every candidate here already represents a real bucket
-    crossing (edge-detect happened in the detect phase), so every candidate
-    both mutates state and emits. Calls ``save_state(state)`` once when any
-    candidates are present, mirroring the other reconcile act phases. See
-    GitHub #1001.
+    Every candidate here represents either a bucket crossing (mutates state
+    and emits ``SESSION_LIVENESS_CHANGED``) or a debounce-elapsed renotify at
+    an already-latched top bucket (bucket untouched, only the distress signal
+    re-fires, #1858). Calls ``save_state(state)`` once when any candidates
+    are present, mirroring the other reconcile act phases. See GitHub #1001.
     """
     if not candidates:
         return
@@ -229,21 +267,37 @@ def _act_on_liveness_candidates(
         # always hits — matches the direct-index pattern used by sibling
         # act phases (e.g. stalled.py) rather than a defensive .get().
         session = session_by_id[candidate.session_id]
-        session.liveness_bucket = candidate.new_bucket
-        record_event(
-            OrchestratorEventType.SESSION_LIVENESS_CHANGED,
-            {
-                "session_id": candidate.session_id,
-                "ticket_id": candidate.ticket_id,
-                "client": candidate.client,
-                "stage": candidate.stage.value,
-                "old_bucket": candidate.old_bucket.value,
-                "new_bucket": candidate.new_bucket.value,
-                "stale_minutes": candidate.stale_minutes,
-            },
-            correlation_id=candidate.ticket_id,
-        )
+        if candidate.old_bucket != candidate.new_bucket:
+            session.liveness_bucket = candidate.new_bucket
+            record_event(
+                OrchestratorEventType.SESSION_LIVENESS_CHANGED,
+                {
+                    "session_id": candidate.session_id,
+                    "ticket_id": candidate.ticket_id,
+                    "client": candidate.client,
+                    "stage": candidate.stage.value,
+                    "old_bucket": candidate.old_bucket.value,
+                    "new_bucket": candidate.new_bucket.value,
+                    "stale_minutes": candidate.stale_minutes,
+                },
+                correlation_id=candidate.ticket_id,
+            )
+            if candidate.new_bucket is not LivenessBucket.STALE_45M:
+                session.liveness_attention_next_eligible_at = None
         if candidate.distress:
+            # next_renotify_eligible_at is always set alongside distress in
+            # the detect phase (see _detect_liveness_candidates); narrow it
+            # explicitly here (rather than trust the invariant silently) so
+            # .isoformat() below is both mypy-safe and fail-loud if the
+            # invariant is ever broken.
+            next_eligible_at = candidate.next_renotify_eligible_at
+            if next_eligible_at is None:
+                msg = (
+                    "liveness candidate has distress=True but no "
+                    "next_renotify_eligible_at (detect-phase invariant violated)"
+                )
+                raise ValueError(msg)
+            session.liveness_attention_next_eligible_at = next_eligible_at
             record_event(
                 OrchestratorEventType.SESSION_NEEDS_ATTENTION,
                 {
@@ -263,9 +317,14 @@ def _act_on_liveness_candidates(
                     "stage": candidate.stage.value,
                     "stale_minutes": candidate.stale_minutes,
                     "elapsed_seconds": candidate.elapsed_seconds,
+                    "renotify_marker": next_eligible_at.isoformat(),
                 },
                 correlation_id=candidate.ticket_id,
             )
+            # fire_push_notification lives inside this same distress block for
+            # both the initial crossing fire and every steady-state renotify
+            # (#1858) -- intentional: the operator is meant to get paged
+            # again on every re-fire, not just the first one.
             _deps.fire_push_notification(session.name, session.client)
     save_state(state)
 

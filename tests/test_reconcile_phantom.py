@@ -3674,3 +3674,98 @@ def test_phantom_queue_mutations_merged_crash_forces_finalize_stage(
     assert t.disposition == "shipped"
     assert t.stage == Stage.FINALIZE
     assert t.stage_high_water == Stage.REVIEW
+
+
+def test_merged_crash_shipped_never_charges_unproductive(
+    tmp_config_dir: Path,
+) -> None:
+    """#1750: a merged-PR terminal salvage must never be charged an attempt.
+
+    This branch has no sentinel to classify (the PR URL is not even in hand),
+    so it hardcodes unproductive=False. Charging it would penalise the single
+    most productive outcome the pipeline has.
+    """
+    from cw.reconcile._shared import ProposedAction, ReapCandidate
+    from cw.reconcile.phantom import _apply_phantom_queue_mutations
+
+    task = TicketTask(
+        ticket_id="ph-1750-merged",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="ph-1750-merged",
+        stage=Stage.REVIEW,
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    candidate = ReapCandidate(
+        session_id="ph-1750-merged",
+        proposed_action=ProposedAction.CRASH_COMPLETE,
+        ticket_id="ph-1750-merged",
+        client="client-a",
+    )
+    merged_completed_ids: list[str] = []
+
+    _apply_phantom_queue_mutations(
+        {}, [], [candidate], [], [], {}, set(), [], merged_completed_ids
+    )
+
+    t = next(t for t in load_dev_queue().tasks if t.ticket_id == "ph-1750-merged")
+    assert t.status == QueueItemStatus.COMPLETED
+    assert t.disposition == "shipped"
+    assert t.unproductive_attempts == 0
+
+
+def test_salvaged_completion_with_commits_is_productive(tmp_config_dir: Path) -> None:
+    """#1750: the salvaged branch DOES have a real sentinel, so it classifies it."""
+    from cw.auto_dev_result import AutoDevResult
+    from cw.reconcile.phantom import _apply_phantom_queue_mutations
+
+    payload = _shipped_salvage_payload()
+    payload["ticket_id"] = "ph-1750-salv"
+    result = AutoDevResult.model_validate(payload)
+    assert result.commits, "fixture must carry commits for this to be meaningful"
+
+    task = TicketTask(
+        ticket_id="ph-1750-salv",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="ph-1750-salv",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    _apply_phantom_queue_mutations(
+        {}, [], [], [], ["ph-1750-salv"], {"ph-1750-salv": result}, set(), [], []
+    )
+
+    t = next(t for t in load_dev_queue().tasks if t.ticket_id == "ph-1750-salv")
+    assert t.status != QueueItemStatus.RUNNING
+    assert t.unproductive_attempts == 0
+
+
+def test_salvaged_completion_with_no_evidence_is_unproductive(
+    tmp_config_dir: Path,
+) -> None:
+    """#1750: a salvaged sentinel showing no work done IS charged."""
+    from cw.auto_dev_result import AutoDevResult
+    from cw.reconcile.phantom import _apply_phantom_queue_mutations
+
+    payload = _shipped_salvage_payload()
+    payload["ticket_id"] = "ph-1750-empty"
+    payload["commits"] = []
+    payload["review"] = {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0}
+    result = AutoDevResult.model_validate(payload)
+
+    task = TicketTask(
+        ticket_id="ph-1750-empty",
+        client="client-a",
+        status=QueueItemStatus.RUNNING,
+        session_id="ph-1750-empty",
+    )
+    save_dev_queue(DevQueueStore(tasks=[task]))
+
+    _apply_phantom_queue_mutations(
+        {}, [], [], [], ["ph-1750-empty"], {"ph-1750-empty": result}, set(), [], []
+    )
+
+    t = next(t for t in load_dev_queue().tasks if t.ticket_id == "ph-1750-empty")
+    assert t.unproductive_attempts == 1
