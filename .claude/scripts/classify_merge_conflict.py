@@ -29,9 +29,12 @@ Safe categories (evaluated in this order, per block):
         (Python `import`/`from ... import`, JS/TS `import ...`). Resolution:
         the union of unique lines in first-seen order (ours, then theirs).
     doc_append — the file path is on the documentation allowlist (see
-        `is_doc_path`) and both sides are non-empty. Resolution: our block
-        followed by their block. Gated by PATH, never by content shape: a
-        CHANGELOG-shaped disjoint append inside a source file is `unsafe`.
+        `is_doc_path`: CHANGELOG-named files or anything under `docs/`, never
+        a bare `.md` suffix elsewhere) and both sides are non-empty.
+        Resolution: our block followed by their block. Gated by PATH, never
+        by content shape: a CHANGELOG-shaped disjoint append inside a source
+        file — or inside this repo's own orchestration prose, e.g.
+        `.claude/commands/*.md` — is `unsafe`.
 
 Anything else — overlapping edits, mixed content, malformed or diff3-style
 markers, a listed file with no markers at all — is `unsafe`.
@@ -92,7 +95,6 @@ REASON_UNSAFE_SHAPE = "overlapping_change_in_non_doc_path"
 # is tolerated so an indented import block still unions cleanly.
 _IMPORT_RE = re.compile(r"^\s*(?:import\b|from\s+\S+\s+import\b)")
 
-_DOC_SUFFIX = ".md"
 _DOC_DIR = "docs"
 _CHANGELOG_PREFIX = "CHANGELOG"
 
@@ -127,14 +129,19 @@ def is_doc_path(path: str) -> bool:
     """Return True if *path* is on the documentation allowlist.
 
     The allowlist is deliberately narrow and purely path-based: a CHANGELOG by
-    any extension, any Markdown file, or anything under a ``docs/`` directory.
-    Content shape never promotes a source file into this category — that is
-    the whole point of `doc_append` being path-gated.
+    any extension, or anything under a ``docs/`` directory — matching the
+    binding operator directive verbatim ("`doc_append` stays path-gated to the
+    docs/CHANGELOG allowlist"). A bare ``.md`` suffix elsewhere in the tree is
+    NOT doc-safe: this repo's own orchestration prose that autonomous agents
+    execute (``.claude/commands/*.md``, ``.claude/skills/**/*.md``,
+    ``CLAUDE.md``) lives at a ``.md`` suffix without living under ``docs/``,
+    and a conflicting edit there is a semantic collision, not a
+    disjoint-append shape, even though it looks path-eligible by extension
+    alone. Content shape never promotes a source file into this category —
+    that is the whole point of `doc_append` being path-gated.
     """
     parsed = Path(path)
     if parsed.name.upper().startswith(_CHANGELOG_PREFIX):
-        return True
-    if parsed.suffix.lower() == _DOC_SUFFIX:
         return True
     return _DOC_DIR in parsed.parts[:-1]
 

@@ -278,9 +278,18 @@ def test_classify_block_categories() -> None:
 def test_is_doc_path_allowlist() -> None:
     assert _mod.is_doc_path("CHANGELOG.md")
     assert _mod.is_doc_path("CHANGELOG")
-    assert _mod.is_doc_path("README.md")
     assert _mod.is_doc_path("docs/guide/thing.txt")
     assert not _mod.is_doc_path("src/cw/cli.py")
+
+
+def test_is_doc_path_excludes_non_docs_markdown() -> None:
+    """A bare .md suffix outside docs/ is NOT doc-safe -- this repo's own
+    orchestration prose lives exactly there, and the binding operator
+    directive scopes doc_append to 'the docs/CHANGELOG allowlist' only."""
+    assert not _mod.is_doc_path("README.md")
+    assert not _mod.is_doc_path(".claude/commands/auto-dev-finalize.md")
+    assert not _mod.is_doc_path(".claude/skills/some-skill/SKILL.md")
+    assert not _mod.is_doc_path("CLAUDE.md")
 
 
 def test_import_union_recognizes_non_python_import_forms() -> None:

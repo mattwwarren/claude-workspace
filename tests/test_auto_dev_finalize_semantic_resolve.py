@@ -138,13 +138,21 @@ def test_prep_pr_step1_merge_conflict_refusal_untouched() -> None:
     assert "Do NOT attempt an autonomous conflict resolution" in content
 
 
-def test_classify_merge_conflict_script_referenced_with_installed_path() -> None:
+def test_classify_merge_conflict_script_referenced_repo_relative() -> None:
+    """The new script ships only to this repo's .claude/scripts/ — never to
+    the global ~/.claude/scripts/ — so it must be invoked repo-relative via
+    `uv run python`, matching check_impl_guard_staleness.py's own convention.
+    """
     section = _semantic_resolve_section()
-    assert "~/.claude/scripts/classify_merge_conflict.py" in section
-    assert ".claude/scripts/classify_merge_conflict.py" in section
-    assert "python .claude/scripts/classify_merge_conflict.py" not in section
+    assert "uv run python .claude/scripts/classify_merge_conflict.py" in section
+    assert "~/.claude/scripts/classify_merge_conflict.py" not in section
 
 
 def test_gate_failure_park_is_terminal_no_retry() -> None:
-    """Exactly one resolver invocation in the whole file — no second attempt."""
+    """Exactly one resolver invocation and one gate-detection invocation in
+    the whole file, plus an explicit instruction covering the gate step
+    itself — not just the resolver — never being retried."""
+    section = _semantic_resolve_section()
     assert _finalize().count("classify_merge_conflict.py resolve") == 1
+    assert section.count("prep_pr_state.py detect-gates") == 1
+    assert "do NOT re-run the gate" in section

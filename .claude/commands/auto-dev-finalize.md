@@ -464,19 +464,25 @@ gh pr view <pr_number> --repo <owner>/<repo> --json mergeable,mergeStateStatus
 4. **Classify and resolve — one attempt, no loops:**
 
    ```bash
-   ~/.claude/scripts/classify_merge_conflict.py resolve \
-     --conflicted-files /tmp/conflicted-files-$CW_SESSION --json
+   RESOLVE_OUTPUT=$(uv run python .claude/scripts/classify_merge_conflict.py resolve \
+     --conflicted-files /tmp/conflicted-files-$CW_SESSION --json)
+   RESOLVE_EXIT=$?
    ```
+
+   (Repo-relative, `uv run python`-invoked — this script ships only to *this* repo's `.claude/scripts/`, never to the global `~/.claude/scripts/`, unlike `prep_pr_finalize.py`/`prep_pr_state.py` below. Same convention as `check_impl_guard_staleness.py`/`check_plan_scope_conformance.py` elsewhere in this pipeline.)
 
    The script resolves only three enumerated safe shapes (`one_sided_insert`, `import_union`, and a path-gated `doc_append`), atomically across every conflicted file, and writes nothing at all if any block is unsafe.
 
-   - **Exit 1 or 2 (refused)** → `git merge --abort`, then fall through to the **existing, unchanged** `merge_conflict_post_push` sentinel below, appending to `blocker.details`: `"; semantic auto-resolve attempted — refused: <classifier JSON summary>"`.
-   - **Exit 0 (resolved)** → stage the reported `resolved_files`, confirm nothing is still unmerged, and commit:
+   - **Exit 1 or 2 (refused)** → `git merge --abort`, then fall through to the **existing, unchanged** `merge_conflict_post_push` sentinel below, appending to `blocker.details`: `"; semantic auto-resolve attempted — refused: $RESOLVE_OUTPUT"`.
+   - **Exit 0 (resolved)** → stage the reported `resolved_files`, confirm nothing is still unmerged, and commit with a message that records what was auto-synthesized (never `--no-edit` — the default merge message is the only artifact of this event that outlives the pipeline run, since `friction_highlights` does not persist):
 
      ```bash
-     git add <resolved_files>
+     RESOLVED_FILES=$(echo "$RESOLVE_OUTPUT" | jq -r '.resolved_files[]')
+     git add $RESOLVED_FILES
      test -z "$(git diff --name-only --diff-filter=U)"   # defense in depth
-     git commit --no-edit
+     CATEGORIES=$(echo "$RESOLVE_OUTPUT" | jq -r '.categories | to_entries | map("\(.key)=\(.value)") | join(", ")')
+     git commit -m "Merge origin/main (semantic auto-resolve: $CATEGORIES)" \
+       --trailer "Auto-Resolved-By: classify_merge_conflict.py (#1850)"
      ```
 
 5. **Run the project's quality gates once — this is a hard escalation valve, not a fix loop.**
