@@ -721,7 +721,7 @@ class TestCostFields:
 
 
 class TestTicketTaskFindingDispositions:
-    """GitHub #1838: the cross-round adjudication ledger field (schema v30)."""
+    """GitHub #1838: the cross-round adjudication ledger field (schema v31)."""
 
     def test_defaults_to_an_empty_dict(self) -> None:
         assert TicketTask(ticket_id="T-1", client="c").finding_dispositions == {}
@@ -744,7 +744,7 @@ class TestTicketTaskFindingDispositions:
         assert entry.rationale == "settled by the operator"
         assert entry.recorded_at == "2026-08-16T00:00:00Z"
 
-    def test_legacy_pre_v30_row_loads_with_an_empty_ledger(self) -> None:
+    def test_legacy_pre_v31_row_loads_with_an_empty_ledger(self) -> None:
         """A persisted row from before the field existed must still load."""
         legacy = {
             "ticket_id": "T-1",
@@ -988,7 +988,7 @@ class TestPrStateAndSchemaV8:
     """PR-state hydration model + schema/config surface (#929)."""
 
     def test_dev_queue_schema_version_is_current(self) -> None:
-        assert DEV_QUEUE_SCHEMA_VERSION == 30
+        assert DEV_QUEUE_SCHEMA_VERSION == 31
 
     def test_pr_state_defaults(self) -> None:
         state = PrState()

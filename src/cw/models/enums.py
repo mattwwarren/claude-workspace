@@ -111,6 +111,11 @@ class ReapReason(StrEnum):
     SALVAGE_PARKED = "salvage_parked"
     FINALIZE_BLOCKED = "finalize_blocked"
     TERMINAL_SIBLING = "terminal_sibling"
+    # GitHub #1713 — a BLOCKED_ON_USER row parked behind a gate condition
+    # (own PR pending merge, or blocked behind another ticket's open PR)
+    # whose blocking PR has since merged. release_stale_gated_tasks detects
+    # and (under ReapPolicy.AUTO) releases these rows.
+    STALE_GATE = "stale_gate"
 
 
 class LastResultSource(StrEnum):

@@ -17,7 +17,7 @@ here:
    (``codex_review._context._render_adjudicated_findings_block``) — the
    ``VoidedFinding`` record never does, by its own documented design.
 2. **The memory is durable on the queue row.** ``TicketTask``'s
-   ``finding_dispositions`` (schema v30) survives worktree teardown, regress,
+   ``finding_dispositions`` (schema v31) survives worktree teardown, regress,
    and redispatch, so round N+2 remembers what round N settled without
    re-reading anything.
 

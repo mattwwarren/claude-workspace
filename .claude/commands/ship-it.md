@@ -1,7 +1,7 @@
 ---
 description: "Ship the current branch as a PR with auto-merge enabled (claude-workspace project ship-it)"
 argument-hint: "[--base <branch>] [--title <value>]"
-allowed-tools: ["Bash", "Read"]
+allowed-tools: ["Bash", "Read", "Write"]
 ---
 
 # Ship It (claude-workspace)
@@ -103,6 +103,14 @@ if [ -f .claude/cw-context.json ]; then
 fi
 ```
 
+Echo each variable's final state so it lands in the agent's context before it's used to compose the PR body:
+
+```bash
+echo "RANGE_BODY: $RANGE_BODY"
+echo "CLOSES_TRAILER: $CLOSES_TRAILER"
+echo "LAST_RESORT_TITLE: $LAST_RESORT_TITLE"
+```
+
 ## Step 3a: Changelog Gate Compliance
 
 `.github/workflows/changelog-gate.yml` fails a PR whose title starts with
@@ -162,15 +170,9 @@ EXTRA_LABEL_ARGS=""
      EXTRA_LABEL_ARGS="--label no-changelog"
      ```
 
-Create the PR with `gh pr create`:
+Author the fully-rendered PR body via the **Write tool** — see CLAUDE.md's **Agent File Operations** rule — to `.cw/pr-body.md`, substituting the `$RANGE_BODY` / `$CLOSES_TRAILER` / `$LAST_RESORT_TITLE` values echoed above into this template:
 
-```bash
-gh pr create \
-  --base "${BASE:-main}" \
-  --head "$BRANCH" \
-  --title "$TITLE" \
-  ${EXTRA_LABEL_ARGS} \
-  --body "$(cat <<EOF
+```markdown
 ## Summary
 
 $RANGE_BODY
@@ -186,8 +188,17 @@ ${CLOSES_TRAILER}
 ${LAST_RESORT_TITLE:+
 > Title derived from HEAD commit — verify it is correct.
 }🤖 Shipped via /prep-pr + project /ship-it
-EOF
-)"
+```
+
+Then create the PR with `gh pr create`:
+
+```bash
+gh pr create \
+  --base "${BASE:-main}" \
+  --head "$BRANCH" \
+  --title "$TITLE" \
+  ${EXTRA_LABEL_ARGS} \
+  --body-file .cw/pr-body.md
 ```
 
 If PR creation fails, BLOCK with the `gh` error verbatim.

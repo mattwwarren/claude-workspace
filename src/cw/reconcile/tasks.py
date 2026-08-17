@@ -18,8 +18,8 @@ from cw.dev_queue import (
     save_dev_queue,
     transition_task_status,
 )
-from cw.events import record_event
-from cw.gh import TIMED_OUT_MERGED_LOOKBACK_DAYS
+from cw.events import advance_cursor, read_events, record_event
+from cw.gh import _GH_PR_STATE_MERGED, TIMED_OUT_MERGED_LOOKBACK_DAYS
 from cw.models import (
     DevQueueStore,
     OrchestratorConfig,
@@ -31,6 +31,7 @@ from cw.models import (
     SessionStatus,
     TicketTask,
 )
+from cw.pr_hydrate import _parse_pr_url
 from cw.reconcile import _deps, _shared
 from cw.reconcile._shared import (
     _DIRTY_WORKTREE_REASON,
@@ -677,3 +678,301 @@ def park_terminal_sibling_tasks() -> list[str]:
         )
 
     return parked_ids
+
+
+# ---------------------------------------------------------------------------
+# release_stale_gated_tasks (GitHub #1713)
+# ---------------------------------------------------------------------------
+
+# Consumer cursor name for the Variant A (own-PR-merged) event stream.
+# Independent of orchestrate.py's _RETIREMENT_CONSUMER ("orchestrate_retire")
+# -- that consumer retires Session/PRDispatchRecord state for the manual
+# ``cw orchestrate retire`` command and never touches a TicketTask; this one
+# is a distinct consumer over the SAME PR_MERGED event stream, read from the
+# automatic per-tick dispatch loop (GitHub #1713 root-cause chain).
+_STALE_GATE_CONSUMER = "dev_queue_stale_gate"
+
+# Variant A gate-class markers: a BLOCKED_ON_USER row parked behind its OWN
+# PR's merge/CI gate. "merge_pending" is the disposition Rule 3b stamps
+# verbatim (dispatch/routing.py); "blocked"/"automerge_not_armed" is Rule 5's
+# stamp for a failed auto-merge arm on an already-created PR (both parks
+# populate task.pr_url -- merge_pending directly, automerge_not_armed via the
+# pr_info fallback threaded in dispatch/routing.py).
+#
+# The "automerge_not_armed" / "prior_pipeline_pr_open" reason literals
+# themselves are NOT re-declared here -- _is_variant_a_gate_task and
+# _is_variant_b_gate_task below import them directly from
+# cw.dispatch.routing (the sole producer that stamps task.blocked_reason
+# with these values) via a function-level deferred import, so a locally
+# re-declared copy can never drift from the producer with no compiler
+# signal. Deferred, not module-top, because cw.dispatch's package __init__
+# imports cw.reconcile at module level (loop.py/gating.py/lanes.py), so a
+# top-level `from cw.dispatch.routing import ...` here creates a real
+# circular import at package-init time (confirmed: ImportError "cannot
+# import name 'reconcile' from partially initialized module 'cw.reconcile'"
+# via gating.py's `from cw.reconcile import reconcile`). Same shape as the
+# #698 reconcile._shared -> cw.dispatch precedent and the #1310 gating<->
+# claim pair -- see cw.reconcile._shared.classify_sentinel_stage_position
+# and cw.dispatch.claim's deferred `from cw.dispatch.gating import
+# _invalidate_stale_context_json`.
+_VARIANT_A_MERGE_PENDING_DISPOSITION = "merge_pending"
+_VARIANT_A_BLOCKED_DISPOSITION = "blocked"
+
+# Variant B gate-class markers: a BLOCKED_ON_USER row with no PR of its own,
+# parked behind a DIFFERENT ticket's open PR (dispatch/routing.py Rule 5,
+# merge_gate_blocked/prior_pipeline_pr_open).
+_VARIANT_B_DISPOSITION = "merge_gate_blocked"
+
+_PROPOSED_ACTION_VARIANT_A = "release_stale_gate_variant_a"
+_PROPOSED_ACTION_VARIANT_B = "release_stale_gate_variant_b"
+
+
+def _is_variant_a_gate_task(task: TicketTask) -> bool:
+    """True iff *task* is a BLOCKED_ON_USER row parked behind its own PR gate."""
+    if task.status != QueueItemStatus.BLOCKED_ON_USER:
+        return False
+    if task.disposition == _VARIANT_A_MERGE_PENDING_DISPOSITION:
+        return True
+    # Function-level import breaks the cw.dispatch<->cw.reconcile package
+    # import cycle -- see the comment above _VARIANT_A_MERGE_PENDING_
+    # DISPOSITION.
+    from cw.dispatch.routing import _AUTOMERGE_NOT_ARMED_REASON
+
+    return (
+        task.disposition == _VARIANT_A_BLOCKED_DISPOSITION
+        and task.blocked_reason == _AUTOMERGE_NOT_ARMED_REASON
+    )
+
+
+def _is_variant_b_gate_task(task: TicketTask) -> bool:
+    """True iff *task* is a BLOCKED_ON_USER row parked behind ANOTHER ticket's PR."""
+    # Function-level import breaks the cw.dispatch<->cw.reconcile package
+    # import cycle -- see the comment above _VARIANT_A_MERGE_PENDING_
+    # DISPOSITION.
+    from cw.dispatch.routing import _PRIOR_PIPELINE_PR_OPEN_REASON
+
+    return (
+        task.status == QueueItemStatus.BLOCKED_ON_USER
+        and task.disposition == _VARIANT_B_DISPOSITION
+        and task.blocked_reason == _PRIOR_PIPELINE_PR_OPEN_REASON
+        and task.blocked_on_pr is not None
+    )
+
+
+def _index_variant_a_candidates(
+    store: DevQueueStore,
+) -> dict[tuple[str, str], TicketTask]:
+    """(client, ticket_id) -> task for every current Variant A gate-class row."""
+    return {
+        (t.client, t.ticket_id): t for t in store.tasks if _is_variant_a_gate_task(t)
+    }
+
+
+def _merged_pr_numbers_by_client(store: DevQueueStore) -> dict[str, set[int]]:
+    """client -> set of PR numbers this store has observed MERGED (via pr_state).
+
+    Scans every task's hydrated ``pr_state`` (populated by cw.pr_hydrate's
+    per-tick poll, independent of the PR_MERGED event stream Variant A
+    consumes) -- the cross-reference source for Variant B, whose blocked row
+    carries no PR of its own to poll. Scoped per-client, matching the
+    Self-Verified Premise that a dev-queue client is bound to exactly one
+    repo, so a bare PR number is unambiguous within one client's task set.
+    """
+    merged: dict[str, set[int]] = {}
+    for t in store.tasks:
+        if t.pr_state is None or t.pr_state.state != _GH_PR_STATE_MERGED:
+            continue
+        if not t.pr_url:
+            continue
+        parsed = _parse_pr_url(t.pr_url)
+        if parsed is None:
+            continue
+        _, pr_number = parsed
+        merged.setdefault(t.client, set()).add(pr_number)
+    return merged
+
+
+def _release_variant_a(task: TicketTask, policy: ReapPolicy) -> None:
+    """Apply the SIGNAL_ONLY/AUTO release for a Variant A gate task."""
+    if policy is ReapPolicy.AUTO:
+        # Why: this row's PR is confirmed MERGED (own-PR event) or already
+        # created (automerge_not_armed) -- mirrors
+        # complete_timed_out_merged_tasks's identical disposition="shipped"
+        # for the same "PR merged, no further gh call needed" shape.
+        transition_task_status(task, QueueItemStatus.COMPLETED, disposition="shipped")
+        task.session_id = None
+    else:
+        task.stale_gate_detected_at = datetime.now(UTC)
+
+
+def _release_variant_b(task: TicketTask, policy: ReapPolicy) -> None:
+    """Apply the SIGNAL_ONLY/AUTO release for a Variant B gate task."""
+    if policy is ReapPolicy.AUTO:
+        transition_task_status(task, QueueItemStatus.PENDING)
+        task.session_id = None
+    else:
+        task.stale_gate_detected_at = datetime.now(UTC)
+
+
+def release_stale_gated_tasks() -> list[str]:
+    """Re-validate BLOCKED_ON_USER dev-queue rows against a cleared PR gate.
+
+    GitHub #1713: dev-queue rows parked behind a merge/CI gate never observe
+    that gate clearing -- ``hydrate_pr_states`` emits ``pr.merged`` events
+    every tick, but nothing before this function consumed them against
+    dev-queue task state. Two independent variants (see the ticket's
+    root-cause chain):
+
+    * Variant A -- the row is blocked behind ITS OWN PR (disposition
+      "merge_pending", or "blocked"/blocked_reason="automerge_not_armed").
+      Detected by consuming ``PR_MERGED`` events off a dedicated consumer
+      cursor (``_STALE_GATE_CONSUMER``) and matching each event's
+      ``(client, ticket_id)`` against the current Variant A candidate set.
+    * Variant B -- the row is blocked behind a DIFFERENT ticket's PR
+      (disposition "merge_gate_blocked"/blocked_reason=
+      "prior_pipeline_pr_open", ``blocked_on_pr`` carrying the blocking PR's
+      bare number). No event stream names this row directly, so it is found
+      by a dev-queue-wide cross-reference scan against every OTHER task's
+      hydrated ``pr_state`` within the same client.
+
+    Per ``park_terminal_sibling_tasks``'s exact precedent (ADR-0006):
+    ``SESSION_REAP_PROPOSED`` fires on EVERY detection regardless of
+    ``reap_policy`` -- only the status mutation differs.
+    ``ReapPolicy.SIGNAL_ONLY`` (default): stamp ``stale_gate_detected_at``,
+    leave ``task.status`` untouched. ``ReapPolicy.AUTO``: perform the
+    variant-specific release (Variant A -> COMPLETED/"shipped", Variant B ->
+    PENDING requeue) via ``transition_task_status``, whose unconditional
+    latch-clear then clears ``stale_gate_detected_at`` in the same call.
+
+    Residual blind spot (binding operator resolution, not closed here):
+    Variant B is cross-reference-only -- a blocking PR that merged and then
+    left the queue entirely (its task row removed/never tracked) has no
+    ``pr_state`` for this scan to match against, so that row stays parked
+    until an operator intervenes. No ``gh pr view`` fallback is attempted.
+
+    Does NOT require ``sessions_lock`` -- operates on the dev queue and the
+    events inbox only. Returns the list of ticket_ids released or stamped.
+    """
+    clients = load_clients()
+    orchestrator_config = load_orchestrator_config()
+    events = read_events(
+        consumer=_STALE_GATE_CONSUMER,
+        event_types=[OrchestratorEventType.PR_MERGED],
+    )
+
+    released_ids: list[str] = []
+    # Snapshot fields needed for event emission after the lock (lock-order
+    # invariant #765 -- record_event acquires _inbox_lock). session_id is
+    # captured BEFORE _release_variant_a/_release_variant_b run (both clear
+    # task.session_id under the AUTO branch) -- mirrors
+    # park_terminal_sibling_tasks's orig_session_id precedent exactly.
+    pending_events: list[tuple[str, str, str, str, str | None]] = []
+
+    # PR_MERGED event IDs processed by the Variant A loop below, deferred
+    # until AFTER save_dev_queue succeeds (see the advance_cursor loop below
+    # this `with` block for why).
+    processed_event_ids: list[str] = []
+
+    with dev_queue_lock():
+        store = load_dev_queue()
+        changed = False
+
+        # Variant A: consume PR_MERGED events off the dedicated cursor.
+        variant_a_index = _index_variant_a_candidates(store)
+        for event in events:
+            payload = event.payload
+            client = str(payload.get("client", ""))
+            ticket_id = str(payload.get("ticket_id", ""))
+            task = variant_a_index.get((client, ticket_id))
+            # Re-check gate-class membership at process time (not just index
+            # membership): defends against a task mutated earlier in this
+            # same batch (e.g. two events resolving to the same row) so a
+            # stale index entry can never double-release.
+            if task is not None and _is_variant_a_gate_task(task):
+                orig_session_id = task.session_id
+                policy = _resolve_task_policy(
+                    task.client, task.lane, clients, orchestrator_config
+                )
+                _release_variant_a(task, policy)
+                released_ids.append(task.ticket_id)
+                pending_events.append(
+                    (
+                        task.ticket_id,
+                        task.client,
+                        task.lane,
+                        _PROPOSED_ACTION_VARIANT_A,
+                        orig_session_id,
+                    )
+                )
+                changed = True
+            processed_event_ids.append(event.id)
+
+        # Variant B: dev-queue-wide cross-reference scan (no event stream
+        # names these rows directly -- see docstring).
+        merged_by_client = _merged_pr_numbers_by_client(store)
+        for task in store.tasks:
+            if not _is_variant_b_gate_task(task):
+                continue
+            if task.blocked_on_pr not in merged_by_client.get(task.client, set()):
+                continue
+            orig_session_id = task.session_id
+            policy = _resolve_task_policy(
+                task.client, task.lane, clients, orchestrator_config
+            )
+            _release_variant_b(task, policy)
+            released_ids.append(task.ticket_id)
+            pending_events.append(
+                (
+                    task.ticket_id,
+                    task.client,
+                    task.lane,
+                    _PROPOSED_ACTION_VARIANT_B,
+                    orig_session_id,
+                )
+            )
+            changed = True
+
+        if changed:
+            save_dev_queue(store)
+
+        # Advance cursors only AFTER the mutation batch above is durably
+        # persisted (crash-safety fix, GitHub #1713 review). Advancing the
+        # cursor inside the Variant A loop (the pre-fix shape) permanently
+        # consumed a PR_MERGED event before its corresponding release was
+        # written -- a crash, or a save_dev_queue failure (disk full, lock
+        # I/O), between the two left the task stuck BLOCKED_ON_USER forever
+        # with no future trigger, reproducing inside this very mechanism the
+        # exact silent-staleness failure class #1713 exists to close.
+        # PR_MERGED fires once per PR (first-observation dedup), so there is
+        # no second chance.
+        #
+        # If save_dev_queue raises above, this loop never runs: the
+        # exception propagates out of this `with dev_queue_lock():` block
+        # (releasing the lock), up through release_stale_gated_tasks(), to
+        # _run_stale_gate_release_guarded's broad-catch wrapper in
+        # dispatch/loop.py, which logs and retries next tick. The cursor was
+        # never advanced, so the retry re-reads the same events and
+        # re-derives the same mutation -- safe to repeat because the on-disk
+        # dev-queue state is unchanged when save_dev_queue itself is what
+        # failed (no partial write reaches disk; see atomic_write_text).
+        for event_id in processed_event_ids:
+            advance_cursor(_STALE_GATE_CONSUMER, event_id)
+
+    # Emit events after dev_queue_lock releases (lock-order invariant #765).
+    for ticket_id, client, lane, proposed_action, session_id in pending_events:
+        record_event(
+            OrchestratorEventType.SESSION_REAP_PROPOSED,
+            {
+                "session_id": session_id,
+                "session_name": None,
+                "client": client,
+                "ticket_id": ticket_id,
+                "lane": lane,
+                "proposed_action": proposed_action,
+                "reason": ReapReason.STALE_GATE.value,
+                "evidence": {},
+            },
+            correlation_id=ticket_id,
+        )
+
+    return released_ids

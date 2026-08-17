@@ -1478,7 +1478,7 @@ debt itself is already surfaced on the posted review comment.
 **Semantics:** GitHub #1838. One event per re-derived review finding suppressed
 because its `review_debt.fingerprint_v1` identity matched a `REJECTED` entry in
 the ticket's cross-round adjudication ledger
-(`TicketTask.finding_dispositions`, schema v30). The finding is stamped
+(`TicketTask.finding_dispositions`, schema v31). The finding is stamped
 `disposition="rejected"` and leaves `must_fix`/`blocking`.
 
 Mandatory for the same reason as `review.finding_voided` above, and NOT a reuse

@@ -8,6 +8,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Stale-gate detection for dev-queue tasks parked behind a cleared PR gate
+  (#1713):** dev-queue rows blocked behind a merge/CI gate (their own PR, or
+  a different ticket's PR ahead of them in the pipeline) never observed that
+  gate clearing — `hydrate_pr_states` emitted `pr.merged` events every tick,
+  but nothing consumed them against dev-queue task state. Adds
+  `ReapReason.STALE_GATE`, a `stale_gate_detected_at` task field, and a new
+  `release_stale_gated_tasks` reconcile pass wired into the dispatch loop
+  that re-validates both blocking variants (own-PR "merge_pending"/
+  "automerge_not_armed", and cross-ticket "merge_gate_blocked") and, under
+  `ReapPolicy.AUTO`, releases the task (own-PR case completes it, blocking-PR
+  case requeues it to PENDING). `SESSION_REAP_PROPOSED` fires on every
+  detection regardless of policy, per ADR-0006 precedent; `SIGNAL_ONLY`
+  (default) only stamps the detection timestamp.
+
 - **Accepted-limitation decision record for the no-sentinel regress-marker
   gap (#1801):** `TicketTask.regressed_into_stage` (#1794) does not survive
   a spawn that dies before ever emitting a sentinel — the marker is

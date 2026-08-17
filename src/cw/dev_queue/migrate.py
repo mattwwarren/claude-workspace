@@ -208,8 +208,17 @@ def _fill_pending_operator_comment_default(task_raw: dict[str, Any]) -> None:
         task_raw["pending_operator_comment"] = False
 
 
+def _fill_stale_gate_default(task_raw: dict[str, Any]) -> None:
+    """Fill stale_gate_detected_at/blocked_on_pr introduced in dev-queue
+    schema v30 (GitHub #1713). Idempotent."""
+    if "stale_gate_detected_at" not in task_raw:
+        task_raw["stale_gate_detected_at"] = None
+    if "blocked_on_pr" not in task_raw:
+        task_raw["blocked_on_pr"] = None
+
+
 def _fill_finding_dispositions_default(task_raw: dict[str, Any]) -> None:
-    """Fill finding_dispositions introduced in dev-queue schema v30
+    """Fill finding_dispositions introduced in dev-queue schema v31
     (GitHub #1838). Idempotent — and additive by construction: an existing
     ledger is never reset, which is the forward-only contract the field's own
     no-clear-site comment in models/tasks.py describes."""
@@ -261,6 +270,7 @@ def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
                 _fill_regressed_into_stage_default(task_raw)
                 _fill_finalize_regress_branch_head_default(task_raw)
                 _fill_pending_operator_comment_default(task_raw)
+                _fill_stale_gate_default(task_raw)
                 _fill_finding_dispositions_default(task_raw)
     _fill_watched_prs_default(raw)
     raw["schema_version"] = DEV_QUEUE_SCHEMA_VERSION

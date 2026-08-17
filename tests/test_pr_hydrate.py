@@ -18,6 +18,7 @@ from cw.models import (
     OrchestratorConfig,
     OrchestratorEventType,
     PrState,
+    QueueItemStatus,
     TicketTask,
     WatchedPr,
 )
@@ -1024,6 +1025,39 @@ class TestCandidateSelection:
         )
         hydrate_pr_states(OrchestratorConfig())
         assert calls == []
+
+    def test_is_candidate_true_once_automerge_not_armed_pr_url_stamped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GitHub #1713 regression guard: before dispatch/routing.py's pr_info
+        fallback, an automerge_not_armed park never populated task.pr_url, so
+        _is_candidate's ``if not task.pr_url: return False`` gate permanently
+        skipped these rows -- they were never polled, so pr.merged could never
+        fire for them. Once pr_url is stamped (as routing.py's Rule 5 fix
+        does), the row becomes an ordinary hydration candidate."""
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-2",
+                        client="acme",
+                        status=QueueItemStatus.BLOCKED_ON_USER,
+                        disposition="blocked",
+                        blocked_reason="automerge_not_armed",
+                        pr_url=_URL,
+                    )
+                ]
+            )
+        )
+        calls = []
+        monkeypatch.setattr(
+            "cw.pr_hydrate.fetch_pr_view",
+            lambda *a, **_k: calls.append(a) or _pr_view_payload(state="OPEN"),
+        )
+        hydrate_pr_states(OrchestratorConfig())
+        assert len(calls) == 1
+        task = load_dev_queue().tasks[0]
+        assert task.pr_state is not None
 
 
 class TestDeriveCounterparty:

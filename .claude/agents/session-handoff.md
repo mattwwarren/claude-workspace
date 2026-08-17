@@ -19,44 +19,14 @@ Handle abnormal session endings gracefully. When a session can't continue normal
 
 ## Handoff Scenarios
 
-### 1. Context Exhaustion (80%+ usage)
+Each scenario follows the same "Handoff Methodology" below (context gather →
+classify → generate). Only the trigger and what the output emphasizes differ:
 
-**Trigger:** Session context approaching limit
-
-**Actions:**
-1. Summarize completed work
-2. Capture in-progress state
-3. List blocking issues (if any)
-4. Generate compact resume prompt
-
-**Output emphasis:** Minimal, focused handoff that preserves critical context
-
-### 2. Debug Fork (2+ levels deep)
-
-**Trigger:** Debugging attempts exceeding 2 without resolution
-
-**Actions:**
-1. Document what was tried
-2. Record error messages/symptoms
-3. Identify hypotheses not yet tested
-4. Generate TWO separate handoffs:
-   - Main task continuation (without debug rabbit hole)
-   - Debug investigation (fresh start on the specific issue)
-
-**Output emphasis:** Split the problem to prevent future rabbit-holing
-
-### 3. Scope Exhaustion
-
-**Trigger:** Task scope expanded beyond original intent
-
-**Actions:**
-1. Identify original scope
-2. List scope additions that occurred
-3. Separate into: must-do, should-do, nice-to-do
-4. Generate handoff focused on must-do items
-5. Create separate issues/tasks for scope additions
-
-**Output emphasis:** Restore focus to original intent
+| Scenario | Trigger | Output emphasis |
+|----------|---------|------------------|
+| Context Exhaustion | Session context at 80%+ usage | Minimal, focused handoff that preserves critical context |
+| Debug Fork | Debugging attempts exceeding 2 without resolution | Split into TWO documents — main task continuation (excludes the rabbit hole) and debug investigation (fresh start on the specific issue); see "Special Handling" below |
+| Scope Exhaustion | Task scope expanded beyond original intent | Restore focus — handoff covers must-do items only; should-do/nice-to-do become separate deferred issues |
 
 ## Handoff Methodology
 
@@ -96,6 +66,14 @@ Create handoff document with:
 **For Scope Exhaustion:**
 - Create focused handoff (original scope only)
 - Document deferred items as future tasks
+
+## Compact-Repr Rule
+
+In the spirit of #839: every rendered section below is a terse fragment, not
+prose. The Resume Prompt is a **pointer** into the Completed/In
+Progress/Blocked sections above it — not a re-narration of them. Cite what
+to read and where to pick up; if a field would just restate a fact already
+captured earlier in the document, drop the field instead.
 
 ## Output Format
 
@@ -220,16 +198,9 @@ Start by [fresh approach suggestion].
 ### Complements /session-done
 
 `/session-done` is for normal endings (work complete or stopping point reached).
-`/handoff` is for abnormal endings (forced stop due to constraints).
-
-**When to use which:**
-| Situation | Use |
-|-----------|-----|
-| Work complete | `/session-done` |
-| Good stopping point | `/session-done` |
-| Context exhausted | `/handoff --reason context` |
-| Debug rabbit hole | `/handoff --reason debug-fork` |
-| Scope explosion | `/handoff --reason scope` |
+`/handoff` is for abnormal endings (forced stop due to constraints). See
+`.claude/commands/handoff.md`'s own "When to Use" table for the full
+situation → command mapping — not restated here.
 
 ### References Plan Files
 

@@ -756,3 +756,141 @@ def test_dry_run_summary_skips_drift_report_when_subject_did_not_match(
     assert "WOULD close" not in result.stdout
     assert NO_DRIFT_LINE not in result.stdout
     assert "no action would be taken" in result.stdout
+
+
+# --- Group E: quality gates ported from release.yml (#1841) ---
+#
+# `release.yml`'s `verify` job held the only ruff/format/mypy/pytest gate on
+# any release path, and that workflow fires solely on a `push: tags: ['v*']`
+# event. Tags this workflow pushes are GITHUB_TOKEN-authored, so they never
+# retrigger it — the automated release path reached zero quality gates
+# (#1841, same anti-recursion class as #1799). The gates now live here, ahead
+# of tag creation, and `verify` is deleted (see test_release_workflow.py).
+
+QUALITY_GATES_STEP_ID = "quality-gates"
+TAG_CHECK_STEP_ID = "tag"
+CREATE_TAG_STEP_NAME = "Create and push tag"
+INSTALL_TMUX_STEP_NAME = "Install tmux"
+INSTALL_DEPS_STEP_NAME = "Install dependencies"
+MATCH_TRUE_GATE = "steps.guard.outputs.match == 'true'"
+TAG_NOT_EXISTS_GATE = "steps.tag.outputs.exists == 'false'"
+CI_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
+SETUP_UV_PIN = "astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b"
+# Byte-identical to the four commands in the deleted `verify` job's "Run
+# quality gates" step -- ported, not re-specified. Notably NO coverage flags:
+# `ci.yml`'s pytest step adds them, `verify`'s did not.
+PORTED_GATE_COMMANDS = (
+    "uv run ruff check src/ tests/",
+    "uv run ruff format --check src/ tests/",
+    "uv run mypy --strict src/",
+    "uv run pytest tests/ -v",
+)
+
+
+def _step_index_by_uses_prefix(prefix: str) -> int:
+    for index, step in enumerate(_steps()):
+        if step.get("uses", "").startswith(prefix):
+            return index
+    msg = f"No step using {prefix!r} in {WORKFLOW_PATH}"
+    raise AssertionError(msg)
+
+
+def test_quality_gates_step_sits_between_tag_check_and_tag_creation() -> None:
+    """Placement is the whole point: gates must run before the tag is pushed.
+
+    A gate landing after "Create and push tag" would fail a release that has
+    already shipped its tag, which is strictly worse than not gating at all.
+    """
+    assert _step_index(TAG_CHECK_STEP_ID) < _step_index(QUALITY_GATES_STEP_ID)
+    assert _step_index(QUALITY_GATES_STEP_ID) < _step_index_by_name(
+        CREATE_TAG_STEP_NAME
+    )
+
+
+def test_quality_gates_step_gated_on_match_true() -> None:
+    """This job runs on every push to `main`, not just release commits."""
+    assert MATCH_TRUE_GATE in _step(QUALITY_GATES_STEP_ID)["if"]
+
+
+def test_quality_gates_step_runs_the_four_ported_commands_verbatim() -> None:
+    script = _script(QUALITY_GATES_STEP_ID)
+    for command in PORTED_GATE_COMMANDS:
+        assert command in script
+    # `verify` ran a bare pytest; the coverage flags are `ci.yml`'s, and
+    # porting must not quietly expand the gate's scope.
+    assert "--cov" not in script
+
+
+def test_quality_gates_step_has_no_continue_on_error() -> None:
+    """Steps run sequentially in a job, so a hard failure here is what stops
+    "Create and push tag" from running — `continue-on-error` would silently
+    restore the unverified-release hole this ticket closes."""
+    assert "continue-on-error" not in _step(QUALITY_GATES_STEP_ID)
+
+
+def test_installer_steps_precede_quality_gates_and_share_its_gate() -> None:
+    gates_index = _step_index(QUALITY_GATES_STEP_ID)
+    setup_uv_index = _step_index_by_uses_prefix(SETUP_UV_PIN)
+    tmux_index = _step_index_by_name(INSTALL_TMUX_STEP_NAME)
+    deps_index = _step_index_by_name(INSTALL_DEPS_STEP_NAME)
+
+    assert setup_uv_index < gates_index
+    assert tmux_index < gates_index
+    assert deps_index < gates_index
+
+    steps = _steps()
+    for index in (setup_uv_index, tmux_index, deps_index):
+        assert MATCH_TRUE_GATE in steps[index]["if"]
+
+
+def test_quality_gates_and_installer_steps_skip_on_idempotent_re_run() -> None:
+    """A re-run after the tag already shipped must not re-pay for the full
+    toolchain install and quality-gate suite -- match "Create and push tag"'s
+    own tag.outputs.exists == 'false' gate, not just the match=='true' guard."""
+    gates_index = _step_index(QUALITY_GATES_STEP_ID)
+    setup_uv_index = _step_index_by_uses_prefix(SETUP_UV_PIN)
+    tmux_index = _step_index_by_name(INSTALL_TMUX_STEP_NAME)
+    deps_index = _step_index_by_name(INSTALL_DEPS_STEP_NAME)
+
+    steps = _steps()
+    for index in (setup_uv_index, tmux_index, deps_index, gates_index):
+        assert TAG_NOT_EXISTS_GATE in steps[index]["if"]
+
+
+def test_installer_steps_land_after_the_tag_existence_check() -> None:
+    """The installers are part of the ported block, not preamble — they must
+    not burn runner time ahead of the cheap guard/version/tag checks."""
+    tag_index = _step_index(TAG_CHECK_STEP_ID)
+    assert tag_index < _step_index_by_uses_prefix(SETUP_UV_PIN)
+    assert tag_index < _step_index_by_name(INSTALL_TMUX_STEP_NAME)
+    assert tag_index < _step_index_by_name(INSTALL_DEPS_STEP_NAME)
+
+
+def test_install_dependencies_step_syncs_dev_and_mcp_extras() -> None:
+    """Matches `verify`'s sync exactly — `mypy --strict` and the MCP tests
+    both need the `mcp` extra present."""
+    step = _steps()[_step_index_by_name(INSTALL_DEPS_STEP_NAME)]
+    assert step["run"] == "uv sync --dev --extra mcp"
+
+
+def test_install_tmux_step_is_linux_only_with_no_os_conditional() -> None:
+    """`tag-release` is `ubuntu-latest`-only (no OS matrix like the deleted
+    `verify` job had), so the macOS half of the ported pattern is dead code."""
+    assert _workflow()["jobs"][JOB]["runs-on"] == "ubuntu-latest"
+    step = _steps()[_step_index_by_name(INSTALL_TMUX_STEP_NAME)]
+    assert step["run"] == "sudo apt-get update && sudo apt-get install -y tmux"
+    assert "runner.os" not in step["if"]
+
+
+def test_setup_uv_pin_matches_the_ci_workflow_pin() -> None:
+    """Ported verbatim from `ci.yml` / the deleted `verify` job — a drifting
+    pin here would mean the release path installs a different uv than CI."""
+    ci_workflow: dict[Any, Any] = yaml.safe_load(CI_WORKFLOW_PATH.read_text())
+    ci_pins = {
+        step["uses"]
+        for job in ci_workflow["jobs"].values()
+        for step in job["steps"]
+        if step.get("uses", "").startswith("astral-sh/setup-uv@")
+    }
+    ported_pin = _steps()[_step_index_by_uses_prefix(SETUP_UV_PIN)]["uses"]
+    assert ci_pins == {ported_pin}
