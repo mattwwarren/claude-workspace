@@ -371,3 +371,30 @@ class TestOpenPrProbeCacheSidecar:
 
         assert len(cache) == 1
         assert cache["acme/1862"].has_open_pr is False
+
+    def test_non_dict_top_level_json_returns_empty(self, tmp_config_dir: Path) -> None:
+        import cw.dispatch_state
+
+        cw.dispatch_state.DISPATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cw.dispatch_state.DISPATCH_STATE_FILE.write_text(
+            json.dumps(["not", "a", "dict"])
+        )
+
+        assert load_open_pr_probe_cache() == {}
+
+    def test_write_failure_is_swallowed(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fail-soft persistence: a failed write costs one extra probe, not a raise."""
+
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr("cw.dispatch_state.atomic_write_text", _boom)
+
+        save_open_pr_probe_entry(
+            "acme", "1862", OpenPrProbeCache(datetime.now(UTC), has_open_pr=True)
+        )
+
+        assert load_open_pr_probe_cache() == {}

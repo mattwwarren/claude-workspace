@@ -228,6 +228,17 @@ Before Step 1f or Step 1g, check the plan agent's friction report for the exact 
 
 `no_op` is distinct from `blocked` + `agent_block`: "already satisfied" is a healthy outcome, not a failure needing attention, and routing it through `blocked` produces alerting noise.
 
+A third option exists for a narrower case (#1862): if the work is *not*
+already merged but this ticket **already has an open, unmerged PR** from an
+earlier dispatch, the correct exit is `status: "stale_dispatch"` with
+`blocker.reason: "pr_already_open"`, `blocker.details` naming the PR, `pr:
+null`, and `next_actions: []`. Neither `no_op` (nothing is complete) nor
+`blocked` (nothing is broken) fits. This normally never reaches Stage 1 — the
+Stage 0 intake self-check and `cw`'s own pre-dispatch gate both catch it
+first — but a resume path that skipped Stage 0 can surface it here. See
+`.claude/commands/auto-dev-intake.md`'s "Step 3 open-PR self-check" for the
+exact sentinel shape and the fail-open rule for an unreliable `gh` answer.
+
 **If the signal is absent:** proceed to Step 1f (Plan Quality Review).
 
 ### Step 1f: Plan Quality Review
