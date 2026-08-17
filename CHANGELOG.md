@@ -46,6 +46,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   detection) — plus supporting changes to the `cw.codex_review` package
   and `cw.models.enums`.
 
+- **`empty_diff_blocked` sentinel status for zero-commit branches
+  (#1870):** an `/auto-dev` branch that reaches IMPL/REVIEW exit — or the
+  dispatch loop's own empty-diff gate — with zero commits ahead of
+  `origin/<default_branch>` previously had no dedicated terminal status,
+  so it was liable to be mislabeled `crashed` and re-dispatched onto the
+  same empty branch. Adds the `empty_diff_blocked` status (schema v6,
+  accepted under all supported versions during rollout) plus
+  `EMPTY_DIFF_BLOCKER_REASON` (`empty_diff_no_commits`), wires it into
+  `STAGE_FAILURE_STATUSES`, `SALVAGE_TERMINAL_STATUSES`, and
+  `_TERMINAL_REJECT_STATUSES`, adds `cw.branch_ahead.commits_ahead_of_default`
+  to measure the diff, adds a dispatch-level empty-diff gate, exits
+  `empty_diff_blocked` from the clean review-synthesis path, and classifies
+  it in `wait` exit codes and the monitor. Documented across the headless
+  contract and the producer skills (`auto-dev-impl`, `auto-dev-review`,
+  `auto-dev`).
+
 ### Fixed
 
 - **Codex-subsystem `make_blocked()` call sites silently borrowed
