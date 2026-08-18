@@ -1973,9 +1973,7 @@ class TestSpawnCloseRequeue:
 
         _write_test_client_yaml(tmp_config_dir, tmp_path)
         sess = _seed_daemon_session(tmp_path, tmp_config_dir, surface_ref=None)
-        _seed_running_task(
-            ticket_id="GEN-42", client="test-client", session_id=sess.id
-        )
+        _seed_running_task(ticket_id="GEN-42", client="test-client", session_id=sess.id)
         runner = CliRunner()
 
         result = runner.invoke(main, ["spawn", "close", "--requeue", sess.id])
@@ -2018,9 +2016,7 @@ class TestSpawnCloseRequeue:
         from cw.models import OrchestratorEventType, QueueItemStatus
 
         sess = _seed_daemon_session(tmp_path, tmp_config_dir, surface_ref=None)
-        _seed_running_task(
-            ticket_id="GEN-42", client="test-client", session_id=sess.id
-        )
+        _seed_running_task(ticket_id="GEN-42", client="test-client", session_id=sess.id)
         runner = CliRunner()
 
         result = runner.invoke(main, ["spawn", "close", sess.id])
@@ -2060,9 +2056,7 @@ class TestSpawnCloseRequeue:
 
         _write_test_client_yaml(tmp_config_dir, tmp_path)
         sess = _seed_daemon_session(tmp_path, tmp_config_dir, surface_ref=None)
-        _seed_running_task(
-            ticket_id="GEN-42", client="test-client", session_id=sess.id
-        )
+        _seed_running_task(ticket_id="GEN-42", client="test-client", session_id=sess.id)
 
         def _requeue_with_race(
             *args: object, **kwargs: object
@@ -2097,9 +2091,7 @@ class TestSpawnCloseRequeue:
 
         _write_test_client_yaml(tmp_config_dir, tmp_path)
         sess = _seed_daemon_session(tmp_path, tmp_config_dir, surface_ref=None)
-        _seed_running_task(
-            ticket_id="GEN-42", client="test-client", session_id=sess.id
-        )
+        _seed_running_task(ticket_id="GEN-42", client="test-client", session_id=sess.id)
         runner = CliRunner()
 
         result = runner.invoke(main, ["spawn", "close", "--requeue", sess.id])
