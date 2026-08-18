@@ -55,6 +55,19 @@ def _make_prompt_file(tmp_path: Path, content: str = "Do the thing.") -> Path:
     return prompt_file
 
 
+def _write_test_client_yaml(tmp_config_dir: Path, tmp_path: Path) -> None:
+    """Write a minimal clients.yaml for 'test-client' (mirrors
+    test_dev_queue.py's ``_write_client_yaml``) so ``requeue_ticket``'s
+    ``get_client`` lookup resolves during ``--requeue`` CLI tests."""
+    config_dir = tmp_config_dir / ".config" / "cw"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    ws = tmp_path / "requeue-ws"
+    ws.mkdir(parents=True, exist_ok=True)
+    (config_dir / "clients.yaml").write_text(
+        f"clients:\n  test-client:\n    workspace_path: {ws}\n"
+    )
+
+
 def _seed_running_task(
     ticket_id: str = "GEN-42",
     client: str = "test-client",
@@ -1945,6 +1958,175 @@ class TestSpawnCLI:
         result = runner.invoke(main, ["spawn", "close", sess.id, "--confirmed-dead"])
 
         assert result.exit_code == 0
+
+
+class TestSpawnCloseRequeue:
+    """Tests for `cw spawn close --requeue` (#1889)."""
+
+    def test_requeue_flag_cancels_then_requeues_to_pending(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """(a) RUNNING session closed with --requeue: task lands PENDING at its
+        original stage, CLI output names both the close and the requeue."""
+        from cw.dev_queue import load_dev_queue
+        from cw.models import QueueItemStatus, Stage
+
+        _write_test_client_yaml(tmp_config_dir, tmp_path)
+        sess = _seed_daemon_session(tmp_path, tmp_config_dir, surface_ref=None)
+        _seed_running_task(
+            ticket_id="GEN-42", client="test-client", session_id=sess.id
+        )
+        runner = CliRunner()
+
+        result = runner.invoke(main, ["spawn", "close", "--requeue", sess.id])
+
+        assert result.exit_code == 0, result.output
+        assert "Closed session" in result.output
+        assert "Requeued GEN-42" in result.output
+
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == "GEN-42")
+        assert task.status == QueueItemStatus.PENDING
+        assert task.stage == Stage.PLAN  # DEFAULT_STAGE — unchanged, no --stage
+
+    def test_requeue_flag_no_resolvable_ticket_id_is_graceful_noop(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """(b) session name with no auto-dev/ prefix: --requeue no-ops with an
+        explanatory message, exit code still 0."""
+        sess = _seed_daemon_session(
+            tmp_path,
+            tmp_config_dir,
+            surface_ref=None,
+            name="test-client/interactive-session",
+        )
+        runner = CliRunner()
+
+        result = runner.invoke(main, ["spawn", "close", "--requeue", sess.id])
+
+        assert result.exit_code == 0
+        assert "Closed session" in result.output
+        assert "no-op" in result.output.lower()
+
+    def test_requeue_flag_omitted_preserves_current_behavior(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """(c) --requeue omitted: no dev-queue mutation beyond the existing
+        cancel_task_for_session, no TICKET_REQUEUED event."""
+        from cw.dev_queue import load_dev_queue
+        from cw.events import read_events
+        from cw.models import OrchestratorEventType, QueueItemStatus
+
+        sess = _seed_daemon_session(tmp_path, tmp_config_dir, surface_ref=None)
+        _seed_running_task(
+            ticket_id="GEN-42", client="test-client", session_id=sess.id
+        )
+        runner = CliRunner()
+
+        result = runner.invoke(main, ["spawn", "close", sess.id])
+
+        assert result.exit_code == 0
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == "GEN-42")
+        assert task.status == QueueItemStatus.CANCELLED
+
+        events = read_events(
+            consumer="_test_requeue_omitted",
+            event_types=[OrchestratorEventType.TICKET_REQUEUED],
+        )
+        assert events == []
+
+    def test_requeue_flag_concierge_race_resolved_gracefully(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(d) the row is already advanced to PENDING by the concierge
+        cancelled_row_restore recipe in the window between _spawn_close_impl's
+        cancel and the --requeue call: exits 0, prints the "already recovered"
+        message, does not raise RequeueStateError (uncaught) or double-emit
+        TICKET_REQUEUED.
+
+        Simulates the race directly via transition_task_status on the
+        freshly-cancelled row (a focused unit test of the catch/fresh-read
+        path per the plan), not a full concierge-tick integration test. The
+        wrapper injects the race then delegates to the real requeue_ticket,
+        so the RequeueStateError it raises is genuine -- caused by real state
+        (row is PENDING), not fabricated -- and spawn_close's own catch/
+        fresh-read logic is what's under test.
+        """
+        from cw.dev_queue import load_dev_queue, save_dev_queue, transition_task_status
+        from cw.dev_queue.requeue import requeue_ticket as real_requeue_ticket
+        from cw.events import read_events
+        from cw.models import OrchestratorEventType, QueueItemStatus
+
+        _write_test_client_yaml(tmp_config_dir, tmp_path)
+        sess = _seed_daemon_session(tmp_path, tmp_config_dir, surface_ref=None)
+        _seed_running_task(
+            ticket_id="GEN-42", client="test-client", session_id=sess.id
+        )
+
+        def _requeue_with_race(
+            *args: object, **kwargs: object
+        ) -> dict[str, str | bool | int]:
+            store = load_dev_queue()
+            task = next(t for t in store.tasks if t.ticket_id == "GEN-42")
+            transition_task_status(task, QueueItemStatus.PENDING)
+            save_dev_queue(store)
+            return real_requeue_ticket(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("cw.cli.spawn.requeue_ticket", _requeue_with_race)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["spawn", "close", "--requeue", sess.id])
+
+        assert result.exit_code == 0, result.output
+        assert "already" in result.output.lower()
+
+        events = read_events(
+            consumer="_test_requeue_race",
+            event_types=[OrchestratorEventType.TICKET_REQUEUED],
+        )
+        assert events == []
+
+    def test_requeue_flag_emits_ticket_requeued_event(
+        self, tmp_config_dir: Path, tmp_path: Path
+    ) -> None:
+        """(e) TICKET_REQUEUED recorded with reason="spawn_close_requeue" and
+        from_stage/to_stage sourced from requeue_ticket's return dict."""
+        from cw.events import read_events
+        from cw.models import OrchestratorEventType
+
+        _write_test_client_yaml(tmp_config_dir, tmp_path)
+        sess = _seed_daemon_session(tmp_path, tmp_config_dir, surface_ref=None)
+        _seed_running_task(
+            ticket_id="GEN-42", client="test-client", session_id=sess.id
+        )
+        runner = CliRunner()
+
+        result = runner.invoke(main, ["spawn", "close", "--requeue", sess.id])
+
+        assert result.exit_code == 0, result.output
+        events = read_events(
+            consumer="_test_requeue_event",
+            event_types=[OrchestratorEventType.TICKET_REQUEUED],
+        )
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["ticket_id"] == "GEN-42"
+        assert payload["client"] == "test-client"
+        assert payload["reason"] == "spawn_close_requeue"
+        assert payload["from_stage"] == "plan"
+        assert payload["to_stage"] == "plan"
+
+    def test_requeue_help_text_present(self, tmp_config_dir: Path) -> None:
+        """(f) the literal --requeue help text is present in
+        `cw spawn close --help` output."""
+        runner = CliRunner()
+
+        result = runner.invoke(main, ["spawn", "close", "--help"])
+
+        assert result.exit_code == 0
+        assert "--requeue" in result.output
+        assert "cancelled_row_restore" in result.output
 
 
 # ---------------------------------------------------------------------------
