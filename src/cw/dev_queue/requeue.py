@@ -229,21 +229,32 @@ def _apply_requeue_stage(
                     f" ('{_PLAN_SPEC_MARKER}' + '{_PLAN_SOUNDNESS_MARKER}')"
                     " was found on the tracker."
                 )
+                remediation_clause = (
+                    " Let Stage 1 (plan) run and post its approved plan"
+                    " first, or requeue at --stage plan instead."
+                )
             else:
                 # #1906: fetch_approved_plan_comment is GitHub-only -- a
                 # known non-GitHub tracker (e.g. linear) was never actually
-                # queried, so the message must not claim it was checked.
+                # queried, so the message must not claim it was checked, and
+                # must not tell the operator to regenerate a plan that may
+                # already be posted and approved on that tracker.
                 availability_clause = (
                     " is missing or stale, and the configured tracker"
                     f" ({plan_check.tracker!r}) was not checked for a"
                     " reviewed plan comment -- tracker-side plan recovery"
                     " for this tracker is not implemented by this guard."
                 )
+                remediation_clause = (
+                    " Verify whether an approved plan is already posted on"
+                    f" the {plan_check.tracker!r} tracker before requeuing;"
+                    " if so, Stage 2's tracker-aware plan recovery can pick"
+                    " it up directly instead of re-running Stage 1 (plan)."
+                )
             msg = (
                 f"Cannot requeue ticket '{task.ticket_id}' to stage 'impl':"
                 f" no approved plan is available. '{wt_path / '.cw' / 'plan.md'}'"
-                f"{availability_clause} Let Stage 1 (plan) run and post its"
-                " approved plan first, or requeue at --stage plan instead."
+                f"{availability_clause}{remediation_clause}"
             )
             raise RequeueStageError(msg)
 

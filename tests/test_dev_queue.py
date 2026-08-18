@@ -6717,7 +6717,16 @@ class TestRequeueTicket:
     # (and the misleading "was found on the tracker" claim) when the
     # resolved tracker is positively known to be non-GitHub. -------------
 
-    def test_requeue_stage_impl_bypass_skips_tracker_call_for_non_github_tracker(
+    def _assert_fetch_approved_plan_comment_not_called(
+        self, _ticket_id: str, **_kwargs: object
+    ) -> str | None:
+        msg = (
+            "fetch_approved_plan_comment must not be called for a"
+            " known non-GitHub tracker"
+        )
+        raise AssertionError(msg)
+
+    def test_requeue_stage_impl_bypass_honest_for_non_github_tracker(
         self,
         tmp_config_dir: Path,
         tmp_path: Path,
@@ -6725,7 +6734,9 @@ class TestRequeueTicket:
     ) -> None:
         """A Linear-tracked client's impl-bypass guard never calls the
         GitHub-only fetch_approved_plan_comment -- it isn't the right
-        tracker to ask."""
+        tracker to ask -- and the resulting refusal message must not claim
+        the tracker was checked for a reviewed plan comment, since it
+        wasn't."""
         from cw.dev_queue import requeue_ticket
         from cw.exceptions import RequeueStageError
 
@@ -6738,55 +6749,11 @@ class TestRequeueTicket:
             "cw.dev_queue.requeue.worktree_path_for",
             lambda _client, _branch: missing_wt,
         )
-
-        def _fail_if_called(_ticket_id: str, **_kwargs: object) -> str | None:
-            msg = (
-                "fetch_approved_plan_comment must not be called for a"
-                " known non-GitHub tracker"
-            )
-            raise AssertionError(msg)
-
         monkeypatch.setattr(
-            "cw.dev_queue.requeue.fetch_approved_plan_comment", _fail_if_called
+            "cw.dev_queue.requeue.fetch_approved_plan_comment",
+            self._assert_fetch_approved_plan_comment_not_called,
         )
         task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-bypass-7a")
-        save_dev_queue(DevQueueStore(tasks=[task]))
-
-        with pytest.raises(RequeueStageError):
-            requeue_ticket("GEN-500", "genhealth", stage_override="impl")
-
-    def test_requeue_stage_impl_bypass_error_message_is_honest_for_non_github_tracker(
-        self,
-        tmp_config_dir: Path,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The refusal message for a non-GitHub tracker must not claim the
-        tracker was checked for a reviewed plan comment -- it wasn't."""
-        from cw.dev_queue import requeue_ticket
-        from cw.exceptions import RequeueStageError
-
-        _write_client_yaml(tmp_config_dir, tmp_path)
-        _write_project_config_yaml(
-            tmp_path / "ws", "tracking:\n  primary:\n    system: linear\n"
-        )
-        missing_wt = tmp_path / "no-such-worktree"
-        monkeypatch.setattr(
-            "cw.dev_queue.requeue.worktree_path_for",
-            lambda _client, _branch: missing_wt,
-        )
-
-        def _fail_if_called(_ticket_id: str, **_kwargs: object) -> str | None:
-            msg = (
-                "fetch_approved_plan_comment must not be called for a"
-                " known non-GitHub tracker"
-            )
-            raise AssertionError(msg)
-
-        monkeypatch.setattr(
-            "cw.dev_queue.requeue.fetch_approved_plan_comment", _fail_if_called
-        )
-        task = _make_blocked_task(stage=Stage.PLAN, session_id="sess-bypass-7b")
         save_dev_queue(DevQueueStore(tasks=[task]))
 
         with pytest.raises(RequeueStageError) as exc_info:
