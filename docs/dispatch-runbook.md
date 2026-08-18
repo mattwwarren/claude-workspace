@@ -702,6 +702,17 @@ concierge is off, or when the row is refused at the attempt ceiling.
 
 A quota window or hang loop (#979) grinds a ticket to
 `attempt_cap_blocked` (`attempts` bumps on every claim AND stage transition).
+
+The number the park fired against is the *resolved* attempt ceiling — the
+row's lane `attempt_ceiling`, or `global_attempt_ceiling` when the lane sets
+none (#1751). Do not read `global_attempt_ceiling` and assume it is what
+parked the row: both park events (`dispatch.tick` with
+`skip_reason=attempt_cap_blocked`, and the matching
+`session.needs_attention`) carry the resolved number on an `attempt_ceiling`
+payload field. A lane whose operator answers every park can set
+`attempt_ceiling: false` to opt out of the cap entirely — see
+`config/CONFIG_REFERENCE.md`.
+
 Reset recipe — the file-edit steps are only safe with ZERO loops alive:
 
 ```bash
@@ -1197,8 +1208,11 @@ Three recipes, each individually toggleable via `concierge_recoveries`:
    committed work ahead of its base branch is restored to PENDING, so work
    is never silently lost to a stray cancel.
 
-Both recipe 1 and recipe 2 gate on `attempts < global_attempt_ceiling`; at
-the ceiling, the row is refused and left parked rather than requeued — that
+Both recipe 1 and recipe 2 gate on `unproductive_attempts` being below the
+resolved attempt ceiling (the row's lane `attempt_ceiling`, or
+`global_attempt_ceiling` when the lane sets none — #1751; a lane with
+`attempt_ceiling: false` has no ceiling and is never refused here). At the
+ceiling, the row is refused and left parked rather than requeued — that
 refusal is itself an escalation-eligible state (see 11.2) for
 `stalled_retry_cap_parked` rows, so an operator still gets paged rather than
 the ticket silently spinning forever. Every recovery emits a

@@ -2020,7 +2020,9 @@ def test_release_stale_gated_tasks_lane_reap_policy_override(
     )
     save_dev_queue(DevQueueStore(tasks=[task]))
     save_state(CwState(sessions=[]))
-    auto_lane_client = _client_with_lane("client-a", "special", ReapPolicy.AUTO)
+    auto_lane_client = _client_with_lane(
+        "client-a", "special", reap_policy=ReapPolicy.AUTO
+    )
     monkeypatch.setattr(
         "cw.reconcile.tasks.load_clients", lambda: {"client-a": auto_lane_client}
     )

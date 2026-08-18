@@ -57,7 +57,7 @@ State is stored at `~/.local/share/cw/` (or `$XDG_DATA_HOME/cw/`).
 | `operator_github_login` | string \| null | `null` | Override the runtime-resolved GitHub login used for counterparty/self-identity resolution (RFC 0011 S1). Rare multi-account case; the runtime `gh api user` login is authoritative when unset. |
 | `repo_path` | path | *none** | Shared repo path (worktree mode) |
 | `branch` | string | *none** | Branch name (worktree mode) |
-| `lanes` | list[LaneConfig] | `[]` | Named dispatch lanes (a scheduling boundary for dev-queue tickets; manage with `cw lane add/ls/pause/resume/rm`, target with `cw dev-queue add --lane` / `cw dev-queue move`). Each lane has `name` (required), `max_parallel: int = 1`, `priority: int = 0`, `paused: bool = false`, `description: str = ""`, `reap_policy: "signal_only" | "auto" | null = null` (null inherits the global `reap_policy` from `orchestrator.yaml`), `pipeline: PipelineConfig | null = null` (per-lane per-stage executor override — see [Pipeline Configuration](#pipeline-configuration--per-stage-model-pinning) below), `signoff: "operator" | null = null` (RFC 0007 Phase 3 — see [Operator Signoff Gates](#operator-signoff-gates-rfc-0007-phase-3) below), `gate_recipes: dict[str,bool] | null = null` (RFC 0009 Phase 4 — per-lane gate-recipe enablement; see [Gate Recipe Enablement](#gate-recipe-enablement-rfc-0009-phase-4) below), `review_recipes: dict[str,bool] | null = null` (RFC 0010 Phase 3 — per-lane review-recipe enablement; see [Review Recipe Enablement](#review-recipe-enablement-rfc-0010-phase-3) below), `codex_fix_loop_enabled: true | null = null` (#1553 — lane override for the codex backend's autonomous MUST_FIX fix loop; `null` defers to the global `default_codex_fix_loop_enabled` in `orchestrator.yaml`; see [Codex Fix-Loop Gate](#codex-fix-loop-gate-1465) below). When no lanes are declared, a single implicit `default` lane is synthesized. |
+| `lanes` | list[LaneConfig] | `[]` | Named dispatch lanes (a scheduling boundary for dev-queue tickets; manage with `cw lane add/ls/pause/resume/rm`, target with `cw dev-queue add --lane` / `cw dev-queue move`). Each lane has `name` (required), `max_parallel: int = 1`, `priority: int = 0`, `paused: bool = false`, `description: str = ""`, `reap_policy: "signal_only" | "auto" | null = null` (null inherits the global `reap_policy` from `orchestrator.yaml`), `pipeline: PipelineConfig | null = null` (per-lane per-stage executor override — see [Pipeline Configuration](#pipeline-configuration--per-stage-model-pinning) below), `signoff: "operator" | null = null` (RFC 0007 Phase 3 — see [Operator Signoff Gates](#operator-signoff-gates-rfc-0007-phase-3) below), `gate_recipes: dict[str,bool] | null = null` (RFC 0009 Phase 4 — per-lane gate-recipe enablement; see [Gate Recipe Enablement](#gate-recipe-enablement-rfc-0009-phase-4) below), `review_recipes: dict[str,bool] | null = null` (RFC 0010 Phase 3 — per-lane review-recipe enablement; see [Review Recipe Enablement](#review-recipe-enablement-rfc-0010-phase-3) below), `codex_fix_loop_enabled: true | null = null` (#1553 — lane override for the codex backend's autonomous MUST_FIX fix loop; `null` defers to the global `default_codex_fix_loop_enabled` in `orchestrator.yaml`; see [Codex Fix-Loop Gate](#codex-fix-loop-gate-1465) below), `attempt_ceiling: int | false | null = null` (#1751 — lane override for the global attempt ceiling; `null` defers to `global_attempt_ceiling` in `orchestrator.yaml`, `false` disables the ceiling for this lane; see [Per-Lane Attempt Ceiling](#per-lane-attempt-ceiling-1751) below). When no lanes are declared, a single implicit `default` lane is synthesized. |
 | `pipeline` | PipelineConfig | standard 4-stage pipeline, no per-stage models | Per-stage executor configuration (RFC 0005): `stages` (default `[plan, impl, review, finalize]`) and `executors` (default `{}`). See [Pipeline Configuration](#pipeline-configuration--per-stage-model-pinning) below. |
 
 \* Either `workspace_path` OR both `repo_path` + `branch` must be set.
@@ -360,6 +360,65 @@ ticket (e.g. a hypothetical `codex_invocation_ceiling` on the lane config)
 could hard-stop the fix loop before it reaches the worst case above,
 independent of `_MAX_FIX_CYCLES`. No such field exists today — this is
 flagged as a possible follow-up, not a commitment.
+
+### Per-Lane Attempt Ceiling (#1751)
+
+The attempt ceiling parks a dev-queue row `BLOCKED_ON_USER` once its
+`unproductive_attempts` counter reaches the cap, so a task that keeps dying
+without producing work cannot be re-dispatched forever (#786, re-pointed at
+`unproductive_attempts` by #1750). `attempt_ceiling` on a lane overrides that
+cap for rows in that lane; a lane that sets no value falls through to
+`global_attempt_ceiling` in `orchestrator.yaml`.
+
+Precedence, highest to lowest:
+
+1. `LaneConfig.attempt_ceiling` for the row's lane.
+2. `OrchestratorConfig.global_attempt_ceiling` (default `10`).
+
+Both the dispatch admission gate and the concierge's recovery recipes resolve
+the ceiling through the same code path, so the concierge can never refuse to
+requeue a row that dispatch would have happily claimed.
+
+```yaml
+clients:
+  my-project:
+    workspace_path: /home/user/projects/my-project
+    lanes:
+      # A supervised lane: the operator answers every park, so the operator IS
+      # the rate limiter an automated ceiling exists to be. Disable the cap.
+      - name: codex-trial
+        signoff: operator
+        attempt_ceiling: false
+      # An unattended lane that just needs more headroom than the global 10.
+      - name: long-haul
+        attempt_ceiling: 25
+```
+
+**`false` disables the ceiling — not `null`.** This is the one place the
+lane-override fields do not all read the same way, and the distinction is
+load-bearing:
+
+- `attempt_ceiling: false` — this lane has no ceiling. Rows in it are never
+  parked with `disposition: attempt_cap_blocked`, however high
+  `unproductive_attempts` climbs.
+- `attempt_ceiling: null` (or the key omitted) — this lane sets *no override*.
+  It inherits `global_attempt_ceiling`, including any future change to that
+  value. This is the same meaning `null` carries for `reap_policy`, `signoff`,
+  `finalize_gate`, and `codex_fix_loop_enabled`.
+
+"Inherit whatever the global becomes" and "never park on the ceiling" are
+different intents, and YAML `null` cannot express both — a key that is absent
+and a key explicitly set to `null` are indistinguishable once parsed.
+
+Two values are rejected outright rather than reinterpreted, because `bool` is
+an `int` subclass and each would otherwise be silently coerced into the
+opposite of what an operator writing it means:
+
+- `attempt_ceiling: 0` — reads as `false` (disabled), not "cap at zero".
+- `attempt_ceiling: true` — reads as `1` (park after a single unproductive
+  attempt), not "enabled".
+
+Use a positive integer, `false`, or omit the key.
 
 ## Orchestrator Configuration (`~/.claude-workspace/orchestrator.yaml`)
 
