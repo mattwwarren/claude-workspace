@@ -12735,6 +12735,36 @@ class TestSpawnErrorBackoff:
         assert claimed.spawn_error_count == 0
         assert claimed.next_eligible_at is None
 
+    def test_ever_spawned_stamped_true_after_successful_spawn(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+        simple_config: OrchestratorConfig,
+    ) -> None:
+        """#1631: a genuine spawn flips ever_spawned False -> True.
+
+        This is the single write site for the field, and the only test that
+        exercises it through a real dispatch_tick -- the reconcile-level
+        predicate tests construct their TicketTask literals by hand and never
+        reach claim.py, so this is what a mutation of the stamp line falsifies.
+        """
+        _make_clients_yaml(tmp_dispatch_dirs, sample_client_config)
+        task = TicketTask(
+            ticket_id="GEN-1631",
+            client="test-client",
+            ever_spawned=False,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+
+        daemon = FakeNativeDaemonClient()
+        result = dispatch_tick(simple_config, native_daemon=daemon)
+
+        assert result.spawned == 1
+        queue = load_dev_queue()
+        claimed = queue.tasks[0]
+        assert claimed.status == QueueItemStatus.RUNNING
+        assert claimed.ever_spawned is True
+
     def test_expired_backoff_allows_reclaim(
         self,
         tmp_dispatch_dirs: Path,

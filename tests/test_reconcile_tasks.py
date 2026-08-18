@@ -577,6 +577,53 @@ class TestCompleteTimedOutMergedTasks:
             lane=lane,
         )
 
+    def _usage_limit_only_task(
+        self, ticket_id: str, *, lane: str = "batch-2"
+    ) -> TicketTask:
+        """#1631's exact shape: every attempt died via UsageLimitError.
+
+        That revert path calls _revert_claimed_task_to_pending with
+        stamp_backoff=False (dispatch/claim.py), so the counters move
+        asymmetrically -- `attempts` increments at claim time but
+        `spawn_error_count` never does. The row is therefore
+        attempts=3, spawn_error_count=0, session_id=None,
+        stage_high_water=None: indistinguishable from a legitimate
+        first-stage ship on the pre-#1631 predicate, and only
+        ever_spawned=False separates the two.
+        """
+        return _make_ticket_task(
+            ticket_id=ticket_id,
+            client="client-a",
+            stage=Stage.PLAN,
+            stage_high_water=None,
+            attempts=3,
+            spawn_error_count=0,
+            session_id=None,
+            ever_spawned=False,
+            lane=lane,
+        )
+
+    def _legitimate_first_stage_task(self, ticket_id: str) -> TicketTask:
+        """A task that genuinely spawned, ran and shipped inside its FIRST
+        pipeline stage, then timed out before the row advanced.
+
+        stage_high_water is None and spawn_error_count is 0, so on the task
+        record this is byte-identical to _usage_limit_only_task above apart
+        from ever_spawned=True. This is the shape #1623's reverted
+        stage_high_water disjunct wrongly refused; the test using it exists
+        to prove #1631's new predicate does NOT reintroduce that regression.
+        """
+        return _make_ticket_task(
+            ticket_id=ticket_id,
+            client="client-a",
+            stage=Stage.IMPL,
+            stage_high_water=None,
+            attempts=1,
+            spawn_error_count=0,
+            session_id=None,
+            ever_spawned=True,
+        )
+
     def _legitimately_progressed_reverted_task(self, ticket_id: str) -> TicketTask:
         """A task that genuinely ran, completed at least one stage, then was
         reverted to PENDING (session_id cleared) for retry -- attempts >
@@ -695,6 +742,104 @@ class TestCompleteTimedOutMergedTasks:
         assert p["lane"] == "batch-2"
         assert p["paused_status"] == _NEVER_CLAIMED_COMPLETION_REASON
         assert attention_events[0].correlation_id == ticket_id
+
+    def test_usage_limit_only_history_refused_stays_pending_and_emits_needs_attention(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#1631's exact shape: attempts=3, spawn_error_count=0,
+        session_id=None, stage_high_water=None, ever_spawned=False -- every
+        attempt died via UsageLimitError, whose revert deliberately does NOT
+        stamp spawn_error_count. Refused: stays PENDING, NOT in the return
+        value, no SESSION_COMPLETED fires, exactly one SESSION_NEEDS_ATTENTION
+        fires whose breadcrumb names the never-spawned cause rather than the
+        (wrong, for this shape) spawn-error-path cause."""
+        now = datetime.now(UTC)
+        ticket_id = "TKT-USAGE-LIMIT"
+        session = _mk_timed_out_daemon_session(
+            "sess-usage-limit", ticket_id, completed_at=now - timedelta(days=1)
+        )
+        save_state(CwState(sessions=[session]))
+        save_dev_queue(
+            DevQueueStore(tasks=[self._usage_limit_only_task(ticket_id, lane="batch-2")])
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.pr_is_merged_for_ticket",
+            lambda _tid, **_kw: (True, True),
+        )
+
+        completed = complete_timed_out_merged_tasks()
+
+        assert completed == []
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.PENDING
+        assert task.attempts == 3
+        assert task.spawn_error_count == 0
+        assert task.session_id is None
+
+        completed_events = read_events(
+            consumer="test-usage-limit-completed",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert len(completed_events) == 0
+
+        attention_events = read_events(
+            consumer="test-usage-limit-attention",
+            event_types=[OrchestratorEventType.SESSION_NEEDS_ATTENTION],
+        )
+        assert len(attention_events) == 1
+        p = attention_events[0].payload
+        assert p["client"] == "client-a"
+        assert p["ticket_id"] == ticket_id
+        assert p["lane"] == "batch-2"
+        assert p["paused_status"] == _NEVER_CLAIMED_COMPLETION_REASON
+        assert attention_events[0].correlation_id == ticket_id
+        breadcrumbs = p["breadcrumbs"]
+        assert "never successfully spawned" in breadcrumbs
+        assert "ever_spawned=False" in breadcrumbs
+        assert "died on the spawn-error path" not in breadcrumbs
+
+    def test_legitimate_first_stage_ship_still_completes(
+        self,
+        tmp_config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Criterion preservation (#1623 R4, #1631): a task that genuinely
+        spawned and shipped inside its first pipeline stage -- attempts=1,
+        spawn_error_count=0, stage_high_water=None, ever_spawned=True -- is
+        still completed. The only thing separating it from the usage-limit
+        shape above is ever_spawned, so a predicate that refused this one
+        would be worse than the bug it closes."""
+        now = datetime.now(UTC)
+        ticket_id = "TKT-FIRST-STAGE"
+        session = _mk_timed_out_daemon_session(
+            "sess-first-stage", ticket_id, completed_at=now - timedelta(days=1)
+        )
+        save_state(CwState(sessions=[session]))
+        save_dev_queue(
+            DevQueueStore(tasks=[self._legitimate_first_stage_task(ticket_id)])
+        )
+        monkeypatch.setattr(
+            "cw.reconcile._deps.pr_is_merged_for_ticket",
+            lambda _tid, **_kw: (True, True),
+        )
+
+        completed = complete_timed_out_merged_tasks()
+
+        assert completed == [ticket_id]
+        store = load_dev_queue()
+        task = next(t for t in store.tasks if t.ticket_id == ticket_id)
+        assert task.status == QueueItemStatus.COMPLETED
+        assert task.disposition == "shipped"
+
+        events = read_events(
+            consumer="test-first-stage-completed",
+            event_types=[OrchestratorEventType.SESSION_COMPLETED],
+        )
+        assert len(events) == 1
+        assert events[0].payload["reason"] == "timed_out_merged"
 
     def test_legitimately_progressed_reverted_task_still_completes(
         self,
