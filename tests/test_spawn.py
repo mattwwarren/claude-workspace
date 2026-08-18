@@ -2120,6 +2120,55 @@ class TestSpawnCloseRequeue:
         assert "--requeue" in result.output
         assert "cancelled_row_restore" in result.output
 
+    def test_requeue_flag_genuine_state_error_propagates(
+        self, tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(g) the row lands on a genuinely non-approvable status (FAILED, not
+        PENDING/RUNNING) in the window between _spawn_close_impl's cancel and
+        the --requeue call: this is NOT the concierge race (scenario d) --
+        the except RequeueStateError handler's fresh read finds a real state
+        problem, so the bare `raise` fires and the CLI exits non-zero instead
+        of silently no-op'ing.
+
+        Mirrors scenario (d)'s realism: the wrapper injects the race then
+        delegates to the real requeue_ticket, so the RequeueStateError it
+        raises is genuine, not fabricated.
+        """
+        from cw.dev_queue import load_dev_queue, save_dev_queue, transition_task_status
+        from cw.dev_queue.requeue import requeue_ticket as real_requeue_ticket
+        from cw.events import read_events
+        from cw.models import OrchestratorEventType, QueueItemStatus
+
+        _write_test_client_yaml(tmp_config_dir, tmp_path)
+        sess = _seed_daemon_session(tmp_path, tmp_config_dir, surface_ref=None)
+        _seed_running_task(ticket_id="GEN-42", client="test-client", session_id=sess.id)
+
+        def _requeue_with_genuine_state_error(
+            *args: object, **kwargs: object
+        ) -> dict[str, str | bool | int]:
+            store = load_dev_queue()
+            task = next(t for t in store.tasks if t.ticket_id == "GEN-42")
+            transition_task_status(task, QueueItemStatus.FAILED)
+            save_dev_queue(store)
+            return real_requeue_ticket(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(
+            "cw.cli.spawn.requeue_ticket", _requeue_with_genuine_state_error
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["spawn", "close", "--requeue", sess.id])
+
+        assert result.exit_code != 0
+        assert "GEN-42" in result.output
+        assert "no-op" not in result.output.lower()
+
+        events = read_events(
+            consumer="_test_requeue_genuine_error",
+            event_types=[OrchestratorEventType.TICKET_REQUEUED],
+        )
+        assert events == []
+
 
 # ---------------------------------------------------------------------------
 # Tests for #314 task fields in cw-context.json

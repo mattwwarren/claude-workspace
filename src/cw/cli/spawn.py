@@ -119,6 +119,69 @@ def _spawn_close_impl(
         save_state(state)
 
 
+def _spawn_close_requeue_impl(
+    *,
+    session_id: str,
+    ticket_id: str | None,
+    client: str | None,
+) -> None:
+    """Requeue a just-closed session's ticket back to PENDING (``--requeue``).
+
+    Folds ``cw dev-queue requeue ... --from-cancelled`` into ``cw spawn
+    close``. No-ops with a message if no ticket_id resolves from the session
+    name. Handles the cancelled_row_restore concierge race (#1889): a
+    concierge tick may have already landed the row on PENDING/RUNNING in the
+    window between :func:`_spawn_close_impl`'s cancel and the
+    :func:`requeue_ticket` call below — one fresh read tells us whether
+    that's what happened, or whether this is a genuine state problem that
+    should propagate. Separated from the Click command so tests can call it
+    directly.
+    """
+    if ticket_id is None or client is None:
+        click.echo(
+            f"--requeue: no ticket_id resolved from session '{session_id}';"
+            " --requeue is a no-op."
+        )
+        return
+
+    try:
+        result = requeue_ticket(
+            ticket_id, client, allow_regress=False, from_cancelled=True
+        )
+    except RequeueStateError:
+        store = load_dev_queue()
+        task = _find_ticket(store, ticket_id, client)
+        if task.status in (QueueItemStatus.PENDING, QueueItemStatus.RUNNING):
+            logger.info(
+                "spawn_close_requeue_race_resolved: ticket_id=%s client=%s status=%s",
+                ticket_id,
+                client,
+                task.status.value,
+            )
+            click.echo(
+                f"Ticket '{ticket_id}' already {task.status.value};"
+                " --requeue is a no-op."
+            )
+            return
+        raise
+    else:
+        record_event(
+            OrchestratorEventType.TICKET_REQUEUED,
+            {
+                "ticket_id": ticket_id,
+                "client": client,
+                "from_stage": result["from_stage"],
+                "to_stage": result["to_stage"],
+                "reason": "spawn_close_requeue",
+                "regressed": result["regressed"],
+            },
+        )
+        click.echo(
+            f"Requeued {ticket_id} ({client}):"
+            f" {result['from_stage']} -> {result['to_stage']} (PENDING)"
+        )
+
+
 @main.group(invoke_without_command=True)
 @click.option("--client", "-c", default=None, help="Client name.")
 @click.option("--worktree", "-w", default=None, help="Worktree path.")
@@ -249,55 +312,9 @@ def spawn_close(session_id: str, confirmed_dead: bool, requeue: bool) -> None:
     _spawn_close_impl(session_id=session_id)
     click.echo(f"Closed session: {session_id}")
 
-    if not requeue:
-        return
-    if ticket_id is None or client is None:
-        click.echo(
-            f"--requeue: no ticket_id resolved from session '{session_id}';"
-            " --requeue is a no-op."
-        )
-        return
-
-    try:
-        result = requeue_ticket(
-            ticket_id, client, allow_regress=False, from_cancelled=True
-        )
-    except RequeueStateError:
-        # cancelled_row_restore concierge race (#1889): a concierge tick may
-        # have already landed this row on PENDING/RUNNING in the window
-        # between _spawn_close_impl's cancel and this call. One fresh read
-        # tells us whether that's what happened, or whether this is a
-        # genuine state problem that should propagate.
-        store = load_dev_queue()
-        task = _find_ticket(store, ticket_id, client)
-        if task.status in (QueueItemStatus.PENDING, QueueItemStatus.RUNNING):
-            logger.info(
-                "spawn_close_requeue_race_resolved: ticket_id=%s client=%s status=%s",
-                ticket_id,
-                client,
-                task.status.value,
-            )
-            click.echo(
-                f"Ticket '{ticket_id}' already {task.status.value};"
-                " --requeue is a no-op."
-            )
-            return
-        raise
-    else:
-        record_event(
-            OrchestratorEventType.TICKET_REQUEUED,
-            {
-                "ticket_id": ticket_id,
-                "client": client,
-                "from_stage": result["from_stage"],
-                "to_stage": result["to_stage"],
-                "reason": "spawn_close_requeue",
-                "regressed": result["regressed"],
-            },
-        )
-        click.echo(
-            f"Requeued {ticket_id} ({client}):"
-            f" {result['from_stage']} -> {result['to_stage']} (PENDING)"
+    if requeue:
+        _spawn_close_requeue_impl(
+            session_id=session_id, ticket_id=ticket_id, client=client
         )
 
 
