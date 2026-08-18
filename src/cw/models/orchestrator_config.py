@@ -201,6 +201,31 @@ class LaneConfig(BaseModel):
     # global-True default back OUT -- the same asymmetry finalize_gate/signoff
     # already encode for their own gates.
     codex_fix_loop_enabled: Literal[True] | None = None
+    # Lane-level override for the global attempt ceiling (#1751, scoping the
+    # flat #786 bound that #1750 re-pointed at unproductive_attempts).
+    # Precedence: lane > OrchestratorConfig.global_attempt_ceiling. Resolved by
+    # cw.reconcile._shared.resolve_attempt_ceiling, which BOTH the dispatch
+    # claim path and the concierge recovery recipes call -- they must agree on
+    # the number or the concierge would refuse a requeue the claim path would
+    # have allowed (the drift #1750's own comments warn against).
+    #
+    # Tri-state, and NOT the Literal[True] | None shape its three sibling
+    # lane-override fields use: this one genuinely needs a "disable" state that
+    # none of them do. `None` = the lane sets no override (defer to global) --
+    # the meaning every sibling already assigns to None, which is exactly why
+    # `False`, not `None`, is the disable token here: a lane that wants to
+    # inherit whatever the global ceiling later becomes and a lane that wants
+    # no ceiling ever are different intents that must stay distinguishable, and
+    # Pydantic collapses "key absent" and "key present: null" to the same None.
+    # `False` = the lane explicitly disables the ceiling (a supervised lane
+    # whose operator answers every park IS the rate limiter, so an automated
+    # bound buys nothing). A positive int = the lane's own ceiling.
+    #
+    # `False` is free to reuse for this meaning precisely because
+    # codex_fix_loop_enabled above reserves it as "cannot be used" -- the
+    # opt-in-only asymmetry that makes Literal[True] valid there is what
+    # leaves False unclaimed here.
+    attempt_ceiling: Literal[False] | int | None = None
     # Lane-level gate-recipe enablement map (RFC 0009 P4, #1067). Middle tier in
     # resolve_gate_recipe_enabled's 3-tier precedence: consulted when the ticket
     # carries no override for the recipe, and itself overridden by
@@ -223,6 +248,38 @@ class LaneConfig(BaseModel):
             msg = "lane name must be non-empty"
             raise ValueError(msg)
         return v
+
+    @field_validator("attempt_ceiling", mode="before")
+    @classmethod
+    def _check_attempt_ceiling(cls, value: object) -> object:
+        """Reject the two raw values Pydantic's smart union silently reinterprets.
+
+        ``bool`` is an ``int`` subclass, so ``Literal[False] | int`` resolves
+        ``0`` to ``False`` (i.e. "disabled" -- the *opposite* of what an
+        operator writing "cap at 0" means) and ``True`` to ``1`` (a ceiling of
+        one unproductive attempt, not "enabled"). Both are plausible typos in
+        hand-edited YAML, so they fail loudly here rather than being quietly
+        reinterpreted. Runs ``mode="before"`` because by the time the union has
+        run, the evidence of which literal was written is already gone.
+        """
+        if isinstance(value, bool):
+            if value is True:
+                msg = (
+                    "lane attempt_ceiling does not accept true; use a positive"
+                    " integer to set a lane ceiling, false to disable the"
+                    " ceiling, or omit the key to defer to"
+                    " global_attempt_ceiling"
+                )
+                raise ValueError(msg)
+            return value
+        if isinstance(value, int) and value <= 0:
+            msg = (
+                f"lane attempt_ceiling must be a positive integer (got {value});"
+                " use false to disable the ceiling, or omit the key to defer to"
+                " global_attempt_ceiling"
+            )
+            raise ValueError(msg)
+        return value
 
     @field_validator("gate_recipes")
     @classmethod

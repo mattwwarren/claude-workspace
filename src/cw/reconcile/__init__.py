@@ -111,6 +111,7 @@ from cw.reconcile._shared import (
     _worktree_dirty_by_path,
     compute_drift,
     feature_branch_key,
+    resolve_attempt_ceiling,
     resolve_reap_policy,
     ticket_id_for_session,
 )
@@ -246,6 +247,7 @@ __all__ = [
     "reconcile",
     "record_session_liveness_changes",
     "release_stale_gated_tasks",
+    "resolve_attempt_ceiling",
     "resolve_concierge_recipe_enabled",
     "resolve_reap_policy",
     "revert_completed_silent_tasks",
