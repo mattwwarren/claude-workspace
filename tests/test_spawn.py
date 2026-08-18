@@ -2170,6 +2170,121 @@ class TestSpawnCloseRequeue:
         assert events == []
 
 
+class TestSpawnCloseRequeueImplDirect:
+    """Direct-call unit tests for _spawn_close_requeue_impl (#1889).
+
+    Companions to TestSpawnCloseRequeue's 7 CliRunner-based scenarios, which
+    cover the `--requeue` flag's CLI wiring. These call the function
+    directly -- the purpose stated in its docstring ("Separated from the
+    Click command so tests can call it directly") -- mirroring the
+    direct-call pattern used for its siblings in TestSpawnClose /
+    TestSpawnComplete.
+    """
+
+    def test_noop_when_ticket_id_or_client_none(
+        self, tmp_config_dir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Guard clause: ticket_id=None or client=None each short-circuit to
+        a no-op message without calling requeue_ticket."""
+        from cw.cli import _spawn_close_requeue_impl
+
+        _spawn_close_requeue_impl(
+            session_id="dead1234", ticket_id=None, client="test-client"
+        )
+        out = capsys.readouterr().out
+        assert "no-op" in out.lower()
+
+        _spawn_close_requeue_impl(
+            session_id="dead1234", ticket_id="GEN-42", client=None
+        )
+        out = capsys.readouterr().out
+        assert "no-op" in out.lower()
+
+    def test_race_resolved_noop_when_fresh_read_finds_pending_or_running(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """RequeueStateError whose fresh read finds PENDING/RUNNING is the
+        concierge race (#1889): swallowed as a no-op, not raised.
+
+        Mirrors TestSpawnCloseRequeue's scenario (d): the wrapper injects
+        the race then delegates to the real requeue_ticket, so the
+        RequeueStateError raised is genuine, not fabricated.
+        """
+        from cw.dev_queue import load_dev_queue, save_dev_queue, transition_task_status
+        from cw.dev_queue.requeue import requeue_ticket as real_requeue_ticket
+        from cw.events import read_events
+        from cw.models import OrchestratorEventType, QueueItemStatus
+
+        _write_test_client_yaml(tmp_config_dir, tmp_path)
+        _seed_running_task(ticket_id="GEN-42", client="test-client")
+
+        def _requeue_with_race(
+            *args: object, **kwargs: object
+        ) -> dict[str, str | bool | int]:
+            store = load_dev_queue()
+            task = next(t for t in store.tasks if t.ticket_id == "GEN-42")
+            transition_task_status(task, QueueItemStatus.PENDING)
+            save_dev_queue(store)
+            return real_requeue_ticket(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr("cw.cli.spawn.requeue_ticket", _requeue_with_race)
+
+        from cw.cli import _spawn_close_requeue_impl
+
+        _spawn_close_requeue_impl(
+            session_id="dead1234", ticket_id="GEN-42", client="test-client"
+        )
+
+        events = read_events(
+            consumer="_test_requeue_impl_direct_race",
+            event_types=[OrchestratorEventType.TICKET_REQUEUED],
+        )
+        assert events == []
+
+    def test_genuine_state_error_propagates(
+        self,
+        tmp_config_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """RequeueStateError whose fresh read finds neither PENDING nor
+        RUNNING (e.g. FAILED) is a genuine state problem: the bare `raise`
+        fires and propagates out of the function.
+
+        Mirrors TestSpawnCloseRequeue's scenario (g).
+        """
+        from cw.dev_queue import load_dev_queue, save_dev_queue, transition_task_status
+        from cw.dev_queue.requeue import requeue_ticket as real_requeue_ticket
+        from cw.exceptions import RequeueStateError
+        from cw.models import QueueItemStatus
+
+        _write_test_client_yaml(tmp_config_dir, tmp_path)
+        _seed_running_task(ticket_id="GEN-42", client="test-client")
+
+        def _requeue_with_genuine_state_error(
+            *args: object, **kwargs: object
+        ) -> dict[str, str | bool | int]:
+            store = load_dev_queue()
+            task = next(t for t in store.tasks if t.ticket_id == "GEN-42")
+            transition_task_status(task, QueueItemStatus.FAILED)
+            save_dev_queue(store)
+            return real_requeue_ticket(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(
+            "cw.cli.spawn.requeue_ticket", _requeue_with_genuine_state_error
+        )
+
+        from cw.cli import _spawn_close_requeue_impl
+
+        with pytest.raises(RequeueStateError):
+            _spawn_close_requeue_impl(
+                session_id="dead1234", ticket_id="GEN-42", client="test-client"
+            )
+
+
 # ---------------------------------------------------------------------------
 # Tests for #314 task fields in cw-context.json
 # ---------------------------------------------------------------------------

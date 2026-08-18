@@ -56,6 +56,7 @@ from cw.cli.session_inspect import session_group
 from cw.cli.sessions import _display_sessions, _display_status
 from cw.cli.spawn import (
     _spawn_close_impl,
+    _spawn_close_requeue_impl,
     _spawn_complete_impl,
     _spawn_create_impl,
 )
@@ -88,6 +89,7 @@ __all__ = [
     "_relative_time",
     "_sentinel_present_in_transcript",
     "_spawn_close_impl",
+    "_spawn_close_requeue_impl",
     "_spawn_complete_impl",
     "_spawn_create_impl",
     "_transcript_age_seconds",
