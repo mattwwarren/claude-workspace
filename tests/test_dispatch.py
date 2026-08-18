@@ -3459,7 +3459,9 @@ class TestPerLaneAttemptCeiling:
             update={
                 "lanes": [
                     LaneConfig(name=DEFAULT_LANE, max_parallel=1),
-                    LaneConfig(name="supervised", max_parallel=1, attempt_ceiling=False),
+                    LaneConfig(
+                        name="supervised", max_parallel=1, attempt_ceiling=False
+                    ),
                 ]
             }
         )
