@@ -585,8 +585,18 @@ row to `CANCELLED` — not `BLOCKED_ON_USER`. `cw dev-queue requeue` normally
 rejects anything but `BLOCKED_ON_USER`/`AWAITING_OPERATOR_SIGNOFF`, so a
 CANCELLED row is otherwise a requeue dead-end (#1018).
 
-Fix: requeue it explicitly with the escape hatch, which moves it back to
-PENDING at its current stage and clears `session_id`/`stage_base_ref`:
+**One-command path (#1889):** `cw spawn close --confirmed-dead --requeue
+<sid>` folds the close and the requeue into a single invocation — it closes
+the session, then (if a `ticket_id` resolves from the session name) requeues
+the ticket to PENDING at its current stage, same as the two-step recipe
+below. This is the recommended path for the common case: a stranded RUNNING
+session whose session name still encodes a resolvable ticket. Prefer the
+manual two-step recipe only when you need to close without immediately
+requeuing (e.g. inspecting the row first).
+
+Manual two-step recipe: requeue it explicitly with the escape hatch, which
+moves it back to PENDING at its current stage and clears
+`session_id`/`stage_base_ref`:
 
 ```bash
 cw dev-queue requeue <T> -c <CLIENT> --from-cancelled
@@ -594,17 +604,22 @@ cw dev-queue requeue <T> -c <CLIENT> --from-cancelled
 
 §11.1's `cancelled_row_restore` concierge recipe already auto-handles this
 when the worktree has committed work ahead of base and `concierge_enabled:
-true`. This manual CLI flag covers the remaining cases: zero commits ahead
-of base, a missing/pruned worktree, or concierge disabled. See also:
-Attempt-cap reset (below) — a different terminal condition
-(`attempt_cap_blocked` on a parked row), not a CANCELLED row.
+true`. Both the manual `--from-cancelled` flag and `--requeue` above cover
+the remaining cases: zero commits ahead of base, a missing/pruned worktree,
+or concierge disabled. `--requeue` is safe to pass even when concierge is
+enabled and could win the race — its underlying `requeue_ticket()` call
+raising `RequeueStateError` is followed by one fresh read; if that read
+shows the row already landed on PENDING/RUNNING (the concierge recipe having
+resolved it first), `--requeue` treats that as success and no-ops rather
+than erroring. See also: Attempt-cap reset (below) — a different terminal
+condition (`attempt_cap_blocked` on a parked row), not a CANCELLED row.
 
-**Caveat:** `--from-cancelled` accepts *any* CANCELLED row, regardless of why
-it was cancelled — the row carries no record of provenance by the time it
-reaches this flag. If the ticket may have been deliberately cancelled (e.g.
-via `cw dev-queue cancel` as a duplicate or superseded ticket) rather than
-stranded by `spawn close`, check `cw dev-queue tasks -t <T> -c <CLIENT>` /
-the event history before requeuing it.
+**Caveat:** both `--from-cancelled` and `--requeue` accept *any* CANCELLED
+row, regardless of why it was cancelled — the row carries no record of
+provenance by the time it reaches either flag. If the ticket may have been
+deliberately cancelled (e.g. via `cw dev-queue cancel` as a duplicate or
+superseded ticket) rather than stranded by `spawn close`, check `cw
+dev-queue tasks -t <T> -c <CLIENT>` / the event history before requeuing it.
 
 ### FAILED row recovery (`--from-failed`)
 
