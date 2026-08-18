@@ -18,10 +18,16 @@ from cw.config import (
     save_state,
     sessions_lock,
 )
-from cw.dev_queue import cancel_task_for_session, dev_queue_lock, load_dev_queue
+from cw.dev_queue import (
+    _find_ticket,
+    cancel_task_for_session,
+    dev_queue_lock,
+    load_dev_queue,
+    requeue_ticket,
+)
 from cw.dispatch import _DISPATCH_CONSUMER, _apply_events_to_store
 from cw.events import advance_cursor, record_event
-from cw.exceptions import CwError
+from cw.exceptions import CwError, RequeueStateError
 from cw.models import (
     ClientConfig,
     CompletionReason,
@@ -195,8 +201,27 @@ def spawn(
         "cw spawn close <id> stays gated by the auto-mode classifier."
     ),
 )
+@click.option(
+    "--requeue",
+    is_flag=True,
+    default=False,
+    help=(
+        "After closing, also requeue the session's ticket back to PENDING at "
+        "its current stage (folds `cw dev-queue requeue ... --from-cancelled` "
+        "into this one command). No-ops with a message if no ticket_id "
+        "resolves from the session name. Same caveat as --from-cancelled: "
+        "accepts a CANCELLED row regardless of why it was cancelled -- check "
+        "`cw dev-queue show` / event history first if the ticket may have "
+        "been deliberately cancelled. Redundant with the cancelled_row_restore "
+        "concierge recipe when concierge_enabled: true and the worktree has "
+        "committed work ahead of base (see docs/dispatch-runbook.md §7/§11.1) "
+        "-- safe to pass either way, since a concierge tick that already "
+        "landed the row on PENDING/RUNNING first is treated as success here, "
+        "not an error."
+    ),
+)
 @handle_errors
-def spawn_close(session_id: str, confirmed_dead: bool) -> None:
+def spawn_close(session_id: str, confirmed_dead: bool, requeue: bool) -> None:
     """Close a spawned session by session ID.
 
     Stops the session via the native daemon and marks it as COMPLETED.
@@ -205,10 +230,75 @@ def spawn_close(session_id: str, confirmed_dead: bool) -> None:
     Example:
       cw spawn close abc12345
       cw spawn close --confirmed-dead abc12345  # flag first for allowlist match
+      cw spawn close --confirmed-dead --requeue abc12345  # + requeue its ticket
     """
     del confirmed_dead  # permission-prefix token only; not forwarded to impl
+
+    # Read-only per ADR-0005: resolve ticket_id/client from state *before*
+    # _spawn_close_impl runs, so the requeue orchestration below has what it
+    # needs without re-deriving it from a session that's already COMPLETED.
+    ticket_id: str | None = None
+    client: str | None = None
+    if requeue:
+        state = load_state()
+        sess = state.find_by_name_or_id(session_id)
+        if sess is not None:
+            ticket_id = ticket_id_for_session(sess.name)
+            client = sess.client
+
     _spawn_close_impl(session_id=session_id)
     click.echo(f"Closed session: {session_id}")
+
+    if not requeue:
+        return
+    if ticket_id is None or client is None:
+        click.echo(
+            f"--requeue: no ticket_id resolved from session '{session_id}';"
+            " --requeue is a no-op."
+        )
+        return
+
+    try:
+        result = requeue_ticket(
+            ticket_id, client, allow_regress=False, from_cancelled=True
+        )
+    except RequeueStateError:
+        # cancelled_row_restore concierge race (#1889): a concierge tick may
+        # have already landed this row on PENDING/RUNNING in the window
+        # between _spawn_close_impl's cancel and this call. One fresh read
+        # tells us whether that's what happened, or whether this is a
+        # genuine state problem that should propagate.
+        store = load_dev_queue()
+        task = _find_ticket(store, ticket_id, client)
+        if task.status in (QueueItemStatus.PENDING, QueueItemStatus.RUNNING):
+            logger.info(
+                "spawn_close_requeue_race_resolved: ticket_id=%s client=%s status=%s",
+                ticket_id,
+                client,
+                task.status.value,
+            )
+            click.echo(
+                f"Ticket '{ticket_id}' already {task.status.value};"
+                " --requeue is a no-op."
+            )
+            return
+        raise
+    else:
+        record_event(
+            OrchestratorEventType.TICKET_REQUEUED,
+            {
+                "ticket_id": ticket_id,
+                "client": client,
+                "from_stage": result["from_stage"],
+                "to_stage": result["to_stage"],
+                "reason": "spawn_close_requeue",
+                "regressed": result["regressed"],
+            },
+        )
+        click.echo(
+            f"Requeued {ticket_id} ({client}):"
+            f" {result['from_stage']} -> {result['to_stage']} (PENDING)"
+        )
 
 
 def _spawn_complete_impl(
