@@ -243,6 +243,24 @@ def _fill_finding_dispositions_default(task_raw: dict[str, Any]) -> None:
         task_raw["finding_dispositions"] = {}
 
 
+def _fill_ever_spawned_default(task_raw: dict[str, Any]) -> None:
+    """Fill ever_spawned introduced in dev-queue schema v33 (GitHub #1631).
+
+    Seeds True, not False, and the direction is the whole point: a legacy row
+    carries no record of whether a session was ever spawned for it, so
+    assuming the worst would let reconcile's timed-out-merged backstop
+    retroactively refuse completions that are in fact legitimate — strictly
+    worse than the false-completion #1631 closes. Fail open, and let the one
+    write site (dispatch/claim.py) and the one seed site (dev_queue_add) build
+    real knowledge going forward.
+
+    Idempotent, and additive by construction: an explicit False set by
+    dev_queue_add is never overwritten back to the default, mirroring v31's
+    forward-only finding_dispositions filler."""
+    if "ever_spawned" not in task_raw:
+        task_raw["ever_spawned"] = True
+
+
 def _fill_watched_prs_default(raw: dict[str, Any]) -> None:
     """Fill the top-level watched_prs list introduced in schema v15 (#1154).
 
@@ -290,6 +308,7 @@ def migrate_dev_queue(raw: dict[str, Any]) -> dict[str, Any]:
                 _fill_stale_gate_default(task_raw)
                 _fill_finding_dispositions_default(task_raw)
                 _fill_unproductive_attempts_default(task_raw)
+                _fill_ever_spawned_default(task_raw)
     _fill_watched_prs_default(raw)
     raw["schema_version"] = DEV_QUEUE_SCHEMA_VERSION
     return raw

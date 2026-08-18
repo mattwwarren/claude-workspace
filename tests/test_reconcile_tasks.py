@@ -762,7 +762,9 @@ class TestCompleteTimedOutMergedTasks:
         )
         save_state(CwState(sessions=[session]))
         save_dev_queue(
-            DevQueueStore(tasks=[self._usage_limit_only_task(ticket_id, lane="batch-2")])
+            DevQueueStore(
+                tasks=[self._usage_limit_only_task(ticket_id, lane="batch-2")]
+            )
         )
         monkeypatch.setattr(
             "cw.reconcile._deps.pr_is_merged_for_ticket",

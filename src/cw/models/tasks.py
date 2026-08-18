@@ -124,7 +124,22 @@ from cw.review_finding_dispositions import FindingDisposition
 #      crashloop the ceiling exists to catch (#1653) is still bounded.
 #      Incremented at exactly one seam (transition_task_status), mirroring
 #      regress_attempts's v6 single-seam precedent.
-DEV_QUEUE_SCHEMA_VERSION = 32
+# v33: added TicketTask.ever_spawned (GitHub #1631) — durable "a session was
+#      genuinely spawned for this row at least once" marker. Exists because
+#      the two attempt counters move asymmetrically on the UsageLimitError
+#      revert path (attempts increments, spawn_error_count deliberately does
+#      not — #868 fleet-wide backoff), which left a usage-limit-only history
+#      structurally identical on the task record to a task that ran, shipped
+#      and timed out inside its first stage, and therefore silently
+#      auto-completable by reconcile's timed-out-merged backstop. Stamped
+#      True at exactly one seam (dispatch/claim.py's spawn-success block),
+#      seeded False at exactly one seam (dev_queue_add, the only place with
+#      positive proof a row has never spawned), and — like v31's
+#      finding_dispositions — deliberately has NO clear site: it is a
+#      permanent historical fact, not a per-arrival marker. Model default and
+#      migration fill are both True (fail-open): state we cannot reconstruct
+#      must not retroactively refuse a legitimate completion.
+DEV_QUEUE_SCHEMA_VERSION = 33
 DEFAULT_LANE: str = "default"
 DEFAULT_STAGE: Stage = Stage.PLAN
 
@@ -231,6 +246,33 @@ class TicketTask(BaseModel):
     # Deliberately NOT read by the #756 per-stage validation_failed cap in
     # reconcile/_shared.py, which stays on raw `attempts`. See GitHub #1750.
     unproductive_attempts: int = 0
+    # Durable proof that a session was genuinely spawned for this row at least
+    # once — the state reconcile/tasks.py's _is_never_claimed needs and cannot
+    # derive from the counters above. `attempts` increments at claim time, but
+    # the UsageLimitError revert path calls _revert_claimed_task_to_pending
+    # with stamp_backoff=False, so spawn_error_count does NOT move in lockstep
+    # (deliberate: #868's fleet-wide backoff must not charge a usage limit as
+    # a spawn error). A row whose every attempt died that way therefore looks
+    # exactly like one that ran, shipped and timed out inside its first stage.
+    #
+    # Written True at exactly one seam: dispatch/claim.py's spawn-success
+    # block, alongside the session_id stamp. Seeded False at exactly one seam:
+    # dev_queue_add (cli/dev_queue/crud.py), the only construction site with
+    # positive proof the row has never spawned.
+    #
+    # The model default is True, NOT False, and that asymmetry is load-bearing
+    # rather than stylistic: it matches the migration fill (fail-open — a
+    # legacy row carries no record of its spawn history, and refusing its
+    # completion retroactively would be worse than the bug), and it keeps
+    # every TicketTask built without the field — test fixtures, and any future
+    # construction site that has no such proof — out of the refusal branch.
+    #
+    # Deliberately has NO clear site: it survives every requeue, regress,
+    # revert and retry. This is the v31 finding_dispositions convention (a
+    # durable historical fact), not the v27/v29 per-arrival-marker convention;
+    # forgetting that a spawn once succeeded is exactly the amnesia #1631
+    # exists to remove. See GitHub #1631.
+    ever_spawned: bool = True
     # Number of times the task has been auto-regressed from FINALIZE back to
     # IMPL for self-heal (e.g. diff-cover gate failures). Bounded by
     # FINALIZE_REGRESS_CAP in auto_dev_result.py. See GitHub #770.

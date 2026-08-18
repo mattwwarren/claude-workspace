@@ -5570,9 +5570,7 @@ class TestDevQueueAddSignoff:
 class TestDevQueueAddEverSpawned:
     """``cw dev-queue add`` seeds ever_spawned=False (v33, GitHub #1631)."""
 
-    def test_dev_queue_add_seeds_ever_spawned_false(
-        self, tmp_config_dir: Path
-    ) -> None:
+    def test_dev_queue_add_seeds_ever_spawned_false(self, tmp_config_dir: Path) -> None:
         """The model default is True (fail-open for rows of unknown history);
         this is the one construction site with positive proof the row has
         never spawned, so it overrides to False. A dropped kwarg here would

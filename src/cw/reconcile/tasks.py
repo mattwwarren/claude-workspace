@@ -187,21 +187,27 @@ def _is_never_claimed(task: TicketTask) -> bool:
     definitionally a reconciler false-match (GitHub #1385, #1623), not a
     genuine completion.
 
-    Known accepted gap (#1631, not closed here): a task whose every attempt
-    failed via UsageLimitError has attempts > spawn_error_count (that revert
-    path deliberately does not stamp spawn_error_count -- dispatch/claim.py:
-    769, #868 fleet-wide backoff, see #1623 R7) and is therefore NOT refused
-    by this predicate, even though it never attached to a worker either. It
-    is structurally identical on the task record to a task that legitimately
-    ran, shipped, and timed out inside its first stage (both have
-    stage_high_water is None) apart from an attempts count that carries no
-    threshold meaning -- closing it needs new durable state ("a session was
-    successfully spawned at least once"), not a cleverer predicate.
+    Second disjunct (#1631): ``not task.ever_spawned``. The first disjunct
+    alone cannot see a row whose every attempt failed via UsageLimitError,
+    because that revert path deliberately does not stamp spawn_error_count
+    (stamp_backoff=False -- #868 fleet-wide backoff, see #1623 R7), leaving
+    attempts > spawn_error_count. On the task record such a row is identical
+    to one that legitimately ran, shipped and timed out inside its first
+    stage (both have stage_high_water is None), so no arrangement of the
+    existing counters can separate them -- it takes the durable
+    ``ever_spawned`` fact, stamped True at dispatch/claim.py's one
+    spawn-success seam and never cleared. Rows predating that field, and any
+    built without it, default to True and so are untouched by this disjunct
+    (fail-open: see the field's comment in models/tasks.py).
     """
-    return task.session_id is None and task.attempts == task.spawn_error_count
+    return (
+        task.session_id is None and task.attempts == task.spawn_error_count
+    ) or not task.ever_spawned
 
 
-def _emit_never_claimed_refusals(refused: list[tuple[str, Session, str]]) -> None:
+def _emit_never_claimed_refusals(
+    refused: list[tuple[str, Session, str, bool]],
+) -> None:
     """Emit SESSION_NEEDS_ATTENTION for each refused false-completion.
 
     Called after dev_queue_lock releases, mirroring this module's existing
@@ -209,8 +215,29 @@ def _emit_never_claimed_refusals(refused: list[tuple[str, Session, str]]) -> Non
     events-inbox lock and this function's caller must not hold
     dev_queue_lock while doing so (see _revert_running_tasks_for_sessions
     for the same ordering rationale, #765).
+
+    Emits one of two cause-specific breadcrumb variants, selected by the
+    tuple's ``ever_spawned`` element: the two disjuncts of
+    :func:`_is_never_claimed` describe genuinely different histories, and a
+    single string naming only the spawn-error path would misattribute every
+    #1631 usage-limit refusal to a mechanism that provably did not fire for
+    it (that path leaves spawn_error_count at 0 by design).
     """
-    for ticket_id, session, lane in refused:
+    for ticket_id, session, lane, ever_spawned in refused:
+        if ever_spawned:
+            breadcrumbs = (
+                f"matched timed-out session {session.id!r} but the dev-queue "
+                "task was never claimed (session_id=None, every attempt "
+                "died on the spawn-error path) -- refusing false completion"
+            )
+        else:
+            breadcrumbs = (
+                f"matched timed-out session {session.id!r} but the dev-queue "
+                "task never successfully spawned a session (ever_spawned=False, "
+                "every attempt died before a genuine spawn -- e.g. usage-limit "
+                "reverts, which leave spawn_error_count at 0) -- refusing false "
+                "completion"
+            )
         record_event(
             OrchestratorEventType.SESSION_NEEDS_ATTENTION,
             {
@@ -220,11 +247,7 @@ def _emit_never_claimed_refusals(refused: list[tuple[str, Session, str]]) -> Non
                 "ticket_id": ticket_id,
                 "claude_session_id": None,
                 "paused_status": _NEVER_CLAIMED_COMPLETION_REASON,
-                "breadcrumbs": (
-                    f"matched timed-out session {session.id!r} but the dev-queue "
-                    "task was never claimed (session_id=None, every attempt "
-                    "died on the spawn-error path) -- refusing false completion"
-                ),
+                "breadcrumbs": breadcrumbs,
                 "crashed": False,
                 "lane": lane,
             },
@@ -305,15 +328,18 @@ def complete_timed_out_merged_tasks() -> list[str]:
     issue-linkage), upgrades the task to COMPLETED and emits SESSION_COMPLETED
     with reason="timed_out_merged".
 
-    A matching PENDING row with no claim history (attempts == spawn_error_
-    count, session_id is None -- every attempt died on the generic
-    spawn-error path) is refused rather than completed. Such a row was
-    never dispatched and its match is a reconciler false-match (GitHub
+    A matching PENDING row with no claim history -- either attempts ==
+    spawn_error_count with session_id is None (every attempt died on the
+    generic spawn-error path), or ever_spawned False (no attempt ever
+    reached a genuine spawn, the usage-limit shape whose revert leaves
+    spawn_error_count at 0) -- is refused rather than completed. Such a row
+    was never dispatched and its match is a reconciler false-match (GitHub
     #1385), not a genuine completion. It is left PENDING and a
     SESSION_NEEDS_ATTENTION event is emitted with
-    paused_status=_NEVER_CLAIMED_COMPLETION_REASON (#1387 belt-and-braces
-    guard, widened by #1623 to also cover attempts > 0 spawn-error-only
-    histories).
+    paused_status=_NEVER_CLAIMED_COMPLETION_REASON and a breadcrumb naming
+    which of the two causes fired (#1387 belt-and-braces guard, widened by
+    #1623 to cover attempts > 0 spawn-error-only histories and by #1631 to
+    cover usage-limit-only ones).
 
     Called from reconcile() AFTER sessions_lock is released — no gh subprocess
     runs under the session lock (liveness requirement, #485 SHOULD_FIX 4).
@@ -349,7 +375,7 @@ def complete_timed_out_merged_tasks() -> list[str]:
 
     # Phase 3: Acquire only dev_queue_lock for the PENDING→COMPLETED write.
     completed_ids: list[str] = []
-    refused: list[tuple[str, Session, str]] = []
+    refused: list[tuple[str, Session, str, bool]] = []
     with dev_queue_lock():
         store = load_dev_queue()
         changed = False
@@ -361,7 +387,9 @@ def complete_timed_out_merged_tasks() -> list[str]:
                     and task.status == QueueItemStatus.PENDING
                 ):
                     if _is_never_claimed(task):
-                        refused.append((ticket_id, session, task.lane))
+                        refused.append(
+                            (ticket_id, session, task.lane, task.ever_spawned)
+                        )
                         break
                     # Why: PR URL is not retrieved here — a second gh call is
                     # disproportionate for this recovery path; disposition alone

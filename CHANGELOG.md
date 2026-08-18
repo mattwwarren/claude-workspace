@@ -6,6 +6,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A usage-limit-only attempt history no longer reads as a legitimate
+  first-stage ship (#1631):** reconcile's timed-out-merged backstop refused to
+  auto-complete a PENDING row only when `attempts == spawn_error_count`, but
+  the two counters move asymmetrically on the `UsageLimitError` revert path —
+  `attempts` increments at claim time while `spawn_error_count` deliberately
+  does not (`stamp_backoff=False`, so a usage limit is never charged as a spawn
+  error against #868's fleet-wide backoff). A row whose every attempt died that
+  way therefore looked byte-identical on the task record to one that genuinely
+  ran, shipped and timed out inside its first pipeline stage (both carry
+  `stage_high_water is None`), and was silently marked `shipped` off a PR it
+  never opened. Adds `TicketTask.ever_spawned` (dev-queue schema v33), stamped
+  `True` at the single spawn-success seam in `dispatch/claim.py`, seeded
+  `False` at the single true-new-task constructor (`cw dev-queue add`), and
+  OR'd into `_is_never_claimed`'s guard. The field is durable — no requeue,
+  regress, revert or retry clears it — and both the model default and the
+  migration fill are `True` (fail-open): a legacy row carries no record of its
+  spawn history, and retroactively refusing a legitimate completion would be
+  worse than the bug. The `SESSION_NEEDS_ATTENTION` breadcrumb now names which
+  of the two refusal causes fired instead of unconditionally blaming the
+  spawn-error path. The usage-limit back-off mechanism itself is unchanged.
+
 ## [1.35.0] - 2026-08-17
 
 ### Changed
