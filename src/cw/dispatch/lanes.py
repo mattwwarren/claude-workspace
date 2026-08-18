@@ -560,6 +560,7 @@ def _dispatch_client_lanes(
             task, backoff_skipped = _claim_next_pending(
                 client.name,
                 lane=lane_cfg.name,
+                client=client,
                 config=config,
                 priority_ticket_ids=priority_ids,
                 usage_limited_until=usage_limited_until,

@@ -1176,6 +1176,44 @@ class TestCodexFixLoopEnabledGate:
         )
 
 
+class TestLaneAttemptCeiling:
+    """Lane-scoped attempt_ceiling with global fallback (#1751).
+
+    Tri-state field: ``None`` = lane sets no override (defer to
+    ``OrchestratorConfig.global_attempt_ceiling``), ``False`` = lane explicitly
+    disables the ceiling, positive ``int`` = lane override value.
+    """
+
+    def test_lane_config_attempt_ceiling_defaults_none(self) -> None:
+        assert LaneConfig(name="default").attempt_ceiling is None
+
+    def test_lane_config_accepts_positive_int_override(self) -> None:
+        assert LaneConfig(name="x", attempt_ceiling=25).attempt_ceiling == 25
+
+    def test_lane_config_accepts_false_to_disable(self) -> None:
+        assert LaneConfig(name="x", attempt_ceiling=False).attempt_ceiling is False
+
+    def test_lane_config_rejects_zero_ceiling(self) -> None:
+        """Raw ``0`` would silently smart-union-collapse to ``False`` (disable)."""
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError):
+            LaneConfig(name="x", attempt_ceiling=0)
+
+    def test_lane_config_rejects_negative_ceiling(self) -> None:
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError):
+            LaneConfig(name="x", attempt_ceiling=-1)
+
+    def test_lane_config_rejects_true_ceiling(self) -> None:
+        """Raw ``True`` would silently smart-union-collapse to a ceiling of 1."""
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError):
+            LaneConfig(name="x", attempt_ceiling=True)
+
+
 class TestConsecutiveSkipLatches:
     """RFC 0007 Phase 4 (W2) + #974: consecutive-skip attention latches."""
 

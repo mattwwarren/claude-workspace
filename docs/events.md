@@ -286,7 +286,10 @@ but all in exponential backoff after spawn_error, next_eligible_at in the
 future) → `no_pending` (nothing to claim) → `none` (at least one session
 spawned). `attempt_cap_blocked` sits outside this per-client precedence
 chain: it is emitted **per task** (payload carries `ticket_id`) when the
-global attempt ceiling parks a task. Optional extra keys: `lanes` (per-lane
+attempt ceiling parks a task, and additionally carries `attempt_ceiling`
+(int) — the *resolved* ceiling that actually fired (#1751). Read that field,
+not `global_attempt_ceiling`: the ceiling is lane-scoped, so the row's lane
+may have overridden the global value. Optional extra keys: `lanes` (per-lane
 breakdown), and on freshness-gate ticks `freshness_detail`
 (`non_main_head | main_behind_origin | main_dirty_checkout |
 main_diverged_from_origin | main_detached_head`) plus `blocked_branch`.
@@ -541,6 +544,17 @@ open enum; consumers MUST tolerate unknown values. Known values:
   BLOCKED_ON_USER instead of being re-dispatched to avoid clobbering in-flight
   work. `breadcrumbs` is the absolute path to the worktree. Operator should
   review, commit or discard the changes, then manually unblock the task.
+- `"attempt_cap_blocked"` — the dispatch claim path refused to claim a
+  PENDING row whose `unproductive_attempts` reached its attempt ceiling, and
+  parked it BLOCKED_ON_USER before any spawn (#786/#1257). Session-less by
+  construction: `session_id`/`session_name`/`breadcrumbs` are empty and
+  `claude_session_id` is `null`, since no session was started this attempt.
+  Carries one extra payload field beyond the canonical nine —
+  `attempt_ceiling` (int), the *resolved* ceiling that fired (#1751). Read
+  that, not `global_attempt_ceiling`: the row's lane may have overridden it,
+  and a lane with `attempt_ceiling: false` never produces this park at all.
+  Operator recovery is §7's "Attempt-cap reset" in
+  `docs/dispatch-runbook.md`.
 - `"plan_parked"` — A headless worker completed its plan stage with open
   ambiguities or unverified premises (`ambiguities_pending_resolution` or
   `premises_pending_verification` sentinel status). The task is BLOCKED_ON_USER.

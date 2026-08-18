@@ -3484,7 +3484,10 @@ class TestActOnPhantomCandidatesPerLane:
             "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
         )
         _fast_ph_client = _client_with_lane(
-            "client-a", "fast", ReapPolicy.AUTO, workspace_path=tmp_path / "ws"
+            "client-a",
+            "fast",
+            reap_policy=ReapPolicy.AUTO,
+            workspace_path=tmp_path / "ws",
         )
         monkeypatch.setattr(
             "cw.reconcile._deps.load_effective_clients",
@@ -3541,7 +3544,10 @@ class TestActOnPhantomCandidatesPerLane:
             "cw.reconcile._deps.get_native_daemon_client", FakeNativeDaemonClient
         )
         _slow_ph_client = _client_with_lane(
-            "client-a", "slow", ReapPolicy.SIGNAL_ONLY, workspace_path=tmp_path / "ws"
+            "client-a",
+            "slow",
+            reap_policy=ReapPolicy.SIGNAL_ONLY,
+            workspace_path=tmp_path / "ws",
         )
         monkeypatch.setattr(
             "cw.reconcile._deps.load_effective_clients",

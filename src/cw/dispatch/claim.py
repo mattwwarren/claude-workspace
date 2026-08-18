@@ -42,6 +42,7 @@ from cw.models import (
     QueueItemStatus,
     Stage,
 )
+from cw.reconcile import resolve_attempt_ceiling
 from cw.worktree import (
     check_not_main_checkout,
     create_worktree,
@@ -120,12 +121,20 @@ _codex_capability_cache: list[tuple[CodexCapabilityDiagnosis, datetime]] = []
 _codex_capability_park_count: list[int] = [0]
 
 
-def _emit_attempt_cap_blocked_event(client_name: str, ticket_id: str) -> None:
-    """Emit a dispatch.tick event when a task is parked at the global attempt ceiling.
+def _emit_attempt_cap_blocked_event(
+    client_name: str, ticket_id: str, ceiling: int
+) -> None:
+    """Emit a dispatch.tick event when a task is parked at the attempt ceiling.
 
     Per-task event (not per-client-per-tick) for operator observability: a quiet
     loop after several failures should be distinguishable from a healthy idle loop.
     See GitHub #786.
+
+    ``attempt_ceiling`` carries the *resolved* number that actually fired
+    (#1751). Since the ceiling became lane-scoped, an operator reading this
+    event can no longer infer it from ``global_attempt_ceiling`` — the lane may
+    have overridden it. Additive: this payload is a plain untyped dict, so no
+    consumer schema migration is involved.
     """
     record_event(
         OrchestratorEventType.DISPATCH_TICK,
@@ -134,14 +143,15 @@ def _emit_attempt_cap_blocked_event(client_name: str, ticket_id: str) -> None:
             "claimed": 0,
             "skip_reason": DispatchSkipReason.ATTEMPT_CAP_BLOCKED,
             "ticket_id": ticket_id,
+            "attempt_ceiling": ceiling,
         },
     )
 
 
 def _emit_attempt_cap_attention_event(
-    task: TicketTask, client_name: str, lane: str
+    task: TicketTask, client_name: str, lane: str, ceiling: int
 ) -> None:
-    """Emit SESSION_NEEDS_ATTENTION when a task is parked at the global attempt ceiling.
+    """Emit SESSION_NEEDS_ATTENTION when a task is parked at the attempt ceiling.
 
     Sibling of :func:`_emit_attempt_cap_blocked_event` (#1257) -- that helper
     emits a DISPATCH_TICK event (operator-visible tick summary); this one
@@ -151,6 +161,11 @@ def _emit_attempt_cap_attention_event(
     detail exists at this pre-spawn ceiling check (the task never spawned a
     session this attempt), so ``session_id``/``session_name``/``breadcrumbs``
     are empty/None.
+
+    ``attempt_ceiling`` is the resolved lane-or-global number that fired, for
+    the same reason its DISPATCH_TICK sibling carries it (#1751). The canonical
+    9-field shape already varies per caller elsewhere (see ``renotify_marker``
+    in reconcile/liveness.py), so one extra field here is additive.
     """
     record_event(
         OrchestratorEventType.SESSION_NEEDS_ATTENTION,
@@ -164,6 +179,7 @@ def _emit_attempt_cap_attention_event(
             "breadcrumbs": "",
             "crashed": False,
             "lane": lane,
+            "attempt_ceiling": ceiling,
         },
         correlation_id=task.ticket_id,
     )
@@ -259,6 +275,7 @@ def _claim_next_pending(
     client_name: str,
     *,
     lane: str,
+    client: ClientConfig,
     config: OrchestratorConfig,
     priority_ticket_ids: list[str] | None = None,
     usage_limited_until: datetime | None = None,
@@ -278,11 +295,19 @@ def _claim_next_pending(
     parameter is intentionally a *preference*, not a filter — see the
     fallback after the priority loop).
 
-    Global attempt ceiling: if
-    task.unproductive_attempts >= config.global_attempt_ceiling, the task is
-    parked BLOCKED_ON_USER instead of claimed. A dispatch.tick event with
-    skip_reason=ATTEMPT_CAP_BLOCKED is emitted per parked task for
-    observability. See GitHub #786.
+    Attempt ceiling: if task.unproductive_attempts >= the ceiling resolved for
+    the task's lane, the task is parked BLOCKED_ON_USER instead of claimed. A
+    dispatch.tick event with skip_reason=ATTEMPT_CAP_BLOCKED is emitted per
+    parked task for observability. See GitHub #786.
+
+    The ceiling is resolved per-lane by
+    :func:`cw.reconcile.resolve_attempt_ceiling` (#1751), which takes *client*
+    for that lookup and falls back to ``config.global_attempt_ceiling``.
+    A lane that sets ``attempt_ceiling: false`` resolves to ``None``, meaning
+    no ceiling at all — a supervised lane's operator answers every park and is
+    itself the rate limiter, so the automated bound buys nothing there. The
+    concierge's recovery recipes call the same resolver, so neither layer can
+    refuse work the other would have allowed.
 
     The ceiling reads ``unproductive_attempts``, NOT raw ``attempts`` (GitHub
     #1750): every claim still increments ``attempts`` below, but only claims
@@ -347,15 +372,23 @@ def _claim_next_pending(
                         if _is_stale_pr_gated(task, stale_pr_ticket_ids):
                             _park_stale_pr_task(task, client_name, lane, store)
                             break
-                        if task.unproductive_attempts >= config.global_attempt_ceiling:
+                        ceiling = resolve_attempt_ceiling(client, task, config)
+                        if (
+                            ceiling is not None
+                            and task.unproductive_attempts >= ceiling
+                        ):
                             transition_task_status(
                                 task,
                                 QueueItemStatus.BLOCKED_ON_USER,
                                 disposition="attempt_cap_blocked",
                             )
                             save_dev_queue(store)
-                            _emit_attempt_cap_blocked_event(client_name, task.ticket_id)
-                            _emit_attempt_cap_attention_event(task, client_name, lane)
+                            _emit_attempt_cap_blocked_event(
+                                client_name, task.ticket_id, ceiling
+                            )
+                            _emit_attempt_cap_attention_event(
+                                task, client_name, lane, ceiling
+                            )
                             break
                         transition_task_status(task, QueueItemStatus.RUNNING)
                         task.attempts += 1
@@ -378,15 +411,16 @@ def _claim_next_pending(
             if _is_stale_pr_gated(task, stale_pr_ticket_ids):
                 _park_stale_pr_task(task, client_name, lane, store)
                 continue
-            if task.unproductive_attempts >= config.global_attempt_ceiling:
+            ceiling = resolve_attempt_ceiling(client, task, config)
+            if ceiling is not None and task.unproductive_attempts >= ceiling:
                 transition_task_status(
                     task,
                     QueueItemStatus.BLOCKED_ON_USER,
                     disposition="attempt_cap_blocked",
                 )
                 save_dev_queue(store)
-                _emit_attempt_cap_blocked_event(client_name, task.ticket_id)
-                _emit_attempt_cap_attention_event(task, client_name, lane)
+                _emit_attempt_cap_blocked_event(client_name, task.ticket_id, ceiling)
+                _emit_attempt_cap_attention_event(task, client_name, lane, ceiling)
                 continue
             transition_task_status(task, QueueItemStatus.RUNNING)
             task.attempts += 1

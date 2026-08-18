@@ -1714,6 +1714,48 @@ def resolve_reap_policy(
     return global_cfg.reap_policy
 
 
+def resolve_attempt_ceiling(
+    client: ClientConfig | None,
+    task: TicketTask,
+    global_cfg: OrchestratorConfig,
+) -> int | None:
+    """Resolve the effective attempt ceiling for a task's lane.
+
+    Precedence (highest to lowest):
+      1. Lane-level ``LaneConfig.attempt_ceiling`` for ``task.lane``.
+      2. Global ``OrchestratorConfig.global_attempt_ceiling``.
+
+    Returns ``None`` when the lane sets ``attempt_ceiling=False`` — an explicit
+    "this lane has no ceiling", not a missing value. A supervised lane
+    (``signoff: operator``) has a human answering every park, so the human IS
+    the rate limiter an automated bound exists to be; that is the case #1751
+    exists to express. Callers must therefore treat ``None`` as "never park on
+    the ceiling", never as "fall back to some default".
+
+    A ``None`` *client* (unresolvable / removed from clients.yaml) or a lane
+    name not declared in that client's lanes falls through to the global
+    config, keeping behaviour identical to the pre-#1751 flat read — the same
+    fallthrough contract :func:`resolve_reap_policy` gives its own candidates.
+
+    Takes a single ``client`` rather than the ``clients`` dict its sibling
+    resolvers take: neither real call site holds a dict of every client at that
+    depth (``cw.dispatch.claim`` is handed one ``ClientConfig``; the concierge
+    detect functions do a per-task ``get_client()``), and threading one down
+    would touch four call chains for no gain.
+
+    Lives here, not in ``cw.dispatch``, because both consumers need it and the
+    import direction only runs ``cw.dispatch -> cw.reconcile`` (#786, #1750,
+    #1751).
+    """
+    if client is not None:
+        for lane_cfg in client.effective_lanes:
+            if lane_cfg.name == task.lane and lane_cfg.attempt_ceiling is not None:
+                if lane_cfg.attempt_ceiling is False:
+                    return None
+                return lane_cfg.attempt_ceiling
+    return global_cfg.global_attempt_ceiling
+
+
 def feature_branch_key(
     client_name: str,
     ticket_id: str,
