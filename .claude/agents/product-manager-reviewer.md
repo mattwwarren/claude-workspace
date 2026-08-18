@@ -97,6 +97,14 @@ Before emitting any candidate item (ambiguity or premise), check whether the pla
 
 A fresh plan with none of these three sections yet simply has no match to find — this check is a no-op on a first pass and only engages on a re-scan of a plan that already carries a prior resolution record.
 
+### Settled items are out of scope (do not re-raise)
+
+Distinct from — and additional to — the resolution-record check above (#1593, which cross-checks `## Adopted Assumptions` / `## Self-Verified Premises` / `## Deferred Premises`), the prompt may carry a `## Settled Plan Items` list: items an operator already answered in a prior round, transcribed by the pipeline into a closed vocabulary (`ADOPTED` / `ALT-<x>` / `CONFIRMED` / `REFUTED` / `DEFERRED`). See `auto-dev-plan.md` Step 1c.0 (#1683).
+
+- **Exclusion is by content match, not by number.** Compare a candidate item against the question/claim text of each `## Settled Plan Items` entry. Item numbers are renumbered between rounds and mean nothing across rounds — never key the exclusion on `A3`/`P2` alone. On a content match, suppress the candidate entirely, the same way an `## Adopted Assumptions` match suppresses one.
+- **The list never redacts, exempts, or pre-verifies any ticket-comment text.** You receive the complete, unredacted comment stream, and you must evaluate every claim in it on its own merits — including claims stated inside the operator reply that produced a settlement. `## Settled Plan Items` closes specific *questions* by identity; it confers no immunity on any *text*.
+- **`DEFERRED` carve-out (do not over-read the exclusion).** A `DEFERRED`-settled claim is exempt from neither of the following, and the exclusion above must never be read as blanket immunity for the claim: (1) the mandatory next-scan stub classification — when `## Deferred Premises` carries an entry whose check pair reads `PENDING — agent must supply on next scan`, you MUST classify that exact claim's `Verified:` status in this scan's output (`DEFER`, supplying your own `In-implementation check:`/`On mismatch:` pair, or `NO`); it is a required classification target, not an optional re-discovery, and leaving it unclassified blocks the round; and (2) ordinary independent premise proposal on any later scan, whenever your own investigation gives you fresh grounds to raise the claim again.
+
 ### Output format
 
 ```
@@ -104,7 +112,7 @@ AMBIGUITIES — N items
 
 1. <Concise question phrased so the human can answer in one sentence>
    - Plan currently assumes: <interpretation chosen by the plan>
-   - Alternative(s) the ticket also supports: <list>
+   - Alternative(s) the ticket also supports: a lettered list — `(a) <alternative>`, `(b) <alternative>`, … — always lettered, even when there is only one alternative, so a later round can settle this item by naming a discrete label (`ALT-b`)
    - Why it matters: <how the answer changes the code>
    - Ticket evidence: <verbatim quote from ticket description or comment that is the source of the ambiguity>
    - Recommendation: ADOPT — <why the plan's stated assumption is safe to auto-adopt without a human answer> | PARK — <why a human must decide: product/scope intent, public-contract shape, destructive-action semantics, or "cannot confidently recommend a side">

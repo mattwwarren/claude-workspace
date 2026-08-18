@@ -7,31 +7,57 @@ legitimate self-escalation, and applies the Rule 1-6 status routing (scope-gated
 approval, pauses, stage success/advance, no-op, failure/regress, and the
 conservative fallback). Also resolves the effective scope tier and the
 operator-signoff policy, and accumulates per-session cost onto the task.
+
+Package split (#1728). The historical flat ``routing.py`` was 1345 lines, ~35%
+over CLAUDE.md's ~1000-line ceiling. Four separable concerns now live in
+submodules, re-exported below so no ``from cw.dispatch.routing import X`` call
+site changed:
+
+  - ``scope_tier``  -- effective scope-tier resolution and carried-context
+    persistence (``_resolve_scope_tier`` & co.).
+  - ``stage_walk``  -- ``stage_reached`` classification and the forward
+    stage-pointer walk, including its REVIEW-rung gate ladder
+    (``_resolve_stage_walk`` & co.); the largest of the four.
+  - ``pr_refs``     -- the #1713 blocker-``details`` PR cross-reference
+    literals and extractor.
+  - ``cost``        -- ``_accumulate_task_cost``.
+
+**Monkeypatch coupling — why this ``__init__`` is not a pure re-export shim.**
+Unlike ``cw.cli``/``cw.reconcile``, whose ``__init__`` files only re-export,
+this one *defines* the Rule 1-6 decision table itself. ``tests/test_dispatch.py``
+monkeypatches ``cw.dispatch.routing.record_event``, ``._stage_regress`` and
+``._stage_advance_unchecked`` by dotted string path at 10 call sites, and a
+function resolves its free names against the ``__dict__`` of the module it was
+*defined* in, not the one that calls it (see ``tests/conftest.py``'s
+``capture_events`` docstring). Every function that calls one of those three
+names -- ``_park_must_fix_mechanically_rejected``,
+``_record_scope_routing_decision``, ``_stage_advance_unchecked``,
+``_route_scope_gated_approval``, ``_route_stage_success``,
+``_route_staged_decision``, ``apply_staged_decision`` -- must therefore stay
+defined in the module object bound to the exact dotted path
+``cw.dispatch.routing``. Moving any of them into a submodule would leave the
+patches pointing at a module the real calls never consult: green tests
+observing nothing. That constraint, not line-count aesthetics, chose the four
+seams above. ``tests/test_dispatch_routing_package.py`` pins it as an
+executable assertion.
 """
 
 from __future__ import annotations
 
 import logging
-import re
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from cw.auto_dev_result import (
-    _STAGE_REACHED_CANONICAL,
     FINALIZE_REGRESS_BLOCKER_REASONS,
     FINALIZE_REGRESS_CAP,
     OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
     PAUSED_FOR_USER_INPUT_STATUSES,
-    PLAN_SOURCE_NONE,
     SCOPE_GATED_APPROVAL_STATUSES,
-    SCOPE_TIER_LARGE,
     SCOPE_TIER_SMALL,
     STAGE_FAILURE_STATUSES,
     STAGE_SUCCESS_STATUSES,
 )
 from cw.codex_review import CODEX_MUST_FIX_MECHANICALLY_REJECTED
-from cw.config import (
-    load_state,
-)
 from cw.dev_queue import (
     REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION,
     _advance_task_pointer,
@@ -41,18 +67,19 @@ from cw.dev_queue import (
     _stage_regress,
     transition_task_status,
 )
-
-# The REVIEW-scoped gate table (#1823 extraction). Imported at module top in
-# this direction only: review_gates reaches back into this module for
-# _resolve_scope_tier / _APPROVAL_GATE_REASON via function-level deferred
-# imports, so promoting either of those to a module-top import there recreates
-# a real cycle. Same shape as gating.py <-> claim.py since #1310, guarded by
-# test_dispatch_package_submodules_import_without_cycle.
 from cw.dispatch.productivity import extract_claim_evidence, is_unproductive
 from cw.dispatch.regress_repeat import (
     _consume_finalize_regress_repeat,
     _maybe_emit_finalize_regress_repeat_signal,
 )
+
+# The REVIEW-scoped gate table (#1823 extraction). Imported at module top in
+# this direction only: review_gates reaches back into this package for
+# _resolve_scope_tier / _APPROVAL_GATE_REASON via function-level deferred
+# imports, so promoting either of those to a module-top import there recreates
+# a real cycle. Same shape as gating.py <-> claim.py since #1310, and as
+# routing/stage_walk.py's own deferred reach back into this module (#1728),
+# guarded by test_dispatch_package_submodules_import_without_cycle.
 from cw.dispatch.review_gates import (
     _park_branch_staleness_gate,
     _park_empty_diff_gate,
@@ -67,9 +94,29 @@ from cw.dispatch.review_gates import (
     _should_gate_for_scope_hint,
     _should_gate_for_signoff,
 )
+from cw.dispatch.routing.cost import _accumulate_task_cost
+from cw.dispatch.routing.pr_refs import (
+    _AUTOMERGE_NOT_ARMED_REASON,
+    _BLOCKING_PR_NUMBER_RE,
+    _PRIOR_PIPELINE_PR_OPEN_REASON,
+    _extract_blocked_on_pr,
+)
+from cw.dispatch.routing.scope_tier import (
+    _extract_scope_tier,
+    _persist_carried_context,
+    _resolve_scope_tier,
+)
+from cw.dispatch.routing.stage_walk import (
+    _STAGE_REACHED_TO_STAGE,
+    _classify_sentinel_stage_position,
+    _is_earlier_stage_report,
+    _is_stage_advance_claim,
+    _resolve_stage_walk,
+    _StagePosition,
+    _walk_stage_pointer_forward,
+)
 from cw.events import record_event
 from cw.models import (
-    ClientConfig,
     OrchestratorEventType,
     QueueItemStatus,
     Stage,
@@ -81,15 +128,41 @@ if TYPE_CHECKING:
         TicketTask,
     )
 
+# Re-exported submodule surface. Listed here (rather than left as bare
+# imports) because several names are consumed only by *other* modules --
+# dispatch/__init__.py's facade, dispatch/loop.py, reconcile/tasks.py's
+# deferred imports -- and would otherwise read as unused. Mirrors
+# dispatch/__init__.py's own __all__ convention.
+__all__ = [
+    "_AUTOMERGE_NOT_ARMED_REASON",
+    "_BLOCKING_PR_NUMBER_RE",
+    "_PRIOR_PIPELINE_PR_OPEN_REASON",
+    "_STAGE_REACHED_TO_STAGE",
+    "_StagePosition",
+    "_accumulate_task_cost",
+    "_classify_sentinel_stage_position",
+    "_extract_blocked_on_pr",
+    "_extract_scope_tier",
+    "_is_earlier_stage_report",
+    "_is_stage_advance_claim",
+    "_persist_carried_context",
+    "_resolve_scope_tier",
+    "_resolve_stage_walk",
+    "_walk_stage_pointer_forward",
+    "apply_staged_decision",
+]
+
 _log = logging.getLogger("cw.dispatch")
 
 
 # ``rule`` values stamped onto the #1617 ``dispatch.scope_routing_decision``
-# audit event by each of this module's park-decision sites, plus the
+# audit event by each of this package's park-decision sites, plus the
 # gate-release site in ``dev_queue.approval`` (imported there, see that
 # module's function-level deferred-import convention for the
 # dispatch<->dev_queue cycle break). Named constants so a typo at any of the
 # ~9 call sites cannot silently break the audit trail's site-attribution.
+# ``_RULE_STAGE_WALK`` is consumed by ``routing/stage_walk.py`` through its
+# deferred import back into this module.
 _RULE_SCOPE_GATED_APPROVAL = "Rule 1"
 _RULE_STAGE_SUCCESS = "Rule 3"
 _RULE_STAGE_WALK = "stage_walk"
@@ -99,55 +172,6 @@ _RULE_GATE_RELEASE = "gate_release"
 # paused_status written to SESSION_NEEDS_ATTENTION when a session parks at plan
 # stage (ambiguities_pending_resolution / premises_pending_verification).
 _PLAN_PARKED_REASON = "plan_parked"
-
-
-# Rule 5 blocker.reason literals this module reason-keys on directly (GitHub
-# #1713). Deliberately local literals, not an import of
-# cw.auto_dev_result.parse.BLOCKER_REASON_PRIOR_PIPELINE_PR_OPEN: that
-# constant is the *parser's* BlockedResult reason code (a synthetic result for
-# a sentinel the parser itself could not extract), a different producer/
-# context from this module's read of a well-formed AutoDevResult's
-# blocker.reason -- textually identical value, deliberately separate constant,
-# same precedent as dev_queue.lifecycle._SALVAGE_NO_SENTINEL_DISPOSITION vs.
-# reconcile._shared._NEEDS_SALVAGE_REASON.
-_AUTOMERGE_NOT_ARMED_REASON = "automerge_not_armed"
-_PRIOR_PIPELINE_PR_OPEN_REASON = "prior_pipeline_pr_open"
-
-# Matches "PR #<N>" in a prior_pipeline_pr_open blocker.details string (see
-# .claude/commands/auto-dev-finalize.md's template: "PR #<number>
-# (<headRefName>) is open and shares files..."). The producer contract
-# (same doc, line ~122: "When multiple open PRs overlap, list all
-# overlapping PRs in `details`") documents that details may legitimately
-# name MORE THAN ONE overlapping PR when a row is blocked on several at
-# once -- _extract_blocked_on_pr below scans every match and fails closed
-# (returns None) unless exactly one is found, rather than silently picking
-# the first and mismatching the release condition against a still-open
-# second PR.
-_BLOCKING_PR_NUMBER_RE = re.compile(r"PR #(\d+)")
-
-
-def _extract_blocked_on_pr(details: object) -> int | None:
-    """Extract the blocking PR number from a prior_pipeline_pr_open blocker.
-
-    Regex-only (R3 precedent, mirrors ``_marker_version``): no structured
-    field carries this reference (GitHub #1713 root-cause chain, Variant B) --
-    the producer only ever emits it inside ``blocker.details`` free text.
-    Fails closed (returns ``None``) on a malformed/absent ``details`` or on
-    ANY count of matches other than exactly one, rather than raising or
-    guessing. A malformed/absent details degrades to "no cross-reference"
-    instead of crashing dispatch routing; an ambiguous multi-PR block (the
-    producer contract permits ``details`` to name more than one overlapping
-    PR) degrades to the same "no cross-reference" blind spot the ticket's
-    orphaned-reference case already accepts, rather than releasing the row
-    the moment ONE of several blocking PRs merges while another
-    file-overlapping PR is still open.
-    """
-    if not isinstance(details, str):
-        return None
-    matches = _BLOCKING_PR_NUMBER_RE.findall(details)
-    if len(matches) != 1:
-        return None
-    return int(matches[0])
 
 
 # paused_status written to SESSION_NEEDS_ATTENTION when Rule 1 parks a
@@ -252,90 +276,6 @@ BREADCRUMB_ELIGIBLE_PAUSED_STATUSES: frozenset[str] = (
 ) | {_AWAITING_OPERATOR_REASON, _MUST_FIX_MECHANICALLY_REJECTED_REASON}
 
 
-def _accumulate_task_cost(task: TicketTask, session_id: str | None) -> None:
-    """Add the session's cost_usd to task.total_cost_usd, if available.
-
-    Reads cost via two-source fallback:
-      1. session.cost_usd (populated by signal_stop — normal headless path)
-      2. session.last_result.get('cost_usd') (populated by the RFC 0012 door —
-         the harvest-authority write path used when signal_stop did not run)
-
-    When both sources are absent, total_cost_usd is left unchanged.
-    Called inside dev_queue_lock so the mutation is covered by the same
-    save_dev_queue call that persists the COMPLETED status.
-    """
-    if session_id is None:
-        return
-    state = load_state()
-    session = next((s for s in state.sessions if s.id == session_id), None)
-    if session is None:
-        return
-    cost: float | None = session.cost_usd
-    if cost is None and isinstance(session.last_result, dict):
-        raw_cost = session.last_result.get("cost_usd")
-        if isinstance(raw_cost, (int, float)):
-            cost = float(raw_cost)
-    if cost is not None:
-        task.total_cost_usd = (task.total_cost_usd or 0.0) + cost
-
-
-def _extract_scope_tier(last_result: dict[str, object] | None) -> str | None:
-    """Pull ``scope.tier`` off a raw sentinel dict, tolerating a missing/non-dict
-    ``scope`` key. Shared by ``_persist_carried_context`` and
-    ``_resolve_scope_tier`` so the two never drift on how they read the field.
-    """
-    scope_val = last_result.get("scope") if last_result is not None else None
-    return scope_val.get("tier") if isinstance(scope_val, dict) else None
-
-
-def _persist_carried_context(
-    task: TicketTask, last_result: dict[str, object] | None
-) -> None:
-    """Stamp carried-through context (plan_source, computed scope tier) onto the
-    task from a stage-matched sentinel, so a rescue respawn's fresh claim->spawn
-    re-materializes it via cw-context.json (#1050). Null/pre-impl values and a
-    stray plan_source=PLAN_SOURCE_NONE never clobber an already-set value.
-    """
-    if not isinstance(last_result, dict):
-        return
-    plan_source = last_result.get("plan_source")
-    if isinstance(plan_source, str) and plan_source not in ("", PLAN_SOURCE_NONE):
-        task.plan_source = plan_source
-    tier = _extract_scope_tier(last_result)
-    if isinstance(tier, str) and tier:
-        task.computed_scope_tier = tier
-
-
-def _resolve_scope_tier(
-    last_result: dict[str, object] | None, task: TicketTask
-) -> str | None:
-    """Resolve the effective scope tier for a scope-gated advance decision.
-
-    Precedence (escalate-only, #314, #696, #926):
-      0. If either ``task.scope_hint`` or the sentinel's ``scope.tier`` is
-         ``"large"``, the result is ``"large"`` -- an operator hint can only
-         ADD the approval gate, never remove it, and a large sentinel tier is
-         never de-escalated by a smaller hint.
-      1. Otherwise, ``last_result.scope.tier`` -- the plan sentinel's own
-         classification.
-      2. Otherwise, ``task.scope_hint`` -- operator/queue hint, used when the
-         sentinel omits the tier.
-
-    Why: a real PLAN-stage sentinel can legitimately carry ``scope.tier=null``
-    (``lines_actual`` is unknown pre-impl), so a raw read blocked small tickets
-    that should flow PLAN->IMPL unattended (#663 dogfood). Returns ``None`` when
-    neither source supplies a tier -- the caller then blocks conservatively.
-    """
-    tier = _extract_scope_tier(last_result)
-    # Step 0 of the precedence above. Only the exact string "large" escalates;
-    # unexpected hint values (e.g. "medium") are treated as not-large.
-    if SCOPE_TIER_LARGE in (task.scope_hint, tier):
-        return SCOPE_TIER_LARGE
-    if isinstance(tier, str):
-        return tier
-    return task.scope_hint
-
-
 def _park_must_fix_mechanically_rejected(task: TicketTask) -> None:
     """Park *task* BLOCKED_ON_USER for a mechanically-rejected MUST_FIX (#1714).
 
@@ -348,12 +288,11 @@ def _park_must_fix_mechanically_rejected(task: TicketTask) -> None:
     adjudication, which is a quality signal that must stay distinguishable from
     both.
 
-    Field-for-field mirror of ``_park_review_health_gate`` above (same
-    emit-before-transition ordering, same payload shape) with one deliberate
-    difference: ``breadcrumbs`` carries the real ``blocker.reason`` here,
-    because -- unlike the health gate -- this park genuinely originates from a
-    populated blocker dict. That matches Rule 5's own generic breadcrumbs
-    semantics further down this module.
+    Field-for-field mirror of ``_park_review_health_gate`` (review_gates.py)
+    with one deliberate difference: ``breadcrumbs`` carries the real
+    ``blocker.reason`` here, because -- unlike the health gate -- this park
+    genuinely originates from a populated blocker dict. That matches Rule 5's
+    own generic breadcrumbs semantics further down this module.
 
     BLOCKED_ON_USER, not a hold disposition:
     ``REVIEW_MUST_FIX_MECHANICALLY_REJECTED_DISPOSITION`` is deliberately
@@ -400,8 +339,10 @@ def _record_scope_routing_decision(
     Reads ``task.disposition``/``task.scope_hint`` AFTER the site's mutation
     (or lack of one), so ``disposition`` reflects what actually happened, not
     just what was evaluated. Called unconditionally on every routing pass at
-    each of the three ``routing.py`` park-decision sites (Rule 1, Rule 3, and
-    the stage-walk's REVIEW rung) -- this is why the event is excluded from
+    each of the three ``routing`` park-decision sites (Rule 1, Rule 3, and
+    the stage-walk's REVIEW rung, the last of which lives in
+    ``routing/stage_walk.py`` and reaches this function through a deferred
+    import) -- this is why the event is excluded from
     ``_DEFAULT_OPERATOR_EVENT_TYPES`` (``orchestrator_config.py``): an
     audit/diagnostic trail, not an operator alert, at far higher volume than
     any currently-forwarded member.
@@ -503,310 +444,6 @@ def _stage_advance_unchecked(
         )
     else:
         _advance_task_pointer(task, stages)
-
-
-# Maps a sentinel's ``AutoDevResult.stage_reached`` (the closed 7-value
-# StageReached literal, see cw.auto_dev_result) to the pipeline Stage it
-# represents completion of. Used by ``_classify_sentinel_stage_position`` to
-# guard against a late/replayed sentinel from a previous leg being routed
-# against whatever stage the task's row currently holds (#986 incident, GitHub
-# #1019), and to classify a legitimate later-stage self-escalation (#1149).
-# GitHub #1676 narrowed the earlier-stage arm of that guard: only a
-# STAGE_SUCCESS_STATUSES sentinel (the shape the #986/#1019 replay race can
-# actually produce) still refuses at an earlier stage -- see
-# ``_is_stage_advance_claim`` and ``_resolve_stage_walk``. A follow-up in the
-# same ticket then gated the two Rule 1-6 bodies that perform their own
-# additional task.stage-mutating decision beyond the table's ordinary status
-# transition (Rule 5a's FINALIZE self-heal regress, Rule 1's small-tier
-# auto-advance) on ``_is_earlier_stage_report`` -- neither is safe to fire on
-# a sentinel that never reached task.stage, even though the table's ordinary
-# transition now routes it correctly.
-#
-# Stage.HARDEN is deliberately absent: it has no legitimate stage_reached
-# counterpart (RFC 0005 A1, dormant stage) -- every one of the 7 canonical
-# values below maps to PLAN/IMPL/REVIEW/FINALIZE, never HARDEN, so any
-# sentinel arriving against a HARDEN-stage task always mismatches by
-# construction.
-_STAGE_REACHED_TO_STAGE: dict[str, Stage] = {
-    "stage1_pre_flight": Stage.PLAN,
-    "stage1_plan": Stage.PLAN,
-    "stage2_impl": Stage.IMPL,
-    "stage3_review": Stage.REVIEW,
-    "stage4a_merge_gate": Stage.FINALIZE,
-    "stage4b_pr_create": Stage.FINALIZE,
-    "stage5_post_create": Stage.FINALIZE,
-}
-
-
-# Fail fast at import time if this mapping's keys ever drift from the
-# canonical StageReached value set (e.g. a new stage added to the Literal in
-# auto_dev_result.py without a matching entry here) -- a silent gap here
-# degrades to a permanent stage-mismatch refusal with no test signal.
-if set(_STAGE_REACHED_TO_STAGE) != _STAGE_REACHED_CANONICAL:
-    _drift_msg = (
-        "_STAGE_REACHED_TO_STAGE keys drifted from cw.auto_dev_result."
-        "_STAGE_REACHED_CANONICAL -- update both together"
-    )
-    raise AssertionError(_drift_msg)
-
-
-_StagePosition = Literal["bypass", "earlier", "same", "later", "unresolvable"]
-
-
-def _is_stage_advance_claim(last_result: dict[str, object] | None) -> bool:
-    """True iff *last_result* claims a stage-advance (GitHub #1676).
-
-    Only a ``STAGE_SUCCESS_STATUSES`` sentinel (``shipped``/``stage_complete``)
-    can be the subject of the #986/#1019 same-session multi-observation replay
-    race this guard exists for: those are the only statuses a live worker
-    self-escalates on, walking ``task.stage`` forward one rung at a time via
-    ``_walk_stage_pointer_forward`` while preserving ``session_id`` across
-    hops, which is exactly the shape a stale/replayed observation of an
-    earlier hop can be mistaken for. Every other terminal status (``blocked``,
-    a pause, a scope-gated approval, ``no_op``, ...) reported at an earlier
-    stage is a legitimate "could not reach the dispatched stage" outcome, not
-    a replay -- ``_resolve_stage_walk`` uses this to narrow the earlier-stage
-    refusal to advance-claims only.
-    """
-    return isinstance(last_result, dict) and last_result.get("status") in (
-        STAGE_SUCCESS_STATUSES
-    )
-
-
-def _classify_sentinel_stage_position(
-    task: TicketTask,
-    last_result: dict[str, object] | None,
-    clients: dict[str, ClientConfig],
-) -> tuple[_StagePosition, list[Stage] | None, int | None]:
-    """Classify the sentinel's mapped stage relative to ``task.stage`` (#1149).
-
-    Returns ``(position, stages, target_idx)``. ``stages`` and ``target_idx``
-    are populated only for the ``"later"`` case (the pipeline stage list and
-    the walk's destination index); all other positions return ``(pos, None,
-    None)``.
-
-    - ``"bypass"``       -- no ``stage_reached`` to check (e.g. a
-      ``BlockedResult``-derived payload). Routing proceeds exactly as before
-      #1019.
-    - ``"earlier"``      -- the sentinel's stage precedes ``task.stage``. This
-      classifier is a pure ordinal position -- it does not itself decide
-      refuse/proceed. ``_resolve_stage_walk`` refuses an ``"earlier"``
-      position only when the sentinel is a stage-advance claim
-      (``_is_stage_advance_claim``, GitHub #1676): the late/replayed-sentinel
-      shape from a previous leg (the #986 incident). Every other earlier-stage
-      status is a legitimate "could not reach the dispatched stage" report and
-      proceeds to the ordinary Rule 1-6 table at the task's unchanged stage.
-    - ``"same"``         -- exact match. Routes normally via the Rule 1-6 table,
-      exactly as the pre-#1149 equality guard did.
-    - ``"later"``        -- the sentinel's stage follows ``task.stage``: a
-      legitimate self-escalation the row has not yet caught up to. Walk forward.
-    - ``"unresolvable"`` -- a non-str ``stage_reached``, an unmapped value, an
-      unknown client, or a stage absent from the client's pipeline. Fail-closed
-      refuse, matching the pre-#1149 equality check's behavior for these cases.
-
-    Position is computed via ``pipeline.stages.index`` (R2) -- never the
-    ``Stage`` StrEnum's own ordering, which is alphabetical and unrelated to
-    pipeline order. See ``_STAGE_REACHED_TO_STAGE`` for the
-    HARDEN-always-mismatches rationale.
-    """
-    stage_reached = (
-        last_result.get("stage_reached") if isinstance(last_result, dict) else None
-    )
-    if stage_reached is None:
-        return "bypass", None, None
-    mapped = (
-        _STAGE_REACHED_TO_STAGE.get(stage_reached)
-        if isinstance(stage_reached, str)
-        else None
-    )
-    if mapped is None:
-        return "unresolvable", None, None
-    if mapped == task.stage:
-        # Exact match routes regardless of client/pipeline resolvability --
-        # preserves the pre-#1149 equality guard, which never consulted clients.
-        return "same", None, None
-    # A non-matching stage needs the pipeline order to decide earlier vs later.
-    client_cfg = clients.get(task.client)
-    stages = client_cfg.pipeline.stages if client_cfg is not None else None
-    if stages is None or task.stage not in stages or mapped not in stages:
-        return "unresolvable", None, None
-    sentinel_idx = stages.index(mapped)
-    if sentinel_idx < stages.index(task.stage):
-        return "earlier", None, None
-    return "later", stages, sentinel_idx
-
-
-def _is_earlier_stage_report(
-    task: TicketTask,
-    last_result: dict[str, object] | None,
-    clients: dict[str, ClientConfig],
-) -> bool:
-    """True iff the sentinel's ``stage_reached`` precedes ``task.stage`` (GitHub #1676).
-
-    ``_resolve_stage_walk``'s narrowed refusal (``_is_stage_advance_claim``)
-    already lets a non-advance-claim earlier-stage sentinel proceed to the
-    ordinary Rule 1-6 table at ``task.stage`` unchanged -- that part is
-    correct and covers Rule 2/Rule 4/Rule 5's main body as-is. But two Rule
-    bodies perform an *additional* ``task.stage``-mutating decision beyond
-    the table's ordinary status transition, and both implicitly assumed the
-    sentinel reflects work actually done AT ``task.stage``: Rule 5a's
-    FINALIZE self-heal regress, and Rule 1's small-tier auto-advance
-    (``_route_scope_gated_approval``). An earlier-stage sentinel breaks that
-    assumption -- it never reached ``task.stage``, so regressing or
-    advancing ``task.stage`` on its say-so is wrong regardless of its
-    ``blocker.reason`` or resolved scope tier. This predicate gates exactly
-    those two sites; it does not change ``_resolve_stage_walk`` itself.
-    """
-    position, _, _ = _classify_sentinel_stage_position(task, last_result, clients)
-    return position == "earlier"
-
-
-def _walk_stage_pointer_forward(
-    task: TicketTask,
-    stages: list[Stage],
-    target_idx: int,
-    clients: dict[str, ClientConfig],
-    last_result: dict[str, object] | None,
-) -> Literal["proceed", "parked"]:
-    """Walk ``task.stage`` forward to ``stages[target_idx]``, one rung at a time.
-
-    Each rung advances through ``_advance_task_pointer`` (the shared
-    ``TASK_STAGE_CHANGED`` chokepoint, dev_queue.py), so every real stage move
-    emits exactly one event. Before crossing a REVIEW rung the gates are
-    checked, in order (#1617 D1/D3, extended by #1823 and #1870):
-
-      1. The empty-diff gate (#1870): the branch has zero commits ahead of
-         ``origin/<default_branch>``, so the walk stops at REVIEW and parks the
-         task ``BLOCKED_ON_USER``/``empty_diff_gate``. Ahead of everything
-         below -- there is nothing for the other gates to reason about.
-      2. Otherwise the branch-staleness gate (#1823): the branch is behind
-         ``origin/<default_branch>`` with overlapping churn; parks
-         ``BLOCKED_ON_USER``/``branch_behind_main``.
-      3. Otherwise the scope_hint escalation gate: an operator/queue
-         ``scope_hint`` of ``"large"`` outranks both gates below and parks the
-         task ``BLOCKED_ON_USER``/``approval_gate`` -- the third park-decision
-         site #1617 closed (the Checkpoint-3a-headless-auto-continue bypass).
-      4. Otherwise the RFC 0011 A3 proactive finalize hold (#1160): the walk
-         stops at REVIEW and parks the task ``BLOCKED_ON_USER``/
-         ``finalize_gate_held``.
-      5. Otherwise the operator-signoff gate -- if it applies, the walk stops
-         at REVIEW and parks the task ``AWAITING_OPERATOR_SIGNOFF`` (signoff is
-         the ship checkpoint, REVIEW->FINALIZE; RFC 0007 Phase 3, #990).
-
-    Every REVIEW-rung evaluation -- gated or not -- emits the #1617
-    scope-routing audit event (``_record_scope_routing_decision``) so a
-    bypass is diagnosable after the fact.
-
-    ``_advance_task_pointer`` unconditionally clears ``task.session_id`` on
-    every hop ("R6: clear session_id on advance"). That is correct for a genuine
-    single-hop advance, but a multi-hop walk must not blank the id before the
-    landing Rule 1-6 body reads it for its ``SESSION_NEEDS_ATTENTION`` event --
-    so the real id is captured once and restored after each hop. The landing
-    Rule's own genuine advance (Rule 3) still clears it, exactly as pre-#1149
-    single-hop behavior. See GitHub #1149 (plan-review MUST_FIX #1).
-    """
-    original_session_id = task.session_id
-    # #1717: captured once, before any hop -- mirrors original_session_id
-    # above. _advance_task_pointer clears task.stage_base_ref on every hop
-    # (same R6-style side effect as session_id), so the live value is already
-    # gone by the time the walk reaches the REVIEW rung on the very same hop
-    # that carried it there. No real dispatch claim happens mid-walk, so this
-    # pre-walk snapshot is the correct "current head" proxy throughout.
-    original_stage_base_ref = task.stage_base_ref
-    while stages.index(task.stage) < target_idx:
-        # Computed once per iteration, before any REVIEW-rung gate check
-        # below, and consumed (cleared) here regardless of which gate -- if
-        # any -- fires below. REVIEW is visited at most once per walk (the
-        # while condition only moves forward), so this is the walk's single
-        # consumption point for the FINALIZE-regress repeat marker.
-        # _consume_finalize_regress_repeat itself no-ops at any non-REVIEW
-        # stage.
-        is_repeat = _consume_finalize_regress_repeat(task, original_stage_base_ref)
-        if task.stage == Stage.REVIEW and _should_gate_for_empty_diff(task, clients):
-            # Why ahead of even the staleness gate: staleness asks whether the
-            # branch's content still matches main, which presumes there IS
-            # content. A branch with zero commits has nothing to be stale about
-            # and nothing to approve -- answering "may this ship?" at all is the
-            # bug (#1870).
-            _park_empty_diff_gate(task)
-            _record_scope_routing_decision(task, last_result, _RULE_STAGE_WALK)
-            _maybe_emit_finalize_regress_repeat_signal(task, is_repeat)
-            return "parked"
-        if task.stage == Stage.REVIEW and _should_gate_for_branch_staleness(
-            task, clients
-        ):
-            # Why first: every gate below reasons about a sentinel produced
-            # against this branch's tree. If the tree no longer matches
-            # origin/<default> in a file-overlapping way, that sentinel's
-            # verdict -- scope, health, everything -- describes a tree that is
-            # not what would ship (#1823).
-            _park_branch_staleness_gate(task)
-            _record_scope_routing_decision(task, last_result, _RULE_STAGE_WALK)
-            _maybe_emit_finalize_regress_repeat_signal(task, is_repeat)
-            return "parked"
-        if task.stage == Stage.REVIEW and _should_gate_for_scope_hint(
-            task, last_result
-        ):
-            _park_scope_hint_gate(task)
-            _record_scope_routing_decision(task, last_result, _RULE_STAGE_WALK)
-            _maybe_emit_finalize_regress_repeat_signal(task, is_repeat)
-            return "parked"
-        # Not `elif` (ruff RET505: an elif after a `return` is redundant) --
-        # the `return` above already makes this exclusive with the branches
-        # below, unlike the landing Rule 1-6 sites (which have no early return
-        # and so use a real `elif` chain instead).
-        if task.stage == Stage.REVIEW and _should_force_hold_finalize(task, clients):
-            _park_finalize_hold(task)
-            _record_scope_routing_decision(task, last_result, _RULE_STAGE_WALK)
-            _maybe_emit_finalize_regress_repeat_signal(task, is_repeat)
-            return "parked"
-        if task.stage == Stage.REVIEW and _should_gate_for_signoff(task, clients):
-            _park_signoff_gate(task)
-            _record_scope_routing_decision(task, last_result, _RULE_STAGE_WALK)
-            _maybe_emit_finalize_regress_repeat_signal(task, is_repeat)
-            return "parked"
-        if task.stage == Stage.REVIEW:
-            _record_scope_routing_decision(task, last_result, _RULE_STAGE_WALK)
-            _maybe_emit_finalize_regress_repeat_signal(task, is_repeat)
-        _advance_task_pointer(task, stages)
-        task.session_id = original_session_id
-    return "proceed"
-
-
-def _resolve_stage_walk(
-    task: TicketTask,
-    last_result: dict[str, object] | None,
-    clients: dict[str, ClientConfig],
-) -> Literal["refuse", "proceed", "parked"]:
-    """Decide how a sentinel's stage position routes against ``task.stage`` (#1149).
-
-    Unresolvable positions always refuse (fail-closed, the #1019/#986 guard,
-    preserved). An earlier-stage position refuses only when the sentinel is a
-    stage-advance claim (``_is_stage_advance_claim``, GitHub #1676) --
-    narrowed from an unconditional earlier-stage refusal, since only a
-    ``STAGE_SUCCESS_STATUSES`` sentinel can be the #986/#1019 same-session
-    replay this guard exists for. Every other earlier-stage status (a
-    pause, a scope-gated approval, ``no_op``, ``blocked``, ...) is a
-    legitimate "could not reach the dispatched stage" report and proceeds to
-    the ordinary Rule 1-6 table at the task's unchanged stage, same as
-    same-stage and bypass. A later-stage sentinel walks ``task.stage`` forward
-    to the sentinel's stage via ``_walk_stage_pointer_forward``, then proceeds
-    (or parks at a REVIEW signoff gate). The walk mutates ``task.stage`` in
-    place as a side effect -- the caller then applies the Rule 1-6 table at
-    the now-matching stage.
-    """
-    position, stages, target_idx = _classify_sentinel_stage_position(
-        task, last_result, clients
-    )
-    if position == "later" and stages is not None and target_idx is not None:
-        return _walk_stage_pointer_forward(
-            task, stages, target_idx, clients, last_result
-        )
-    if position == "unresolvable":
-        return "refuse"
-    if position == "earlier" and _is_stage_advance_claim(last_result):
-        return "refuse"
-    return "proceed"
 
 
 def apply_staged_decision(
@@ -1089,6 +726,7 @@ def _route_staged_decision(
     stage, then the Rule 1-6 table applies at the now-matching stage; if a
     REVIEW gate (the A3 finalize hold, #1160, or the signoff gate) intervenes
     the walk parks the task and returns without applying the table.
+
     Same-stage and no-``stage_reached`` sentinels route through Rule 1-6 exactly
     as before. Returns ``False`` on refusal, ``True`` for every routed path.
     """
@@ -1318,11 +956,11 @@ def _route_staged_decision(
         # behind a DIFFERENT ticket's open PR -- this row has no PR of its
         # own yet, so pr_url/pr_hydrate can't help. Stamp the blocking PR's
         # bare number (regex-extracted from blocker.details, the only place
-        # the producer emits it -- see _extract_blocked_on_pr) directly on
-        # task AFTER transition_task_status returns: that call's unconditional
-        # latch-clear (mirrors escalation_parked_at) zeroes blocked_on_pr as
-        # part of every transition, so stamping before the call would be
-        # immediately wiped.
+        # the producer emits it -- see routing/pr_refs.py's
+        # _extract_blocked_on_pr) directly on task AFTER transition_task_status
+        # returns: that call's unconditional latch-clear (mirrors
+        # escalation_parked_at) zeroes blocked_on_pr as part of every
+        # transition, so stamping before the call would be immediately wiped.
         if blocker_reason == _PRIOR_PIPELINE_PR_OPEN_REASON:
             details = blocker.get("details") if isinstance(blocker, dict) else None
             task.blocked_on_pr = _extract_blocked_on_pr(details)
