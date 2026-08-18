@@ -8830,6 +8830,94 @@ class TestDeriveDisposition:
     def test_unknown_returns_abandoned(self) -> None:
         assert self._derive("some_unknown_status") == "abandoned"
 
+    def test_stale_dispatch_derives_verbatim(self) -> None:
+        """#1862: STAGE_FAILURE_STATUSES membership composes in by reference."""
+        assert self._derive("stale_dispatch") == "stale_dispatch"
+
+
+# ---------------------------------------------------------------------------
+# TestStaleDispatchDispositions (#1862)
+# ---------------------------------------------------------------------------
+
+
+class TestStaleDispatchDispositions:
+    """The two #1862 disposition literals and their lockstep guards.
+
+    The agent-emitted sentinel path and the code-side pre-dispatch gate park
+    use DISTINCT literals (plan adopted assumption 7, #1729 precedent). One
+    literal for both would put a gate-class park -- which hardcodes
+    ``breadcrumbs=""`` and structurally cannot carry one -- into
+    ``BREADCRUMB_ELIGIBLE_PAUSED_STATUSES``.
+    """
+
+    def test_status_derived_disposition_value(self) -> None:
+        from cw.dev_queue import STALE_DISPATCH_DISPOSITION
+
+        assert STALE_DISPATCH_DISPOSITION == "stale_dispatch"
+
+    def test_status_derived_disposition_is_a_status_member(self) -> None:
+        from typing import get_args
+
+        from cw.auto_dev_result import Status
+        from cw.dev_queue import STALE_DISPATCH_DISPOSITION
+
+        assert STALE_DISPATCH_DISPOSITION in get_args(Status)
+
+    def test_gate_disposition_value(self) -> None:
+        from cw.dev_queue import STALE_DISPATCH_GATE_DISPOSITION
+
+        assert STALE_DISPATCH_GATE_DISPOSITION == "stale_dispatch_gate"
+
+    def test_gate_disposition_is_never_a_status_member(self) -> None:
+        """Inverse lockstep guard: the gate literal must not collapse into
+        the Status-derived set (adopted assumption 7)."""
+        from typing import get_args
+
+        from cw.auto_dev_result import Status
+        from cw.dev_queue import STALE_DISPATCH_GATE_DISPOSITION
+
+        assert STALE_DISPATCH_GATE_DISPOSITION not in get_args(Status)
+
+    def test_gate_disposition_is_not_breadcrumb_eligible(self) -> None:
+        from cw.dev_queue import STALE_DISPATCH_GATE_DISPOSITION
+        from cw.dispatch import BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+
+        assert (
+            STALE_DISPATCH_GATE_DISPOSITION not in BREADCRUMB_ELIGIBLE_PAUSED_STATUSES
+        )
+
+    def test_pre_dispatch_stale_pr_reason_value(self) -> None:
+        from cw.dev_queue.lifecycle import _PRE_DISPATCH_STALE_PR_REASON
+
+        assert _PRE_DISPATCH_STALE_PR_REASON == "pr_already_open_pre_dispatch"
+
+    def test_gate_park_stamps_disposition_without_charging_attempt(self) -> None:
+        """The code-side park: BLOCKED_ON_USER, no unproductive charge, no pr_url."""
+        from cw.dev_queue import (
+            STALE_DISPATCH_GATE_DISPOSITION,
+            transition_task_status,
+        )
+        from cw.dev_queue.lifecycle import _PRE_DISPATCH_STALE_PR_REASON
+
+        task = TicketTask(
+            ticket_id="GEN-1862-park",
+            client="test-client",
+            status=QueueItemStatus.PENDING,
+        )
+        transition_task_status(
+            task,
+            QueueItemStatus.BLOCKED_ON_USER,
+            disposition=STALE_DISPATCH_GATE_DISPOSITION,
+            blocked_reason=_PRE_DISPATCH_STALE_PR_REASON,
+            unproductive=False,
+        )
+        assert task.status == QueueItemStatus.BLOCKED_ON_USER
+        assert task.disposition == "stale_dispatch_gate"
+        assert task.blocked_reason == _PRE_DISPATCH_STALE_PR_REASON
+        assert task.completed_at is not None
+        assert task.pr_url is None
+        assert task.unproductive_attempts == 0
+
 
 # ---------------------------------------------------------------------------
 # TestHoldAwareDisposition

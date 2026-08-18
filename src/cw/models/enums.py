@@ -394,6 +394,9 @@ class DispatchSkipReason(StrEnum):
     cannot push and would burn a slot for a guaranteed-failing session.
     ATTEMPT_CAP_BLOCKED is emitted per-task when the global attempt ceiling
     parks a task; it is not part of the per-client-tick precedence chain.
+    STALE_PR_BLOCKED (#1862) is likewise per-task and outside the precedence
+    chain: it is emitted when the pre-dispatch open-PR gate parks a PLAN/IMPL-
+    stage task whose branch already carries an open, unmerged PR.
     HOST_CAPACITY_GATED ranks just above CAP_FULL (#1444): a fleet-wide
     ``OrchestratorConfig.host_session_budget`` ceiling on concurrently-running
     DAEMON sessions across the whole host, folded into the per-client
@@ -410,6 +413,7 @@ class DispatchSkipReason(StrEnum):
     CAP_FULL = "cap_full"
     LANE_CAP_BLOCKED = "lane_cap_blocked"
     ATTEMPT_CAP_BLOCKED = "attempt_cap_blocked"
+    STALE_PR_BLOCKED = "stale_pr_blocked"
     SPAWN_ERROR = "spawn_error"
     LANE_CIRCUIT_PAUSED = "lane_circuit_paused"
     SPAWN_ERROR_BACKOFF = "spawn_error_backoff"

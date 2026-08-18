@@ -32,7 +32,7 @@ _log = logging.getLogger("cw.auto_dev_result")
 # Accepted sentinel schema versions. Single source of truth: parse.py derives
 # SUPPORTED_SCHEMA_VERSIONS (its pre-Pydantic gate) from this Literal via
 # get_args, so a version bump edits exactly one place (#1535 drift class).
-SchemaVersion = Literal[1, 2, 3, 4, 5, 6]
+SchemaVersion = Literal[1, 2, 3, 4, 5, 6, 7]
 
 Status = Literal[
     "shipped",
@@ -60,6 +60,17 @@ Status = Literal[
     # supported schema versions (same rollout exception as _V4_STATUSES) until
     # the producer skills bump their emitted schema_version to 6.
     "empty_diff_blocked",
+    # #1862: this ticket already has an open, unmerged PR from an earlier
+    # dispatch, so the run refuses rather than re-implementing on top of work
+    # already in review. Distinct from no_op (nothing is complete -- the PR is
+    # unmerged) and from blocked (nothing is broken -- the PR is healthy, just
+    # not this session's to duplicate). May be reported pre-branch (the Stage 0
+    # intake self-check) or post-branch (discovered mid-IMPL on a resume), so
+    # it is NOT a _PRE_BRANCH_STATUSES member and may carry a blocker naming
+    # the discovered PR. Accepted under all supported schema versions (same
+    # rollout exception as _V4_STATUSES) until the producer skills bump their
+    # emitted schema_version to 7.
+    "stale_dispatch",
 ]
 # Statuses introduced after v1. Emitting one under schema_version=1 is a
 # producer bug — it would silently degrade for downstream tools that key off
@@ -93,6 +104,7 @@ STAGE_FAILURE_STATUSES: frozenset[str] = frozenset(
         "scope_exceeded",
         "forbidden_area",
         "empty_diff_blocked",
+        "stale_dispatch",
     }
 )
 # blocker.reason (open enum, §4.2) paired with the empty_diff_blocked status
@@ -100,6 +112,14 @@ STAGE_FAILURE_STATUSES: frozenset[str] = frozenset(
 # codex-review synthesis path and the auto-dev-review producer skill -- and a
 # typo in either would be invisible to the closed-enum status check. See #1870.
 EMPTY_DIFF_BLOCKER_REASON: Literal["empty_diff_no_commits"] = "empty_diff_no_commits"
+# blocker.reason (open enum, §4.2) paired with the stale_dispatch status above.
+# Named for the same reason EMPTY_DIFF_BLOCKER_REASON is: two producers write
+# it (the auto-dev-intake Stage 0 self-check and the auto-dev-plan Stage 1
+# resume-path check), and a typo in either would be invisible to the
+# closed-enum status check. Deliberately distinct from
+# cw.dev_queue.lifecycle._PRE_DISPATCH_STALE_PR_REASON, which names the
+# *code-side* gate's park -- that one is never emitted by an agent. See #1862.
+STALE_DISPATCH_BLOCKER_REASON: Literal["pr_already_open"] = "pr_already_open"
 # Blocker reasons at Stage.FINALIZE eligible for automatic regress to IMPL.
 # "agent_block" covers prep-pr gate failures (diff-cover, etc.) that a fresh
 # impl session can fix by adding missing tests. Reasons absent here (e.g.
@@ -147,6 +167,10 @@ SALVAGE_TERMINAL_STATUSES: frozenset[str] = (
             # sentinel reported an empty diff would otherwise be mislabeled
             # crashed and re-dispatched onto the same empty branch.
             "empty_diff_blocked",
+            # #1862. Explicit member for the same reason: a crashed worker
+            # whose last sentinel reported an already-open PR would otherwise
+            # be re-dispatched onto the exact ticket the sentinel just refused.
+            "stale_dispatch",
         }
     )
     | PAUSED_FOR_USER_INPUT_STATUSES
@@ -445,7 +469,13 @@ class Blocker(BaseModel):
 
 
 _TERMINAL_REJECT_STATUSES: frozenset[Status] = frozenset(
-    {"scope_exceeded", "forbidden_area", "blocked", "empty_diff_blocked"},
+    {
+        "scope_exceeded",
+        "forbidden_area",
+        "blocked",
+        "empty_diff_blocked",
+        "stale_dispatch",
+    },
 )
 _PRE_BRANCH_STATUSES: frozenset[Status] = frozenset(
     {
@@ -701,6 +731,11 @@ class AutoDevResult(BaseModel):
         # (EMPTY_DIFF_BLOCKER_REASON names which branch measured empty against
         # which base) — unlike scope_exceeded/forbidden_area it is post-branch,
         # so there is a real measurement to report.
+        # Exception (#1862): stale_dispatch may carry one on the same terms
+        # (STALE_DISPATCH_BLOCKER_REASON, with details naming the discovered
+        # PR's number/URL/review state) -- that identity is the whole triage
+        # signal, and `pr` stays required-null because this run did not create
+        # the PR it found.
         if self.status == "blocked" and self.blocker is None:
             msg = "blocker must be non-null when status is 'blocked'"
             raise ValueError(msg)
@@ -708,6 +743,7 @@ class AutoDevResult(BaseModel):
             "blocked",
             "merge_gate_blocked",
             "empty_diff_blocked",
+            "stale_dispatch",
         }
         if not blocker_allowed and self.blocker is not None:
             msg = f"blocker must be null when status is {self.status!r}"
@@ -778,16 +814,20 @@ class AutoDevResult(BaseModel):
             )
             raise ValueError(msg)
 
-        # stage1_pre_flight can exit as no_op (work not needed) or blocked
+        # stage1_pre_flight can exit as no_op (work not needed), blocked
         # (work needed but a pre-flight gate failed, e.g. Origin Sync — see
-        # issue #226). Other statuses still violate the pre-impl contract.
+        # issue #226), or stale_dispatch (work needed but this ticket already
+        # has an open PR from an earlier dispatch — #1862; the intake
+        # self-check that detects it runs at pre-flight, before any planning).
+        # Other statuses still violate the pre-impl contract.
         if self.stage_reached == "stage1_pre_flight" and self.status not in (
             "no_op",
             "blocked",
+            "stale_dispatch",
         ):
             msg = (
                 f"stage_reached='stage1_pre_flight' requires status in "
-                f"('no_op', 'blocked'), got status={self.status!r}"
+                f"('no_op', 'blocked', 'stale_dispatch'), got status={self.status!r}"
             )
             raise ValueError(msg)
 

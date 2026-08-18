@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from cw.config import (
     _load_concurrency_overrides,
@@ -45,6 +45,7 @@ from cw.dispatch.claim import (
     _lane_occupants_for_client,
     _spawn_claimed_task,
 )
+from cw.dispatch.pr_gate import resolve_stale_pr_ticket_ids
 
 _log = logging.getLogger("cw.dispatch")
 
@@ -353,6 +354,82 @@ def _handle_paused_lane(
     return lane_paused_here
 
 
+class _LaneSlotBreakdown(NamedTuple):
+    """Per-lane occupancy split feeding the grant math and the tick payload.
+
+    ``blocked``/``signoff`` are the BLOCKED_ON_USER and AWAITING_OPERATOR_SIGNOFF
+    subsets of the lane's occupants (both occupy slots per ADR-0006, but must be
+    reported separately so an operator can see *why* claimed=0 when pending>0 --
+    #588, #990); ``pending`` is the claimable backlog.
+    """
+
+    blocked: int
+    signoff: int
+    pending: int
+
+
+def _lane_slot_breakdown(
+    lane_occupants: list[dict[str, str]],
+    queue_snapshot: DevQueueStore,
+    *,
+    client_name: str,
+    lane_name: str,
+) -> _LaneSlotBreakdown:
+    """Split one lane's occupancy into blocked/signoff/pending counts.
+
+    Extracted from :func:`_dispatch_client_lanes` to keep that function inside
+    its PLR statement budget. Derives blocked/signoff from the already-computed
+    *lane_occupants* rather than re-scanning the queue; only ``pending`` needs
+    its own scan, since PENDING rows are deliberately not lane occupants.
+    """
+    return _LaneSlotBreakdown(
+        blocked=sum(
+            1
+            for o in lane_occupants
+            if o["status"] == QueueItemStatus.BLOCKED_ON_USER.value
+        ),
+        signoff=sum(
+            1
+            for o in lane_occupants
+            if o["status"] == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF.value
+        ),
+        pending=sum(
+            1
+            for t in queue_snapshot.tasks
+            if t.client == client_name
+            and t.lane == lane_name
+            and t.status == QueueItemStatus.PENDING
+        ),
+    )
+
+
+def _resolve_stale_pr_ticket_ids_if_gated(
+    client: ClientConfig,
+    queue_snapshot: DevQueueStore,
+    *,
+    config: OrchestratorConfig,
+    available_client_slots: int,
+) -> frozenset[str]:
+    """The #1862 pre-dispatch open-PR gate's resolve call, guarded (perf follow-up).
+
+    Extracted from :func:`_dispatch_client_lanes` to keep that function inside
+    its PLR branch/statement budget (mirrors the extraction rationale
+    ``_lane_slot_breakdown`` above already states).
+
+    Skipped when this client has no capacity to claim anything this tick
+    (``available_client_slots <= 0``, mirroring the per-lane loop's own early
+    exit) -- probing is pure cost with no possible effect on a tick that
+    cannot claim regardless, and skipping it here means a client that is
+    already fully saturated never pays the gate's gh-subprocess fan-out. Also
+    skipped fleet-wide when the operator has disabled the gate via
+    ``OrchestratorConfig.pr_gate_enabled`` (the escape hatch mirroring
+    ``ssh_key_gate_enabled``).
+    """
+    if not config.pr_gate_enabled or available_client_slots <= 0:
+        return frozenset()
+    return resolve_stale_pr_ticket_ids(client, queue_snapshot)
+
+
 def _dispatch_client_lanes(
     client: ClientConfig,
     effective_lanes: list[LaneConfig],
@@ -422,6 +499,20 @@ def _dispatch_client_lanes(
     # join _lane_stats_for_client uses -- so blocked_in_lane/signoff_in_lane
     # below derive from it rather than re-scanning the queue.
     occupants_by_lane = _lane_occupants_for_client(client, queue_snapshot)
+    # Pre-dispatch open-PR gate (#1862). Resolved once here -- outside every
+    # lock and outside the per-lane loop -- because it makes `gh` calls, which
+    # _claim_next_pending must never do while holding dev_queue_lock(). The
+    # `queue_snapshot` it scans was already loaded lock-free by dispatch_tick
+    # (ADR-0005: a stale read is acceptable for read-only callers); a row that
+    # changed since then is re-checked by stage under the lock inside
+    # _claim_next_pending, so a stale snapshot cannot park a healthy task. See
+    # _resolve_stale_pr_ticket_ids_if_gated for the capacity/toggle guard.
+    stale_pr_ticket_ids = _resolve_stale_pr_ticket_ids_if_gated(
+        client,
+        queue_snapshot,
+        config=config,
+        available_client_slots=available_client_slots,
+    )
 
     for lane_cfg in effective_lanes:
         if available_client_slots <= 0:
@@ -448,37 +539,21 @@ def _dispatch_client_lanes(
         # running_in_lane = RUNNING + BLOCKED_ON_USER + AWAITING_OPERATOR_SIGNOFF
         # (total occupied slots, OCCUPIED_LANE_STATUSES, #990).
         running_in_lane = running_by_lane.get(lane_cfg.name, 0)
-        # blocked_in_lane = BLOCKED_ON_USER only (for per-lane breakdown),
-        # derived from occupants_by_lane rather than re-scanning the queue.
-        blocked_in_lane = sum(
-            1
-            for o in occupants_by_lane.get(lane_cfg.name, [])
-            if o["status"] == QueueItemStatus.BLOCKED_ON_USER.value
-        )
-        # signoff_in_lane = AWAITING_OPERATOR_SIGNOFF only (for per-lane
-        # breakdown). Must be subtracted out of running_in_lane below, else a
-        # signoff-parked ticket is misreported as "running" (#990).
-        signoff_in_lane = sum(
-            1
-            for o in occupants_by_lane.get(lane_cfg.name, [])
-            if o["status"] == QueueItemStatus.AWAITING_OPERATOR_SIGNOFF.value
-        )
-        pending_in_lane = sum(
-            1
-            for t in queue_snapshot.tasks
-            if t.client == client.name
-            and t.lane == lane_cfg.name
-            and t.status == QueueItemStatus.PENDING
+        breakdown = _lane_slot_breakdown(
+            occupants_by_lane.get(lane_cfg.name, []),
+            queue_snapshot,
+            client_name=client.name,
+            lane_name=lane_cfg.name,
         )
         grant = min(
             lane_cfg.max_parallel - running_in_lane,
-            pending_in_lane,
+            breakdown.pending,
             available_client_slots,
         )
         # Detect: pending work exists but the lane cap is full of occupied
         # slots (RUNNING + BLOCKED_ON_USER >= max_parallel). Raises the
         # skip_reason to LANE_CAP_BLOCKED instead of the misleading NO_PENDING.
-        if grant <= 0 and pending_in_lane > 0:
+        if grant <= 0 and breakdown.pending > 0:
             lane_cap_blocked = True
         lane_claimed = 0
         for _ in range(max(0, grant)):
@@ -488,6 +563,7 @@ def _dispatch_client_lanes(
                 config=config,
                 priority_ticket_ids=priority_ids,
                 usage_limited_until=usage_limited_until,
+                stale_pr_ticket_ids=stale_pr_ticket_ids,
             )
             spawn_backoff_skipped |= backoff_skipped
             if task is None:
@@ -522,10 +598,10 @@ def _dispatch_client_lanes(
 
         lane_stats[lane_cfg.name] = {
             "claimed": lane_claimed,
-            "running": running_in_lane - blocked_in_lane - signoff_in_lane,
-            "blocked": blocked_in_lane,
-            "signoff": signoff_in_lane,
-            "pending": pending_in_lane,
+            "running": running_in_lane - breakdown.blocked - breakdown.signoff,
+            "blocked": breakdown.blocked,
+            "signoff": breakdown.signoff,
+            "pending": breakdown.pending,
         }
 
         if usage_limit_detected or spawn_error:

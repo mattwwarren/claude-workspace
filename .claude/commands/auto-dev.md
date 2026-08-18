@@ -957,6 +957,7 @@ Applies to: `no_op`, `plan_pending_approval`, `ambiguities_pending_resolution`, 
 | `forbidden_area` | `--forbidden` constraint matched a planned file; ticket rejected before impl started |
 | `blocked` | Unrecoverable error mid-pipeline; see `blocker` field for details |
 | `empty_diff_blocked` | Branch pushed but measures zero commits ahead of `origin/<default_branch>` — nothing to review or ship; dispatch's #1870 gate or the review-stage synthesis itself detected this and parked for human triage rather than presenting a normal scope-approval decision. `branch` is non-null; `next_actions` is empty; `blocker.reason` is typically `empty_diff_no_commits` |
+| `stale_dispatch` | This ticket already has an open, **unmerged** PR from an earlier dispatch, so the run refuses rather than re-implementing work already in review (#1862). Detected by the Stage 0 intake self-check (see `auto-dev-intake.md` Step 3), or by `cw`'s own pre-dispatch gate before a session is even spawned. `pr` stays **null** — this run did not create that PR; its number/URL/review state go in `blocker.details`. `next_actions` is empty; `blocker.reason` is `pr_already_open`. Distinct from `no_op` (nothing is complete — the PR is unmerged) and from `merge_gate_blocked` (that is a *different* ticket's PR blocking this one) |
 
 ### `blocker.reason` Values
 
@@ -1000,6 +1001,7 @@ Optional keys (some `reason` values require them):
 - `merge_gate_blocked` → `"stage4a_merge_gate"`
 - `scope_exceeded` / `forbidden_area` → whichever stage detected the violation (`"stage1_plan"` at planning, or the impl stage if later); mirror in `blocker.stage`
 - `empty_diff_blocked` → `"stage2_impl"` or `"stage3_review"` — whichever stage measured the empty branch; both are legal. Mirror it in `blocker.stage`
+- `stale_dispatch` → `"stage1_pre_flight"` for the Stage 0 intake self-check (the common case), or whichever later stage a resume path discovered the open PR at. Mirror it in `blocker.stage`
 - `blocked` with `blocker.reason: "plan_unreviewable"`, `"plan_unsound"`, `"ambiguity_scan_unconverged"`, or `"deferred_stub_unresolved"` → `"stage1_plan"`
 - `blocked` (other reasons) → whichever stage produced the BLOCK; mirror this in `blocker.stage`.
 
@@ -1036,6 +1038,11 @@ Empty (`[]`) when the status is anything else. Per the headless contract §4.4, 
 - **v2** — adds the `no_op` status (Stage 1 pre-flight already-satisfied path).
 - **v3** — `no_op` emitted with `stage_reached="stage1_pre_flight"` and `plan_source="none"`.
 - **v4** — promotes `ambiguities_pending_resolution` and `premises_pending_verification` to canonical statuses (previously interim values the parser routed through the synthetic-block fallback), and adds the top-level `ambiguities` / `premises` arrays (non-empty when their corresponding status is set).
+- **v5** — adds the optional `review.agents_run` int (count of reviewer agents that ran). Defaults to `0`; older payloads that omit it parse unchanged.
+- **v6** — adds the `empty_diff_blocked` status and its canonical `empty_diff_no_commits` `blocker.reason` (#1870).
+- **v7** — adds the `stale_dispatch` status and its canonical `pr_already_open` `blocker.reason`, and widens `stage_reached="stage1_pre_flight"`'s allowed statuses (previously `no_op`/`blocked`) to admit it (#1862).
+
+v5-v7 are accepted by the parser under **all** supported schema versions as a rollout exception, so this skill may keep emitting its current `schema_version` while using them. See `docs/headless-contract.md §8` for the authoritative table.
 
 A parser older than the emitted version routes unknown statuses through the synthetic-block fallback, so the consumer side must merge before producers emit a new version. The `cw` parser accepts legacy v1–v3 during the rollout window; the v4 parser side shipped in `claude-workspace#191` and must be deployed before this skill emits `schema_version: 4`.
 
