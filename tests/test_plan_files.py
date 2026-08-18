@@ -81,6 +81,40 @@ def test_empty_bullet_body_is_skipped() -> None:
     assert parse_plan_files_modified(plan) == ["a/b.py"]
 
 
+def test_ignores_files_modified_section_illustrated_inside_a_code_fence() -> None:
+    """A fenced illustration ahead of the real section is not the manifest.
+
+    This is the false positive that blocked #1905's first impl pass: the plan
+    doc fenced an example ``## Files Modified`` block, and the fence-unaware
+    matcher parsed the example's fake path as the whole manifest. The mirrored
+    gate script still has this weakness — tracked in #1917.
+    """
+    plan = (
+        "# Plan\n\n"
+        "## Patterns Found\n\n"
+        "```\n"
+        "## Files Modified\n"
+        "- src/fake_illustration.py\n"
+        "```\n\n"
+        "## Files Modified\n"
+        "- src/real_target.py\n"
+    )
+    assert parse_plan_files_modified(plan) == ["src/real_target.py"]
+
+
+def test_skips_fenced_bullets_inside_the_files_modified_body() -> None:
+    """A fence opened and closed mid-section hides only its own bullets."""
+    plan = (
+        "## Files Modified\n"
+        "- a/before.py\n"
+        "```python\n"
+        "- a/fenced.py\n"
+        "```\n"
+        "- a/after.py\n"
+    )
+    assert parse_plan_files_modified(plan) == ["a/before.py", "a/after.py"]
+
+
 def test_looks_like_path_rejects_tokens_containing_whitespace() -> None:
     """Defensive guard inherited from the mirrored script: a token with inner
     whitespace is never a path, even though the bullet/table split above cannot
