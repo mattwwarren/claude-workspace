@@ -786,12 +786,7 @@ _ADDED_FILES_LOG = (
     "Let me know if there are others we should add."
 )
 _SEARCH_BLOCK = (
-    "core/database.py\n"
-    "<<<<<<< SEARCH\n"
-    "old = 1\n"
-    "=======\n"
-    "new = 2\n"
-    ">>>>>>> REPLACE\n"
+    "core/database.py\n<<<<<<< SEARCH\nold = 1\n=======\nnew = 2\n>>>>>>> REPLACE\n"
 )
 
 
@@ -1083,8 +1078,8 @@ def test_build_task_message_fetches_from_tracker_when_plan_absent(
 
     result = build_task_message(tmp_path, ticket_id="896", plan_fetcher=fetcher)
 
-    assert result is not None
-    assert "Do the thing." in result
+    assert result == _PATH_FREE_TASK_INSTRUCTION
+    assert "Do the thing." in _task_context(tmp_path)
     assert fetcher.calls == ["896"]
 
 
@@ -1138,8 +1133,8 @@ def test_build_task_message_plan_on_disk_skips_fetcher(tmp_path: Path) -> None:
 
     result = build_task_message(tmp_path, ticket_id="896", plan_fetcher=fetcher)
 
-    assert result is not None
-    assert "existing plan" in result
+    assert result == _PATH_FREE_TASK_INSTRUCTION
+    assert "existing plan" in _task_context(tmp_path)
     assert fetcher.calls == []
 
 

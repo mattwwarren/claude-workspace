@@ -33,6 +33,7 @@ from cw.local_runner import (
     ENDPOINT_NOT_CONFIGURED,
     LIVENESS_UNAVAILABLE,
     PLAN_MISSING,
+    TASK_CONTEXT_RELATIVE_PATH,
     UNEXPECTED_ERROR,
     AiderRunner,
     GithubIssuePlanFetcher,
@@ -79,6 +80,7 @@ from cw.opencode_runner import (
 from cw.opencode_runner import (
     make_blocked as make_opencode_blocked,
 )
+from cw.plan_files import parse_plan_files_modified
 from cw.reconcile import AUTO_DEV_LABEL_PREFIX
 from cw.result import emit_result_locked
 from cw.spawn import spawn_create_impl
@@ -311,6 +313,11 @@ class _PreflightOK(NamedTuple):
     endpoint: str
     model: str
     task_message: str
+    # The plan's ``## Files Modified`` manifest — aider's explicit edit set
+    # (#1905). Empty when the plan has no manifest section.
+    files: list[str]
+    # The materialised read-only task-context file passed to aider as --read.
+    read_only_path: Path
 
 
 def _local_preflight(
@@ -356,10 +363,20 @@ def _local_preflight(
             worktree=worktree,
             reason=PLAN_MISSING,
         )
+    # Both files below are guaranteed on disk by build_task_message's own
+    # materialise-before-return contract (it writes .cw/plan.md on a tracker
+    # fetch, and the task-context file unconditionally on the success path).
+    # The re-read is still suppressed: an unreadable plan degrades to "no
+    # manifest" (zero --file flags, aider's own heuristic), never to a crash.
+    plan_text = ""
+    with contextlib.suppress(OSError):
+        plan_text = (worktree / ".cw" / "plan.md").read_text(encoding="utf-8")
     return _PreflightOK(
         endpoint=config.endpoint,  # narrowed: is-None check above
         model=config.model or "",
         task_message=task_message,
+        files=parse_plan_files_modified(plan_text),
+        read_only_path=worktree / TASK_CONTEXT_RELATIVE_PATH,
     )
 
 
@@ -441,7 +458,12 @@ class LocalExecutor:
                 # Capture the PID + start-time as a liveness handle, leave the
                 # session ACTIVE, and return — reconcile/local harvest completes
                 # it once the process exits. NEVER block on the run here.
-                argv = build_argv(preflight.model, preflight.task_message)
+                argv = build_argv(
+                    preflight.model,
+                    preflight.task_message,
+                    preflight.files,
+                    preflight.read_only_path,
+                )
                 env = build_env(preflight.endpoint)
                 proc = self._runner.launch(worktree, argv, env)
                 start_time_ns = read_process_start_time_ns(proc.pid)
