@@ -8,6 +8,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A requeue-to-impl refusal message no longer claims a non-GitHub tracker
+  was checked when it wasn't (#1906):** `requeue.py`'s impl-bypass plan-
+  availability guard called `fetch_approved_plan_comment` (GitHub-only)
+  unconditionally as its tracker fallback, so a Linear-tracked (or other
+  non-GitHub) ticket's requeue-to-impl refusal wrongly told the operator "no
+  reviewed plan comment ... was found on the tracker" even though the
+  tracker was never actually queried, and directed them to re-run Stage 1
+  when an approved plan may already be posted there. The guard now resolves
+  the client's tracker first: it still fail-opens (attempts the GitHub fetch)
+  when the tracker is unresolvable, but skips the call and returns an honest,
+  tracker-aware refusal message when the tracker is positively known to be
+  non-GitHub — pointing the operator at tracker-side plan recovery instead of
+  a redundant Stage 1 rerun.
+
 - **A usage-limit-only attempt history no longer reads as a legitimate
   first-stage ship (#1631):** reconcile's timed-out-merged backstop refused to
   auto-complete a PENDING row only when `attempts == spawn_error_count`, but
