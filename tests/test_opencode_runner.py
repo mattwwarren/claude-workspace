@@ -7,17 +7,21 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from cw.auto_dev_result import AutoDevResult
 from cw.opencode_runner import (
     OPENCODE_LOG_RELATIVE_PATH,
     OPENCODE_NO_OUTPUT,
     OPENCODE_NOT_FOUND,
     STAGE4A_MERGE_GATE,
+    SUPPORTED_STAGES,
     FakeOpencodeRunner,
     RealOpencodeRunner,
     build_argv,
     build_env,
     build_finalize_prompt,
+    build_stage_prompt,
     extract_text_from_jsonl,
     make_blocked,
     opencode_available,
@@ -61,6 +65,7 @@ def test_build_argv_with_model(tmp_path: Path) -> None:
     assert "--format" in argv
     assert "json" in argv
     assert "--pure" in argv
+    assert "--auto" in argv
     assert "--dir" in argv
     assert str(tmp_path) in argv
     assert "--model" in argv
@@ -82,11 +87,16 @@ def test_build_argv_without_model(tmp_path: Path) -> None:
 
 def test_build_env_filters_secrets() -> None:
     """build_env excludes non-allowlisted vars (e.g. AWS_SECRET_KEY)."""
-    env_patch = {"AWS_SECRET_KEY": "leaked", "HOME": "/tmp"}
+    env_patch = {
+        "AWS_SECRET_KEY": "leaked",
+        "HOME": "/tmp",
+        "TMPDIR": "/var/folders/xx/T/",
+    }
     with patch.dict("os.environ", env_patch, clear=False):
         env = build_env()
     assert "AWS_SECRET_KEY" not in env
     assert env["HOME"] == "/tmp"
+    assert env["TMPDIR"] == "/var/folders/xx/T/"
 
 
 # ---------------------------------------------------------------------------
@@ -297,3 +307,58 @@ def test_build_finalize_prompt_references_skill_and_ticket() -> None:
     assert "stage4b_pr_create" in prompt
     assert "stage5_post_create" in prompt
     assert "<<<AUTO_DEV_RESULT>>>" in prompt
+
+
+# ---------------------------------------------------------------------------
+# build_stage_prompt (all stages)
+# ---------------------------------------------------------------------------
+
+
+def test_supported_stages_contains_plan_impl_review_finalize() -> None:
+    """SUPPORTED_STAGES includes the four auto-dev pipeline stages."""
+    assert "plan" in SUPPORTED_STAGES
+    assert "impl" in SUPPORTED_STAGES
+    assert "review" in SUPPORTED_STAGES
+    assert "finalize" in SUPPORTED_STAGES
+    assert "harden" not in SUPPORTED_STAGES
+
+
+def test_build_stage_prompt_plan() -> None:
+    """build_stage_prompt for plan references the plan command file."""
+    prompt = build_stage_prompt("plan", "T-1")
+    assert "auto-dev-plan.md" in prompt
+    assert "T-1" in prompt
+    assert "--headless" in prompt
+    assert "stage1_plan" in prompt
+    assert "<<<AUTO_DEV_RESULT>>>" in prompt
+
+
+def test_build_stage_prompt_impl() -> None:
+    """build_stage_prompt for impl references the impl command file."""
+    prompt = build_stage_prompt("impl", "T-1")
+    assert "auto-dev-impl.md" in prompt
+    assert "T-1" in prompt
+    assert "--headless" in prompt
+    assert "stage2_impl" in prompt
+    assert "<<<AUTO_DEV_RESULT>>>" in prompt
+
+
+def test_build_stage_prompt_review() -> None:
+    """build_stage_prompt for review references the review command file."""
+    prompt = build_stage_prompt("review", "T-1")
+    assert "auto-dev-review.md" in prompt
+    assert "T-1" in prompt
+    assert "--headless" in prompt
+    assert "stage3_review" in prompt
+    assert "<<<AUTO_DEV_RESULT>>>" in prompt
+
+
+def test_build_stage_prompt_finalize_matches_build_finalize_prompt() -> None:
+    """build_stage_prompt('finalize', ...) matches build_finalize_prompt."""
+    assert build_stage_prompt("finalize", "T-1") == build_finalize_prompt("T-1")
+
+
+def test_build_stage_prompt_unsupported_stage_raises() -> None:
+    """build_stage_prompt raises KeyError for unsupported stage."""
+    with pytest.raises(KeyError):
+        build_stage_prompt("harden", "T-1")

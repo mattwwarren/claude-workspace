@@ -65,9 +65,10 @@ from cw.models import (
 from cw.opencode_runner import (
     OPENCODE_NOT_FOUND,
     STAGE4A_MERGE_GATE,
+    SUPPORTED_STAGES,
     OpencodeRunner,
     RealOpencodeRunner,
-    build_finalize_prompt,
+    build_stage_prompt,
     opencode_available,
 )
 from cw.opencode_runner import (
@@ -569,17 +570,26 @@ def _opencode_preflight(
     task: TicketTask,
     worktree: Path,
     client: ClientConfig,
+    stage: Stage,
 ) -> AutoDevResult | _OpencodePreflightOK:
-    """Run OpencodeExecutor pre-flight checks for the FINALIZE stage (#1670).
+    """Run OpencodeExecutor pre-flight checks for any supported stage.
 
-    Returns a blocked ``AutoDevResult`` on binary-missing; returns
-    ``_OpencodePreflightOK`` with the resolved argv + env (finalize prompt)
-    when the binary is available. Non-FINALIZE stages are stage-blocked in
-    spawn() before reaching here. The finalize prompt instructs opencode to
-    read and follow the existing ``auto-dev-finalize.md`` skill (R6) — no
-    plan fetch is needed for FINALIZE.
+    Returns a blocked ``AutoDevResult`` on binary-missing or unsupported
+    stage; returns ``_OpencodePreflightOK`` with the resolved argv + env
+    (stage prompt) when the binary is available and the stage is supported.
+    The stage prompt instructs opencode to read and follow the existing
+    ``auto-dev-{stage}.md`` command file (R6) — no plan fetch is needed
+    for FINALIZE, and other stages handle their own context materialization
+    per their command files.
     """
-    del client  # unused: FINALIZE builds its prompt from ticket_id, not the tracker
+    del client  # unused: opencode builds its prompt from ticket_id + stage
+    if stage.value not in SUPPORTED_STAGES:
+        return make_opencode_blocked(
+            ticket_id=task.ticket_id,
+            worktree=worktree,
+            reason=f"opencode_{stage.value}_not_implemented",
+            stage_reached=STAGE4A_MERGE_GATE,
+        )
     if not opencode_available():
         return make_opencode_blocked(
             ticket_id=task.ticket_id,
@@ -588,7 +598,7 @@ def _opencode_preflight(
             retry_eligible=True,
             retry_delay_seconds=0,
         )
-    prompt = build_finalize_prompt(task.ticket_id)
+    prompt = build_stage_prompt(stage.value, task.ticket_id)
     return _OpencodePreflightOK(
         argv=build_opencode_argv(config.model, worktree, prompt),
         env=build_opencode_env(),
@@ -598,11 +608,12 @@ def _opencode_preflight(
 class OpencodeExecutor:
     """StageExecutor backed by a fire-and-forget opencode subprocess (#1669).
 
-    FINALIZE-only: spawn() returns make_blocked(reason=opencode_<stage>_not_implemented)
-    if called on any stage other than FINALIZE (#1670 R5). The FINALIZE stage
-    materializes a prompt that instructs opencode to read and follow the
-    existing ``auto-dev-finalize.md`` skill (R6) and emit the sentinel with the
-    correct ``stage_reached`` marker (R1).
+    Supports PLAN, IMPL, REVIEW, and FINALIZE stages. Unsupported stages
+    (e.g. HARDEN) are blocked in pre-flight with
+    ``reason=opencode_<stage>_not_implemented``. Each stage's prompt
+    materializes an instruction to read and follow the existing
+    ``auto-dev-{stage}.md`` command file (R6) and emit the sentinel with
+    the correct ``stage_reached`` marker (R1).
 
     spawn() is non-blocking on the launch path: after synchronous pre-flight
     checks, it launches opencode via ``OpencodeRunner.launch`` (Popen, no wait),
@@ -661,15 +672,7 @@ class OpencodeExecutor:
             save_state(state)
 
         preflight: AutoDevResult | _OpencodePreflightOK
-        if stage != Stage.FINALIZE:
-            preflight = make_opencode_blocked(
-                ticket_id=task.ticket_id,
-                worktree=worktree,
-                reason=f"opencode_{stage.value}_not_implemented",
-                stage_reached=STAGE4A_MERGE_GATE,
-            )
-        else:
-            preflight = _opencode_preflight(self._config, task, worktree, client)
+        preflight = _opencode_preflight(self._config, task, worktree, client, stage)
         argv: list[str] = []
         try:
             if isinstance(preflight, _OpencodePreflightOK):

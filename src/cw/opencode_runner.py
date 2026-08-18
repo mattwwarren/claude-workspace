@@ -82,6 +82,7 @@ _ENV_ALLOWLIST: frozenset[str] = frozenset(
         "USER",
         "LOGNAME",
         "SHELL",
+        "TMPDIR",
         "GIT_AUTHOR_NAME",
         "GIT_AUTHOR_EMAIL",
         "GIT_COMMITTER_NAME",
@@ -186,9 +187,11 @@ def build_argv(model: str | None, worktree: Path, prompt: str) -> list[str]:
     """Return the opencode argv for the given model, worktree, and prompt.
 
     Pins ``--format json`` (event stream for harvest), ``--pure`` (no external
-    plugins — mechanical permission profile per #1669 R4), and ``--dir`` (run
-    in the worktree). The prompt is the trailing positional, redacted in
-    diagnostics by ``redact_argv``.
+    plugins — mechanical permission profile per #1669 R4), ``--auto`` (auto-
+    approve permissions not explicitly denied — essential for headless fire-
+    and-forget operation where no TTY is available to answer prompts), and
+    ``--dir`` (run in the worktree). The prompt is the trailing positional,
+    redacted in diagnostics by ``redact_argv``.
     """
     argv: list[str] = [
         "opencode",
@@ -196,6 +199,7 @@ def build_argv(model: str | None, worktree: Path, prompt: str) -> list[str]:
         "--format",
         "json",
         "--pure",
+        "--auto",
         "--dir",
         str(worktree),
     ]
@@ -217,29 +221,54 @@ def build_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if k in _ENV_ALLOWLIST}
 
 
+_STAGE_COMMAND_FILES: dict[str, str] = {
+    "plan": ".claude/commands/auto-dev-plan.md",
+    "impl": ".claude/commands/auto-dev-impl.md",
+    "review": ".claude/commands/auto-dev-review.md",
+    "finalize": ".claude/commands/auto-dev-finalize.md",
+}
+
+_STAGE_REACHED_HINTS: dict[str, str] = {
+    "plan": "stage1_plan",
+    "impl": "stage2_impl",
+    "review": "stage3_review",
+    "finalize": "stage4a_merge_gate, stage4b_pr_create, or stage5_post_create",
+}
+
+SUPPORTED_STAGES: frozenset[str] = frozenset(_STAGE_COMMAND_FILES.keys())
+
+
+def build_stage_prompt(stage_value: str, ticket_id: str) -> str:
+    """Build the opencode prompt for any auto-dev stage.
+
+    opencode has no slash-command resolution (unlike ClaudeNativeExecutor's
+    ``/auto-dev-{stage} <ticket> --headless`` invocation), so the prompt
+    inlines the instruction to read and follow the existing
+    ``auto-dev-{stage}.md`` command file — backend-neutral at the producer
+    level (the command file runs ``gh``/``git`` commands, not executor-
+    specific code). The prompt instructs opencode to run the stage flow
+    and emit the ``<<<AUTO_DEV_RESULT>>>`` sentinel with the correct
+    ``stage_reached`` marker.
+    """
+    command_file = _STAGE_COMMAND_FILES[stage_value]
+    stage_hints = _STAGE_REACHED_HINTS[stage_value]
+    stage_upper = stage_value.upper()
+    return (
+        f"Run the auto-dev {stage_upper} stage for ticket {ticket_id}. "
+        f"Read and follow the instructions in {command_file} "
+        f"(arguments: {ticket_id} --headless). "
+        f"When complete, emit the <<<AUTO_DEV_RESULT>>> sentinel with "
+        f"stage_reached set to {stage_hints} as appropriate."
+    )
+
+
 def build_finalize_prompt(ticket_id: str) -> str:
     """Build the opencode prompt for the FINALIZE stage (#1670).
 
-    opencode has no slash-command resolution (unlike ClaudeNativeExecutor's
-    ``/auto-dev-finalize <ticket> --headless`` invocation), so the prompt
-    inlines the instruction to read and follow the existing
-    ``auto-dev-finalize.md`` skill — backend-neutral at the producer level
-    (it runs ``gh`` commands, not executor-specific code, per R6). The
-    prompt instructs opencode to run the finalize flow (merge-gate → PR
-    create → auto-merge → read-back) and emit the ``<<<AUTO_DEV_RESULT>>>``
-    sentinel with the correct ``stage_reached`` marker (R1).
+    Wrapper around ``build_stage_prompt("finalize", ticket_id)``. Kept for
+    backward compatibility with existing call sites and tests.
     """
-    return (
-        f"Run the auto-dev FINALIZE stage for ticket {ticket_id}. "
-        "Read and follow the instructions in "
-        ".claude/commands/auto-dev-finalize.md "
-        f"(arguments: {ticket_id} --headless). "
-        "The finalize flow runs: merge-gate check, PR creation, "
-        "auto-merge enablement, read-back verification. "
-        "When complete, emit the <<<AUTO_DEV_RESULT>>> sentinel with "
-        "stage_reached set to stage4a_merge_gate, stage4b_pr_create, or "
-        "stage5_post_create as appropriate."
-    )
+    return build_stage_prompt("finalize", ticket_id)
 
 
 def make_blocked(
