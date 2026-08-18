@@ -16,6 +16,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lanes can carry their own attempt budget without disturbing the fleet-wide
   ceiling.
 
+- **`cw spawn close --requeue` (#1889):** folds
+  `cw dev-queue requeue ... --from-cancelled` into `cw spawn close`, so
+  closing a confirmed-dead session whose `claude --bg` async-completion
+  wakeup never arrived and requeuing its ticket back to PENDING at its
+  current stage is one command instead of two separate ones run in sequence.
+
 ### Fixed
 
 - **Headless aider no longer stalls silently on a missing-file free-text ask
