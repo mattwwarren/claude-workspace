@@ -27,7 +27,7 @@ ROOT = Path(__file__).parent.parent
 COMMANDS = ROOT / ".claude" / "commands"
 
 ORIENTATION_START = "**Orientation:**"
-ORIENTATION_END = '**Comments are live, not cached'
+ORIENTATION_END = "**Comments are live, not cached"
 
 GH_ME_RESOLVE = "ME=$(gh api user --jq .login)"
 GH_JQ_FILTER = (
