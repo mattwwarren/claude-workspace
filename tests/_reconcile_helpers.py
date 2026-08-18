@@ -511,17 +511,25 @@ def _auto_config(**kwargs: object) -> OrchestratorConfig:
 def _client_with_lane(
     client_name: str,
     lane_name: str,
-    lane_policy: ReapPolicy,
     *,
     workspace_path: Path | None = None,
+    **lane_kwargs: object,
 ) -> ClientConfig:
-    """Build a ClientConfig with one lane carrying a specific reap_policy."""
+    """Build a ClientConfig with one lane.
+
+    Pass any :class:`~cw.models.LaneConfig` field (e.g. ``reap_policy=``,
+    ``attempt_ceiling=``) as a keyword — generalized by #1751 so lane-scoped
+    resolver tests share one factory instead of accreting a near-duplicate
+    helper per field. Built via ``model_validate`` on a merged dict (the same
+    idiom as ``conftest._make_ticket_task``) so the open ``**lane_kwargs``
+    needs no type suppression.
+    """
     from cw.models import LaneConfig
 
     return ClientConfig(
         name=client_name,
         workspace_path=workspace_path or Path("/tmp/ws"),
-        lanes=[LaneConfig(name=lane_name, reap_policy=lane_policy)],
+        lanes=[LaneConfig.model_validate({"name": lane_name, **lane_kwargs})],
     )
 
 

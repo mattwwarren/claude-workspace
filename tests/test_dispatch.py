@@ -226,6 +226,14 @@ def _make_clients_yaml(
                 lines.append(f"        max_parallel: {lane.max_parallel}\n")
                 if lane.priority != 0:
                     lines.append(f"        priority: {lane.priority}\n")
+                # #1751: `false` (disable) and a positive int are distinct
+                # states, and both differ from `None` (defer to global) — so
+                # the emitted YAML must preserve the literal token, not
+                # coerce it. `str(False)` is "False", which PyYAML parses as
+                # a bool, so lowercasing is what keeps the round-trip honest.
+                if lane.attempt_ceiling is not None:
+                    token = str(lane.attempt_ceiling).lower()
+                    lines.append(f"        attempt_ceiling: {token}\n")
         if codex_review_client == client.name:
             lines.append("    pipeline:\n")
             lines.append("      executors:\n")
@@ -3310,6 +3318,230 @@ class TestGlobalAttemptCeiling:
 
 
 # ---------------------------------------------------------------------------
+# TestPerLaneAttemptCeiling
+# ---------------------------------------------------------------------------
+
+
+class TestPerLaneAttemptCeiling:
+    """LaneConfig.attempt_ceiling overrides global_attempt_ceiling (#1751).
+
+    Sibling of :class:`TestGlobalAttemptCeiling` above: same dispatch-tick
+    admission gate, exercised through a client whose lane declares its own
+    ceiling. A supervised lane has a human as its rate limiter, so the single
+    global bound #786 shipped is not the right bound for every lane.
+    """
+
+    def _ceiling_config(self, ceiling: int) -> OrchestratorConfig:
+        return OrchestratorConfig(
+            tick_interval_seconds=30,
+            per_client_max_parallel={"test-client": 1},
+            global_attempt_ceiling=ceiling,
+        )
+
+    def _client_with_lane_ceiling(
+        self,
+        base: ClientConfig,
+        attempt_ceiling: bool | int | None,
+    ) -> ClientConfig:
+        """Return *base* with a DEFAULT_LANE carrying *attempt_ceiling*."""
+        return base.model_copy(
+            update={
+                "lanes": [
+                    LaneConfig(
+                        name=DEFAULT_LANE,
+                        max_parallel=1,
+                        attempt_ceiling=attempt_ceiling,
+                    )
+                ]
+            }
+        )
+
+    def test_lane_ceiling_overrides_global_lower(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """Lane ceiling 25 with global 10: a row at 15 still claims."""
+        client = self._client_with_lane_ceiling(sample_client_config, 25)
+        _make_clients_yaml(tmp_dispatch_dirs, client)
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1751-higher",
+                        client="test-client",
+                        status=QueueItemStatus.PENDING,
+                        attempts=15,
+                        unproductive_attempts=15,
+                    )
+                ]
+            )
+        )
+
+        dispatch_tick(
+            self._ceiling_config(ceiling=10), native_daemon=FakeNativeDaemonClient()
+        )
+
+        queue = load_dev_queue()
+        claimed = next(t for t in queue.tasks if t.ticket_id == "GEN-1751-higher")
+        assert claimed.status == QueueItemStatus.RUNNING
+        assert claimed.disposition != "attempt_cap_blocked"
+
+    def test_lane_ceiling_overrides_global_higher(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """Lane ceiling 2 with global 10: a row at 2 parks below the global bound."""
+        client = self._client_with_lane_ceiling(sample_client_config, 2)
+        _make_clients_yaml(tmp_dispatch_dirs, client)
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1751-lower",
+                        client="test-client",
+                        status=QueueItemStatus.PENDING,
+                        attempts=2,
+                        unproductive_attempts=2,
+                    )
+                ]
+            )
+        )
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(self._ceiling_config(ceiling=10), native_daemon=daemon)
+
+        queue = load_dev_queue()
+        parked = next(t for t in queue.tasks if t.ticket_id == "GEN-1751-lower")
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.disposition == "attempt_cap_blocked"
+        assert daemon.spawn_calls == []
+
+    def test_lane_ceiling_false_disables_park_entirely(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """``attempt_ceiling: false`` never parks, however high the counter."""
+        client = self._client_with_lane_ceiling(sample_client_config, False)
+        _make_clients_yaml(tmp_dispatch_dirs, client)
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1751-disabled",
+                        client="test-client",
+                        status=QueueItemStatus.PENDING,
+                        attempts=50,
+                        unproductive_attempts=50,
+                    )
+                ]
+            )
+        )
+
+        dispatch_tick(
+            self._ceiling_config(ceiling=10), native_daemon=FakeNativeDaemonClient()
+        )
+
+        queue = load_dev_queue()
+        claimed = next(t for t in queue.tasks if t.ticket_id == "GEN-1751-disabled")
+        assert claimed.status == QueueItemStatus.RUNNING
+        assert claimed.disposition != "attempt_cap_blocked"
+
+    def test_unmatched_lane_falls_through_to_global(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """A task whose lane is not the overridden one keeps #786's behaviour."""
+        client = sample_client_config.model_copy(
+            update={
+                "lanes": [
+                    LaneConfig(name=DEFAULT_LANE, max_parallel=1),
+                    LaneConfig(name="supervised", max_parallel=1, attempt_ceiling=False),
+                ]
+            }
+        )
+        _make_clients_yaml(tmp_dispatch_dirs, client)
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1751-fallthrough",
+                        client="test-client",
+                        lane=DEFAULT_LANE,
+                        status=QueueItemStatus.PENDING,
+                        attempts=3,
+                        unproductive_attempts=3,
+                    )
+                ]
+            )
+        )
+
+        daemon = FakeNativeDaemonClient()
+        dispatch_tick(self._ceiling_config(ceiling=3), native_daemon=daemon)
+
+        queue = load_dev_queue()
+        parked = next(t for t in queue.tasks if t.ticket_id == "GEN-1751-fallthrough")
+        assert parked.status == QueueItemStatus.BLOCKED_ON_USER
+        assert parked.disposition == "attempt_cap_blocked"
+        assert daemon.spawn_calls == []
+
+    def test_park_events_carry_resolved_lane_ceiling(
+        self,
+        tmp_dispatch_dirs: Path,
+        sample_client_config: ClientConfig,
+    ) -> None:
+        """Both park events report the RESOLVED ceiling, not the global one.
+
+        With a per-lane ceiling an operator can no longer infer "why did this
+        park" from ``global_attempt_ceiling`` alone, so the number that
+        actually fired must ride on the payload.
+        """
+        client = self._client_with_lane_ceiling(sample_client_config, 5)
+        _make_clients_yaml(tmp_dispatch_dirs, client)
+        save_dev_queue(
+            DevQueueStore(
+                tasks=[
+                    TicketTask(
+                        ticket_id="GEN-1751-events",
+                        client="test-client",
+                        status=QueueItemStatus.PENDING,
+                        attempts=5,
+                        unproductive_attempts=5,
+                    )
+                ]
+            )
+        )
+
+        dispatch_tick(
+            self._ceiling_config(ceiling=50), native_daemon=FakeNativeDaemonClient()
+        )
+
+        events = read_events(
+            consumer="test-1751-lane-ceiling-events",
+            event_types=[
+                OrchestratorEventType.DISPATCH_TICK,
+                OrchestratorEventType.SESSION_NEEDS_ATTENTION,
+            ],
+        )
+        cap_events = [
+            e
+            for e in events
+            if e.payload.get("skip_reason") == DispatchSkipReason.ATTEMPT_CAP_BLOCKED
+        ]
+        assert len(cap_events) == 1
+        assert cap_events[0].payload["attempt_ceiling"] == 5
+
+        attention_events = [
+            e for e in events if e.payload.get("paused_status") == "attempt_cap_blocked"
+        ]
+        assert len(attention_events) == 1
+        assert attention_events[0].payload["attempt_ceiling"] == 5
+
+
+# ---------------------------------------------------------------------------
 # TestClaimNextPendingPriority
 # ---------------------------------------------------------------------------
 
@@ -4901,6 +5133,7 @@ class TestClaimNextPendingUsageLimitedGate:
         result = _claim_next_pending(
             "test-client",
             lane=DEFAULT_LANE,
+            client=sample_client_config,
             config=simple_config,
             usage_limited_until=future,
         )
@@ -4925,6 +5158,7 @@ class TestClaimNextPendingUsageLimitedGate:
         claimed, backoff_skipped = _claim_next_pending(
             "test-client",
             lane=DEFAULT_LANE,
+            client=sample_client_config,
             config=simple_config,
             usage_limited_until=past,
         )

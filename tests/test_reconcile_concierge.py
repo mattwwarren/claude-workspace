@@ -12,6 +12,7 @@ from cw.auto_dev_result import AutoDevResult
 from cw.config import save_state
 from cw.dev_queue import load_dev_queue, save_dev_queue
 from cw.models import (
+    DEFAULT_LANE,
     CompletionReason,
     CwState,
     DevQueueStore,
@@ -55,6 +56,33 @@ def _write_acme_clients_yaml(tmp_config_dir: Path, workspace: Path) -> None:
     (config_dir / "clients.yaml").write_text(
         f"clients:\n  acme:\n    workspace_path: {workspace}\n"
         "    default_branch: main\n"
+    )
+
+
+def _write_acme_clients_yaml_with_lane(
+    tmp_config_dir: Path,
+    workspace: Path,
+    *,
+    lane_name: str,
+    attempt_ceiling: str,
+) -> None:
+    """Write an 'acme' clients.yaml whose *lane_name* carries *attempt_ceiling*.
+
+    Deliberately separate from :func:`_write_acme_clients_yaml` (#1751) so the
+    lane-less default every other test in this file relies on stays untouched
+    — those tests are themselves the regression guard proving the concierge
+    still falls through to the global ceiling when no lane opts in.
+    *attempt_ceiling* is the raw YAML token (``"false"``, ``"25"``) so a test
+    can assert the disable state and an override value are genuinely distinct.
+    """
+    config_dir = tmp_config_dir / ".config" / "cw"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "clients.yaml").write_text(
+        f"clients:\n  acme:\n    workspace_path: {workspace}\n"
+        "    default_branch: main\n"
+        "    lanes:\n"
+        f"      - name: {lane_name}\n"
+        f"        attempt_ceiling: {attempt_ceiling}\n"
     )
 
 
@@ -393,6 +421,61 @@ class TestRecipeFalseParkRequeue:
         assert recovered == ["GEN-1"]
         store = load_dev_queue()
         assert store.tasks[0].status == QueueItemStatus.PENDING
+
+    def test_lane_ceiling_override_changes_refused_ceiling(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """#1751 recipe 1: a lane that disables the ceiling is not refused.
+
+        The row sits at the *global* ceiling, which before #1751 was the only
+        number this recipe could read. Its lane disables the cap, and the
+        dispatch claim path would happily re-claim it — so refusing here would
+        reintroduce exactly the claim/concierge drift #1750's comment warns
+        against, one layer up.
+        """
+        _write_acme_clients_yaml_with_lane(
+            tmp_config_dir,
+            tmp_config_dir / "ws",
+            lane_name=DEFAULT_LANE,
+            attempt_ceiling="false",
+        )
+        task = _make_task(
+            disposition="stalled_retry_cap_parked",
+            attempts=10,
+            unproductive_attempts=10,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[]))
+
+        cfg = _config(global_attempt_ceiling=10)
+        recovered = run_concierge_recoveries(now=_NOW, native_live=set(), config=cfg)
+
+        assert recovered == ["GEN-1"]
+        store = load_dev_queue()
+        assert store.tasks[0].status == QueueItemStatus.PENDING
+
+    def test_unknown_client_falls_through_to_global_ceiling(
+        self, tmp_config_dir: Path
+    ) -> None:
+        """#1751 recipe 1: no clients.yaml → CwError → global ceiling still applies.
+
+        This is the state every other test in this file runs in, so it is also
+        the guard that the lane lookup did not change their behaviour.
+        """
+        task = _make_task(
+            disposition="stalled_retry_cap_parked",
+            attempts=10,
+            unproductive_attempts=10,
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[]))
+
+        cfg = _config(global_attempt_ceiling=10)
+        recovered = run_concierge_recoveries(now=_NOW, native_live=set(), config=cfg)
+
+        assert recovered == []
+        store = load_dev_queue()
+        assert store.tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
 
     def test_still_live_session_is_skipped(self, tmp_config_dir: Path) -> None:
         """A row whose session's surface_ref IS in native_live is not touched."""
@@ -1111,6 +1194,36 @@ class TestRecipeParkMarkerPoisonClear:
         assert recovered == []
         store = load_dev_queue()
         assert store.tasks[0].status == QueueItemStatus.BLOCKED_ON_USER
+
+    def test_lane_ceiling_override_changes_refused_ceiling(
+        self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#1751 recipe 2: a lane that disables the ceiling is not refused.
+
+        Mirror of recipe 1's counterpart — both recipes must route through the
+        same lane-scoped resolver as the dispatch claim path.
+        """
+        self._stale_45m(monkeypatch)
+        _write_acme_clients_yaml_with_lane(
+            tmp_config_dir,
+            tmp_config_dir / "ws",
+            lane_name=DEFAULT_LANE,
+            attempt_ceiling="false",
+        )
+        task = _make_task(disposition=None, attempts=10, unproductive_attempts=10)
+        session = _make_session(
+            last_result={"paused_status": "silently_idle"},
+            consecutive_salvage_skips=1,
+            surface_ref="surf-dead",
+        )
+        save_dev_queue(DevQueueStore(tasks=[task]))
+        save_state(CwState(sessions=[session]))
+
+        recovered = run_concierge_recoveries(
+            now=_NOW, native_live=set(), config=_config(global_attempt_ceiling=10)
+        )
+
+        assert recovered == ["GEN-1"]
 
     def test_ceiling_gate_a2_reads_unproductive_attempts_not_attempts(
         self, tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
