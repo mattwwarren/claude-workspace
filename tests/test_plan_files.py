@@ -9,7 +9,7 @@ lives in tests/conftest.py so the two suites cannot drift apart.
 
 from __future__ import annotations
 
-from cw.plan_files import parse_plan_files_modified
+from cw.plan_files import _looks_like_path, parse_plan_files_modified
 from tests.conftest import _plan_text
 
 
@@ -67,6 +67,25 @@ def test_deduplicates_paths_preserving_first_occurrence_order() -> None:
     """Repeated paths collapse to the first occurrence, order preserved."""
     plan = "## Files Modified\n- b.py\n- a/b.py\n- b.py\n"
     assert parse_plan_files_modified(plan) == ["b.py", "a/b.py"]
+
+
+def test_bare_dot_and_slash_bullets_are_not_paths() -> None:
+    """A bullet carrying only ``.``/``..``/``/`` is decoration, not a file."""
+    plan = "## Files Modified\n- .\n- ..\n- /\n- a/b.py\n"
+    assert parse_plan_files_modified(plan) == ["a/b.py"]
+
+
+def test_empty_bullet_body_is_skipped() -> None:
+    """A bullet whose body is empty after decoration-stripping yields nothing."""
+    plan = "## Files Modified\n- *\n- \n- a/b.py\n"
+    assert parse_plan_files_modified(plan) == ["a/b.py"]
+
+
+def test_looks_like_path_rejects_tokens_containing_whitespace() -> None:
+    """Defensive guard inherited from the mirrored script: a token with inner
+    whitespace is never a path, even though the bullet/table split above cannot
+    produce one today."""
+    assert _looks_like_path("a b.py") is False
 
 
 def test_parses_shared_conftest_plan_fixture() -> None:
