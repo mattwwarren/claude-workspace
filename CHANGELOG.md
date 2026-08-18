@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Per-lane attempt ceiling for dispatch and concierge (#1751):** dispatch's
+  claim path and reconcile's concierge recovery recipes previously enforced
+  only the single global `dispatch.attempt_ceiling`. Adds
+  `LaneConfig.attempt_ceiling` and `resolve_attempt_ceiling`, which resolve a
+  per-lane override before falling back to the global default, so individual
+  lanes can carry their own attempt budget without disturbing the fleet-wide
+  ceiling.
+
 ### Fixed
 
 - **A requeue-to-impl refusal message no longer claims a non-GitHub tracker

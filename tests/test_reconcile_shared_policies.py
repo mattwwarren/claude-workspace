@@ -71,7 +71,7 @@ from tests._reconcile_helpers import (
     _write_staged_clients_yaml,
     _write_transcript_records,
 )
-from tests.conftest import _make_daemon_session
+from tests.conftest import _make_daemon_session, _make_ticket_task
 
 
 class TestEmitReapProposed:
@@ -616,7 +616,9 @@ class TestResolveReapPolicy:
         from cw.reconcile import ProposedAction, ReapCandidate, resolve_reap_policy
 
         clients = {
-            "client-a": _client_with_lane("client-a", "fast", ReapPolicy.AUTO),
+            "client-a": _client_with_lane(
+                "client-a", "fast", reap_policy=ReapPolicy.AUTO
+            ),
         }
         cfg = OrchestratorConfig(reap_policy=ReapPolicy.SIGNAL_ONLY)
         candidate = ReapCandidate(
@@ -633,7 +635,9 @@ class TestResolveReapPolicy:
         from cw.reconcile import ProposedAction, ReapCandidate, resolve_reap_policy
 
         clients = {
-            "client-a": _client_with_lane("client-a", "slow", ReapPolicy.SIGNAL_ONLY),
+            "client-a": _client_with_lane(
+                "client-a", "slow", reap_policy=ReapPolicy.SIGNAL_ONLY
+            ),
         }
         cfg = OrchestratorConfig(reap_policy=ReapPolicy.AUTO)
         candidate = ReapCandidate(
@@ -677,7 +681,9 @@ class TestResolveReapPolicy:
         """DEFAULT_LANE not in custom lanes → global policy used."""
         from cw.reconcile import ProposedAction, ReapCandidate, resolve_reap_policy
 
-        lane_cfg = _client_with_lane("client-a", "custom-lane", ReapPolicy.SIGNAL_ONLY)
+        lane_cfg = _client_with_lane(
+            "client-a", "custom-lane", reap_policy=ReapPolicy.SIGNAL_ONLY
+        )
         clients = {"client-a": lane_cfg}
         cfg = OrchestratorConfig(reap_policy=ReapPolicy.AUTO)
         candidate = ReapCandidate(
@@ -689,6 +695,72 @@ class TestResolveReapPolicy:
         )
         # "default" lane not in client's declared lanes → global AUTO
         assert resolve_reap_policy(candidate, clients, cfg) is ReapPolicy.AUTO
+
+
+# ---------------------------------------------------------------------------
+# Per-lane attempt_ceiling tests (GitHub #1751)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveAttemptCeiling:
+    """resolve_attempt_ceiling respects lane → global precedence (#1751).
+
+    Unlike :func:`resolve_reap_policy`, this resolver takes a single
+    ``client: ClientConfig | None`` rather than a ``clients`` dict — neither
+    real call site (the dispatch claim primitive, the concierge detect
+    functions) has a dict of every client at that depth.
+    """
+
+    def test_lane_ceiling_beats_global(self) -> None:
+        """A lane override wins over a lower global ceiling."""
+        from cw.reconcile import resolve_attempt_ceiling
+
+        client = _client_with_lane("client-a", "lane-x", attempt_ceiling=25)
+        cfg = OrchestratorConfig(global_attempt_ceiling=10)
+        task = _make_ticket_task(
+            ticket_id="t1", client="client-a", lane="lane-x", unproductive_attempts=0
+        )
+
+        assert resolve_attempt_ceiling(client, task, cfg) == 25
+
+    def test_lane_false_disables_ceiling(self) -> None:
+        """``attempt_ceiling: false`` resolves to None (no ceiling at all)."""
+        from cw.reconcile import resolve_attempt_ceiling
+
+        client = _client_with_lane("client-a", "lane-x", attempt_ceiling=False)
+        cfg = OrchestratorConfig(global_attempt_ceiling=10)
+        task = _make_ticket_task(ticket_id="t2", client="client-a", lane="lane-x")
+
+        assert resolve_attempt_ceiling(client, task, cfg) is None
+
+    def test_global_used_when_lane_not_in_client(self) -> None:
+        """Lane name absent from the client's lanes → falls back to global."""
+        from cw.reconcile import resolve_attempt_ceiling
+
+        client = _client_with_lane("client-a", "other-lane", attempt_ceiling=25)
+        cfg = OrchestratorConfig(global_attempt_ceiling=10)
+        task = _make_ticket_task(ticket_id="t3", client="client-a", lane="lane-x")
+
+        assert resolve_attempt_ceiling(client, task, cfg) == 10
+
+    def test_global_used_when_client_is_none(self) -> None:
+        """Unresolvable client → falls back to global."""
+        from cw.reconcile import resolve_attempt_ceiling
+
+        cfg = OrchestratorConfig(global_attempt_ceiling=7)
+        task = _make_ticket_task(ticket_id="t4", client="gone", lane="lane-x")
+
+        assert resolve_attempt_ceiling(None, task, cfg) == 7
+
+    def test_default_lane_resolves_via_global(self) -> None:
+        """DEFAULT_LANE not in the client's custom lanes → global ceiling used."""
+        from cw.reconcile import resolve_attempt_ceiling
+
+        client = _client_with_lane("client-a", "custom-lane", attempt_ceiling=25)
+        cfg = OrchestratorConfig(global_attempt_ceiling=10)
+        task = _make_ticket_task(ticket_id="t5", client="client-a", lane=DEFAULT_LANE)
+
+        assert resolve_attempt_ceiling(client, task, cfg) == 10
 
 
 class TestReapProposedPayloadLane:

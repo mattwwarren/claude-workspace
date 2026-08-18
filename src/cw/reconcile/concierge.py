@@ -87,6 +87,7 @@ from cw.reconcile._shared import (
     _queue_status_for_salvaged,
     _transcript_age_seconds,
     _validate_existing_result_for_routing,
+    resolve_attempt_ceiling,
     salvage_terminal_result,
     ticket_id_for_session,
 )
@@ -119,7 +120,13 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from cw.auto_dev_result import AutoDevResult, BlockedResult
-    from cw.models import CwState, OrchestratorConfig, Session, TicketTask
+    from cw.models import (
+        ClientConfig,
+        CwState,
+        OrchestratorConfig,
+        Session,
+        TicketTask,
+    )
     from cw.result import EmitOutcome
 
 _log = logging.getLogger(__name__)
@@ -361,6 +368,34 @@ def _has_park_marker(session: Session) -> bool:
     )
 
 
+def _refused_at_attempt_ceiling(task: TicketTask, config: OrchestratorConfig) -> bool:
+    """True when *task* sits at or above its effective attempt ceiling.
+
+    GitHub #1750: mirrors the dispatch claim path's ceiling — both must read
+    the same counter or the concierge would refuse a requeue the claim path
+    would have allowed. GitHub #1751 extends that agreement to the *number*:
+    the ceiling is now lane-scoped, so both layers route through
+    :func:`~cw.reconcile._shared.resolve_attempt_ceiling` rather than reading
+    ``global_attempt_ceiling`` flat. A lane that disables the ceiling resolves
+    to ``None`` and is never refused here.
+
+    Single copy shared by recipes 1 and 2 precisely because the invariant is
+    "these two agree" — two in-place copies of an agreement rule are two
+    places for it to drift.
+
+    An unknown/removed client raises :class:`~cw.exceptions.CwError` from
+    ``get_client``; that falls through to the global ceiling, preserving the
+    pre-#1751 behaviour for every row whose client isn't in clients.yaml. Same
+    ``try``/``except CwError`` idiom recipe 3 already uses below.
+    """
+    try:
+        client_cfg: ClientConfig | None = get_client(task.client)
+    except CwError:
+        client_cfg = None
+    ceiling = resolve_attempt_ceiling(client_cfg, task, config)
+    return ceiling is not None and task.unproductive_attempts >= ceiling
+
+
 def _detect_false_park_candidates(
     state: CwState,
     tasks: list[TicketTask],
@@ -429,11 +464,12 @@ def _detect_false_park_candidates(
                     "session_id": session.id if session else None,
                 },
                 session_id=session.id if session else None,
-                # GitHub #1750: mirrors the dispatch claim path's ceiling —
-                # both must read the same counter or the concierge would
-                # refuse a requeue the claim path would have allowed.
-                refused_ceiling=task.unproductive_attempts
-                >= config.global_attempt_ceiling,
+                # GitHub #1750/#1751: mirrors the dispatch claim path's
+                # ceiling — both must read the same counter, and (since the
+                # ceiling became lane-scoped) the same resolved number, or the
+                # concierge would refuse a requeue the claim path would have
+                # allowed.
+                refused_ceiling=_refused_at_attempt_ceiling(task, config),
                 dead_on_arrival=_compute_dead_on_arrival(
                     session, now, transcript_age_seconds=transcript_age_seconds
                 ),
@@ -616,11 +652,12 @@ def _detect_park_marker_poison_candidates(
                     "session_id": session.id,
                 },
                 session_id=session.id,
-                # GitHub #1750: mirrors the dispatch claim path's ceiling —
-                # both must read the same counter or the concierge would
-                # refuse a requeue the claim path would have allowed.
-                refused_ceiling=task.unproductive_attempts
-                >= config.global_attempt_ceiling,
+                # GitHub #1750/#1751: mirrors the dispatch claim path's
+                # ceiling — both must read the same counter, and (since the
+                # ceiling became lane-scoped) the same resolved number, or the
+                # concierge would refuse a requeue the claim path would have
+                # allowed.
+                refused_ceiling=_refused_at_attempt_ceiling(task, config),
             )
         )
     return candidates
