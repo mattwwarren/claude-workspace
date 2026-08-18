@@ -92,6 +92,8 @@ _ENV_ALLOWLIST: frozenset[str] = frozenset(
         "GIT_ASKPASS",
         "SSH_AUTH_SOCK",
         "SSH_AGENT_PID",
+        "SLACK_MCP_CLIENT_ID",
+        "SLACK_MCP_CLIENT_SECRET",
     }
 )
 
@@ -216,16 +218,20 @@ def build_env() -> dict[str, str]:
     (AWS_*, tokens, etc.) are excluded by default. opencode reads its model
     config from its own config file (``~/.config/opencode/opencode.json``),
     not from env vars — no OPENAI_* overrides are needed (unlike aider's
-    ``build_env``).
+    ``build_env``). MCP server auth env vars (SLACK_MCP_CLIENT_ID,
+    SLACK_MCP_CLIENT_SECRET) are passed through because opencode's config
+    references them via ``{env:...}`` substitution — without them, Slack MCP
+    authentication silently fails in the subprocess. TMPDIR is required for
+    tempfile access (macOS resolves to ``/var/folders/.../T/``).
     """
     return {k: v for k, v in os.environ.items() if k in _ENV_ALLOWLIST}
 
 
 _STAGE_COMMAND_FILES: dict[str, str] = {
-    "plan": ".claude/commands/auto-dev-plan.md",
-    "impl": ".claude/commands/auto-dev-impl.md",
-    "review": ".claude/commands/auto-dev-review.md",
-    "finalize": ".claude/commands/auto-dev-finalize.md",
+    "plan": "~/.claude/commands/auto-dev-plan.md",
+    "impl": "~/.claude/commands/auto-dev-impl.md",
+    "review": "~/.claude/commands/auto-dev-review.md",
+    "finalize": "~/.claude/commands/auto-dev-finalize.md",
 }
 
 _STAGE_REACHED_HINTS: dict[str, str] = {

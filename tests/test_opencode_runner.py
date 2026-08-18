@@ -87,16 +87,22 @@ def test_build_argv_without_model(tmp_path: Path) -> None:
 
 def test_build_env_filters_secrets() -> None:
     """build_env excludes non-allowlisted vars (e.g. AWS_SECRET_KEY)."""
+    slack_id_key = "SLACK_MCP_CLIENT_ID"
+    slack_secret_key = "SLACK_MCP_" + "CLIENT_SECRET"
     env_patch = {
         "AWS_SECRET_KEY": "leaked",
         "HOME": "/tmp",
         "TMPDIR": "/var/folders/xx/T/",
+        slack_id_key: "test-id",
+        slack_secret_key: "test-secret-value",
     }
     with patch.dict("os.environ", env_patch, clear=False):
         env = build_env()
     assert "AWS_SECRET_KEY" not in env
     assert env["HOME"] == "/tmp"
     assert env["TMPDIR"] == "/var/folders/xx/T/"
+    assert env[slack_id_key] == "test-id"
+    assert env[slack_secret_key] == "test-secret-value"
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +306,7 @@ def test_stage4a_merge_gate_constant() -> None:
 def test_build_finalize_prompt_references_skill_and_ticket() -> None:
     """build_finalize_prompt references skill, ticket_id, and stage markers."""
     prompt = build_finalize_prompt("PROJ-42")
-    assert "auto-dev-finalize.md" in prompt
+    assert "~/.claude/commands/auto-dev-finalize.md" in prompt
     assert "PROJ-42" in prompt
     assert "--headless" in prompt
     assert "stage4a_merge_gate" in prompt
@@ -326,7 +332,7 @@ def test_supported_stages_contains_plan_impl_review_finalize() -> None:
 def test_build_stage_prompt_plan() -> None:
     """build_stage_prompt for plan references the plan command file."""
     prompt = build_stage_prompt("plan", "T-1")
-    assert "auto-dev-plan.md" in prompt
+    assert "~/.claude/commands/auto-dev-plan.md" in prompt
     assert "T-1" in prompt
     assert "--headless" in prompt
     assert "stage1_plan" in prompt
@@ -336,7 +342,7 @@ def test_build_stage_prompt_plan() -> None:
 def test_build_stage_prompt_impl() -> None:
     """build_stage_prompt for impl references the impl command file."""
     prompt = build_stage_prompt("impl", "T-1")
-    assert "auto-dev-impl.md" in prompt
+    assert "~/.claude/commands/auto-dev-impl.md" in prompt
     assert "T-1" in prompt
     assert "--headless" in prompt
     assert "stage2_impl" in prompt
@@ -346,7 +352,7 @@ def test_build_stage_prompt_impl() -> None:
 def test_build_stage_prompt_review() -> None:
     """build_stage_prompt for review references the review command file."""
     prompt = build_stage_prompt("review", "T-1")
-    assert "auto-dev-review.md" in prompt
+    assert "~/.claude/commands/auto-dev-review.md" in prompt
     assert "T-1" in prompt
     assert "--headless" in prompt
     assert "stage3_review" in prompt

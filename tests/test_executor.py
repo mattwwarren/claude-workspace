@@ -1291,7 +1291,7 @@ def test_opencode_executor_spawn_runner_path(
         assert "--auto" in call["argv"]
         assert "--model" in call["argv"]
         prompt = call["argv"][-1]
-        assert "auto-dev-finalize.md" in prompt
+        assert "~/.claude/commands/auto-dev-finalize.md" in prompt
         assert "T-1" in prompt
 
         state = load_state()
@@ -1334,7 +1334,7 @@ def test_opencode_executor_spawn_impl_stage(
         assert call["argv"][0] == "opencode"
         assert "--auto" in call["argv"]
         prompt = call["argv"][-1]
-        assert "auto-dev-impl.md" in prompt
+        assert "~/.claude/commands/auto-dev-impl.md" in prompt
         assert "T-1" in prompt
         assert "stage2_impl" in prompt
 
