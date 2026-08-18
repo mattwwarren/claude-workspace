@@ -5567,6 +5567,29 @@ class TestDevQueueAddSignoff:
         assert task.signoff is None
 
 
+class TestDevQueueAddEverSpawned:
+    """``cw dev-queue add`` seeds ever_spawned=False (v33, GitHub #1631)."""
+
+    def test_dev_queue_add_seeds_ever_spawned_false(self, tmp_config_dir: Path) -> None:
+        """The model default is True (fail-open for rows of unknown history);
+        this is the one construction site with positive proof the row has
+        never spawned, so it overrides to False. A dropped kwarg here would
+        silently reopen #1631's gap for every brand-new task."""
+        from cw.dev_queue import load_dev_queue
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["dev-queue", "add", "GEN-1631", "--client", "client-a"],
+        )
+        assert result.exit_code == 0, result.output
+
+        store = load_dev_queue()
+        task = next((t for t in store.tasks if t.ticket_id == "GEN-1631"), None)
+        assert task is not None
+        assert task.ever_spawned is False
+
+
 class TestDevQueueAddHoldFinalize:
     """Tests for ``--hold-finalize`` on ``cw dev-queue add`` (RFC 0011 A3, #1160)."""
 

@@ -138,6 +138,13 @@ def dev_queue_add(
                 signoff=signoff,
                 hold_finalize=hold_finalize_value,
                 stage=stage_value,
+                # #1631: the model default is True (fail-open, for rows whose
+                # spawn history cannot be reconstructed). This is the one
+                # construction site with positive proof of the opposite -- a
+                # ticket being enqueued right now has demonstrably never
+                # spawned -- so it overrides. Everything downstream only ever
+                # raises this to True; nothing lowers it.
+                ever_spawned=False,
             )
         except ValidationError as exc:
             msg = f"Invalid ticket '{ticket_id}': {exc.errors()[0]['msg']}"
