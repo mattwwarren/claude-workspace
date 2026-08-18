@@ -623,6 +623,14 @@ class OrchestratorConfig(BaseModel):
     # each bypass emits SSH_KEY_GATE_BYPASSED (forwarded to the operator
     # channel by default -- see _DEFAULT_OPERATOR_EVENT_TYPES above).
     ssh_key_gate_enabled: bool = True
+    # GitHub #1862 — operator escape hatch for the pre-dispatch open-PR gate
+    # (cw.dispatch.pr_gate.resolve_stale_pr_ticket_ids). Default True (gate
+    # stays enforced), mirroring ssh_key_gate_enabled's fail-safe default: it
+    # gates an already-live probe that can park PLAN/IMPL-stage PENDING tasks,
+    # not new automation. Setting this False skips the gate entirely for every
+    # client -- the operator's escape hatch if a `gh`-probe fan-out ever stalls
+    # a dispatch tick (e.g. a large cold-cache PLAN/IMPL backlog).
+    pr_gate_enabled: bool = True
     # Tool-name patterns forwarded to EVERY DAEMON worker spawn as a single
     # `--disallowed-tools=<comma-joined>` token (cw.spawn.build_disallowed_tools_arg).
     # Default empty: cw forces no tool restriction on workers. Replaces the

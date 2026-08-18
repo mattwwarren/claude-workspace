@@ -65,6 +65,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Dispatch now gates on an already-open PR for PLAN/IMPL-stage tickets, with
+  a new `stale_dispatch` terminal status (#1862):** a ticket could be
+  re-dispatched into PLAN or IMPL while a PR from a prior attempt was still
+  open, producing duplicate work and duplicate PRs. Adds a pre-dispatch
+  open-PR probe (`src/cw/dispatch/pr_gate.py`) backed by an
+  `OpenPrProbeCache` sidecar so repeated ticks don't re-query GitHub for the
+  same ticket, gated by the new `OrchestratorConfig.pr_gate_enabled` escape
+  hatch (default enabled, mirroring `ssh_key_gate_enabled`) and skipped
+  outright when a client has no free dispatch slots. The probe loop caps
+  itself at 20 open-PR checks per tick and batches its sidecar writes rather
+  than persisting one at a time. Detecting an open PR routes the ticket to
+  the new `stale_dispatch` terminal status instead of dispatching a
+  duplicate; recovery is via `cw dev-queue requeue <ticket> -c <client>`,
+  documented in `docs/dispatch-runbook.md` and `docs/session-disposition.md`.
+
 - **`SESSION_NEEDS_ATTENTION` now re-fires on a debounced cadence for
   sessions latched at the top staleness bucket (#1858):** a session
   saturated at `STALE_45M` previously fired the operator distress signal

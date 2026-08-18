@@ -24,6 +24,7 @@ from cw.auto_dev_result import (
     SCOPE_TIER_SMALL,
     STAGE_FAILURE_STATUSES,
     STAGE_SUCCESS_STATUSES,
+    STALE_DISPATCH_BLOCKER_REASON,
     SUPPORTED_SCHEMA_VERSIONS,
     AgentHealthEntry,
     AutoDevResult,
@@ -3283,6 +3284,153 @@ class TestEmptyDiffBlockedStatus:
 
 
 # ---------------------------------------------------------------------------
+# Issue #1862 — stale_dispatch: this ticket already has an open, unmerged PR
+# from an earlier dispatch, so the run refuses rather than re-implementing on
+# top of work already in review.
+# ---------------------------------------------------------------------------
+
+
+def _stale_dispatch_payload() -> dict[str, Any]:
+    """Minimal valid stale_dispatch payload (#1862).
+
+    Shaped as the Stage 0 intake self-check emits it: a pre-impl exit
+    (``stage1_pre_flight``), so ``scope.tier`` / ``scope.lines_actual`` /
+    ``health.lowest_agent_confidence`` are null and ``branch`` is null.
+    """
+    return {
+        "schema_version": 6,
+        "ticket_id": "GEN-1862",
+        "status": "stale_dispatch",
+        "stage_reached": "stage1_pre_flight",
+        "scope": {
+            "tier": None,
+            "files": 0,
+            "lines_estimate": 0,
+            "lines_actual": None,
+            "forbidden_touched": False,
+        },
+        "plan_source": "none",
+        "branch": None,
+        "worktree_path": "/tmp/wt/gen-1862",
+        "fork_point_sha": None,
+        "commits": [],
+        "pr": None,
+        "review": {"must_fix_initial": 0, "should_fix": 0, "fix_cycles_used": 0},
+        "health": {
+            "lowest_agent_confidence": None,
+            "any_incomplete_risk": False,
+            "shortcuts": [],
+            "recommendation": "EXIT_FOR_HUMAN_REVIEW",
+            "downgrade_applied": False,
+            "fix_loop_escalated": False,
+        },
+        "friction_highlights": [],
+        "blocker": None,
+        "next_actions": [],
+    }
+
+
+class TestStaleDispatchStatus:
+    """#1862: the new closed-enum Status value and its invariants."""
+
+    def test_null_blocker_parses(self) -> None:
+        result = AutoDevResult.model_validate(_stale_dispatch_payload())
+        assert result.status == "stale_dispatch"
+        assert result.blocker is None
+
+    def test_populated_blocker_parses(self) -> None:
+        p = _stale_dispatch_payload()
+        p["blocker"] = {
+            "stage": "stage1_pre_flight",
+            "reason": STALE_DISPATCH_BLOCKER_REASON,
+            "details": "PR #1899 (dev/1862) is open and awaiting review.",
+        }
+        result = AutoDevResult.model_validate(p)
+        assert result.blocker is not None
+        assert result.blocker.reason == STALE_DISPATCH_BLOCKER_REASON
+
+    def test_blocker_reason_constant_value(self) -> None:
+        assert STALE_DISPATCH_BLOCKER_REASON == "pr_already_open"
+
+    def test_non_empty_next_actions_rejected(self) -> None:
+        """Terminal-reject membership: nothing for a consumer to act on."""
+        p = _stale_dispatch_payload()
+        p["next_actions"] = ["user_approve_review"]
+        with pytest.raises(ValidationError, match="terminal-reject"):
+            AutoDevResult.model_validate(p)
+
+    def test_non_null_pr_rejected(self) -> None:
+        """`pr` stays required-null: the discovered PR travels in blocker.details.
+
+        A non-null `pr` would claim *this* run created it (#1862).
+        """
+        p = _stale_dispatch_payload()
+        p["pr"] = {
+            "number": 1899,
+            "url": "https://github.com/foo/bar/pull/1899",
+            "auto_merge": True,
+            "base": "main",
+        }
+        with pytest.raises(ValidationError, match="pr must be null"):
+            AutoDevResult.model_validate(p)
+
+    def test_not_a_pre_branch_status(self) -> None:
+        """Adopted assumption 2: legal at both PLAN (pre-branch) and mid-IMPL
+        (post-branch), so a branch payload must not be forbidden (#1862)."""
+        from cw.auto_dev_result import _PRE_BRANCH_STATUSES
+
+        assert "stale_dispatch" not in _PRE_BRANCH_STATUSES
+
+    def test_mid_impl_report_with_branch_parses(self) -> None:
+        """The post-branch variant: discovered at Stage 1/2 after a resume."""
+        p = _stale_dispatch_payload()
+        p["stage_reached"] = "stage2_impl"
+        p["branch"] = "dev/1862"
+        p["scope"]["tier"] = "small"
+        p["scope"]["lines_actual"] = 0
+        p["health"]["lowest_agent_confidence"] = "HIGH"
+        result = AutoDevResult.model_validate(p)
+        assert result.status == "stale_dispatch"
+        assert result.branch == "dev/1862"
+
+    def test_parses_through_parse_stdout(self) -> None:
+        result = parse_stdout(_wrap_sentinel(_stale_dispatch_payload()))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "stale_dispatch"
+
+    def test_is_a_stage_failure_status(self) -> None:
+        assert "stale_dispatch" in STAGE_FAILURE_STATUSES
+
+    def test_is_a_salvage_terminal_status(self) -> None:
+        """SALVAGE_TERMINAL_STATUSES is hand-maintained, NOT derived from
+        STAGE_FAILURE_STATUSES — membership has to be asserted explicitly or a
+        crashed worker's stale-dispatch sentinel gets re-dispatched (#1862)."""
+        assert "stale_dispatch" in SALVAGE_TERMINAL_STATUSES
+
+    def test_routes_to_blocked_on_user(self) -> None:
+        assert (
+            queue_status_for_terminal_sentinel("stale_dispatch")
+            == QueueItemStatus.BLOCKED_ON_USER
+        )
+
+    @pytest.mark.parametrize("version", sorted(SUPPORTED_SCHEMA_VERSIONS - {1}))
+    def test_accepted_under_every_supported_schema_version(self, version: int) -> None:
+        """Rollout exception (#1862), same terms as empty_diff_blocked's.
+
+        v1 is excluded: it predates every post-v1 status and no producer emits
+        it (the `no_op` v2 gate is the only version-gated status check).
+        """
+        p = _stale_dispatch_payload()
+        p["schema_version"] = version
+        result = parse_stdout(_wrap_sentinel(p))
+        assert isinstance(result, AutoDevResult)
+        assert result.status == "stale_dispatch"
+
+    def test_v7_is_a_supported_schema_version(self) -> None:
+        assert 7 in SUPPORTED_SCHEMA_VERSIONS
+
+
+# ---------------------------------------------------------------------------
 # Issue #430 — Case 4: scope_exceeded / forbidden_area emitted at/after
 # stage2_impl carry non-null branch and/or lines_actual. Extend the no_op
 # stray-branch/lines coerce to scope_exceeded and forbidden_area.
@@ -3540,6 +3688,9 @@ class TestB2StatusSets:
                     # #1870: a branch measured with zero commits ahead of
                     # origin/<default_branch> is a stage failure, not a pause.
                     "empty_diff_blocked",
+                    # #1862: this ticket already has an open, unmerged PR from
+                    # an earlier dispatch — a stage failure, not a pause.
+                    "stale_dispatch",
                 }
             )
             == STAGE_FAILURE_STATUSES

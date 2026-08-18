@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import time
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 from cw.auto_dev_result import (
     OPERATOR_UNAVAILABLE_BLOCKER_REASONS,
@@ -166,6 +166,48 @@ BRANCH_STALENESS_GATE_DISPOSITION = "branch_behind_main"
 # BASE lineage), which would spin an empty branch straight back through the
 # pipeline and defeat the gate outright.
 EMPTY_DIFF_GATE_DISPOSITION = "empty_diff_gate"
+
+# Disposition stamped when a session reported the ``stale_dispatch`` sentinel
+# itself -- an agent ran, discovered this ticket already has an open, unmerged
+# PR from an earlier dispatch, and refused rather than re-implementing on top
+# of work already in review (#1862).
+#
+# Unlike the four gate dispositions above, this one is NOT stamped directly:
+# it is the verbatim ``Status`` value ``_derive_disposition`` returns, because
+# ``"stale_dispatch"`` is a ``STAGE_FAILURE_STATUSES`` member. The constant
+# exists so call sites and tests name the literal once, and so the lockstep
+# test in test_dev_queue.py can pin it against ``get_args(Status)``.
+STALE_DISPATCH_DISPOSITION: Final = "stale_dispatch"
+
+# Disposition stamped when dispatch's *pre-dispatch* open-PR gate refuses to
+# claim a PLAN/IMPL-stage PENDING task whose branch already has an open PR
+# (#1862). No agent ever ran for this park -- the gate fires in
+# ``_claim_next_pending`` before any session is spawned.
+#
+# Deliberately a SECOND literal, distinct from STALE_DISPATCH_DISPOSITION
+# above, on the #1729 precedent EMPTY_DIFF_GATE_DISPOSITION already sets (see
+# its comment, and dispatch.review_gates' module comment). It is never added
+# to ``Status``, ``STAGE_FAILURE_STATUSES``, ``SALVAGE_TERMINAL_STATUSES``, or
+# any other ``Status``-derived set -- so it never becomes
+# BREADCRUMB_ELIGIBLE_PAUSED_STATUSES-eligible, matching that this park
+# hardcodes ``breadcrumbs=""`` and structurally cannot carry one. One literal
+# for both would put the two in conflict.
+#
+# Same set-membership treatment as the gate dispositions above: deliberately
+# NOT a HOLD_DISPOSITIONS member. An already-open PR clears by landing or
+# closing that PR, not by an operator saying "proceed anyway", and membership
+# would make it eligible for concierge's false-park auto-requeue recipe --
+# which would re-dispatch the exact ticket this gate exists to hold back.
+STALE_DISPATCH_GATE_DISPOSITION: Final = "stale_dispatch_gate"
+
+# ``TicketTask.blocked_reason`` stamped alongside
+# STALE_DISPATCH_GATE_DISPOSITION (#1862). Deliberately distinct from
+# ``cw.auto_dev_result.STALE_DISPATCH_BLOCKER_REASON`` ("pr_already_open"),
+# which an *agent* emits on its sentinel: the ``_pre_dispatch`` suffix is how
+# an operator reading ``cw dev-queue status`` tells "the loop refused to spawn
+# this" apart from "a session ran and reported the conflict". Different
+# namespaces -- do not collapse them.
+_PRE_DISPATCH_STALE_PR_REASON: Final = "pr_already_open_pre_dispatch"
 
 # Textually identical to cw.reconcile._shared._NEEDS_SALVAGE_REASON
 # ("needs_salvage") but a SEPARATE constant, not an import of it: _shared

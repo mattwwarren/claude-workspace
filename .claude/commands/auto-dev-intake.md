@@ -216,6 +216,63 @@ rules below are tracker-aware.
    `OPERATOR_UNAVAILABLE_BLOCKER_REASONS` — no schema change required. A fetch
    failure matching no signature is not handled by this block.
 
+   **Step 3 open-PR self-check (#1862) — run after a successful fetch, before
+   Step 0d.** A dispatch can succeed, push a branch, and open a PR while its
+   queue row is never advanced past PLAN/IMPL (the session died before its
+   sentinel landed, or the sentinel was never harvested). The next dispatch then
+   re-plans and re-implements a ticket whose work is already sitting in an open,
+   unmerged PR. Check for that before doing any planning work:
+
+   ```bash
+   gh pr list --head "<branch-prefix>/<ticket-id>" --state open \
+     --json number,url,reviewDecision,isDraft
+   ```
+
+   Use the effective branch prefix (`--branch-prefix` if given, else the
+   client's `feature_branch_prefix`, default `dev`) — the same key `cw` itself
+   probes. A non-empty result means this ticket already has an open PR.
+
+   Treat only a *reliable* answer as a hit: a non-zero exit, a timeout, or a
+   missing `gh` binary is **not** evidence of a PR — fall through and continue
+   the run, exactly as `cw`'s own gate fails open. Do not gate a refusal on an
+   unreliable signal.
+
+   On a genuine hit, EXIT before spawning any agent with the structured
+   `stale_dispatch` sentinel:
+
+   ```json
+   {
+     "status": "stale_dispatch",
+     "stage_reached": "stage1_pre_flight",
+     "branch": null,
+     "pr": null,
+     "blocker": {
+       "stage": "stage1_pre_flight",
+       "reason": "pr_already_open",
+       "details": "<PR number, URL, and review state, e.g. 'PR #1899 (https://github.com/o/r/pull/1899) is open, reviewDecision=REVIEW_REQUIRED'>",
+       "message": "Ticket already has an open, unmerged PR from an earlier dispatch",
+       "recovery_hint": "Land or close the PR, then unblock the ticket (cw dev-queue unblock)",
+       "retry_eligible": false,
+       "retry_delay_seconds": null
+     },
+     "next_actions": []
+   }
+   ```
+
+   `pr` **must** stay null — this run did not create that PR, and the schema
+   rejects a non-null `pr` on this status. The discovered PR's identity belongs
+   in `blocker.details`; that string is the operator's whole triage signal.
+   `next_actions` **must** be empty (`stale_dispatch` is a terminal-reject
+   status). Do NOT report `no_op` (nothing is complete — the PR is unmerged) or
+   `blocked` (nothing is broken — the PR is healthy, just not this session's to
+   duplicate).
+
+   Not a substitute for `cw`'s own pre-dispatch gate, which catches the same
+   condition before a session is even spawned (`disposition:
+   "stale_dispatch_gate"`); this check covers the paths that gate does not —
+   an interactive `/auto-dev` run, and a resume that re-enters intake with the
+   row already claimed.
+
    **Headless only — initialize correlation context and emit `stage.entered` (`s0_intake`):**
    ```bash
    CW_CTX=".claude/cw-context.json"

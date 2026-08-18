@@ -934,13 +934,23 @@ def _route_staged_decision(
             if blocker_reason == _AUTOMERGE_NOT_ARMED_REASON
             else None
         )
+        # GitHub #1862: a stale_dispatch report legitimately carries zero
+        # commits and zero findings -- the session correctly refused to
+        # duplicate work already sitting in an open PR. Under the generic
+        # evidence-based computation that reads as unproductive, so repeated
+        # honest refusals would charge the ceiling and eventually re-park the
+        # row at attempt_cap_blocked, burying the specific signal this status
+        # exists to surface. Hardcoded False for the same reason Rule 4
+        # hardcodes it for no_op: a correct, evidence-producing terminal
+        # outcome, not a crashloop.
+        rule5_unproductive = False if status == "stale_dispatch" else claim_unproductive
         transition_task_status(
             task,
             QueueItemStatus.BLOCKED_ON_USER,
             disposition=disposition,
             pr_url=gate_pr_url,
             blocked_reason=blocker_reason,
-            unproductive=claim_unproductive,  # #1750 Rule 5
+            unproductive=rule5_unproductive,  # #1750 Rule 5
         )
         # GitHub #1713 Variant B: prior_pipeline_pr_open blocks this ticket
         # behind a DIFFERENT ticket's open PR -- this row has no PR of its
