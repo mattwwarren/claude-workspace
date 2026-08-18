@@ -513,6 +513,7 @@ def _client_with_lane(
     lane_name: str,
     *,
     workspace_path: Path | None = None,
+    base: ClientConfig | None = None,
     **lane_kwargs: object,
 ) -> ClientConfig:
     """Build a ClientConfig with one lane.
@@ -523,13 +524,22 @@ def _client_with_lane(
     helper per field. Built via ``model_validate`` on a merged dict (the same
     idiom as ``conftest._make_ticket_task``) so the open ``**lane_kwargs``
     needs no type suppression.
+
+    Pass an existing *base* :class:`~cw.models.ClientConfig` to copy its other
+    fields (e.g. a fixture-provided ``worktree_base``) while replacing its
+    lanes with the single one built here, instead of constructing a fresh,
+    minimal ``ClientConfig`` from scratch — the other shape a lane-override
+    test occasionally needs (#1751 review round 1).
     """
     from cw.models import LaneConfig
 
+    lane = LaneConfig.model_validate({"name": lane_name, **lane_kwargs})
+    if base is not None:
+        return base.model_copy(update={"name": client_name, "lanes": [lane]})
     return ClientConfig(
         name=client_name,
         workspace_path=workspace_path or Path("/tmp/ws"),
-        lanes=[LaneConfig.model_validate({"name": lane_name, **lane_kwargs})],
+        lanes=[lane],
     )
 
 

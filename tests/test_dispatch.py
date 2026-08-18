@@ -3338,31 +3338,21 @@ class TestPerLaneAttemptCeiling:
             global_attempt_ceiling=ceiling,
         )
 
-    def _client_with_lane_ceiling(
-        self,
-        base: ClientConfig,
-        attempt_ceiling: bool | int | None,
-    ) -> ClientConfig:
-        """Return *base* with a DEFAULT_LANE carrying *attempt_ceiling*."""
-        return base.model_copy(
-            update={
-                "lanes": [
-                    LaneConfig(
-                        name=DEFAULT_LANE,
-                        max_parallel=1,
-                        attempt_ceiling=attempt_ceiling,
-                    )
-                ]
-            }
-        )
-
     def test_lane_ceiling_overrides_global_lower(
         self,
         tmp_dispatch_dirs: Path,
         sample_client_config: ClientConfig,
     ) -> None:
         """Lane ceiling 25 with global 10: a row at 15 still claims."""
-        client = self._client_with_lane_ceiling(sample_client_config, 25)
+        from tests._reconcile_helpers import _client_with_lane
+
+        client = _client_with_lane(
+            sample_client_config.name,
+            DEFAULT_LANE,
+            base=sample_client_config,
+            max_parallel=1,
+            attempt_ceiling=25,
+        )
         _make_clients_yaml(tmp_dispatch_dirs, client)
         save_dev_queue(
             DevQueueStore(
@@ -3393,7 +3383,15 @@ class TestPerLaneAttemptCeiling:
         sample_client_config: ClientConfig,
     ) -> None:
         """Lane ceiling 2 with global 10: a row at 2 parks below the global bound."""
-        client = self._client_with_lane_ceiling(sample_client_config, 2)
+        from tests._reconcile_helpers import _client_with_lane
+
+        client = _client_with_lane(
+            sample_client_config.name,
+            DEFAULT_LANE,
+            base=sample_client_config,
+            max_parallel=1,
+            attempt_ceiling=2,
+        )
         _make_clients_yaml(tmp_dispatch_dirs, client)
         save_dev_queue(
             DevQueueStore(
@@ -3424,7 +3422,15 @@ class TestPerLaneAttemptCeiling:
         sample_client_config: ClientConfig,
     ) -> None:
         """``attempt_ceiling: false`` never parks, however high the counter."""
-        client = self._client_with_lane_ceiling(sample_client_config, False)
+        from tests._reconcile_helpers import _client_with_lane
+
+        client = _client_with_lane(
+            sample_client_config.name,
+            DEFAULT_LANE,
+            base=sample_client_config,
+            max_parallel=1,
+            attempt_ceiling=False,
+        )
         _make_clients_yaml(tmp_dispatch_dirs, client)
         save_dev_queue(
             DevQueueStore(
@@ -3501,7 +3507,15 @@ class TestPerLaneAttemptCeiling:
         park" from ``global_attempt_ceiling`` alone, so the number that
         actually fired must ride on the payload.
         """
-        client = self._client_with_lane_ceiling(sample_client_config, 5)
+        from tests._reconcile_helpers import _client_with_lane
+
+        client = _client_with_lane(
+            sample_client_config.name,
+            DEFAULT_LANE,
+            base=sample_client_config,
+            max_parallel=1,
+            attempt_ceiling=5,
+        )
         _make_clients_yaml(tmp_dispatch_dirs, client)
         save_dev_queue(
             DevQueueStore(
